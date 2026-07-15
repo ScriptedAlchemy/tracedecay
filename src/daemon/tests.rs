@@ -22,6 +22,35 @@ use super::{
 mod compatibility;
 
 #[test]
+fn tool_json_payload_requires_exactly_one_json_block() {
+    let valid = serde_json::json!({
+        "content": [
+            {"text": "status"},
+            {"text": "{\"ok\":true}"}
+        ]
+    });
+    assert_eq!(
+        super::tool_json_payload(&valid, "test").unwrap(),
+        serde_json::json!({"ok": true})
+    );
+
+    for (content, expected) in [
+        (
+            serde_json::json!([{"text": "{\"first\":1}"}, {"text": "[2]"}]),
+            "returned multiple JSON payloads",
+        ),
+        (
+            serde_json::json!([{"text": "status"}, {"type": "image"}]),
+            "returned no JSON payload",
+        ),
+    ] {
+        let error =
+            super::tool_json_payload(&serde_json::json!({"content": content}), "test").unwrap_err();
+        assert!(error.to_string().contains(expected));
+    }
+}
+
+#[test]
 fn daemon_lifecycle_rejects_new_work_after_draining() {
     let lifecycle = DaemonLifecycle::default();
     assert!(lifecycle.accepting());

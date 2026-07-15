@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::errors::{Result, TraceDecayError};
 use crate::storage::{BRANCH_META_FILENAME, PrivateStoreIo};
 
+use super::branch_db_family_paths;
+
 const JOURNAL_FILENAME: &str = ".branch-delete-transaction.json";
 const JOURNAL_VERSION: u32 = 1;
 const QUARANTINE_MARKER: &str = ".branch-delete-";
@@ -541,14 +543,6 @@ fn quarantine_database_paths(
                 .ok_or_else(|| config_error("branch deletion family is empty"))
         })
         .collect()
-}
-
-fn branch_db_family_paths(db_path: &Path) -> [PathBuf; 3] {
-    let mut wal = db_path.to_path_buf();
-    wal.set_extension("db-wal");
-    let mut shm = db_path.to_path_buf();
-    shm.set_extension("db-shm");
-    [db_path.to_path_buf(), wal, shm]
 }
 
 fn quarantine_family_paths(database: &Path, transaction_id: &str) -> Result<[PathBuf; 3]> {
