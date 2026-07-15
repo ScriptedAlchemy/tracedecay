@@ -1,33 +1,84 @@
-# Next delivery: sanitized observation capture
+# PR5: sanitized observation vertical
 
-PR4's production transcript-store boundary is implemented. The next slice moves
-one provider's parsed transcript records into an immutable, sanitized
-observation path behind the same daemon-owned database authority.
+PR4 established the daemon-owned transcript persistence boundary. PR5 moves one
+existing provider end to end through typed capture, mandatory sanitization,
+authoritative persistence, replay, and restart.
 
-## Scope
+## Product slice
 
-- Define ordinary typed capture inputs, sanitizer receipts, source identity, and
-  idempotency keys; do not add a macro DSL or parallel metadata model.
-- Route one existing provider path end to end through capture, persistence, and
-  replay while preserving the root binary and V1 behavior.
-- Reuse the open `GlobalDb` authority and `tracedecay-store` boundary. Do not
-  open a second database or add local, in-memory, source-adjacent, or recovery
-  fallback writers.
-- Persist project observations in the canonical project-wide store shared by
-  all branches and worktrees; keep account-wide user sessions in the
-  user/profile store. Branch/worktree scope applies only to code-graph indexes.
-- Resolve worktrees through the project registry and Git common directory, and
-  fail closed when the required project or user-store authority is unavailable.
-- Persist only sanitized observations; malformed, partial, duplicate, and
-  restart behavior must remain explicit and retry-safe.
-- Add direct behavior tests for secret rejection/redaction, idempotent replay,
-  crash-before-commit, suffix resume, stale-owner rejection, and restart.
+Use one existing production provider path. Preserve its current parser and V1
+behavior while adding the V2 observation path behind the same daemon and
+`GlobalDb` authority.
 
-## Done when
+The vertical path is:
 
-- One real provider path produces replayable sanitized observations through the
-  production daemon/store authority.
-- Crash and retry tests prove no duplicate observation, skipped suffix, advanced
-  offset without data, or unsanitized durable payload.
-- Linux and Windows checks pass without inventory generators, plan parsers,
-  workflow executors, or generated architecture views.
+```text
+provider record
+  -> bounded parse
+  -> typed sanitizer input
+  -> sanitization receipt and observation identity
+  -> daemon command
+  -> atomic observation, source cursor, and projection enqueue
+  -> replay/read with explicit coverage
+```
+
+## Required behavior
+
+- Define ordinary Rust types for source identity, source generation/cursor,
+  canonical observation identity, sanitizer disposition, receipt, payload
+  reference, and idempotency key.
+- Parse structure before scanning content. Apply the mandatory sanitizer before
+  any database, payload file, log, metric, dead letter, replay, or export sink.
+- Persist only receipt-bound sanitized content. Rejected or quarantined content
+  must not leak through error messages or recovery artifacts.
+- Send observations to the daemon. Hooks and provider adapters may frame and
+  spool events but cannot open or mutate SQLite.
+- Reuse the already-open `GlobalDb` and `tracedecay-store` boundary. Commit the
+  observation, durable source cursor/offset, and projection enqueue atomically.
+- Keep project observations in the canonical project-wide store and
+  profile-wide observations in the profile store. Do not derive ownership from
+  CWD, provider cache paths, or transcript filenames alone.
+- Resolve worktrees through the project registry and Git common directory.
+  Missing, ambiguous, stale, or unavailable authority fails closed.
+- Defer partial records without advancing the durable cursor. An exact retry is
+  idempotent; the same identity with different content is a typed collision.
+- Bound record size, decoding, queues, retry state, and error output. Preserve
+  explicit cancellation; add no automatic workflow or agent timeout.
+- Expose enough replay/read behavior to prove the stored observation is usable;
+  do not stop at schemas or unused scaffolding.
+
+## Direct tests
+
+- valid record persists and replays with its receipt and source identity;
+- secret-shaped fields are rejected, redacted, or quarantined before every sink;
+- malformed and partial records do not advance the cursor;
+- duplicate replay inserts nothing and preserves the original receipt;
+- identity/digest collision fails without overwriting either record;
+- crash before commit advances neither data nor cursor;
+- crash after commit before acknowledgement replays idempotently;
+- suffix resume neither skips nor duplicates observations;
+- restart catch-up uses the daemon-owned authority;
+- stale owner, missing project/profile authority, and worktree ambiguity fail
+  without creating a fallback database;
+- concurrent clients still produce one committed observation sequence;
+- Linux and Windows stock Cargo tests pass.
+
+## Prohibited scope
+
+- no plan parser, completion tracker, PR DAG, next-ready controller, rewrite
+  executor, compatibility inventory, generated plan view, or baseline packet;
+- no Claude workflow JavaScript or other host-specific rewrite workflow;
+- no macro DSL, procedural macro, parallel schema model, or crate created only
+  to satisfy a plan document;
+- no second database connection authority, fallback writer, network-mounted
+  SQLite, direct hook write, or source-adjacent durable store;
+- no broad provider rewrite, semantic search, dashboard redesign, or remote
+  replication in this slice.
+
+## Done
+
+PR5 is complete when one real provider record can be captured, sanitized,
+committed, replayed, and recovered through the production daemon; every failure
+boundary preserves atomic data/cursor state; no unsanitized durable byte or
+fallback writer exists; direct focused tests and relevant Linux/Windows stock
+Cargo gates pass.

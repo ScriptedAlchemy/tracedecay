@@ -1,46 +1,71 @@
 # TraceDecay V2 rewrite
 
-Status: active product rewrite.
+Status: active product rewrite. PR4 is complete; PR #421 remains open.
 
-## What exists
+The authoritative delivery order is [00-plan-set-index.md](00-plan-set-index.md).
+The next executable slice is [NEXT.md](NEXT.md). Numbered plans define component
+requirements and boundaries, not separate crate-first work queues.
 
-- `tracedecay-domain` contains the first executable V2 foundation: versioned domain and research contracts.
-- `tracedecay-store` owns the canonical transcript persistence contract and delegates production writes to the already-open `GlobalDb` authority.
-- Transcript ingest, startup catch-up, restart recovery, and daemon/MCP/dashboard paths use that boundary without a fallback writer.
-- Direct tests cover atomic batches, durable monotonic offsets, replay, partial-line deferral, rollback, and single-owner concurrency across Claude, Cursor, and Cline-like inputs.
-- Transcript and LCM mutations use fresh RAII transactions owned by the authoritative `GlobalDb`; cancellation or failure rolls back database rows and newly created external payload files together.
-- The root integration test keeps a small, direct research-anchor contract.
-- Existing runtime Doctor, daemon, storage, hooks, MCP, and CLI behavior remain product code. They are not replaced by inventories or plan metadata.
+## Current product foundation
 
-## What was removed
+- `tracedecay-domain` contains the first executable V2 domain contracts.
+- `tracedecay-store` defines canonical transcript persistence while the
+  already-open `GlobalDb` remains the physical connection and transaction
+  authority.
+- Transcript ingest, startup catch-up, restart recovery, daemon, MCP, and
+  dashboard paths use that authority without a fallback writer.
+- Transcript batches atomically update messages, projections, durable cursors,
+  and monotonic offsets. Replay and exact retries are idempotent.
+- Transcript and LCM mutations use fresh RAII transactions. Failure or
+  cancellation rolls back database rows and newly created payload files.
+- Direct tests cover Claude, Cursor, Cline-like input, partial records, replay,
+  rollback, restart, concurrency, and Windows behavior.
+- Existing Doctor, daemon, storage, hooks, MCP, and CLI remain product code.
 
-- The compatibility-inventory binary and production module.
-- Generated architecture views, policy generators, source/YAML parsers, snapshot envelopes, and receipt catalogs.
-- Abandoned evidence/privacy-corpus infrastructure and scanner-specific CI lanes.
-- Agent skills and large Markdown checklists for executing the rewrite plan.
-- Plan parsers, workflow executors, and incremental-PR orchestration artifacts.
+## Storage and authority
 
-Those systems modeled the rewrite instead of delivering it. They are intentionally not part of V2.
-
-## Storage scope
-
+- One daemon is the sole mutable SQLite authority. Hooks, clients, workers,
+  MCP servers, dashboard handlers, and remote nodes send typed operations to it.
 - Project facts and project session/LCM data live in one canonical project-wide
-  store shared by every branch and worktree of that project.
-- Account-wide user sessions live in the user/profile store, not in a project or
-  worktree store.
-- Only code-graph indexes are branch/worktree-scoped. A worktree resolves its
-  canonical project through the project registry and Git common directory.
-- If the required project or user-store authority cannot be resolved, the
-  operation fails closed. It must not create or write a worktree-local fallback.
+  store shared across branches and worktrees.
+- Profile-wide user activity lives in the user/profile store.
+- Only code indexes are branch/worktree/snapshot scoped.
+- Worktrees resolve their project through the project registry and Git common
+  directory. Missing or ambiguous authority fails closed.
+- No path may create a worktree-local, source-adjacent, in-memory, recovery, or
+  direct-database fallback writer.
+
+## Delivery rules
+
+- Ship executable product behavior and direct tests in every PR.
+- Prefer one end-to-end vertical slice over broad scaffolding.
+- Component plans may contribute to the same PR. A plan name does not require a
+  new crate, generator, registry, or standalone implementation phase.
+- Preserve stock Cargo compatibility. Developer-local build wrappers and cache
+  layouts are never repository or CI requirements.
+- Use explicit cancellation and typed progress for long operations. Do not add
+  an automatic rewrite, workflow, agent, or no-progress timeout.
+- Keep privacy, recovery, concurrency, cross-platform, migration, and deletion
+  gates with the product behavior they protect.
+- PR #421 merges only after PR19 completes and aggregate verification is stable.
+
+## Removed permanently
+
+- compatibility and architecture inventory implementations;
+- plan Markdown parsers, PR-ID normalizers, slice DAGs, completion ledgers,
+  progress trackers, next-ready controllers, and rewrite executors;
+- generated plan views, owner maps, baseline packets, and planning-artifact CI;
+- large agent checklists or Claude workflow JavaScript for executing the rewrite;
+- parallel YAML/JSON/Markdown models that generate product declarations.
+
+Real product generation remains legal only when it removes duplicate product
+authorities and follows [RUST-METAPROGRAMMING.md](RUST-METAPROGRAMMING.md).
+Real dynamic workflows are daemon-owned typed product operations. They never
+parse or execute this roadmap.
 
 ## Release
 
-Release configuration publishes the V2 library crates while reserving the single Git tag and GitHub release for the root package. The first crates.io publication of each new crate requires a one-time token, manual bootstrap, or trusted-publisher setup; later releases can use the normal workspace release flow.
-
-## Delivery rule
-
-Each rewrite change must ship executable product behavior and direct tests of that behavior. Do not add a second metadata model of the product, generated plan views, or CI that validates planning artifacts.
-
-Custom Rust macros and generators have a separate negative-code admission budget. See [RUST-METAPROGRAMMING.md](RUST-METAPROGRAMMING.md) before introducing one.
-
-PR4's production store boundary is complete. See [NEXT.md](NEXT.md) for the next executable product slice.
+V2 library crates publish through the workspace release flow while the root
+package owns the Git tag and GitHub release. A new crate's first crates.io
+publication may require one-time trusted-publisher or token bootstrap; this is a
+release setup step, not an alternate development workflow.
