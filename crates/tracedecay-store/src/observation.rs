@@ -23,20 +23,6 @@ impl ObservationWrite {
         expected_cursor: Option<ClaudeSourceCursorV1>,
         next_cursor: ClaudeSourceCursorV1,
     ) -> ObservationStoreResult<Self> {
-        if !observation
-            .receipt()
-            .disposition()
-            .permits_durable_payload()
-        {
-            return Err(ObservationStoreError::Contract(
-                ObservationContractError::ReceiptPayloadForbidden,
-            ));
-        }
-        if observation.receipt().payload() != Some(observation.payload_reference()) {
-            return Err(ObservationStoreError::Contract(
-                ObservationContractError::ReceiptPayloadMismatch,
-            ));
-        }
         if observation.source() != next_cursor.source()
             || observation.scope() != next_cursor.scope()
             || observation.identity().generation() != next_cursor.generation()
@@ -355,18 +341,8 @@ pub trait ObservationStore: Send + Sync {
 
     fn advance_source_cursor(
         &self,
-        _advance: ObservationCursorAdvance,
-    ) -> impl Future<Output = ObservationStoreResult<CursorAdvanceOutcome>> + Send {
-        async {
-            Err(ObservationStoreError::Storage {
-                operation: "advance observation source cursor",
-                source: Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "observation source cursor advances are not implemented",
-                )),
-            })
-        }
-    }
+        advance: ObservationCursorAdvance,
+    ) -> impl Future<Output = ObservationStoreResult<CursorAdvanceOutcome>> + Send;
 
     fn get_observation(
         &self,

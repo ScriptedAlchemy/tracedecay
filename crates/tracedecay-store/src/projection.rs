@@ -72,7 +72,6 @@ impl ClaudeObservationProjection {
         session: SessionRecord,
         message: SessionMessageRecord,
     ) -> ProjectionStoreResult<Self> {
-        validate_projection_observation(observation)?;
         let digest_value = serde_json::json!({
             "projector_version": CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
             "session": &session,
@@ -99,10 +98,9 @@ impl ClaudeObservationProjection {
     }
 
     pub fn for_skip(
-        observation: &DurableClaudeObservationV1,
+        _observation: &DurableClaudeObservationV1,
         reason: ProjectionSkipReason,
     ) -> ProjectionStoreResult<Self> {
-        validate_projection_observation(observation)?;
         Ok(Self::Skipped(reason))
     }
 }
@@ -132,22 +130,6 @@ impl ClaudeSessionMessageProjection {
     pub fn output_digest(&self) -> &PayloadDigestV1 {
         &self.output_digest
     }
-}
-
-fn validate_projection_observation(
-    observation: &DurableClaudeObservationV1,
-) -> ProjectionStoreResult<()> {
-    if !observation
-        .receipt()
-        .disposition()
-        .permits_durable_payload()
-        || observation.receipt().payload() != Some(observation.payload_reference())
-    {
-        return Err(ProjectionStoreError::Contract(
-            ObservationContractError::ReceiptPayloadMismatch,
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

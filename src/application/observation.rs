@@ -377,7 +377,9 @@ mod tests {
         ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeSourceIdentityV1, ObservationScopeV1,
         ProjectId, SessionId,
     };
-    use tracedecay_store::observation::NonDurableFrameReason;
+    use tracedecay_store::observation::{
+        CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
+    };
     use tracedecay_store::{ObservationCommitReceipt, ObservationStoreResult};
 
     use crate::privacy::{PR5_MAX_CLAUDE_RECORD_BYTES, parse_claude_record_v1};
@@ -387,6 +389,7 @@ mod tests {
     #[derive(Default)]
     struct FakeStore {
         observations: Mutex<Vec<StoredObservation>>,
+        source_cursors: Mutex<Vec<ClaudeSourceCursorV1>>,
         cancel_on_persist: Mutex<Option<ObservationCancellation>>,
         cancel_on_get: Mutex<Option<ObservationCancellation>>,
         cancel_on_replay: Mutex<Option<ObservationCancellation>>,
@@ -415,6 +418,12 @@ mod tests {
             let cursor = write.next_cursor().clone();
             let receipt =
                 ObservationCommitReceipt::new(sequence, observation.clone(), cursor.clone());
+            let mut cursors = self.source_cursors.lock().unwrap();
+            cursors.retain(|existing| {
+                existing.source() != cursor.source() || existing.scope() != cursor.scope()
+            });
+            cursors.push(cursor.clone());
+            drop(cursors);
             observations.push(StoredObservation::new(
                 sequence,
                 observation,
@@ -429,10 +438,43 @@ mod tests {
 
         async fn get_source_cursor(
             &self,
-            _source: &ClaudeSourceIdentityV1,
-            _scope: &ObservationScopeV1,
+            source: &ClaudeSourceIdentityV1,
+            scope: &ObservationScopeV1,
         ) -> ObservationStoreResult<Option<ClaudeSourceCursorV1>> {
-            Ok(None)
+            Ok(self
+                .source_cursors
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|cursor| cursor.source() == source && cursor.scope() == scope)
+                .cloned())
+        }
+
+        async fn advance_source_cursor(
+            &self,
+            advance: ObservationCursorAdvance,
+        ) -> ObservationStoreResult<CursorAdvanceOutcome> {
+            let mut cursors = self.source_cursors.lock().unwrap();
+            let position = cursors.iter().position(|cursor| {
+                cursor.source() == advance.next_cursor().source()
+                    && cursor.scope() == advance.next_cursor().scope()
+            });
+            let actual = position.map(|index| cursors[index].clone());
+            if actual.as_ref() == Some(advance.next_cursor()) {
+                return Ok(CursorAdvanceOutcome::ExactDuplicate);
+            }
+            if actual.as_ref() != advance.expected_cursor() {
+                return Err(ObservationStoreError::CursorConflict {
+                    expected: Box::new(advance.expected_cursor().cloned()),
+                    actual: Box::new(actual),
+                });
+            }
+            if let Some(index) = position {
+                cursors[index] = advance.next_cursor().clone();
+            } else {
+                cursors.push(advance.next_cursor().clone());
+            }
+            Ok(CursorAdvanceOutcome::Committed)
         }
 
         async fn advance_source_cursor(

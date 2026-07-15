@@ -100,6 +100,16 @@ fn cursor_advance(
     .unwrap()
 }
 
+#[test]
+fn observation_write_retains_cursor_specific_validation() {
+    let candidate = observation(0, 100, "receipt.cursor-contract", "sanitized payload");
+
+    assert!(matches!(
+        ObservationWrite::new(candidate, None, cursor(99)),
+        Err(ObservationStoreError::CursorObservationMismatch)
+    ));
+}
+
 async fn user_table_counts(tmp: &TempDir) -> BTreeMap<String, i64> {
     let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
         .build()
