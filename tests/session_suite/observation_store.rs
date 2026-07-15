@@ -579,7 +579,7 @@ async fn cursor_only_progress_allows_file_replacement_from_zero_with_exact_cas()
     let advance = ObservationCursorAdvance::new(
         source(),
         scope(),
-        replacement_generation.clone(),
+        replacement_generation,
         Some(cursor(42)),
         ClaudeByteRangeV1::new(0, 10).unwrap(),
         NonDurableFrameReason::OutOfScope,
@@ -621,19 +621,19 @@ fn cursor_only_progress_rejects_file_replacement_after_zero() {
 async fn cursor_only_progress_survives_restart() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_lcm_db_path(&tmp);
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
-    store
-        .advance_source_cursor(cursor_advance(
-            None,
-            0,
-            10,
-            NonDurableFrameReason::SanitizerQuarantined,
-        ))
-        .await
-        .unwrap();
-    drop(store);
-    drop(db);
+    {
+        let db = open_lcm_db(&tmp).await;
+        let store = GlobalDbObservationStore::new(&db);
+        store
+            .advance_source_cursor(cursor_advance(
+                None,
+                0,
+                10,
+                NonDurableFrameReason::SanitizerQuarantined,
+            ))
+            .await
+            .unwrap();
+    }
 
     let reopened = tracedecay::global_db::GlobalDb::open_at_assuming_schema(&db_path)
         .await
