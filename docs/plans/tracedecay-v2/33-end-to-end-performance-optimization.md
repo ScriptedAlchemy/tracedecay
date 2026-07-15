@@ -16,10 +16,10 @@ semantics, privacy, authority, durability, coverage, ordering, and recovery.
 Performance work is complete only when representative end-to-end evidence shows
 the improvement and the correctness gates remain green.
 
-PR5–PR19 fix obvious unbounded queues, repeated no-op work, and severe measured
-regressions when discovered. PR20 freezes versioned workloads, records the
-first comparable baseline, and owns cross-path optimization after V2
-convergence.
+PR5–PR19 add bounded instrumentation and capture a representative baseline when
+each path ships. PR20 owns cross-path optimization after V2 convergence; it
+does not postpone an obvious unbounded queue, repeated no-op, or severe
+regression discovered by an earlier slice.
 
 ## Measurement contract
 
