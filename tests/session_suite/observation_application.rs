@@ -1,10 +1,13 @@
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
 use tracedecay::application::observation::{
-    CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest, ObservationApplication,
-    ObservationApplicationError,
+    CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest, GetObservationRequest,
+    ObservationApplication, ObservationApplicationError, ObservationCancellation,
+    ReplayObservationsRequest,
 };
-use tracedecay::privacy::ClaudeRecordSanitizerV1;
+use tracedecay::privacy::{
+    ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1, parse_claude_record_v1,
+};
 use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
@@ -18,7 +21,6 @@ use tracedecay_store::{
 use crate::common::{isolated_lcm_db_path, open_lcm_db};
 
 const GENERATION: u64 = 17;
-const FRAME_END: u64 = 4_096;
 const OBSERVATION_TABLES: &[&str] = &[
     "sanitization_receipts",
     "observations",
@@ -40,18 +42,27 @@ fn request(
     record: Value,
     expected_cursor: Option<ClaudeSourceCursorV1>,
 ) -> CaptureClaudeObservationRequest {
+    let encoded_frame = serde_json::to_vec(&record).unwrap();
+    let frame_end = u64::try_from(encoded_frame.len()).unwrap();
+    let parsed_record = parse_claude_record_v1(
+        &encoded_frame,
+        ClaudeByteRangeV1::new(0, frame_end).unwrap(),
+    )
+    .unwrap();
     CaptureClaudeObservationRequest::new(
-        record,
+        parsed_record,
         ClaudeObservationIdentityMaterialV1::new(
             source(session_id),
             ObservationScopeV1::Profile,
             ClaudeFileGenerationV1::new(GENERATION).unwrap(),
-            ClaudeByteRangeV1::new(0, FRAME_END).unwrap(),
+            ClaudeByteRangeV1::new(0, frame_end).unwrap(),
         )
         .unwrap(),
         expected_cursor,
         RetentionClass::new("retention.observation-application-test").unwrap(),
+        ObservationCancellation::default(),
     )
+    .unwrap()
 }
 
 fn nested_value(mut value: Value, depth: usize) -> Value {
@@ -157,7 +168,7 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
 
     // Simulate a lost acknowledgement: retry the exact request after commit.
     let retry = application
-        .capture_claude_observation(request(session_id, record, None))
+        .capture_claude_observation(request(session_id, record.clone(), None))
         .await
         .unwrap();
     match &retry {
@@ -181,9 +192,18 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
     assert!(matches!(projected, ProjectionPersistOutcome::Projected(_)));
     assert!(!format!("{projected:?}").contains(secret));
 
-    let point = application.get_observation(&observation_id).await.unwrap();
+    let point = application
+        .get_observation(GetObservationRequest::new(
+            observation_id.clone(),
+            ObservationCancellation::default(),
+        ))
+        .await
+        .unwrap();
     let replay = application
-        .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+        .replay_observations(ReplayObservationsRequest::new(
+            ObservationReplayRequest::new(0, 10).unwrap(),
+            ObservationCancellation::default(),
+        ))
         .await
         .unwrap();
     assert!(point.observation().is_some());
@@ -207,17 +227,19 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
         );
     }
 
-    let collision_secret = "sk-proj-collision-error-canary-0987654321";
+    let collision_secret = "sk-proj-collision-errors-canary-0987654321";
+    let collision_record = conversational_record(
+        "message-private",
+        "different payload text",
+        collision_secret,
+    );
+    assert_eq!(
+        serde_json::to_vec(&collision_record).unwrap().len(),
+        serde_json::to_vec(&record).unwrap().len(),
+        "collision fixture must preserve the source identity range"
+    );
     let collision = application
-        .capture_claude_observation(request(
-            session_id,
-            conversational_record(
-                "message-private",
-                "different collision payload",
-                collision_secret,
-            ),
-            None,
-        ))
+        .capture_claude_observation(request(session_id, collision_record, None))
         .await
         .expect_err("same identity with different sanitized payload must collide");
     assert!(matches!(collision, ObservationApplicationError::Store(_)));
@@ -236,7 +258,21 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
     let db = open_lcm_db(&tmp).await;
     let application = ObservationApplication::new(
         GlobalDbObservationStore::new(&db),
-        ClaudeRecordSanitizerV1::pr5().unwrap(),
+        ClaudeRecordSanitizerV1::new(
+            ClaudeSanitizerPolicyV1::pr5()
+                .unwrap()
+                .with_limits(1, usize::MAX, usize::MAX)
+                .unwrap(),
+        ),
+    );
+    let quarantine_application = ObservationApplication::new(
+        GlobalDbObservationStore::new(&db),
+        ClaudeRecordSanitizerV1::new(
+            ClaudeSanitizerPolicyV1::pr5()
+                .unwrap()
+                .with_limits(usize::MAX, 2, usize::MAX)
+                .unwrap(),
+        ),
     );
     let session_id = "session.observation-nondurable";
     let rejected_secret = "sk-proj-rejected-canary-1234567890";
@@ -244,7 +280,11 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
     let before = table_counts(&tmp).await;
 
     let rejected = application
-        .capture_claude_observation(request(session_id, json!(rejected_secret), None))
+        .capture_claude_observation(request(
+            session_id,
+            json!({"payload": rejected_secret}),
+            None,
+        ))
         .await
         .unwrap();
     assert!(matches!(
@@ -253,10 +293,10 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
     ));
     assert!(!format!("{rejected:?}").contains(rejected_secret));
 
-    let quarantined = application
+    let quarantined = quarantine_application
         .capture_claude_observation(request(
             session_id,
-            nested_value(json!(quarantined_secret), 100),
+            nested_value(json!(quarantined_secret), 4),
             None,
         ))
         .await
@@ -287,7 +327,10 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
     );
     assert!(
         application
-            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .replay_observations(ReplayObservationsRequest::new(
+                ObservationReplayRequest::new(0, 10).unwrap(),
+                ObservationCancellation::default(),
+            ))
             .await
             .unwrap()
             .observations()
