@@ -124,7 +124,8 @@ impl Database {
     /// JOIN+LIKE form times out at >25s on chromium. Both pathologies stem
     /// from re-running the wildcard scan per candidate row.
     pub async fn collect_test_marker_ids(&self) -> Result<Vec<String>> {
-        self.collect_test_marker_ids_on(self.conn()).await
+        let connection = self.writer_connection("collect test marker ids").await?;
+        self.collect_test_marker_ids_on(&connection).await
     }
 
     pub(crate) async fn collect_test_marker_ids_on(

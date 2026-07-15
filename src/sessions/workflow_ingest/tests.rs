@@ -443,7 +443,7 @@ async fn other_project_run_does_not_advance_watermark() {
     // well below the out-of-project run's far-future mtime. On the buggy
     // path (watermark advanced before the scope filter) it would equal
     // FUTURE, and the next sweep would strand every target run.
-    let watermark = read_ingest_watermark(&db.dashboard_connection(), INGEST_WATERMARK_KEY).await;
+    let watermark = read_ingest_watermark(db.read_connection(), INGEST_WATERMARK_KEY).await;
     assert!(
         watermark > 0 && watermark < i64::try_from(FUTURE).unwrap(),
         "out-of-project run advanced the watermark to {watermark} (>= {FUTURE})"

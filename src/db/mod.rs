@@ -27,7 +27,9 @@ pub(crate) use access::{
     enter_daemon_database_scope, is_lock_contended, probe_writer_owner,
 };
 pub use connection::{Database, SQLITE_UNSAFE_FAST_ENV};
-pub(crate) use connection::{platform_safe_journal_mode, platform_safe_synchronous_mode};
+pub(crate) use connection::{
+    DatabaseWriterConnection, platform_safe_journal_mode, platform_safe_synchronous_mode,
+};
 pub use fingerprints::StoredFingerprint;
 pub use redundancy_pairs::{RedundancyPairRow, RedundancyPairWrite};
 pub use search::DependencyImportUse;
