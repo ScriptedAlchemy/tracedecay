@@ -1,7 +1,7 @@
 use super::writer_test_support::{git, init_indexed_repo};
 use super::{
     HookBranchWriteRequest, HookBranchWriteResult, HookBranchWriter, McpServer,
-    direct_background_refresh_writer,
+    McpServerConstructionContext, direct_background_refresh_writer,
 };
 use crate::daemon::HookAgent;
 use crate::errors::TraceDecayError;
@@ -80,21 +80,22 @@ async fn add_branch_plan_uses_injected_writer_without_direct_fallback() {
             refresh_file_token_map: false,
         },
     );
-    let server = McpServer::new_with_dbs_and_reconcilers_and_writers(
-        cg,
-        None,
-        None,
-        None,
-        None,
-        None,
-        true,
-        None,
-        None,
-        crate::dashboard::direct_dashboard_automation_writer(),
-        writer,
-        direct_background_refresh_writer(),
-    )
-    .await;
+    let server =
+        McpServer::new_with_dbs_and_reconcilers_and_writers(McpServerConstructionContext {
+            cg,
+            scope_prefix: None,
+            global_db: None,
+            registry_db: None,
+            session_db: None,
+            user_session_db: None,
+            allow_default_registry_fallback: true,
+            automation_scheduler_reconciler: None,
+            database_owner_reconciler: None,
+            dashboard_automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
+            hook_branch_writer: writer,
+            background_refresh_writer: direct_background_refresh_writer(),
+        })
+        .await;
     let snapshot = server.cg_snapshot().await;
 
     server
@@ -131,21 +132,22 @@ async fn add_branch_at_plan_delegates_open_and_sync_without_direct_fallback() {
             refresh_file_token_map: false,
         },
     );
-    let server = McpServer::new_with_dbs_and_reconcilers_and_writers(
-        cg,
-        None,
-        None,
-        None,
-        None,
-        None,
-        true,
-        None,
-        None,
-        crate::dashboard::direct_dashboard_automation_writer(),
-        writer,
-        direct_background_refresh_writer(),
-    )
-    .await;
+    let server =
+        McpServer::new_with_dbs_and_reconcilers_and_writers(McpServerConstructionContext {
+            cg,
+            scope_prefix: None,
+            global_db: None,
+            registry_db: None,
+            session_db: None,
+            user_session_db: None,
+            allow_default_registry_fallback: true,
+            automation_scheduler_reconciler: None,
+            database_owner_reconciler: None,
+            dashboard_automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
+            hook_branch_writer: writer,
+            background_refresh_writer: direct_background_refresh_writer(),
+        })
+        .await;
     let snapshot = server.cg_snapshot().await;
 
     server
@@ -185,21 +187,22 @@ async fn sync_current_branch_deferred_writer_does_not_fall_back_to_direct_sync()
             refresh_file_token_map: false,
         },
     );
-    let server = McpServer::new_with_dbs_and_reconcilers_and_writers(
-        cg,
-        None,
-        None,
-        None,
-        None,
-        None,
-        true,
-        None,
-        None,
-        crate::dashboard::direct_dashboard_automation_writer(),
-        writer,
-        direct_background_refresh_writer(),
-    )
-    .await;
+    let server =
+        McpServer::new_with_dbs_and_reconcilers_and_writers(McpServerConstructionContext {
+            cg,
+            scope_prefix: None,
+            global_db: None,
+            registry_db: None,
+            session_db: None,
+            user_session_db: None,
+            allow_default_registry_fallback: true,
+            automation_scheduler_reconciler: None,
+            database_owner_reconciler: None,
+            dashboard_automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
+            hook_branch_writer: writer,
+            background_refresh_writer: direct_background_refresh_writer(),
+        })
+        .await;
     let snapshot = server.cg_snapshot().await;
     let marker =
         hook_events::sync_marker_path(&snapshot.store_layout().data_root, HookAgent::Codex);
@@ -236,21 +239,22 @@ async fn sync_current_branch_writer_error_does_not_fall_back_to_direct_sync() {
     let root = dir.path().to_path_buf();
     let branch = "failed-branch";
     let observed = Arc::new(Mutex::new(Vec::new()));
-    let server = McpServer::new_with_dbs_and_reconcilers_and_writers(
-        cg,
-        None,
-        None,
-        None,
-        None,
-        None,
-        true,
-        None,
-        None,
-        crate::dashboard::direct_dashboard_automation_writer(),
-        failing_writer(Arc::clone(&observed)),
-        direct_background_refresh_writer(),
-    )
-    .await;
+    let server =
+        McpServer::new_with_dbs_and_reconcilers_and_writers(McpServerConstructionContext {
+            cg,
+            scope_prefix: None,
+            global_db: None,
+            registry_db: None,
+            session_db: None,
+            user_session_db: None,
+            allow_default_registry_fallback: true,
+            automation_scheduler_reconciler: None,
+            database_owner_reconciler: None,
+            dashboard_automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
+            hook_branch_writer: failing_writer(Arc::clone(&observed)),
+            background_refresh_writer: direct_background_refresh_writer(),
+        })
+        .await;
     let snapshot = server.cg_snapshot().await;
     let marker =
         hook_events::sync_marker_path(&snapshot.store_layout().data_root, HookAgent::Codex);

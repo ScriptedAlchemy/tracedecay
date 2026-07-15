@@ -53,6 +53,20 @@ pub struct WorkflowScopeFilter {
     pub agent_label: Option<String>,
 }
 
+/// Internal query context for the session-message search fan-in.
+///
+/// The optional scoped filters are intentionally grouped with the common search
+/// fields so every search entry point feeds the same SQL builder.
+struct SessionMessageSearchQuery<'a> {
+    provider: Option<&'a str>,
+    project_key: Option<&'a str>,
+    query: &'a str,
+    limit: usize,
+    filters: SessionSearchFilters<'a>,
+    git_filter: Option<&'a crate::sessions::git_correlation::GitScopeFilter>,
+    workflow_filter: Option<&'a WorkflowScopeFilter>,
+}
+
 /// Total savings + call count for a project (or all projects when `project` is None).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SavingsTotal {
@@ -4591,15 +4605,15 @@ impl GlobalDb {
         limit: usize,
         filters: SessionSearchFilters<'_>,
     ) -> Vec<SessionMessageSearchResult> {
-        self.search_session_messages_filtered_inner(
-            Some(provider),
+        self.search_session_messages_filtered_inner(SessionMessageSearchQuery {
+            provider: Some(provider),
             project_key,
             query,
             limit,
             filters,
-            None,
-            None,
-        )
+            git_filter: None,
+            workflow_filter: None,
+        })
         .await
     }
 
@@ -4617,15 +4631,15 @@ impl GlobalDb {
         filters: SessionSearchFilters<'_>,
         git_filter: &crate::sessions::git_correlation::GitScopeFilter,
     ) -> Vec<SessionMessageSearchResult> {
-        self.search_session_messages_filtered_inner(
+        self.search_session_messages_filtered_inner(SessionMessageSearchQuery {
             provider,
             project_key,
             query,
             limit,
             filters,
-            Some(git_filter),
-            None,
-        )
+            git_filter: Some(git_filter),
+            workflow_filter: None,
+        })
         .await
     }
 
@@ -4647,15 +4661,15 @@ impl GlobalDb {
         filters: SessionSearchFilters<'_>,
         workflow_filter: &WorkflowScopeFilter,
     ) -> Vec<SessionMessageSearchResult> {
-        self.search_session_messages_filtered_inner(
+        self.search_session_messages_filtered_inner(SessionMessageSearchQuery {
             provider,
             project_key,
             query,
             limit,
             filters,
-            None,
-            Some(workflow_filter),
-        )
+            git_filter: None,
+            workflow_filter: Some(workflow_filter),
+        })
         .await
     }
 
@@ -4667,29 +4681,31 @@ impl GlobalDb {
         limit: usize,
         filters: SessionSearchFilters<'_>,
     ) -> Vec<SessionMessageSearchResult> {
-        self.search_session_messages_filtered_inner(
-            None,
+        self.search_session_messages_filtered_inner(SessionMessageSearchQuery {
+            provider: None,
             project_key,
             query,
             limit,
             filters,
-            None,
-            None,
-        )
+            git_filter: None,
+            workflow_filter: None,
+        })
         .await
     }
 
-    #[allow(clippy::too_many_arguments)] // internal fan-in of independent scope/time/git/workflow filters
     async fn search_session_messages_filtered_inner(
         &self,
-        provider: Option<&str>,
-        project_key: Option<&str>,
-        query: &str,
-        limit: usize,
-        filters: SessionSearchFilters<'_>,
-        git_filter: Option<&crate::sessions::git_correlation::GitScopeFilter>,
-        workflow_filter: Option<&WorkflowScopeFilter>,
+        search: SessionMessageSearchQuery<'_>,
     ) -> Vec<SessionMessageSearchResult> {
+        let SessionMessageSearchQuery {
+            provider,
+            project_key,
+            query,
+            limit,
+            filters,
+            git_filter,
+            workflow_filter,
+        } = search;
         // A git-scoped search against a store written before the correlation
         // schema existed can never match; report empty rather than issuing a
         // `no such table` EXISTS subquery.

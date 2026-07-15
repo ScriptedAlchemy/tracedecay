@@ -2321,18 +2321,26 @@ impl DaemonEngine {
             handshake.clone(),
         );
         let candidate = crate::mcp::McpServer::new_with_dbs_and_reconcilers_and_writers(
-            cg,
-            handshake.scope_prefix.clone(),
-            accounting_db,
-            registry_db,
-            Some(session_db),
-            Some(user_session_db),
-            false,
-            Some(reconciler),
-            Some(database_owner_reconciler),
-            coordinated_dashboard_automation_writer(self.store_administration.clone()),
-            coordinated_hook_branch_writer(self.store_administration.clone()),
-            coordinated_background_refresh_writer(self.store_administration.clone()),
+            crate::mcp::server::McpServerConstructionContext {
+                cg,
+                scope_prefix: handshake.scope_prefix.clone(),
+                global_db: accounting_db,
+                registry_db,
+                session_db: Some(session_db),
+                user_session_db: Some(user_session_db),
+                allow_default_registry_fallback: false,
+                automation_scheduler_reconciler: Some(reconciler),
+                database_owner_reconciler: Some(database_owner_reconciler),
+                dashboard_automation_writer: coordinated_dashboard_automation_writer(
+                    self.store_administration.clone(),
+                ),
+                hook_branch_writer: coordinated_hook_branch_writer(
+                    self.store_administration.clone(),
+                ),
+                background_refresh_writer: coordinated_background_refresh_writer(
+                    self.store_administration.clone(),
+                ),
+            },
         )
         .await;
         let (server, inserted) = self
@@ -2869,18 +2877,24 @@ async fn portable_project_server(
         crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registry_db));
     let registry_db = Some(registry_db);
     let candidate = crate::mcp::McpServer::new_with_dbs_and_reconcilers_and_writers(
-        cg,
-        handshake.scope_prefix.clone(),
-        accounting_db,
-        registry_db,
-        Some(session_db),
-        Some(user_session_db),
-        false,
-        None,
-        Some(database_owner_reconciler),
-        coordinated_dashboard_automation_writer(store_administration.clone()),
-        coordinated_hook_branch_writer(store_administration.clone()),
-        coordinated_background_refresh_writer(store_administration.clone()),
+        crate::mcp::server::McpServerConstructionContext {
+            cg,
+            scope_prefix: handshake.scope_prefix.clone(),
+            global_db: accounting_db,
+            registry_db,
+            session_db: Some(session_db),
+            user_session_db: Some(user_session_db),
+            allow_default_registry_fallback: false,
+            automation_scheduler_reconciler: None,
+            database_owner_reconciler: Some(database_owner_reconciler),
+            dashboard_automation_writer: coordinated_dashboard_automation_writer(
+                store_administration.clone(),
+            ),
+            hook_branch_writer: coordinated_hook_branch_writer(store_administration.clone()),
+            background_refresh_writer: coordinated_background_refresh_writer(
+                store_administration.clone(),
+            ),
+        },
     )
     .await;
     let (resolved, inserted) = store_administration

@@ -867,6 +867,36 @@ pub(crate) async fn execute_background_refresh_direct(
     Ok(cg.get_file_token_map().await.ok())
 }
 
+/// Cohesive dependencies used to construct an MCP server.
+///
+/// Keeping these values together makes explicit that all of them describe one
+/// server instance, rather than independent configuration parameters.
+pub(crate) struct McpServerConstructionContext {
+    pub(crate) cg: TraceDecay,
+    pub(crate) scope_prefix: Option<String>,
+    pub(crate) global_db: Option<Arc<GlobalDb>>,
+    pub(crate) registry_db: Option<Arc<GlobalDb>>,
+    pub(crate) session_db: Option<Arc<GlobalDb>>,
+    pub(crate) user_session_db: Option<Arc<GlobalDb>>,
+    pub(crate) allow_default_registry_fallback: bool,
+    pub(crate) automation_scheduler_reconciler:
+        Option<crate::dashboard::AutomationSchedulerReconciler>,
+    pub(crate) database_owner_reconciler: Option<DatabaseOwnerReconciler>,
+    pub(crate) dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
+    pub(crate) hook_branch_writer: HookBranchWriter,
+    pub(crate) background_refresh_writer: BackgroundRefreshWriter,
+}
+
+struct McpToolErrorAnalyticsRequest<'a> {
+    project_root: &'a Path,
+    session_id: Option<String>,
+    tool_name: &'a str,
+    request_id: &'a Value,
+    arguments: &'a Value,
+    duration_us: Option<u64>,
+    error: &'a TraceDecayError,
+}
+
 /// The MCP server wrapping a `TraceDecay` instance.
 // Lock ordering: file_token_map -> method/resource/tool call counts (never nested)
 pub struct McpServer {
@@ -1167,7 +1197,7 @@ impl McpServer {
         let session_db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
             .await
             .map(Arc::new);
-        Self::new_with_dbs_and_reconcilers_and_writers(
+        Self::new_with_dbs_and_reconcilers_and_writers(McpServerConstructionContext {
             cg,
             scope_prefix,
             global_db,
@@ -1177,28 +1207,30 @@ impl McpServer {
             allow_default_registry_fallback,
             automation_scheduler_reconciler,
             database_owner_reconciler,
-            crate::dashboard::direct_dashboard_automation_writer(),
-            direct_hook_branch_writer(),
-            direct_background_refresh_writer(),
-        )
+            dashboard_automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
+            hook_branch_writer: direct_hook_branch_writer(),
+            background_refresh_writer: direct_background_refresh_writer(),
+        })
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new_with_dbs_and_reconcilers_and_writers(
-        cg: TraceDecay,
-        scope_prefix: Option<String>,
-        global_db: Option<Arc<GlobalDb>>,
-        registry_db: Option<Arc<GlobalDb>>,
-        session_db: Option<Arc<GlobalDb>>,
-        user_session_db: Option<Arc<GlobalDb>>,
-        allow_default_registry_fallback: bool,
-        automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
-        database_owner_reconciler: Option<DatabaseOwnerReconciler>,
-        dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
-        hook_branch_writer: HookBranchWriter,
-        background_refresh_writer: BackgroundRefreshWriter,
+        context: McpServerConstructionContext,
     ) -> Arc<Self> {
+        let McpServerConstructionContext {
+            cg,
+            scope_prefix,
+            global_db,
+            registry_db,
+            session_db,
+            user_session_db,
+            allow_default_registry_fallback,
+            automation_scheduler_reconciler,
+            database_owner_reconciler,
+            dashboard_automation_writer,
+            hook_branch_writer,
+            background_refresh_writer,
+        } = context;
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
         let response_handle_project_root = cg.project_root().to_path_buf();
@@ -3267,31 +3299,30 @@ impl McpServer {
                 JsonRpcResponse::success(id, result.value)
             }
             Err(e) => {
-                self.record_mcp_tool_error_analytics(
-                    cg.project_root(),
-                    analytics_session_id,
+                self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
+                    project_root: cg.project_root(),
+                    session_id: analytics_session_id,
                     tool_name,
-                    &request_id,
-                    &analytics_arguments,
-                    handler_elapsed_us,
-                    &e,
-                );
+                    request_id: &request_id,
+                    arguments: &analytics_arguments,
+                    duration_us: handler_elapsed_us,
+                    error: &e,
+                });
                 tool_error_response(id, tool_name, &e)
             }
         }
     }
 
-    #[allow(clippy::too_many_arguments)] // internal fan-in of independent request/analytics fields
-    fn record_mcp_tool_error_analytics(
-        &self,
-        project_root: &std::path::Path,
-        session_id: Option<String>,
-        tool_name: &str,
-        request_id: &Value,
-        arguments: &Value,
-        duration_us: Option<u64>,
-        error: &TraceDecayError,
-    ) {
+    fn record_mcp_tool_error_analytics(&self, request: McpToolErrorAnalyticsRequest<'_>) {
+        let McpToolErrorAnalyticsRequest {
+            project_root,
+            session_id,
+            tool_name,
+            request_id,
+            arguments,
+            duration_us,
+            error,
+        } = request;
         let Some(gdb) = self.global_db.clone() else {
             return;
         };
