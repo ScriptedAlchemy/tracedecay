@@ -351,7 +351,7 @@ async fn apply_rows(
             .await
             .map_err(|error| storage("insert projected session", error))?;
         }
-    };
+    }
 
     let message = projection.message();
     let message_created = match read_message(conn, &message.provider, &message.message_id).await? {
