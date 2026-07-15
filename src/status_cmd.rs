@@ -180,16 +180,16 @@ pub(crate) async fn handle_status_command(
             cost_info.as_ref(),
         );
     } else {
-        tracedecay::display::print_status_table(
-            &stats,
+        tracedecay::display::print_status_table(tracedecay::display::StatusTable {
+            stats: &stats,
             tokens_saved,
             global_tokens_saved,
             worldwide,
-            &country_flags,
-            branch_info.as_ref(),
-            cost_info.as_ref(),
+            country_flags: &country_flags,
+            branch_info: branch_info.as_ref(),
+            cost_info: cost_info.as_ref(),
             details,
-        );
+        });
     }
 
     if !tracedecay::config::is_in_gitignore(&project_path) {

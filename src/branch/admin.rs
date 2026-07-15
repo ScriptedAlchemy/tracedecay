@@ -145,27 +145,31 @@ impl PreparedBranchAdminMutation {
         let project_root = self.project_root.clone();
         let gc_branches = self.gc_branches.clone();
         transaction::commit_with_hook(
-            &self.tracedecay_dir,
-            transaction_id,
-            &self.database_paths,
-            self.metadata_before,
-            self.metadata_after,
-            publish_deleting,
-            move |quarantine_paths| {
-                validate_quarantined_stores(quarantine_paths)?;
-                for branch in &gc_branches {
-                    if super::is_branch_ref_present(&project_root, branch) {
-                        return Err(crate::errors::TraceDecayError::Config {
-                            message: format!(
-                                "branch ref '{branch}' reappeared before GC metadata publication; deletion rolled back"
-                            ),
-                        });
-                    }
-                }
-                Ok(())
+            transaction::CommitRequest {
+                tracedecay_dir: &self.tracedecay_dir,
+                supplied_transaction_id: transaction_id,
+                database_paths: &self.database_paths,
+                metadata_before: self.metadata_before,
+                metadata_after: self.metadata_after,
             },
-            rollback_deleting,
-            hook,
+            transaction::CommitHooks {
+                publish_deleting,
+                validate_precommit: move |quarantine_paths| {
+                    validate_quarantined_stores(quarantine_paths)?;
+                    for branch in &gc_branches {
+                        if super::is_branch_ref_present(&project_root, branch) {
+                            return Err(crate::errors::TraceDecayError::Config {
+                                message: format!(
+                                    "branch ref '{branch}' reappeared before GC metadata publication; deletion rolled back"
+                                ),
+                            });
+                        }
+                    }
+                    Ok(())
+                },
+                rollback_deleting,
+                hook,
+            },
         )?;
         Ok(self.report)
     }

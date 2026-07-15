@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracedecay::display::{
-    format_bytes, format_number, format_relative_time, format_token_count, print_status_header,
-    print_status_table,
+    StatusTable, format_bytes, format_number, format_relative_time, format_token_count,
+    print_status_header, print_status_table,
 };
 use tracedecay::types::GraphStats;
 
@@ -296,11 +296,27 @@ fn many_kinds_stats() -> GraphStats {
 
 // ── print_status_table ──────────────────────────────────────────────────────
 
+fn status_table(stats: &GraphStats) -> StatusTable<'_> {
+    StatusTable {
+        stats,
+        tokens_saved: 0,
+        global_tokens_saved: None,
+        worldwide: None,
+        country_flags: &[],
+        branch_info: None,
+        cost_info: None,
+        details: true,
+    }
+}
+
 #[test]
 fn test_print_status_table_no_flags_no_worldwide() {
     let stats = sample_stats();
     // Should not panic
-    print_status_table(&stats, 50_000, None, None, &[], None, None, true);
+    print_status_table(StatusTable {
+        tokens_saved: 50_000,
+        ..status_table(&stats)
+    });
 }
 
 #[test]
@@ -310,28 +326,31 @@ fn test_print_status_table_with_flags() {
         "\u{1f1fa}\u{1f1f8}".to_string(),
         "\u{1f1ec}\u{1f1e7}".to_string(),
     ];
-    print_status_table(&stats, 50_000, None, None, &flags, None, None, true);
+    print_status_table(StatusTable {
+        tokens_saved: 50_000,
+        country_flags: &flags,
+        ..status_table(&stats)
+    });
 }
 
 #[test]
 fn test_print_status_table_with_worldwide() {
     let stats = sample_stats();
-    print_status_table(
-        &stats,
-        50_000,
-        None,
-        Some(10_000_000),
-        &[],
-        None,
-        None,
-        true,
-    );
+    print_status_table(StatusTable {
+        tokens_saved: 50_000,
+        worldwide: Some(10_000_000),
+        ..status_table(&stats)
+    });
 }
 
 #[test]
 fn test_print_status_table_with_global_tokens() {
     let stats = sample_stats();
-    print_status_table(&stats, 50_000, Some(200_000), None, &[], None, None, true);
+    print_status_table(StatusTable {
+        tokens_saved: 50_000,
+        global_tokens_saved: Some(200_000),
+        ..status_table(&stats)
+    });
 }
 
 #[test]
@@ -342,74 +361,69 @@ fn test_print_status_table_with_all_options() {
         "\u{1f1e9}\u{1f1ea}".to_string(),
         "\u{1f1ef}\u{1f1f5}".to_string(),
     ];
-    print_status_table(
-        &stats,
-        100_000,
-        Some(500_000),
-        Some(50_000_000),
-        &flags,
-        None,
-        None,
-        true,
-    );
+    print_status_table(StatusTable {
+        tokens_saved: 100_000,
+        global_tokens_saved: Some(500_000),
+        worldwide: Some(50_000_000),
+        country_flags: &flags,
+        ..status_table(&stats)
+    });
 }
 
 #[test]
 fn test_print_status_table_empty_stats() {
     let stats = empty_stats();
     // Empty stats with file_count=0 and node_count=0 should satisfy debug_assert
-    print_status_table(&stats, 0, None, None, &[], None, None, true);
+    print_status_table(status_table(&stats));
 }
 
 #[test]
 fn test_print_status_table_many_node_kinds() {
     let stats = many_kinds_stats();
     // 16 node kinds should exercise column wrapping
-    print_status_table(
-        &stats,
-        1_000_000,
-        Some(5_000_000),
-        Some(100_000_000),
-        &[],
-        None,
-        None,
-        true,
-    );
+    print_status_table(StatusTable {
+        tokens_saved: 1_000_000,
+        global_tokens_saved: Some(5_000_000),
+        worldwide: Some(100_000_000),
+        ..status_table(&stats)
+    });
 }
 
 #[test]
 fn test_print_status_table_zero_tokens() {
     let stats = sample_stats();
-    print_status_table(&stats, 0, None, None, &[], None, None, true);
+    print_status_table(status_table(&stats));
 }
 
 #[test]
 fn test_print_status_table_large_token_values() {
     let stats = sample_stats();
-    print_status_table(
-        &stats,
-        999_999_999,
-        Some(1_000_000_000),
-        Some(50_000_000_000),
-        &[],
-        None,
-        None,
-        true,
-    );
+    print_status_table(StatusTable {
+        tokens_saved: 999_999_999,
+        global_tokens_saved: Some(1_000_000_000),
+        worldwide: Some(50_000_000_000),
+        ..status_table(&stats)
+    });
 }
 
 #[test]
 fn test_print_status_table_no_source_bytes() {
     let mut stats = sample_stats();
     stats.total_source_bytes = 0;
-    print_status_table(&stats, 10_000, None, None, &[], None, None, true);
+    print_status_table(StatusTable {
+        tokens_saved: 10_000,
+        ..status_table(&stats)
+    });
 }
 
 #[test]
 fn test_print_status_table_no_languages() {
     let mut stats = sample_stats();
     stats.files_by_language.clear();
-    print_status_table(&stats, 10_000, None, None, &[], None, None, true);
+    print_status_table(StatusTable {
+        tokens_saved: 10_000,
+        ..status_table(&stats)
+    });
 }
 
 #[test]
@@ -417,7 +431,11 @@ fn test_print_status_table_many_flags() {
     let stats = sample_stats();
     // 30 flags — exceeds MAX_DISPLAY_FLAGS (25), should trigger truncation with "..."
     let flags: Vec<String> = (0..30).map(|_| "\u{1f1fa}\u{1f1f8}".to_string()).collect();
-    print_status_table(&stats, 50_000, None, None, &flags, None, None, true);
+    print_status_table(StatusTable {
+        tokens_saved: 50_000,
+        country_flags: &flags,
+        ..status_table(&stats)
+    });
 }
 
 #[test]
@@ -426,7 +444,10 @@ fn test_print_status_table_single_node_kind() {
     stats.node_count = 5;
     stats.file_count = 5;
     stats.nodes_by_kind.insert("function".to_string(), 5);
-    print_status_table(&stats, 100, None, None, &[], None, None, true);
+    print_status_table(StatusTable {
+        tokens_saved: 100,
+        ..status_table(&stats)
+    });
 }
 
 #[test]
@@ -434,7 +455,10 @@ fn test_print_status_table_recent_sync_times() {
     let mut stats = sample_stats();
     stats.last_sync_at = now_secs() - 5;
     stats.last_full_sync_at = now_secs() - 3600;
-    print_status_table(&stats, 10_000, None, None, &[], None, None, true);
+    print_status_table(StatusTable {
+        tokens_saved: 10_000,
+        ..status_table(&stats)
+    });
 }
 
 // ── print_status_header ─────────────────────────────────────────────────────

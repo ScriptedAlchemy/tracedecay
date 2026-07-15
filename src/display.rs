@@ -138,18 +138,30 @@ pub fn print_status_header(
     println!("{}", table_separator('╰', '─', '╯', cell_width, num_cols));
 }
 
+/// Inputs for rendering the compact status table.
+pub struct StatusTable<'a> {
+    pub stats: &'a GraphStats,
+    pub tokens_saved: u64,
+    pub global_tokens_saved: Option<u64>,
+    pub worldwide: Option<u64>,
+    pub country_flags: &'a [String],
+    pub branch_info: Option<&'a BranchInfo>,
+    pub cost_info: Option<&'a CostRow>,
+    pub details: bool,
+}
+
 /// Prints the status output as a compact bordered table.
-#[allow(clippy::too_many_arguments)]
-pub fn print_status_table(
-    stats: &GraphStats,
-    tokens_saved: u64,
-    global_tokens_saved: Option<u64>,
-    worldwide: Option<u64>,
-    country_flags: &[String],
-    branch_info: Option<&BranchInfo>,
-    cost_info: Option<&CostRow>,
-    details: bool,
-) {
+pub fn print_status_table(table: StatusTable<'_>) {
+    let StatusTable {
+        stats,
+        tokens_saved,
+        global_tokens_saved,
+        worldwide,
+        country_flags,
+        branch_info,
+        cost_info,
+        details,
+    } = table;
     let num_cols = 3;
     debug_assert!(
         stats.file_count > 0 || stats.node_count == 0,

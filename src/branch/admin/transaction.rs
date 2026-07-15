@@ -158,17 +158,24 @@ pub(super) fn ensure_no_pending_recovery(tracedecay_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(super) struct CommitRequest<'a> {
+    pub(super) tracedecay_dir: &'a Path,
+    pub(super) supplied_transaction_id: Option<&'a str>,
+    pub(super) database_paths: &'a [PathBuf],
+    pub(super) metadata_before: Option<String>,
+    pub(super) metadata_after: Option<String>,
+}
+
+pub(super) struct CommitHooks<P, V, R, H> {
+    pub(super) publish_deleting: P,
+    pub(super) validate_precommit: V,
+    pub(super) rollback_deleting: R,
+    pub(super) hook: H,
+}
+
 pub(super) fn commit_with_hook<P, V, R, H>(
-    tracedecay_dir: &Path,
-    supplied_transaction_id: Option<&str>,
-    database_paths: &[PathBuf],
-    metadata_before: Option<String>,
-    metadata_after: Option<String>,
-    publish_deleting: P,
-    validate_precommit: V,
-    rollback_deleting: R,
-    mut hook: H,
+    request: CommitRequest<'_>,
+    hooks: CommitHooks<P, V, R, H>,
 ) -> Result<()>
 where
     P: FnOnce() -> Result<()>,
@@ -176,6 +183,19 @@ where
     R: FnOnce() -> Result<()>,
     H: FnMut(TransactionPhase) -> Result<()>,
 {
+    let CommitRequest {
+        tracedecay_dir,
+        supplied_transaction_id,
+        database_paths,
+        metadata_before,
+        metadata_after,
+    } = request;
+    let CommitHooks {
+        publish_deleting,
+        validate_precommit,
+        rollback_deleting,
+        mut hook,
+    } = hooks;
     if database_paths.is_empty() {
         validate_precommit(&[])?;
         let current = read_current_metadata(tracedecay_dir)?;
