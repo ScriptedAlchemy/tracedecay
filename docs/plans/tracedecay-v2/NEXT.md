@@ -51,6 +51,8 @@ provider record
   only existing bounded local measurements available to PR5. PR5 neither adds
   nor depends on Plan26/PR14 observability infrastructure. This is input to
   [PR20](33-end-to-end-performance-optimization.md), not a reason to widen PR5.
+  Retain the versioned [workload](../../../benchmarks/pr5-observation/workload-v1.json)
+  and [raw baseline result](../../../benchmarks/pr5-observation/result-2026-07-15-b05b4cd5.json).
 
 ## Direct tests
 
