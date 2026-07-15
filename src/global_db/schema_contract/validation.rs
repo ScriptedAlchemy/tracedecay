@@ -1,0 +1,399 @@
+use libsql::{Connection, params};
+
+use super::super::{global_db_operation_error, global_db_operation_message};
+use super::definitions::{Column, INDEXES, Index, TABLES, Table};
+use super::pragma::{
+    ActualColumn, ActualForeignKey, ActualIndex, read_columns, read_foreign_keys, read_indexes,
+};
+
+const OPERATION: &str = "validate global database authority schema";
+
+fn outer_parentheses_enclose_value(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
+        return false;
+    }
+    let mut depth = 0_i64;
+    let mut quote = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(active) = quote {
+            if byte == active {
+                if bytes.get(index + 1) == Some(&active) {
+                    index += 1;
+                } else {
+                    quote = None;
+                }
+            }
+        } else {
+            match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 && index + 1 != bytes.len() {
+                        return false;
+                    }
+                    if depth < 0 {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    depth == 0 && quote.is_none()
+}
+
+fn normalize_default(value: Option<&str>) -> Option<String> {
+    value.map(|value| {
+        let mut value = value.trim();
+        while outer_parentheses_enclose_value(value) {
+            value = value[1..value.len() - 1].trim();
+        }
+        value.to_string()
+    })
+}
+
+async fn validate_table(conn: &Connection, contract: &Table) -> crate::errors::Result<()> {
+    let actual = read_columns(conn, contract.name).await?;
+    if actual.len() != contract.columns.len() {
+        return Err(global_db_operation_message(
+            OPERATION,
+            format!(
+                "table '{}' has an incompatible number of columns",
+                contract.name
+            ),
+        ));
+    }
+    for (expected_cid, column) in contract.columns.iter().enumerate() {
+        let Some(actual) = actual.get(&column.name.to_ascii_lowercase()) else {
+            return Err(global_db_operation_message(
+                OPERATION,
+                format!(
+                    "table '{}' is missing column '{}'",
+                    contract.name, column.name
+                ),
+            ));
+        };
+        if actual.cid != i64::try_from(expected_cid).unwrap_or(i64::MAX)
+            || !column_metadata_matches(actual, column)
+        {
+            return Err(global_db_operation_message(
+                OPERATION,
+                format!(
+                    "table '{}' column '{}' has incompatible xinfo metadata",
+                    contract.name, column.name
+                ),
+            ));
+        }
+    }
+
+    let actual = read_foreign_keys(conn, contract.name).await?;
+    if !foreign_keys_match(&actual, contract) {
+        return Err(global_db_operation_message(
+            OPERATION,
+            format!("table '{}' has incompatible foreign keys", contract.name),
+        ));
+    }
+    Ok(())
+}
+
+fn column_metadata_matches(actual: &ActualColumn, expected: &Column) -> bool {
+    actual.hidden == 0
+        && actual
+            .declared_type
+            .eq_ignore_ascii_case(expected.declared_type)
+        && actual.not_null == expected.not_null
+        && normalize_default(actual.default_value.as_deref())
+            == normalize_default(expected.default_value)
+        && actual.primary_key_ordinal == expected.primary_key_ordinal
+}
+
+fn foreign_keys_match(actual: &[ActualForeignKey], contract: &Table) -> bool {
+    actual.len() == contract.foreign_keys.len()
+        && contract.foreign_keys.iter().all(|expected| {
+            actual.iter().any(|actual| {
+                actual.sequence == 0
+                    && actual.from.eq_ignore_ascii_case(expected.from)
+                    && actual
+                        .target_table
+                        .eq_ignore_ascii_case(expected.target_table)
+                    && actual
+                        .target_column
+                        .eq_ignore_ascii_case(expected.target_column)
+                    && actual.on_update.eq_ignore_ascii_case("NO ACTION")
+                    && actual.on_delete.eq_ignore_ascii_case(expected.on_delete)
+                    && actual.match_mode.eq_ignore_ascii_case("NONE")
+            })
+        })
+}
+
+fn index_matches(actual: &ActualIndex, expected: &Index) -> bool {
+    expected
+        .name
+        .is_none_or(|name| actual.name.eq_ignore_ascii_case(name))
+        && actual.unique == expected.unique
+        && actual.origin.eq_ignore_ascii_case(expected.origin)
+        && !actual.partial
+        && actual.columns.len() == expected.columns.len()
+        && actual
+            .columns
+            .iter()
+            .zip(expected.columns)
+            .all(|(actual, expected)| {
+                actual.cid >= 0
+                    && !actual.descending
+                    && actual.collation.eq_ignore_ascii_case("BINARY")
+                    && actual.name.eq_ignore_ascii_case(expected)
+            })
+}
+
+fn index_has_columns(actual: &ActualIndex, expected: &[&str]) -> bool {
+    actual.unique
+        && actual.origin.eq_ignore_ascii_case("u")
+        && !actual.partial
+        && actual.columns.len() == expected.len()
+        && actual
+            .columns
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| {
+                actual.cid >= 0
+                    && !actual.descending
+                    && actual.collation.eq_ignore_ascii_case("BINARY")
+                    && actual.name.eq_ignore_ascii_case(expected)
+            })
+}
+
+pub(in crate::global_db) async fn validate_observation_migration_source(
+    conn: &Connection,
+    has_legacy_idempotency: bool,
+) -> crate::errors::Result<()> {
+    let contract = &TABLES[7];
+    let columns = read_columns(conn, contract.name).await?;
+    if columns.len() != contract.columns.len() + usize::from(has_legacy_idempotency)
+        || contract.columns.iter().any(|expected| {
+            columns
+                .get(&expected.name.to_ascii_lowercase())
+                .is_none_or(|actual| !column_metadata_matches(actual, expected))
+        })
+    {
+        return Err(global_db_operation_message(
+            OPERATION,
+            "observations has incompatible metadata for canonical migration",
+        ));
+    }
+    if has_legacy_idempotency {
+        let Some(column) = columns.get("idempotency_key") else {
+            return Err(global_db_operation_message(
+                OPERATION,
+                "observations is missing legacy idempotency metadata",
+            ));
+        };
+        if column.hidden != 0
+            || !column.declared_type.eq_ignore_ascii_case("TEXT")
+            || !column.not_null
+            || column.default_value.is_some()
+            || column.primary_key_ordinal != 0
+        {
+            return Err(global_db_operation_message(
+                OPERATION,
+                "observations has incompatible legacy idempotency metadata",
+            ));
+        }
+    }
+    let foreign_keys = read_foreign_keys(conn, contract.name).await?;
+    if !foreign_keys_match(&foreign_keys, contract) {
+        return Err(global_db_operation_message(
+            OPERATION,
+            "observations has incompatible foreign keys for canonical migration",
+        ));
+    }
+    let indexes = read_indexes(conn, contract.name).await?;
+    let unique = indexes
+        .iter()
+        .filter(|index| index.unique && !index.origin.eq_ignore_ascii_case("pk"))
+        .collect::<Vec<_>>();
+    let expected_count = 1 + usize::from(has_legacy_idempotency);
+    if unique.len() != expected_count
+        || !unique
+            .iter()
+            .any(|index| index_has_columns(index, &["observation_id"]))
+        || (has_legacy_idempotency
+            && !unique
+                .iter()
+                .any(|index| index_has_columns(index, &["idempotency_key"])))
+    {
+        return Err(global_db_operation_message(
+            OPERATION,
+            "observations has incompatible unique indexes for canonical migration",
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_indexes_for_table(conn: &Connection, table: &str) -> crate::errors::Result<()> {
+    let actual = read_indexes(conn, table).await?;
+    let expected = INDEXES
+        .iter()
+        .filter(|contract| contract.table.eq_ignore_ascii_case(table))
+        .collect::<Vec<_>>();
+    for contract in &expected {
+        if !actual.iter().any(|index| index_matches(index, contract)) {
+            return Err(global_db_operation_message(
+                OPERATION,
+                format!(
+                    "table '{}' is missing required {}index on ({})",
+                    contract.table,
+                    if contract.unique { "unique " } else { "" },
+                    contract.columns.join(", ")
+                ),
+            ));
+        }
+    }
+
+    let actual_unique = actual
+        .iter()
+        .filter(|index| index.unique && !index.origin.eq_ignore_ascii_case("pk"))
+        .collect::<Vec<_>>();
+    let expected_unique = expected
+        .iter()
+        .copied()
+        .filter(|index| index.unique)
+        .collect::<Vec<_>>();
+    if actual_unique.len() != expected_unique.len()
+        || expected_unique.iter().any(|expected| {
+            !actual_unique
+                .iter()
+                .any(|actual| index_matches(actual, expected))
+        })
+    {
+        return Err(global_db_operation_message(
+            OPERATION,
+            format!("table '{table}' has incompatible unique-key indexes"),
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_trigger(conn: &Connection, name: &str, table: &str) -> crate::errors::Result<()> {
+    let mut rows = conn
+        .query(
+            "SELECT tbl_name FROM sqlite_master
+             WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE",
+            params![name],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let actual = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map(|row| row.get::<String>(0))
+        .transpose()
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    if actual
+        .as_deref()
+        .is_some_and(|actual| actual.eq_ignore_ascii_case(table))
+    {
+        Ok(())
+    } else {
+        Err(global_db_operation_message(
+            OPERATION,
+            format!("required trigger '{name}' on table '{table}' is missing"),
+        ))
+    }
+}
+
+async fn validate_observation_autoincrement(conn: &Connection) -> crate::errors::Result<()> {
+    let mut rows = conn
+        .query(
+            "SELECT EXISTS(
+                SELECT 1 FROM global_schema_migrations
+                WHERE migration = 'observations-v2-canonical-autoincrement'
+             ),
+             COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'observations'), 0),
+             COALESCE((SELECT MAX(sequence) FROM observations), 0)",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .ok_or_else(|| {
+            global_db_operation_message(OPERATION, "AUTOINCREMENT invariant returned no row")
+        })?;
+    let recorded = row
+        .get::<i64>(0)
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        != 0;
+    let sqlite_sequence = row
+        .get::<i64>(1)
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let committed_sequence = row
+        .get::<i64>(2)
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    if recorded && sqlite_sequence >= committed_sequence {
+        Ok(())
+    } else {
+        Err(global_db_operation_message(
+            OPERATION,
+            "observations is missing its canonical AUTOINCREMENT invariant",
+        ))
+    }
+}
+
+async fn validate_tables_and_indexes(
+    conn: &Connection,
+    tables: &[Table],
+) -> crate::errors::Result<()> {
+    for contract in tables {
+        validate_table(conn, contract).await?;
+        validate_indexes_for_table(conn, contract.name).await?;
+    }
+    Ok(())
+}
+
+pub(in crate::global_db) async fn validate_registry_schema_contract(
+    conn: &Connection,
+) -> crate::errors::Result<()> {
+    validate_tables_and_indexes(conn, &TABLES[..6]).await
+}
+
+/// Validates the composed registry, observation-authority, and projection-authority schemas.
+///
+/// Transcript, LCM, git-correlation, and workflow-index tables are independently owned and
+/// validated by their schema modules; this validator intentionally does not claim those domains.
+pub(in crate::global_db) async fn validate_authority_schema_contract(
+    conn: &Connection,
+) -> crate::errors::Result<()> {
+    validate_tables_and_indexes(conn, TABLES).await?;
+    for invariant in super::invariants::INVARIANTS {
+        for trigger in invariant.triggers {
+            validate_trigger(conn, trigger.name, trigger.table).await?;
+        }
+    }
+    validate_observation_autoincrement(conn).await?;
+    super::invariants::validate_invariant_rows(conn).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_default;
+
+    #[test]
+    fn default_normalization_only_strips_balanced_outer_parentheses() {
+        assert_eq!(normalize_default(Some(" ((0)) ")).as_deref(), Some("0"));
+        assert_eq!(
+            normalize_default(Some("(0) + (1)")).as_deref(),
+            Some("(0) + (1)")
+        );
+        assert_eq!(normalize_default(Some("((0)")).as_deref(), Some("((0)"));
+        assert_eq!(normalize_default(Some("(')')")).as_deref(), Some("')'"));
+    }
+}

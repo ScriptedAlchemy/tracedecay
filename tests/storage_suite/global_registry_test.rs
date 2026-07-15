@@ -236,7 +236,9 @@ async fn delete_project_paths_use_same_canonical_key_as_upsert() {
     db.upsert(&project_one, 10).await;
     db.upsert(&project_two, 20).await;
     db.delete_project(&project_one.join(".")).await;
-    let deleted = db.delete_project_paths(&[project_two.join(".")]).await;
+    let deleted = db
+        .delete_projects(&[project_two.join(".").to_string_lossy().into_owned()])
+        .await;
 
     assert_eq!(db.get_project_tokens(&project_one).await, 0);
     assert_eq!(deleted, 1);

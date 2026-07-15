@@ -1,4 +1,6 @@
-use libsql::{Connection, params};
+use std::collections::BTreeSet;
+
+use libsql::{Connection, TransactionBehavior, params};
 use tracedecay_domain::{
     CanonicalObservationIdV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
     ObservationCollisionOutcomeV1, ObservationScopeV1, classify_observation_collision,
@@ -10,11 +12,148 @@ use tracedecay_store::{
     StoredObservation,
 };
 
-use super::GlobalDb;
+use super::{GlobalDb, global_db_operation_error, global_db_operation_message};
 
-pub(super) async fn ensure_observation_schema(conn: &Connection) -> Result<(), libsql::Error> {
+const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical-autoincrement";
+const OBSERVATION_SCHEMA_OPERATION: &str = "migrate observation authority schema";
+
+async fn observation_table_exists(conn: &Connection) -> crate::errors::Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'observations'",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    rows.next()
+        .await
+        .map(|row| row.is_some())
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
+}
+
+async fn observation_columns(conn: &Connection) -> crate::errors::Result<BTreeSet<String>> {
+    let mut rows = conn
+        .query("SELECT name FROM pragma_table_xinfo('observations')", ())
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    let mut columns = BTreeSet::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
+    {
+        columns.insert(
+            row.get::<String>(0)
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?,
+        );
+    }
+    Ok(columns)
+}
+
+async fn migration_recorded(conn: &Connection) -> crate::errors::Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM global_schema_migrations WHERE migration = ?1",
+            params![OBSERVATION_SCHEMA_MIGRATION],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    rows.next()
+        .await
+        .map(|row| row.is_some())
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
+}
+
+async fn migrate_observation_schema(
+    conn: &Connection,
+    table_preexisted: bool,
+) -> crate::errors::Result<()> {
+    let columns = observation_columns(conn).await?;
+    let required = [
+        "sequence",
+        "observation_id",
+        "payload_digest",
+        "receipt_id",
+        "observation_json",
+        "committed_cursor_json",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<BTreeSet<_>>();
+    let mut allowed = required.clone();
+    allowed.insert("idempotency_key".to_string());
+    if !required.is_subset(&columns) || !columns.is_subset(&allowed) {
+        return Err(global_db_operation_message(
+            OBSERVATION_SCHEMA_OPERATION,
+            "observations has unsupported columns for canonical migration",
+        ));
+    }
+    super::schema_contract::validate_observation_migration_source(
+        conn,
+        columns.contains("idempotency_key"),
+    )
+    .await?;
+    let recorded = migration_recorded(conn).await?;
+    if !table_preexisted || (recorded && columns == required) {
+        conn.execute(
+            "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
+            params![OBSERVATION_SCHEMA_MIGRATION],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        return Ok(());
+    }
+
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    transaction
+        .execute_batch(
+            "PRAGMA defer_foreign_keys = ON;
+             DROP TRIGGER IF EXISTS observations_immutable_update;
+             DROP TRIGGER IF EXISTS observations_immutable_delete;
+             DROP TABLE IF EXISTS observations_canonical_v2;
+             CREATE TABLE observations_canonical_v2 (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                observation_id TEXT NOT NULL UNIQUE,
+                payload_digest TEXT NOT NULL,
+                receipt_id TEXT NOT NULL,
+                observation_json TEXT NOT NULL,
+                committed_cursor_json TEXT NOT NULL,
+                FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
+             );
+             INSERT INTO observations_canonical_v2
+                (sequence, observation_id, payload_digest, receipt_id,
+                 observation_json, committed_cursor_json)
+             SELECT sequence, observation_id, payload_digest, receipt_id,
+                    observation_json, committed_cursor_json
+             FROM observations;
+             DROP TABLE observations;
+             ALTER TABLE observations_canonical_v2 RENAME TO observations;",
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO global_schema_migrations(migration) VALUES (?1)",
+            params![OBSERVATION_SCHEMA_MIGRATION],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
+}
+
+pub(super) async fn ensure_observation_schema(conn: &Connection) -> crate::errors::Result<()> {
+    let table_preexisted = observation_table_exists(conn).await?;
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS sanitization_receipts (
+        "CREATE TABLE IF NOT EXISTS global_schema_migrations (
+            migration TEXT PRIMARY KEY
+        );
+        CREATE TABLE IF NOT EXISTS sanitization_receipts (
             receipt_id TEXT PRIMARY KEY,
             sanitizer_version TEXT NOT NULL,
             payload_digest TEXT NOT NULL,
@@ -50,7 +189,8 @@ pub(super) async fn ensure_observation_schema(conn: &Connection) -> Result<(), l
             END;",
     )
     .await
-    .map(|_| ())
+    .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    migrate_observation_schema(conn, table_preexisted).await
 }
 
 fn storage(
@@ -182,27 +322,6 @@ async fn read_by_observation_id(
         "read observation",
     )
     .await
-}
-
-async fn has_legacy_idempotency_column(conn: &Connection) -> ObservationStoreResult<bool> {
-    let mut rows = conn
-        .query("PRAGMA table_info(observations)", ())
-        .await
-        .map_err(|error| storage("inspect observation schema", error))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage("inspect observation schema", error))?
-    {
-        if row
-            .get::<String>(1)
-            .map_err(|error| storage("inspect observation schema", error))?
-            == "idempotency_key"
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 async fn read_cursor(
@@ -382,41 +501,22 @@ impl GlobalDb {
             return Err(ObservationStoreError::SanitizationReceiptCollision);
         }
 
-        let insert_result = if has_legacy_idempotency_column(&transaction).await? {
-            transaction
-                .execute(
-                    "INSERT INTO observations
-                    (observation_id, idempotency_key, payload_digest, receipt_id,
-                     observation_json, committed_cursor_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        candidate.observation_id().as_str(),
-                        candidate.observation_id().as_str(),
-                        payload_digest,
-                        receipt_id,
-                        observation_json.as_str(),
-                        cursor_json.as_str()
-                    ],
-                )
-                .await
-        } else {
-            transaction
-                .execute(
-                    "INSERT INTO observations
+        transaction
+            .execute(
+                "INSERT INTO observations
                         (observation_id, payload_digest, receipt_id,
                          observation_json, committed_cursor_json)
                      VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        candidate.observation_id().as_str(),
-                        payload_digest,
-                        receipt_id,
-                        observation_json.as_str(),
-                        cursor_json.as_str()
-                    ],
-                )
-                .await
-        };
-        insert_result.map_err(|error| storage("insert immutable observation", error))?;
+                params![
+                    candidate.observation_id().as_str(),
+                    payload_digest,
+                    receipt_id,
+                    observation_json.as_str(),
+                    cursor_json.as_str()
+                ],
+            )
+            .await
+            .map_err(|error| storage("insert immutable observation", error))?;
         let committed = read_by_observation_id(&transaction, candidate.observation_id())
             .await?
             .ok_or_else(|| {

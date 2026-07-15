@@ -320,7 +320,7 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
 }
 
 #[tokio::test]
-async fn legacy_idempotency_column_rows_remain_readable_and_writable() {
+async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_lcm_db_path(&tmp);
     std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
@@ -407,7 +407,7 @@ async fn legacy_idempotency_column_rows_remain_readable_and_writable() {
     assert_eq!(stored.committed_cursor(), &original_cursor);
     assert_eq!(
         stored.projection_status(),
-        ObservationProjectionStatus::NotQueued
+        ObservationProjectionStatus::Queued
     );
 
     let duplicate = store
@@ -428,21 +428,22 @@ async fn legacy_idempotency_column_rows_remain_readable_and_writable() {
     let verify_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
     let verify_conn = verify_db.connect().unwrap();
     let mut rows = verify_conn
+        .query("SELECT name FROM pragma_table_xinfo('observations')", ())
+        .await
+        .unwrap();
+    let mut columns = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        columns.push(row.get::<String>(0).unwrap());
+    }
+    assert!(!columns.iter().any(|name| name == "idempotency_key"));
+    let mut rows = verify_conn
         .query(
-            "SELECT idempotency_key FROM observations WHERE observation_id = ?1",
+            "SELECT sequence FROM observations WHERE observation_id = ?1",
             libsql::params![next.observation_id().as_str()],
         )
         .await
         .unwrap();
-    assert_eq!(
-        rows.next()
-            .await
-            .unwrap()
-            .unwrap()
-            .get::<String>(0)
-            .unwrap(),
-        next.observation_id().as_str()
-    );
+    assert!(rows.next().await.unwrap().is_some());
 }
 
 #[tokio::test]

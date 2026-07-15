@@ -56,6 +56,42 @@ async fn create_conflicting_schema_view(db_path: &Path, view_name: &str) {
         .unwrap();
 }
 
+async fn require_schema_reensure(db: &GlobalDb) {
+    let slot = GLOBAL_DB_SLOTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(db.db_path())
+        .and_then(Weak::upgrade)
+        .expect("authoritative open has schema slot");
+    slot.lock().await.ensured = false;
+}
+
+async fn seed_observation(conn: &Connection, sequence: i64, observation_id: &str) {
+    let receipt_id = format!("receipt_{sequence}");
+    conn.execute(
+        "INSERT INTO sanitization_receipts
+         (receipt_id, sanitizer_version, payload_digest, receipt_json)
+         VALUES (?1, 'v1', ?2, '{}')",
+        params![receipt_id.as_str(), format!("digest_{sequence}")],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO observations
+         (sequence, observation_id, payload_digest, receipt_id,
+          observation_json, committed_cursor_json)
+         VALUES (?1, ?2, ?3, ?4, '{}', '{}')",
+        params![
+            sequence,
+            observation_id,
+            format!("digest_{sequence}"),
+            receipt_id
+        ],
+    )
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn try_open_at_reports_observation_schema_failure() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -68,7 +104,7 @@ async fn try_open_at_reports_observation_schema_failure() {
     let TraceDecayError::DatabaseOperation { operation, source } = error else {
         panic!("unexpected error: {error}");
     };
-    assert_eq!(operation, "initialize observation schema");
+    assert_eq!(operation, "migrate observation authority schema");
     let message = source.to_string();
     assert!(message.contains("observations"), "{message}");
     assert!(GlobalDb::open_at(&db_path).await.is_none());
@@ -120,8 +156,101 @@ async fn try_open_at_rejects_observation_table_without_authority_constraints() {
     let TraceDecayError::Database { message, operation } = error else {
         panic!("unexpected error: {error}");
     };
-    assert_eq!(operation, "validate global database schema");
+    assert_eq!(operation, "validate global database authority schema");
     assert!(message.contains("observations"), "{message}");
+}
+
+#[tokio::test]
+async fn legacy_idempotency_and_non_autoincrement_observations_migrate_canonically() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let raw_db = Builder::new_local(&db_path).build().await.unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute_batch(
+            "CREATE TABLE sanitization_receipts (
+                receipt_id TEXT PRIMARY KEY,
+                sanitizer_version TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                receipt_json TEXT NOT NULL
+            );
+             CREATE TABLE observations (
+                sequence INTEGER PRIMARY KEY,
+                observation_id TEXT NOT NULL UNIQUE,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                payload_digest TEXT NOT NULL,
+                receipt_id TEXT NOT NULL,
+                observation_json TEXT NOT NULL,
+                committed_cursor_json TEXT NOT NULL,
+                FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
+             );
+             INSERT INTO sanitization_receipts VALUES ('receipt_41', 'v1', 'digest_41', '{}');
+             INSERT INTO observations VALUES
+                (41, 'observation_41', 'legacy-key', 'digest_41', 'receipt_41', '{}', '{}');",
+        )
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let mut columns = db
+        .conn
+        .query("SELECT name FROM pragma_table_xinfo('observations')", ())
+        .await
+        .unwrap();
+    let mut names = Vec::new();
+    while let Some(row) = columns.next().await.unwrap() {
+        names.push(row.get::<String>(0).unwrap());
+    }
+    assert!(!names.iter().any(|name| name == "idempotency_key"));
+
+    let mut rows = db
+        .conn
+        .query(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'observations'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        41
+    );
+    let mut rows = db
+        .conn
+        .query(
+            "SELECT observation_id, observation_sequence FROM projection_queue",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "observation_41");
+    assert_eq!(row.get::<i64>(1).unwrap(), 41);
+
+    db.conn
+        .execute_batch(
+            "INSERT INTO sanitization_receipts VALUES ('receipt_42', 'v1', 'digest_42', '{}');
+             INSERT INTO observations
+                (observation_id, payload_digest, receipt_id, observation_json,
+                 committed_cursor_json)
+             VALUES ('observation_42', 'digest_42', 'receipt_42', '{}', '{}');",
+        )
+        .await
+        .unwrap();
+    let mut rows = db
+        .conn
+        .query(
+            "SELECT sequence FROM observations WHERE observation_id = 'observation_42'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        42
+    );
 }
 
 #[tokio::test]
@@ -176,6 +305,56 @@ async fn schema_validation_rejects_incomplete_registry_table() {
         error.to_string().contains("incompatible number of columns"),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn schema_validation_rejects_partial_required_index() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    db.conn
+        .execute_batch(
+            "DROP INDEX idx_project_aliases_project_id;
+             CREATE INDEX idx_project_aliases_project_id
+             ON project_aliases(project_id) WHERE last_seen_at > 0;",
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("partial authority index unexpectedly opened");
+    };
+    assert!(
+        error.to_string().contains("missing required index"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn schema_validation_rejects_hidden_generated_registry_column() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let raw_db = Builder::new_local(&db_path).build().await.unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute_batch(
+            "CREATE TABLE projects (
+                path TEXT PRIMARY KEY,
+                tokens_saved INTEGER NOT NULL DEFAULT 0,
+                derived INTEGER GENERATED ALWAYS AS (tokens_saved + 1) VIRTUAL
+            )",
+        )
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("hidden generated registry column unexpectedly opened");
+    };
+    assert!(error.to_string().contains("incompatible number of columns"));
 }
 
 #[tokio::test]
@@ -288,13 +467,158 @@ async fn cross_table_identity_constraints_reject_mismatched_rows() {
 }
 
 #[tokio::test]
-async fn try_open_at_propagates_project_row_migration_failure() {
+async fn malformed_same_name_invariant_trigger_is_replaced() {
     let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    db.conn
+        .execute_batch(
+            "DROP TRIGGER projection_queue_identity_insert_v1;
+             CREATE TRIGGER projection_queue_identity_insert_v1
+             BEFORE INSERT ON projection_queue BEGIN SELECT 1; END;",
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
+    seed_observation(&reopened.conn, 1, "observation_trigger").await;
+    let error = reopened
+        .conn
+        .execute(
+            "INSERT INTO projection_queue(observation_id, observation_sequence)
+             VALUES ('observation_trigger', 2)",
+            (),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("observation identity mismatch"));
+}
+
+#[tokio::test]
+async fn store_project_identity_cannot_be_reparented() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    db.upsert_code_project("project_one", &dir.path().join("one"), None, None, None)
+        .await
+        .unwrap();
+    db.upsert_code_project("project_two", &dir.path().join("two"), None, None, None)
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO store_instances
+             (store_id, project_id, store_kind, storage_mode, store_relpath, created_at)
+             VALUES ('store_one', 'project_one', 'sessions', 'central', 'sessions', 1)",
+            (),
+        )
+        .await
+        .unwrap();
+    let error = db
+        .conn
+        .execute(
+            "UPDATE store_instances SET project_id = 'project_two'
+             WHERE store_id = 'store_one'",
+            (),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("store project identity is immutable")
+    );
+}
+
+#[tokio::test]
+async fn schema_reensure_repairs_projection_queue_to_checkpoint_frontier() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    seed_observation(&db.conn, 1, "observation_one").await;
+    seed_observation(&db.conn, 2, "observation_two").await;
+    db.conn
+        .execute_batch(
+            "INSERT INTO observation_projection_checkpoints(projector_version, last_sequence)
+             VALUES ('claude-session-message-v1', 1);
+             INSERT INTO projection_queue(observation_id, observation_sequence)
+             VALUES ('observation_one', 1);",
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
+    let mut rows = reopened
+        .conn
+        .query(
+            "SELECT observation_id, observation_sequence FROM projection_queue",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "observation_two");
+    assert_eq!(row.get::<i64>(1).unwrap(), 2);
+    assert!(rows.next().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn schema_reensure_rejects_checkpoint_beyond_committed_frontier() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    seed_observation(&db.conn, 1, "observation_one").await;
+    db.conn
+        .execute(
+            "INSERT INTO observation_projection_checkpoints(projector_version, last_sequence)
+             VALUES ('claude-session-message-v1', 2)",
+            (),
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("checkpoint beyond committed frontier unexpectedly opened");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("checkpoint exceeds the committed observation frontier"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn try_open_at_prevalidates_projects_before_canonical_migration() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let legacy = format!("{}/.", project.display());
     let db_path = dir.path().join("global.db");
     let raw_db = Builder::new_local(&db_path).build().await.unwrap();
     let raw_conn = raw_db.connect().unwrap();
     raw_conn
-        .execute("CREATE TABLE projects (path TEXT PRIMARY KEY)", ())
+        .execute_batch(
+            "CREATE TABLE projects (
+                path TEXT PRIMARY KEY,
+                tokens_saved INTEGER NOT NULL DEFAULT 0,
+                unexpected TEXT
+             )",
+        )
+        .await
+        .unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO projects(path, tokens_saved) VALUES (?1, 7)",
+            params![legacy.as_str()],
+        )
         .await
         .unwrap();
     drop(raw_conn);
@@ -303,12 +627,31 @@ async fn try_open_at_propagates_project_row_migration_failure() {
     let Err(error) = GlobalDb::try_open_at(&db_path).await else {
         panic!("invalid projects table unexpectedly opened");
     };
-    let TraceDecayError::DatabaseOperation { operation, source } = error else {
+    let TraceDecayError::Database { message, operation } = error else {
         panic!("unexpected error: {error}");
     };
-    assert_eq!(operation, "migrate global project rows");
-    let message = source.to_string();
-    assert!(message.contains("tokens_saved"), "{message}");
+    assert_eq!(operation, "validate global database authority schema");
+    assert!(
+        message.contains("incompatible number of columns"),
+        "{message}"
+    );
+
+    let raw_db = Builder::new_local(&db_path).build().await.unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    let mut rows = raw_conn
+        .query("SELECT path FROM projects", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        legacy
+    );
+    assert!(rows.next().await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -475,6 +818,115 @@ async fn code_project_listing_uses_latest_lossless_primary_root() {
     );
 }
 
+#[tokio::test]
+async fn code_project_listing_preserves_literal_unicode_replacement_character() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let project = dir.path().join("literal-\u{fffd}-project");
+    db.upsert_code_project("proj_unicode", &project, None, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        db.try_list_code_project_paths(usize::MAX).await.unwrap(),
+        vec![project]
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn code_project_listing_prefers_explicit_unicode_root_after_non_unicode_move() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let (old_non_unicode, _) = colliding_non_unicode_project_paths(dir.path());
+    let current_unicode = dir.path().join("current-unicode");
+    db.upsert_code_project("proj_moved_unicode", &old_non_unicode, None, None, None)
+        .await
+        .unwrap();
+    db.upsert_code_project("proj_moved_unicode", &current_unicode, None, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        db.try_list_code_project_paths(usize::MAX).await.unwrap(),
+        vec![current_unicode]
+    );
+    assert_eq!(
+        db.project_id_by_alias_key(&project_path_alias_key(&old_non_unicode))
+            .await
+            .as_deref(),
+        Some("proj_moved_unicode")
+    );
+}
+
+#[tokio::test]
+async fn legacy_code_project_listing_rejects_display_without_lossless_alias_evidence() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let project = dir.path().join("literal-\u{fffd}-legacy");
+    db.upsert_code_project("proj_no_evidence", &project, None, None, None)
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "DELETE FROM project_aliases WHERE project_id = 'proj_no_evidence'",
+            (),
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE code_projects SET primary_root_platform = NULL,
+             primary_root_bytes = NULL, primary_root_last_seen_at = NULL
+             WHERE project_id = 'proj_no_evidence'",
+            (),
+        )
+        .await
+        .unwrap();
+
+    let error = db
+        .try_list_code_project_paths(usize::MAX)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("no current lossless legacy root evidence")
+    );
+}
+
+#[tokio::test]
+async fn code_project_listing_rejects_incomplete_primary_root_tuple() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let project = dir.path().join("project");
+    db.upsert_code_project("proj_incomplete", &project, None, None, None)
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE code_projects SET primary_root_bytes = NULL
+             WHERE project_id = 'proj_incomplete'",
+            (),
+        )
+        .await
+        .unwrap();
+
+    let error = db
+        .try_list_code_project_paths(usize::MAX)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("incomplete primary root"));
+}
+
 #[cfg(any(unix, windows))]
 #[tokio::test]
 async fn legacy_code_project_listing_fails_closed_on_ambiguous_native_roots() {
@@ -504,6 +956,54 @@ async fn legacy_code_project_listing_fails_closed_on_ambiguous_native_roots() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("ambiguous legacy"), "{error}");
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn legacy_code_project_listing_uses_unique_current_plain_alias_evidence() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let (old_non_unicode, _) = colliding_non_unicode_project_paths(dir.path());
+    let current_unicode = dir.path().join("current-unicode");
+    db.upsert_code_project("proj_legacy_move", &old_non_unicode, None, None, None)
+        .await
+        .unwrap();
+    db.upsert_code_project("proj_legacy_move", &current_unicode, None, None, None)
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE project_aliases SET last_seen_at = 10
+             WHERE alias_path = ?1",
+            params![project_path_alias_key(&old_non_unicode)],
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE project_aliases SET last_seen_at = 20
+             WHERE alias_path = ?1",
+            params![project_path_alias_key(&current_unicode)],
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE code_projects SET last_seen_at = 20,
+             primary_root_platform = NULL, primary_root_bytes = NULL,
+             primary_root_last_seen_at = NULL
+             WHERE project_id = 'proj_legacy_move'",
+            (),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        db.try_list_code_project_paths(usize::MAX).await.unwrap(),
+        vec![current_unicode]
+    );
 }
 
 #[tokio::test]
