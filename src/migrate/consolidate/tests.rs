@@ -4272,34 +4272,35 @@ async fn create_shard(
         .writer_connection("seed consolidation shard fixture")
         .await
         .unwrap();
-    let memory = writer.memory_store();
-    let outcome = memory
-        .add_fact(
-            AddFactRequest {
-                content: fact_content.to_string(),
-                category: MemoryCategory::Project,
-                source: Some("consolidation-test".to_string()),
-                tags: vec![project_id.to_string()],
-                entities: vec!["TraceDecay".to_string()],
-                trust: Some(0.8),
-                metadata: json!({"project_id": project_id}),
-            },
-            0.5,
-        )
-        .await
-        .unwrap();
-    if feedback {
-        memory
-            .record_feedback_event(FeedbackRequest {
-                fact_id: outcome.fact.unwrap().fact_id,
-                action: FeedbackAction::Helpful,
-                source: Some("consolidation-test".to_string()),
-                note: Some("verified".to_string()),
-            })
+    {
+        let memory = writer.memory_store();
+        let outcome = memory
+            .add_fact(
+                AddFactRequest {
+                    content: fact_content.to_string(),
+                    category: MemoryCategory::Project,
+                    source: Some("consolidation-test".to_string()),
+                    tags: vec![project_id.to_string()],
+                    entities: vec!["TraceDecay".to_string()],
+                    trust: Some(0.8),
+                    metadata: json!({"project_id": project_id}),
+                },
+                0.5,
+            )
             .await
             .unwrap();
+        if feedback {
+            memory
+                .record_feedback_event(FeedbackRequest {
+                    fact_id: outcome.fact.unwrap().fact_id,
+                    action: FeedbackAction::Helpful,
+                    source: Some("consolidation-test".to_string()),
+                    note: Some("verified".to_string()),
+                })
+                .await
+                .unwrap();
+        }
     }
-    drop(memory);
     drop(writer);
     graph.checkpoint().await.unwrap();
     graph.close();
@@ -4373,34 +4374,35 @@ async fn add_fact_to_shard(
         .writer_connection("seed consolidation memory fixture")
         .await
         .unwrap();
-    let memory = writer.memory_store();
-    let outcome = memory
-        .add_fact(
-            AddFactRequest {
-                content: content.to_string(),
-                category: MemoryCategory::Project,
-                source: Some(project_id.to_string()),
-                tags: vec![tag.to_string()],
-                entities: vec!["TraceDecay".to_string()],
-                trust: Some(0.8),
-                metadata,
-            },
-            0.5,
-        )
-        .await
-        .unwrap();
-    if let Some(action) = feedback {
-        memory
-            .record_feedback_event(FeedbackRequest {
-                fact_id: outcome.fact.unwrap().fact_id,
-                action,
-                source: Some(project_id.to_string()),
-                note: Some("overlap".to_string()),
-            })
+    {
+        let memory = writer.memory_store();
+        let outcome = memory
+            .add_fact(
+                AddFactRequest {
+                    content: content.to_string(),
+                    category: MemoryCategory::Project,
+                    source: Some(project_id.to_string()),
+                    tags: vec![tag.to_string()],
+                    entities: vec!["TraceDecay".to_string()],
+                    trust: Some(0.8),
+                    metadata,
+                },
+                0.5,
+            )
             .await
             .unwrap();
+        if let Some(action) = feedback {
+            memory
+                .record_feedback_event(FeedbackRequest {
+                    fact_id: outcome.fact.unwrap().fact_id,
+                    action,
+                    source: Some(project_id.to_string()),
+                    note: Some("overlap".to_string()),
+                })
+                .await
+                .unwrap();
+        }
     }
-    drop(memory);
     drop(writer);
     graph.checkpoint().await.unwrap();
     graph.close();
@@ -4413,45 +4415,46 @@ async fn add_fact_relation_to_shard(fixture: &Fixture, project_id: &str) {
         .writer_connection("seed consolidation relation fixture")
         .await
         .unwrap();
-    let memory = writer.memory_store();
-    let source_fact_id = memory
-        .list_facts(None, Some(0.0), 10)
-        .await
-        .unwrap()
-        .into_iter()
-        .next()
-        .expect("fixture source fact")
-        .fact_id;
-    let target_fact_id = memory
-        .add_fact(
-            AddFactRequest {
-                content: "relation target fact".to_string(),
-                category: MemoryCategory::Project,
-                source: Some("consolidation-test".to_string()),
-                tags: vec!["relation".to_string()],
-                entities: vec!["TraceDecay".to_string()],
-                trust: Some(0.75),
-                metadata: json!({"project_id": project_id}),
-            },
-            0.5,
-        )
-        .await
-        .unwrap()
-        .fact
-        .expect("relation target fact should be stored")
-        .fact_id;
-    memory
-        .upsert_fact_relation(
-            source_fact_id,
-            target_fact_id,
-            FactRelationKind::Supports,
-            0.9,
-            "consolidation-test",
-            json!({"evidence": "fixture"}),
-        )
-        .await
-        .unwrap();
-    drop(memory);
+    {
+        let memory = writer.memory_store();
+        let source_fact_id = memory
+            .list_facts(None, Some(0.0), 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("fixture source fact")
+            .fact_id;
+        let target_fact_id = memory
+            .add_fact(
+                AddFactRequest {
+                    content: "relation target fact".to_string(),
+                    category: MemoryCategory::Project,
+                    source: Some("consolidation-test".to_string()),
+                    tags: vec!["relation".to_string()],
+                    entities: vec!["TraceDecay".to_string()],
+                    trust: Some(0.75),
+                    metadata: json!({"project_id": project_id}),
+                },
+                0.5,
+            )
+            .await
+            .unwrap()
+            .fact
+            .expect("relation target fact should be stored")
+            .fact_id;
+        memory
+            .upsert_fact_relation(
+                source_fact_id,
+                target_fact_id,
+                FactRelationKind::Supports,
+                0.9,
+                "consolidation-test",
+                json!({"evidence": "fixture"}),
+            )
+            .await
+            .unwrap();
+    }
     drop(writer);
     graph.checkpoint().await.unwrap();
     graph.close();

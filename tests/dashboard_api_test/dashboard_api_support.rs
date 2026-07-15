@@ -174,7 +174,7 @@ pub(crate) fn blob_param(bytes: Vec<u8>) -> libsql::Value {
 }
 
 pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) {
-    let conn = cg.db().conn();
+    let db = cg.db();
     let vec_a = match HolographicEncoder::serialize(&[0.20, 0.35, 0.50]) {
         Ok(value) => value,
         Err(err) => panic!("failed to serialize vec_a: {err}"),
@@ -195,10 +195,6 @@ pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) {
         Ok(value) => value,
         Err(err) => panic!("failed to serialize bank_b: {err}"),
     };
-
-    if let Err(err) = conn.execute("BEGIN IMMEDIATE", ()).await {
-        panic!("failed to begin memory fixture transaction: {err}");
-    }
 
     let inserts = [
         (
@@ -260,7 +256,10 @@ pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) {
         ),
     ];
     for (sql, params) in inserts {
-        if let Err(err) = conn.execute(sql, params).await {
+        if let Err(err) = db
+            .execute_write("seed dashboard memory fact", sql, params)
+            .await
+        {
             panic!("failed to insert memory fact: {err}");
         }
     }
@@ -277,8 +276,9 @@ pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) {
         (203_i64, "SimilarityView", "similarityview", "feature", "[]"),
     ];
     for (entity_id, name, normalized_name, entity_type, aliases) in entity_rows {
-        if let Err(err) = conn
-            .execute(
+        if let Err(err) = db
+            .execute_write(
+                "seed dashboard memory entity",
                 "INSERT INTO memory_entities
                     (entity_id, name, normalized_name, entity_type, aliases, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -304,8 +304,9 @@ pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) {
         (103_i64, 203_i64),
     ];
     for (fact_id, entity_id) in joins {
-        if let Err(err) = conn
-            .execute(
+        if let Err(err) = db
+            .execute_write(
+                "seed dashboard memory fact entity",
                 "INSERT INTO memory_fact_entities (fact_id, entity_id) VALUES (?1, ?2)",
                 libsql::params![fact_id, entity_id],
             )
@@ -320,8 +321,9 @@ pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) {
     // last bundle rebuild, and the overview API must report live membership.
     let bank_rows = [("project", bank_a, 5_i64), ("tool", bank_b, 1_i64)];
     for (name, vector, fact_count) in bank_rows {
-        if let Err(err) = conn
-            .execute(
+        if let Err(err) = db
+            .execute_write(
+                "seed dashboard memory bank",
                 "INSERT INTO memory_banks
                     (bank_name, vector, hrr_dim, fact_count, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -337,11 +339,6 @@ pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) {
         {
             panic!("failed to insert memory bank: {err}");
         }
-    }
-
-    if let Err(err) = conn.execute("COMMIT", ()).await {
-        let _ = conn.execute("ROLLBACK", ()).await;
-        panic!("failed to commit memory fixture transaction: {err}");
     }
 }
 

@@ -365,9 +365,6 @@ impl TraceDecay {
         self.db
             .set_metadata_unguarded(&transaction, "last_sync_at", &now_str)
             .await?;
-        // Stamp HEAD so the watcher can diff-scope future syncs (best-effort).
-        self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced();
         self.db
             .set_metadata_unguarded(
                 &transaction,
@@ -385,6 +382,10 @@ impl TraceDecay {
             )
             .await?;
         transaction.commit().await?;
+        // Stamp HEAD after releasing the full-index transaction: this helper
+        // acquires its own writer lane, as do the incremental-sync call sites.
+        self.stamp_last_synced_commit().await;
+        self.touch_branch_meta_synced();
 
         let result = IndexResult {
             file_count: files.len(),

@@ -683,7 +683,10 @@ fn rollback_keeps_database_when_metadata_removal_cannot_be_saved() {
     assert!(db_path.exists());
     let persisted = crate::branch_meta::load_branch_meta(data_dir).unwrap();
     assert!(persisted.is_tracked("feature"));
-    assert!(error.to_string().contains("branch metadata"));
+    assert!(
+        error.to_string().contains("branch metadata"),
+        "unexpected rollback error: {error}"
+    );
 }
 
 #[cfg(test)]

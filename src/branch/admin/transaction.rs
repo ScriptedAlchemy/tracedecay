@@ -201,7 +201,9 @@ where
             let after = metadata_after.as_deref().ok_or_else(|| {
                 config_error("tracked branch deletion cannot remove branch metadata entirely")
             })?;
-            crate::branch_meta::save_branch_meta_serialized(tracedecay_dir, after)?;
+            crate::branch_meta::save_branch_meta_serialized(tracedecay_dir, after).map_err(
+                |error| config_error(format!("failed to publish branch metadata: {error}")),
+            )?;
             sync_file(&tracedecay_dir.join(BRANCH_META_FILENAME))?;
             sync_directory(tracedecay_dir)?;
         }
@@ -282,7 +284,9 @@ where
             let after = journal.metadata_after.as_deref().ok_or_else(|| {
                 config_error("tracked branch deletion cannot remove branch metadata entirely")
             })?;
-            crate::branch_meta::save_branch_meta_serialized(tracedecay_dir, after)?;
+            crate::branch_meta::save_branch_meta_serialized(tracedecay_dir, after).map_err(
+                |error| config_error(format!("failed to publish branch metadata: {error}")),
+            )?;
             sync_file(&tracedecay_dir.join(BRANCH_META_FILENAME))?;
             sync_directory(tracedecay_dir)?;
         }
