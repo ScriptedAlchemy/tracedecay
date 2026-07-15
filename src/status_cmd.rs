@@ -180,7 +180,7 @@ pub(crate) async fn handle_status_command(
             cost_info.as_ref(),
         );
     } else {
-        tracedecay::display::print_status_table(tracedecay::display::StatusTable {
+        tracedecay::display::print_status_table_with(tracedecay::display::StatusTable {
             stats: &stats,
             tokens_saved,
             global_tokens_saved,

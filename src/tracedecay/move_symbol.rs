@@ -161,15 +161,14 @@ impl TraceDecay {
         let dest_module = rust_module_path(&dest_rel);
         let src_module = rust_module_path(&source_rel);
         let analysis = self
-            .analyze_dependencies(DependencyAnalysisInput {
-                target: &target,
-                source_rel: &source_rel,
-                dest_rel: &dest_rel,
-                source: &source,
-                source_modified: &source_modified,
-                moved_text: &moved_text,
-                src_module: src_module.as_deref(),
-            })
+            .analyze_dependencies(
+                &target,
+                &source_rel,
+                &dest_rel,
+                &source,
+                &source_modified,
+                &moved_text,
+            )
             .await?;
 
         // Assemble the destination content.
@@ -359,17 +358,14 @@ impl TraceDecay {
     /// destination. Produces auto-insertable imports plus hints for the rest.
     async fn analyze_dependencies(
         &self,
-        input: DependencyAnalysisInput<'_>,
+        target: &Node,
+        source_rel: &str,
+        dest_rel: &str,
+        source: &str,
+        source_modified: &str,
+        moved_text: &str,
     ) -> Result<DependencyAnalysis> {
-        let DependencyAnalysisInput {
-            target,
-            source_rel,
-            dest_rel,
-            source,
-            source_modified,
-            moved_text,
-            src_module,
-        } = input;
+        let src_module = rust_module_path(source_rel);
         let mut out = DependencyAnalysis::default();
         // Scan only real code: a doc-comment mention (e.g. ``[`compute_total`]``)
         // and identifiers that appear only inside string literals are not
@@ -394,7 +390,7 @@ impl TraceDecay {
             if !handled.insert(node.name.clone()) {
                 continue;
             }
-            let module = src_module.unwrap_or("crate");
+            let module = src_module.as_deref().unwrap_or("crate");
             let use_line = format!("use {module}::{};", node.name);
             let visible = matches!(node.visibility, Visibility::Pub | Visibility::PubCrate);
             if visible {
@@ -691,16 +687,6 @@ struct DependencyAnalysis {
     auto_imports: Vec<String>,
     /// Findings that need caller attention.
     hints: Vec<MoveHint>,
-}
-
-struct DependencyAnalysisInput<'a> {
-    target: &'a Node,
-    source_rel: &'a str,
-    dest_rel: &'a str,
-    source: &'a str,
-    source_modified: &'a str,
-    moved_text: &'a str,
-    src_module: Option<&'a str>,
 }
 
 /// A single binding brought into scope by a `use` statement.

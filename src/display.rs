@@ -152,7 +152,37 @@ pub struct StatusTable<'a> {
 }
 
 /// Prints the status output as a compact bordered table.
-pub fn print_status_table(table: StatusTable<'_>) {
+///
+/// This signature is retained for downstream callers. New code should prefer
+/// [`print_status_table_with`] so its optional inputs remain named.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "preserves the public display API"
+)]
+pub fn print_status_table(
+    stats: &GraphStats,
+    tokens_saved: u64,
+    global_tokens_saved: Option<u64>,
+    worldwide: Option<u64>,
+    country_flags: &[String],
+    branch_info: Option<&BranchInfo>,
+    cost_info: Option<&CostRow>,
+    details: bool,
+) {
+    print_status_table_with(StatusTable {
+        stats,
+        tokens_saved,
+        global_tokens_saved,
+        worldwide,
+        country_flags,
+        branch_info,
+        cost_info,
+        details,
+    });
+}
+
+/// Prints the status output from named inputs.
+pub fn print_status_table_with(table: StatusTable<'_>) {
     let StatusTable {
         stats,
         tokens_saved,
