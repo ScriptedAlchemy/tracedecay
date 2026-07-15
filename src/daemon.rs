@@ -2326,14 +2326,14 @@ impl DaemonEngine {
             registry_db,
             session_db,
             user_session_db,
+            database_owner_reconciler,
             crate::mcp::server::McpServerWriters::daemon_owned(
                 coordinated_dashboard_automation_writer(self.store_administration.clone()),
                 coordinated_hook_branch_writer(self.store_administration.clone()),
                 coordinated_background_refresh_writer(self.store_administration.clone()),
             ),
         )
-        .with_automation_scheduler_reconciler(reconciler)
-        .with_database_owner_reconciler(database_owner_reconciler);
+        .with_automation_scheduler_reconciler(reconciler);
         let candidate = crate::mcp::McpServer::new_with_context(context).await;
         let (server, inserted) = self
             .store_administration
@@ -2874,13 +2874,13 @@ async fn portable_project_server(
         registry_db,
         session_db,
         user_session_db,
+        database_owner_reconciler,
         crate::mcp::server::McpServerWriters::daemon_owned(
             coordinated_dashboard_automation_writer(store_administration.clone()),
             coordinated_hook_branch_writer(store_administration.clone()),
             coordinated_background_refresh_writer(store_administration.clone()),
         ),
-    )
-    .with_database_owner_reconciler(database_owner_reconciler);
+    );
     let candidate = crate::mcp::McpServer::new_with_context(context).await;
     let (resolved, inserted) = store_administration
         .project_servers()

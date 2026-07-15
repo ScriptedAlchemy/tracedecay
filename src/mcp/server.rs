@@ -947,6 +947,7 @@ impl McpServerConstructionContext {
         registry_db: Arc<GlobalDb>,
         session_db: Arc<GlobalDb>,
         user_session_db: Arc<GlobalDb>,
+        database_owner_reconciler: DatabaseOwnerReconciler,
         writers: McpServerWriters,
     ) -> Self {
         Self {
@@ -958,7 +959,7 @@ impl McpServerConstructionContext {
             user_session_db: Some(user_session_db),
             allow_default_registry_fallback: false,
             automation_scheduler_reconciler: None,
-            database_owner_reconciler: None,
+            database_owner_reconciler: Some(database_owner_reconciler),
             dashboard_automation_writer: writers.dashboard_automation,
             hook_branch_writer: writers.hook_branch,
             background_refresh_writer: writers.background_refresh,

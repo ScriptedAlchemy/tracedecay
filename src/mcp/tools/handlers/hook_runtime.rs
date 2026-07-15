@@ -712,6 +712,44 @@ mod tests {
     }
 
     #[test]
+    fn claude_observation_application_store_errors_keep_database_category_without_source_detail() {
+        let error = ClaudeObservationIngestError::Application(ObservationApplicationError::Store(
+            ObservationStoreError::Storage {
+                operation: "private application store operation",
+                source: Box::new(io::Error::other("private application store source detail")),
+            },
+        ));
+        let mapped = map_claude_observation_ingest_error(error);
+        let rendered = mapped.to_string();
+
+        assert!(matches!(
+            mapped,
+            TraceDecayError::Database { ref operation, .. }
+                if operation == "ingest Claude observations"
+        ));
+        assert!(rendered.contains("Claude observation application failed"));
+        assert!(!rendered.contains("private application store operation"));
+        assert!(!rendered.contains("private application store source detail"));
+    }
+
+    #[test]
+    fn unavailable_persisted_observation_is_a_bounded_database_error() {
+        let error = ClaudeObservationIngestError::Application(
+            ObservationApplicationError::PersistedObservationUnavailable,
+        );
+        let mapped = map_claude_observation_ingest_error(error);
+        let rendered = mapped.to_string();
+
+        assert!(matches!(
+            mapped,
+            TraceDecayError::Database { ref operation, .. }
+                if operation == "ingest Claude observations"
+        ));
+        assert!(rendered.contains("Claude observation application failed"));
+        assert!(!rendered.contains("persisted Claude observation"));
+    }
+
+    #[test]
     fn claude_observation_projection_errors_keep_database_category_without_source_detail() {
         let error = ClaudeObservationIngestError::Projection(ProjectionStoreError::Storage {
             operation: "private projection operation",
