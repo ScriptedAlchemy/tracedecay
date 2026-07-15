@@ -799,10 +799,11 @@ fn dispatch_model_for_agent(path: &Path, agent_id: &str) -> Option<String> {
             let Some(name) = item.get("name").and_then(Value::as_str) else {
                 continue;
             };
-            if is_subagent_dispatch_tool(name) && dispatch_targets_agent(item, agent_id) {
-                if let Some(model) = cursor_dispatch_model(item) {
-                    return Some(model);
-                }
+            if is_subagent_dispatch_tool(name)
+                && dispatch_targets_agent(item, agent_id)
+                && let Some(model) = cursor_dispatch_model(item)
+            {
+                return Some(model);
             }
         }
     }

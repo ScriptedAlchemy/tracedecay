@@ -413,15 +413,14 @@ pub(crate) async fn delete_external_payload_in_transaction(
         None => (false, None),
     };
 
-    if opts.verify_hash && file_existed {
-        if let (Some(metadata), Some(path)) = (metadata.as_ref(), path.as_deref()) {
-            let (content, identity) =
-                read_payload_file_for_verify(path)?.ok_or(LcmError::PayloadMissing)?;
-            if Some(identity) != file_identity
-                || util::sha256_hex(&content) != metadata.content_hash
-            {
-                return Err(LcmError::PayloadIntegrityMismatch);
-            }
+    if opts.verify_hash
+        && file_existed
+        && let (Some(metadata), Some(path)) = (metadata.as_ref(), path.as_deref())
+    {
+        let (content, identity) =
+            read_payload_file_for_verify(path)?.ok_or(LcmError::PayloadMissing)?;
+        if Some(identity) != file_identity || util::sha256_hex(&content) != metadata.content_hash {
+            return Err(LcmError::PayloadIntegrityMismatch);
         }
     }
 
@@ -431,14 +430,13 @@ pub(crate) async fn delete_external_payload_in_transaction(
 
     let tombstone_missing_payload =
         opts.rewrite_placeholders && !opts.remove_file && !opts.verify_hash;
-    if let Some(metadata) = metadata.as_ref() {
-        if gc::referenced_payload_refs(conn, &metadata.provider, None)
+    if let Some(metadata) = metadata.as_ref()
+        && gc::referenced_payload_refs(conn, &metadata.provider, None)
             .await?
             .contains(payload_ref)
-            && !tombstone_missing_payload
-        {
-            return Err(LcmError::StillReferenced);
-        }
+        && !tombstone_missing_payload
+    {
+        return Err(LcmError::StillReferenced);
     }
     conn.execute(
         "DELETE FROM lcm_external_payloads WHERE payload_ref = ?1",

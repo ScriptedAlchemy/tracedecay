@@ -437,12 +437,12 @@ pub async fn run_incremental_backfill(
         .iter()
         .filter_map(SessionActivityRow::activity_sort_key)
         .max();
-    if let Some(new_watermark) = new_watermark {
-        if new_watermark > watermark {
-            session_store
-                .git_correlation_meta_set(AUTO_BACKFILL_WATERMARK_KEY, new_watermark)
-                .await?;
-        }
+    if let Some(new_watermark) = new_watermark
+        && new_watermark > watermark
+    {
+        session_store
+            .git_correlation_meta_set(AUTO_BACKFILL_WATERMARK_KEY, new_watermark)
+            .await?;
     }
     Ok(stats)
 }

@@ -301,10 +301,10 @@ fn read_task_metadata(task_dir: &Path) -> Option<Value> {
         if !path.is_file() {
             continue;
         }
-        if let Ok(contents) = std::fs::read_to_string(path) {
-            if let Ok(value) = serde_json::from_str::<Value>(&contents) {
-                return Some(value);
-            }
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && let Ok(value) = serde_json::from_str::<Value>(&contents)
+        {
+            return Some(value);
         }
     }
     None

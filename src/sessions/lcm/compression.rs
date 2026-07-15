@@ -1172,20 +1172,20 @@ async fn assemble_overflow_recovery_replay(
         anchor_source,
         max_assembly_tokens,
     );
-    if candidate.len() == anchors.len() {
-        if let Some(last_unit) = replay_transactions::replay_units(&raws).last() {
-            let mut replay = anchors
+    if candidate.len() == anchors.len()
+        && let Some(last_unit) = replay_transactions::replay_units(&raws).last()
+    {
+        let mut replay = anchors
+            .iter()
+            .map(|message| replay_transactions::raw_replay_message(message))
+            .collect::<Vec<_>>();
+        replay.extend(
+            last_unit
+                .messages
                 .iter()
-                .map(|message| replay_transactions::raw_replay_message(message))
-                .collect::<Vec<_>>();
-            replay.extend(
-                last_unit
-                    .messages
-                    .iter()
-                    .map(|message| replay_transactions::raw_replay_message(message)),
-            );
-            return Ok(replay_transactions::normalize_replay_tool_pairs(&replay));
-        }
+                .map(|message| replay_transactions::raw_replay_message(message)),
+        );
+        return Ok(replay_transactions::normalize_replay_tool_pairs(&replay));
     }
     Ok(candidate)
 }

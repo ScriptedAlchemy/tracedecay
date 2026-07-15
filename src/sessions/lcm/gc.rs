@@ -155,10 +155,10 @@ pub async fn referenced_payload_refs(
     while let Some(row) = rows.next().await? {
         let storage_kind: String = row.get(0)?;
         let payload_ref: Option<String> = row.get(1).unwrap_or(None);
-        if storage_kind == "external" {
-            if let Some(payload_ref) = payload_ref {
-                refs.insert(payload_ref);
-            }
+        if storage_kind == "external"
+            && let Some(payload_ref) = payload_ref
+        {
+            refs.insert(payload_ref);
         }
         for index in 2..6 {
             let value: Option<String> = row.get(index).unwrap_or(None);

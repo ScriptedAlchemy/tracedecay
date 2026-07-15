@@ -415,42 +415,42 @@ async fn prepare_message(
     }
 
     let mut handled_as_structured = false;
-    if let Ok(mut value) = serde_json::from_str::<JsonValue>(&text) {
-        if matches!(value, JsonValue::Object(_) | JsonValue::Array(_)) {
-            handled_as_structured = true;
-            // Hermes `_protect_value` redacts the structure before
-            // externalizing payload substrings (ingest_protection.py:663-677).
-            let mut json_changed = false;
-            if config.sensitive_patterns_enabled {
-                let mut key_patterns = Vec::new();
-                if redact_sensitive_json_values(&mut value, &config, &mut key_patterns) {
-                    protection.redacted = true;
-                    protection.lossy = true;
-                    protection.redaction_patterns.extend(key_patterns);
-                    protection.redaction_patterns.sort();
-                    protection.redaction_patterns.dedup();
-                    json_changed = true;
-                }
-            }
-            let mut nested_payloads = Vec::new();
-            protect_json_media_payloads(
-                &mut value,
-                message,
-                "content",
-                &mut nested_payloads,
-                externalizer,
-            )?;
-            if !nested_payloads.is_empty() {
-                for payload_ref in &nested_payloads {
-                    payload::upsert_payload_metadata(conn, payload_ref).await?;
-                }
-                protection.nested_external_payloads = nested_payloads.len();
+    if let Ok(mut value) = serde_json::from_str::<JsonValue>(&text)
+        && matches!(value, JsonValue::Object(_) | JsonValue::Array(_))
+    {
+        handled_as_structured = true;
+        // Hermes `_protect_value` redacts the structure before
+        // externalizing payload substrings (ingest_protection.py:663-677).
+        let mut json_changed = false;
+        if config.sensitive_patterns_enabled {
+            let mut key_patterns = Vec::new();
+            if redact_sensitive_json_values(&mut value, &config, &mut key_patterns) {
+                protection.redacted = true;
+                protection.lossy = true;
+                protection.redaction_patterns.extend(key_patterns);
+                protection.redaction_patterns.sort();
+                protection.redaction_patterns.dedup();
                 json_changed = true;
             }
-            if json_changed {
-                text = serde_json::to_string(&value)
-                    .map_err(|err| LcmError::Db(format!("json protection failed: {err}")))?;
+        }
+        let mut nested_payloads = Vec::new();
+        protect_json_media_payloads(
+            &mut value,
+            message,
+            "content",
+            &mut nested_payloads,
+            externalizer,
+        )?;
+        if !nested_payloads.is_empty() {
+            for payload_ref in &nested_payloads {
+                payload::upsert_payload_metadata(conn, payload_ref).await?;
             }
+            protection.nested_external_payloads = nested_payloads.len();
+            json_changed = true;
+        }
+        if json_changed {
+            text = serde_json::to_string(&value)
+                .map_err(|err| LcmError::Db(format!("json protection failed: {err}")))?;
         }
     }
 

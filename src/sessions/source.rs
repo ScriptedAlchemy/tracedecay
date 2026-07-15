@@ -852,11 +852,11 @@ fn stream_new_jsonl_raw_with_policy(
         }
     };
     let mut reader = BufReader::new(file);
-    if seek_to > 0 {
-        if let Err(error) = reader.seek(SeekFrom::Start(seek_to)) {
-            log_source_skip(path, "seek jsonl transcript", &error);
-            return None;
-        }
+    if seek_to > 0
+        && let Err(error) = reader.seek(SeekFrom::Start(seek_to))
+    {
+        log_source_skip(path, "seek jsonl transcript", &error);
+        return None;
     }
 
     let mut frames = Vec::new();

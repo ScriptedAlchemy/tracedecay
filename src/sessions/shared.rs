@@ -441,10 +441,10 @@ pub(crate) fn usage_counters_from(value: &Value) -> Option<Value> {
             counters.insert(key.to_string(), Value::from(count));
         }
     }
-    if !counters.contains_key("cache_read_input_tokens") {
-        if let Some(count) = usage.get("cached_input_tokens").and_then(Value::as_i64) {
-            counters.insert("cache_read_input_tokens".to_string(), Value::from(count));
-        }
+    if !counters.contains_key("cache_read_input_tokens")
+        && let Some(count) = usage.get("cached_input_tokens").and_then(Value::as_i64)
+    {
+        counters.insert("cache_read_input_tokens".to_string(), Value::from(count));
     }
     if !counters.is_empty()
         && !counters.contains_key("input_tokens")
@@ -487,10 +487,9 @@ fn collect_tool_names(value: &Value, tools: &mut Vec<String>) {
             if matches!(
                 map.get("type").and_then(Value::as_str),
                 Some("tool_use" | "tool_call" | "function_call")
-            ) {
-                if let Some(name) = map.get("name").and_then(Value::as_str) {
-                    tools.push(name.to_string());
-                }
+            ) && let Some(name) = map.get("name").and_then(Value::as_str)
+            {
+                tools.push(name.to_string());
             }
             for key in ["tool_call", "functionCall", "function_call", "function"] {
                 if let Some(name) = map

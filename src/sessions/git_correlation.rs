@@ -490,10 +490,11 @@ impl SpanObservationDebounce {
     /// when a write for the same key happened within `min_interval_secs`.
     /// An out-of-order (older) `ts` never suppresses a write.
     pub fn should_record(&mut self, key: &str, ts: i64, min_interval_secs: i64) -> bool {
-        if let Some(&last) = self.last_write.get(key) {
-            if ts >= last && ts - last < min_interval_secs {
-                return false;
-            }
+        if let Some(&last) = self.last_write.get(key)
+            && ts >= last
+            && ts - last < min_interval_secs
+        {
+            return false;
         }
         self.last_write.insert(key.to_string(), ts);
         true

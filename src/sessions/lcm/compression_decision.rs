@@ -317,10 +317,10 @@ pub fn bounded_leaf_chunk_len(
     let mut selected_tokens = 0;
     for message in backlog.iter().take(max_messages) {
         let message_tokens = estimate_tokens(&message.content);
-        if let Some(token_limit) = token_limit {
-            if selected_tokens + message_tokens > token_limit {
-                break;
-            }
+        if let Some(token_limit) = token_limit
+            && selected_tokens + message_tokens > token_limit
+        {
+            break;
         }
         selected_tokens += message_tokens;
         selected_len += 1;

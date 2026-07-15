@@ -325,16 +325,16 @@ pub(crate) fn long_base64_run_spans(content: &str) -> Vec<(usize, usize)> {
             if run_start.is_none() {
                 run_start = Some(idx);
             }
-        } else if let Some(start) = run_start.take() {
-            if looks_like_long_base64(&content[start..idx]) {
-                spans.push((start, idx));
-            }
+        } else if let Some(start) = run_start.take()
+            && looks_like_long_base64(&content[start..idx])
+        {
+            spans.push((start, idx));
         }
     }
-    if let Some(start) = run_start {
-        if looks_like_long_base64(&content[start..]) {
-            spans.push((start, content.len()));
-        }
+    if let Some(start) = run_start
+        && looks_like_long_base64(&content[start..])
+    {
+        spans.push((start, content.len()));
     }
     spans
 }

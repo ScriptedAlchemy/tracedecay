@@ -113,12 +113,11 @@ pub(crate) fn transcript_cwd(path: &Path) -> Option<PathBuf> {
             continue;
         }
         let range = tracedecay_domain::ClaudeByteRangeV1::new(offset, end_offset).ok()?;
-        if let Ok(parsed) = parse_claude_record_v1(record, range) {
-            if let Some(cwd) = parsed.value().get("cwd").and_then(Value::as_str) {
-                if !cwd.is_empty() {
-                    return Some(PathBuf::from(cwd));
-                }
-            }
+        if let Ok(parsed) = parse_claude_record_v1(record, range)
+            && let Some(cwd) = parsed.value().get("cwd").and_then(Value::as_str)
+            && !cwd.is_empty()
+        {
+            return Some(PathBuf::from(cwd));
         }
         offset = end_offset;
     }

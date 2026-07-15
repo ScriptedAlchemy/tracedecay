@@ -479,15 +479,16 @@ fn percent_decode_path(value: &str) -> PathBuf {
     let bytes = value.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(
                 std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or(""),
                 16,
-            ) {
-                out.push(byte);
-                index += 3;
-                continue;
-            }
+            )
+        {
+            out.push(byte);
+            index += 3;
+            continue;
         }
         out.push(bytes[index]);
         index += 1;

@@ -93,10 +93,10 @@ pub(crate) async fn backfill_transcript_facts(conn: &Connection) -> Option<Backf
                 continue;
             };
             for (message_id, source_offset) in rows {
-                if let Some(facts) = line_facts.remove(&source_offset) {
-                    if facts.timestamp.is_some() || facts.usage.is_some() {
-                        updates.push((provider.clone(), message_id, facts));
-                    }
+                if let Some(facts) = line_facts.remove(&source_offset)
+                    && (facts.timestamp.is_some() || facts.usage.is_some())
+                {
+                    updates.push((provider.clone(), message_id, facts));
                 }
             }
         }
@@ -643,17 +643,17 @@ async fn sweep_provider(
         // Bound memory cheaply: an oversized transcript would be materialized
         // whole by the full-file parse below, so skip it (and advance past it)
         // rather than risk pinning hundreds of MB per parse.
-        if let Ok(meta) = std::fs::metadata(&candidate.source_path) {
-            if meta.len() > STRUCTURED_BACKFILL_MAX_FILE_BYTES {
-                eprintln!(
-                    "Structured backfill: skipping oversized transcript ({} bytes > {STRUCTURED_BACKFILL_MAX_FILE_BYTES} cap): {}",
-                    meta.len(),
-                    candidate.source_path
-                );
-                stats.files_scanned += 1;
-                write_backfill_cursor(conn, &cursor_key, &candidate.source_path).await?;
-                continue;
-            }
+        if let Ok(meta) = std::fs::metadata(&candidate.source_path)
+            && meta.len() > STRUCTURED_BACKFILL_MAX_FILE_BYTES
+        {
+            eprintln!(
+                "Structured backfill: skipping oversized transcript ({} bytes > {STRUCTURED_BACKFILL_MAX_FILE_BYTES} cap): {}",
+                meta.len(),
+                candidate.source_path
+            );
+            stats.files_scanned += 1;
+            write_backfill_cursor(conn, &cursor_key, &candidate.source_path).await?;
+            continue;
         }
 
         let project_paths =

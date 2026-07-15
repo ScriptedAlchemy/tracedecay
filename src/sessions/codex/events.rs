@@ -576,10 +576,11 @@ fn scan_js_exec_object(s: &str, brace_idx: usize) -> (Option<String>, Option<Str
 /// next whitespace or `:`.
 fn read_js_object_key(s: &str, i: usize) -> (String, usize) {
     let bytes = s.as_bytes();
-    if i < s.len() && matches!(bytes[i], b'"' | b'\'' | b'`') {
-        if let Some((key, next)) = read_js_string(s, i) {
-            return (key, next);
-        }
+    if i < s.len()
+        && matches!(bytes[i], b'"' | b'\'' | b'`')
+        && let Some((key, next)) = read_js_string(s, i)
+    {
+        return (key, next);
     }
     let mut j = i;
     while j < s.len() && !bytes[j].is_ascii_whitespace() && bytes[j] != b':' {
@@ -736,11 +737,11 @@ fn parse_leading_int(text: &str) -> Option<i64> {
     let text = text.trim_start();
     let mut chars = text.chars();
     let mut digits = String::new();
-    if let Some(first) = chars.clone().next() {
-        if first == '-' {
-            digits.push('-');
-            chars.next();
-        }
+    if let Some(first) = chars.clone().next()
+        && first == '-'
+    {
+        digits.push('-');
+        chars.next();
     }
     for ch in chars {
         if ch.is_ascii_digit() {
@@ -1304,10 +1305,10 @@ fn inter_agent_row(
         Value::String(recipient.to_string()),
     );
     metadata.insert("encrypted".to_string(), Value::Bool(encrypted));
-    if let Some(others) = payload.get("other_recipients").and_then(Value::as_array) {
-        if !others.is_empty() {
-            metadata.insert("other_recipients".to_string(), Value::Array(others.clone()));
-        }
+    if let Some(others) = payload.get("other_recipients").and_then(Value::as_array)
+        && !others.is_empty()
+    {
+        metadata.insert("other_recipients".to_string(), Value::Array(others.clone()));
     }
     if let Some(trigger) = payload.get("trigger_turn").and_then(Value::as_bool) {
         metadata.insert("trigger_turn".to_string(), Value::Bool(trigger));

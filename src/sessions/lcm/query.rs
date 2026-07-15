@@ -2722,17 +2722,17 @@ async fn payload_ref_locations_for_scope(
         let owner_session_id: String = row.get(2)?;
         let storage_kind: String = row.get(3)?;
         let raw_payload_ref: Option<String> = row.get(4).unwrap_or(None);
-        if storage_kind == "external" {
-            if let Some(payload_ref) = raw_payload_ref {
-                refs.entry(payload_ref.clone())
-                    .or_insert_with(|| PayloadRefLocation {
-                        payload_ref,
-                        session_id: owner_session_id.clone(),
-                        message_id: message_id.clone(),
-                        store_id,
-                        field: "payload_ref".to_string(),
-                    });
-            }
+        if storage_kind == "external"
+            && let Some(payload_ref) = raw_payload_ref
+        {
+            refs.entry(payload_ref.clone())
+                .or_insert_with(|| PayloadRefLocation {
+                    payload_ref,
+                    session_id: owner_session_id.clone(),
+                    message_id: message_id.clone(),
+                    store_id,
+                    field: "payload_ref".to_string(),
+                });
         }
         for index in 5..9 {
             let value: Option<String> = row.get(index).unwrap_or(None);
