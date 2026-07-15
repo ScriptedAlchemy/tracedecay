@@ -789,12 +789,12 @@ mod tests {
         let reader_path = path.clone();
         let reader = std::thread::spawn(move || {
             for _ in 0..300 {
-                if let Ok(contents) = std::fs::read_to_string(&reader_path) {
-                    if !contents.is_empty() {
-                        toml::from_str::<UserConfig>(&contents).unwrap_or_else(|err| {
-                            panic!("reader observed a torn/partial config: {err}\n{contents}")
-                        });
-                    }
+                if let Ok(contents) = std::fs::read_to_string(&reader_path)
+                    && !contents.is_empty()
+                {
+                    toml::from_str::<UserConfig>(&contents).unwrap_or_else(|err| {
+                        panic!("reader observed a torn/partial config: {err}\n{contents}")
+                    });
                 }
             }
         });

@@ -351,7 +351,7 @@ mod tests {
             project_id: project_id.to_string(),
             canonical_root: canonical_root.to_string(),
             display_root: canonical_root.to_string(),
-            git_common_dir: git_common_dir.map(|s| s.to_string()),
+            git_common_dir: git_common_dir.map(ToString::to_string),
             git_remote_url: None,
             default_branch: None,
             created_at: 0,

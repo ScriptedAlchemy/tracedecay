@@ -204,7 +204,7 @@ fn read_project_pin_from_plugin_block(
             }
             decode_yaml_scalar(value)
                 .ok()
-                .map(|value| value.into_owned())
+                .map(std::borrow::Cow::into_owned)
         })
 }
 

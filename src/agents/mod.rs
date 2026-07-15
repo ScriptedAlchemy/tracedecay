@@ -1934,15 +1934,15 @@ mod git_hook_tests {
             if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
                 continue;
             }
-            if let Some((k, v)) = trimmed.split_once('=') {
-                if k.trim().to_ascii_lowercase() == key_lower {
-                    let v = v.trim();
-                    let v = v
-                        .strip_prefix('"')
-                        .and_then(|s| s.strip_suffix('"'))
-                        .unwrap_or(v);
-                    return Some(v.to_string());
-                }
+            if let Some((k, v)) = trimmed.split_once('=')
+                && k.trim().to_ascii_lowercase() == key_lower
+            {
+                let v = v.trim();
+                let v = v
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .unwrap_or(v);
+                return Some(v.to_string());
             }
         }
         None
