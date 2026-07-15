@@ -61,6 +61,7 @@ pub mod monitor;
 mod open_store_holders;
 mod path_scope;
 mod path_tree;
+pub mod privacy;
 pub mod project_registry;
 pub mod redundancy;
 pub mod resolution;

@@ -1,0 +1,420 @@
+use serde_json::{Value, json};
+use tracedecay_domain::{
+    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
+    ClaudeSourceIdentityV1, ObservationScopeV1, PayloadReferenceV1, RetentionClass,
+    SanitizerDispositionV1, SensitivityV1, SessionId,
+};
+
+use super::{
+    ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1,
+    DetectionConfidenceV1, PR5_CLAUDE_SANITIZER_VERSION, PrivacyDetectorV1, SanitizationActionV1,
+};
+
+fn identity_for(record: &[u8]) -> ClaudeObservationIdentityMaterialV1 {
+    identity_for_session(record, "session.privacy-test")
+}
+
+fn identity_for_session(record: &[u8], session_id: &str) -> ClaudeObservationIdentityMaterialV1 {
+    let source =
+        ClaudeSourceIdentityV1::new(SessionId::new(session_id).expect("valid test session ID"))
+            .expect("valid Claude source identity");
+    let end = u64::try_from(record.len().max(1)).expect("test record length fits in u64");
+    ClaudeObservationIdentityMaterialV1::new(
+        source,
+        ObservationScopeV1::Profile,
+        ClaudeFileGenerationV1::new(1).expect("non-zero test generation"),
+        ClaudeByteRangeV1::new(0, end).expect("non-empty test byte range"),
+    )
+    .expect("valid observation identity")
+}
+
+fn retention_class() -> RetentionClass {
+    RetentionClass::new("retention.privacy-test").expect("valid test retention class")
+}
+
+fn sanitize(sanitizer: &ClaudeRecordSanitizerV1, record: &[u8]) -> ClaudeSanitizationOutcomeV1 {
+    sanitizer
+        .sanitize(record, identity_for(record), retention_class())
+        .expect("sanitizer should produce an outcome")
+}
+
+fn assert_non_durable(
+    outcome: &ClaudeSanitizationOutcomeV1,
+    disposition: SanitizerDispositionV1,
+    detector: PrivacyDetectorV1,
+    action: SanitizationActionV1,
+) {
+    assert!(outcome.durable_observation().is_none());
+    assert_eq!(outcome.receipt().disposition(), disposition);
+    assert_eq!(outcome.receipt().sensitivity(), SensitivityV1::Sensitive);
+    assert!(outcome.receipt().payload().is_none());
+    assert_eq!(outcome.findings().len(), 1);
+    assert_eq!(outcome.findings()[0].detector(), detector);
+    assert_eq!(outcome.findings()[0].action(), action);
+}
+
+fn generated_high_entropy_token() -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    (0..48)
+        .map(|index| char::from(ALPHABET[(index * 17) % ALPHABET.len()]))
+        .collect()
+}
+
+#[test]
+fn clean_record_is_accepted_and_receipt_binds_the_payload() {
+    let expected_payload = json!({
+        "type": "assistant",
+        "message": { "content": "ordinary fixture text" },
+        "future_provider_metadata": { "attempt": 3, "enabled": true }
+    });
+    let record = serde_json::to_vec(&expected_payload).expect("serialize clean fixture");
+
+    let outcome = sanitize(
+        &ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer"),
+        &record,
+    );
+    let observation = outcome
+        .durable_observation()
+        .expect("clean record should cross the durable boundary");
+
+    assert!(outcome.findings().is_empty());
+    assert_eq!(
+        outcome.receipt().disposition(),
+        SanitizerDispositionV1::Accepted
+    );
+    assert_eq!(outcome.receipt().sensitivity(), SensitivityV1::NonSensitive);
+    assert_eq!(observation.payload(), &expected_payload);
+    let expected_reference =
+        PayloadReferenceV1::for_payload(&expected_payload).expect("reference clean payload");
+    assert_eq!(observation.payload_reference(), &expected_reference);
+    assert_eq!(outcome.receipt().payload(), Some(&expected_reference));
+}
+
+#[test]
+fn json_is_parsed_before_unknown_fields_are_scanned() {
+    let bearer_keyword = ["Bear", "er"].concat();
+    let token = "Aa0".repeat(5);
+    let payload = json!({
+        "type": "future_record_kind",
+        "future_provider_field": format!("{bearer_keyword} {token}"),
+        "another_unknown_field": { "kept": "ordinary" }
+    });
+    let valid_record = serde_json::to_vec(&payload).expect("serialize unknown-field fixture");
+
+    let sanitizer = ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer");
+    let valid_outcome = sanitize(&sanitizer, &valid_record);
+    let valid_observation = valid_outcome
+        .durable_observation()
+        .expect("valid objects with unknown fields remain durable");
+    assert_eq!(
+        valid_outcome.receipt().disposition(),
+        SanitizerDispositionV1::Redacted
+    );
+    assert!(
+        valid_outcome
+            .findings()
+            .iter()
+            .any(|finding| finding.detector() == PrivacyDetectorV1::BearerToken)
+    );
+    assert_eq!(
+        valid_observation.payload()["another_unknown_field"]["kept"],
+        json!("ordinary")
+    );
+    assert!(
+        !valid_observation.payload()["future_provider_field"]
+            .as_str()
+            .expect("redacted field remains text")
+            .contains(&token)
+    );
+
+    let mut malformed_record = valid_record;
+    assert_eq!(malformed_record.pop(), Some(b'}'));
+    let malformed_outcome = sanitize(&sanitizer, &malformed_record);
+    assert_non_durable(
+        &malformed_outcome,
+        SanitizerDispositionV1::Rejected,
+        PrivacyDetectorV1::MalformedRecord,
+        SanitizationActionV1::Rejected,
+    );
+    assert!(
+        !malformed_outcome
+            .findings()
+            .iter()
+            .any(|finding| finding.detector() == PrivacyDetectorV1::BearerToken)
+    );
+}
+
+#[test]
+fn default_exact_formats_are_detected_and_redacted() {
+    let bearer_keyword = ["Bear", "er"].concat();
+    let bearer_token = "Aa0".repeat(5);
+    let bearer_value = format!("{bearer_keyword} {bearer_token}");
+
+    let private_key_label = ["PRIVATE", "KEY"].join(" ");
+    let private_key = format!(
+        "-----BEGIN {private_key_label}-----\nfixture-body\n-----END {private_key_label}-----"
+    );
+
+    let credential_prefix = ["s", "k", "-"].concat();
+    let prefixed_credential = format!("{credential_prefix}{}", "A0".repeat(10));
+    let assignment = format!("{} = {}", ["creden", "tial"].concat(), "Abc123".repeat(2));
+
+    let payload = json!({
+        "events": [bearer_value, private_key, prefixed_credential, assignment]
+    });
+    let record = serde_json::to_vec(&payload).expect("serialize exact-format fixture");
+    let outcome = sanitize(
+        &ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer"),
+        &record,
+    );
+    let observation = outcome
+        .durable_observation()
+        .expect("redacted record should remain durable");
+
+    assert_eq!(
+        outcome.receipt().disposition(),
+        SanitizerDispositionV1::Redacted
+    );
+    for detector in [
+        PrivacyDetectorV1::BearerToken,
+        PrivacyDetectorV1::PrivateKey,
+        PrivacyDetectorV1::ExactCredential,
+        PrivacyDetectorV1::CredentialAssignment,
+    ] {
+        assert!(
+            outcome
+                .findings()
+                .iter()
+                .any(|finding| finding.detector() == detector),
+            "missing finding for {detector:?}"
+        );
+    }
+
+    let sanitized = observation.payload().to_string();
+    for detected_text in [
+        bearer_token,
+        private_key_label,
+        prefixed_credential,
+        assignment,
+    ] {
+        assert!(!sanitized.contains(&detected_text));
+    }
+}
+
+#[test]
+fn configured_sensitive_keys_redact_nested_values() {
+    let policy = ClaudeSanitizerPolicyV1::pr5()
+        .expect("valid PR5 policy")
+        .with_sensitive_keys(["custom credential"]);
+    let sanitizer = ClaudeRecordSanitizerV1::new(policy);
+    let payload = json!({
+        "outer": {
+            "custom_credential": {
+                "future": "ordinary nested value",
+                "items": [1, 2, 3]
+            }
+        },
+        "items": [
+            { "custom-credential": ["nested", "array", "value"] }
+        ]
+    });
+    let record = serde_json::to_vec(&payload).expect("serialize sensitive-key fixture");
+
+    let outcome = sanitize(&sanitizer, &record);
+    let observation = outcome
+        .durable_observation()
+        .expect("redacted sensitive fields should remain durable");
+
+    let findings: Vec<_> = outcome
+        .findings()
+        .iter()
+        .filter(|finding| finding.detector() == PrivacyDetectorV1::SensitiveField)
+        .collect();
+    assert_eq!(findings.len(), 2);
+    assert!(findings.iter().all(|finding| {
+        finding.confidence() == DetectionConfidenceV1::Contextual
+            && finding.action() == SanitizationActionV1::Redacted
+    }));
+    for value in [
+        &observation.payload()["outer"]["custom_credential"],
+        &observation.payload()["items"][0]["custom-credential"],
+    ] {
+        assert!(
+            value
+                .as_str()
+                .is_some_and(|text| text.starts_with("[TraceDecay redacted:"))
+        );
+    }
+}
+
+#[test]
+fn contextual_high_entropy_token_is_detected() {
+    let token = generated_high_entropy_token();
+    let payload = json!({
+        "message": format!("opaque session value follows {token}")
+    });
+    let record = serde_json::to_vec(&payload).expect("serialize entropy fixture");
+
+    let outcome = sanitize(
+        &ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer"),
+        &record,
+    );
+    let observation = outcome
+        .durable_observation()
+        .expect("redacted entropy record should remain durable");
+    let finding = outcome
+        .findings()
+        .iter()
+        .find(|finding| finding.detector() == PrivacyDetectorV1::HighEntropyToken)
+        .expect("high-entropy detector should report a finding");
+
+    assert_eq!(finding.confidence(), DetectionConfidenceV1::Heuristic);
+    assert_eq!(finding.action(), SanitizationActionV1::Redacted);
+    assert!(
+        !observation.payload()["message"]
+            .as_str()
+            .expect("message remains text")
+            .contains(&token)
+    );
+}
+
+#[test]
+fn findings_never_contain_detected_secret_text() {
+    let credential_prefix = ["s", "k", "-"].concat();
+    let detected_text = format!("{credential_prefix}{}", "Z9".repeat(10));
+    let record = serde_json::to_vec(&json!({ "payload": detected_text }))
+        .expect("serialize finding-safety fixture");
+
+    let outcome = sanitize(
+        &ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer"),
+        &record,
+    );
+    let diagnostic = format!("{:?}", outcome.findings());
+    let original: Value = serde_json::from_slice(&record).expect("parse fixture for assertion");
+    let secret = original["payload"]
+        .as_str()
+        .expect("fixture payload is text");
+
+    assert!(!diagnostic.contains(secret));
+    assert!(
+        outcome
+            .findings()
+            .iter()
+            .all(|finding| !finding.location().contains(secret))
+    );
+}
+
+#[test]
+fn invalid_and_oversized_records_are_rejected_without_payloads() {
+    let sanitizer = ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer");
+    let malformed = br#"{"message":"#.to_vec();
+    let scalar = serde_json::to_vec(&json!("ordinary scalar")).expect("serialize scalar fixture");
+
+    for record in [Vec::new(), malformed, scalar] {
+        let outcome = sanitize(&sanitizer, &record);
+        assert_non_durable(
+            &outcome,
+            SanitizerDispositionV1::Rejected,
+            PrivacyDetectorV1::MalformedRecord,
+            SanitizationActionV1::Rejected,
+        );
+    }
+
+    let limited_policy = ClaudeSanitizerPolicyV1::pr5()
+        .expect("valid PR5 policy")
+        .with_limits(32, 16, 100)
+        .expect("valid small test limits");
+    let limited_sanitizer = ClaudeRecordSanitizerV1::new(limited_policy);
+    let oversized = serde_json::to_vec(&json!({ "message": "x".repeat(64) }))
+        .expect("serialize oversized fixture");
+    let outcome = sanitize(&limited_sanitizer, &oversized);
+    assert_non_durable(
+        &outcome,
+        SanitizerDispositionV1::Rejected,
+        PrivacyDetectorV1::RecordSizeLimit,
+        SanitizationActionV1::Rejected,
+    );
+}
+
+#[test]
+fn structure_bound_failures_are_quarantined_without_payloads() {
+    let depth_policy = ClaudeSanitizerPolicyV1::pr5()
+        .expect("valid PR5 policy")
+        .with_limits(1_024, 3, 100)
+        .expect("valid depth test limits");
+    let depth_record = serde_json::to_vec(&json!({ "a": { "b": { "c": "value" } } }))
+        .expect("serialize depth fixture");
+    let depth_outcome = sanitize(&ClaudeRecordSanitizerV1::new(depth_policy), &depth_record);
+    assert_non_durable(
+        &depth_outcome,
+        SanitizerDispositionV1::Quarantined,
+        PrivacyDetectorV1::StructureLimit,
+        SanitizationActionV1::Quarantined,
+    );
+
+    let value_policy = ClaudeSanitizerPolicyV1::pr5()
+        .expect("valid PR5 policy")
+        .with_limits(1_024, 16, 4)
+        .expect("valid value-count test limits");
+    let value_record =
+        serde_json::to_vec(&json!({ "values": [1, 2, 3] })).expect("serialize value-count fixture");
+    let value_outcome = sanitize(&ClaudeRecordSanitizerV1::new(value_policy), &value_record);
+    assert_non_durable(
+        &value_outcome,
+        SanitizerDispositionV1::Quarantined,
+        PrivacyDetectorV1::StructureLimit,
+        SanitizationActionV1::Quarantined,
+    );
+}
+
+#[test]
+fn receipt_ids_are_deterministic_and_use_the_fixed_sanitizer_version() {
+    assert_eq!(PR5_CLAUDE_SANITIZER_VERSION, "privacy.claude-record.v1");
+    let sanitizer = ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer");
+    assert_eq!(
+        sanitizer.policy().version().as_str(),
+        PR5_CLAUDE_SANITIZER_VERSION
+    );
+
+    let record = serde_json::to_vec(&json!({ "message": "ordinary deterministic fixture" }))
+        .expect("serialize deterministic fixture");
+    let identity = identity_for(&record);
+    let first = sanitizer
+        .sanitize(&record, identity.clone(), retention_class())
+        .expect("first sanitization succeeds");
+    let second = sanitizer
+        .sanitize(&record, identity.clone(), retention_class())
+        .expect("second sanitization succeeds");
+
+    assert_eq!(
+        first.receipt().receipt().receipt_id(),
+        second.receipt().receipt().receipt_id()
+    );
+    assert_eq!(
+        first.receipt().receipt().sanitizer_version().as_str(),
+        PR5_CLAUDE_SANITIZER_VERSION
+    );
+
+    let changed_record =
+        serde_json::to_vec(&json!({ "message": "different ordinary deterministic fixture" }))
+            .expect("serialize changed fixture");
+    let changed = sanitizer
+        .sanitize(&changed_record, identity, retention_class())
+        .expect("changed sanitization succeeds");
+    assert_ne!(
+        first.receipt().receipt().receipt_id(),
+        changed.receipt().receipt().receipt_id()
+    );
+
+    let changed_identity = sanitizer
+        .sanitize(
+            &record,
+            identity_for_session(&record, "session.privacy-test.changed"),
+            retention_class(),
+        )
+        .expect("changed identity sanitization succeeds");
+    assert_ne!(
+        first.receipt().receipt().receipt_id(),
+        changed_identity.receipt().receipt().receipt_id()
+    );
+}
