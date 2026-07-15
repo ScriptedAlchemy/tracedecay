@@ -10,8 +10,8 @@
 use std::path::Path;
 
 use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, create_runtime, get_json, http_agent,
-    message_record_at, pick_free_port, wait_for_dashboard, write_empty_global_db_schema,
+    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, MessageRecordBuilder, create_runtime, get_json,
+    http_agent, pick_free_port, wait_for_dashboard, write_empty_global_db_schema,
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -69,32 +69,27 @@ fn session(session_id: &str, project: &Path, started_at: i64, title: &str) -> Se
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct MessageDetails<'a> {
+    timestamp: i64,
+    model: Option<&'a str>,
+    metadata_json: Option<&'a str>,
+}
+
 fn message(
     message_id: &str,
     session_id: &str,
     role: &str,
     ordinal: i64,
-    timestamp: i64,
     text: &str,
-    model: Option<&str>,
-    metadata_json: Option<&str>,
+    details: MessageDetails<'_>,
 ) -> SessionMessageRecord {
-    message_record_at(
-        "cursor",
-        message_id,
-        session_id,
-        role,
-        ordinal,
-        Some(timestamp),
-        text,
-        "message",
-        model,
-        None,
-        None,
-        None,
-        metadata_json,
+    MessageRecordBuilder::new(
+        "cursor", message_id, session_id, role, ordinal, text, "message",
     )
+    .with_timestamp(Some(details.timestamp))
+    .with_model(details.model)
+    .with_metadata(details.metadata_json)
+    .build()
 }
 
 /// Chars/4 estimate matching the backend SQL `(LENGTH(text)+3)/4`.
@@ -170,12 +165,14 @@ async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
             "sess-usage",
             "assistant",
             1,
-            day_start + 120,
             TEXT_ASSISTANT,
-            Some("claude-fable-5-thinking-high"),
-            Some(
-                r#"{"usage":{"input_tokens":1200,"output_tokens":350,"cache_read_input_tokens":9000,"cache_creation_input_tokens":50}}"#
-            ),
+            MessageDetails {
+                timestamp: day_start + 120,
+                model: Some("claude-fable-5-thinking-high"),
+                metadata_json: Some(
+                    r#"{"usage":{"input_tokens":1200,"output_tokens":350,"cache_read_input_tokens":9000,"cache_creation_input_tokens":50}}"#
+                ),
+            },
         ))
         .await
     );
@@ -196,10 +193,12 @@ async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
             "sess-estimated",
             "user",
             1,
-            day_start + 210,
             TEXT_USER,
-            Some("gpt-5.5-high"),
-            None,
+            MessageDetails {
+                timestamp: day_start + 210,
+                model: Some("gpt-5.5-high"),
+                metadata_json: None,
+            },
         ))
         .await
     );
@@ -209,10 +208,12 @@ async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
             "sess-estimated",
             "assistant",
             2,
-            day_start + 220,
             TEXT_ASSISTANT,
-            Some("gpt-5.5-high"),
-            None,
+            MessageDetails {
+                timestamp: day_start + 220,
+                model: Some("gpt-5.5-high"),
+                metadata_json: None,
+            },
         ))
         .await
     );
@@ -233,10 +234,12 @@ async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
             "sess-unknown",
             "assistant",
             1,
-            day_start + 310,
             TEXT_UNKNOWN,
-            None,
-            None,
+            MessageDetails {
+                timestamp: day_start + 310,
+                model: None,
+                metadata_json: None,
+            },
         ))
         .await
     );
@@ -257,10 +260,12 @@ async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
             "sess-mixed",
             "assistant",
             1,
-            day_start + 410,
             TEXT_ASSISTANT,
-            Some("claude-opus-4-8-thinking-max"),
-            Some(r#"{"usage":{"prompt_tokens":500,"completion_tokens":700}}"#),
+            MessageDetails {
+                timestamp: day_start + 410,
+                model: Some("claude-opus-4-8-thinking-max"),
+                metadata_json: Some(r#"{"usage":{"prompt_tokens":500,"completion_tokens":700}}"#,),
+            },
         ))
         .await
     );
@@ -270,10 +275,12 @@ async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
             "sess-mixed",
             "assistant",
             2,
-            day_start + 420,
             TEXT_MIXED,
-            Some("claude-opus-4-8-thinking-max"),
-            None,
+            MessageDetails {
+                timestamp: day_start + 420,
+                model: Some("claude-opus-4-8-thinking-max"),
+                metadata_json: None,
+            },
         ))
         .await
     );
@@ -296,31 +303,32 @@ async fn seed_global_db(db_path: &Path, project: &Path, day_start: i64) {
             "sess-codex",
             "assistant",
             1,
-            day_start + 510,
             TEXT_ASSISTANT,
-            Some("gpt-5.3-codex-high"),
-            Some(
-                r#"{"usage":{"input_tokens":900,"output_tokens":150,"cache_read_input_tokens":4000,"total_tokens":5050}}"#
-            ),
+            MessageDetails {
+                timestamp: day_start + 510,
+                model: Some("gpt-5.3-codex-high"),
+                metadata_json: Some(
+                    r#"{"usage":{"input_tokens":900,"output_tokens":150,"cache_read_input_tokens":4000,"total_tokens":5050}}"#
+                ),
+            },
         ))
         .await
     );
     assert!(
-        gdb.upsert_session_message(&message_record_at(
-            "cursor",
-            "m-codex-summary",
-            "sess-codex",
-            "assistant",
-            2,
-            Some(day_start + 520),
-            "Synthetic Codex compaction placeholder that is not real model output.",
-            "summary",
-            Some("gpt-5.3-codex-high"),
-            None,
-            None,
-            None,
-            None,
-        ))
+        gdb.upsert_session_message(
+            &MessageRecordBuilder::new(
+                "cursor",
+                "m-codex-summary",
+                "sess-codex",
+                "assistant",
+                2,
+                "Synthetic Codex compaction placeholder that is not real model output.",
+                "summary",
+            )
+            .with_timestamp(Some(day_start + 520))
+            .with_model(Some("gpt-5.3-codex-high"))
+            .build()
+        )
         .await
     );
 }
@@ -349,10 +357,12 @@ async fn seed_daily_limit_regression(
             "sess-daily-limit",
             "assistant",
             offset,
-            timestamp,
             "Daily limit accounting row.",
-            Some("daily-limit-a"),
-            Some(r#"{"usage":{"input_tokens":1,"output_tokens":1}}"#),
+            MessageDetails {
+                timestamp,
+                model: Some("daily-limit-a"),
+                metadata_json: Some(r#"{"usage":{"input_tokens":1,"output_tokens":1}}"#),
+            },
         ));
     }
 
@@ -361,10 +371,12 @@ async fn seed_daily_limit_regression(
         "sess-daily-limit",
         "assistant",
         500,
-        latest_day + 90,
         "Second latest-day model bucket.",
-        Some("daily-limit-b"),
-        Some(r#"{"usage":{"input_tokens":1,"output_tokens":1}}"#),
+        MessageDetails {
+            timestamp: latest_day + 90,
+            model: Some("daily-limit-b"),
+            metadata_json: Some(r#"{"usage":{"input_tokens":1,"output_tokens":1}}"#),
+        },
     ));
 
     assert!(

@@ -29,7 +29,7 @@ fn raw_message(
     ordinal: i64,
     text: &str,
 ) -> SessionMessageRecord {
-    let mut message = common::message_record(
+    common::MessageRecordBuilder::new(
         provider,
         message_id,
         session_id,
@@ -37,30 +37,29 @@ fn raw_message(
         ordinal,
         text,
         "message",
-        None,
-        None,
-        None,
-        None,
-    );
-    message.timestamp = Some(1_715_000_000 + ordinal);
-    message
+    )
+    .with_timestamp(Some(1_715_000_000 + ordinal))
+    .build()
 }
 
-#[allow(clippy::too_many_arguments)]
+struct RawMessageContext<'a> {
+    role: &'a str,
+    source: &'a str,
+    timestamp: i64,
+}
+
 fn raw_message_with_role_source_timestamp(
     provider: &str,
     message_id: &str,
     session_id: &str,
     ordinal: i64,
-    role: &str,
-    source: &str,
-    timestamp: i64,
     text: &str,
+    context: RawMessageContext<'_>,
 ) -> SessionMessageRecord {
     let mut message = raw_message(provider, message_id, session_id, ordinal, text);
-    message.role = role.to_string();
-    message.timestamp = Some(timestamp);
-    message.metadata_json = Some(serde_json::json!({"source": source}).to_string());
+    message.role = context.role.to_string();
+    message.timestamp = Some(context.timestamp);
+    message.metadata_json = Some(serde_json::json!({"source": context.source}).to_string());
     message
 }
 
@@ -706,30 +705,36 @@ async fn grep_filters_raw_hits_by_role_source_and_time_and_sorts() {
             "old-cli-assistant",
             "session-1",
             1,
-            "assistant",
-            "cli",
-            10,
             "orchard parity old cli assistant",
+            RawMessageContext {
+                role: "assistant",
+                source: "cli",
+                timestamp: 10,
+            },
         ),
         raw_message_with_role_source_timestamp(
             "cursor",
             "new-cli-user",
             "session-1",
             2,
-            "user",
-            "cli",
-            20,
             "orchard parity new cli user",
+            RawMessageContext {
+                role: "user",
+                source: "cli",
+                timestamp: 20,
+            },
         ),
         raw_message_with_role_source_timestamp(
             "cursor",
             "new-api-assistant",
             "session-1",
             3,
-            "assistant",
-            "api",
-            30,
             "orchard parity new api assistant",
+            RawMessageContext {
+                role: "assistant",
+                source: "api",
+                timestamp: 30,
+            },
         ),
     ] {
         assert!(db.upsert_session_message(&message).await);
@@ -771,30 +776,36 @@ async fn load_session_accepts_multiple_roles_and_slices_to_caller_limit() {
             "role-user",
             "session-1",
             1,
-            "user",
-            "cli",
-            10,
             "user message content",
+            RawMessageContext {
+                role: "user",
+                source: "cli",
+                timestamp: 10,
+            },
         ),
         raw_message_with_role_source_timestamp(
             "cursor",
             "role-tool",
             "session-1",
             2,
-            "tool",
-            "cli",
-            20,
             "tool message content",
+            RawMessageContext {
+                role: "tool",
+                source: "cli",
+                timestamp: 20,
+            },
         ),
         raw_message_with_role_source_timestamp(
             "cursor",
             "role-assistant",
             "session-1",
             3,
-            "assistant",
-            "cli",
-            30,
             "assistant message content",
+            RawMessageContext {
+                role: "assistant",
+                source: "cli",
+                timestamp: 30,
+            },
         ),
     ] {
         assert!(db.upsert_session_message(&message).await);

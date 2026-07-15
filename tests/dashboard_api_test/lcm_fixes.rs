@@ -6,9 +6,8 @@
 use std::path::Path;
 
 use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK, create_runtime, get_json, http_agent,
-    message_record_at, pick_free_port, tempdir_or_panic, wait_for_dashboard,
-    write_empty_global_db_schema,
+    EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK, MessageRecordBuilder, create_runtime, get_json,
+    http_agent, pick_free_port, tempdir_or_panic, wait_for_dashboard, write_empty_global_db_schema,
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -62,21 +61,11 @@ fn message(
     timestamp: i64,
     text: &str,
 ) -> SessionMessageRecord {
-    message_record_at(
-        PROVIDER,
-        message_id,
-        SESSION_ID,
-        role,
-        ordinal,
-        Some(timestamp),
-        text,
-        "chat",
-        Some("test-model"),
-        None,
-        None,
-        None,
-        None,
+    MessageRecordBuilder::new(
+        PROVIDER, message_id, SESSION_ID, role, ordinal, text, "chat",
     )
+    .with_timestamp(Some(timestamp))
+    .build()
 }
 
 async fn store_id_of(global_db: &GlobalDb, message_id: &str) -> i64 {

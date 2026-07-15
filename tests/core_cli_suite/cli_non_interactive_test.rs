@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::common::{create_runtime, global_session, message_record, sample_node};
+use crate::common::{MessageRecordBuilder, create_runtime, global_session, sample_node};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
@@ -192,19 +192,20 @@ fn sessions_unfinished_lists_workflow_state_evidence() {
                 .await
         );
         assert!(
-            db.upsert_session_message(&message_record(
-                "claude",
-                "message-1",
-                "session-1",
-                "assistant",
-                1,
-                "Blocked: waiting on missing deploy credentials",
-                "message",
-                None,
-                Some("/tmp/project/transcript.jsonl"),
-                Some(1),
-                Some(r#"{"task_id":"task-7"}"#),
-            ))
+            db.upsert_session_message(
+                &MessageRecordBuilder::new(
+                    "claude",
+                    "message-1",
+                    "session-1",
+                    "assistant",
+                    1,
+                    "Blocked: waiting on missing deploy credentials",
+                    "message",
+                )
+                .with_source(Some("/tmp/project/transcript.jsonl"), Some(1))
+                .with_metadata(Some(r#"{"task_id":"task-7"}"#))
+                .build()
+            )
             .await
         );
     });

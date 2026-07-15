@@ -5,8 +5,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, create_runtime, get_json, http_agent,
-    message_record_at, pick_free_port, wait_for_dashboard, write_empty_global_db_schema,
+    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, MessageRecordBuilder, create_runtime, get_json,
+    http_agent, pick_free_port, wait_for_dashboard, write_empty_global_db_schema,
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -81,7 +81,6 @@ fn subagent_session_with_metadata(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn message(
     id: &str,
     role: &str,
@@ -91,21 +90,12 @@ fn message(
     tool_names: Option<&str>,
     metadata_json: Option<&str>,
 ) -> SessionMessageRecord {
-    message_record_at(
-        "codex",
-        id,
-        "analytics-session",
-        role,
-        ordinal,
-        Some(1_760_000_000 + ordinal),
-        text,
-        kind,
-        Some("gpt-5.5"),
-        tool_names,
-        None,
-        None,
-        metadata_json,
-    )
+    MessageRecordBuilder::new("codex", id, "analytics-session", role, ordinal, text, kind)
+        .with_timestamp(Some(1_760_000_000 + ordinal))
+        .with_model(Some("gpt-5.5"))
+        .with_tool_names(tool_names)
+        .with_metadata(metadata_json)
+        .build()
 }
 
 async fn seed_session_store(db_path: &Path, project: &Path) {

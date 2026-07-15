@@ -9336,16 +9336,19 @@ async fn seed_lcm_tool_result_message_for_provider(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+struct LcmMessageContext<'a> {
+    role: &'a str,
+    source: &'a str,
+    timestamp: i64,
+}
+
 async fn seed_lcm_session_message_with_role_source_timestamp(
     cg: &TraceDecay,
     session_id: &str,
     message_id: &str,
     text: impl Into<String>,
     ordinal: i64,
-    role: &str,
-    source: &str,
-    timestamp: i64,
+    context: LcmMessageContext<'_>,
 ) {
     let db = open_active_project_session_db(cg).await;
     assert!(
@@ -9371,8 +9374,8 @@ async fn seed_lcm_session_message_with_role_source_timestamp(
             provider: "cursor".to_string(),
             message_id: message_id.to_string(),
             session_id: session_id.to_string(),
-            role: role.to_string(),
-            timestamp: Some(timestamp),
+            role: context.role.to_string(),
+            timestamp: Some(context.timestamp),
             ordinal,
             text: text.into(),
             kind: Some("message".to_string()),
@@ -9380,7 +9383,7 @@ async fn seed_lcm_session_message_with_role_source_timestamp(
             tool_names: None,
             source_path: Some(format!("{session_id}.jsonl")),
             source_offset: Some(0),
-            metadata_json: Some(serde_json::json!({"source": source}).to_string()),
+            metadata_json: Some(serde_json::json!({"source": context.source}).to_string()),
         })
         .await
     );
@@ -11654,9 +11657,11 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
         "lcm-native-old-cli-assistant",
         "orchard native old cli assistant",
         1,
-        "assistant",
-        "cli",
-        10,
+        LcmMessageContext {
+            role: "assistant",
+            source: "cli",
+            timestamp: 10,
+        },
     )
     .await;
     seed_lcm_session_message_with_role_source_timestamp(
@@ -11665,9 +11670,11 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
         "lcm-native-new-cli-user",
         "orchard native new cli user",
         2,
-        "user",
-        "cli",
-        20,
+        LcmMessageContext {
+            role: "user",
+            source: "cli",
+            timestamp: 20,
+        },
     )
     .await;
     seed_lcm_session_message_with_role_source_timestamp(
@@ -11676,9 +11683,11 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
         "lcm-native-new-api-assistant",
         "orchard native new api assistant",
         3,
-        "assistant",
-        "api",
-        30,
+        LcmMessageContext {
+            role: "assistant",
+            source: "api",
+            timestamp: 30,
+        },
     )
     .await;
 
@@ -11753,9 +11762,11 @@ async fn lcm_grep_accepts_string_timestamp_filters() {
         "lcm-string-timestamps-old",
         "orchard string timestamp old",
         1,
-        "assistant",
-        "cli",
-        10,
+        LcmMessageContext {
+            role: "assistant",
+            source: "cli",
+            timestamp: 10,
+        },
     )
     .await;
     seed_lcm_session_message_with_role_source_timestamp(
@@ -11764,9 +11775,11 @@ async fn lcm_grep_accepts_string_timestamp_filters() {
         "lcm-string-timestamps-target",
         "orchard string timestamp target",
         2,
-        "assistant",
-        "cli",
-        20,
+        LcmMessageContext {
+            role: "assistant",
+            source: "cli",
+            timestamp: 20,
+        },
     )
     .await;
     seed_lcm_session_message_with_role_source_timestamp(
@@ -11775,9 +11788,11 @@ async fn lcm_grep_accepts_string_timestamp_filters() {
         "lcm-string-timestamps-new",
         "orchard string timestamp new",
         3,
-        "assistant",
-        "cli",
-        30,
+        LcmMessageContext {
+            role: "assistant",
+            source: "cli",
+            timestamp: 30,
+        },
     )
     .await;
 
@@ -11821,9 +11836,11 @@ async fn lcm_grep_accepts_relative_time_filters() {
         "lcm-relative-timestamps-old",
         "orchard relative timestamp old",
         1,
-        "assistant",
-        "cli",
-        now - 7200,
+        LcmMessageContext {
+            role: "assistant",
+            source: "cli",
+            timestamp: now - 7200,
+        },
     )
     .await;
     seed_lcm_session_message_with_role_source_timestamp(
@@ -11832,9 +11849,11 @@ async fn lcm_grep_accepts_relative_time_filters() {
         "lcm-relative-timestamps-new",
         "orchard relative timestamp new",
         2,
-        "assistant",
-        "cli",
-        now - 300,
+        LcmMessageContext {
+            role: "assistant",
+            source: "cli",
+            timestamp: now - 300,
+        },
     )
     .await;
 

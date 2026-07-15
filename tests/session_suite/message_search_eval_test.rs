@@ -24,8 +24,8 @@ use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::SessionMessageSearchResult;
 
 use crate::common::{
-    global_session as sample_session, isolated_global_db_path as isolated_db_path,
-    message_record_at, write_empty_global_db_schema,
+    MessageRecordBuilder, global_session as sample_session,
+    isolated_global_db_path as isolated_db_path, write_empty_global_db_schema,
 };
 
 async fn open_isolated_db(tmp: &TempDir) -> GlobalDb {
@@ -60,21 +60,19 @@ async fn seed_corpus(db: &GlobalDb, fixture: &Value) {
             .iter()
             .enumerate()
         {
-            let record = message_record_at(
+            let record = MessageRecordBuilder::new(
                 provider,
                 message["id"].as_str().expect("message id"),
                 session_id,
                 message["role"].as_str().unwrap_or("assistant"),
                 ordinal as i64,
-                message["timestamp"].as_i64(),
                 message["text"].as_str().expect("message text"),
                 message["kind"].as_str().unwrap_or("message"),
-                Some("test-model"),
-                message["tool_names"].as_str(),
-                Some("/tmp/project/transcript.jsonl"),
-                Some(ordinal as i64),
-                None,
-            );
+            )
+            .with_timestamp(message["timestamp"].as_i64())
+            .with_tool_names(message["tool_names"].as_str())
+            .with_source(Some("/tmp/project/transcript.jsonl"), Some(ordinal as i64))
+            .build();
             assert!(
                 db.upsert_session_message(&record).await,
                 "seed message {}",

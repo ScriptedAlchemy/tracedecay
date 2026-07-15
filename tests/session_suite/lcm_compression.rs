@@ -55,11 +55,11 @@ fn raw_message_with_role(
     ordinal: i64,
     text: &str,
 ) -> SessionMessageRecord {
-    let mut message = common::message_record(
-        provider, message_id, session_id, role, ordinal, text, "message", None, None, None, None,
-    );
-    message.timestamp = Some(1_715_000_000 + ordinal);
-    message
+    common::MessageRecordBuilder::new(
+        provider, message_id, session_id, role, ordinal, text, "message",
+    )
+    .with_timestamp(Some(1_715_000_000 + ordinal))
+    .build()
 }
 
 async fn insert_session(db: &GlobalDb, provider: &str, session_id: &str) {

@@ -7,9 +7,8 @@
 use std::path::Path;
 
 use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, create_runtime, get_json, http_agent,
-    message_record_at, pick_free_port, response_to_json, wait_for_dashboard,
-    write_empty_global_db_schema,
+    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, MessageRecordBuilder, create_runtime, get_json,
+    http_agent, pick_free_port, response_to_json, wait_for_dashboard, write_empty_global_db_schema,
 };
 
 use serde_json::{Value, json};
@@ -57,32 +56,27 @@ fn session(session_id: &str, project: &Path, started_at: i64, title: &str) -> Se
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct MessageDetails<'a> {
+    timestamp: i64,
+    model: Option<&'a str>,
+    metadata_json: Option<&'a str>,
+}
+
 fn message(
     message_id: &str,
     session_id: &str,
     role: &str,
     ordinal: i64,
-    timestamp: i64,
     text: &str,
-    model: Option<&str>,
-    metadata_json: Option<&str>,
+    details: MessageDetails<'_>,
 ) -> SessionMessageRecord {
-    message_record_at(
-        "cursor",
-        message_id,
-        session_id,
-        role,
-        ordinal,
-        Some(timestamp),
-        text,
-        "message",
-        model,
-        None,
-        None,
-        None,
-        metadata_json,
+    MessageRecordBuilder::new(
+        "cursor", message_id, session_id, role, ordinal, text, "message",
     )
+    .with_timestamp(Some(details.timestamp))
+    .with_model(details.model)
+    .with_metadata(details.metadata_json)
+    .build()
 }
 
 async fn lookup_store_id(db_path: &Path, message_id: &str) -> i64 {
@@ -128,10 +122,12 @@ async fn seed_lcm_store(db_path: &Path, project: &Path) -> (String, String, Stri
             &session_id,
             "user",
             1,
-            msg1_at,
             "Let's plan the launch checklist and rollout.",
-            Some("gpt-5.5-high"),
-            Some(r#"{"usage":{"input_tokens":42}}"#),
+            MessageDetails {
+                timestamp: msg1_at,
+                model: Some("gpt-5.5-high"),
+                metadata_json: Some(r#"{"usage":{"input_tokens":42}}"#),
+            },
         ))
         .await
     );
@@ -141,10 +137,12 @@ async fn seed_lcm_store(db_path: &Path, project: &Path) -> (String, String, Stri
             &session_id,
             "assistant",
             2,
-            msg2_at,
             "Launch summary: ship the rollout plan and verify dashboards.",
-            Some("gpt-5.5-high"),
-            Some(r#"{"usage":{"output_tokens":24}}"#),
+            MessageDetails {
+                timestamp: msg2_at,
+                model: Some("gpt-5.5-high"),
+                metadata_json: Some(r#"{"usage":{"output_tokens":24}}"#),
+            },
         ))
         .await
     );
@@ -398,10 +396,12 @@ fn lcm_payload_health_and_gc_routes_require_preview_then_apply() {
             &fixture.session_id,
             "tool",
             3,
-            1_720_000_030,
             &format!("dashboard payload secret {}", "X".repeat(300_000)),
-            Some("gpt-5.5-high"),
-            None,
+            MessageDetails {
+                timestamp: 1_720_000_030,
+                model: Some("gpt-5.5-high"),
+                metadata_json: None,
+            },
         );
         external.kind = Some("tool_result".to_string());
         db.lcm_store(fixture.session_db_path.parent().expect("session db parent"))
@@ -506,10 +506,12 @@ fn lcm_payload_health_numbers_agree_across_status_doctor_and_dashboard() {
             &fixture.session_id,
             "tool",
             3,
-            1_720_000_030,
             &body,
-            Some("gpt-5.5-high"),
-            None,
+            MessageDetails {
+                timestamp: 1_720_000_030,
+                model: Some("gpt-5.5-high"),
+                metadata_json: None,
+            },
         );
         external.kind = Some("tool_result".to_string());
         db.lcm_store(fixture.session_db_path.parent().expect("session db parent"))

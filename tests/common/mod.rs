@@ -911,71 +911,93 @@ pub fn global_session(provider: &str, session_id: &str, project_key: &str) -> Se
     )
 }
 
-/// The shared `SessionMessageRecord` builder every test fixture routes
-/// through. `timestamp`/`model` are explicit because the dashboard fixtures
-/// vary them; the convenience wrappers below fill the common defaults.
-#[allow(clippy::too_many_arguments)]
-pub fn message_record_at(
-    provider: &str,
-    message_id: &str,
-    session_id: &str,
-    role: &str,
+/// Builder for the shared `SessionMessageRecord` fixture.
+pub struct MessageRecordBuilder<'a> {
+    provider: &'a str,
+    message_id: &'a str,
+    session_id: &'a str,
+    role: &'a str,
     ordinal: i64,
+    text: &'a str,
+    kind: &'a str,
     timestamp: Option<i64>,
-    text: &str,
-    kind: &str,
-    model: Option<&str>,
-    tool_names: Option<&str>,
-    source_path: Option<&str>,
+    model: Option<&'a str>,
+    tool_names: Option<&'a str>,
+    source_path: Option<&'a str>,
     source_offset: Option<i64>,
-    metadata_json: Option<&str>,
-) -> SessionMessageRecord {
-    SessionMessageRecord {
-        provider: provider.to_string(),
-        message_id: message_id.to_string(),
-        session_id: session_id.to_string(),
-        role: role.to_string(),
-        timestamp,
-        ordinal,
-        text: text.to_string(),
-        kind: Some(kind.to_string()),
-        model: model.map(str::to_string),
-        tool_names: tool_names.map(str::to_string),
-        source_path: source_path.map(str::to_string),
-        source_offset,
-        metadata_json: metadata_json.map(str::to_string),
-    }
+    metadata_json: Option<&'a str>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn message_record(
-    provider: &str,
-    message_id: &str,
-    session_id: &str,
-    role: &str,
-    ordinal: i64,
-    text: &str,
-    kind: &str,
-    tool_names: Option<&str>,
-    source_path: Option<&str>,
-    source_offset: Option<i64>,
-    metadata_json: Option<&str>,
-) -> SessionMessageRecord {
-    message_record_at(
-        provider,
-        message_id,
-        session_id,
-        role,
-        ordinal,
-        Some(1_715_000_030),
-        text,
-        kind,
-        Some("test-model"),
-        tool_names,
-        source_path,
-        source_offset,
-        metadata_json,
-    )
+impl<'a> MessageRecordBuilder<'a> {
+    pub fn new(
+        provider: &'a str,
+        message_id: &'a str,
+        session_id: &'a str,
+        role: &'a str,
+        ordinal: i64,
+        text: &'a str,
+        kind: &'a str,
+    ) -> Self {
+        Self {
+            provider,
+            message_id,
+            session_id,
+            role,
+            ordinal,
+            text,
+            kind,
+            timestamp: Some(1_715_000_030),
+            model: Some("test-model"),
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        }
+    }
+
+    pub fn with_timestamp(mut self, timestamp: Option<i64>) -> Self {
+        self.timestamp = timestamp;
+        self
+    }
+
+    pub fn with_model(mut self, model: Option<&'a str>) -> Self {
+        self.model = model;
+        self
+    }
+
+    pub fn with_tool_names(mut self, tool_names: Option<&'a str>) -> Self {
+        self.tool_names = tool_names;
+        self
+    }
+
+    pub fn with_source(mut self, source_path: Option<&'a str>, source_offset: Option<i64>) -> Self {
+        self.source_path = source_path;
+        self.source_offset = source_offset;
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata_json: Option<&'a str>) -> Self {
+        self.metadata_json = metadata_json;
+        self
+    }
+
+    pub fn build(self) -> SessionMessageRecord {
+        SessionMessageRecord {
+            provider: self.provider.to_string(),
+            message_id: self.message_id.to_string(),
+            session_id: self.session_id.to_string(),
+            role: self.role.to_string(),
+            timestamp: self.timestamp,
+            ordinal: self.ordinal,
+            text: self.text.to_string(),
+            kind: Some(self.kind.to_string()),
+            model: self.model.map(str::to_string),
+            tool_names: self.tool_names.map(str::to_string),
+            source_path: self.source_path.map(str::to_string),
+            source_offset: self.source_offset,
+            metadata_json: self.metadata_json.map(str::to_string),
+        }
+    }
 }
 
 pub fn lcm_payload_message(
@@ -985,7 +1007,7 @@ pub fn lcm_payload_message(
     role: &str,
     text: &str,
 ) -> SessionMessageRecord {
-    message_record(
+    MessageRecordBuilder::new(
         provider,
         message_id,
         session_id,
@@ -993,11 +1015,8 @@ pub fn lcm_payload_message(
         1,
         text,
         "tool_result",
-        None,
-        None,
-        None,
-        None,
     )
+    .build()
 }
 
 pub fn lcm_dag_message(
@@ -1007,7 +1026,7 @@ pub fn lcm_dag_message(
     ordinal: i64,
     text: &str,
 ) -> SessionMessageRecord {
-    let mut message = message_record(
+    MessageRecordBuilder::new(
         provider,
         message_id,
         session_id,
@@ -1015,13 +1034,9 @@ pub fn lcm_dag_message(
         ordinal,
         text,
         "message",
-        None,
-        None,
-        None,
-        None,
-    );
-    message.timestamp = Some(1_715_000_000 + ordinal);
-    message
+    )
+    .with_timestamp(Some(1_715_000_000 + ordinal))
+    .build()
 }
 
 pub fn lcm_raw_message(
@@ -1030,7 +1045,7 @@ pub fn lcm_raw_message(
     session_id: &str,
     text: &str,
 ) -> SessionMessageRecord {
-    message_record(
+    MessageRecordBuilder::new(
         provider,
         message_id,
         session_id,
@@ -1038,11 +1053,9 @@ pub fn lcm_raw_message(
         1,
         text,
         "message",
-        None,
-        Some("/tmp/project/transcript.jsonl"),
-        Some(42),
-        None,
     )
+    .with_source(Some("/tmp/project/transcript.jsonl"), Some(42))
+    .build()
 }
 
 pub fn global_message(
@@ -1051,7 +1064,7 @@ pub fn global_message(
     session_id: &str,
     text: &str,
 ) -> SessionMessageRecord {
-    message_record(
+    MessageRecordBuilder::new(
         provider,
         message_id,
         session_id,
@@ -1059,11 +1072,11 @@ pub fn global_message(
         1,
         text,
         "message",
-        Some("tracedecay_context,tracedecay_search"),
-        Some("/tmp/project/transcript.jsonl"),
-        Some(42),
-        Some(r#"{"finish_reason":"stop"}"#),
     )
+    .with_tool_names(Some("tracedecay_context,tracedecay_search"))
+    .with_source(Some("/tmp/project/transcript.jsonl"), Some(42))
+    .with_metadata(Some(r#"{"finish_reason":"stop"}"#))
+    .build()
 }
 
 /// Minimal PyYAML stand-in covering only the YAML subset the generated
