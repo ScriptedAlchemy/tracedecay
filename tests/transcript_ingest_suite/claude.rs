@@ -1,13 +1,17 @@
 use std::io::Write;
 
 use tempfile::TempDir;
-use tracedecay::global_db::{GlobalDb, ParseOffset};
+use tracedecay::global_db::GlobalDb;
+#[cfg(unix)]
+use tracedecay::global_db::ParseOffset;
 use tracedecay::sessions::claude::ClaudeSource;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::git_correlation::{
     CommitEvidence, CommitRelation, GitRefFilter, SessionsForQuery, SpanOverlapKind,
 };
-use tracedecay::sessions::source::{TranscriptSource, ingest_source};
+#[cfg(unix)]
+use tracedecay::sessions::source::TranscriptSource;
+use tracedecay::sessions::source::ingest_source;
 
 use crate::support::{assert_metadata_path_eq, init_git_repo, init_project_at, run_git, setup};
 
@@ -119,7 +123,7 @@ async fn claude_non_utf8_cursor_key_survives_atomic_persistence() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn claude_non_utf8_cursor_key_migrates_legacy_offset_without_replay() {
+async fn claude_non_utf8_cursor_key_replays_unbound_legacy_offset() {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
@@ -156,11 +160,11 @@ async fn claude_non_utf8_cursor_key_migrates_legacy_offset_without_replay() {
 
     let source = ClaudeSource::with_home(&home);
     let stats = ingest_source(&db, &source, &project, None).await;
-    assert_eq!(stats.messages_upserted, 1);
+    assert_eq!(stats.messages_upserted, 2);
     assert!(
         db.get_session_message("claude", "legacy-row")
             .await
-            .is_none()
+            .is_some()
     );
     assert!(db.get_session_message("claude", "new-row").await.is_some());
 

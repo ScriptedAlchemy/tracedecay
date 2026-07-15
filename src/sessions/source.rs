@@ -140,7 +140,7 @@ impl TranscriptCursorKey {
         }
     }
 
-    fn store_path(&self) -> PathBuf {
+    pub(crate) fn store_path(&self) -> PathBuf {
         match &self.durable {
             DurableTranscriptCursorKey::Path(path) => path.clone(),
             DurableTranscriptCursorKey::Opaque(key) => PathBuf::from(key),
@@ -160,6 +160,42 @@ impl TranscriptCursorKey {
 pub(crate) struct TranscriptCursorCheckpoint {
     pub key: TranscriptCursorKey,
     pub state: StoredCursor,
+}
+
+/// Loaded cursor state plus the compare-and-swap expectations needed to
+/// preserve opaque-key migration and the legacy health mirror.
+pub(crate) struct LoadedTranscriptCursor {
+    pub checkpoint: TranscriptCursorCheckpoint,
+    durable_offset: ParseOffset,
+    legacy_offset: Option<ParseOffset>,
+}
+
+pub(crate) async fn load_transcript_cursor<S: TranscriptIngestStore>(
+    store: &S,
+    key: TranscriptCursorKey,
+) -> Option<LoadedTranscriptCursor> {
+    let durable_offset = store.get_parse_offset(&key.store_path()).await.ok()?;
+    let legacy_offset = if let Some(legacy_path) = key.legacy_path() {
+        Some(store.get_parse_offset(legacy_path).await.ok()?)
+    } else {
+        None
+    };
+    // Opaque keys cannot safely inherit a lossy V1 path cursor: distinct
+    // native paths may share that alias. Replay once into the injective key,
+    // then keep mirroring the legacy cursor for health compatibility.
+    let effective = durable_offset;
+    Some(LoadedTranscriptCursor {
+        checkpoint: TranscriptCursorCheckpoint {
+            key,
+            state: StoredCursor {
+                position: effective.byte_offset,
+                mtime: effective.mtime,
+                file_id: effective.file_id,
+            },
+        },
+        durable_offset,
+        legacy_offset,
+    })
 }
 
 /// A pluggable transcript provider.
@@ -242,43 +278,61 @@ async fn ingest_one<S: TranscriptIngestStore>(
     project_root: &Path,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestStats {
-    let cursor_key = source.cursor_key(path);
-    let cursor_path = cursor_key.store_path();
-    let Ok(durable_offset) = store.get_parse_offset(&cursor_path).await else {
+    let Some(loaded) = load_transcript_cursor(store, source.cursor_key(path)).await else {
         return TranscriptIngestStats::default();
     };
-    let legacy_offset = if let Some(legacy_path) = cursor_key.legacy_path() {
-        let Ok(offset) = store.get_parse_offset(legacy_path).await else {
-            return TranscriptIngestStats::default();
-        };
-        Some(offset)
-    } else {
-        None
+    let previous = loaded.checkpoint.clone();
+    let Some(parsed) = source.parse_new(path, previous.state, project_root, max_new_bytes) else {
+        return TranscriptIngestStats::default();
     };
-    let parse_offset = if durable_offset == ParseOffset::default() {
-        legacy_offset
-            .filter(|offset| *offset != ParseOffset::default())
-            .unwrap_or(durable_offset)
+    persist_parsed_transcript(
+        store,
+        source.provider(),
+        path,
+        project_root,
+        loaded,
+        &previous,
+        parsed,
+    )
+    .await
+}
+
+/// Persist an already parsed transcript through the authoritative V1 batch and
+/// git-evidence transaction. Observation coordinators reuse this after their
+/// one-pass privacy parse and Claude fold.
+pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
+    store: &S,
+    provider: &'static str,
+    path: &Path,
+    project_root: &Path,
+    loaded: LoadedTranscriptCursor,
+    expected_previous: &TranscriptCursorCheckpoint,
+    parsed: ParsedTranscript,
+) -> TranscriptIngestStats {
+    if loaded.checkpoint.key != expected_previous.key {
+        tracing::debug!(
+            transcript_path = %path.display(),
+            "rejected transcript batch with mismatched typed cursor"
+        );
+        return TranscriptIngestStats::default();
+    }
+
+    let cursor_key = loaded.checkpoint.key;
+    let cursor_path = cursor_key.store_path();
+    let durable_offset = loaded.durable_offset;
+    let legacy_offset = loaded.legacy_offset;
+    let next_offset = if loaded.checkpoint.state == expected_previous.state {
+        ParseOffset {
+            byte_offset: parsed.new_cursor.position,
+            mtime: parsed.new_cursor.mtime,
+            file_id: parsed.new_cursor.file_id,
+        }
     } else {
+        // Backfill/retry scans may start before V1. Upsert their deterministic
+        // rows idempotently while the V1 CAS remains pinned to its newer state.
         durable_offset
     };
-    let prev = StoredCursor {
-        position: parse_offset.byte_offset,
-        mtime: parse_offset.mtime,
-        file_id: parse_offset.file_id,
-    };
-    let Some(parsed) = source.parse_new(path, prev, project_root, max_new_bytes) else {
-        return TranscriptIngestStats::default();
-    };
-
-    let next_offset = ParseOffset {
-        byte_offset: parsed.new_cursor.position,
-        mtime: parsed.new_cursor.mtime,
-        file_id: parsed.new_cursor.file_id,
-    };
     if parsed.messages.is_empty() {
-        // Non-message append (e.g. blank/undecodable rows) still advances the
-        // cursor so the next ingest only sees genuinely new content.
         let batch =
             match TranscriptWriteBatch::advance_offset(cursor_path, durable_offset, next_offset) {
                 Ok(batch) => batch,
@@ -303,7 +357,6 @@ async fn ingest_one<S: TranscriptIngestStore>(
         return TranscriptIngestStats::default();
     }
 
-    let provider = source.provider();
     let commit_records =
         crate::sessions::git_correlation::direct_commit_records(&parsed.messages, project_root);
     let span_observations =
@@ -312,8 +365,6 @@ async fn ingest_one<S: TranscriptIngestStore>(
     let Ok(existing) = store.get_session(provider, &draft.session_id).await else {
         return TranscriptIngestStats::default();
     };
-    // Preserve the session's original start time and title across appends; only
-    // advance ended_at to the latest message seen.
     let started_at = existing
         .as_ref()
         .and_then(|session| session.started_at)
@@ -341,7 +392,7 @@ async fn ingest_one<S: TranscriptIngestStore>(
         title,
         started_at,
         ended_at,
-        transcript_path: Some(path.to_string_lossy().to_string()),
+        transcript_path: Some(cursor_key.durable_text()),
         metadata_json: draft.metadata_json,
         parent_session_id: draft.parent_session_id,
         is_subagent: draft.is_subagent,
@@ -384,7 +435,6 @@ async fn ingest_one<S: TranscriptIngestStore>(
         messages_upserted,
     }
 }
-
 async fn mirror_legacy_cursor<S: TranscriptIngestStore>(
     store: &S,
     transcript_path: &Path,
@@ -632,6 +682,90 @@ fn stream_new_jsonl_with_policy(
     malformed_policy: MalformedJsonlPolicy,
     max_record_bytes: usize,
 ) -> Option<(NewJsonl, Option<JsonlFrameDeferral>)> {
+    let mut raw = stream_new_jsonl_raw_with_policy(
+        path,
+        prev,
+        max_new_bytes,
+        malformed_policy,
+        max_record_bytes,
+    )?;
+    let mut lines = Vec::new();
+    let mut covered_through = raw.new_cursor.position;
+
+    for frame in raw.frames.drain(..) {
+        if frame.bytes.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        match serde_json::from_slice::<Value>(&frame.bytes) {
+            Ok(value) => lines.push(JsonlLine {
+                offset: frame.offset as i64,
+                end_offset: frame.end_offset as i64,
+                value,
+            }),
+            Err(error) => match malformed_policy {
+                MalformedJsonlPolicy::Skip => {
+                    log_jsonl_decode_skip(path, frame.offset, &error);
+                }
+                MalformedJsonlPolicy::Defer => {
+                    covered_through = frame.offset;
+                    raw.deferred = Some(JsonlFrameDeferral::Malformed {
+                        offset: frame.offset,
+                    });
+                    break;
+                }
+            },
+        }
+    }
+    raw.new_cursor.position = covered_through;
+
+    Some((
+        NewJsonl {
+            lines,
+            start_offset: raw.start_offset,
+            new_cursor: raw.new_cursor,
+        },
+        raw.deferred,
+    ))
+}
+
+/// One bounded, complete raw JSONL frame with its exact source byte range.
+pub(crate) struct RawJsonlRecord {
+    pub offset: u64,
+    pub end_offset: u64,
+    pub bytes: Vec<u8>,
+}
+
+/// Raw framing result. No JSON parser has inspected these bytes.
+pub(crate) struct RawNewJsonl {
+    pub frames: Vec<RawJsonlRecord>,
+    pub start_offset: u64,
+    pub new_cursor: StoredCursor,
+    pub deferred: Option<JsonlFrameDeferral>,
+}
+
+/// Strict bounded framing used by Claude's single-parse privacy boundary.
+pub(crate) fn stream_new_jsonl_raw_strict(
+    path: &Path,
+    prev: StoredCursor,
+    max_new_bytes: Option<u64>,
+    max_record_bytes: usize,
+) -> Option<RawNewJsonl> {
+    stream_new_jsonl_raw_with_policy(
+        path,
+        prev,
+        max_new_bytes,
+        MalformedJsonlPolicy::Defer,
+        max_record_bytes,
+    )
+}
+
+fn stream_new_jsonl_raw_with_policy(
+    path: &Path,
+    prev: StoredCursor,
+    max_new_bytes: Option<u64>,
+    oversized_policy: MalformedJsonlPolicy,
+    max_record_bytes: usize,
+) -> Option<RawNewJsonl> {
     let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,
         Err(error) => {
@@ -642,27 +776,20 @@ fn stream_new_jsonl_with_policy(
     let file_size = meta.len();
     let mtime = file_mtime_secs(&meta);
     let file_id = stable_jsonl_file_id(path, &meta).unwrap_or(0);
-
-    // Resume from the saved offset only when the file has grown (or stayed) and
-    // its identity still matches. Legacy cursors without a file id fall back to
-    // the old mtime guard.
     let resume = should_resume_jsonl(prev, file_size, mtime, file_id);
     let seek_to = if resume { prev.position } else { 0 };
 
     if seek_to >= file_size {
-        // Nothing new; refresh mtime so we stop re-stat-ing an idle file.
-        return Some((
-            NewJsonl {
-                lines: Vec::new(),
-                start_offset: seek_to,
-                new_cursor: StoredCursor {
-                    position: seek_to,
-                    mtime,
-                    file_id,
-                },
+        return Some(RawNewJsonl {
+            frames: Vec::new(),
+            start_offset: seek_to,
+            new_cursor: StoredCursor {
+                position: seek_to,
+                mtime,
+                file_id,
             },
-            None,
-        ));
+            deferred: None,
+        });
     }
 
     if let Some(cap) = max_new_bytes {
@@ -674,22 +801,20 @@ fn stream_new_jsonl_with_policy(
                 max_new_bytes = cap,
                 "deferring transcript source backlog beyond configured cap"
             );
-            return Some((
-                NewJsonl {
-                    lines: Vec::new(),
-                    start_offset: seek_to,
-                    new_cursor: StoredCursor {
-                        position: seek_to,
-                        mtime,
-                        file_id,
-                    },
+            return Some(RawNewJsonl {
+                frames: Vec::new(),
+                start_offset: seek_to,
+                new_cursor: StoredCursor {
+                    position: seek_to,
+                    mtime,
+                    file_id,
                 },
-                Some(JsonlFrameDeferral::Backlog {
+                deferred: Some(JsonlFrameDeferral::Backlog {
                     offset: seek_to,
                     unread_bytes,
                     max_new_bytes: cap,
                 }),
-            ));
+            });
         }
     }
 
@@ -708,11 +833,11 @@ fn stream_new_jsonl_with_policy(
         }
     }
 
-    let mut lines = Vec::new();
+    let mut frames = Vec::new();
     let mut offset = seek_to;
-    let mut frames = RawJsonlFrameReader::new(reader, max_record_bytes);
+    let mut reader = RawJsonlFrameReader::new(reader, max_record_bytes);
     let deferred = loop {
-        let frame = match frames.next_frame() {
+        let frame = match reader.next_frame() {
             Ok(frame) => frame,
             Err(error) => {
                 log_source_skip(path, "read jsonl transcript record", &error);
@@ -727,7 +852,7 @@ fn stream_new_jsonl_with_policy(
             RawJsonlFrame::Oversized {
                 byte_len,
                 terminated,
-            } => match (malformed_policy, terminated) {
+            } => match (oversized_policy, terminated) {
                 (MalformedJsonlPolicy::Skip, true) => {
                     log_jsonl_oversized_skip(path, offset, byte_len);
                     offset = offset.saturating_add(byte_len);
@@ -740,52 +865,28 @@ fn stream_new_jsonl_with_policy(
                 }
             },
             RawJsonlFrame::Complete { byte_len } => {
-                let line_offset = offset;
                 let next_offset = offset.saturating_add(byte_len);
-                let record = frames.record();
-                if record.iter().all(u8::is_ascii_whitespace) {
-                    offset = next_offset;
-                    continue;
-                }
-                match serde_json::from_slice::<Value>(record) {
-                    Ok(value) => {
-                        lines.push(JsonlLine {
-                            offset: line_offset as i64,
-                            end_offset: next_offset as i64,
-                            value,
-                        });
-                        offset = next_offset;
-                    }
-                    Err(error) => match malformed_policy {
-                        MalformedJsonlPolicy::Skip => {
-                            log_jsonl_decode_skip(path, line_offset, &error);
-                            offset = next_offset;
-                        }
-                        MalformedJsonlPolicy::Defer => {
-                            break Some(JsonlFrameDeferral::Malformed {
-                                offset: line_offset,
-                            });
-                        }
-                    },
-                }
+                frames.push(RawJsonlRecord {
+                    offset,
+                    end_offset: next_offset,
+                    bytes: reader.record().to_vec(),
+                });
+                offset = next_offset;
             }
         }
     };
 
-    Some((
-        NewJsonl {
-            lines,
-            start_offset: seek_to,
-            new_cursor: StoredCursor {
-                position: offset,
-                mtime,
-                file_id,
-            },
+    Some(RawNewJsonl {
+        frames,
+        start_offset: seek_to,
+        new_cursor: StoredCursor {
+            position: offset,
+            mtime,
+            file_id,
         },
         deferred,
-    ))
+    })
 }
-
 /// Full contents of a changed file plus the advanced cursor.
 pub struct ChangedFile {
     pub contents: String,
