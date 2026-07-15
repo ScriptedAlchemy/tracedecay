@@ -974,6 +974,7 @@ impl McpServerConstructionContext {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_database_owner_reconciler(
         mut self,
         reconciler: DatabaseOwnerReconciler,
