@@ -8,7 +8,7 @@ use std::net::TcpListener;
 #[cfg(not(unix))]
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -461,13 +461,35 @@ impl DaemonProcess {
     fn is_running(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
+
+    /// Force-stops the daemon and reaps its process before returning.
+    ///
+    /// `Child::kill` maps to `SIGKILL` on Unix and the platform termination
+    /// primitive elsewhere, keeping fault-injection tests portable.
+    pub fn kill_and_wait(&mut self) -> std::io::Result<ExitStatus> {
+        terminate_and_reap(&mut self.child)
+    }
 }
 
 impl Drop for DaemonProcess {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = terminate_and_reap(&mut self.child);
     }
+}
+
+fn terminate_and_reap(child: &mut Child) -> std::io::Result<ExitStatus> {
+    if let Some(status) = child.try_wait()? {
+        return Ok(status);
+    }
+
+    if let Err(kill_err) = child.kill() {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        return Err(kill_err);
+    }
+
+    child.wait()
 }
 
 pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
@@ -543,6 +565,18 @@ pub fn daemon_socket_path(home: &Path) -> PathBuf {
 }
 
 pub fn spawn_tracedecay_daemon(home: &Path) -> DaemonProcess {
+    spawn_tracedecay_daemon_with(home, |_| {})
+}
+
+/// Spawns a test daemon after applying caller-supplied command customization.
+///
+/// The callback runs after the standard test environment, arguments, working
+/// directory, and stdio have been installed, so fault tests can override or
+/// extend them without duplicating daemon startup and readiness handling.
+pub fn spawn_tracedecay_daemon_with(
+    home: &Path,
+    configure: impl FnOnce(&mut Command),
+) -> DaemonProcess {
     let profile_root = canonical_existing_path(home).join(".tracedecay");
     std::fs::create_dir_all(&profile_root).expect("daemon profile should be created");
     #[cfg(unix)]
@@ -575,15 +609,15 @@ pub fn spawn_tracedecay_daemon(home: &Path) -> DaemonProcess {
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
     apply_tracedecay_home_env(&mut command, home);
-    let child = command
+    command
         .args(["daemon", "run"])
         .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1")
         .current_dir(home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("tracedecay daemon should start");
+        .stderr(Stdio::null());
+    configure(&mut command);
+    let child = command.spawn().expect("tracedecay daemon should start");
     let mut daemon = DaemonProcess { child };
 
     let deadline = Instant::now() + Duration::from_secs(10);
