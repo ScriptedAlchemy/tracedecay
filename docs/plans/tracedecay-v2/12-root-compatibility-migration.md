@@ -40,12 +40,20 @@ One daemon is the sole database authority. Thin clients and hooks communicate wi
 - Doctor can diagnose preflight, incomplete migration, archive, daemon-version, lock, corruption, and recovery states without unsafe automatic deletion.
 - Upgrades quiesce writes, preserve client reconnection, validate the replacement daemon, and recover to the last verified state on failure.
 - Delete archives and migration-only code when the recovery policy permits and verification remains valid; report exactly what was removed.
+- Delete migration-only dependencies, feature edges, build-script inputs, and
+  test harnesses with the code they served. The final root package is
+  composition and compatibility only, not a catch-all compilation boundary for
+  V2 product implementation.
 - Do not keep compatibility fallbacks for stale clients. Return a clear upgrade/reconnect error instead.
 - Remove external `ast-grep` capability probing and subprocess outline/rewrite,
   duplicate transport/admin handlers, handler-local query/render/database logic,
   and semantic aliases whose compatibility window has closed. Surviving names
   delegate to canonical application operations until their stated removal.
 - Remote/shared-brain support must still route through one authoritative daemon per live store; it never introduces extra database clients.
+- Use measured focused-test compilation to right-size integration-test targets.
+  Split an oversized shared test binary when a narrow test selection repeatedly
+  recompiles unrelated subsystems; do not multiply binaries when the added link
+  cost is greater than the measured feedback-time benefit.
 
 ## Acceptance
 
@@ -55,3 +63,7 @@ One daemon is the sole database authority. Thin clients and hooks communicate wi
 - Doctor reports actionable states and performs only explicitly selected safe repairs.
 - PR19 leaves no dual-write path, generated inventory, compatibility runtime, obsolete direct DB client, skipped family, or migration TODO.
 - Archive deletion follows the documented recovery policy and is tested without risking the sole verified backup.
+- Same-host before/after evidence shows the root package's dependency fan-in,
+  warm incremental check, and representative focused-test compile scope after
+  migration-only code is removed. Any retained high-cost edge has a current
+  product owner and measured justification.

@@ -11,8 +11,9 @@ and [26 observability](26-observability-accounting-and-usage.md).
 ## Outcome
 
 PR20 measures and optimizes the production database, synchronization,
-projection, indexing, and query paths as one system. It preserves exact product
-semantics, privacy, authority, durability, coverage, ordering, and recovery.
+projection, indexing, query, and repository-controlled developer-build paths as
+one system. It preserves exact product semantics, privacy, authority,
+durability, coverage, ordering, and recovery.
 Performance work is complete only when representative end-to-end evidence shows
 the improvement and the correctness gates remain green.
 
@@ -39,6 +40,15 @@ regression discovered by an earlier slice.
   rendering time where the production trace can attribute them safely.
 - Compare baseline and candidate with repeated runs and visible variance.
   Missing, partial, sampled, capped, or noisy evidence cannot claim a win.
+- Developer-build workloads use stock Cargo commands with an explicit package,
+  target, feature set, test target, toolchain, and source change. Record clean,
+  warm incremental, and exact no-op cases where applicable, including wall
+  time, CPU time/utilization, peak memory, rebuilt units, codegen/link time,
+  build-script execution, and cache outcome when the toolchain exposes them.
+- Compare developer-build results on the same host and toolchain with equivalent
+  source and build state. Local wrappers, target locations, concurrent-lane
+  allocation, and Rust Analyzer processes are environmental context, not
+  roadmap mechanisms or portable regression thresholds.
 
 ## Optimization requirements
 
@@ -78,6 +88,30 @@ regression discovered by an earlier slice.
 - Bound cross-project fan-out, graph traversal, reranking, result buffering,
   and per-client concurrency with explicit partial or unavailable coverage.
 
+### Developer build and verification
+
+- Reduce the frequently touched compilation graph by enforcing product crate
+  ownership, removing obsolete dependency and feature edges, and keeping heavy
+  grammars, model runtimes, providers, transports, dashboard assets, and
+  test-only support out of unrelated focused package checks.
+- Measure root-package fan-in and test-target compilation. Split an oversized
+  integration-test binary only when representative focused workflows improve
+  after accounting for additional codegen and linking.
+- Keep build scripts deterministic, declare narrow rerun inputs, and skip
+  generation work when the relevant source assets and enabled feature are
+  unchanged.
+- Portable Cargo manifest, configuration, profile, feature, and build-setting
+  changes are valid optimization levers when repeated same-workload evidence
+  shows a benefit. Verify their clean, incremental, test, release, CI, and
+  published-package effects separately rather than assuming one profile serves
+  every workload.
+- Use narrow package/target/feature commands for inner-loop evidence while
+  retaining the owning PR's relevant broader workspace, all-target, or
+  all-feature correctness gates before handoff.
+- Do not solve repository build cost by pausing analyzers, prescribing a local
+  cache wrapper, hard-coding machine-specific target locations, reproducing the
+  local shim's lane policy, or serializing independent developer operations.
+
 ## Benchmark and regression gate
 
 - Use sanitized realistic small, current, large, and 10x corpora with skewed
@@ -95,11 +129,17 @@ regression discovered by an earlier slice.
 - Gate material regressions in p95/p99 latency, throughput, memory, CPU, disk,
   write amplification, no-op work, and startup/recovery time using reviewed
   workload-specific thresholds rather than one universal score.
+- Gate material regressions in representative same-host clean, warm
+  incremental, no-op, and focused-test compilation. Reuse a matching PR7–PR19
+  baseline where one exists and establish a PR20 baseline before optimization
+  otherwise. Publish the command and workload identity with the result; do not
+  turn one developer machine's absolute duration into a cross-platform limit.
 
 ## Done
 
 PR20 is complete when measured production bottlenecks across database, sync,
-projection, indexing, and query have bounded implementations; realistic Linux
-and Windows comparisons meet reviewed regression gates; crash/restart and
-concurrency tests remain correct; and no optimization weakens product semantics,
-privacy, scope, durability, coverage, ordering, or daemon authority.
+projection, indexing, query, and repository-controlled developer builds have
+bounded implementations; realistic Linux and Windows comparisons meet reviewed
+regression gates; crash/restart and concurrency tests remain correct; and no
+optimization weakens product semantics, privacy, scope, durability, coverage,
+ordering, or daemon authority.

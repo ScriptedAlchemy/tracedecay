@@ -7,19 +7,28 @@
   published Cargo configuration, or hosted-CI policy.
 - Do not encode these machine-specific paths or cache choices in tracked product behavior,
   repository Cargo configuration, public documentation, or CI solely to satisfy this section.
-- **Local default: build into the checkout's own repo-local `target/` directory** (each
-  worktree has its own; checkouts under `/fast/projects/` are already on this machine's fast
-  disk, so this is both isolated and fast). No `CARGO_TARGET_DIR` override needed normally.
-- **If the repo-local target dir is locked/contended** (another process holds the cargo
-  build lock — "Blocking waiting for file lock on build directory" — or a concurrent agent
-  owns the checkout), fall back to a cache target dir on the fast volume:
-  `CARGO_TARGET_DIR=/fast/cargo-target/<repo-or-worktree-name>` (e.g.
-  `/fast/cargo-target/tracedecay-merge-check`). Never place target dirs under `/tmp`,
-  `$HOME`, or anywhere on the root disk.
-- Cargo-launched TraceDecay test data follows the active target dir:
-  repo-local default → `TRACEDECAY_DATA_DIR=target/test-profile/.tracedecay`; fast-cache
-  fallback → `TRACEDECAY_DATA_DIR=<CARGO_TARGET_DIR>/test-profile/.tracedecay`.
-- Run normal repo commands from the repo root with all features: `cargo check --all-features`, `cargo test --all-features`, `cargo test-all`, `cargo nextest run --workspace --all-features --no-fail-fast`.
+- Portable repository Cargo changes are allowed when measurements justify them,
+  including manifests, profiles, features, build settings, and build-script
+  configuration. Preserve stock-Cargo contributor, CI, release, and published
+  package behavior; never hard-code this machine's target paths or slot policy.
+- Invoke ordinary `cargo` commands. Zack's machine-local cargo shim/cargo-slot
+  transparently allocates non-blocking lanes for concurrent Rust operations; do
+  not bypass it, add repository lane coordination, or serialize Cargo work to
+  avoid contention.
+- Do not pause, kill, or disable Rust Analyzer to improve build timings. Its
+  Claude Code LSP-owned processes are outside repository build optimization.
+- The shim's local policy uses the checkout's repo-local `target/` by default
+  and allocates isolated targets under `/fast/cargo-target/` when a non-blocking
+  lane needs one. Let the shim select the lane; agents do not set
+  `CARGO_TARGET_DIR` or `TRACEDECAY_DATA_DIR` to manage contention.
+- Cargo-launched TraceDecay test data follows the target selected by the shim.
+  Never redirect targets or test data under `/tmp`, `$HOME`, or the root disk.
+- During development, scope checks and test compilation to the smallest touched
+  package, target, and feature set. A test-name filter does not reduce which
+  test binary Cargo compiles, so batch focused tests by target where practical.
+- Before handoff, run the relevant broader all-feature gate from the repo root:
+  `cargo check --all-features`, `cargo test --all-features`, `cargo test-all`,
+  or `cargo nextest run --workspace --all-features --no-fail-fast`.
 - Toolchain caches (`sccache`, cargo registry) live under `/fast/cache/` and need no
   per-agent changes.
 - Hosted CI and other developers follow their own environment/repository defaults; never
@@ -43,4 +52,6 @@
 
 - Parallel branch work uses git worktrees under `.worktrees/` in the repo root (for example `.worktrees/codex-cli-args-stdin`).
 - Integration/default branch is `master` (GitHub: ScriptedAlchemy/tracedecay).
-- Multi-PR merge verification: build a detached temporary worktree on `origin/master`, merge all target branches, then run tests with isolated `CARGO_TARGET_DIR` (under `/fast/cargo-target/`, see the Cargo section) and `TRACEDECAY_DATA_DIR` paths.
+- Multi-PR merge verification: build a detached temporary worktree on
+  `origin/master`, merge all target branches, then run ordinary Cargo tests and
+  let the local shim allocate the isolated build and test-data lane.

@@ -56,6 +56,13 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - Expose workflow create, validate, run, inspect, cancel, and history operations in PR17 as typed domain/application contracts only.
 - Add each use case in the same product PR as its domain/store/query behavior; do not create speculative APIs ahead of executable behavior.
 - PR11 removes remaining root-level business orchestration by routing adapters through the completed application core.
+- Keep the application's direct dependency graph narrow and feature-minimal.
+  Concrete stores, transports, providers, model runtimes, dashboard assets, and
+  their build scripts must not enter its normal check or test graph.
+- Treat PR11 as a compilation-boundary migration as well as an ownership
+  migration: record same-host warm incremental check and representative
+  application-test compilation before and after root orchestration moves.
+  Regressions require an identified cause and explicit disposition.
 
 ## Acceptance
 
@@ -65,3 +72,6 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - Authorization, scope, cancellation, idempotency, freshness, coverage, and error semantics have direct tests.
 - No generic bus/framework, plan parser/executor, generated inventory, or JavaScript workflow runtime exists in this layer.
 - PR11 leaves no product orchestration in transport handlers or the legacy root crate.
+- A focused application check or test does not compile transport, dashboard,
+  provider, or concrete-storage targets, and the legacy root crate's dependency
+  fan-in is measurably reduced.

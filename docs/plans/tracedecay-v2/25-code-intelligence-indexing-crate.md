@@ -47,6 +47,15 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 - Produce stable canonical rows and digests for identical input, registry, and extractor revisions on every supported host.
 - Preserve parse errors and unsupported constructs as evidence; never invent successful structure.
 - Keep language-specific logic behind a small extractor interface while sharing identity, lineage, and output contracts.
+- Keep parser and grammar dependencies behind the code-intelligence ownership
+  boundary so unrelated domain, store, application, and adapter checks do not
+  compile them. Feature groupings reflect shipped language capability, not a
+  convenience meta-feature that silently expands unrelated builds.
+- Record same-host clean, warm incremental, and no-op check/test compilation
+  for the core registry and representative grammar groups. If an extractor-only
+  change repeatedly rebuilds unrelated grammar bindings, use that evidence to
+  refine module, feature, or crate boundaries without weakening default product
+  capability.
 - Structural results report deterministic file/span order, parse coverage,
   unsupported regions, and bounded errors. Pagination cursors bind query,
   descriptor, generation, and ordering; cancellation cannot publish partial
@@ -87,3 +96,6 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 - Crash, cancellation, disk-full, stale-snapshot, and concurrent-build tests publish either one complete generation or none.
 - V1 fixtures migrate through logical batches with no indexer database open and no lost or duplicate supported records.
 - Direct behavior tests prove capture is the only intake and store/projector composition is the only publication path.
+- Focused non-indexing package checks do not compile Tree-sitter grammars or
+  structural-search implementation, and PR9 publishes the compilation baselines
+  required for PR20 comparison.

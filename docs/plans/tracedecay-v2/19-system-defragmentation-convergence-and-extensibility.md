@@ -17,6 +17,8 @@ policy, lifecycle, or transport logic.
 - Dependency direction and component ownership rules.
 - The criteria for admitting a new crate or external extension point.
 - Convergence of duplicate implementations onto canonical operations.
+- Repository-controlled compilation boundaries, dependency fan-in, and test
+  target ownership where they follow product ownership.
 - PR19 deletion of obsolete modules, adapters, shims, and compatibility paths.
 - Architectural tests that protect real boundaries.
 
@@ -44,6 +46,9 @@ policy, lifecycle, or transport logic.
    - New components begin as modules in the crate that owns their lifecycle.
    - A new crate is admitted only when it creates a real ownership boundary, enforces useful
      dependency direction, supports independent reuse, or isolates a materially different runtime.
+   - Compile-time savings justify extraction only when same-host measurements
+     show a smaller frequently touched graph after accounting for added crate
+     metadata, code generation, and linking.
    - File size, naming preference, or speculative reuse alone does not justify a crate.
 
 4. Canonical operations
@@ -66,6 +71,18 @@ policy, lifecycle, or transport logic.
      parser acquisitions, surface-local handlers/query/render/database logic,
      and superseded semantic aliases after their bounded compatibility window.
 
+7. Developer feedback topology
+   - Each crate owns only the normal, optional, build, and development
+     dependencies required by its product boundary. Heavy providers, grammars,
+     model runtimes, transports, and dashboard generation remain isolated from
+     unrelated focused checks and tests.
+   - Integration-test targets align with product ownership and measured focused
+     workflows. A name filter is not treated as proof of narrow compilation.
+   - Build scripts declare narrow rerun inputs and skip generation or asset work
+     when the relevant inputs and features are unchanged or disabled.
+   - Optimize boundaries from the PR7+ developer-feedback evidence in Plan 00;
+     do not create a crate-count target or machine-specific build policy.
+
 ## Acceptance
 
 - Dependency checks prevent domain and application layers from importing adapters or concrete stores.
@@ -73,5 +90,8 @@ policy, lifecycle, or transport logic.
 - Concurrent clients cannot become additional database authorities.
 - Every surviving crate has a documented ownership or dependency reason beyond file organization.
 - PR19 removes superseded implementations, compatibility shims, dead flags, and unused dependencies.
+- Every high-fan-in crate, heavy default feature, build script, and oversized
+  shared test target has a current ownership reason or same-host evidence for
+  retaining it; focused workflows do not compile unrelated heavy subsystems.
 - Direct behavior and boundary tests replace generated inventories and architecture scorecards.
 - No plan parser, tracker, executor, generated product model, or workflow JavaScript remains.

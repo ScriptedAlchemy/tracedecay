@@ -54,8 +54,23 @@ not be rebuilt.
 - Project facts and project sessions are project-wide. User activity is
   profile-wide. Only code indexes vary by branch/worktree/snapshot.
 - Missing authority, scope, privacy state, or recovery proof fails closed.
-- Use stock Cargo commands. Local cache wrappers are developer conveniences and
-  never enter repository source, tests, documentation requirements, or CI.
+- Product, contributor, and CI behavior uses stock Cargo semantics.
+  Machine-local wrappers may be documented only in explicitly scoped workspace
+  guidance; they never become product behavior, repository tests, public setup
+  requirements, or hosted-CI dependencies.
+- Beginning with PR7, a slice that materially changes crate boundaries,
+  dependency fan-in, feature activation, build-script inputs, or test-target
+  topology records same-host baseline and candidate developer-feedback evidence.
+  Measure a warm incremental or no-op check plus a representative touched test
+  target; report wall time, rebuilt units, and available CPU/peak-memory data
+  with visible variance. Absolute machine-specific timings are diagnostic, not
+  portable acceptance thresholds.
+- Developer-build work may change portable repository Cargo manifests,
+  configuration, profiles, features, build settings, and build scripts when
+  same-workload evidence shows a benefit and stock-Cargo contributor, CI,
+  release, and publication behavior remains valid. Rust Analyzer ownership,
+  local Cargo wrappers, machine-specific concurrency lanes, absolute target
+  locations, and local cache placement remain outside this roadmap.
 - Direct behavior, fault, restart, concurrency, cross-platform, and deletion
   tests are delivery evidence. Planning-artifact validation is not.
 - Retained obligations are assigned below. None is silently deferred or
@@ -81,7 +96,7 @@ not be rebuilt.
 | PR17 | Real typed dynamic workflows and automations: daemon-owned definitions, deterministic replay, and one shared scheduler/history/lease/effect/artifact kernel. |
 | PR18 | Official API stabilization and SDKs: frozen public contract, OpenAPI/schema publication, first-party Rust/TypeScript/Python SDKs, docs, and conformance. |
 | PR19 | Compatibility migration, defragmentation, cutover, and deletion: resumable backfill, shadow parity, bounded cutovers, rollback window, V2 default, and removal of every superseded V1 path. |
-| PR20 | End-to-end performance optimization: measured database, synchronization, projection, indexing, cache/generation, and query improvements with Linux/Windows and crash/restart regression gates. |
+| PR20 | End-to-end performance optimization: measured database, synchronization, projection, indexing, cache/generation, query, and repository-controlled developer-build improvements with Linux/Windows and crash/restart regression gates. |
 
 PR #421 stays open through PR20. It merges only after PR20 and the aggregate
 Linux, Windows, migration, recovery, privacy, performance, and deletion gates
@@ -93,8 +108,10 @@ are stable.
   recovery, and migration boundaries.
 - Plans 05, 15, 23, 25, and 31: PR8–PR10 temporal, lexical, code, semantic,
   ranking, and evaluation behavior.
-- Plans 06, 08–10, 17, 20, and 21: PR11–PR12 application, policy,
-  configuration, catalog, transport, presentation, and public contracts.
+- Plans 06, 08–10, 17, 20, 21, and
+  [34](34-workspace-refactoring-and-api-migration.md): PR11–PR12 application,
+  policy, configuration, catalog, transport, presentation, public contracts, and
+  safe workspace refactoring.
 - Plans 07, 22, and 27: PR13 hook, Scout, host integration, bundle, and
   conformance behavior.
 - Plans 11, 14, 19, and 26: PR14 product UI, Doctor, observability, regression,
@@ -105,8 +122,9 @@ are stable.
 - Plan 32: PR17 typed dynamic-workflow product.
 - Plans 12, 13, 17, 19, and every component migration section: PR18–PR19
   publication, provenance, compatibility, cutover, and deletion.
-- Plan 33: PR20 end-to-end database, synchronization, indexing, and query
-  performance optimization. Owning slices provide instrumentation and baselines.
+- Plan 33: PR20 end-to-end database, synchronization, indexing, query, and
+  repository-controlled developer-build performance optimization. Owning slices
+  provide instrumentation and baselines.
 - The retired Plans 29–30 review artifacts are deleted. Any still-valid behavior belongs in
   the owning product plan and its direct regression tests.
 
@@ -132,4 +150,6 @@ a developer-plan executor.
 For each PR: implement the smallest coherent vertical slice, run focused direct
 tests, independently review the integrated diff, run the relevant broader stock
 Cargo and cross-platform gates, and delete replaced paths when the rollback gate
-permits it. Passing code and tests in Git are the completion record.
+permits it. From PR7 onward, include the developer-feedback measurements above
+when the slice materially changes Rust compilation scope. Passing code and tests
+in Git are the completion record.

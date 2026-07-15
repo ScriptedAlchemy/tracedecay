@@ -61,3 +61,25 @@ Every public surface resolves stable capability IDs to the same application use 
 - Compatibility tests cover only currently supported names and typed guidance for retired names; no frozen total-count assertion is allowed.
 - Architecture tests reject source parsers, generators, generated inventories, plan/workflow dependencies, execution logic, storage, transport implementations, and UI code from tracedecay-tool-catalog.
 - Repository checks verify no public adapter has a handler-local query, policy, persistence, or authorization path that bypasses the cataloged application use case.
+
+## Refactoring workflow boundary
+
+The catalog owns discovery and typed definitions for refactoring capabilities,
+not a second refactoring engine. Read-only `tracedecay_rename_preview`, existing
+symbol/string edit primitives, callers/reference discovery, diagnostics, and
+future apply operations remain independently callable base tools. Composed
+refactoring workflow bundles reference those canonical tools instead of copying
+handlers or schemas.
+
+[Workspace refactoring and API migration](34-workspace-refactoring-and-api-migration.md)
+owns the behavior and acceptance contract for apply-grade previews, atomic symbol
+rename, and semantic API migration. In particular:
+
+- pure symbol rename and compatibility-aware API promotion are separate operations;
+- apply tools consume immutable preview/plan identifiers and digests and fail closed on stale evidence;
+- catalog capability metadata is granular by language and symbol/site kind;
+- unsupported or not-yet-shipped apply operations are never advertised as callable;
+- human-readable and JSON results render one typed changed/unchanged/skipped/blocked manifest; and
+- neutral adoption evals must prove that agents preview before apply and choose
+  semantic migration rather than rename when compatibility or coordinated
+  definition changes are required.
