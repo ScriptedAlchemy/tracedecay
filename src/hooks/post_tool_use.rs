@@ -209,7 +209,7 @@ pub(super) fn is_post_tool_use_failure_event(parsed: &Value) -> bool {
 
 fn normalize_event_name(name: &str) -> String {
     name.chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .flat_map(char::to_lowercase)
         .collect()
 }

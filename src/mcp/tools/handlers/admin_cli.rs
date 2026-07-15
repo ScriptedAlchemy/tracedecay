@@ -82,7 +82,7 @@ impl<'a> AdminCliContext<'a> {
     }
 
     fn project_root(&self) -> Option<&'a Path> {
-        self.project.map(|cg| cg.project_root())
+        self.project.map(TraceDecay::project_root)
     }
 }
 

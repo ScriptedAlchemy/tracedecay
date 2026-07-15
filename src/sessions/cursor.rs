@@ -516,7 +516,7 @@ impl TranscriptSource for CursorSweepSource {
                 return Vec::new();
             };
             return entries
-                .filter_map(|entry| entry.ok())
+                .filter_map(std::result::Result::ok)
                 .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
                 .filter(|entry| {
                     entry

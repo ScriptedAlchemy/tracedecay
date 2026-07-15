@@ -2280,7 +2280,8 @@ impl McpServer {
 
             // Parse the incoming JSON
             let parsed: std::result::Result<JsonRpcRequest, _> = serde_json::from_str(&line);
-            let request_activity = request_lifecycle.and_then(|lifecycle| lifecycle.try_enter());
+            let request_activity =
+                request_lifecycle.and_then(super::super::daemon::DaemonLifecycle::try_enter);
             let rejecting_for_drain = request_lifecycle.is_some() && request_activity.is_none();
 
             let response = if rejecting_for_drain {

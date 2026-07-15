@@ -124,7 +124,7 @@ pub(super) fn skill_view_md(value: &Value) -> String {
                 let bytes = file
                     .get("bytes")
                     .and_then(Value::as_array)
-                    .map(|bytes| bytes.len())
+                    .map(Vec::len)
                     .unwrap_or_default();
                 md.bullet(&format!("**{path}** - {bytes} bytes"));
             }

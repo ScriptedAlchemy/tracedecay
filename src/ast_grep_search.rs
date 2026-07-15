@@ -55,7 +55,7 @@ impl Language for TdLang {
     }
 
     fn field_to_id(&self, field: &str) -> Option<u16> {
-        self.ts.field_id_for_name(field).map(|f| f.get())
+        self.ts.field_id_for_name(field).map(std::num::NonZero::get)
     }
 
     fn expando_char(&self) -> char {

@@ -143,7 +143,7 @@ impl TranscriptStore for GlobalDbTranscriptStore<'_> {
         self.db
             .get_parse_offset_result(&cursor_key)
             .await
-            .map(|offset| offset.unwrap_or_default())
+            .map(Option::unwrap_or_default)
             .map_err(|error| Self::persistence_error(cursor_path, error))
     }
 

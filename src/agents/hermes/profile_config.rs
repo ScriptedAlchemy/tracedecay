@@ -48,7 +48,7 @@ fn read_pinned_project_root_from_block(
     }
     decode_yaml_scalar(value)
         .ok()
-        .map(|decoded| decoded.into_owned())
+        .map(std::borrow::Cow::into_owned)
 }
 
 pub(super) fn enable_plugin(config_path: &Path) -> Result<bool> {

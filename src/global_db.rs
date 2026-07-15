@@ -878,10 +878,10 @@ fn normalize_git_remote_url(remote: &str) -> Option<String> {
         return None;
     }
     let mut normalized = remote.trim_end_matches('/').to_string();
-    if let Some(rest) = normalized.strip_prefix("git@") {
-        if let Some((host, path)) = rest.split_once(':') {
-            normalized = format!("https://{host}/{path}");
-        }
+    if let Some(rest) = normalized.strip_prefix("git@")
+        && let Some((host, path)) = rest.split_once(':')
+    {
+        normalized = format!("https://{host}/{path}");
     }
     if let Some(stripped) = normalized.strip_suffix(".git") {
         normalized = stripped.to_string();
@@ -1173,10 +1173,10 @@ impl GlobalDb {
             }
             return Ok(Some(db));
         }
-        if let Some(parent) = canonical_path.parent() {
-            if std::fs::create_dir_all(parent).is_err() {
-                return Ok(None);
-            }
+        if let Some(parent) = canonical_path.parent()
+            && std::fs::create_dir_all(parent).is_err()
+        {
+            return Ok(None);
         }
         let Some(db) = Self::open_at_unsynchronized(
             &canonical_path,
@@ -4709,14 +4709,13 @@ impl GlobalDb {
         // A git-scoped search against a store written before the correlation
         // schema existed can never match; report empty rather than issuing a
         // `no such table` EXISTS subquery.
-        if let Some(filter) = git_filter {
-            if !filter.is_empty()
-                && !crate::sessions::git_correlation::tables_present(&self.conn)
-                    .await
-                    .unwrap_or(false)
-            {
-                return Vec::new();
-            }
+        if let Some(filter) = git_filter
+            && !filter.is_empty()
+            && !crate::sessions::git_correlation::tables_present(&self.conn)
+                .await
+                .unwrap_or(false)
+        {
+            return Vec::new();
         }
         // Likewise a workflow-scoped search against a store predating the
         // workflow-index schema can never match: short-circuit to empty rather
@@ -4803,13 +4802,12 @@ impl GlobalDb {
         // anonymous `?` placeholders bind to the next sequential positions,
         // which — since the predicate and its values are appended together in
         // order — line up with the numbered placeholders that follow.
-        if let Some(filter) = git_filter {
-            if let Some((predicate, predicate_values)) =
+        if let Some(filter) = git_filter
+            && let Some((predicate, predicate_values)) =
                 crate::sessions::git_correlation::git_scope_exists_predicate(filter, "m.session_id")
-            {
-                let _ = write!(sql, " AND {predicate}");
-                query_params.extend(predicate_values);
-            }
+        {
+            let _ = write!(sql, " AND {predicate}");
+            query_params.extend(predicate_values);
         }
         // Workflow-run scoping: reuse the shared EXISTS predicate (also used
         // by future lcm/grep paths) so run/agent correlation semantics stay in
