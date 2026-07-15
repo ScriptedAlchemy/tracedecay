@@ -9,6 +9,7 @@ pub struct UtcMicros(pub i64);
 
 /// Closed half-open occurrence interval.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct TimeInterval {
     pub start: UtcMicros,
     pub end: UtcMicros,

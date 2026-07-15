@@ -332,14 +332,27 @@ mod tests {
             Some(ShardDispositionV1::Searched)
         );
         assert!(coverage.is_complete());
-        let serialized = serde_json::to_value(&coverage).unwrap();
-        assert_eq!(serialized["searched"], json!(["shard.a"]));
-        assert!(serialized.get("dispositions").is_none());
+        let serialized = serde_json::to_string(&coverage).unwrap();
+        assert_eq!(
+            serialized,
+            r#"{"searched":["shard.a"],"skipped":[],"stale":[],"unavailable":[],"incompatible":[],"locked":[],"redacted":[],"truncated":[],"freshness":{},"unknown_coverage":false}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<CoverageReportV1>(&serialized).unwrap(),
+            coverage
+        );
 
         assert!(
             serde_json::from_value::<CoverageReportV1>(json!({
                 "searched": ["shard.a"],
                 "stale": ["shard.a"]
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CoverageReportV1>(json!({
+                "searched": ["shard.a"],
+                "future_coverage_field": true
             }))
             .is_err()
         );
@@ -406,6 +419,43 @@ mod tests {
             "shards": shards
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn coverage_wire_objects_reject_unknown_fields() {
+        assert!(
+            serde_json::from_value::<ReadConsistencyV1>(json!({
+                "bounded_stale": {
+                    "max_lag_micros": 10,
+                    "future_consistency_field": true
+                }
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<EvidenceRetentionWatermark>(json!({
+                "evaluated_at": 1,
+                "cutoffs": {},
+                "future_retention_field": true
+            }))
+            .is_err()
+        );
+
+        let mut remote =
+            serde_json::from_str::<serde_json::Value>(&remote_coverage_json(1)).unwrap();
+        remote["future_remote_field"] = json!(true);
+        assert!(serde_json::from_value::<RemoteCoverageV1>(remote).is_err());
+
+        let mut shard =
+            serde_json::from_str::<serde_json::Value>(&remote_coverage_json(1)).unwrap();
+        shard["shards"][0]["future_shard_field"] = json!(true);
+        assert!(serde_json::from_value::<RemoteCoverageV1>(shard).is_err());
+
+        let report = offline_cache_report(99, 100);
+        let mut serialized = serde_json::to_value(&report).unwrap();
+        serialized["remote"]["shards"][0]["cache_grant_snapshot"]["future_grant_field"] =
+            json!(true);
+        assert!(serde_json::from_value::<CoverageReportV1>(serialized).is_err());
     }
 
     #[test]

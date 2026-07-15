@@ -595,25 +595,25 @@ impl ResearchBundleManifestV1 {
 
 mod strict_wire;
 
-use strict_wire::{ClosedJsonValue, strict_envelope, strict_tombstone};
+use strict_wire::CheckedJsonValue;
 
 impl<'de> Deserialize<'de> for ResearchAnchorTombstoneV1 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        let value = ClosedJsonValue::deserialize(deserializer)?.0;
-        strict_tombstone(&value, "tombstone").map_err(serde::de::Error::custom)?;
+        let value = CheckedJsonValue::deserialize(deserializer)?.0;
         let wire: ResearchAnchorTombstoneWireV1 =
             serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-        Ok(wire.into())
+        let tombstone = Self::from(wire);
+        tombstone.validate().map_err(serde::de::Error::custom)?;
+        Ok(tombstone)
     }
 }
 
 /// Strict validation boundary: a manifest is not accepted without the exact
-/// external catalog snapshot whose records it references. Deserialization first
-/// rejects unknown fields throughout the closed V1 wire tree so bytes omitted
-/// from validation and digest projections cannot be smuggled into fixtures.
+/// external catalog snapshot whose records it references. Deserialization rejects
+/// duplicate keys before typed closed-wire decoding and semantic validation.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ResearchBundleEnvelopeV1 {
     pub manifest: ResearchBundleManifestV1,
@@ -632,14 +632,15 @@ impl<'de> Deserialize<'de> for ResearchBundleEnvelopeV1 {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = ClosedJsonValue::deserialize(deserializer)?.0;
-        strict_envelope(&value).map_err(serde::de::Error::custom)?;
+        let value = CheckedJsonValue::deserialize(deserializer)?.0;
         let wire: ResearchBundleEnvelopeWireV1 =
             serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-        Ok(Self {
+        let envelope = Self {
             manifest: wire.manifest,
             retrieval_catalog: wire.retrieval_catalog,
-        })
+        };
+        envelope.validate().map_err(serde::de::Error::custom)?;
+        Ok(envelope)
     }
 }
 

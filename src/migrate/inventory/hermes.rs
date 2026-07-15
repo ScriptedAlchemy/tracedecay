@@ -9,6 +9,7 @@ use super::project::{canonicalize_lossy, inspect_data_dir_candidate};
 use super::sqlite::sqlite_quick_check;
 use crate::config::TRACEDECAY_DIR;
 use crate::errors::Result;
+use crate::yaml_scalar::decode_yaml_scalar;
 
 pub(super) async fn scan_hermes_sources(
     include_default_home: bool,
@@ -196,7 +197,15 @@ fn read_project_pin_from_plugin_block(
         .take(block_end)
         .skip(block_start + 1)
         .find_map(|line| line.trim().strip_prefix("project_root:"))
-        .and_then(parse_yaml_scalar)
+        .and_then(|value| {
+            let value = value.trim();
+            if value.is_empty() {
+                return None;
+            }
+            decode_yaml_scalar(value)
+                .ok()
+                .map(|value| value.into_owned())
+        })
 }
 
 fn find_top_level_section(lines: &[&str], key: &str) -> Option<(usize, usize)> {
@@ -241,20 +250,6 @@ fn find_indented_section(
         })
         .unwrap_or(end);
     Some((section_start, section_end))
-}
-
-fn parse_yaml_scalar(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if value.starts_with('"') {
-        return serde_json::from_str::<String>(value).ok();
-    }
-    if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
-        return Some(value[1..value.len() - 1].replace("''", "'"));
-    }
-    Some(value.to_string())
 }
 
 fn leading_spaces(line: &str) -> usize {

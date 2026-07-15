@@ -11,7 +11,7 @@ use super::id::{
 
 /// Canonical entity categories needed by the research slice.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum EntityKind {
     Actor,
     Repository,
@@ -33,6 +33,7 @@ pub enum EntityKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct EntityRef {
     pub id: EntityId,
     pub kind: EntityKind,
@@ -45,23 +46,27 @@ impl EntityRef {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct EntityVersionRef {
     pub entity: EntityRef,
     pub version: Option<EntityVersionId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct ActorRef {
     pub actor_id: ActorId,
     pub version: Option<EntityVersionId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct AuditReceiptRef {
     pub receipt_id: AuditReceiptId,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogSnapshotRefV1 {
     pub generation: CatalogGenerationId,
     pub digest: ManifestDigest,
@@ -76,7 +81,7 @@ impl CatalogSnapshotRefV1 {
 
 /// Source-local position without literal path or source text.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SourcePosition {
     ByteOffset { start: u64, end: u64 },
     RowId { row_id: i64 },
@@ -98,6 +103,7 @@ impl SourcePosition {
 
 /// Provider-linked activity identity and correlation evidence.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct ActivityResearchFacetV1 {
     pub provider: ProviderId,
     pub host: Option<HostInstanceId>,
@@ -134,6 +140,7 @@ impl ActivityResearchFacetV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct GitResearchSubjectV1 {
     pub repository_id: RepositoryId,
     pub project_id: Option<ProjectId>,
@@ -143,12 +150,14 @@ pub struct GitResearchSubjectV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryResearchSubjectV1 {
     pub repository_id: RepositoryId,
     pub delivery_entity: EntityRef,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct SourceResearchSubjectV1 {
     pub source_store_id: SourceStoreId,
     pub source_entity: EntityRef,
@@ -156,12 +165,14 @@ pub struct SourceResearchSubjectV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct WebResearchSubjectV1 {
     pub source_manifest: EntityRef,
     pub captured_document: Option<EntityRef>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct DocumentResearchSubjectV1 {
     pub document: EntityRef,
     pub version: Option<EntityVersionRef>,
@@ -169,7 +180,12 @@ pub struct DocumentResearchSubjectV1 {
 
 /// Closed primary-subject union. Non-activity subjects may carry a separate activity facet.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(tag = "kind", content = "subject", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    content = "subject",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum ResearchAnchorSubjectV1 {
     Activity(ActivityResearchFacetV1),
     Git(GitResearchSubjectV1),

@@ -5,11 +5,13 @@
 //! config changes stay behind these focused helpers so install/update/uninstall
 //! flows have explicit inputs and preserve the historical error messages.
 
+use std::borrow::Cow;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::agents::backup_config_file;
 use crate::errors::{Result, TraceDecayError};
+use crate::yaml_scalar::decode_yaml_scalar;
 
 /// Reads the removed `plugins.tracedecay.project_root` setting solely as
 /// provenance for one-time data migration and transcript import.
@@ -41,22 +43,12 @@ fn read_pinned_project_root_from_block(
         .skip(start + 1)
         .find_map(|line| line.trim().strip_prefix("project_root:"))?
         .trim();
-    parse_yaml_scalar(value)
-}
-
-/// Decodes a single-line YAML scalar (double-quoted, single-quoted, or plain).
-fn parse_yaml_scalar(value: &str) -> Option<String> {
-    let value = value.trim();
     if value.is_empty() {
         return None;
     }
-    if value.starts_with('"') {
-        return serde_json::from_str::<String>(value).ok();
-    }
-    if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
-        return Some(value[1..value.len() - 1].replace("''", "'"));
-    }
-    Some(value.to_string())
+    decode_yaml_scalar(value)
+        .ok()
+        .map(|decoded| decoded.into_owned())
 }
 
 pub(super) fn enable_plugin(config_path: &Path) -> Result<bool> {
@@ -213,9 +205,12 @@ fn enable_memory_provider_config(existing: &str) -> std::result::Result<String, 
     Ok(join_lines(&lines, had_trailing_newline))
 }
 
-fn memory_provider_value(line: &str) -> Option<&str> {
+fn memory_provider_value(line: &str) -> Option<Cow<'_, str>> {
     let value = line.trim().strip_prefix("provider:")?.trim();
-    Some(value.trim_matches(['"', '\'']))
+    Some(
+        decode_yaml_scalar(value)
+            .unwrap_or_else(|_| Cow::Borrowed(value.trim_matches(['"', '\'']))),
+    )
 }
 
 fn disable_memory_provider_config(existing: &str) -> std::result::Result<String, String> {
@@ -277,7 +272,12 @@ fn enable_context_engine_config(existing: &str) -> std::result::Result<String, S
             .strip_prefix("engine:")
             .map(str::trim)
             .unwrap_or_default();
-        match parse_yaml_scalar(current).as_deref() {
+        let decoded = if current.is_empty() {
+            None
+        } else {
+            decode_yaml_scalar(current).ok()
+        };
+        match decoded.as_deref() {
             None | Some("compressor") => {
                 lines[engine_line] = "  engine: tracedecay".to_string();
             }
@@ -714,6 +714,51 @@ mod tests {
     fn read(path: &Path) -> String {
         std::fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
+    }
+
+    #[test]
+    fn pinned_project_root_scalar_decoding_matches_legacy_policy() {
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join("config.yaml");
+        let cases = [
+            ("   ", None),
+            ("  /plain/repo  ", Some("/plain/repo")),
+            ("'/single/quoted'", Some("/single/quoted")),
+            ("'it''s/repo'", Some("it's/repo")),
+            (r#""C:\\repo\\name""#, Some(r"C:\repo\name")),
+            ("''", Some("")),
+            (r#""""#, Some("")),
+            (r#""unterminated"#, None),
+            (r#""bad\xescape""#, None),
+            (r#""value" trailing"#, None),
+        ];
+
+        for (scalar, expected) in cases {
+            std::fs::write(
+                &config,
+                format!("plugins:\n  tracedecay:\n    project_root: {scalar}\n"),
+            )
+            .unwrap();
+
+            assert_eq!(
+                read_config_pinned_project_root(&config).as_deref(),
+                expected,
+                "scalar: {scalar:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn memory_provider_scalar_decoding_preserves_malformed_fallback() {
+        for (line, expected) in [
+            ("provider: tracedecay", "tracedecay"),
+            ("provider: 'tracedecay'", "tracedecay"),
+            (r#"provider: "tracedecay""#, "tracedecay"),
+            (r#"provider: "unterminated"#, "unterminated"),
+            ("provider: 'unterminated", "unterminated"),
+        ] {
+            assert_eq!(memory_provider_value(line).as_deref(), Some(expected));
+        }
     }
 
     #[test]

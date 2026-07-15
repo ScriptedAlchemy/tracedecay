@@ -119,6 +119,7 @@ tree-sitter-language = "0.1"
 # crates are pulled in and no external `ast-grep` binary is required. Pinned to
 # tree-sitter ^0.26.3, ABI-compatible with the 0.26 grammars this repo builds.
 ast-grep-core = "0.44"
+tracedecay-domain = { path = "crates/tracedecay-domain" }
 tracedecay-store = { path = "crates/tracedecay-store", version = "0.1.0" }
 tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", version = "0.2.0", optional = true }
 tracedecay-large-treesitters = { package = "tokensave-large-treesitters", version = "0.5.0", optional = true }
@@ -173,7 +174,6 @@ logo-art = "0.2"
 cc = "1"
 
 [dev-dependencies]
-tracedecay-domain = { path = "crates/tracedecay-domain" }
 tempfile = "3"
 sha2 = "0.11"
 hex = "0.4"

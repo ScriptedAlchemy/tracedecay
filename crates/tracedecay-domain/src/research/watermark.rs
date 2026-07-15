@@ -6,6 +6,7 @@ use super::id::ShardId;
 
 /// Per-shard progress without a fabricated global sequence.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct VectorWatermark {
     pub components: BTreeMap<ShardId, u64>,
 }
@@ -42,6 +43,7 @@ impl VectorWatermark {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct ShardWatermark {
     pub shard_id: ShardId,
     pub outbox_sequence: u64,

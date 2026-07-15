@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_sha256;
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -774,47 +774,6 @@ fn codex_event_snake_case(event: &str) -> String {
     out
 }
 
-/// Serialize `value` as compact JSON with object keys sorted recursively —
-/// the canonical form Codex hashes (equivalent to Python's
-/// `json.dumps(sort_keys=True, separators=(",", ":"))`). `serde_json` may be
-/// built with `preserve_order`, so key ordering is enforced here rather than
-/// relying on the serializer's default.
-fn codex_canonical_json(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    codex_write_canonical_json(value, &mut out);
-    out
-}
-
-fn codex_write_canonical_json(value: &serde_json::Value, out: &mut String) {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            out.push('{');
-            for (index, key) in keys.into_iter().enumerate() {
-                if index > 0 {
-                    out.push(',');
-                }
-                out.push_str(&serde_json::to_string(key).unwrap_or_default());
-                out.push(':');
-                codex_write_canonical_json(&map[key], out);
-            }
-            out.push('}');
-        }
-        serde_json::Value::Array(items) => {
-            out.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push(',');
-                }
-                codex_write_canonical_json(item, out);
-            }
-            out.push(']');
-        }
-        other => out.push_str(&serde_json::to_string(other).unwrap_or_default()),
-    }
-}
-
 /// Compute Codex's `trusted_hash` for one command-hook handler identity.
 ///
 /// This is a direct port of Codex's `command_hook_hash`: build the handler
@@ -842,10 +801,9 @@ fn codex_command_hook_hash(
         identity.insert("matcher".to_string(), json!(matcher));
     }
     identity.insert("hooks".to_string(), json!([handler]));
-    let canonical = codex_canonical_json(&serde_json::Value::Object(identity));
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.as_bytes());
-    format!("sha256:{}", hex::encode(hasher.finalize()))
+    canonical_sha256(&serde_json::Value::Object(identity))
+        .unwrap_or_else(|error| unreachable!("serde_json::Value canonicalization failed: {error}"))
+        .to_string()
 }
 
 /// Derive the ordered trust records for a rendered Codex `hooks.json` value.

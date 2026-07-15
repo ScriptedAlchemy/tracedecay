@@ -4,7 +4,10 @@
 use std::collections::BTreeMap;
 
 use super::config_error;
-use crate::errors::Result;
+use crate::{
+    errors::Result,
+    yaml_scalar::{YamlScalarError, decode_yaml_scalar},
+};
 
 /// One parsed frontmatter value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,19 +111,24 @@ pub fn parse_skill_frontmatter(contents: &str) -> Result<BTreeMap<String, SkillF
 }
 
 fn unquote_scalar(value: &str) -> String {
-    if let Some(inner) = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) {
-        inner.replace("''", "'")
-    } else if let Some(inner) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
-        serde_json::from_str(value).unwrap_or_else(|_| inner.to_string())
-    } else {
-        value.to_string()
+    match decode_yaml_scalar(value) {
+        Ok(decoded) => decoded.into_owned(),
+        Err(YamlScalarError::MalformedSingleQuoted) => value
+            .strip_prefix('\'')
+            .and_then(|quoted| quoted.strip_suffix('\''))
+            .map_or_else(|| value.to_string(), |inner| inner.replace("''", "'")),
+        Err(YamlScalarError::MalformedDoubleQuoted(_)) => value
+            .strip_prefix('"')
+            .and_then(|quoted| quoted.strip_suffix('"'))
+            .unwrap_or(value)
+            .to_string(),
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{SkillFrontmatterValue, parse_skill_frontmatter};
+    use super::{SkillFrontmatterValue, parse_skill_frontmatter, unquote_scalar};
 
     #[test]
     fn parses_scalars_blocks_and_quoting() {
@@ -145,6 +153,31 @@ mod tests {
             fields["paths"].as_list_items(),
             Some(vec!["**/*.rs".to_string(), "**/Cargo.toml".to_string()])
         );
+    }
+
+    #[test]
+    fn shared_decoder_parity_preserves_successful_quote_mechanics() {
+        for (value, expected) in [
+            ("'plain'", "plain"),
+            ("'it''s YAML'", "it's YAML"),
+            (r#""line\n☺""#, "line\n☺"),
+        ] {
+            assert_eq!(unquote_scalar(value), expected);
+        }
+    }
+
+    #[test]
+    fn preserves_malformed_quote_and_plain_scalar_policy() {
+        for (value, expected) in [
+            (r#""bad\xescape""#, r"bad\xescape"),
+            (r#""unterminated"#, r#""unterminated"#),
+            ("'isn't valid'", "isn't valid"),
+            ("'unterminated", "'unterminated"),
+            ("", ""),
+            ("plain value", "plain value"),
+        ] {
+            assert_eq!(unquote_scalar(value), expected);
+        }
     }
 
     #[test]

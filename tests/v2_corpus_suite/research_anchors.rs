@@ -295,6 +295,145 @@ fn retrieval_catalog_rejects_duplicate_map_record_keys() {
 }
 
 #[test]
+fn strict_wire_rejects_unknown_fields_across_closed_payloads() {
+    let fixture = fixture_json();
+    let cases = [
+        (
+            fixture.replacen(
+                "\"envelope\": {\n    \"manifest\": {",
+                "\"envelope\": {\n    \"future_envelope_field\": true,\n    \"manifest\": {",
+                1,
+            ),
+            "future_envelope_field",
+        ),
+        (
+            fixture.replacen(
+                "\"manifest\": {\n      \"agent_contributions\": [",
+                "\"manifest\": {\n      \"future_manifest_field\": true,\n      \"agent_contributions\": [",
+                1,
+            ),
+            "future_manifest_field",
+        ),
+        (
+            fixture.replacen(
+                "\"subject\": {\n              \"agent_instance_id\":",
+                "\"subject\": {\n              \"future_activity_field\": true,\n              \"agent_instance_id\":",
+                1,
+            ),
+            "future_activity_field",
+        ),
+        (
+            fixture.replacen(
+                "\"coverage\": {\n            \"freshness\": {",
+                "\"coverage\": {\n            \"future_coverage_field\": true,\n            \"freshness\": {",
+                1,
+            ),
+            "future_coverage_field",
+        ),
+        (
+            fixture.replacen(
+                "\"retrieval-anchor-branch-session-001\": {\n          \"access_policy_digest\":",
+                "\"retrieval-anchor-branch-session-001\": {\n          \"future_retrieval_field\": true,\n          \"access_policy_digest\":",
+                1,
+            ),
+            "future_retrieval_field",
+        ),
+        (
+            fixture.replacen(
+                "\"occurred_window\": {\n            \"end\":",
+                "\"occurred_window\": {\n            \"future_time_field\": true,\n            \"end\":",
+                1,
+            ),
+            "future_time_field",
+        ),
+    ];
+
+    for (json, field) in cases {
+        assert_unknown_field_rejected(&json, field);
+    }
+}
+
+#[test]
+fn strict_wire_rejects_duplicate_keys_at_every_object_depth() {
+    let fixture = fixture_json();
+    let cases = [
+        (
+            fixture.replacen(
+                "\"envelope\": {\n    \"manifest\": {",
+                "\"envelope\": {\n    \"manifest\": {},\n    \"manifest\": {",
+                1,
+            ),
+            "manifest",
+        ),
+        (
+            fixture.replacen(
+                "\"receipt_id\": \"sanitization-receipt-synthetic-001\",",
+                "\"receipt_id\": \"sanitization-receipt-synthetic-001\",\n              \"receipt_id\": \"sanitization-receipt-synthetic-001\",",
+                1,
+            ),
+            "receipt_id",
+        ),
+        (
+            fixture.replacen(
+                "\"provider\": \"provider-synthetic\",",
+                "\"provider\": \"provider-synthetic\",\n              \"provider\": \"provider-synthetic\",",
+                1,
+            ),
+            "provider",
+        ),
+        (
+            fixture.replacen(
+                "\"components\": {\n              \"shard-synthetic-a\": 42",
+                "\"components\": {\n              \"shard-synthetic-a\": 42,\n              \"shard-synthetic-a\": 42",
+                1,
+            ),
+            "shard-synthetic-a",
+        ),
+        (
+            fixture.replacen(
+                "\"records\": {\n        \"retrieval-anchor-branch-session-001\": {",
+                "\"records\": {\n        \"retrieval-anchor-branch-session-001\": {},\n        \"retrieval-anchor-branch-session-001\": {",
+                1,
+            ),
+            "retrieval-anchor-branch-session-001",
+        ),
+        (
+            fixture.replacen(
+                "\"shard-synthetic-a\": {\n                \"outbox_sequence\": 42,",
+                "\"shard-synthetic-a\": {\n                \"outbox_sequence\": 42,\n                \"outbox_sequence\": 42,",
+                1,
+            ),
+            "outbox_sequence",
+        ),
+    ];
+
+    for (json, field) in cases {
+        assert_duplicate_field_rejected(&json, field);
+    }
+}
+
+#[test]
+fn strict_wire_accepts_distinct_dynamic_keys() {
+    let watermark: tracedecay_domain::research::VectorWatermark =
+        serde_json::from_str(r#"{"components":{"shard-synthetic-a":1,"shard-synthetic-b":2}}"#)
+            .unwrap();
+
+    assert_eq!(watermark.components.len(), 2);
+    assert_eq!(
+        watermark
+            .components
+            .get(&ShardId::new("shard-synthetic-a").unwrap()),
+        Some(&1)
+    );
+    assert_eq!(
+        watermark
+            .components
+            .get(&ShardId::new("shard-synthetic-b").unwrap()),
+        Some(&2)
+    );
+}
+
+#[test]
 fn malformed_ids_are_rejected_at_the_typed_envelope_boundary() {
     let malformed = fixture_json().replacen(
         "\"manifest_id\": \"research-manifest-synthetic-001\"",

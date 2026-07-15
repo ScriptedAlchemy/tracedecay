@@ -113,7 +113,12 @@ impl TryFrom<&str> for SanitizedOutputDigest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "target", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    content = "target",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum RetrievalAnchorTargetV1 {
     Entity(EntityRef),
     Query(QueryId),
@@ -157,6 +162,7 @@ pub enum RetrievalExpansionMode {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RetrievalExpansionRecipeV1 {
     pub capability_id: CapabilityId,
     pub expansion: RetrievalExpansionMode,
@@ -174,7 +180,7 @@ pub enum PayloadAccessState {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum AnchorDurabilityClass {
     DurableEvidence,
     RetentionBound { expires_at: UtcMicros },
@@ -183,6 +189,7 @@ pub enum AnchorDurabilityClass {
 
 /// Immutable, safe-metadata resolver record for one retrieval anchor.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RetrievalAnchorRecordV1 {
     pub anchor_id: RetrievalAnchorId,
     pub target: RetrievalAnchorTargetV1,
@@ -289,6 +296,7 @@ impl RetrievalAnchorRecordV1 {
 
 /// Snapshot-pinned external catalog used to validate research manifests.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RetrievalAnchorCatalogV1 {
     pub snapshot: CatalogSnapshotRefV1,
     pub records: BTreeMap<RetrievalAnchorId, RetrievalAnchorRecordV1>,
@@ -417,6 +425,7 @@ impl RetrievalAnchorCatalogV1 {
 
 /// Protected, versioned recipe metadata; it contains IDs and proven-safe text only.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RetrievalRecipeV1 {
     pub recipe_id: RetrievalRecipeId,
     pub use_case: UseCaseId,
@@ -438,6 +447,7 @@ impl RetrievalRecipeV1 {
 
 /// One immutable entry in a versioned research manifest.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ResearchContextAnchorV1 {
     pub entry_id: ResearchAnchorId,
     pub retrieval_anchors: NonEmptyUniqueVec<RetrievalAnchorId>,

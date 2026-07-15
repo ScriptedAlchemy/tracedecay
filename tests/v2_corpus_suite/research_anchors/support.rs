@@ -197,8 +197,7 @@ pub(super) fn refresh_catalog_snapshot_digest(fixture: &mut ResearchAnchorFixtur
 }
 
 pub(super) fn assert_unknown_field_rejected(json: &str, field: &str) {
-    let error = serde_json::from_str::<StrictResearchAnchorFixtureV1>(json).unwrap_err();
-    let message = error.to_string();
+    let message = decode_fixture(json).unwrap_err();
     assert!(
         message.contains(&format!("unknown field `{field}`")),
         "expected `{field}` to be rejected as unknown, got: {message}"

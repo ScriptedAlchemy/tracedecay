@@ -64,6 +64,7 @@ impl<'de> Deserialize<'de> for RetentionClass {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct EvidenceRetentionWatermark {
     pub evaluated_at: UtcMicros,
     pub cutoffs: BTreeMap<RetentionClass, UtcMicros>,
@@ -80,7 +81,7 @@ pub enum BrainNodeRoleV1 {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReadConsistencyV1 {
     Authoritative,
     BoundedStale { max_lag_micros: u64 },
@@ -95,6 +96,7 @@ pub enum ReadConsistencyV1 {
 /// unbound cache timestamp. Optional verified fields represent current evidence;
 /// absent evidence never implies current placement, authority, or revocation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct VerifiedCacheGrantSnapshotV1 {
     pub grant_digest: ManifestDigest,
     pub issued_at: UtcMicros,
@@ -161,6 +163,7 @@ impl VerifiedCacheGrantSnapshotV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteShardCoverageV1 {
     pub shard_id: ShardId,
     pub authority_id: StoreAuthorityId,
@@ -373,6 +376,7 @@ where
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteCoverageV1 {
     pub brain_id: BrainId,
     pub placement_version: EntityVersionId,
@@ -482,7 +486,8 @@ impl CoverageReportV1 {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CoverageWireV1 {
     #[serde(default)]
     searched: Vec<ShardId>,
@@ -510,6 +515,35 @@ struct CoverageWireV1 {
     remote: Option<RemoteCoverageV1>,
 }
 
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct CoverageWireRefV1<'a> {
+    #[serde(default)]
+    searched: Vec<&'a ShardId>,
+    #[serde(default)]
+    skipped: Vec<&'a ShardId>,
+    #[serde(default)]
+    stale: Vec<&'a ShardId>,
+    #[serde(default)]
+    unavailable: Vec<&'a ShardId>,
+    #[serde(default)]
+    incompatible: Vec<&'a ShardId>,
+    #[serde(default)]
+    locked: Vec<&'a ShardId>,
+    #[serde(default)]
+    redacted: Vec<&'a ShardId>,
+    #[serde(default)]
+    truncated: Vec<&'a ShardId>,
+    #[serde(default)]
+    freshness: &'a BTreeMap<ShardId, ShardWatermark>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retention_watermark: Option<&'a EvidenceRetentionWatermark>,
+    #[serde(default)]
+    unknown_coverage: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote: Option<&'a RemoteCoverageV1>,
+}
+
 impl CoverageWireV1 {
     fn add_group(
         dispositions: &mut BTreeMap<ShardId, ShardDispositionV1>,
@@ -532,27 +566,42 @@ impl Serialize for CoverageReportV1 {
     where
         S: Serializer,
     {
-        let mut wire = CoverageWireV1 {
-            freshness: self.freshness.clone(),
-            retention_watermark: self.retention_watermark.clone(),
-            unknown_coverage: Some(self.universe == CoverageUniverseKnowledgeV1::Unknown),
-            remote: self.remote.clone(),
-            ..CoverageWireV1::default()
-        };
+        let mut searched = Vec::new();
+        let mut skipped = Vec::new();
+        let mut stale = Vec::new();
+        let mut unavailable = Vec::new();
+        let mut incompatible = Vec::new();
+        let mut locked = Vec::new();
+        let mut redacted = Vec::new();
+        let mut truncated = Vec::new();
         for (shard, disposition) in &self.dispositions {
             let group = match disposition {
-                ShardDispositionV1::Searched => &mut wire.searched,
-                ShardDispositionV1::Skipped => &mut wire.skipped,
-                ShardDispositionV1::Stale => &mut wire.stale,
-                ShardDispositionV1::Unavailable => &mut wire.unavailable,
-                ShardDispositionV1::Incompatible => &mut wire.incompatible,
-                ShardDispositionV1::Locked => &mut wire.locked,
-                ShardDispositionV1::Redacted => &mut wire.redacted,
-                ShardDispositionV1::Truncated => &mut wire.truncated,
+                ShardDispositionV1::Searched => &mut searched,
+                ShardDispositionV1::Skipped => &mut skipped,
+                ShardDispositionV1::Stale => &mut stale,
+                ShardDispositionV1::Unavailable => &mut unavailable,
+                ShardDispositionV1::Incompatible => &mut incompatible,
+                ShardDispositionV1::Locked => &mut locked,
+                ShardDispositionV1::Redacted => &mut redacted,
+                ShardDispositionV1::Truncated => &mut truncated,
             };
-            group.push(shard.clone());
+            group.push(shard);
         }
-        wire.serialize(serializer)
+        CoverageWireRefV1 {
+            searched,
+            skipped,
+            stale,
+            unavailable,
+            incompatible,
+            locked,
+            redacted,
+            truncated,
+            freshness: &self.freshness,
+            retention_watermark: self.retention_watermark.as_ref(),
+            unknown_coverage: Some(self.universe == CoverageUniverseKnowledgeV1::Unknown),
+            remote: self.remote.as_ref(),
+        }
+        .serialize(serializer)
     }
 }
 
