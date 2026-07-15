@@ -3,7 +3,7 @@ use std::future::Future;
 
 use tracedecay_domain::{
     CanonicalObservationIdV1, DurableClaudeObservationV1, ObservationContractError,
-    ObservationScopeV1, PayloadDigestV1, PayloadReferenceV1,
+    PayloadDigestV1, PayloadReferenceV1,
 };
 
 use crate::{SessionMessageRecord, SessionRecord};
@@ -15,7 +15,6 @@ pub const CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION: &str = "claude-session-messa
 pub struct ProjectionProvenance {
     observation_id: CanonicalObservationIdV1,
     receipt_id: String,
-    projector_version: &'static str,
 }
 
 impl ProjectionProvenance {
@@ -28,7 +27,83 @@ impl ProjectionProvenance {
     }
 
     pub fn projector_version(&self) -> &'static str {
-        self.projector_version
+        CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION
+    }
+}
+
+/// Non-blocking disposition for a valid observation that produces no view row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectionSkipReason {
+    NonConversationalRecord,
+}
+
+impl ProjectionSkipReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NonConversationalRecord => "non_conversational_record",
+        }
+    }
+}
+
+/// Deterministic effect derived from one receipt-bound Claude observation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClaudeObservationProjection {
+    Message(Box<ClaudeSessionMessageProjection>),
+    Skipped(ProjectionSkipReason),
+}
+
+impl ClaudeObservationProjection {
+    pub fn message(&self) -> Option<&ClaudeSessionMessageProjection> {
+        match self {
+            Self::Message(projection) => Some(projection),
+            Self::Skipped(_) => None,
+        }
+    }
+
+    pub fn skip_reason(&self) -> Option<ProjectionSkipReason> {
+        match self {
+            Self::Message(_) => None,
+            Self::Skipped(reason) => Some(*reason),
+        }
+    }
+
+    pub fn for_message(
+        observation: &DurableClaudeObservationV1,
+        session: SessionRecord,
+        message: SessionMessageRecord,
+    ) -> ProjectionStoreResult<Self> {
+        validate_projection_observation(observation)?;
+        let digest_value = serde_json::json!({
+            "projector_version": CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+            "session": &session,
+            "message": &message,
+        });
+        let output_digest = PayloadReferenceV1::for_payload(&digest_value)
+            .map_err(ProjectionStoreError::Contract)?
+            .digest()
+            .clone();
+        Ok(Self::Message(Box::new(ClaudeSessionMessageProjection {
+            session,
+            message,
+            provenance: ProjectionProvenance {
+                observation_id: observation.observation_id().clone(),
+                receipt_id: observation
+                    .receipt()
+                    .receipt()
+                    .receipt_id()
+                    .as_str()
+                    .to_string(),
+            },
+            output_digest,
+        })))
+    }
+
+    pub fn for_skip(
+        observation: &DurableClaudeObservationV1,
+        reason: ProjectionSkipReason,
+    ) -> ProjectionStoreResult<Self> {
+        validate_projection_observation(observation)?;
+        Ok(Self::Skipped(reason))
     }
 }
 
@@ -59,11 +134,9 @@ impl ClaudeSessionMessageProjection {
     }
 }
 
-/// Receipt-validated, deterministic mapping from one Claude JSONL observation
-/// to the existing searchable session/message product rows.
-pub fn project_claude_observation(
+fn validate_projection_observation(
     observation: &DurableClaudeObservationV1,
-) -> ProjectionStoreResult<ClaudeSessionMessageProjection> {
+) -> ProjectionStoreResult<()> {
     if !observation
         .receipt()
         .disposition()
@@ -74,163 +147,21 @@ pub fn project_claude_observation(
             ObservationContractError::ReceiptPayloadMismatch,
         ));
     }
-
-    let record = observation.payload();
-    let record_type = record
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(ProjectionStoreError::InvalidClaudePayload(
-            "missing record type",
-        ))?;
-    if !matches!(record_type, "user" | "assistant") {
-        return Err(ProjectionStoreError::InvalidClaudePayload(
-            "record is not a conversational turn",
-        ));
-    }
-    let message_value = record.get("message").unwrap_or(record);
-    let role = message_value
-        .get("role")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(record_type)
-        .to_string();
-    let content = message_value.get("content").unwrap_or(message_value);
-    let index_content = if role == "assistant" {
-        content.as_array().map(|blocks| {
-            serde_json::Value::Array(
-                blocks
-                    .iter()
-                    .filter(|block| {
-                        !matches!(
-                            block.get("type").and_then(serde_json::Value::as_str),
-                            Some("thinking" | "redacted_thinking")
-                        )
-                    })
-                    .cloned()
-                    .collect(),
-            )
-        })
-    } else {
-        None
-    };
-    let index_content = index_content.as_ref().unwrap_or(content);
-    let text = index_content
-        .as_str()
-        .map(ToString::to_string)
-        .unwrap_or_else(|| index_content.to_string());
-    if text.trim().is_empty() {
-        return Err(ProjectionStoreError::InvalidClaudePayload(
-            "message content is empty",
-        ));
-    }
-
-    let session_id = observation.source().session_id().as_str().to_string();
-    let position = observation.identity().position();
-    let ordinal = i64::try_from(position.start())
-        .map_err(|_| ProjectionStoreError::SequenceOverflow(position.start()))?;
-    let message_id = message_value
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| record.get("uuid").and_then(serde_json::Value::as_str))
-        .filter(|id| !id.is_empty())
-        .map_or_else(
-            || format!("{session_id}:{}", position.start()),
-            ToString::to_string,
-        );
-    let scope_key = match observation.scope() {
-        ObservationScopeV1::Profile => "user".to_string(),
-        ObservationScopeV1::Project { project_id } => project_id.as_str().to_string(),
-    };
-    let mut tool_names = index_content
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|block| {
-            matches!(
-                block.get("type").and_then(serde_json::Value::as_str),
-                Some("tool_use" | "tool_call" | "function_call")
-            )
-        })
-        .filter_map(|block| block.get("name").and_then(serde_json::Value::as_str))
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    tool_names.sort();
-    tool_names.dedup();
-
-    let session = SessionRecord {
-        provider: "claude".to_string(),
-        session_id: session_id.clone(),
-        project_key: scope_key.clone(),
-        project_path: scope_key,
-        title: None,
-        started_at: None,
-        ended_at: None,
-        transcript_path: None,
-        metadata_json: None,
-        parent_session_id: None,
-        is_subagent: false,
-        agent_id: None,
-        parent_tool_use_id: None,
-    };
-    let message = SessionMessageRecord {
-        provider: "claude".to_string(),
-        message_id,
-        session_id,
-        role,
-        timestamp: record.get("timestamp").and_then(serde_json::Value::as_i64),
-        ordinal,
-        text,
-        kind: Some("message".to_string()),
-        model: message_value
-            .get("model")
-            .and_then(serde_json::Value::as_str)
-            .map(ToString::to_string),
-        tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
-        source_path: None,
-        source_offset: Some(ordinal),
-        metadata_json: None,
-    };
-    let digest_value = serde_json::json!({
-        "projector_version": CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
-        "session": &session,
-        "message": &message,
-    });
-    let output_digest = PayloadReferenceV1::for_payload(&digest_value)
-        .map_err(ProjectionStoreError::Contract)?
-        .digest()
-        .clone();
-    Ok(ClaudeSessionMessageProjection {
-        session,
-        message,
-        provenance: ProjectionProvenance {
-            observation_id: observation.observation_id().clone(),
-            receipt_id: observation
-                .receipt()
-                .receipt()
-                .receipt_id()
-                .as_str()
-                .to_string(),
-            projector_version: CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
-        },
-        output_digest,
-    })
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectionCheckpoint {
-    projector_version: &'static str,
     last_sequence: u64,
 }
 
 impl ProjectionCheckpoint {
     pub fn new(last_sequence: u64) -> Self {
-        Self {
-            projector_version: CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
-            last_sequence,
-        }
+        Self { last_sequence }
     }
 
     pub fn projector_version(&self) -> &'static str {
-        self.projector_version
+        CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION
     }
 
     pub fn last_sequence(&self) -> u64 {
@@ -241,6 +172,10 @@ impl ProjectionCheckpoint {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProjectionPersistOutcome {
     Projected(ProjectionCheckpoint),
+    Skipped {
+        checkpoint: ProjectionCheckpoint,
+        reason: ProjectionSkipReason,
+    },
     ExactDuplicate(ProjectionCheckpoint),
 }
 
@@ -248,6 +183,7 @@ impl ProjectionPersistOutcome {
     pub fn checkpoint(&self) -> &ProjectionCheckpoint {
         match self {
             Self::Projected(checkpoint) | Self::ExactDuplicate(checkpoint) => checkpoint,
+            Self::Skipped { checkpoint, .. } => checkpoint,
         }
     }
 }
@@ -256,13 +192,19 @@ impl ProjectionPersistOutcome {
 pub struct ProjectionRebuildOutcome {
     checkpoint: ProjectionCheckpoint,
     projected_rows: usize,
+    skipped_observations: usize,
 }
 
 impl ProjectionRebuildOutcome {
-    pub fn new(checkpoint: ProjectionCheckpoint, projected_rows: usize) -> Self {
+    pub fn new(
+        checkpoint: ProjectionCheckpoint,
+        projected_rows: usize,
+        skipped_observations: usize,
+    ) -> Self {
         Self {
             checkpoint,
             projected_rows,
+            skipped_observations,
         }
     }
 
@@ -273,12 +215,14 @@ impl ProjectionRebuildOutcome {
     pub fn projected_rows(&self) -> usize {
         self.projected_rows
     }
+
+    pub fn skipped_observations(&self) -> usize {
+        self.skipped_observations
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectionStoreError {
-    #[error("Claude observation payload is not projectable: {0}")]
-    InvalidClaudePayload(&'static str),
     #[error("observation sequence {0} exceeds the supported integer range")]
     SequenceOverflow(u64),
     #[error("projector checkpoint gap: expected sequence {expected}, received {actual}")]
@@ -309,6 +253,12 @@ pub enum ProjectionStoreError {
 pub type ProjectionStoreResult<T> = Result<T, ProjectionStoreError>;
 
 pub trait ObservationProjectionStore: Send + Sync {
+    /// Returns at most one queued observation in authoritative sequence order.
+    /// Callers retain cancellation and batch-budget control between items.
+    fn next_queued_observation(
+        &self,
+    ) -> impl Future<Output = ProjectionStoreResult<Option<CanonicalObservationIdV1>>> + Send;
+
     fn project_observation(
         &self,
         observation_id: &CanonicalObservationIdV1,

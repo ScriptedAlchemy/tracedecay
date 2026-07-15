@@ -64,6 +64,12 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
 }
 
 impl ObservationProjectionStore for GlobalDbObservationStore<'_> {
+    async fn next_queued_observation(
+        &self,
+    ) -> ProjectionStoreResult<Option<CanonicalObservationIdV1>> {
+        self.db.next_queued_observation_result().await
+    }
+
     async fn project_observation(
         &self,
         observation_id: &CanonicalObservationIdV1,

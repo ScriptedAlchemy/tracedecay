@@ -14,10 +14,10 @@ pub use observation::{
     ObservationWrite, StoredObservation,
 };
 pub use projection::{
-    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ClaudeSessionMessageProjection,
-    ObservationProjectionStore, ProjectionCheckpoint, ProjectionPersistOutcome,
-    ProjectionProvenance, ProjectionRebuildOutcome, ProjectionStoreError, ProjectionStoreResult,
-    project_claude_observation,
+    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ClaudeObservationProjection,
+    ClaudeSessionMessageProjection, ObservationProjectionStore, ProjectionCheckpoint,
+    ProjectionPersistOutcome, ProjectionProvenance, ProjectionRebuildOutcome, ProjectionSkipReason,
+    ProjectionStoreError, ProjectionStoreResult,
 };
 pub use transcript::{
     ParseOffset, SessionMessageRecord, SessionRecord, TranscriptStore, TranscriptStoreError,

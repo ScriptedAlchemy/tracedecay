@@ -4,14 +4,14 @@ use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
-    ObservationContractError, ObservationScopeV1, PayloadReferenceV1, RetentionClass,
-    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
-    SensitivityV1, SessionId,
+    ObservationScopeV1, PayloadReferenceV1, RetentionClass, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    SessionId,
 };
 use tracedecay_store::{
     CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationPersistOutcome,
     ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    ProjectionPersistOutcome, ProjectionStoreError, project_claude_observation,
+    ProjectionPersistOutcome, ProjectionSkipReason, ProjectionStoreError,
 };
 
 use crate::common::{isolated_lcm_db_path, open_lcm_db};
@@ -98,7 +98,7 @@ fn conversational_payload(message_id: &str, text: &str) -> Value {
     json!({
         "type": "assistant",
         "uuid": format!("record-{message_id}"),
-        "timestamp": 1_750_000_000_i64,
+        "timestamp": "2025-06-15T15:06:40Z",
         "message": {
             "id": message_id,
             "role": "assistant",
@@ -122,12 +122,13 @@ async fn table_count(tmp: &TempDir, table: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
-async fn projection_counts(tmp: &TempDir) -> (i64, i64, i64, i64, i64) {
+async fn projection_counts(tmp: &TempDir) -> (i64, i64, i64, i64, i64, i64) {
     (
         table_count(tmp, "sessions").await,
         table_count(tmp, "session_messages").await,
         table_count(tmp, "observation_projection_provenance").await,
         table_count(tmp, "observation_projection_checkpoints").await,
+        table_count(tmp, "observation_projection_dispositions").await,
         table_count(tmp, "projection_queue").await,
     )
 }
@@ -184,61 +185,25 @@ async fn projected_message_texts(tmp: &TempDir) -> Vec<String> {
     texts
 }
 
-#[test]
-fn pure_mapper_preserves_legacy_identity_and_stable_receipt_provenance() {
-    let payload = json!({
-        "type": "assistant",
-        "uuid": "record-map",
-        "timestamp": 1_750_000_123_i64,
-        "message": {
-            "id": "message-map",
-            "role": "assistant",
-            "content": [
-                {"type": "thinking", "thinking": "private-reasoning-canary"},
-                {"type": "text", "text": "searchable mapping canary"},
-                {"type": "tool_use", "name": "Read", "input": {"path": "README.md"}}
-            ],
-            "model": "claude-sonnet-4"
-        }
-    });
-    let candidate = observation("session-map", 40, 90, "receipt.map", payload);
-
-    let first = project_claude_observation(&candidate).unwrap();
-    let second = project_claude_observation(&candidate).unwrap();
-
-    assert_eq!(first, second);
-    assert_eq!(first.session().provider, "claude");
-    assert_eq!(first.session().session_id, "session-map");
-    assert_eq!(first.session().project_key, "user");
-    assert_eq!(first.message().message_id, "message-map");
-    assert_eq!(first.message().session_id, "session-map");
-    assert_eq!(first.message().role, "assistant");
-    assert_eq!(first.message().model.as_deref(), Some("claude-sonnet-4"));
-    assert_eq!(first.message().ordinal, 40);
-    assert_eq!(first.message().source_offset, Some(40));
-    assert!(first.message().text.contains("searchable mapping canary"));
-    assert!(!first.message().text.contains("private-reasoning-canary"));
-    assert_eq!(first.message().tool_names.as_deref(), Some("Read"));
-    assert_eq!(
-        first.provenance().observation_id(),
-        candidate.observation_id()
-    );
-    assert_eq!(first.provenance().receipt_id(), "receipt.map");
-    assert_eq!(
-        first.provenance().projector_version(),
-        CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION
-    );
-    assert!(!first.output_digest().as_str().is_empty());
-
-    let mismatched_payload = conversational_payload("message-map", "different payload");
-    let error = DurableClaudeObservationV1::new(
-        candidate.identity().clone(),
-        candidate.receipt().clone(),
-        candidate.retention_class().clone(),
-        mismatched_payload,
-    )
-    .unwrap_err();
-    assert_eq!(error, ObservationContractError::ReceiptPayloadMismatch);
+async fn projection_ownership_rows(tmp: &TempDir) -> Vec<i64> {
+    let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
+        .build()
+        .await
+        .unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT message_created
+             FROM observation_projection_provenance ORDER BY observation_id",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut ownership = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        ownership.push(row.get(0).unwrap());
+    }
+    ownership
 }
 
 #[tokio::test]
@@ -251,7 +216,21 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
         0,
         100,
         "receipt.atomic-projection",
-        conversational_payload("message-atomic", "atomic searchable canary"),
+        json!({
+            "type": "assistant",
+            "uuid": "record-message-atomic",
+            "timestamp": "2025-06-15T15:08:43Z",
+            "message": {
+                "id": "message-atomic",
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "private-reasoning-canary"},
+                    {"type": "text", "text": "atomic searchable canary"},
+                    {"type": "tool_use", "name": "Read", "input": {"path": "README.md"}}
+                ],
+                "model": "claude-sonnet-4"
+            }
+        }),
     );
     let sequence = persist(&store, candidate.clone(), None).await;
     assert_eq!(sequence, 1);
@@ -284,19 +263,27 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
         .await;
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].message.message_id, "message-atomic");
-    assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0));
-    let mapped = project_claude_observation(&candidate).unwrap();
+    assert_eq!(hits[0].message.role, "assistant");
+    assert_eq!(hits[0].message.timestamp, Some(1_750_000_123));
+    assert_eq!(hits[0].message.ordinal, 0);
+    assert_eq!(hits[0].message.kind.as_deref(), Some("message"));
+    assert_eq!(hits[0].message.model.as_deref(), Some("claude-sonnet-4"));
+    assert_eq!(hits[0].message.tool_names.as_deref(), Some("Read"));
     assert_eq!(
-        projection_provenance_rows(&tmp).await,
-        vec![(
-            CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION.to_string(),
-            candidate.observation_id().as_str().to_string(),
-            "receipt.atomic-projection".to_string(),
-            "claude".to_string(),
-            "message-atomic".to_string(),
-            mapped.output_digest().as_str().to_string(),
-        )]
+        hits[0].message.source_path.as_deref(),
+        Some("claude:session-atomic")
     );
+    assert_eq!(hits[0].message.source_offset, Some(0));
+    assert!(!hits[0].message.text.contains("private-reasoning-canary"));
+    assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0, 0));
+    let provenance = projection_provenance_rows(&tmp).await;
+    assert_eq!(provenance.len(), 1);
+    assert_eq!(provenance[0].0, CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION);
+    assert_eq!(provenance[0].1, candidate.observation_id().as_str());
+    assert_eq!(provenance[0].2, "receipt.atomic-projection");
+    assert_eq!(provenance[0].3, "claude");
+    assert_eq!(provenance[0].4, "message-atomic");
+    assert_eq!(provenance[0].5.len(), 64);
 
     let before = projection_counts(&tmp).await;
     let replay = store
@@ -309,6 +296,209 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
     ));
     assert_eq!(replay.checkpoint(), projected.checkpoint());
     assert_eq!(projection_counts(&tmp).await, before);
+}
+
+#[tokio::test]
+async fn non_conversational_observation_is_skipped_without_blocking_the_checkpoint() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let skipped = observation(
+        "session-skip",
+        0,
+        50,
+        "receipt.skip",
+        json!({"type": "progress", "data": {"status": "working"}}),
+    );
+    let message = observation(
+        "session-skip",
+        50,
+        100,
+        "receipt.after-skip",
+        conversational_payload("message-after-skip", "checkpoint advanced canary"),
+    );
+    persist(&store, skipped.clone(), None).await;
+    persist(&store, message.clone(), Some(cursor("session-skip", 50))).await;
+
+    let outcome = store
+        .project_observation(skipped.observation_id())
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        ProjectionPersistOutcome::Skipped {
+            reason: ProjectionSkipReason::NonConversationalRecord,
+            ..
+        }
+    ));
+    assert_eq!(outcome.checkpoint().last_sequence(), 1);
+    assert_eq!(projection_counts(&tmp).await, (0, 0, 0, 1, 1, 1));
+    assert_eq!(
+        store.next_queued_observation().await.unwrap().as_ref(),
+        Some(message.observation_id())
+    );
+
+    store
+        .project_observation(message.observation_id())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        2
+    );
+    assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 1, 0));
+    assert!(matches!(
+        store
+            .project_observation(skipped.observation_id())
+            .await
+            .unwrap(),
+        ProjectionPersistOutcome::ExactDuplicate(_)
+    ));
+    let rebuilt = store.rebuild_projection(2).await.unwrap();
+    assert_eq!(rebuilt.projected_rows(), 1);
+    assert_eq!(rebuilt.skipped_observations(), 1);
+    assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 1, 0));
+}
+
+#[tokio::test]
+async fn bounded_next_queue_item_resumes_after_restart_and_drains_idempotently() {
+    let tmp = TempDir::new().unwrap();
+    let first = observation(
+        "session-restart",
+        0,
+        100,
+        "receipt.restart-1",
+        conversational_payload("message-restart-1", "restart first canary"),
+    );
+    let second = observation(
+        "session-restart",
+        100,
+        200,
+        "receipt.restart-2",
+        conversational_payload("message-restart-2", "restart second canary"),
+    );
+
+    {
+        let db = open_lcm_db(&tmp).await;
+        let store = GlobalDbObservationStore::new(&db);
+        persist(&store, first.clone(), None).await;
+        persist(&store, second.clone(), Some(cursor("session-restart", 100))).await;
+        assert_eq!(
+            store.next_queued_observation().await.unwrap().as_ref(),
+            Some(first.observation_id())
+        );
+        store
+            .project_observation(first.observation_id())
+            .await
+            .unwrap();
+    }
+
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        1
+    );
+    assert_eq!(
+        store.next_queued_observation().await.unwrap().as_ref(),
+        Some(second.observation_id())
+    );
+    store
+        .project_observation(second.observation_id())
+        .await
+        .unwrap();
+    assert!(store.next_queued_observation().await.unwrap().is_none());
+    assert!(matches!(
+        store
+            .project_observation(second.observation_id())
+            .await
+            .unwrap(),
+        ProjectionPersistOutcome::ExactDuplicate(_)
+    ));
+    assert_eq!(projection_counts(&tmp).await, (1, 2, 2, 1, 0, 0));
+}
+
+#[tokio::test]
+async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let candidate = observation(
+        "session-v1",
+        0,
+        100,
+        "receipt.v1",
+        conversational_payload("message-v1", "v1 parity canary"),
+    );
+    persist(&store, candidate.clone(), None).await;
+
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let conn = raw_db.connect().unwrap();
+    conn.execute(
+        "INSERT INTO sessions
+            (provider, session_id, project_key, project_path, title, is_subagent)
+         VALUES (?1, ?2, 'legacy-project', '/legacy/project', 'V1 title', 0)",
+        libsql::params!["claude", "session-v1"],
+    )
+    .await
+    .unwrap();
+    let metadata_json = serde_json::to_string(&json!({
+        "source": "claude_transcript",
+        "raw_type": "assistant",
+        "source_generation": GENERATION,
+    }))
+    .unwrap();
+    conn.execute(
+        "INSERT INTO session_messages
+            (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
+             tool_names, source_path, source_offset, metadata_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        libsql::params![
+            "claude",
+            "message-v1",
+            "session-v1",
+            "assistant",
+            1_750_000_000_i64,
+            0_i64,
+            serde_json::to_string(&json!([{"type": "text", "text": "v1 parity canary"}])).unwrap(),
+            "message",
+            "claude-sonnet-4",
+            Option::<String>::None,
+            "claude:session-v1",
+            0_i64,
+            metadata_json,
+        ],
+    )
+    .await
+    .unwrap();
+
+    store
+        .project_observation(candidate.observation_id())
+        .await
+        .unwrap();
+    assert_eq!(projection_ownership_rows(&tmp).await, vec![0]);
+    assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0, 0));
+
+    store.rebuild_projection(0).await.unwrap();
+    assert_eq!(projection_counts(&tmp).await, (1, 1, 0, 1, 0, 1));
+    store.rebuild_projection(1).await.unwrap();
+    assert_eq!(projection_ownership_rows(&tmp).await, vec![0]);
+    assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0, 0));
+    let mut rows = conn
+        .query(
+            "SELECT project_key, project_path, title FROM sessions
+             WHERE provider = 'claude' AND session_id = 'session-v1'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "legacy-project");
+    assert_eq!(row.get::<String>(1).unwrap(), "/legacy/project");
+    assert_eq!(row.get::<String>(2).unwrap(), "V1 title");
 }
 
 #[tokio::test]
@@ -349,7 +539,7 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
         store.projection_checkpoint().await.unwrap().last_sequence(),
         0
     );
-    assert_eq!(projection_counts(&tmp).await, (0, 0, 0, 0, 1));
+    assert_eq!(projection_counts(&tmp).await, (0, 0, 0, 0, 0, 1));
     assert!(
         db.search_session_messages("claude", Some("user"), "rollback searchable", 10)
             .await
@@ -373,7 +563,7 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
         .project_observation(candidate.observation_id())
         .await
         .unwrap();
-    assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0));
+    assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0, 0));
     assert_eq!(
         db.search_session_messages("claude", Some("user"), "rollback searchable", 10)
             .await
@@ -501,7 +691,7 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
         store.projection_checkpoint().await.unwrap().last_sequence(),
         0
     );
-    assert_eq!(projection_counts(&tmp).await, (0, 0, 0, 0, 3));
+    assert_eq!(projection_counts(&tmp).await, (0, 0, 0, 0, 0, 3));
 
     for candidate in &observations[..2] {
         store
@@ -518,7 +708,7 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     rows_before.sort();
     let counts_before = projection_counts(&tmp).await;
     let provenance_before = projection_provenance_rows(&tmp).await;
-    assert_eq!(counts_before, (1, 2, 2, 1, 1));
+    assert_eq!(counts_before, (1, 2, 2, 1, 0, 1));
 
     let rebuilt = store.rebuild_projection(2).await.unwrap();
     assert_eq!(rebuilt.checkpoint().last_sequence(), 2);
@@ -563,4 +753,14 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
             .count(),
         1
     );
+
+    let rebuilt_empty = store.rebuild_projection(0).await.unwrap();
+    assert_eq!(rebuilt_empty.projected_rows(), 0);
+    assert_eq!(rebuilt_empty.skipped_observations(), 0);
+    assert_eq!(projection_counts(&tmp).await, (1, 0, 0, 1, 0, 3));
+
+    let rebuilt_full = store.rebuild_projection(3).await.unwrap();
+    assert_eq!(rebuilt_full.projected_rows(), 3);
+    assert_eq!(rebuilt_full.skipped_observations(), 0);
+    assert_eq!(projection_counts(&tmp).await, (1, 3, 3, 1, 0, 0));
 }
