@@ -144,11 +144,8 @@ pub async fn get(
     }))
 }
 
-/// Inserts or replaces a cache row. The primary key is
-/// `(project_id, session_id, file_path, mode, args_hash)`; a re-`put` with
-/// matching keys replaces the prior row, which is how stale entries (mtime
-/// mismatch) get evicted.
-pub struct ReadCacheWrite<'a> {
+/// Parameters for [`put`].
+pub(crate) struct ReadCacheWrite<'a> {
     pub project_id: &'a str,
     pub session_id: &'a str,
     pub file_path: &'a str,
@@ -160,7 +157,11 @@ pub struct ReadCacheWrite<'a> {
     pub token_count: u32,
 }
 
-pub async fn put(conn: &Connection, write: ReadCacheWrite<'_>) -> Result<()> {
+/// Inserts or replaces a cache row. The primary key is
+/// `(project_id, session_id, file_path, mode, args_hash)`; a re-`put` with
+/// matching keys replaces the prior row, which is how stale entries (mtime
+/// mismatch) get evicted.
+pub(crate) async fn put(conn: &Connection, write: ReadCacheWrite<'_>) -> Result<()> {
     let ReadCacheWrite {
         project_id,
         session_id,
