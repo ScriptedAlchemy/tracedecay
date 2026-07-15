@@ -14,8 +14,8 @@ use tracedecay_store::{
 };
 
 use crate::privacy::{
-    ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, PR5_MAX_CLAUDE_RECORD_BYTES,
-    ParsedClaudeRecordV1, PrivacySanitizerError, SanitizationFindingV1,
+    ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ParsedClaudeRecordV1,
+    PrivacySanitizerError, SanitizationFindingV1,
 };
 
 /// Cloneable, operation-local cancellation shared by application adapters.
@@ -36,17 +36,6 @@ impl ObservationCancellation {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CaptureClaudeObservationRequestError {
-    #[error("Claude observation frame is empty")]
-    EmptyFrame,
-    #[error("Claude observation frame size {actual} exceeds the {max} byte limit")]
-    FrameTooLarge { actual: usize, max: usize },
-    #[error(
-        "Claude observation frame length {frame_bytes} does not match source byte range {range_bytes}"
-    )]
-    ByteRangeLengthMismatch {
-        frame_bytes: usize,
-        range_bytes: u64,
-    },
     #[error("parsed Claude observation source range does not match observation identity")]
     SourceRangeMismatch,
 }
@@ -68,27 +57,9 @@ impl CaptureClaudeObservationRequest {
         retention_class: RetentionClass,
         cancellation: ObservationCancellation,
     ) -> Result<Self, CaptureClaudeObservationRequestError> {
-        if parsed_record.encoded_len() == 0 {
-            return Err(CaptureClaudeObservationRequestError::EmptyFrame);
-        }
-        if parsed_record.encoded_len() > PR5_MAX_CLAUDE_RECORD_BYTES {
-            return Err(CaptureClaudeObservationRequestError::FrameTooLarge {
-                actual: parsed_record.encoded_len(),
-                max: PR5_MAX_CLAUDE_RECORD_BYTES,
-            });
-        }
         let position = identity.position();
         if *parsed_record.source_range() != position {
             return Err(CaptureClaudeObservationRequestError::SourceRangeMismatch);
-        }
-        let range_bytes = position.end() - position.start();
-        if u64::try_from(parsed_record.encoded_len()).ok() != Some(range_bytes) {
-            return Err(
-                CaptureClaudeObservationRequestError::ByteRangeLengthMismatch {
-                    frame_bytes: parsed_record.encoded_len(),
-                    range_bytes,
-                },
-            );
         }
         Ok(Self {
             parsed_record,
@@ -409,7 +380,7 @@ mod tests {
     use tracedecay_store::observation::NonDurableFrameReason;
     use tracedecay_store::{ObservationCommitReceipt, ObservationStoreResult};
 
-    use crate::privacy::parse_claude_record_v1;
+    use crate::privacy::{PR5_MAX_CLAUDE_RECORD_BYTES, parse_claude_record_v1};
 
     use super::*;
 
