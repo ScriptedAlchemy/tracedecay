@@ -559,14 +559,13 @@ async fn auto_apply_session_fact_proposals(
     if applied
         .iter()
         .any(|record| record.state == FactProposalState::Applied)
+        && let Some(digest_root) = digest_root
     {
-        if let Some(digest_root) = digest_root {
-            crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-                memory_conn,
-                digest_root,
-            )
-            .await;
-        }
+        crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+            memory_conn,
+            digest_root,
+        )
+        .await;
     }
     Ok(applied)
 }

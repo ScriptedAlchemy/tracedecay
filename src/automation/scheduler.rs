@@ -375,12 +375,11 @@ fn schedule_decision_for_trigger(
     // `min_idle_secs` is a true idle window: the project must have been quiet
     // (no LCM session ingest activity) for at least this long. An unknown
     // activity signal (no session store yet) counts as idle.
-    if let Some(min_idle_secs) = task_config.min_idle_secs {
-        if let Some(last_activity) = activity.last_activity_secs {
-            if elapsed_secs(last_activity, now_secs) < min_idle_secs {
-                return AutomationScheduleDecision::skipped("scheduler_idle_window_active");
-            }
-        }
+    if let Some(min_idle_secs) = task_config.min_idle_secs
+        && let Some(last_activity) = activity.last_activity_secs
+        && elapsed_secs(last_activity, now_secs) < min_idle_secs
+    {
+        return AutomationScheduleDecision::skipped("scheduler_idle_window_active");
     }
 
     // Session-evidence tasks are event-driven across every supported host.
@@ -419,35 +418,35 @@ fn schedule_decision_for_trigger(
             }
             return AutomationScheduleDecision::due();
         }
-        if let Some(interval_secs) = interval_secs.filter(|_| !fresh_session_activity) {
-            if elapsed_secs(completed_at, now_secs) < interval_secs {
-                return AutomationScheduleDecision::skipped("scheduler_interval_not_elapsed");
-            }
+        if let Some(interval_secs) = interval_secs.filter(|_| !fresh_session_activity)
+            && elapsed_secs(completed_at, now_secs) < interval_secs
+        {
+            return AutomationScheduleDecision::skipped("scheduler_interval_not_elapsed");
         }
-        if let Some(cron) = cron.filter(|_| !fresh_session_activity) {
-            if !cron_is_due(&cron, Some(completed_at), now_secs) {
-                return AutomationScheduleDecision::skipped("scheduler_cron_not_due");
-            }
-        }
-    } else if let Some(cron) = cron {
-        if !cron_is_due(&cron, None, now_secs) {
+        if let Some(cron) = cron.filter(|_| !fresh_session_activity)
+            && !cron_is_due(&cron, Some(completed_at), now_secs)
+        {
             return AutomationScheduleDecision::skipped("scheduler_cron_not_due");
         }
+    } else if let Some(cron) = cron
+        && !cron_is_due(&cron, None, now_secs)
+    {
+        return AutomationScheduleDecision::skipped("scheduler_cron_not_due");
     }
 
     // Session-evidence tasks only re-run when new session activity landed
     // after their last successful run started; a run without fresh evidence
     // would re-review the same transcript slices. Skips do not consume the
     // interval clock, so the task fires on the first tick after new activity.
-    if task_consumes_session_evidence(task) {
-        if let Some(record) = latest_successful_record(records, task) {
-            let started_at = record.started_at.parse::<i64>().ok().unwrap_or(0);
-            let has_new_activity = activity
-                .last_activity_secs
-                .is_some_and(|last_activity| last_activity > started_at);
-            if !has_new_activity {
-                return AutomationScheduleDecision::skipped("no_new_session_activity");
-            }
+    if task_consumes_session_evidence(task)
+        && let Some(record) = latest_successful_record(records, task)
+    {
+        let started_at = record.started_at.parse::<i64>().ok().unwrap_or(0);
+        let has_new_activity = activity
+            .last_activity_secs
+            .is_some_and(|last_activity| last_activity > started_at);
+        if !has_new_activity {
+            return AutomationScheduleDecision::skipped("no_new_session_activity");
         }
     }
 
@@ -723,10 +722,10 @@ async fn lock_is_stale(path: &Path, stale_after_secs: Option<u64>, now_secs: i64
     let Some(stale_after_secs) = stale_after_secs else {
         return Ok(false);
     };
-    if let Some(pid) = lock_pid(path).await? {
-        if process_is_live(pid) {
-            return Ok(false);
-        }
+    if let Some(pid) = lock_pid(path).await?
+        && process_is_live(pid)
+    {
+        return Ok(false);
     }
     let Some(created_at) = lock_created_at(path).await? else {
         return Ok(true);
@@ -751,13 +750,13 @@ async fn lock_pid(path: &Path) -> Result<Option<u32>> {
 }
 
 async fn lock_created_at(path: &Path) -> Result<Option<i64>> {
-    if let Ok(contents) = tokio::fs::read_to_string(path).await {
-        if let Some(created_at) = contents.lines().find_map(|line| {
+    if let Ok(contents) = tokio::fs::read_to_string(path).await
+        && let Some(created_at) = contents.lines().find_map(|line| {
             line.strip_prefix("created_at=")
                 .and_then(|value| value.trim().parse::<i64>().ok())
-        }) {
-            return Ok(Some(created_at));
-        }
+        })
+    {
+        return Ok(Some(created_at));
     }
 
     let metadata = match tokio::fs::metadata(path).await {

@@ -342,12 +342,11 @@ fn remove_marked_block_for_target(existing: &str, target: SkillInstallTarget) ->
     // file mid-migration (one host slugged, another still legacy-unslugged),
     // removing the legacy block here would delete the other host's block, so
     // leave it untouched and let the remove-all path handle it instead.
-    if !has_other_slugged_block(existing, target) {
-        if let Some((start, end)) =
+    if !has_other_slugged_block(existing, target)
+        && let Some((start, end)) =
             managed_block_range(existing, target, PROMPT_INDEX_START, PROMPT_INDEX_END)?
-        {
-            return Ok(remove_range(existing, start, end));
-        }
+    {
+        return Ok(remove_range(existing, start, end));
     }
     Ok(existing.to_string())
 }
@@ -563,15 +562,15 @@ fn swap_overlay_dirs(overlay_root: &Path, stage_root: &Path) -> Result<()> {
         // Remove the staged directory so a failed swap does not orphan a
         // `.tracedecay-managed.tmp-<pid>-<nonce>` sibling on every retry.
         fs::remove_dir_all(stage_root).ok();
-        if backup_root.exists() {
-            if let Err(restore_err) = fs::rename(&backup_root, overlay_root) {
-                tracing::warn!(
-                    backup = %backup_root.display(),
-                    overlay = %overlay_root.display(),
-                    error = %restore_err,
-                    "failed to restore managed skill overlay backup; previous content remains at backup path"
-                );
-            }
+        if backup_root.exists()
+            && let Err(restore_err) = fs::rename(&backup_root, overlay_root)
+        {
+            tracing::warn!(
+                backup = %backup_root.display(),
+                overlay = %overlay_root.display(),
+                error = %restore_err,
+                "failed to restore managed skill overlay backup; previous content remains at backup path"
+            );
         }
         return Err(err.into());
     }

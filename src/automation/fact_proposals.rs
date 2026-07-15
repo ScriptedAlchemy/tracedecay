@@ -262,11 +262,11 @@ fn fold_duplicate(
     target.duplicate_count = target.duplicate_count.saturating_add(1);
     target.last_duplicate_run_id = Some(run_id.to_string());
     target.updated_at = now;
-    if let Some(content) = discarded_content {
-        if target.folded_contents.len() < MAX_FOLDED_CONTENTS {
-            let truncated: String = content.chars().take(FOLDED_CONTENT_MAX_CHARS).collect();
-            target.folded_contents.push(truncated);
-        }
+    if let Some(content) = discarded_content
+        && target.folded_contents.len() < MAX_FOLDED_CONTENTS
+    {
+        let truncated: String = content.chars().take(FOLDED_CONTENT_MAX_CHARS).collect();
+        target.folded_contents.push(truncated);
     }
 }
 

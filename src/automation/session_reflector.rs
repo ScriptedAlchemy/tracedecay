@@ -61,10 +61,10 @@ impl EvidenceCitationSet {
                 if let Some(store_id) = hit.get("store_id").and_then(value_as_i64) {
                     citations.raw_store_ids.insert(store_id);
                 }
-            } else if kind == Some("summary_node") {
-                if let Some(node_id) = hit.get("node_id").and_then(Value::as_str) {
-                    citations.summary_nodes.insert(node_id.to_string());
-                }
+            } else if kind == Some("summary_node")
+                && let Some(node_id) = hit.get("node_id").and_then(Value::as_str)
+            {
+                citations.summary_nodes.insert(node_id.to_string());
             }
         }
         citations.collect_replay_slices(evidence);

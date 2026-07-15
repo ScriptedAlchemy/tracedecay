@@ -247,10 +247,10 @@ pub fn validate_job(job: &AutomationJob) -> Result<()> {
     if matches!(job.cooldown_secs, Some(0)) {
         return job_error("job cooldown_secs must be greater than zero");
     }
-    if let Some(command) = &job.pre_run_command {
-        if command.trim().is_empty() {
-            return job_error("job pre_run_command must not be empty when set");
-        }
+    if let Some(command) = &job.pre_run_command
+        && command.trim().is_empty()
+    {
+        return job_error("job pre_run_command must not be empty when set");
     }
     for skill_id in &job.skill_ids {
         if skill_id.trim().is_empty() {
@@ -382,20 +382,20 @@ pub fn job_schedule_decision(
             }
             return None;
         }
-        if let Some(interval_secs) = interval_secs {
-            if elapsed_secs(completed_at, now_secs) < interval_secs {
-                return Some("scheduler_interval_not_elapsed");
-            }
+        if let Some(interval_secs) = interval_secs
+            && elapsed_secs(completed_at, now_secs) < interval_secs
+        {
+            return Some("scheduler_interval_not_elapsed");
         }
-        if let Some(cron) = cron {
-            if !cron_is_due(&cron, Some(completed_at), now_secs) {
-                return Some("scheduler_cron_not_due");
-            }
-        }
-    } else if let Some(cron) = cron {
-        if !cron_is_due(&cron, None, now_secs) {
+        if let Some(cron) = cron
+            && !cron_is_due(&cron, Some(completed_at), now_secs)
+        {
             return Some("scheduler_cron_not_due");
         }
+    } else if let Some(cron) = cron
+        && !cron_is_due(&cron, None, now_secs)
+    {
+        return Some("scheduler_cron_not_due");
     }
     None
 }

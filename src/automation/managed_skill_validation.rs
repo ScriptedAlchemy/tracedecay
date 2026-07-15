@@ -296,12 +296,12 @@ pub(crate) fn validate_managed_pending_update(
             "managed skill staged_at must be a positive timestamp".to_string(),
         ));
     }
-    if let Some(resulting_state) = pending.resulting_state {
-        if resulting_state != ManagedSkillState::Archived {
-            return Err(config_error(
-                "managed skill pending update resulting_state must be archived".to_string(),
-            ));
-        }
+    if let Some(resulting_state) = pending.resulting_state
+        && resulting_state != ManagedSkillState::Archived
+    {
+        return Err(config_error(
+            "managed skill pending update resulting_state must be archived".to_string(),
+        ));
     }
     let skill = ManagedSkill {
         metadata: pending.metadata.clone(),

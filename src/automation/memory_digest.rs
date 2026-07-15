@@ -560,10 +560,10 @@ fn remove_native_digest(target: SkillInstallTarget, plugin_root: &Path) -> Resul
         Err(e) => return Err(e.into()),
     }
     // The Codex digest lives in its own skill package dir; prune it when empty.
-    if target == SkillInstallTarget::Codex {
-        if let Some(parent) = path.parent() {
-            let _ = fs::remove_dir(parent);
-        }
+    if target == SkillInstallTarget::Codex
+        && let Some(parent) = path.parent()
+    {
+        let _ = fs::remove_dir(parent);
     }
     Ok(())
 }

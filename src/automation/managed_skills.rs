@@ -343,11 +343,11 @@ pub async fn apply_managed_skill_consolidation(
         None => None,
     };
 
-    if let (Some(target), Some(update)) = (&mut target, target_update) {
-        if apply_managed_skill_update(target, update)? {
-            target.touch();
-            target.refresh_checksum();
-        }
+    if let (Some(target), Some(update)) = (&mut target, target_update)
+        && apply_managed_skill_update(target, update)?
+    {
+        target.touch();
+        target.refresh_checksum();
     }
 
     source.metadata.absorbed_into = target_id.map(ToOwned::to_owned);

@@ -270,10 +270,10 @@ pub(crate) async fn skipped_run_parts(
         "reason": reason,
         "dry_run": true,
     });
-    if let Some(task_key) = report_task_key {
-        if let Some(object) = report.as_object_mut() {
-            object.insert("task".to_string(), json!(task_key));
-        }
+    if let Some(task_key) = report_task_key
+        && let Some(object) = report.as_object_mut()
+    {
+        object.insert("task".to_string(), json!(task_key));
     }
     let record = append_skipped_record(
         run,
