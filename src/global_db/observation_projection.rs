@@ -52,7 +52,14 @@ pub(super) async fn ensure_observation_projection_schema(
         );",
     )
     .await?;
-    migrate_legacy_projection_output_uniqueness(conn).await
+    migrate_legacy_projection_output_uniqueness(conn).await?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_output
+         ON observation_projection_provenance
+            (projector_version, output_provider, output_message_id);",
+    )
+    .await?;
+    Ok(())
 }
 
 async fn has_legacy_projection_output_uniqueness(conn: &Connection) -> Result<bool, libsql::Error> {
@@ -301,22 +308,49 @@ async fn read_message(
         .ok_or_else(|| storage_message("decode projected message", "invalid row"))
 }
 
-async fn read_latest_output_owner(
+struct ProjectionOutputOwner {
+    sequence: u64,
+    observation: DurableClaudeObservationV1,
+}
+
+struct ProjectionOutputOwners {
+    owners: Vec<ProjectionOutputOwner>,
+    projector_owned: bool,
+}
+
+impl ProjectionOutputOwners {
+    fn latest(&self) -> Option<&ProjectionOutputOwner> {
+        self.owners.last()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.owners.is_empty()
+    }
+}
+
+async fn read_output_owners(
     conn: &Connection,
     projection: &ClaudeSessionMessageProjection,
-) -> ProjectionStoreResult<Option<(u64, DurableClaudeObservationV1)>> {
+) -> ProjectionStoreResult<ProjectionOutputOwners> {
     let message = projection.message();
     let mut rows = conn
         .query(
-            "SELECT observations.sequence, observations.observation_json
+            "SELECT observations.sequence, observations.observation_json,
+                    EXISTS (
+                        SELECT 1
+                        FROM observation_projection_provenance AS owned
+                        WHERE owned.projector_version = provenance.projector_version
+                          AND owned.output_provider = provenance.output_provider
+                          AND owned.output_message_id = provenance.output_message_id
+                          AND owned.message_created = 1
+                    )
              FROM observation_projection_provenance AS provenance
              JOIN observations
                ON observations.observation_id = provenance.observation_id
              WHERE provenance.projector_version = ?1
                AND provenance.output_provider = ?2
                AND provenance.output_message_id = ?3
-             ORDER BY observations.sequence DESC
-             LIMIT 1",
+             ORDER BY observations.sequence ASC",
             params![
                 CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
                 message.provider.as_str(),
@@ -324,15 +358,29 @@ async fn read_latest_output_owner(
             ],
         )
         .await
-        .map_err(|error| storage("read latest projection output owner", error))?;
-    let Some(row) = rows
+        .map_err(|error| storage("read projection output owners", error))?;
+    let mut owners = Vec::new();
+    let mut projector_owned = false;
+    while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage("read latest projection output owner", error))?
-    else {
-        return Ok(None);
-    };
-    decode_observation_row(&row, "read latest projection output owner").map(Some)
+        .map_err(|error| storage("read projection output owners", error))?
+    {
+        let (sequence, observation) =
+            decode_observation_row(&row, "read projection output owners")?;
+        projector_owned = row
+            .get::<i64>(2)
+            .map_err(|error| storage("read projection output owners", error))?
+            != 0;
+        owners.push(ProjectionOutputOwner {
+            sequence,
+            observation,
+        });
+    }
+    Ok(ProjectionOutputOwners {
+        owners,
+        projector_owned,
+    })
 }
 
 async fn message_projection(
@@ -372,6 +420,48 @@ async fn verify_rows(
         });
     }
     Ok(())
+}
+
+fn same_projection_lineage(
+    candidate: &DurableClaudeObservationV1,
+    owner: &DurableClaudeObservationV1,
+) -> bool {
+    candidate.source() == owner.source() && candidate.scope() == owner.scope()
+}
+
+async fn verify_output_state(
+    conn: &Connection,
+    projection: &ClaudeSessionMessageProjection,
+    owners: &ProjectionOutputOwners,
+) -> ProjectionStoreResult<()> {
+    let message = projection.message();
+    let Some(latest) = owners.latest() else {
+        return Err(ProjectionStoreError::ProvenanceCollision);
+    };
+
+    if owners.projector_owned {
+        let owner_projection = message_projection(conn, &latest.observation).await?;
+        verify_provenance(conn, &owner_projection).await?;
+        return verify_rows(conn, &owner_projection).await;
+    }
+
+    let actual = read_message(conn, &message.provider, &message.message_id)
+        .await?
+        .ok_or_else(|| ProjectionStoreError::OutputCollision {
+            provider: message.provider.clone(),
+            message_id: message.message_id.clone(),
+        })?;
+    for owner in &owners.owners {
+        let owner_projection = message_projection(conn, &owner.observation).await?;
+        verify_provenance(conn, &owner_projection).await?;
+        if message_rows_compatible(&actual, owner_projection.message()) {
+            return verify_rows(conn, &owner_projection).await;
+        }
+    }
+    Err(ProjectionStoreError::OutputCollision {
+        provider: message.provider.clone(),
+        message_id: message.message_id.clone(),
+    })
 }
 
 fn session_rows_compatible(
@@ -537,22 +627,24 @@ async fn apply_rows(
 
     let message = projection.message();
     let existing = read_message(conn, &message.provider, &message.message_id).await?;
-    let latest_owner = read_latest_output_owner(conn, projection).await?;
-    let message_created = match (existing, latest_owner) {
-        (Some(actual), Some((owner_sequence, owner_observation))) => {
-            let owner_projection = message_projection(conn, &owner_observation).await?;
-            verify_provenance(conn, &owner_projection).await?;
-            if !message_rows_compatible(&actual, owner_projection.message()) {
+    let owners = read_output_owners(conn, projection).await?;
+    let message_created = match (existing, owners.is_empty()) {
+        (Some(actual), false) => {
+            verify_output_state(conn, projection, &owners).await?;
+            let latest = owners
+                .latest()
+                .ok_or(ProjectionStoreError::ProvenanceCollision)?;
+            if !same_projection_lineage(observation, &latest.observation) {
                 return Err(ProjectionStoreError::OutputCollision {
                     provider: message.provider.clone(),
                     message_id: message.message_id.clone(),
                 });
             }
 
-            if sequence < owner_sequence {
+            if sequence < latest.sequence {
                 false
             } else if observation.identity().generation()
-                == owner_observation.identity().generation()
+                == latest.observation.identity().generation()
             {
                 if !message_rows_compatible(&actual, message) {
                     return Err(ProjectionStoreError::OutputCollision {
@@ -561,7 +653,7 @@ async fn apply_rows(
                     });
                 }
                 false
-            } else if message_rows_compatible(&actual, message) {
+            } else if !owners.projector_owned || message_rows_compatible(&actual, message) {
                 false
             } else {
                 conn.execute(
@@ -591,14 +683,14 @@ async fn apply_rows(
                 false
             }
         }
-        (Some(actual), None) if message_rows_compatible(&actual, message) => false,
-        (Some(_), None) | (None, Some(_)) => {
+        (Some(actual), true) if message_rows_compatible(&actual, message) => false,
+        (Some(_), true) | (None, false) => {
             return Err(ProjectionStoreError::OutputCollision {
                 provider: message.provider.clone(),
                 message_id: message.message_id.clone(),
             });
         }
-        (None, None) => {
+        (None, true) => {
             conn.execute(
                 "INSERT INTO session_messages
             (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
@@ -771,12 +863,8 @@ async fn verify_effect(
     match effect {
         ClaudeObservationProjection::Message(projection) => {
             verify_provenance(conn, projection).await?;
-            let (_, owner_observation) = read_latest_output_owner(conn, projection)
-                .await?
-                .ok_or(ProjectionStoreError::ProvenanceCollision)?;
-            let owner_projection = message_projection(conn, &owner_observation).await?;
-            verify_provenance(conn, &owner_projection).await?;
-            verify_rows(conn, &owner_projection).await
+            let owners = read_output_owners(conn, projection).await?;
+            verify_output_state(conn, projection, &owners).await
         }
         ClaudeObservationProjection::Skipped(reason) => {
             verify_skip_disposition(conn, observation, *reason).await

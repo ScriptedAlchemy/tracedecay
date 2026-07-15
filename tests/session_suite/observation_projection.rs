@@ -564,6 +564,111 @@ async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
 }
 
 #[tokio::test]
+async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let original = observation_in_generation(
+        "session-adopted-rollover",
+        GENERATION,
+        0,
+        100,
+        "receipt.adopted-rollover-1",
+        conversational_payload("message-adopted-rollover", "adopted original canary"),
+    );
+    let replacement = observation_in_generation(
+        "session-adopted-rollover",
+        GENERATION + 1,
+        0,
+        100,
+        "receipt.adopted-rollover-2",
+        conversational_payload(
+            "message-adopted-rollover",
+            "adopted replacement must not appear",
+        ),
+    );
+    persist(&store, original.clone(), None).await;
+    persist(
+        &store,
+        replacement.clone(),
+        Some(cursor_in_generation(
+            "session-adopted-rollover",
+            GENERATION,
+            100,
+        )),
+    )
+    .await;
+
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let conn = raw_db.connect().unwrap();
+    conn.execute(
+        "INSERT INTO sessions
+            (provider, session_id, project_key, project_path, is_subagent)
+         VALUES ('claude', 'session-adopted-rollover', 'user', 'user', 0)",
+        (),
+    )
+    .await
+    .unwrap();
+    let metadata_json = serde_json::to_string(&json!({
+        "source": "claude_transcript",
+        "raw_type": "assistant",
+        "source_generation": GENERATION,
+    }))
+    .unwrap();
+    conn.execute(
+        "INSERT INTO session_messages
+            (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
+             tool_names, source_path, source_offset, metadata_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        libsql::params![
+            "claude",
+            "message-adopted-rollover",
+            "session-adopted-rollover",
+            "assistant",
+            1_750_000_000_i64,
+            0_i64,
+            serde_json::to_string(&json!([{"type": "text", "text": "adopted original canary"}]))
+                .unwrap(),
+            "message",
+            "claude-sonnet-4",
+            Option::<String>::None,
+            "claude:session-adopted-rollover",
+            0_i64,
+            metadata_json,
+        ],
+    )
+    .await
+    .unwrap();
+
+    drain_projection_queue(&store).await;
+    assert_eq!(projection_ownership_rows(&tmp).await, vec![0, 0]);
+    let texts = projected_message_texts(&tmp).await;
+    assert_eq!(texts.len(), 1);
+    assert!(texts[0].contains("adopted original canary"));
+    assert!(!texts[0].contains("adopted replacement must not appear"));
+    assert!(matches!(
+        store
+            .project_observation(replacement.observation_id())
+            .await
+            .unwrap(),
+        ProjectionPersistOutcome::ExactDuplicate(_)
+    ));
+
+    store.rebuild_projection(0).await.unwrap();
+    assert_eq!(projection_counts(&tmp).await, (1, 1, 0, 1, 0, 2));
+    drain_projection_queue(&store).await;
+    assert_eq!(projection_counts(&tmp).await, (1, 1, 2, 1, 0, 0));
+    assert_eq!(projection_ownership_rows(&tmp).await, vec![0, 0]);
+    let texts = projected_message_texts(&tmp).await;
+    assert_eq!(texts.len(), 1);
+    assert!(texts[0].contains("adopted original canary"));
+    assert!(!texts[0].contains("adopted replacement must not appear"));
+}
+
+#[tokio::test]
 async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queue() {
     for (stage, trigger) in [
         ("message", "BEFORE INSERT ON session_messages"),
@@ -763,6 +868,67 @@ async fn divergent_output_collision_is_typed_and_rolls_back_every_projection_wri
     assert_eq!(texts.len(), 1);
     assert!(texts[0].contains("original collision canary"));
     assert!(!texts[0].contains("divergent collision canary"));
+}
+
+#[tokio::test]
+async fn reused_message_id_across_sources_collides_without_consuming_queue() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let first = observation_in_generation(
+        "session-reused-id-a",
+        GENERATION,
+        0,
+        100,
+        "receipt.reused-id-a",
+        conversational_payload("shared-cross-source", "cross-source original canary"),
+    );
+    let second = observation_in_generation(
+        "session-reused-id-b",
+        GENERATION + 1,
+        0,
+        100,
+        "receipt.reused-id-b",
+        conversational_payload("shared-cross-source", "cross-source replacement canary"),
+    );
+    persist(&store, first.clone(), None).await;
+    persist(&store, second.clone(), None).await;
+    store
+        .project_observation(first.observation_id())
+        .await
+        .unwrap();
+    let counts_before = projection_counts(&tmp).await;
+    let provenance_before = projection_provenance_rows(&tmp).await;
+    let texts_before = projected_message_texts(&tmp).await;
+    let checkpoint_before = store.projection_checkpoint().await.unwrap();
+
+    let error = store
+        .project_observation(second.observation_id())
+        .await
+        .expect_err("a reused message ID from another typed source must collide");
+    assert!(matches!(
+        error,
+        ProjectionStoreError::OutputCollision { provider, message_id }
+            if provider == "claude" && message_id == "shared-cross-source"
+    ));
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap(),
+        checkpoint_before
+    );
+    assert_eq!(projection_counts(&tmp).await, counts_before);
+    assert_eq!(projection_provenance_rows(&tmp).await, provenance_before);
+    assert_eq!(projected_message_texts(&tmp).await, texts_before);
+    assert_eq!(texts_before.len(), 1);
+    assert!(texts_before[0].contains("cross-source original canary"));
+    assert_eq!(
+        store
+            .get_observation(second.observation_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .projection_status(),
+        ObservationProjectionStatus::Queued
+    );
 }
 
 #[tokio::test]
