@@ -137,6 +137,49 @@ async fn init_primary(fx: &Fixture) -> String {
 }
 
 #[tokio::test]
+async fn observation_store_resolver_maps_primary_and_linked_worktree_to_same_store() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let fx = build_fixture();
+    let project_id = init_primary(&fx).await;
+    let store_root = fx.profile_root.join(format!("projects/{project_id}"));
+    let database_path = store_root.join("sessions.db");
+    if !database_path.exists() {
+        std::fs::write(&database_path, b"").unwrap();
+    }
+    let marker_path = tracedecay::storage::repository_identity_path(&fx.main)
+        .expect("primary checkout should have a repository identity path");
+    std::fs::remove_file(&marker_path).unwrap();
+
+    let db = GlobalDb::open_at(&fx.profile_root.join("global.db"))
+        .await
+        .expect("global db should open");
+    assert!(
+        db.project_registry_context_by_alias(&fx.worktree)
+            .await
+            .is_none(),
+        "the linked worktree must resolve through git common-dir, not a preexisting path alias"
+    );
+
+    let primary = db
+        .resolve_project_observation_store(&fx.main.join("."))
+        .await
+        .expect("the primary checkout should resolve through its canonical path alias");
+    let linked = db
+        .resolve_project_observation_store(&fx.worktree)
+        .await
+        .expect("the linked worktree should resolve through its git common-dir alias");
+
+    assert_eq!(primary.project.project_id, project_id);
+    assert_eq!(linked.project.project_id, project_id);
+    assert_eq!(linked.store, primary.store);
+    assert_eq!(linked.store_root, primary.store_root);
+    assert_eq!(linked.database_path, primary.database_path);
+    assert_eq!(primary.store_root, store_root.canonicalize().unwrap());
+    assert_eq!(primary.database_path, database_path.canonicalize().unwrap());
+    db.close();
+}
+
+#[tokio::test]
 async fn opening_from_linked_worktree_keeps_canonical_root_on_primary() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let fx = build_fixture();

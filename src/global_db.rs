@@ -28,8 +28,10 @@ use crate::sessions::{
     },
 };
 
+mod observation_store;
 mod transcript;
 
+pub use observation_store::{ProjectObservationStoreError, ProjectObservationStoreResolution};
 pub(crate) use transcript::TranscriptPersistenceError;
 
 const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
