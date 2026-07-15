@@ -4,7 +4,7 @@ use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
-    ObservationScopeV1, PayloadReferenceV1, RetentionClass, SanitizationReceiptId,
+    ObservationScopeV1, PayloadDigestV1, PayloadReferenceV1, RetentionClass, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionId,
 };
@@ -283,7 +283,7 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
     assert_eq!(provenance[0].2, "receipt.atomic-projection");
     assert_eq!(provenance[0].3, "claude");
     assert_eq!(provenance[0].4, "message-atomic");
-    assert_eq!(provenance[0].5.len(), 64);
+    assert!(PayloadDigestV1::new(provenance[0].5.clone()).is_ok());
 
     let before = projection_counts(&tmp).await;
     let replay = store
