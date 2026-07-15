@@ -71,7 +71,7 @@ async fn validate_table(conn: &Connection, contract: &Table) -> crate::errors::R
             ),
         ));
     }
-    for (expected_cid, column) in contract.columns.iter().enumerate() {
+    for column in contract.columns {
         let Some(actual) = actual.get(&column.name.to_ascii_lowercase()) else {
             return Err(global_db_operation_message(
                 OPERATION,
@@ -81,9 +81,7 @@ async fn validate_table(conn: &Connection, contract: &Table) -> crate::errors::R
                 ),
             ));
         };
-        if actual.cid != i64::try_from(expected_cid).unwrap_or(i64::MAX)
-            || !column_metadata_matches(actual, column)
-        {
+        if !column_metadata_matches(actual, column) {
             return Err(global_db_operation_message(
                 OPERATION,
                 format!(

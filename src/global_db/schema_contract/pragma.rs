@@ -7,7 +7,6 @@ use super::super::global_db_operation_error;
 const OPERATION: &str = "validate global database authority schema";
 
 pub(super) struct ActualColumn {
-    pub(super) cid: i64,
     pub(super) declared_type: String,
     pub(super) not_null: bool,
     pub(super) default_value: Option<String>,
@@ -50,7 +49,7 @@ pub(super) async fn read_columns(
 ) -> crate::errors::Result<HashMap<String, ActualColumn>> {
     let mut rows = conn
         .query(
-            "SELECT cid, name, type, \"notnull\", dflt_value, pk, hidden
+            "SELECT name, type, \"notnull\", dflt_value, pk, hidden
              FROM pragma_table_xinfo(?1) ORDER BY cid",
             params![table],
         )
@@ -63,29 +62,26 @@ pub(super) async fn read_columns(
         .map_err(|error| global_db_operation_error(OPERATION, error))?
     {
         let name = row
-            .get::<String>(1)
+            .get::<String>(0)
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
         columns.insert(
             name.to_ascii_lowercase(),
             ActualColumn {
-                cid: row
-                    .get(0)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
                 declared_type: row
-                    .get(2)
+                    .get(1)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
                 not_null: row
-                    .get::<i64>(3)
+                    .get::<i64>(2)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?
                     != 0,
                 default_value: row
-                    .get(4)
+                    .get(3)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
                 primary_key_ordinal: row
-                    .get(5)
+                    .get(4)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
                 hidden: row
-                    .get(6)
+                    .get(5)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
             },
         );

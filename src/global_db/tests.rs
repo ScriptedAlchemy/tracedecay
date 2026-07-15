@@ -516,6 +516,103 @@ async fn schema_validation_accepts_equivalent_table_level_primary_key() {
 }
 
 #[tokio::test]
+async fn legacy_code_projects_columns_migrate_without_losing_registry_data() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let project_root = dir.path().join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let canonical_root = project_root
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let raw_db = Builder::new_local(&db_path).build().await.unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE code_projects (
+                project_id TEXT PRIMARY KEY,
+                canonical_root TEXT NOT NULL,
+                display_root TEXT NOT NULL,
+                git_common_dir TEXT,
+                git_remote_url TEXT,
+                default_branch TEXT,
+                created_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL
+             );
+             CREATE TABLE project_aliases (
+                alias_path TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                last_seen_at INTEGER NOT NULL,
+                FOREIGN KEY(project_id) REFERENCES code_projects(project_id) ON DELETE CASCADE
+             );
+             CREATE INDEX idx_project_aliases_project_id ON project_aliases(project_id);
+             CREATE INDEX idx_legacy_code_projects_seen ON code_projects(last_seen_at);",
+        )
+        .await
+        .unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO code_projects
+             (project_id, canonical_root, display_root, git_common_dir,
+              git_remote_url, default_branch, created_at, last_seen_at)
+             VALUES ('legacy-project', ?1, ?1, NULL, NULL, 'main', 10, 20)",
+            params![canonical_root.clone()],
+        )
+        .await
+        .unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO project_aliases(alias_path, project_id, last_seen_at)
+             VALUES ('legacy-alias', 'legacy-project', 20)",
+            (),
+        )
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    let db = GlobalDb::try_open_at(&db_path)
+        .await
+        .expect("legacy registry should migrate")
+        .expect("global database");
+    assert_eq!(
+        db.get_code_project("legacy-project")
+            .await
+            .expect("legacy project row")
+            .default_branch
+            .as_deref(),
+        Some("main")
+    );
+    let mut rows = db
+        .conn
+        .query(
+            "SELECT
+                EXISTS(SELECT 1 FROM project_aliases
+                       WHERE alias_path = 'legacy-alias' AND project_id = 'legacy-project'),
+                EXISTS(SELECT 1 FROM sqlite_schema
+                       WHERE type = 'index' AND name = 'idx_legacy_code_projects_seen'),
+                (SELECT COUNT(*) FROM pragma_foreign_key_check)",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 1);
+    assert_eq!(row.get::<i64>(1).unwrap(), 1);
+    assert_eq!(row.get::<i64>(2).unwrap(), 0);
+    drop(row);
+    drop(rows);
+    drop(db);
+
+    GlobalDb::try_open_at(&db_path)
+        .await
+        .expect("migrated registry should reopen")
+        .expect("global database");
+}
+
+#[tokio::test]
 async fn schema_validation_rejects_incomplete_registry_table() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
