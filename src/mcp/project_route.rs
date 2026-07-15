@@ -40,15 +40,13 @@ impl HookProjectRouteCache {
         if let Some(route) = event.route.as_ref() {
             if let Some(session_id) = route.session_id.as_deref().filter(|id| !id.is_empty()) {
                 self.insert_session_route(session_id.to_string(), project_path.clone());
-                if let Some(thread_id) = route.thread_id.as_deref().filter(|id| !id.is_empty()) {
-                    if let Some(old_thread_id) = self
+                if let Some(thread_id) = route.thread_id.as_deref().filter(|id| !id.is_empty())
+                    && let Some(old_thread_id) = self
                         .threads_by_session
                         .insert(session_id.to_string(), thread_id.to_string())
-                    {
-                        if old_thread_id != thread_id {
-                            self.remove_thread_route(&old_thread_id);
-                        }
-                    }
+                    && old_thread_id != thread_id
+                {
+                    self.remove_thread_route(&old_thread_id);
                 }
             }
             if let Some(thread_id) = route.thread_id.as_deref().filter(|id| !id.is_empty()) {
@@ -77,15 +75,15 @@ impl HookProjectRouteCache {
     }
 
     fn project_path_for_arguments(&self, arguments: &Value) -> Option<&str> {
-        if let Some(thread_id) = mcp_route_thread_id(arguments) {
-            if let Some(project_path) = self.paths_by_thread.get(&thread_id) {
-                return Some(project_path.as_str());
-            }
+        if let Some(thread_id) = mcp_route_thread_id(arguments)
+            && let Some(project_path) = self.paths_by_thread.get(&thread_id)
+        {
+            return Some(project_path.as_str());
         }
-        if let Some(session_id) = mcp_analytics_session_id(arguments) {
-            if let Some(project_path) = self.paths_by_session.get(&session_id) {
-                return Some(project_path.as_str());
-            }
+        if let Some(session_id) = mcp_analytics_session_id(arguments)
+            && let Some(project_path) = self.paths_by_session.get(&session_id)
+        {
+            return Some(project_path.as_str());
         }
         self.project_path.as_deref()
     }
@@ -114,20 +112,17 @@ impl HookProjectRouteCache {
         if !self.paths_by_thread.contains_key(&thread_id) {
             self.thread_order.push_back(thread_id.clone());
         }
-        if let Some(session_id) = session_id {
-            if let Some(old_session_id) = self
+        if let Some(session_id) = session_id
+            && let Some(old_session_id) = self
                 .session_by_thread
                 .insert(thread_id.clone(), session_id.to_string())
-            {
-                if old_session_id != session_id
-                    && self
-                        .threads_by_session
-                        .get(&old_session_id)
-                        .is_some_and(|old_thread_id| old_thread_id == &thread_id)
-                {
-                    self.threads_by_session.remove(&old_session_id);
-                }
-            }
+            && old_session_id != session_id
+            && self
+                .threads_by_session
+                .get(&old_session_id)
+                .is_some_and(|old_thread_id| old_thread_id == &thread_id)
+        {
+            self.threads_by_session.remove(&old_session_id);
         }
         self.paths_by_thread.insert(thread_id, project_path);
         self.evict_old_thread_routes();
@@ -135,14 +130,13 @@ impl HookProjectRouteCache {
 
     fn remove_thread_route(&mut self, thread_id: &str) {
         self.paths_by_thread.remove(thread_id);
-        if let Some(session_id) = self.session_by_thread.remove(thread_id) {
-            if self
+        if let Some(session_id) = self.session_by_thread.remove(thread_id)
+            && self
                 .threads_by_session
                 .get(&session_id)
                 .is_some_and(|old_thread_id| old_thread_id == thread_id)
-            {
-                self.threads_by_session.remove(&session_id);
-            }
+        {
+            self.threads_by_session.remove(&session_id);
         }
     }
 
@@ -151,10 +145,10 @@ impl HookProjectRouteCache {
             let Some(session_id) = self.session_order.pop_front() else {
                 break;
             };
-            if self.paths_by_session.remove(&session_id).is_some() {
-                if let Some(thread_id) = self.threads_by_session.remove(&session_id) {
-                    self.remove_thread_route(&thread_id);
-                }
+            if self.paths_by_session.remove(&session_id).is_some()
+                && let Some(thread_id) = self.threads_by_session.remove(&session_id)
+            {
+                self.remove_thread_route(&thread_id);
             }
         }
     }

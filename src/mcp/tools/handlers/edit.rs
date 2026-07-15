@@ -174,12 +174,13 @@ async fn text_tool_result<T: Serialize + EditOutcome>(
 
     // Verification only makes sense for a real (written) successful edit: a dry
     // run changed nothing on disk, and a failure left the file as-is.
-    if verify && !dry_run && success {
-        if let Some(verdict) = run_edit_verification(cg, result.file_path()).await {
-            if let Some(obj) = value.as_object_mut() {
-                obj.insert("verification".to_string(), verdict);
-            }
-        }
+    if verify
+        && !dry_run
+        && success
+        && let Some(verdict) = run_edit_verification(cg, result.file_path()).await
+        && let Some(obj) = value.as_object_mut()
+    {
+        obj.insert("verification".to_string(), verdict);
     }
 
     let text = render::finalize(Some(cg.project_root()), args, &value, || {

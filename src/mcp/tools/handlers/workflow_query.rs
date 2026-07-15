@@ -314,10 +314,10 @@ fn render_run_detail_md(md: &mut Md, value: &Value) {
             md.field(label, field);
         }
     }
-    if let Some(parent) = run.get("parent_session_id").and_then(Value::as_str) {
-        if !parent.is_empty() {
-            md.field("thread", &format!("`{parent}`"));
-        }
+    if let Some(parent) = run.get("parent_session_id").and_then(Value::as_str)
+        && !parent.is_empty()
+    {
+        md.field("thread", &format!("`{parent}`"));
     }
     let summary = render::field_str(run, "result_summary");
     if !summary.is_empty() {
@@ -331,14 +331,13 @@ fn render_run_detail_md(md: &mut Md, value: &Value) {
         .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
         .as_ref()
         .and_then(Value::as_array)
+        && !phases.is_empty()
     {
-        if !phases.is_empty() {
-            md.blank().line("**Phases**");
-            for phase in phases {
-                let title = render::field_str(phase, "title");
-                if !title.is_empty() {
-                    md.bullet(title);
-                }
+        md.blank().line("**Phases**");
+        for phase in phases {
+            let title = render::field_str(phase, "title");
+            if !title.is_empty() {
+                md.bullet(title);
             }
         }
     }

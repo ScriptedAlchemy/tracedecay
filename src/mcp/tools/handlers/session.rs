@@ -294,13 +294,13 @@ fn message_text_snippet(text: &str, max_chars: usize) -> String {
 
 fn readable_message_text(text: &str, budget: usize) -> String {
     let trimmed = text.trim_start();
-    if trimmed.starts_with('[') || trimmed.starts_with('{') {
-        if let Ok(value) = serde_json::from_str::<Value>(text) {
-            let mut out = String::new();
-            collect_readable_text(&value, &mut out, budget);
-            if !out.trim().is_empty() {
-                return out;
-            }
+    if (trimmed.starts_with('[') || trimmed.starts_with('{'))
+        && let Ok(value) = serde_json::from_str::<Value>(text)
+    {
+        let mut out = String::new();
+        collect_readable_text(&value, &mut out, budget);
+        if !out.trim().is_empty() {
+            return out;
         }
     }
     text.to_string()
@@ -633,31 +633,31 @@ fn message_search_payload(
         "count": results.len(),
         "results": results,
     });
-    if !request.git_filter.is_empty() {
-        if let Some(map) = payload.as_object_mut() {
-            map.insert(
-                "git_filter".to_string(),
-                serde_json::to_value(&request.git_filter).unwrap_or(Value::Null),
-            );
-            map.insert("git_filter_applied".to_string(), Value::Bool(true));
-        }
+    if !request.git_filter.is_empty()
+        && let Some(map) = payload.as_object_mut()
+    {
+        map.insert(
+            "git_filter".to_string(),
+            serde_json::to_value(&request.git_filter).unwrap_or(Value::Null),
+        );
+        map.insert("git_filter_applied".to_string(), Value::Bool(true));
     }
-    if request.workflow_scope.is_some() {
-        if let Some(map) = payload.as_object_mut() {
+    if request.workflow_scope.is_some()
+        && let Some(map) = payload.as_object_mut()
+    {
+        map.insert(
+            "workflow_run".to_string(),
+            request
+                .workflow_run
+                .map_or(Value::Null, |run| Value::String(run.to_string())),
+        );
+        if let Some(label) = request.workflow_agent {
             map.insert(
-                "workflow_run".to_string(),
-                request
-                    .workflow_run
-                    .map_or(Value::Null, |run| Value::String(run.to_string())),
+                "workflow_agent".to_string(),
+                Value::String(label.to_string()),
             );
-            if let Some(label) = request.workflow_agent {
-                map.insert(
-                    "workflow_agent".to_string(),
-                    Value::String(label.to_string()),
-                );
-            }
-            map.insert("workflow_filter_applied".to_string(), Value::Bool(true));
         }
+        map.insert("workflow_filter_applied".to_string(), Value::Bool(true));
     }
     payload
 }
@@ -1576,10 +1576,10 @@ fn string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {
             {
                 return Ok(text.to_string());
             }
-            if let Some(integer) = value.as_i64() {
-                if integer >= 0 {
-                    return Ok(integer.to_string());
-                }
+            if let Some(integer) = value.as_i64()
+                && integer >= 0
+            {
+                return Ok(integer.to_string());
             }
             Err(argument_error(format!(
                 "{name} must contain only non-empty strings or non-negative integers"
@@ -1786,23 +1786,23 @@ fn mark_schema_ensured(db_path: &Path) {
 /// Opens a writable session DB, ensuring the schema at most once per
 /// process per path (see [`ENSURED_SCHEMA_DB_PATHS`]).
 async fn open_session_db_with_cached_ensure(db_path: &Path) -> Option<GlobalDb> {
-    if schema_already_ensured(db_path) {
-        if let Some(db) = GlobalDb::open_at_assuming_schema(db_path).await {
-            return Some(db);
-        }
-        // Fast path failed (e.g. file replaced mid-session): fall through to
-        // a full ensure rather than failing the tool call.
+    if schema_already_ensured(db_path)
+        && let Some(db) = GlobalDb::open_at_assuming_schema(db_path).await
+    {
+        return Some(db);
     }
+    // Fast path failed (e.g. file replaced mid-session): fall through to
+    // a full ensure rather than failing the tool call.
     let db = GlobalDb::open_at(db_path).await?;
     mark_schema_ensured(db_path);
     Some(db)
 }
 
 async fn open_session_db_for_bulk_catch_up(db_path: &Path) -> Option<GlobalDb> {
-    if schema_already_ensured(db_path) {
-        if let Some(db) = GlobalDb::open_at_assuming_schema(db_path).await {
-            return Some(db);
-        }
+    if schema_already_ensured(db_path)
+        && let Some(db) = GlobalDb::open_at_assuming_schema(db_path).await
+    {
+        return Some(db);
     }
     let db = GlobalDb::open_at_without_structured_backfill(db_path).await?;
     mark_schema_ensured(db_path);
@@ -2797,16 +2797,15 @@ pub(super) async fn handle_lcm_doctor(
         .lcm_doctor(provider, session_id, mode, apply, clean_config, gc_config)
         .await
         .map_err(lcm_error)?;
-    if let Some(object) = payload.as_object_mut() {
-        if let Some(diagnostics) = object
+    if let Some(object) = payload.as_object_mut()
+        && let Some(diagnostics) = object
             .get_mut("diagnostics")
             .and_then(serde_json::Value::as_object_mut)
-        {
-            diagnostics.insert(
-                "ast_grep".to_string(),
-                super::super::definitions::ast_grep_diagnostics_json(),
-            );
-        }
+    {
+        diagnostics.insert(
+            "ast_grep".to_string(),
+            super::super::definitions::ast_grep_diagnostics_json(),
+        );
     }
     Ok(tool_json(context.project_root, &args, &payload))
 }
@@ -2828,10 +2827,10 @@ pub(super) async fn handle_lcm_load_session(
             limit: bounded_usize_arg(&args, "limit", 1, MAX_LCM_RESULT_LIMIT)?.unwrap_or(50),
             roles: {
                 let mut roles = string_array_arg(&args, "roles")?;
-                if roles.is_empty() {
-                    if let Some(role) = string_arg(&args, "role") {
-                        roles.push(role.to_string());
-                    }
+                if roles.is_empty()
+                    && let Some(role) = string_arg(&args, "role")
+                {
+                    roles.push(role.to_string());
                 }
                 roles
             },
@@ -2849,13 +2848,13 @@ pub(super) async fn handle_lcm_load_session(
         "next_cursor": page.next_cursor,
         "content_limit": content_slice.limit,
     });
-    if let Some(clamped_from) = content_limit_clamped_from {
-        if let Some(object) = payload.as_object_mut() {
-            object.insert(
-                "content_limit_clamped_from".to_string(),
-                json!(clamped_from),
-            );
-        }
+    if let Some(clamped_from) = content_limit_clamped_from
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert(
+            "content_limit_clamped_from".to_string(),
+            json!(clamped_from),
+        );
     }
     Ok(tool_json(context.project_root, &args, &payload))
 }
@@ -2923,30 +2922,28 @@ pub(super) async fn handle_lcm_grep(
         "relationship_scope": string_arg(&args, "relationship_scope").unwrap_or("all"),
         "message_type": string_arg(&args, "message_type").unwrap_or("all"),
     });
-    if !capped_sessions.is_empty() {
-        if let Some(map) = payload.as_object_mut() {
-            let dropped: usize = capped_sessions.values().sum();
-            map.insert(
-                "capped_sessions".to_string(),
-                serde_json::to_value(&capped_sessions).unwrap_or(Value::Null),
-            );
-            map.insert(
+    if !capped_sessions.is_empty()
+        && let Some(map) = payload.as_object_mut()
+    {
+        let dropped: usize = capped_sessions.values().sum();
+        map.insert(
+            "capped_sessions".to_string(),
+            serde_json::to_value(&capped_sessions).unwrap_or(Value::Null),
+        );
+        map.insert(
                 "note".to_string(),
                 json!(format!(
                     "per-session cap dropped {dropped} additional hit(s) from {} session(s);                      rerun with scope=session and that session_id for complete results",
                     capped_sessions.len()
                 )),
             );
-        }
     }
-    if git_filter_applied {
-        if let Some(map) = payload.as_object_mut() {
-            map.insert(
-                "git_filter".to_string(),
-                serde_json::to_value(&git_filter).unwrap_or(Value::Null),
-            );
-            map.insert("git_filter_applied".to_string(), Value::Bool(true));
-        }
+    if git_filter_applied && let Some(map) = payload.as_object_mut() {
+        map.insert(
+            "git_filter".to_string(),
+            serde_json::to_value(&git_filter).unwrap_or(Value::Null),
+        );
+        map.insert("git_filter_applied".to_string(), Value::Bool(true));
     }
     Ok(tool_json(context.project_root, &args, &payload))
 }

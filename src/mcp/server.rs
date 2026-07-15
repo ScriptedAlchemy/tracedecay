@@ -1637,13 +1637,13 @@ impl McpServer {
 
         let cg = self.cg_snapshot().await;
         let stale = cg.find_stale_files().await;
-        if !stale.is_empty() {
-            if let Err(e) = cg.sync_if_stale_silent(&stale).await {
-                eprintln!("[tracedecay] startup catch-up sync failed: {e}");
-                self.startup_catch_up_done.store(true, Ordering::Release);
-                self.transcript_ingest_done.store(true, Ordering::Release);
-                return;
-            }
+        if !stale.is_empty()
+            && let Err(e) = cg.sync_if_stale_silent(&stale).await
+        {
+            eprintln!("[tracedecay] startup catch-up sync failed: {e}");
+            self.startup_catch_up_done.store(true, Ordering::Release);
+            self.transcript_ingest_done.store(true, Ordering::Release);
+            return;
         }
         self.refresh_file_token_map().await;
         let now = std::time::SystemTime::now()
@@ -1801,11 +1801,11 @@ impl McpServer {
         }
 
         let stale = cg.find_stale_files().await;
-        if !stale.is_empty() {
-            if let Err(e) = cg.sync_if_stale_silent(&stale).await {
-                eprintln!("[tracedecay] lazy sync failed: {e}");
-                return;
-            }
+        if !stale.is_empty()
+            && let Err(e) = cg.sync_if_stale_silent(&stale).await
+        {
+            eprintln!("[tracedecay] lazy sync failed: {e}");
+            return;
         }
         // Always refresh: a sibling MCP peer may have synced the DB
         // between our cooldown windows, in which case `stale` is empty
@@ -2034,18 +2034,18 @@ impl McpServer {
         // Fast path: serve from cache if still fresh.
         {
             let cache = self.version_cache.lock().ok()?;
-            if let Some(checked_at) = cache.checked_at {
-                if checked_at.elapsed() < VERSION_CHECK_INTERVAL {
-                    let latest = cache.latest.as_deref()?;
-                    return if crate::cloud::is_newer_minor_version(current, latest) {
-                        Some(format!(
-                            "⚠️ tracedecay v{current} is installed, but v{latest} is available. \
+            if let Some(checked_at) = cache.checked_at
+                && checked_at.elapsed() < VERSION_CHECK_INTERVAL
+            {
+                let latest = cache.latest.as_deref()?;
+                return if crate::cloud::is_newer_minor_version(current, latest) {
+                    Some(format!(
+                        "⚠️ tracedecay v{current} is installed, but v{latest} is available. \
                              Run `tracedecay upgrade` to update."
-                        ))
-                    } else {
-                        None
-                    };
-                }
+                    ))
+                } else {
+                    None
+                };
             }
         }
 
@@ -2379,15 +2379,15 @@ impl McpServer {
             let delta = tokens_saved - last_flushed;
             let mut config = crate::user_config::UserConfig::load();
             config.pending_upload += delta;
-            if config.upload_enabled {
-                if let Some(_total) = crate::cloud::flush_pending(config.pending_upload) {
-                    config.pending_upload = 0;
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as i64;
-                    config.last_upload_at = now;
-                }
+            if config.upload_enabled
+                && let Some(_total) = crate::cloud::flush_pending(config.pending_upload)
+            {
+                config.pending_upload = 0;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                config.last_upload_at = now;
             }
             if let Err(err) = config.save() {
                 eprintln!("[tracedecay] warning: could not save config: {err}");
@@ -2490,10 +2490,10 @@ impl McpServer {
         };
 
         // Track errors
-        if let Some(ref resp) = result {
-            if resp.error.is_some() {
-                self.stats.errors.fetch_add(1, Ordering::Relaxed);
-            }
+        if let Some(ref resp) = result
+            && resp.error.is_some()
+        {
+            self.stats.errors.fetch_add(1, Ordering::Relaxed);
         }
 
         result
@@ -2656,10 +2656,10 @@ impl McpServer {
             .and_then(|ci| ci.get("name"))
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
-        if client_name.is_some() {
-            if let Ok(mut slot) = self.client_name.lock() {
-                *slot = client_name;
-            }
+        if client_name.is_some()
+            && let Ok(mut slot) = self.client_name.lock()
+        {
+            *slot = client_name;
         }
         JsonRpcResponse::success(id, initialize_result(SERVER_INSTRUCTIONS))
     }
@@ -2974,12 +2974,11 @@ impl McpServer {
             None
         };
         let mut handler_arguments = route_cache.apply_to_tool_arguments(tool_name, arguments);
-        if crate::analytics::is_skill_view_tool(tool_name) {
-            if let Some(request_id) = json_rpc_request_id_string(&id) {
-                if let Some(map) = handler_arguments.as_object_mut() {
-                    map.insert("__mcp_request_id".to_string(), json!(request_id));
-                }
-            }
+        if crate::analytics::is_skill_view_tool(tool_name)
+            && let Some(request_id) = json_rpc_request_id_string(&id)
+            && let Some(map) = handler_arguments.as_object_mut()
+        {
+            map.insert("__mcp_request_id".to_string(), json!(request_id));
         }
 
         let dispatch_outcome = handle_tool_call_with_registry_and_implicit_project(
@@ -3047,16 +3046,15 @@ impl McpServer {
                 self.maybe_flush_worldwide().await;
 
                 // Append per-call token savings to the response content.
-                if raw_file_tokens > 0 {
-                    if let Some(content) = result
+                if raw_file_tokens > 0
+                    && let Some(content) = result
                         .value
                         .get_mut("content")
                         .and_then(|c| c.as_array_mut())
-                    {
-                        content.push(json!({"type": "text", "text": format!(
-                            "\ntracedecay_metrics: before={raw_file_tokens} after={response_tokens}"
-                        )}));
-                    }
+                {
+                    content.push(json!({"type": "text", "text": format!(
+                        "\ntracedecay_metrics: before={raw_file_tokens} after={response_tokens}"
+                    )}));
                 }
                 let analytics_outcome = if tool_result_has_semantic_error(&result) {
                     "error"
@@ -3135,14 +3133,13 @@ impl McpServer {
                 // runs have queued skill drafts for review, append a one-line
                 // notice so the approval queue doesn't grow silently. Fact
                 // proposal counts stay telemetry-only in `staged_notice`.
-                if let Some(notice) = self.maybe_automation_staged_notice(&cg).await {
-                    if let Some(content) = result
+                if let Some(notice) = self.maybe_automation_staged_notice(&cg).await
+                    && let Some(content) = result
                         .value
                         .get_mut("content")
                         .and_then(|c| c.as_array_mut())
-                    {
-                        content.push(json!({"type": "text", "text": format!("\n{notice}")}));
-                    }
+                {
+                    content.push(json!({"type": "text", "text": format!("\n{notice}")}));
                 }
 
                 // Per-file staleness banner (#428 design): files this response
@@ -3240,14 +3237,13 @@ impl McpServer {
                             refreshed_recently,
                         });
 
-                        if let Some(banner) = banner {
-                            if let Some(content) = result
+                        if let Some(banner) = banner
+                            && let Some(content) = result
                                 .value
                                 .get_mut("content")
                                 .and_then(|c| c.as_array_mut())
-                            {
-                                content.insert(0, json!({"type": "text", "text": &banner}));
-                            }
+                        {
+                            content.insert(0, json!({"type": "text", "text": &banner}));
                         }
                     }
                 }
@@ -3521,11 +3517,11 @@ impl McpServer {
             "approx_tokens_saved": self.tokens_saved.load(Ordering::Relaxed),
         });
 
-        if let Some(ref gdb) = self.global_db {
-            if let Some(global_total) = gdb.global_tokens_saved().await {
-                let local = self.tokens_saved.load(Ordering::Relaxed);
-                stats["global_tokens_saved"] = json!(global_total.saturating_sub(local));
-            }
+        if let Some(ref gdb) = self.global_db
+            && let Some(global_total) = gdb.global_tokens_saved().await
+        {
+            let local = self.tokens_saved.load(Ordering::Relaxed);
+            stats["global_tokens_saved"] = json!(global_total.saturating_sub(local));
         }
 
         let cg = self.cg_snapshot().await;

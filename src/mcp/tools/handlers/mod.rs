@@ -200,13 +200,12 @@ async fn selected_registered_project_reader(
         global_db,
         allow_default_registry_fallback,
     )?];
-    if let Ok(default_profile_root) = crate::storage::default_profile_root() {
-        if !profile_roots
+    if let Ok(default_profile_root) = crate::storage::default_profile_root()
+        && !profile_roots
             .iter()
             .any(|root| root == &default_profile_root)
-        {
-            profile_roots.push(default_profile_root);
-        }
+    {
+        profile_roots.push(default_profile_root);
     }
 
     let mut last_error = None;
@@ -427,17 +426,15 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
             ),
         });
     }
-    if let Some(project_path) = options.implicit_project_path {
-        if tool_dispatches_registered_project_reader(tool_name)
-            && !rejected_tool_project_selector_present(tool_name, &args)
-        {
-            if let Some(map) = args.as_object_mut() {
-                map.insert(
-                    "project_path".to_string(),
-                    json!(project_path.to_string_lossy().to_string()),
-                );
-            }
-        }
+    if let Some(project_path) = options.implicit_project_path
+        && tool_dispatches_registered_project_reader(tool_name)
+        && !rejected_tool_project_selector_present(tool_name, &args)
+        && let Some(map) = args.as_object_mut()
+    {
+        map.insert(
+            "project_path".to_string(),
+            json!(project_path.to_string_lossy().to_string()),
+        );
     }
     let selected_cg = selected_registered_project_reader(
         tool_name,

@@ -184,10 +184,10 @@ fn metadata_with_tags(args: &Value) -> Value {
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}));
     let tags = string_array_values(args, "tags");
-    if !tags.is_empty() {
-        if let Some(map) = metadata.as_object_mut() {
-            map.insert("tags".to_string(), json!(tags));
-        }
+    if !tags.is_empty()
+        && let Some(map) = metadata.as_object_mut()
+    {
+        map.insert("tags".to_string(), json!(tags));
     }
     metadata
 }

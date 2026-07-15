@@ -211,11 +211,11 @@ fn render_status_md(value: &Value) -> String {
         keys.sort();
         for k in keys {
             let v = &obj[k];
-            if k.contains("warning") {
-                if let Some(s) = v.as_str() {
-                    warnings.push(s.to_string());
-                    continue;
-                }
+            if k.contains("warning")
+                && let Some(s) = v.as_str()
+            {
+                warnings.push(s.to_string());
+                continue;
             }
             match v {
                 Value::String(s) => {
@@ -719,10 +719,10 @@ pub(super) async fn handle_files(
     }
 
     // Apply glob pattern filter
-    if let Some(pat) = args.get("pattern").and_then(|v| v.as_str()) {
-        if let Ok(glob) = glob::Pattern::new(pat) {
-            files.retain(|f| glob.matches(&f.path));
-        }
+    if let Some(pat) = args.get("pattern").and_then(|v| v.as_str())
+        && let Ok(glob) = glob::Pattern::new(pat)
+    {
+        files.retain(|f| glob.matches(&f.path));
     }
 
     // Listing files is metadata-only — no source code is served, so no tokens saved.
@@ -2093,10 +2093,10 @@ pub(super) async fn handle_todos(
     let mut by_kind: HashMap<String, u64> = HashMap::new();
 
     'outer: for file in &files {
-        if let Some(prefix) = path {
-            if !crate::path_scope::path_matches_scope(&file.path, Some(prefix)) {
-                continue;
-            }
+        if let Some(prefix) = path
+            && !crate::path_scope::path_matches_scope(&file.path, Some(prefix))
+        {
+            continue;
         }
         let Ok(project_path) = ProjectPath::resolve(project_root, Path::new(&file.path)) else {
             continue;
@@ -2857,26 +2857,26 @@ pub(super) async fn handle_signature_search(
     let mut entries: Vec<Value> = Vec::new();
     let mut touched: Vec<String> = Vec::new();
     for node in function_nodes.iter().chain(method_nodes.iter()) {
-        if let Some(prefix) = path_filter {
-            if !crate::path_scope::path_matches_scope(&node.file_path, Some(prefix)) {
-                continue;
-            }
+        if let Some(prefix) = path_filter
+            && !crate::path_scope::path_matches_scope(&node.file_path, Some(prefix))
+        {
+            continue;
         }
 
-        if let Some(want) = want_async {
-            if node.is_async != want {
-                continue;
-            }
+        if let Some(want) = want_async
+            && node.is_async != want
+        {
+            continue;
         }
 
         let Some(sig) = node.signature.as_deref() else {
             continue;
         };
 
-        if let Some(ret_pat) = returns {
-            if !returns_substring(sig).contains(ret_pat) {
-                continue;
-            }
+        if let Some(ret_pat) = returns
+            && !returns_substring(sig).contains(ret_pat)
+        {
+            continue;
         }
 
         if !params.is_empty() {

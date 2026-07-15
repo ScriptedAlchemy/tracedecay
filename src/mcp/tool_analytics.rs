@@ -94,10 +94,9 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
     if matches!(
         input.tool_name,
         "tracedecay_fact_store" | "tracedecay_fact_feedback"
-    ) {
-        if let Some(action) = input.arguments.get("action").and_then(Value::as_str) {
-            metadata["action"] = json!(action);
-        }
+    ) && let Some(action) = input.arguments.get("action").and_then(Value::as_str)
+    {
+        metadata["action"] = json!(action);
     }
 
     append_tool_response_analytics(

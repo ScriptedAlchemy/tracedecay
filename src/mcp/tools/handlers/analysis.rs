@@ -148,10 +148,10 @@ fn identifier_from_segment(seg: &str) -> String {
     }
     // `foo as bar` → keep `bar`.
     let after_as = seg.split_whitespace().collect::<Vec<_>>();
-    if let Some(pos) = after_as.iter().position(|w| *w == "as") {
-        if let Some(alias) = after_as.get(pos + 1) {
-            return (*alias).to_string();
-        }
+    if let Some(pos) = after_as.iter().position(|w| *w == "as")
+        && let Some(alias) = after_as.get(pos + 1)
+    {
+        return (*alias).to_string();
     }
     seg.split_whitespace()
         .next()
@@ -2064,10 +2064,10 @@ fn find_struct_literals(source: &str, struct_name: &str) -> Vec<LiteralSite> {
         }
         if b == b'}' {
             depth -= 1;
-            if let Some(&entered_at) = pattern_stack.last() {
-                if depth == entered_at {
-                    pattern_stack.pop();
-                }
+            if let Some(&entered_at) = pattern_stack.last()
+                && depth == entered_at
+            {
+                pattern_stack.pop();
             }
             byte += 1;
             continue;

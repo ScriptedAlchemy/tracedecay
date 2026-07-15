@@ -57,10 +57,9 @@ pub(super) async fn lazy_index_ignored_dependency_candidates(
         if let Some(path) = candidate_entry_paths(cg.project_root(), &candidate.module)
             .into_iter()
             .next()
+            && seen.insert(path.clone())
         {
-            if seen.insert(path.clone()) {
-                paths.push(path);
-            }
+            paths.push(path);
         }
     }
     cg.lazy_index_ignored_dependency_files(&paths).await

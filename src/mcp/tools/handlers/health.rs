@@ -207,10 +207,9 @@ pub(super) async fn handle_gini(
             for e in &all_edges {
                 if let (Some(src_file), Some(tgt_file)) =
                     (node_to_file.get(&e.source), node_to_file.get(&e.target))
+                    && src_file != tgt_file
                 {
-                    if src_file != tgt_file {
-                        *per_file.entry(tgt_file.clone()).or_insert(0.0) += 1.0;
-                    }
+                    *per_file.entry(tgt_file.clone()).or_insert(0.0) += 1.0;
                 }
             }
             per_file.into_iter().collect()
@@ -227,10 +226,9 @@ pub(super) async fn handle_gini(
             for e in &all_edges {
                 if let (Some(src_file), Some(tgt_file)) =
                     (node_to_file.get(&e.source), node_to_file.get(&e.target))
+                    && src_file != tgt_file
                 {
-                    if src_file != tgt_file {
-                        *per_file.entry(src_file.clone()).or_insert(0.0) += 1.0;
-                    }
+                    *per_file.entry(src_file.clone()).or_insert(0.0) += 1.0;
                 }
             }
             per_file.into_iter().collect()
@@ -248,12 +246,11 @@ pub(super) async fn handle_gini(
                 .map(|n| (n.id.clone(), (n.name.clone(), 0.0)))
                 .collect();
             for n in &nodes {
-                if let Some(parent) = n.parent_id.as_deref() {
-                    if class_nodes.contains(parent) {
-                        if let Some(entry) = per_class.get_mut(parent) {
-                            entry.1 += 1.0;
-                        }
-                    }
+                if let Some(parent) = n.parent_id.as_deref()
+                    && class_nodes.contains(parent)
+                    && let Some(entry) = per_class.get_mut(parent)
+                {
+                    entry.1 += 1.0;
                 }
             }
             per_class.into_values().collect()

@@ -362,12 +362,10 @@ fn context_markdown_lane_preview(markdown: &str) -> String {
     let mut in_fence = false;
 
     for line in markdown.split_inclusive('\n') {
-        if !in_fence {
-            if let Some(key) = context_lane_key(line) {
-                push_context_lane_preview(&mut preview, &lane_key, &lane);
-                lane.clear();
-                lane_key = key.to_string();
-            }
+        if !in_fence && let Some(key) = context_lane_key(line) {
+            push_context_lane_preview(&mut preview, &lane_key, &lane);
+            lane.clear();
+            lane_key = key.to_string();
         }
         lane.push_str(line);
         if line.trim_start().starts_with("```") {

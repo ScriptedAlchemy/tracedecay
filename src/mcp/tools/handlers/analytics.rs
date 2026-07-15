@@ -508,10 +508,10 @@ async fn automation_section(project_root: &Path, since: i64) -> Value {
     let mut in_window = 0usize;
     let mut by_job: BTreeMap<String, BTreeMap<&'static str, i64>> = BTreeMap::new();
     for record in &records {
-        if let Some(started_at) = parse_rfc3339_timestamp(&record.started_at) {
-            if started_at < since {
-                continue;
-            }
+        if let Some(started_at) = parse_rfc3339_timestamp(&record.started_at)
+            && started_at < since
+        {
+            continue;
         }
         in_window += 1;
         let job = serde_json::to_value(record.task)

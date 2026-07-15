@@ -1140,10 +1140,11 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
     let mut touched = Vec::new();
 
     for file_path in &all_files {
-        if let Some(filter) = file_filter {
-            if !file_path.starts_with(filter) && *file_path != filter {
-                continue;
-            }
+        if let Some(filter) = file_filter
+            && !file_path.starts_with(filter)
+            && *file_path != filter
+        {
+            continue;
         }
 
         let base_nodes = base_cg.get_nodes_by_file(file_path).await?;
@@ -1161,10 +1162,10 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
 
         // Added: in head but not in base
         for (qn, node) in &head_map {
-            if let Some(filter) = kind_filter {
-                if node.kind.as_str() != filter {
-                    continue;
-                }
+            if let Some(filter) = kind_filter
+                && node.kind.as_str() != filter
+            {
+                continue;
             }
             if !base_map.contains_key(qn) {
                 added.push(json!({
@@ -1181,10 +1182,10 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
 
         // Removed: in base but not in head
         for (qn, node) in &base_map {
-            if let Some(filter) = kind_filter {
-                if node.kind.as_str() != filter {
-                    continue;
-                }
+            if let Some(filter) = kind_filter
+                && node.kind.as_str() != filter
+            {
+                continue;
             }
             if !head_map.contains_key(qn) {
                 removed.push(json!({
@@ -1201,24 +1202,24 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
 
         // Changed: in both but signature differs
         for (qn, head_node) in &head_map {
-            if let Some(filter) = kind_filter {
-                if head_node.kind.as_str() != filter {
-                    continue;
-                }
+            if let Some(filter) = kind_filter
+                && head_node.kind.as_str() != filter
+            {
+                continue;
             }
-            if let Some(base_node) = base_map.get(qn) {
-                if base_node.signature != head_node.signature {
-                    changed.push(json!({
-                        "name": head_node.name,
-                        "qualified_name": head_node.qualified_name,
-                        "kind": head_node.kind.as_str(),
-                        "file": head_node.file_path,
-                        "line": head_node.start_line,
-                        "base_signature": base_node.signature,
-                        "head_signature": head_node.signature,
-                    }));
-                    touched.push(head_node.file_path.clone());
-                }
+            if let Some(base_node) = base_map.get(qn)
+                && base_node.signature != head_node.signature
+            {
+                changed.push(json!({
+                    "name": head_node.name,
+                    "qualified_name": head_node.qualified_name,
+                    "kind": head_node.kind.as_str(),
+                    "file": head_node.file_path,
+                    "line": head_node.start_line,
+                    "base_signature": base_node.signature,
+                    "head_signature": head_node.signature,
+                }));
+                touched.push(head_node.file_path.clone());
             }
         }
     }

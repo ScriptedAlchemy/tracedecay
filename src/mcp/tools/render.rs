@@ -578,20 +578,20 @@ pub(super) fn risky_patterns_md(value: &Value) -> String {
         .unwrap_or(matches.len() as u64);
     md.field("Match count", &match_count.to_string());
 
-    if let Some(by_kind) = value.get("by_kind").and_then(Value::as_object) {
-        if !by_kind.is_empty() {
-            let mut entries: Vec<(String, u64)> = by_kind
-                .iter()
-                .map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0)))
-                .collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            let summary = entries
-                .iter()
-                .map(|(kind, count)| format!("{kind}: {count}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            md.field("By kind", &summary);
-        }
+    if let Some(by_kind) = value.get("by_kind").and_then(Value::as_object)
+        && !by_kind.is_empty()
+    {
+        let mut entries: Vec<(String, u64)> = by_kind
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0)))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let summary = entries
+            .iter()
+            .map(|(kind, count)| format!("{kind}: {count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        md.field("By kind", &summary);
     }
     md.blank();
 
@@ -606,15 +606,15 @@ pub(super) fn risky_patterns_md(value: &Value) -> String {
         let file = m.get("file").and_then(Value::as_str).unwrap_or("<unknown>");
         let line = m.get("line").and_then(Value::as_u64).unwrap_or(0);
         md.bullet(&format!("**{} at {file}:{line}**", kind.to_uppercase()));
-        if let Some(snippet) = m.get("snippet").and_then(Value::as_str) {
-            if !snippet.is_empty() {
-                md.line(&format!("  **Snippet:** {snippet}"));
-            }
+        if let Some(snippet) = m.get("snippet").and_then(Value::as_str)
+            && !snippet.is_empty()
+        {
+            md.line(&format!("  **Snippet:** {snippet}"));
         }
-        if let Some(enclosing) = m.get("enclosing").and_then(Value::as_str) {
-            if !enclosing.is_empty() {
-                md.line(&format!("  **Enclosing:** {enclosing}"));
-            }
+        if let Some(enclosing) = m.get("enclosing").and_then(Value::as_str)
+            && !enclosing.is_empty()
+        {
+            md.line(&format!("  **Enclosing:** {enclosing}"));
         }
         if m.get("in_test").and_then(Value::as_bool).unwrap_or(false) {
             md.line("  **In test:** true");
@@ -695,10 +695,10 @@ fn render_diagnostic_record(md: &mut Md, diagnostic: &Value) {
     if let Some(driver) = diagnostic.get("driver").and_then(Value::as_str) {
         md.line(&format!("  **Driver:** {driver}"));
     }
-    if let Some(enclosing) = diagnostic.get("enclosing").and_then(Value::as_str) {
-        if !enclosing.is_empty() {
-            md.line(&format!("  **Enclosing:** {enclosing}"));
-        }
+    if let Some(enclosing) = diagnostic.get("enclosing").and_then(Value::as_str)
+        && !enclosing.is_empty()
+    {
+        md.line(&format!("  **Enclosing:** {enclosing}"));
     }
     if let Some(node) = diagnostic.get("node").filter(|v| !v.is_null()) {
         let name = node
@@ -820,10 +820,11 @@ fn scalar_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Number(n) => {
-            if let Some(f) = n.as_f64() {
-                if n.as_i64().is_none() && n.as_u64().is_none() {
-                    return format_score(f);
-                }
+            if let Some(f) = n.as_f64()
+                && n.as_i64().is_none()
+                && n.as_u64().is_none()
+            {
+                return format_score(f);
             }
             n.to_string()
         }
@@ -836,12 +837,11 @@ fn scalar_str(v: &Value) -> String {
 /// Key-aware scalar rendering: humanizes epoch timestamps for `*_at`/`*_time`
 /// keys and otherwise defers to [`scalar_str`] (which rounds floats).
 fn scalar_str_keyed(key: &str, v: &Value) -> String {
-    if is_timestamp_key(key) {
-        if let Some(ts) = v.as_u64() {
-            if ts > 100_000_000 {
-                return format!("{} ({ts})", format_relative_time(ts));
-            }
-        }
+    if is_timestamp_key(key)
+        && let Some(ts) = v.as_u64()
+        && ts > 100_000_000
+    {
+        return format!("{} ({ts})", format_relative_time(ts));
     }
     scalar_str(v)
 }
