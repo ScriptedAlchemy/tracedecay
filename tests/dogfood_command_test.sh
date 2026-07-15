@@ -43,7 +43,7 @@ test -x "$installed"
 cmp "$fake_target/release/tracedecay" "$staged"
 cmp "$staged" "$installed"
 
-grep -Fxq 'cargo build --locked --release --all-features --bin tracedecay' "$log"
+grep -Fxq 'cargo build --release --all-features --bin tracedecay' "$log"
 grep -Fxq 'post-update' "$log"
 grep -Fxq 'daemon restart' "$log"
 grep -Fxq 'daemon status' "$log"
