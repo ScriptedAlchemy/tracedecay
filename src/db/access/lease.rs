@@ -257,12 +257,7 @@ pub(super) fn acquire_process_lease(
     }
 
     let token = authority_token();
-    let held = match role {
-        DatabaseAuthorityRole::Daemon | DatabaseAuthorityRole::Test => {
-            acquire_daemon_locks(identity, &token, intent)?
-        }
-        DatabaseAuthorityRole::Maintenance => acquire_maintenance_locks(identity, &token, intent)?,
-    };
+    let held = acquire_authority_locks(identity, &token, intent, role)?;
     leases.insert(
         identity.database_key.clone(),
         ProcessLease::Authority {
@@ -274,14 +269,24 @@ pub(super) fn acquire_process_lease(
     Ok(token)
 }
 
-fn acquire_daemon_locks(
+fn acquire_authority_locks(
     identity: &DatabaseIdentity,
     token: &str,
     intent: &str,
+    role: DatabaseAuthorityRole,
 ) -> Result<HeldLocks> {
     let access = open_lock_file(&identity.access_lock_path)?;
-    fs2::FileExt::try_lock_shared(&access)
-        .map_err(|error| lock_acquisition_error("ordinary access", identity, intent, &error))?;
+    match role {
+        DatabaseAuthorityRole::Daemon | DatabaseAuthorityRole::Test => {
+            fs2::FileExt::try_lock_shared(&access).map_err(|error| {
+                lock_acquisition_error("ordinary access", identity, intent, &error)
+            })?;
+        }
+        DatabaseAuthorityRole::Maintenance => {
+            fs2::FileExt::try_lock_exclusive(&access)
+                .map_err(|error| lock_acquisition_error("maintenance", identity, intent, &error))?;
+        }
+    }
 
     let writer = match open_lock_file(&identity.writer_lock_path).and_then(|writer| {
         fs2::FileExt::try_lock_exclusive(&writer)
@@ -306,47 +311,17 @@ fn acquire_daemon_locks(
         let _ = fs2::FileExt::unlock(&access);
         return Err(error);
     }
-    Ok(HeldLocks::Daemon {
-        access,
-        writer,
-        owner,
-    })
-}
-
-fn acquire_maintenance_locks(
-    identity: &DatabaseIdentity,
-    token: &str,
-    intent: &str,
-) -> Result<HeldLocks> {
-    let access = open_lock_file(&identity.access_lock_path)?;
-    fs2::FileExt::try_lock_exclusive(&access)
-        .map_err(|error| lock_acquisition_error("maintenance", identity, intent, &error))?;
-    let writer = match open_lock_file(&identity.writer_lock_path).and_then(|writer| {
-        fs2::FileExt::try_lock_exclusive(&writer)
-            .map_err(|error| lock_acquisition_error("writer", identity, intent, &error))?;
-        Ok(writer)
-    }) {
-        Ok(writer) => writer,
-        Err(error) => {
-            let _ = fs2::FileExt::unlock(&access);
-            return Err(error);
-        }
-    };
-    if let Err(error) = reject_deletion_tombstone(identity, intent) {
-        let _ = fs2::FileExt::unlock(&writer);
-        let _ = fs2::FileExt::unlock(&access);
-        return Err(error);
-    }
-    let owner = writer_owner(token, intent);
-    if let Err(error) = write_owner(&identity.writer_owner_path, &owner) {
-        let _ = fs2::FileExt::unlock(&writer);
-        let _ = fs2::FileExt::unlock(&access);
-        return Err(error);
-    }
-    Ok(HeldLocks::Maintenance {
-        access,
-        writer,
-        owner,
+    Ok(match role {
+        DatabaseAuthorityRole::Daemon | DatabaseAuthorityRole::Test => HeldLocks::Daemon {
+            access,
+            writer,
+            owner,
+        },
+        DatabaseAuthorityRole::Maintenance => HeldLocks::Maintenance {
+            access,
+            writer,
+            owner,
+        },
     })
 }
 
