@@ -892,6 +892,19 @@ pub(crate) struct McpServerWriters {
     background_refresh: BackgroundRefreshWriter,
 }
 
+pub(crate) struct McpServerDaemonDatabases {
+    pub(crate) accounting: Option<Arc<GlobalDb>>,
+    pub(crate) registry: Arc<GlobalDb>,
+    pub(crate) project_sessions: Arc<GlobalDb>,
+    pub(crate) user_sessions: Arc<GlobalDb>,
+}
+
+pub(crate) struct McpServerDaemonAuthority {
+    pub(crate) databases: McpServerDaemonDatabases,
+    pub(crate) database_owner_reconciler: DatabaseOwnerReconciler,
+    pub(crate) writers: McpServerWriters,
+}
+
 impl McpServerWriters {
     pub(crate) fn daemon_owned(
         dashboard_automation: crate::dashboard::DashboardAutomationWriter,
@@ -943,20 +956,20 @@ impl McpServerConstructionContext {
     pub(crate) fn daemon_owned(
         cg: TraceDecay,
         scope_prefix: Option<String>,
-        global_db: Option<Arc<GlobalDb>>,
-        registry_db: Arc<GlobalDb>,
-        session_db: Arc<GlobalDb>,
-        user_session_db: Arc<GlobalDb>,
-        database_owner_reconciler: DatabaseOwnerReconciler,
-        writers: McpServerWriters,
+        authority: McpServerDaemonAuthority,
     ) -> Self {
+        let McpServerDaemonAuthority {
+            databases,
+            database_owner_reconciler,
+            writers,
+        } = authority;
         Self {
             cg,
             scope_prefix,
-            global_db,
-            registry_db: Some(registry_db),
-            session_db: Some(session_db),
-            user_session_db: Some(user_session_db),
+            global_db: databases.accounting,
+            registry_db: Some(databases.registry),
+            session_db: Some(databases.project_sessions),
+            user_session_db: Some(databases.user_sessions),
             allow_default_registry_fallback: false,
             automation_scheduler_reconciler: None,
             database_owner_reconciler: Some(database_owner_reconciler),

@@ -2322,16 +2322,20 @@ impl DaemonEngine {
         let context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
             cg,
             handshake.scope_prefix.clone(),
-            accounting_db,
-            registry_db,
-            session_db,
-            user_session_db,
-            database_owner_reconciler,
-            crate::mcp::server::McpServerWriters::daemon_owned(
-                coordinated_dashboard_automation_writer(self.store_administration.clone()),
-                coordinated_hook_branch_writer(self.store_administration.clone()),
-                coordinated_background_refresh_writer(self.store_administration.clone()),
-            ),
+            crate::mcp::server::McpServerDaemonAuthority {
+                databases: crate::mcp::server::McpServerDaemonDatabases {
+                    accounting: accounting_db,
+                    registry: registry_db,
+                    project_sessions: session_db,
+                    user_sessions: user_session_db,
+                },
+                database_owner_reconciler,
+                writers: crate::mcp::server::McpServerWriters::daemon_owned(
+                    coordinated_dashboard_automation_writer(self.store_administration.clone()),
+                    coordinated_hook_branch_writer(self.store_administration.clone()),
+                    coordinated_background_refresh_writer(self.store_administration.clone()),
+                ),
+            },
         )
         .with_automation_scheduler_reconciler(reconciler);
         let candidate = crate::mcp::McpServer::new_with_context(context).await;
@@ -2870,16 +2874,20 @@ async fn portable_project_server(
     let context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
         cg,
         handshake.scope_prefix.clone(),
-        accounting_db,
-        registry_db,
-        session_db,
-        user_session_db,
-        database_owner_reconciler,
-        crate::mcp::server::McpServerWriters::daemon_owned(
-            coordinated_dashboard_automation_writer(store_administration.clone()),
-            coordinated_hook_branch_writer(store_administration.clone()),
-            coordinated_background_refresh_writer(store_administration.clone()),
-        ),
+        crate::mcp::server::McpServerDaemonAuthority {
+            databases: crate::mcp::server::McpServerDaemonDatabases {
+                accounting: accounting_db,
+                registry: registry_db,
+                project_sessions: session_db,
+                user_sessions: user_session_db,
+            },
+            database_owner_reconciler,
+            writers: crate::mcp::server::McpServerWriters::daemon_owned(
+                coordinated_dashboard_automation_writer(store_administration.clone()),
+                coordinated_hook_branch_writer(store_administration.clone()),
+                coordinated_background_refresh_writer(store_administration.clone()),
+            ),
+        },
     );
     let candidate = crate::mcp::McpServer::new_with_context(context).await;
     let (resolved, inserted) = store_administration
