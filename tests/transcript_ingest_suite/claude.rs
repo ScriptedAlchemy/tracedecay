@@ -920,10 +920,9 @@ async fn claude_system_hook_errors_become_searchable_hook_events() {
     assert!(metadata.get("hook_count").is_some());
 
     // Durable message identity does not leak an absolute checkout/cache path.
-    assert_eq!(
-        hit.message.source_path.as_deref(),
-        Some("claude:claude-hook-sess")
-    );
+    let source_path = hit.message.source_path.as_deref().unwrap();
+    assert!(source_path.starts_with("tracedecay-claude-observation-source-v1-sha256-"));
+    assert!(!source_path.contains(tmp.path().to_string_lossy().as_ref()));
     assert!(hit.message.source_offset.is_some());
 
     let routine = db

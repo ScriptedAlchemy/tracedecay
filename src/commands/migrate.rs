@@ -463,7 +463,7 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                 tracedecay::migrate::registry::StaleRootScope::CanonicalRootMissing,
             );
             let mut stale_storage_projects = Vec::new();
-            for project_path in global_db.list_project_paths().await {
+            for project_path in global_db.list_project_paths_compat().await {
                 let project_path = PathBuf::from(project_path);
                 if !prefixes.is_empty()
                     && !prefixes

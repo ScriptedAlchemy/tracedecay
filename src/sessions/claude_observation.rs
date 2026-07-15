@@ -1,45 +1,50 @@
 //! Observation-first Claude transcript ingestion.
 //!
 //! The provider owns framing and scope. This coordinator owns the mandatory
-//! sanitizer/store boundary, feeds the exact committed sanitized value into
-//! the existing V1 fold, then drains projection work in source order.
+//! sanitizer/store boundary, then drains projection work in source order. The
+//! projector is the only writer of V1 session and message rows.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, DomainError, ObservationContractError,
-    ObservationScopeV1, RetentionClass, SessionId,
+    ObservationScopeV1, RetentionClass, SanitizationReceiptV1, SessionId,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
 };
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationStoreError,
-    ProjectionPersistOutcome, ProjectionStoreError,
+    ProjectionPersistOutcome, ProjectionStoreError, TranscriptStoreError,
 };
 
 use crate::application::observation::{
-    CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest,
-    CaptureClaudeObservationRequestError, ObservationApplication, ObservationApplicationError,
-    ObservationCancellation,
+    AdvanceNonDurableSourceCursorRequest, CaptureClaudeObservationOutcome,
+    CaptureClaudeObservationRequest, CaptureClaudeObservationRequestError, ObservationApplication,
+    ObservationApplicationError, ObservationCancellation,
 };
 use crate::privacy::{ClaudeRecordSanitizerV1, PrivacySanitizerError};
 use crate::sessions::claude::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSource,
-    ClaudeSourceFrame, identify_claude_source, scan_claude_source_frames,
+    ClaudeSourceFrame, identify_claude_source, try_scan_claude_source_frames_with_resume,
 };
 use crate::sessions::shared::{StoredCursor, TranscriptIngestStats};
 use crate::sessions::source::{
-    TranscriptSource, load_transcript_cursor, persist_parsed_transcript,
+    JsonlResumeState, STRICT_JSONL_BATCH_BYTES, TranscriptIngestError, TranscriptSource,
+    load_transcript_cursor,
 };
 use crate::store::{GlobalDbObservationStore, GlobalDbTranscriptStore};
 
 pub(crate) const CLAUDE_TRANSCRIPT_RETENTION_CLASS: &str = "transcript.claude.v1";
-/// A prompt hook never allocates an unbounded historical tail. Startup recovery
-/// deliberately passes `None` so a deferred hook backlog has a drain path.
-pub(crate) const CLAUDE_HOOK_MAX_NEW_BYTES: u64 = 2 * 1024 * 1024;
+/// Every pass, including startup recovery, bounds its raw and parsed backlog.
+pub(crate) const CLAUDE_HOOK_MAX_NEW_BYTES: u64 = STRICT_JSONL_BATCH_BYTES;
+const CLAUDE_RECOVERY_MAX_NEW_BYTES: u64 = STRICT_JSONL_BATCH_BYTES * 8;
+const MAX_CLAUDE_SOURCES_PER_PASS: usize = 64;
+const CLAUDE_SOURCE_FRONTIER_KEY: &str =
+    "tracedecay-internal:claude-observation-source-frontier:v1";
 const MAX_PROJECTIONS_PER_PASS: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -55,6 +60,7 @@ pub(crate) struct ClaudeObservationIngestStats {
     pub projections_skipped: u64,
     pub projection_duplicates: u64,
     pub deferred_sources: u64,
+    pub source_bytes_scanned: u64,
 }
 
 impl ClaudeObservationIngestStats {
@@ -85,6 +91,9 @@ impl ClaudeObservationIngestStats {
             .projection_duplicates
             .saturating_add(other.projection_duplicates);
         self.deferred_sources = self.deferred_sources.saturating_add(other.deferred_sources);
+        self.source_bytes_scanned = self
+            .source_bytes_scanned
+            .saturating_add(other.source_bytes_scanned);
         self
     }
 }
@@ -111,32 +120,48 @@ pub(crate) enum ClaudeObservationIngestError {
     Store(#[from] ObservationStoreError),
     #[error("Claude observation projection failed")]
     Projection(#[from] ProjectionStoreError),
-    #[error("Claude transcript cursor could not be loaded")]
-    TranscriptCursorUnavailable,
+    #[error("Claude transcript ingest failed")]
+    Transcript(#[from] TranscriptIngestError),
     #[error("Claude observation frame is not in the parsed state")]
     MissingParsedRecord,
     #[error("Claude observation frame rejected its sanitized replacement")]
     InvalidFrameState,
     #[error("Claude observation scanner returned non-contiguous coverage")]
     NonContiguousCoverage,
+    #[error(
+        "Claude observation ingestion failed for {failed_sources} source(s); first reason: {first_reason_code}"
+    )]
+    SourceFailures {
+        failed_sources: u64,
+        first_reason_code: &'static str,
+        first_retryable: bool,
+    },
 }
 
 enum FrameCaptureOutcome {
     Persisted(CapturedClaudeFrame),
-    Rejected,
-    Quarantined,
+    Rejected(SanitizationReceiptV1),
+    Quarantined(SanitizationReceiptV1),
 }
 
 struct FrameCaptureContext {
     source: ClaudeSourceIdentityV1,
     scope: ObservationScopeV1,
     generation: ClaudeFileGenerationV1,
+    file_identity: u64,
     retention_class: RetentionClass,
     cancellation: ObservationCancellation,
 }
 
+struct NonDurableSegment {
+    covered: ClaudeByteRangeV1,
+    reason: NonDurableFrameReason,
+    sanitization_receipt: Option<SanitizationReceiptV1>,
+    resume_fingerprint: u64,
+}
+
 enum ScannedSegment {
-    Frame(ClaudeSourceFrame),
+    Frame(Box<ClaudeSourceFrame>),
     Skipped(ClaudeSkippedFrame),
 }
 
@@ -154,6 +179,13 @@ impl ScannedSegment {
             Self::Skipped(frame) => frame.end_offset,
         }
     }
+
+    fn resume_fingerprint(&self) -> u64 {
+        match self {
+            Self::Frame(frame) => frame.resume_fingerprint,
+            Self::Skipped(frame) => frame.resume_fingerprint,
+        }
+    }
 }
 
 /// Converts a durable observation cursor into a provider scanner cursor.
@@ -165,22 +197,14 @@ pub(crate) fn scanner_cursor(cursor: Option<&ClaudeSourceCursorV1>) -> StoredCur
     })
 }
 
-fn earliest_scanner_cursor(
-    v1: StoredCursor,
+fn authoritative_scanner_cursor(
+    legacy: StoredCursor,
     observation: Option<&ClaudeSourceCursorV1>,
 ) -> StoredCursor {
-    let observation = scanner_cursor(observation);
-    if v1.file_id == observation.file_id {
-        if v1.position <= observation.position {
-            v1
-        } else {
-            observation
-        }
-    } else {
-        // A missing cursor or a generation disagreement requires a replay from
-        // zero. Both stores are idempotent, so this cannot regress either sink.
-        StoredCursor::default()
-    }
+    // Existing installs bootstrap observation capture at the legacy V1
+    // frontier once. After the first observation cursor exists, that cursor is
+    // the sole scan authority; the projector is the sole V1 writer.
+    observation.map_or(legacy, |cursor| scanner_cursor(Some(cursor)))
 }
 
 fn cursor_at(
@@ -188,8 +212,14 @@ fn cursor_at(
     scope: &ObservationScopeV1,
     generation: ClaudeFileGenerationV1,
     offset: u64,
+    resume_checkpoint: Option<(u64, u64)>,
 ) -> Result<ClaudeSourceCursorV1, ObservationContractError> {
-    ClaudeSourceCursorV1::new(source.clone(), scope.clone(), generation, offset)
+    let cursor = ClaudeSourceCursorV1::new(source.clone(), scope.clone(), generation, offset)?;
+    Ok(
+        resume_checkpoint.map_or(cursor.clone(), |(file_identity, resume_fingerprint)| {
+            cursor.with_resume_checkpoint(file_identity, resume_fingerprint)
+        }),
+    )
 }
 
 fn expected_cursor_for_frame(
@@ -205,7 +235,7 @@ fn expected_cursor_for_frame(
         // Commit-before-ACK replay: persistence classifies the immutable
         // observation before cursor CAS, so its original frame-start cursor is
         // the only valid duplicate request.
-        return cursor_at(source, scope, generation, frame_start).map(Some);
+        return cursor_at(source, scope, generation, frame_start, None).map(Some);
     }
     Ok(actual.cloned())
 }
@@ -250,7 +280,8 @@ where
         expected_cursor,
         context.retention_class.clone(),
         context.cancellation.clone(),
-    )?;
+    )?
+    .with_resume_checkpoint(context.file_identity, frame.resume_fingerprint);
     match application.capture_claude_observation(request).await? {
         CaptureClaudeObservationOutcome::Persisted {
             outcome,
@@ -266,34 +297,353 @@ where
                 exact_duplicate: matches!(outcome, ObservationPersistOutcome::ExactDuplicate(_)),
             }))
         }
-        CaptureClaudeObservationOutcome::Rejected { .. } => Ok(FrameCaptureOutcome::Rejected),
-        CaptureClaudeObservationOutcome::Quarantined { .. } => Ok(FrameCaptureOutcome::Quarantined),
+        CaptureClaudeObservationOutcome::Rejected { receipt, .. } => {
+            Ok(FrameCaptureOutcome::Rejected(receipt))
+        }
+        CaptureClaudeObservationOutcome::Quarantined { receipt, .. } => {
+            Ok(FrameCaptureOutcome::Quarantined(receipt))
+        }
     }
 }
 
-async fn advance_non_durable<S>(
+async fn advance_non_durable_covered_range<S>(
     application: &ObservationApplication<S>,
-    source: &ClaudeSourceIdentityV1,
-    scope: &ObservationScopeV1,
-    generation: ClaudeFileGenerationV1,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
-    covered: ClaudeByteRangeV1,
-    reason: NonDurableFrameReason,
-) -> Result<CursorAdvanceOutcome, ClaudeObservationIngestError>
+    context: &FrameCaptureContext,
+    observation_cursor: &mut Option<ClaudeSourceCursorV1>,
+    segment: NonDurableSegment,
+    stats: &mut ClaudeObservationIngestStats,
+) -> Result<(), ClaudeObservationIngestError>
 where
     S: ObservationStore,
 {
-    let advance = ObservationCursorAdvance::new(
-        source.clone(),
-        scope.clone(),
-        generation,
-        expected_cursor,
+    let NonDurableSegment {
         covered,
         reason,
+        sanitization_receipt,
+        resume_fingerprint,
+    } = segment;
+    if observation_cursor.as_ref().is_some_and(|cursor| {
+        cursor.generation() == context.generation && cursor.byte_offset() >= covered.end()
+    }) {
+        stats.cursor_duplicates = stats.cursor_duplicates.saturating_add(1);
+        return Ok(());
+    }
+
+    let end = covered.end();
+    let advance = match sanitization_receipt {
+        Some(receipt) => ObservationCursorAdvance::new_with_sanitization_receipt(
+            context.source.clone(),
+            context.scope.clone(),
+            context.generation,
+            observation_cursor.clone(),
+            covered,
+            reason,
+            receipt,
+        )?,
+        None => ObservationCursorAdvance::new(
+            context.source.clone(),
+            context.scope.clone(),
+            context.generation,
+            observation_cursor.clone(),
+            covered,
+            reason,
+        )?,
+    }
+    .with_resume_checkpoint(context.file_identity, resume_fingerprint);
+    let outcome = application
+        .advance_non_durable_source_cursor(AdvanceNonDurableSourceCursorRequest::new(
+            advance,
+            context.cancellation.clone(),
+        ))
+        .await?;
+    *observation_cursor = Some(cursor_at(
+        &context.source,
+        &context.scope,
+        context.generation,
+        end,
+        Some((context.file_identity, resume_fingerprint)),
+    )?);
+    match outcome {
+        CursorAdvanceOutcome::Committed => {
+            stats.cursor_advances = stats.cursor_advances.saturating_add(1);
+        }
+        CursorAdvanceOutcome::ExactDuplicate => {
+            stats.cursor_duplicates = stats.cursor_duplicates.saturating_add(1);
+        }
+    }
+    Ok(())
+}
+
+struct PreparedSource<'a> {
+    application: ObservationApplication<GlobalDbObservationStore<'a>>,
+    capture_context: FrameCaptureContext,
+    observation_cursor: Option<ClaudeSourceCursorV1>,
+    segments: Vec<ScannedSegment>,
+    stats: ClaudeObservationIngestStats,
+}
+
+enum SourcePreparation<'a> {
+    Finished(ClaudeObservationIngestStats),
+    Ready(Box<PreparedSource<'a>>),
+}
+
+fn scan_stats(coverage: ClaudeFrameCoverage, read_through: u64) -> ClaudeObservationIngestStats {
+    let start_offset = match coverage {
+        ClaudeFrameCoverage::Complete { start_offset, .. }
+        | ClaudeFrameCoverage::Deferred { start_offset, .. } => start_offset,
+    };
+    ClaudeObservationIngestStats {
+        deferred_sources: u64::from(matches!(coverage, ClaudeFrameCoverage::Deferred { .. })),
+        source_bytes_scanned: read_through.saturating_sub(start_offset),
+        ..ClaudeObservationIngestStats::default()
+    }
+}
+
+fn deferred_source_stats(source_bytes_scanned: u64) -> ClaudeObservationIngestStats {
+    ClaudeObservationIngestStats {
+        deferred_sources: 1,
+        source_bytes_scanned,
+        ..ClaudeObservationIngestStats::default()
+    }
+}
+
+fn scanned_segments(
+    frames: Vec<ClaudeSourceFrame>,
+    skipped_frames: Vec<ClaudeSkippedFrame>,
+) -> Result<Vec<ScannedSegment>, ClaudeObservationIngestError> {
+    let mut segments = Vec::with_capacity(frames.len() + skipped_frames.len());
+    segments.extend(frames.into_iter().map(Box::new).map(ScannedSegment::Frame));
+    segments.extend(skipped_frames.into_iter().map(ScannedSegment::Skipped));
+    segments.sort_by_key(ScannedSegment::start);
+    if segments
+        .windows(2)
+        .any(|pair| pair[0].end() != pair[1].start())
+    {
+        return Err(ClaudeObservationIngestError::NonContiguousCoverage);
+    }
+    Ok(segments)
+}
+
+async fn prepare_source<'a>(
+    db: &'a crate::global_db::GlobalDb,
+    source_adapter: &ClaudeSource,
+    path: &Path,
+    project_root: &Path,
+    scope: &ObservationScopeV1,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+) -> Result<SourcePreparation<'a>, ClaudeObservationIngestError> {
+    if cancellation.is_cancelled() {
+        return Err(ObservationApplicationError::Cancelled.into());
+    }
+    let identity = identify_claude_source(path).ok_or_else(|| {
+        TranscriptIngestError::InvalidSourceIdentity {
+            provider: "claude",
+            path: path.to_path_buf(),
+        }
+    })?;
+    let source = ClaudeSourceIdentityV1::for_source(
+        SessionId::new(identity.session_id.clone())?,
+        SessionId::new(identity.source_id.clone())?,
     )?;
-    Ok(application
-        .advance_non_durable_source_cursor(advance)
-        .await?)
+    let observation_store = GlobalDbObservationStore::new(db);
+    let transcript_store = GlobalDbTranscriptStore::new(db);
+    let loaded = load_transcript_cursor(&transcript_store, identity.cursor_key.clone()).await?;
+    let observation_cursor = observation_store.get_source_cursor(&source, scope).await?;
+    let previous =
+        authoritative_scanner_cursor(loaded.checkpoint.state, observation_cursor.as_ref());
+    let resume_state = observation_cursor.as_ref().and_then(|cursor| {
+        Some(JsonlResumeState {
+            generation: cursor.generation().file_id(),
+            file_identity: cursor.file_identity()?,
+            fingerprint: cursor.resume_fingerprint()?,
+        })
+    });
+    let Some(mut scan) =
+        try_scan_claude_source_frames_with_resume(identity, previous, max_new_bytes, resume_state)?
+    else {
+        return Ok(SourcePreparation::Finished(
+            ClaudeObservationIngestStats::default(),
+        ));
+    };
+    let coverage = scan.coverage;
+    let stats = scan_stats(coverage, scan.read_through);
+    if matches!(
+        coverage,
+        ClaudeFrameCoverage::Deferred {
+            start_offset,
+            covered_through,
+            ..
+        } if start_offset == covered_through
+    ) {
+        return Ok(SourcePreparation::Finished(deferred_source_stats(
+            stats.source_bytes_scanned,
+        )));
+    }
+    if let ClaudeFrameCoverage::Deferred {
+        start_offset,
+        covered_through,
+        ..
+    } = coverage
+    {
+        // Scope filtering historically treated every backlog deferral as an
+        // empty scan. A progressive bounded batch is complete through its
+        // covered prefix; restore the deferral after filtering for accounting.
+        scan.coverage = ClaudeFrameCoverage::Complete {
+            start_offset,
+            end_offset: covered_through,
+        };
+    }
+    let retained = source_adapter.retain_scoped_frames(&mut scan, project_root);
+    scan.coverage = coverage;
+    if retained.is_none() {
+        return Ok(SourcePreparation::Finished(deferred_source_stats(
+            stats.source_bytes_scanned,
+        )));
+    }
+
+    let generation = ClaudeFileGenerationV1::new(scan.file_generation)?;
+    let sanitizer = ClaudeRecordSanitizerV1::pr5()?;
+    let application = ObservationApplication::new(observation_store, sanitizer);
+    let retention_class = RetentionClass::new(CLAUDE_TRANSCRIPT_RETENTION_CLASS)?;
+    let capture_context = FrameCaptureContext {
+        source,
+        scope: scope.clone(),
+        generation,
+        file_identity: scan.file_identity,
+        retention_class,
+        cancellation: cancellation.clone(),
+    };
+    let segments = scanned_segments(
+        std::mem::take(&mut scan.frames),
+        std::mem::take(&mut scan.skipped_frames),
+    )?;
+    Ok(SourcePreparation::Ready(Box::new(PreparedSource {
+        application,
+        capture_context,
+        observation_cursor,
+        segments,
+        stats,
+    })))
+}
+
+async fn apply_scanned_segment(
+    application: &ObservationApplication<GlobalDbObservationStore<'_>>,
+    capture_context: &FrameCaptureContext,
+    observation_cursor: &mut Option<ClaudeSourceCursorV1>,
+    segment: ScannedSegment,
+    stats: &mut ClaudeObservationIngestStats,
+) -> Result<(), ClaudeObservationIngestError> {
+    let resume_fingerprint = segment.resume_fingerprint();
+    match segment {
+        ScannedSegment::Skipped(skipped) => {
+            let covered = ClaudeByteRangeV1::new(skipped.offset, skipped.end_offset)?;
+            let reason = match skipped.reason {
+                ClaudeSkippedFrameReason::Whitespace => NonDurableFrameReason::BlankFrame,
+                ClaudeSkippedFrameReason::OutOfScope => NonDurableFrameReason::OutOfScope,
+                ClaudeSkippedFrameReason::Malformed => NonDurableFrameReason::MalformedFrame,
+                ClaudeSkippedFrameReason::Oversized => NonDurableFrameReason::OversizedFrame,
+            };
+            advance_non_durable_covered_range(
+                application,
+                capture_context,
+                observation_cursor,
+                NonDurableSegment {
+                    covered,
+                    reason,
+                    sanitization_receipt: None,
+                    resume_fingerprint,
+                },
+                stats,
+            )
+            .await?;
+        }
+        ScannedSegment::Frame(mut frame) => {
+            let expected = expected_cursor_for_frame(
+                observation_cursor.as_ref(),
+                &capture_context.source,
+                &capture_context.scope,
+                capture_context.generation,
+                frame.offset,
+            )?;
+            let range = ClaudeByteRangeV1::new(frame.offset, frame.end_offset)?;
+            match capture_frame(application, &mut frame, expected, capture_context).await? {
+                FrameCaptureOutcome::Persisted(captured) => {
+                    *observation_cursor = Some(cursor_after_receipt(
+                        observation_cursor.take(),
+                        &captured.committed_cursor,
+                    ));
+                    if captured.exact_duplicate {
+                        stats.observation_duplicates =
+                            stats.observation_duplicates.saturating_add(1);
+                    } else {
+                        stats.observations_committed =
+                            stats.observations_committed.saturating_add(1);
+                    }
+                }
+                FrameCaptureOutcome::Rejected(receipt) => {
+                    stats.records_rejected = stats.records_rejected.saturating_add(1);
+                    advance_non_durable_covered_range(
+                        application,
+                        capture_context,
+                        observation_cursor,
+                        NonDurableSegment {
+                            covered: range,
+                            reason: NonDurableFrameReason::SanitizerRejected,
+                            sanitization_receipt: Some(receipt),
+                            resume_fingerprint,
+                        },
+                        stats,
+                    )
+                    .await?;
+                }
+                FrameCaptureOutcome::Quarantined(receipt) => {
+                    stats.records_quarantined = stats.records_quarantined.saturating_add(1);
+                    advance_non_durable_covered_range(
+                        application,
+                        capture_context,
+                        observation_cursor,
+                        NonDurableSegment {
+                            covered: range,
+                            reason: NonDurableFrameReason::SanitizerQuarantined,
+                            sanitization_receipt: Some(receipt),
+                            resume_fingerprint,
+                        },
+                        stats,
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn apply_prepared_source(
+    prepared: PreparedSource<'_>,
+    cancellation: &ObservationCancellation,
+) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
+    let PreparedSource {
+        application,
+        capture_context,
+        mut observation_cursor,
+        segments,
+        mut stats,
+    } = prepared;
+    for segment in segments {
+        if cancellation.is_cancelled() {
+            return Err(ObservationApplicationError::Cancelled.into());
+        }
+        apply_scanned_segment(
+            &application,
+            &capture_context,
+            &mut observation_cursor,
+            segment,
+            &mut stats,
+        )
+        .await?;
+    }
+    Ok(stats)
 }
 
 async fn process_source(
@@ -305,222 +655,20 @@ async fn process_source(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
-    if cancellation.is_cancelled() {
-        return Err(ObservationApplicationError::Cancelled.into());
-    }
-    let Some(identity) = identify_claude_source(path) else {
-        return Ok(ClaudeObservationIngestStats::default());
-    };
-    let source = ClaudeSourceIdentityV1::new(SessionId::new(identity.session_id.clone())?)?;
-    let observation_store = GlobalDbObservationStore::new(db);
-    let transcript_store = GlobalDbTranscriptStore::new(db);
-    let loaded = load_transcript_cursor(&transcript_store, identity.cursor_key.clone())
-        .await
-        .ok_or(ClaudeObservationIngestError::TranscriptCursorUnavailable)?;
-    let observation_cursor = observation_store.get_source_cursor(&source, scope).await?;
-    let previous = earliest_scanner_cursor(loaded.checkpoint.state, observation_cursor.as_ref());
-    let Some(mut scan) = scan_claude_source_frames(identity, previous, max_new_bytes) else {
-        return Ok(ClaudeObservationIngestStats::default());
-    };
-    if source_adapter
-        .retain_scoped_frames(&mut scan, project_root)
-        .is_none()
-    {
-        return Ok(ClaudeObservationIngestStats {
-            deferred_sources: 1,
-            ..ClaudeObservationIngestStats::default()
-        });
-    }
-    if matches!(
-        scan.coverage,
-        ClaudeFrameCoverage::Deferred {
-            start_offset,
-            covered_through,
-            ..
-        } if start_offset == covered_through
-    ) {
-        return Ok(ClaudeObservationIngestStats {
-            deferred_sources: 1,
-            ..ClaudeObservationIngestStats::default()
-        });
-    }
-    let source_deferred = matches!(scan.coverage, ClaudeFrameCoverage::Deferred { .. });
-
-    let generation = ClaudeFileGenerationV1::new(scan.file_generation)?;
-    let sanitizer = ClaudeRecordSanitizerV1::pr5()?;
-    let application = ObservationApplication::new(observation_store, sanitizer);
-    let retention_class = RetentionClass::new(CLAUDE_TRANSCRIPT_RETENTION_CLASS)?;
-    let capture_context = FrameCaptureContext {
-        source: source.clone(),
-        scope: scope.clone(),
-        generation,
-        retention_class,
-        cancellation: cancellation.clone(),
-    };
-    let mut segments = Vec::with_capacity(scan.frames.len() + scan.skipped_frames.len());
-    segments.extend(
-        std::mem::take(&mut scan.frames)
-            .into_iter()
-            .map(ScannedSegment::Frame),
-    );
-    segments.extend(
-        std::mem::take(&mut scan.skipped_frames)
-            .into_iter()
-            .map(ScannedSegment::Skipped),
-    );
-    segments.sort_by_key(ScannedSegment::start);
-    if segments
-        .windows(2)
-        .any(|pair| pair[0].end() != pair[1].start())
-    {
-        return Err(ClaudeObservationIngestError::NonContiguousCoverage);
-    }
-
-    let mut stats = ClaudeObservationIngestStats {
-        deferred_sources: u64::from(source_deferred),
-        ..ClaudeObservationIngestStats::default()
-    };
-    let mut observation_cursor = observation_cursor;
-    let mut sanitized_frames = Vec::new();
-    for segment in segments {
-        if cancellation.is_cancelled() {
-            return Err(ObservationApplicationError::Cancelled.into());
-        }
-        match segment {
-            ScannedSegment::Skipped(skipped) => {
-                if observation_cursor.as_ref().is_some_and(|cursor| {
-                    cursor.generation() == generation && cursor.byte_offset() >= skipped.end_offset
-                }) {
-                    stats.cursor_duplicates = stats.cursor_duplicates.saturating_add(1);
-                    continue;
-                }
-                let covered = ClaudeByteRangeV1::new(skipped.offset, skipped.end_offset)?;
-                let reason = match skipped.reason {
-                    ClaudeSkippedFrameReason::Whitespace => NonDurableFrameReason::BlankFrame,
-                    ClaudeSkippedFrameReason::OutOfScope => NonDurableFrameReason::OutOfScope,
-                };
-                let outcome = advance_non_durable(
-                    &application,
-                    &source,
-                    scope,
-                    generation,
-                    observation_cursor.clone(),
-                    covered,
-                    reason,
-                )
-                .await?;
-                observation_cursor =
-                    Some(cursor_at(&source, scope, generation, skipped.end_offset)?);
-                match outcome {
-                    CursorAdvanceOutcome::Committed => {
-                        stats.cursor_advances = stats.cursor_advances.saturating_add(1);
-                    }
-                    CursorAdvanceOutcome::ExactDuplicate => {
-                        stats.cursor_duplicates = stats.cursor_duplicates.saturating_add(1);
-                    }
-                }
-            }
-            ScannedSegment::Frame(mut frame) => {
-                let expected = expected_cursor_for_frame(
-                    observation_cursor.as_ref(),
-                    &source,
-                    scope,
-                    generation,
-                    frame.offset,
-                )?;
-                let range = ClaudeByteRangeV1::new(frame.offset, frame.end_offset)?;
-                match capture_frame(&application, &mut frame, expected, &capture_context).await? {
-                    FrameCaptureOutcome::Persisted(captured) => {
-                        observation_cursor = Some(cursor_after_receipt(
-                            observation_cursor,
-                            &captured.committed_cursor,
-                        ));
-                        if captured.exact_duplicate {
-                            stats.observation_duplicates =
-                                stats.observation_duplicates.saturating_add(1);
-                        } else {
-                            stats.observations_committed =
-                                stats.observations_committed.saturating_add(1);
-                        }
-                        sanitized_frames.push(frame);
-                    }
-                    FrameCaptureOutcome::Rejected => {
-                        stats.records_rejected = stats.records_rejected.saturating_add(1);
-                        if observation_cursor.as_ref().is_some_and(|cursor| {
-                            cursor.generation() == generation && cursor.byte_offset() >= range.end()
-                        }) {
-                            stats.cursor_duplicates = stats.cursor_duplicates.saturating_add(1);
-                            continue;
-                        }
-                        let outcome = advance_non_durable(
-                            &application,
-                            &source,
-                            scope,
-                            generation,
-                            observation_cursor.clone(),
-                            range,
-                            NonDurableFrameReason::SanitizerRejected,
-                        )
-                        .await?;
-                        observation_cursor =
-                            Some(cursor_at(&source, scope, generation, range.end())?);
-                        match outcome {
-                            CursorAdvanceOutcome::Committed => {
-                                stats.cursor_advances = stats.cursor_advances.saturating_add(1);
-                            }
-                            CursorAdvanceOutcome::ExactDuplicate => {
-                                stats.cursor_duplicates = stats.cursor_duplicates.saturating_add(1);
-                            }
-                        }
-                    }
-                    FrameCaptureOutcome::Quarantined => {
-                        stats.records_quarantined = stats.records_quarantined.saturating_add(1);
-                        if observation_cursor.as_ref().is_some_and(|cursor| {
-                            cursor.generation() == generation && cursor.byte_offset() >= range.end()
-                        }) {
-                            stats.cursor_duplicates = stats.cursor_duplicates.saturating_add(1);
-                            continue;
-                        }
-                        let outcome = advance_non_durable(
-                            &application,
-                            &source,
-                            scope,
-                            generation,
-                            observation_cursor.clone(),
-                            range,
-                            NonDurableFrameReason::SanitizerQuarantined,
-                        )
-                        .await?;
-                        observation_cursor =
-                            Some(cursor_at(&source, scope, generation, range.end())?);
-                        match outcome {
-                            CursorAdvanceOutcome::Committed => {
-                                stats.cursor_advances = stats.cursor_advances.saturating_add(1);
-                            }
-                            CursorAdvanceOutcome::ExactDuplicate => {
-                                stats.cursor_duplicates = stats.cursor_duplicates.saturating_add(1);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    scan.frames = sanitized_frames;
-    let Some(parsed) = source_adapter.fold_scanned_frames(&scan, project_root) else {
-        return Err(ClaudeObservationIngestError::InvalidFrameState);
-    };
-    stats.transcript = persist_parsed_transcript(
-        &transcript_store,
-        "claude",
+    match prepare_source(
+        db,
+        source_adapter,
         path,
         project_root,
-        loaded,
-        &scan.previous_cursor,
-        parsed,
+        scope,
+        max_new_bytes,
+        cancellation,
     )
-    .await;
-    Ok(stats)
+    .await?
+    {
+        SourcePreparation::Finished(stats) => Ok(stats),
+        SourcePreparation::Ready(prepared) => apply_prepared_source(*prepared, cancellation).await,
+    }
 }
 
 async fn drain_projection_queue(
@@ -529,6 +677,7 @@ async fn drain_projection_queue(
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
     let store = GlobalDbObservationStore::new(db);
     let mut stats = ClaudeObservationIngestStats::default();
+    let mut projected_sessions = HashSet::new();
     for _ in 0..MAX_PROJECTIONS_PER_PASS {
         if cancellation.is_cancelled() {
             return Err(ObservationApplicationError::Cancelled.into());
@@ -539,6 +688,18 @@ async fn drain_projection_queue(
         match store.project_observation(&observation_id).await? {
             ProjectionPersistOutcome::Projected(_) => {
                 stats.projections_completed = stats.projections_completed.saturating_add(1);
+                stats.transcript.messages_upserted =
+                    stats.transcript.messages_upserted.saturating_add(1);
+                if let Some(observation) = store.get_observation(&observation_id).await? {
+                    projected_sessions.insert(
+                        observation
+                            .observation()
+                            .source()
+                            .session_id()
+                            .as_str()
+                            .to_owned(),
+                    );
+                }
             }
             ProjectionPersistOutcome::Skipped { .. } => {
                 stats.projections_skipped = stats.projections_skipped.saturating_add(1);
@@ -548,7 +709,68 @@ async fn drain_projection_queue(
             }
         }
     }
+    stats.transcript.sessions_upserted =
+        u64::try_from(projected_sessions.len()).unwrap_or(u64::MAX);
     Ok(stats)
+}
+
+fn frontier_store_error(
+    operation: &'static str,
+    error: impl std::fmt::Debug,
+) -> ClaudeObservationIngestError {
+    TranscriptIngestError::Store(TranscriptStoreError::Storage {
+        operation,
+        source: Box::new(std::io::Error::other(format!("{error:?}"))),
+    })
+    .into()
+}
+
+async fn scheduled_source_paths(
+    db: &crate::global_db::GlobalDb,
+    source: &ClaudeSource,
+    project_root: &Path,
+) -> Result<(Vec<PathBuf>, usize), ClaudeObservationIngestError> {
+    let mut paths = source.transcript_paths(project_root);
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        return Ok((paths, 0));
+    }
+    let frontier = db
+        .get_parse_offset_result(CLAUDE_SOURCE_FRONTIER_KEY)
+        .await
+        .map_err(|error| frontier_store_error("read Claude source frontier", error))?
+        .unwrap_or_default();
+    let start = usize::try_from(frontier.byte_offset).unwrap_or(usize::MAX) % paths.len();
+    paths.rotate_left(start);
+    let deferred = paths.len().saturating_sub(MAX_CLAUDE_SOURCES_PER_PASS);
+    paths.truncate(MAX_CLAUDE_SOURCES_PER_PASS);
+    Ok((paths, deferred))
+}
+
+async fn advance_source_frontier(
+    db: &crate::global_db::GlobalDb,
+    processed: usize,
+) -> Result<(), ClaudeObservationIngestError> {
+    if processed == 0 {
+        return Ok(());
+    }
+    let previous = db
+        .get_parse_offset_result(CLAUDE_SOURCE_FRONTIER_KEY)
+        .await
+        .map_err(|error| frontier_store_error("read Claude source frontier", error))?
+        .unwrap_or_default();
+    let processed = u64::try_from(processed).unwrap_or(u64::MAX);
+    db.advance_parse_offset_result(
+        CLAUDE_SOURCE_FRONTIER_KEY,
+        crate::global_db::ParseOffset {
+            byte_offset: previous.byte_offset.saturating_add(processed),
+            mtime: 0,
+            file_id: 1,
+        },
+    )
+    .await
+    .map_err(|error| frontier_store_error("advance Claude source frontier", error))
 }
 
 /// Ingest one Claude source against an already-open authoritative database.
@@ -560,22 +782,59 @@ pub(crate) async fn ingest_source_with_observations(
     max_new_bytes: Option<u64>,
     cancellation: ObservationCancellation,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
-    let mut stats = ClaudeObservationIngestStats::default();
-    for path in source.transcript_paths(project_root) {
-        stats = stats.merge(
-            process_source(
-                db,
-                source,
-                &path,
-                project_root,
-                &scope,
-                max_new_bytes,
-                &cancellation,
-            )
-            .await?,
-        );
+    let (paths, deferred) = scheduled_source_paths(db, source, project_root).await?;
+    let mut stats = ClaudeObservationIngestStats {
+        deferred_sources: u64::try_from(deferred).unwrap_or(u64::MAX),
+        ..ClaudeObservationIngestStats::default()
+    };
+    let mut remaining_bytes = max_new_bytes.unwrap_or(CLAUDE_RECOVERY_MAX_NEW_BYTES);
+    let mut attempted_sources = 0usize;
+    let mut source_failures = None;
+    for path in paths {
+        if remaining_bytes == 0 {
+            stats.deferred_sources = stats.deferred_sources.saturating_add(1);
+            continue;
+        }
+        attempted_sources = attempted_sources.saturating_add(1);
+        let source_budget = remaining_bytes.min(STRICT_JSONL_BATCH_BYTES);
+        let outcome = match process_source(
+            db,
+            source,
+            &path,
+            project_root,
+            &scope,
+            Some(source_budget),
+            &cancellation,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let failure = crate::sessions::classify_claude_observation_failure(&error);
+                let summary =
+                    source_failures.get_or_insert((0_u64, failure.reason_code, failure.retryable));
+                summary.0 = summary.0.saturating_add(1);
+                tracing::warn!(
+                    reason_code = failure.reason_code,
+                    retryable = failure.retryable,
+                    "Claude observation source ingest failed"
+                );
+                continue;
+            }
+        };
+        remaining_bytes = remaining_bytes.saturating_sub(outcome.source_bytes_scanned);
+        stats = stats.merge(outcome);
     }
-    Ok(stats.merge(drain_projection_queue(db, &cancellation).await?))
+    advance_source_frontier(db, attempted_sources).await?;
+    let projection_stats = drain_projection_queue(db, &cancellation).await?;
+    if let Some((failed_sources, first_reason_code, first_retryable)) = source_failures {
+        return Err(ClaudeObservationIngestError::SourceFailures {
+            failed_sources,
+            first_reason_code,
+            first_retryable,
+        });
+    }
+    Ok(stats.merge(projection_stats))
 }
 
 /// Production profile-scope Claude path used by hooks and startup recovery.
@@ -613,18 +872,22 @@ mod tests {
 
     use super::*;
     use crate::application::observation::ReplayObservationsRequest;
+    use crate::sessions::claude::{scan_claude_source_frames, try_scan_claude_source_frames};
 
     const INGEST_STATE_TABLES: &[&str] = &[
         "sanitization_receipts",
         "observations",
         "source_cursors",
+        "source_cursor_advances",
         "projection_queue",
         "observation_projection_checkpoints",
-        "parse_offsets",
+        "observation_projection_provenance",
         "sessions",
         "session_messages",
         "session_messages_fts",
     ];
+
+    fn assert_stats_future(_future: impl std::future::Future<Output = TranscriptIngestStats>) {}
 
     struct Fixture {
         temp: TempDir,
@@ -723,11 +986,76 @@ mod tests {
         counts
     }
 
-    async fn assert_invalid_frame_preserves_observation_state(session_id: &str, frame: &[u8]) {
+    async fn persisted_observation_authority_json(fixture: &Fixture) -> Vec<String> {
+        let database = libsql::Builder::new_local(fixture.profile.join("sessions.db"))
+            .build()
+            .await
+            .expect("open observation authority database");
+        let connection = database
+            .connect()
+            .expect("connect observation authority database");
+        let mut rows = connection
+            .query(
+                "SELECT observation_json FROM observations
+                 UNION ALL SELECT receipt_json FROM sanitization_receipts
+                 UNION ALL SELECT source_json FROM source_cursors",
+                (),
+            )
+            .await
+            .expect("read observation authority JSON");
+        let mut documents = Vec::new();
+        while let Some(row) = rows.next().await.expect("read authority JSON row") {
+            documents.push(row.get(0).expect("decode authority JSON"));
+        }
+        documents
+    }
+
+    fn observation_source(path: &Path) -> ClaudeSourceIdentityV1 {
+        let identity = identify_claude_source(path).expect("Claude source identity");
+        ClaudeSourceIdentityV1::for_source(
+            SessionId::new(identity.session_id).unwrap(),
+            SessionId::new(identity.source_id).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn observation_cursor_becomes_the_only_scan_authority_after_bootstrap() {
+        let legacy = StoredCursor {
+            position: 800,
+            mtime: 17,
+            file_id: 41,
+        };
+        assert_eq!(authoritative_scanner_cursor(legacy, None), legacy);
+
+        let source =
+            ClaudeSourceIdentityV1::new(SessionId::new("cursor-authority").unwrap()).unwrap();
+        let observation = ClaudeSourceCursorV1::new(
+            source,
+            ObservationScopeV1::Profile,
+            ClaudeFileGenerationV1::new(73).unwrap(),
+            1_200,
+        )
+        .unwrap();
+        assert_eq!(
+            authoritative_scanner_cursor(legacy, Some(&observation)),
+            StoredCursor {
+                position: 1_200,
+                mtime: 0,
+                file_id: 73,
+            }
+        );
+    }
+
+    async fn assert_invalid_frame_preserves_observation_state(
+        session_id: &str,
+        frame: &[u8],
+        non_durable_covered: bool,
+    ) {
         let fixture = Fixture::new(session_id).await;
         fs::write(&fixture.transcript, frame).expect("write invalid Claude frame");
         let source_adapter = fixture.source(session_id);
-        let source = ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap();
+        let source = observation_source(&fixture.transcript);
         let store = GlobalDbObservationStore::new(&fixture.db);
         let before = ingest_state_counts(&fixture).await;
 
@@ -738,18 +1066,32 @@ mod tests {
 
         assert_eq!(stats.observations_committed, 0);
         assert_eq!(stats.observation_duplicates, 0);
-        assert_eq!(stats.cursor_advances, 0);
+        assert_eq!(stats.cursor_advances, u64::from(non_durable_covered));
         assert_eq!(stats.projections_completed, 0);
-        assert_eq!(stats.deferred_sources, 1);
+        assert_eq!(stats.deferred_sources, u64::from(!non_durable_covered));
         assert_eq!(stats.transcript, TranscriptIngestStats::default());
-        assert_eq!(ingest_state_counts(&fixture).await, before);
-        assert!(
-            store
-                .get_source_cursor(&source, &ObservationScopeV1::Profile)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        let after = ingest_state_counts(&fixture).await;
+        if non_durable_covered {
+            assert_eq!(after[2], 1, "covered non-durable source cursor");
+            assert_eq!(after[3], 1, "covered non-durable cursor advance");
+            assert_eq!(after.iter().sum::<i64>(), 2);
+            assert!(
+                store
+                    .get_source_cursor(&source, &ObservationScopeV1::Profile)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        } else {
+            assert_eq!(after, before);
+            assert!(
+                store
+                    .get_source_cursor(&source, &ObservationScopeV1::Profile)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
         assert!(
             store
                 .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
@@ -764,7 +1106,11 @@ mod tests {
         );
     }
 
-    async fn assert_invalid_suffix_preserves_valid_prefix(session_id: &str, suffix: &[u8]) {
+    async fn assert_invalid_suffix_preserves_valid_prefix(
+        session_id: &str,
+        suffix: &[u8],
+        non_durable_covered: bool,
+    ) {
         let fixture = Fixture::new(session_id).await;
         let marker = format!("valid prefix before {session_id}");
         let record = json!({
@@ -781,7 +1127,7 @@ mod tests {
         fs::write(&fixture.transcript, bytes).expect("write valid prefix and invalid suffix");
 
         let source_adapter = fixture.source(session_id);
-        let source = ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap();
+        let source = observation_source(&fixture.transcript);
         let first = fixture
             .ingest(&source_adapter, None, ObservationCancellation::default())
             .await
@@ -789,7 +1135,7 @@ mod tests {
         assert_eq!(first.observations_committed, 1);
         assert_eq!(first.transcript.messages_upserted, 1);
         assert_eq!(first.projections_completed, 1);
-        assert_eq!(first.deferred_sources, 1);
+        assert_eq!(first.deferred_sources, u64::from(!non_durable_covered));
 
         let store = GlobalDbObservationStore::new(&fixture.db);
         let source_cursor = store
@@ -797,13 +1143,23 @@ mod tests {
             .await
             .unwrap()
             .expect("valid prefix source cursor");
-        assert_eq!(source_cursor.byte_offset(), suffix_start);
+        assert_eq!(
+            source_cursor.byte_offset(),
+            if non_durable_covered {
+                suffix_start + u64::try_from(suffix.len()).unwrap()
+            } else {
+                suffix_start
+            }
+        );
         let identity = identify_claude_source(&fixture.transcript).unwrap();
         let transcript_store = GlobalDbTranscriptStore::new(&fixture.db);
         let transcript_cursor = load_transcript_cursor(&transcript_store, identity.cursor_key)
             .await
             .expect("valid prefix transcript cursor");
-        assert_eq!(transcript_cursor.checkpoint.state.position, suffix_start);
+        assert_eq!(
+            transcript_cursor.checkpoint.state.position, 0,
+            "observation ingestion must not advance the legacy V1 cursor"
+        );
         assert_eq!(
             store
                 .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
@@ -826,7 +1182,7 @@ mod tests {
             .ingest(&source_adapter, None, ObservationCancellation::default())
             .await
             .expect("invalid suffix retry must remain deferred");
-        assert_eq!(retry.deferred_sources, 1);
+        assert_eq!(retry.deferred_sources, u64::from(!non_durable_covered));
         assert_eq!(retry.transcript, TranscriptIngestStats::default());
         assert_eq!(ingest_state_counts(&fixture).await, committed);
     }
@@ -839,15 +1195,35 @@ mod tests {
             "never-persist-this-secret",
         );
         let source = fixture.source("production-session");
+        assert_eq!(
+            source.transcript_paths(&fixture.profile),
+            vec![fixture.transcript.clone()]
+        );
+        let (scheduled, deferred) = scheduled_source_paths(&fixture.db, &source, &fixture.profile)
+            .await
+            .unwrap();
+        assert_eq!(scheduled, vec![fixture.transcript.clone()]);
+        assert_eq!(deferred, 0);
+        let identity = identify_claude_source(&fixture.transcript).unwrap();
+        let scan = try_scan_claude_source_frames(
+            identity,
+            StoredCursor::default(),
+            Some(STRICT_JSONL_BATCH_BYTES),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(scan.frames.len(), 1);
 
         let stats = fixture
             .ingest(&source, None, ObservationCancellation::default())
             .await
             .expect("ingest production Claude observation");
 
-        assert_eq!(stats.observations_committed, 1);
+        assert_eq!(stats.observations_committed, 1, "{stats:?}");
+        assert_eq!(stats.transcript.sessions_upserted, 1);
         assert_eq!(stats.transcript.messages_upserted, 1);
         assert_eq!(stats.projections_completed, 1);
+        assert_eq!(stats.deferred_sources, 0, "{stats:?}");
         let store = GlobalDbObservationStore::new(&fixture.db);
         let observations = store
             .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
@@ -865,15 +1241,327 @@ mod tests {
             observations[0].projection_status(),
             tracedecay_store::ObservationProjectionStatus::NotQueued
         );
+        let canonical_transcript = std::fs::canonicalize(&fixture.transcript).unwrap();
+        let authority_json = persisted_observation_authority_json(&fixture).await;
+        assert_eq!(authority_json.len(), 3);
+        assert!(authority_json.iter().all(|document| {
+            !document.contains(canonical_transcript.to_string_lossy().as_ref())
+        }));
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+
+            let raw_path_hex = hex::encode(canonical_transcript.as_os_str().as_bytes());
+            assert!(
+                authority_json
+                    .iter()
+                    .all(|document| !document.contains(&raw_path_hex))
+            );
+        }
         let hits = fixture
             .db
             .search_session_messages("claude", Some("user"), "production vertical searchable", 10)
             .await;
         assert_eq!(hits.len(), 1);
+        let cursor = store
+            .get_source_cursor(
+                observations[0].observation().source(),
+                &ObservationScopeV1::Profile,
+            )
+            .await
+            .unwrap()
+            .expect("durable observation cursor");
+        assert_eq!(cursor.file_identity(), Some(scan.file_identity));
+        assert_eq!(
+            cursor.resume_fingerprint(),
+            Some(scan.frames[0].resume_fingerprint)
+        );
+
+        let committed = ingest_state_counts(&fixture).await;
+        let retry = fixture
+            .ingest(&source, None, ObservationCancellation::default())
+            .await
+            .expect("retry must resume from the observation cursor without a collision");
+        assert_eq!(retry.transcript, TranscriptIngestStats::default());
+        assert_eq!(retry.observations_committed, 0);
+        assert_eq!(retry.observation_duplicates, 0);
+        assert_eq!(retry.projections_completed, 0);
+        assert_eq!(retry.projection_duplicates, 0);
+        assert_eq!(retry.source_bytes_scanned, 0);
+        assert_eq!(ingest_state_counts(&fixture).await, committed);
+        assert_eq!(
+            fixture
+                .db
+                .search_session_messages(
+                    "claude",
+                    Some("user"),
+                    "production vertical searchable",
+                    10,
+                )
+                .await,
+            hits
+        );
     }
 
     #[tokio::test]
-    async fn commit_before_ack_retry_backfills_v1_without_duplicate_observation() {
+    async fn legacy_claude_ingest_api_routes_through_observation_authority() {
+        let fixture = Fixture::new("legacy-api-session").await;
+        fixture.write_record("legacy API searchable", "legacy-api-secret");
+        let source = fixture.source("legacy-api-session");
+        assert_stats_future(crate::sessions::claude::ingest_user_sessions(
+            &fixture.db,
+            &fixture.profile,
+            Some("legacy-api-session".to_string()),
+            Vec::new(),
+        ));
+
+        let stats = crate::sessions::claude::try_ingest_user_sessions_with_source(
+            &fixture.db,
+            &fixture.profile,
+            &source,
+        )
+        .await
+        .expect("legacy API must use the observation coordinator");
+
+        assert_eq!(stats.messages_upserted, 1);
+        let state = ingest_state_counts(&fixture).await;
+        assert_eq!(state[0], 1, "sanitization receipt");
+        assert_eq!(state[1], 1, "durable observation");
+        assert_eq!(state[2], 1, "observation source cursor");
+        assert_eq!(state[5], 1, "projection checkpoint");
+        assert_eq!(state[6], 1, "projection provenance");
+        assert_eq!(state[7], 1, "projected V1 session");
+        assert_eq!(state[8], 1, "projected V1 message");
+        let observations = GlobalDbObservationStore::new(&fixture.db)
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(observations.len(), 1);
+        assert!(
+            !observations[0]
+                .observation()
+                .payload()
+                .to_string()
+                .contains("legacy-api-secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_source_frontier_charges_actual_bytes_within_global_budget() {
+        let fixture = Fixture::new("frontier-session-0").await;
+        let payload = "x".repeat(600 * 1024);
+        let mut expected_source_bytes = 0_u64;
+        for index in 0..3 {
+            let session_id = format!("frontier-session-{index}");
+            let transcript = fixture
+                .home
+                .join(".claude/projects/project-scope")
+                .join(format!("{session_id}.jsonl"));
+            let record = json!({
+                "type": "user",
+                "sessionId": session_id,
+                "uuid": format!("frontier-message-{index}"),
+                "timestamp": "2026-07-15T00:00:00Z",
+                "cwd": fixture.temp.path(),
+                "message": {"role": "user", "content": format!("frontier {index} {payload}")}
+            });
+            let record = format!("{record}\n");
+            expected_source_bytes =
+                expected_source_bytes.saturating_add(u64::try_from(record.len()).unwrap());
+            fs::write(transcript, record).unwrap();
+        }
+        assert!(expected_source_bytes <= CLAUDE_HOOK_MAX_NEW_BYTES);
+        let source = ClaudeSource::with_home(&fixture.home).for_user_scope(None, Vec::new());
+
+        let first = fixture
+            .ingest(
+                &source,
+                Some(CLAUDE_HOOK_MAX_NEW_BYTES),
+                ObservationCancellation::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.observations_committed, 3);
+        assert_eq!(first.source_bytes_scanned, expected_source_bytes);
+        assert_eq!(first.deferred_sources, 0);
+
+        let observations = GlobalDbObservationStore::new(&fixture.db)
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(observations.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn deferred_sources_charge_work_without_pinning_the_round_robin_frontier() {
+        let fixture = Fixture::new("partial-budget-session-0").await;
+        let partial_bytes = usize::try_from(CLAUDE_HOOK_MAX_NEW_BYTES / 2).unwrap();
+        for index in 0..2 {
+            let transcript = fixture
+                .home
+                .join(".claude/projects/project-scope")
+                .join(format!("partial-budget-session-{index}.jsonl"));
+            fs::write(transcript, vec![b'x'; partial_bytes]).unwrap();
+        }
+        let ready = fixture
+            .home
+            .join(".claude/projects/project-scope")
+            .join("partial-budget-session-2.jsonl");
+        fs::write(
+            ready,
+            format!(
+                "{}\n",
+                json!({
+                    "type": "user",
+                    "sessionId": "partial-budget-session-2",
+                    "uuid": "partial-budget-ready-message",
+                    "timestamp": "2026-07-15T00:00:00Z",
+                    "cwd": fixture.temp.path(),
+                    "message": {"role": "user", "content": "ready after partial sources"}
+                })
+            ),
+        )
+        .unwrap();
+        let source = ClaudeSource::with_home(&fixture.home).for_user_scope(None, Vec::new());
+
+        let stats = fixture
+            .ingest(
+                &source,
+                Some(CLAUDE_HOOK_MAX_NEW_BYTES),
+                ObservationCancellation::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(stats.observations_committed, 0);
+        assert_eq!(stats.source_bytes_scanned, CLAUDE_HOOK_MAX_NEW_BYTES);
+        assert_eq!(stats.deferred_sources, 3);
+
+        let recovered = fixture
+            .ingest(&source, Some(1), ObservationCancellation::default())
+            .await
+            .unwrap();
+        assert_eq!(recovered.observations_committed, 1);
+        assert_eq!(recovered.transcript.messages_upserted, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bad_source_is_isolated_and_committed_projection_work_still_drains() {
+        let fixture = Fixture::new("queued-before-bad-source").await;
+        fixture.write_record("queued before bad source", "queued-secret");
+        let seed_source = fixture.source("queued-before-bad-source");
+        let seeded = process_source(
+            &fixture.db,
+            &seed_source,
+            &fixture.transcript,
+            &fixture.profile,
+            &ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(seeded.observations_committed, 1);
+        assert_eq!(ingest_state_counts(&fixture).await[4], 1);
+
+        let transcripts = fixture.transcript.parent().unwrap();
+        fs::write(transcripts.join("!bad\nsource.jsonl"), b"{}\n").unwrap();
+        fs::write(
+            transcripts.join("zz-valid-after-bad.jsonl"),
+            format!(
+                "{}\n",
+                json!({
+                    "type": "user",
+                    "sessionId": "zz-valid-after-bad",
+                    "uuid": "valid-after-bad-message",
+                    "timestamp": "2026-07-15T00:00:00Z",
+                    "cwd": fixture.temp.path(),
+                    "message": {"role": "user", "content": "valid after bad source"}
+                })
+            ),
+        )
+        .unwrap();
+        let source = ClaudeSource::with_home(&fixture.home).for_user_scope(None, Vec::new());
+
+        let error = fixture
+            .ingest(&source, None, ObservationCancellation::default())
+            .await
+            .expect_err("the isolated source failure remains visible");
+        assert!(matches!(
+            error,
+            ClaudeObservationIngestError::SourceFailures {
+                failed_sources: 1,
+                first_reason_code: "observation_domain_invalid",
+                first_retryable: false,
+            }
+        ));
+        let state = ingest_state_counts(&fixture).await;
+        assert_eq!(
+            state[4], 0,
+            "projection queue must drain despite source error"
+        );
+        assert_eq!(
+            state[8], 2,
+            "later valid source and queued seed must project"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_advances_large_backlog_in_bounded_batches() {
+        const FRAME_BYTES: usize = 128 * 1024;
+        const FRAMES: u64 = 20;
+
+        let fixture = Fixture::new("bounded-recovery-session").await;
+        let frame = " ".repeat(FRAME_BYTES);
+        let mut transcript = Vec::new();
+        for _ in 0..FRAMES {
+            transcript.extend_from_slice(frame.as_bytes());
+            transcript.push(b'\n');
+        }
+        assert!(transcript.len() as u64 > CLAUDE_HOOK_MAX_NEW_BYTES);
+        let transcript_len = transcript.len() as u64;
+        fs::write(&fixture.transcript, transcript).unwrap();
+
+        let source_adapter = fixture.source("bounded-recovery-session");
+        let source = observation_source(&fixture.transcript);
+        let store = GlobalDbObservationStore::new(&fixture.db);
+
+        let first = fixture
+            .ingest(&source_adapter, None, ObservationCancellation::default())
+            .await
+            .unwrap();
+        assert_eq!(first.observations_committed, 0);
+        assert!(first.cursor_advances > 0);
+        assert!(first.cursor_advances < FRAMES);
+        assert_eq!(first.transcript, TranscriptIngestStats::default());
+        assert_eq!(first.deferred_sources, 1);
+        let first_cursor = store
+            .get_source_cursor(&source, &ObservationScopeV1::Profile)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(first_cursor.byte_offset() > 0);
+        assert!(first_cursor.byte_offset() < transcript_len);
+
+        let second = fixture
+            .ingest(&source_adapter, None, ObservationCancellation::default())
+            .await
+            .unwrap();
+        assert_eq!(second.observations_committed, 0);
+        assert!(second.cursor_advances > 0);
+        assert_eq!(second.transcript, TranscriptIngestStats::default());
+        assert_eq!(second.deferred_sources, 0);
+        let final_cursor = store
+            .get_source_cursor(&source, &ObservationScopeV1::Profile)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(final_cursor.byte_offset(), transcript_len);
+    }
+
+    #[tokio::test]
+    async fn commit_before_ack_retry_projects_without_rescan_or_duplicate() {
         let fixture = Fixture::new("retry-session").await;
         fixture.write_record("retry backfill searchable", "retry-secret");
         let source_adapter = fixture.source("retry-session");
@@ -883,8 +1571,11 @@ mod tests {
         source_adapter
             .retain_scoped_frames(&mut scan, &fixture.profile)
             .expect("retain profile-scoped retry frame");
-        let source =
-            ClaudeSourceIdentityV1::new(SessionId::new(identity.session_id).unwrap()).unwrap();
+        let source = ClaudeSourceIdentityV1::for_source(
+            SessionId::new(identity.session_id).unwrap(),
+            SessionId::new(identity.source_id).unwrap(),
+        )
+        .unwrap();
         let store = GlobalDbObservationStore::new(&fixture.db);
         let application = ObservationApplication::new(
             store,
@@ -898,6 +1589,7 @@ mod tests {
                 source,
                 scope: ObservationScopeV1::Profile,
                 generation: ClaudeFileGenerationV1::new(scan.file_generation).unwrap(),
+                file_identity: scan.file_identity,
                 retention_class: RetentionClass::new(CLAUDE_TRANSCRIPT_RETENTION_CLASS).unwrap(),
                 cancellation: ObservationCancellation::default(),
             },
@@ -912,7 +1604,8 @@ mod tests {
             .expect("retry production coordinator");
 
         assert_eq!(stats.observations_committed, 0);
-        assert_eq!(stats.observation_duplicates, 1);
+        assert_eq!(stats.observation_duplicates, 0);
+        assert_eq!(stats.source_bytes_scanned, 0);
         assert_eq!(stats.transcript.messages_upserted, 1);
         assert_eq!(stats.projections_completed, 1);
         let observations = application
@@ -963,17 +1656,23 @@ mod tests {
             "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
             "x".repeat(crate::privacy::PR5_MAX_CLAUDE_RECORD_BYTES)
         );
-        for (session_id, frame) in [
+        for (session_id, frame, non_durable_covered) in [
             (
                 "invalid-malformed",
                 br#"{"type":"user",malformed}
 "#
                 .as_slice(),
+                true,
             ),
-            ("invalid-partial", br#"{"type":"user""#.as_slice()),
-            ("invalid-oversized", oversized.as_bytes()),
+            ("invalid-partial", br#"{"type":"user""#.as_slice(), false),
+            ("invalid-oversized", oversized.as_bytes(), true),
         ] {
-            assert_invalid_frame_preserves_observation_state(session_id, frame).await;
+            assert_invalid_frame_preserves_observation_state(
+                session_id,
+                frame,
+                non_durable_covered,
+            )
+            .await;
         }
     }
 
@@ -983,17 +1682,19 @@ mod tests {
             "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
             "x".repeat(crate::privacy::PR5_MAX_CLAUDE_RECORD_BYTES)
         );
-        for (session_id, suffix) in [
+        for (session_id, suffix, non_durable_covered) in [
             (
                 "prefix-malformed",
                 br#"{"type":"user",malformed}
 "#
                 .as_slice(),
+                true,
             ),
-            ("prefix-partial", br#"{"type":"user""#.as_slice()),
-            ("prefix-oversized", oversized.as_bytes()),
+            ("prefix-partial", br#"{"type":"user""#.as_slice(), false),
+            ("prefix-oversized", oversized.as_bytes(), true),
         ] {
-            assert_invalid_suffix_preserves_valid_prefix(session_id, suffix).await;
+            assert_invalid_suffix_preserves_valid_prefix(session_id, suffix, non_durable_covered)
+                .await;
         }
     }
 }

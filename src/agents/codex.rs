@@ -788,7 +788,29 @@ fn codex_command_hook_hash(
     command: &str,
     timeout: u64,
     is_async: bool,
-) -> String {
+) -> Result<String> {
+    codex_command_hook_hash_with(
+        event_name,
+        matcher,
+        command,
+        timeout,
+        is_async,
+        |identity| {
+            canonical_sha256(identity)
+                .map(|digest| digest.to_string())
+                .map_err(|error| error.to_string())
+        },
+    )
+}
+
+fn codex_command_hook_hash_with(
+    event_name: &str,
+    matcher: Option<&str>,
+    command: &str,
+    timeout: u64,
+    is_async: bool,
+    canonicalize: impl FnOnce(&serde_json::Value) -> std::result::Result<String, String>,
+) -> Result<String> {
     let handler = json!({
         "type": "command",
         "command": command,
@@ -801,9 +823,9 @@ fn codex_command_hook_hash(
         identity.insert("matcher".to_string(), json!(matcher));
     }
     identity.insert("hooks".to_string(), json!([handler]));
-    canonical_sha256(&serde_json::Value::Object(identity))
-        .unwrap_or_else(|error| unreachable!("serde_json::Value canonicalization failed: {error}"))
-        .to_string()
+    canonicalize(&serde_json::Value::Object(identity)).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to canonicalize Codex hook trust identity: {error}"),
+    })
 }
 
 /// Derive the ordered trust records for a rendered Codex `hooks.json` value.
@@ -818,18 +840,18 @@ fn codex_plugin_hook_trust_prefix(marketplace_name: &str) -> String {
 }
 
 #[cfg(test)]
-fn codex_hook_trust_entries(hooks: &serde_json::Value) -> Vec<CodexHookTrustEntry> {
+fn codex_hook_trust_entries(hooks: &serde_json::Value) -> Result<Vec<CodexHookTrustEntry>> {
     codex_hook_trust_entries_for_marketplace(hooks, CODEX_DEFAULT_MARKETPLACE_NAME)
 }
 
 fn codex_hook_trust_entries_for_marketplace(
     hooks: &serde_json::Value,
     marketplace_name: &str,
-) -> Vec<CodexHookTrustEntry> {
+) -> Result<Vec<CodexHookTrustEntry>> {
     let mut entries = Vec::new();
     let trust_prefix = codex_plugin_hook_trust_prefix(marketplace_name);
     let Some(events) = hooks.get("hooks").and_then(|hooks| hooks.as_object()) else {
-        return entries;
+        return Ok(entries);
     };
     for (event_key, groups) in events {
         let event_label = codex_event_snake_case(event_key);
@@ -855,7 +877,7 @@ fn codex_hook_trust_entries_for_marketplace(
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
                 let hash =
-                    codex_command_hook_hash(&event_label, matcher, command, timeout, is_async);
+                    codex_command_hook_hash(&event_label, matcher, command, timeout, is_async)?;
                 let trust_key =
                     format!("{trust_prefix}{event_label}:{group_index}:{handler_index}");
                 entries.push(CodexHookTrustEntry {
@@ -867,7 +889,7 @@ fn codex_hook_trust_entries_for_marketplace(
             }
         }
     }
-    entries
+    Ok(entries)
 }
 
 /// Render the bundled `hooks.json` template for deterministic golden tests.
@@ -882,7 +904,7 @@ fn codex_managed_hook_trust_entries(tracedecay_bin: &str) -> Result<Vec<CodexHoo
         })?;
     let rendered = codex_plugin_hooks(seed, tracedecay_bin)?;
     let value: serde_json::Value = serde_json::from_str(&rendered)?;
-    Ok(codex_hook_trust_entries(&value))
+    codex_hook_trust_entries(&value)
 }
 
 fn codex_personal_marketplace_name(home: &Path) -> Result<String> {
@@ -919,7 +941,7 @@ fn codex_installed_hook_trust_entries(home: &Path) -> Result<(String, Vec<CodexH
         });
     }
     let hooks = load_json_file_strict(&hooks_path)?;
-    let entries = codex_hook_trust_entries_for_marketplace(&hooks, &marketplace_name);
+    let entries = codex_hook_trust_entries_for_marketplace(&hooks, &marketplace_name)?;
     Ok((marketplace_name, entries))
 }
 
@@ -1844,7 +1866,15 @@ fn doctor_check_hooks(
     ));
     // Hash the on-disk hooks.json exactly as Codex would, then compare against
     // the trust records in config.toml to distinguish trusted / missing / stale.
-    let entries = codex_hook_trust_entries_for_marketplace(&hooks, marketplace_name);
+    let entries = match codex_hook_trust_entries_for_marketplace(&hooks, marketplace_name) {
+        Ok(entries) => entries,
+        Err(err) => {
+            dc.warn(&format!(
+                "Cannot hash Codex hooks for trust verification: {err}"
+            ));
+            return;
+        }
+    };
     match load_toml_file(config_path) {
         Ok(config) => match codex_plugin_hook_trust_state(&config, &entries) {
             CodexHookTrustState::Trusted

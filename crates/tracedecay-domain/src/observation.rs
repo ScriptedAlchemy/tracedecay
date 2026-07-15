@@ -14,13 +14,18 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::research::{
-    ComponentVersion, ProjectId, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SessionId, canonical_json_bytes,
+    ComponentVersion, ProjectId, ProviderId, RetentionClass, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SessionId, canonical_json_bytes,
 };
 
-const OBSERVATION_ID_DOMAIN: &[u8] = b"tracedecay.claude.observation.v1\0";
+const CLAUDE_OBSERVATION_ID_DOMAIN: &[u8] = b"tracedecay.claude.observation.v1\0";
+const OBSERVATION_ID_DOMAIN: &[u8] = b"tracedecay.observation.v1\0";
 const LEGACY_IDEMPOTENCY_KEY_DOMAIN: &[u8] = b"tracedecay.claude.idempotency.v1\0";
 const CLAUDE_RECEIPT_ID_DOMAIN: &[u8] = b"tracedecay.privacy.claude.receipt.v1\0";
+const CLAUDE_RECEIPT_SENSITIVITY_DOMAIN: &[u8] = b"sensitivity\0";
+const CLAUDE_RECEIPT_RAW_DIGEST_DOMAIN: &[u8] = b"raw-record-sha256\0";
+const CLAUDE_RECEIPT_SANITIZED_PAYLOAD_DOMAIN: &[u8] = b"sanitized-payload-digest\0";
+const CLAUDE_RECEIPT_NO_PAYLOAD_DOMAIN: &[u8] = b"no-durable-payload\0";
 const CLAUDE_RECEIPT_ID_PREFIX: &str = "privacy.claude.v1.";
 
 /// Pure validation failures at the observation contract boundary.
@@ -62,34 +67,111 @@ pub enum ObservationContractError {
     IdempotencyKeyMismatch,
 }
 
-/// Stable logical identity of one Claude transcript.
+/// Stable logical identity of one provider observation source.
 ///
 /// The session identity is provider-native evidence. The physical file identity
-/// is represented separately by [`ClaudeFileGenerationV1`].
+/// is represented separately by [`ObservationSourceGenerationV1`].
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
-pub struct ClaudeSourceIdentityV1 {
+pub struct ObservationSourceIdentityV1 {
+    #[serde(
+        default = "default_observation_provider",
+        skip_serializing_if = "is_default_observation_provider"
+    )]
+    provider: ProviderId,
     session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_key: Option<SessionId>,
 }
 
-impl ClaudeSourceIdentityV1 {
+impl ObservationSourceIdentityV1 {
     pub fn new(session_id: SessionId) -> Result<Self, ObservationContractError> {
+        Self::for_provider(default_observation_provider(), session_id)
+    }
+
+    pub fn for_provider(
+        provider: ProviderId,
+        session_id: SessionId,
+    ) -> Result<Self, ObservationContractError> {
+        provider
+            .validate()
+            .map_err(|_| ObservationContractError::InvalidSourceIdentity)?;
         session_id
             .validate()
             .map_err(|_| ObservationContractError::InvalidSourceIdentity)?;
-        Ok(Self { session_id })
+        Ok(Self {
+            provider,
+            session_id,
+            source_key: None,
+        })
+    }
+
+    pub fn for_source(
+        session_id: SessionId,
+        source_key: SessionId,
+    ) -> Result<Self, ObservationContractError> {
+        Self::for_provider_source(default_observation_provider(), session_id, source_key)
+    }
+
+    pub fn for_provider_source(
+        provider: ProviderId,
+        session_id: SessionId,
+        source_key: SessionId,
+    ) -> Result<Self, ObservationContractError> {
+        provider
+            .validate()
+            .map_err(|_| ObservationContractError::InvalidSourceIdentity)?;
+        session_id
+            .validate()
+            .map_err(|_| ObservationContractError::InvalidSourceIdentity)?;
+        source_key
+            .validate()
+            .map_err(|_| ObservationContractError::InvalidSourceIdentity)?;
+        Ok(Self {
+            provider,
+            session_id,
+            source_key: Some(source_key),
+        })
+    }
+
+    pub fn provider(&self) -> &ProviderId {
+        &self.provider
     }
 
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
     }
 
+    pub fn source_key(&self) -> &SessionId {
+        self.source_key.as_ref().unwrap_or(&self.session_id)
+    }
+
     pub fn validate(&self) -> Result<(), ObservationContractError> {
+        self.provider
+            .validate()
+            .map_err(|_| ObservationContractError::InvalidSourceIdentity)?;
         self.session_id
             .validate()
-            .map_err(|_| ObservationContractError::InvalidSourceIdentity)
+            .map_err(|_| ObservationContractError::InvalidSourceIdentity)?;
+        if let Some(source_key) = &self.source_key {
+            source_key
+                .validate()
+                .map_err(|_| ObservationContractError::InvalidSourceIdentity)?;
+        }
+        Ok(())
     }
 }
+
+fn default_observation_provider() -> ProviderId {
+    ProviderId::new("claude").expect("the built-in Claude provider id is valid")
+}
+
+fn is_default_observation_provider(provider: &ProviderId) -> bool {
+    provider.as_str() == "claude"
+}
+
+/// Compatibility name for the first observation source adapter.
+pub type ClaudeSourceIdentityV1 = ObservationSourceIdentityV1;
 
 /// Authoritative ownership scope selected before persistence.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -113,9 +195,9 @@ impl ObservationScopeV1 {
 /// Native file generation identity produced by Claude JSONL framing.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
-pub struct ClaudeFileGenerationV1(u64);
+pub struct ObservationSourceGenerationV1(u64);
 
-impl ClaudeFileGenerationV1 {
+impl ObservationSourceGenerationV1 {
     pub fn new(file_id: u64) -> Result<Self, ObservationContractError> {
         if file_id == 0 {
             return Err(ObservationContractError::InvalidFileGeneration);
@@ -126,9 +208,13 @@ impl ClaudeFileGenerationV1 {
     pub fn file_id(self) -> u64 {
         self.0
     }
+
+    pub fn generation_id(self) -> u64 {
+        self.0
+    }
 }
 
-impl<'de> Deserialize<'de> for ClaudeFileGenerationV1 {
+impl<'de> Deserialize<'de> for ObservationSourceGenerationV1 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -137,14 +223,17 @@ impl<'de> Deserialize<'de> for ClaudeFileGenerationV1 {
     }
 }
 
+/// Compatibility name for Claude JSONL file generations.
+pub type ClaudeFileGenerationV1 = ObservationSourceGenerationV1;
+
 /// Exact byte span of one complete Claude JSONL record.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ClaudeByteRangeV1 {
+pub struct ObservationSourceRangeV1 {
     start: u64,
     end: u64,
 }
 
-impl ClaudeByteRangeV1 {
+impl ObservationSourceRangeV1 {
     pub fn new(start: u64, end: u64) -> Result<Self, ObservationContractError> {
         if start >= end {
             return Err(ObservationContractError::InvalidByteRange);
@@ -161,7 +250,7 @@ impl ClaudeByteRangeV1 {
     }
 }
 
-impl<'de> Deserialize<'de> for ClaudeByteRangeV1 {
+impl<'de> Deserialize<'de> for ObservationSourceRangeV1 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -178,22 +267,25 @@ impl<'de> Deserialize<'de> for ClaudeByteRangeV1 {
     }
 }
 
+/// Compatibility name for Claude JSONL byte ranges.
+pub type ClaudeByteRangeV1 = ObservationSourceRangeV1;
+
 /// Stable source evidence used to derive one observation identity.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
-pub struct ClaudeObservationIdentityMaterialV1 {
-    source: ClaudeSourceIdentityV1,
+pub struct ObservationIdentityMaterialV1 {
+    source: ObservationSourceIdentityV1,
     scope: ObservationScopeV1,
-    generation: ClaudeFileGenerationV1,
-    position: ClaudeByteRangeV1,
+    generation: ObservationSourceGenerationV1,
+    position: ObservationSourceRangeV1,
 }
 
-impl ClaudeObservationIdentityMaterialV1 {
+impl ObservationIdentityMaterialV1 {
     pub fn new(
-        source: ClaudeSourceIdentityV1,
+        source: ObservationSourceIdentityV1,
         scope: ObservationScopeV1,
-        generation: ClaudeFileGenerationV1,
-        position: ClaudeByteRangeV1,
+        generation: ObservationSourceGenerationV1,
+        position: ObservationSourceRangeV1,
     ) -> Result<Self, ObservationContractError> {
         source.validate()?;
         scope.validate()?;
@@ -205,7 +297,7 @@ impl ClaudeObservationIdentityMaterialV1 {
         })
     }
 
-    pub fn source(&self) -> &ClaudeSourceIdentityV1 {
+    pub fn source(&self) -> &ObservationSourceIdentityV1 {
         &self.source
     }
 
@@ -213,11 +305,11 @@ impl ClaudeObservationIdentityMaterialV1 {
         &self.scope
     }
 
-    pub fn generation(&self) -> ClaudeFileGenerationV1 {
+    pub fn generation(&self) -> ObservationSourceGenerationV1 {
         self.generation
     }
 
-    pub fn position(&self) -> ClaudeByteRangeV1 {
+    pub fn position(&self) -> ObservationSourceRangeV1 {
         self.position
     }
 
@@ -226,6 +318,9 @@ impl ClaudeObservationIdentityMaterialV1 {
         self.scope.validate()
     }
 }
+
+/// Compatibility name for Claude observation identity material.
+pub type ClaudeObservationIdentityMaterialV1 = ObservationIdentityMaterialV1;
 
 macro_rules! sha256_newtype {
     ($name:ident, $field:literal) => {
@@ -264,28 +359,37 @@ pub type IdempotencyKeyV1 = CanonicalObservationIdV1;
 
 impl CanonicalObservationIdV1 {
     pub fn derive(
-        material: &ClaudeObservationIdentityMaterialV1,
+        material: &ObservationIdentityMaterialV1,
     ) -> Result<Self, ObservationContractError> {
         material.validate()?;
-        Self::new(domain_digest(OBSERVATION_ID_DOMAIN, material)?)
+        let domain = if is_default_observation_provider(material.source().provider()) {
+            CLAUDE_OBSERVATION_ID_DOMAIN
+        } else {
+            OBSERVATION_ID_DOMAIN
+        };
+        Self::new(domain_digest(domain, material)?)
     }
 }
 
-/// Durable Claude JSONL byte cursor tied to one source, owner, and file generation.
+/// Durable byte cursor tied to one provider source, owner, and source generation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
-pub struct ClaudeSourceCursorV1 {
-    source: ClaudeSourceIdentityV1,
+pub struct ObservationSourceCursorV1 {
+    source: ObservationSourceIdentityV1,
     scope: ObservationScopeV1,
-    generation: ClaudeFileGenerationV1,
+    generation: ObservationSourceGenerationV1,
     byte_offset: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_identity: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resume_fingerprint: Option<u64>,
 }
 
-impl ClaudeSourceCursorV1 {
+impl ObservationSourceCursorV1 {
     pub fn new(
-        source: ClaudeSourceIdentityV1,
+        source: ObservationSourceIdentityV1,
         scope: ObservationScopeV1,
-        generation: ClaudeFileGenerationV1,
+        generation: ObservationSourceGenerationV1,
         byte_offset: u64,
     ) -> Result<Self, ObservationContractError> {
         source.validate()?;
@@ -295,10 +399,19 @@ impl ClaudeSourceCursorV1 {
             scope,
             generation,
             byte_offset,
+            file_identity: None,
+            resume_fingerprint: None,
         })
     }
 
-    pub fn source(&self) -> &ClaudeSourceIdentityV1 {
+    #[must_use]
+    pub fn with_resume_checkpoint(mut self, file_identity: u64, resume_fingerprint: u64) -> Self {
+        self.file_identity = Some(file_identity);
+        self.resume_fingerprint = Some(resume_fingerprint);
+        self
+    }
+
+    pub fn source(&self) -> &ObservationSourceIdentityV1 {
         &self.source
     }
 
@@ -306,12 +419,20 @@ impl ClaudeSourceCursorV1 {
         &self.scope
     }
 
-    pub fn generation(&self) -> ClaudeFileGenerationV1 {
+    pub fn generation(&self) -> ObservationSourceGenerationV1 {
         self.generation
     }
 
     pub fn byte_offset(&self) -> u64 {
         self.byte_offset
+    }
+
+    pub fn file_identity(&self) -> Option<u64> {
+        self.file_identity
+    }
+
+    pub fn resume_fingerprint(&self) -> Option<u64> {
+        self.resume_fingerprint
     }
 
     /// Compares cursors only when their ordering authority is identical.
@@ -328,6 +449,9 @@ impl ClaudeSourceCursorV1 {
         Ok(self.byte_offset.cmp(&other.byte_offset))
     }
 }
+
+/// Compatibility name for Claude JSONL source cursors.
+pub type ClaudeSourceCursorV1 = ObservationSourceCursorV1;
 
 /// Canonical content-addressed reference to a sanitized JSON payload.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -391,38 +515,167 @@ pub enum SensitivityV1 {
     Secret,
 }
 
+impl SensitivityV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unclassified => "unclassified",
+            Self::NonSensitive => "non_sensitive",
+            Self::Sensitive => "sensitive",
+            Self::Secret => "secret",
+        }
+    }
+}
+
 /// Canonical inputs used to derive one Claude sanitization receipt reference.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalClaudeSanitizationReceiptMaterialV1 {
     sanitizer_version: ComponentVersion,
     observation_id: CanonicalObservationIdV1,
     disposition: SanitizerDispositionV1,
-    evidence: Vec<u8>,
+    sensitivity: SensitivityV1,
+    raw_digest: [u8; 32],
+    sanitized_payload_digest: Option<PayloadDigestV1>,
+    legacy_evidence: Option<Vec<u8>>,
 }
 
 impl CanonicalClaudeSanitizationReceiptMaterialV1 {
+    #[deprecated(note = "use for_durable_payload or for_non_durable so receipt evidence is typed")]
     pub fn new(
         identity: &ClaudeObservationIdentityMaterialV1,
         sanitizer_version: ComponentVersion,
         disposition: SanitizerDispositionV1,
         evidence: impl AsRef<[u8]>,
     ) -> Result<Self, ObservationContractError> {
+        let evidence = evidence.as_ref().to_vec();
+        let observation_id = CanonicalObservationIdV1::derive(identity)?;
+        let raw_digest = Sha256::digest(&evidence).into();
+        Ok(Self {
+            sanitizer_version,
+            observation_id,
+            disposition,
+            sensitivity: SensitivityV1::Unclassified,
+            raw_digest,
+            sanitized_payload_digest: None,
+            legacy_evidence: Some(evidence),
+        })
+    }
+
+    pub fn for_durable_payload(
+        identity: &ClaudeObservationIdentityMaterialV1,
+        sanitizer_version: ComponentVersion,
+        disposition: SanitizerDispositionV1,
+        raw_digest: &[u8; 32],
+        sanitized_payload: &PayloadReferenceV1,
+    ) -> Result<Self, ObservationContractError> {
+        let sensitivity = match disposition {
+            SanitizerDispositionV1::Accepted => SensitivityV1::NonSensitive,
+            SanitizerDispositionV1::Redacted => SensitivityV1::Secret,
+            SanitizerDispositionV1::Rejected | SanitizerDispositionV1::Quarantined => {
+                return Err(ObservationContractError::ReceiptPayloadForbidden);
+            }
+        };
+        Self::for_durable_payload_with_sensitivity(
+            identity,
+            sanitizer_version,
+            disposition,
+            sensitivity,
+            raw_digest,
+            sanitized_payload,
+        )
+    }
+
+    pub fn for_durable_payload_with_sensitivity(
+        identity: &ClaudeObservationIdentityMaterialV1,
+        sanitizer_version: ComponentVersion,
+        disposition: SanitizerDispositionV1,
+        sensitivity: SensitivityV1,
+        raw_digest: &[u8; 32],
+        sanitized_payload: &PayloadReferenceV1,
+    ) -> Result<Self, ObservationContractError> {
+        if !disposition.permits_durable_payload() {
+            return Err(ObservationContractError::ReceiptPayloadForbidden);
+        }
+        validate_receipt_sensitivity(disposition, sensitivity)?;
         let observation_id = CanonicalObservationIdV1::derive(identity)?;
         Ok(Self {
             sanitizer_version,
             observation_id,
             disposition,
-            evidence: evidence.as_ref().to_vec(),
+            sensitivity,
+            raw_digest: *raw_digest,
+            sanitized_payload_digest: Some(sanitized_payload.digest().clone()),
+            legacy_evidence: None,
+        })
+    }
+
+    pub fn for_non_durable(
+        identity: &ClaudeObservationIdentityMaterialV1,
+        sanitizer_version: ComponentVersion,
+        disposition: SanitizerDispositionV1,
+        raw_digest: &[u8; 32],
+    ) -> Result<Self, ObservationContractError> {
+        Self::for_non_durable_with_sensitivity(
+            identity,
+            sanitizer_version,
+            disposition,
+            SensitivityV1::Sensitive,
+            raw_digest,
+        )
+    }
+
+    pub fn for_non_durable_with_sensitivity(
+        identity: &ClaudeObservationIdentityMaterialV1,
+        sanitizer_version: ComponentVersion,
+        disposition: SanitizerDispositionV1,
+        sensitivity: SensitivityV1,
+        raw_digest: &[u8; 32],
+    ) -> Result<Self, ObservationContractError> {
+        if disposition.permits_durable_payload() {
+            return Err(ObservationContractError::ReceiptPayloadRequired);
+        }
+        validate_receipt_sensitivity(disposition, sensitivity)?;
+        let observation_id = CanonicalObservationIdV1::derive(identity)?;
+        Ok(Self {
+            sanitizer_version,
+            observation_id,
+            disposition,
+            sensitivity,
+            raw_digest: *raw_digest,
+            sanitized_payload_digest: None,
+            legacy_evidence: None,
         })
     }
 
     pub fn derive_receipt_ref(&self) -> Result<SanitizationReceiptRefV1, ObservationContractError> {
         let mut hasher = Sha256::new();
-        hasher.update(CLAUDE_RECEIPT_ID_DOMAIN);
-        hasher.update(self.sanitizer_version.as_str().as_bytes());
-        hasher.update(self.observation_id.as_str().as_bytes());
-        hasher.update(self.disposition.as_str().as_bytes());
-        hasher.update(&self.evidence);
+        if let Some(evidence) = &self.legacy_evidence {
+            hasher.update(CLAUDE_RECEIPT_ID_DOMAIN);
+            hasher.update(self.sanitizer_version.as_str().as_bytes());
+            hasher.update(self.observation_id.as_str().as_bytes());
+            hasher.update(self.disposition.as_str().as_bytes());
+            hasher.update(evidence);
+            let receipt_id = SanitizationReceiptId::new(format!(
+                "{CLAUDE_RECEIPT_ID_PREFIX}{}",
+                format_hex(&hasher.finalize())
+            ))
+            .map_err(|_| ObservationContractError::InvalidReceiptReference)?;
+            return SanitizationReceiptRefV1::new(receipt_id, self.sanitizer_version.clone())
+                .map_err(|_| ObservationContractError::InvalidReceiptReference);
+        }
+        update_hash_frame(&mut hasher, CLAUDE_RECEIPT_ID_DOMAIN);
+        update_hash_frame(&mut hasher, self.sanitizer_version.as_str().as_bytes());
+        update_hash_frame(&mut hasher, self.observation_id.as_str().as_bytes());
+        update_hash_frame(&mut hasher, self.disposition.as_str().as_bytes());
+        update_hash_frame(&mut hasher, CLAUDE_RECEIPT_SENSITIVITY_DOMAIN);
+        update_hash_frame(&mut hasher, self.sensitivity.as_str().as_bytes());
+        update_hash_frame(&mut hasher, CLAUDE_RECEIPT_RAW_DIGEST_DOMAIN);
+        update_hash_frame(&mut hasher, &self.raw_digest);
+        if let Some(payload_digest) = &self.sanitized_payload_digest {
+            update_hash_frame(&mut hasher, CLAUDE_RECEIPT_SANITIZED_PAYLOAD_DOMAIN);
+            update_hash_frame(&mut hasher, payload_digest.as_str().as_bytes());
+        } else {
+            update_hash_frame(&mut hasher, CLAUDE_RECEIPT_NO_PAYLOAD_DOMAIN);
+        }
         let receipt_id = SanitizationReceiptId::new(format!(
             "{CLAUDE_RECEIPT_ID_PREFIX}{}",
             format_hex(&hasher.finalize())
@@ -431,6 +684,24 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
         SanitizationReceiptRefV1::new(receipt_id, self.sanitizer_version.clone())
             .map_err(|_| ObservationContractError::InvalidReceiptReference)
     }
+}
+
+fn validate_receipt_sensitivity(
+    disposition: SanitizerDispositionV1,
+    sensitivity: SensitivityV1,
+) -> Result<(), ObservationContractError> {
+    if sensitivity == SensitivityV1::Unclassified {
+        return Err(ObservationContractError::UnclassifiedPayload);
+    }
+    if disposition == SanitizerDispositionV1::Accepted && sensitivity == SensitivityV1::Secret {
+        return Err(ObservationContractError::SecretPayloadAccepted);
+    }
+    Ok(())
+}
+
+fn update_hash_frame(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
 }
 
 /// Receipt binding sanitizer version, disposition, classification, and payload.
@@ -452,12 +723,7 @@ impl SanitizationReceiptV1 {
         receipt
             .validate()
             .map_err(|_| ObservationContractError::InvalidReceiptReference)?;
-        if sensitivity == SensitivityV1::Unclassified {
-            return Err(ObservationContractError::UnclassifiedPayload);
-        }
-        if disposition == SanitizerDispositionV1::Accepted && sensitivity == SensitivityV1::Secret {
-            return Err(ObservationContractError::SecretPayloadAccepted);
-        }
+        validate_receipt_sensitivity(disposition, sensitivity)?;
         match (disposition.permits_durable_payload(), payload.is_some()) {
             (true, false) => return Err(ObservationContractError::ReceiptPayloadRequired),
             (false, true) => return Err(ObservationContractError::ReceiptPayloadForbidden),
@@ -513,19 +779,19 @@ impl<'de> Deserialize<'de> for SanitizationReceiptV1 {
     }
 }
 
-/// Durable Claude observation that can only be built from receipt-bound content.
+/// Durable provider observation that can only be built from receipt-bound content.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DurableClaudeObservationV1 {
+pub struct DurableObservationV1 {
     observation_id: CanonicalObservationIdV1,
-    identity: ClaudeObservationIdentityMaterialV1,
+    identity: ObservationIdentityMaterialV1,
     receipt: SanitizationReceiptV1,
     retention_class: RetentionClass,
     payload: Value,
 }
 
-impl DurableClaudeObservationV1 {
+impl DurableObservationV1 {
     pub fn new(
-        identity: ClaudeObservationIdentityMaterialV1,
+        identity: ObservationIdentityMaterialV1,
         receipt: SanitizationReceiptV1,
         retention_class: RetentionClass,
         payload: Value,
@@ -556,11 +822,11 @@ impl DurableClaudeObservationV1 {
         &self.observation_id
     }
 
-    pub fn identity(&self) -> &ClaudeObservationIdentityMaterialV1 {
+    pub fn identity(&self) -> &ObservationIdentityMaterialV1 {
         &self.identity
     }
 
-    pub fn source(&self) -> &ClaudeSourceIdentityV1 {
+    pub fn source(&self) -> &ObservationSourceIdentityV1 {
         self.identity.source()
     }
 
@@ -591,7 +857,7 @@ impl DurableClaudeObservationV1 {
     }
 }
 
-impl Serialize for DurableClaudeObservationV1 {
+impl Serialize for DurableObservationV1 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -607,7 +873,7 @@ impl Serialize for DurableClaudeObservationV1 {
     }
 }
 
-impl<'de> Deserialize<'de> for DurableClaudeObservationV1 {
+impl<'de> Deserialize<'de> for DurableObservationV1 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -651,6 +917,9 @@ impl<'de> Deserialize<'de> for DurableClaudeObservationV1 {
     }
 }
 
+/// Compatibility name for durable Claude observations.
+pub type DurableClaudeObservationV1 = DurableObservationV1;
+
 /// Relationship between an existing record and a candidate retry.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -661,8 +930,8 @@ pub enum ObservationCollisionOutcomeV1 {
 }
 
 pub fn classify_observation_collision(
-    existing: &DurableClaudeObservationV1,
-    candidate: &DurableClaudeObservationV1,
+    existing: &DurableObservationV1,
+    candidate: &DurableObservationV1,
 ) -> ObservationCollisionOutcomeV1 {
     if existing.observation_id != candidate.observation_id {
         ObservationCollisionOutcomeV1::Distinct

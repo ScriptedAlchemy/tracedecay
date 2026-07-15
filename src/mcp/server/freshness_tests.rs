@@ -1,6 +1,6 @@
 use super::{
     DatabaseOwnerReconciler, McpServer, McpServerConstructionContext, StalenessBannerInputs,
-    format_index_age_phrase, staleness_banner,
+    format_index_age_phrase, staleness_banner, tool_error_response,
 };
 use crate::config::PinnedUserDataDir;
 use crate::tracedecay::TraceDecay;
@@ -204,11 +204,28 @@ async fn project_startup_catch_up_succeeds_without_user_session_authority() {
         None,
         None,
         cg.project_root(),
+        cg.store_layout().identity.project_id.as_deref(),
     )
     .await
     .expect("project catch-up must not depend on user session storage");
 
     assert!(Arc::ptr_eq(&completed, &project_db));
+}
+
+#[test]
+fn hook_runtime_failures_keep_structured_retry_data_at_json_rpc_boundary() {
+    let error = crate::errors::TraceDecayError::hook_runtime(
+        "observation_cursor_conflict",
+        true,
+        "Claude observation store operation failed",
+    );
+
+    let response = tool_error_response(serde_json::json!(7), "tracedecay_hook_runtime", &error);
+    let data = response.error.unwrap().data.unwrap();
+
+    assert_eq!(data["reason_code"], "observation_cursor_conflict");
+    assert_eq!(data["retryable"], true);
+    assert_eq!(data["detail"], "Claude observation store operation failed");
 }
 
 // ---- ledger settle is bounded when a recorder task wedges ---------

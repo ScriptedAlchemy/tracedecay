@@ -1,8 +1,6 @@
-use std::fs;
-use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-use libsql::{Connection, TransactionBehavior, params};
+use libsql::{Connection, params};
 
 use crate::global_db::GlobalDb;
 use crate::sessions::SessionMessageRecord;
@@ -10,50 +8,44 @@ use crate::tracedecay::current_timestamp;
 
 use super::{LcmError, LcmPayloadExpansion, LcmPayloadRef, gc, util};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeleteOpts {
-    pub rewrite_placeholders: bool,
-    pub remove_file: bool,
-    pub verify_hash: bool,
+mod delete_recovery;
+mod filesystem_authority;
+mod rollback;
+
+pub(crate) use delete_recovery::{
+    CommittedPayloadRemoval, PreparedPayloadDelete, payload_file_fingerprint,
+    remove_committed_payload_file,
+};
+pub use delete_recovery::{DeleteOpts, DeleteOutcome, delete_external_payload};
+#[cfg(test)]
+pub(crate) use delete_recovery::{
+    reconcile_committed_payload_drain, remove_committed_payload_file_with,
+};
+pub use filesystem_authority::safe_remove_payload_file;
+pub(crate) use filesystem_authority::{
+    ensure_contained, existing_payload_dir, existing_payload_dir_opt,
+};
+use filesystem_authority::{prepare_payload_dir, read_payload_file, write_private_file};
+pub(crate) use rollback::PayloadFileRollback;
+
+pub(crate) async fn delete_external_payload_in_transaction(
+    conn: &Connection,
+    storage_root: &Path,
+    payload_ref: &str,
+    opts: &DeleteOpts,
+) -> Result<PreparedPayloadDelete, LcmError> {
+    delete_recovery::delete_external_payload_in_transaction(conn, storage_root, payload_ref, opts)
+        .await
 }
 
-impl Default for DeleteOpts {
-    fn default() -> Self {
-        Self {
-            rewrite_placeholders: true,
-            remove_file: true,
-            verify_hash: true,
-        }
-    }
+pub(crate) fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
+    filesystem_authority::canonical_storage_root(storage_root)
 }
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DeleteOutcome {
-    pub metadata_row_existed: bool,
-    pub file_existed: bool,
-    pub file_removed: bool,
-    pub placeholders_rewritten: usize,
-    pub bytes_freed: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PayloadFileIdentity {
-    #[cfg(unix)]
-    dev: u64,
-    #[cfg(unix)]
-    ino: u64,
-}
-
-#[cfg(target_os = "linux")]
-const O_NOFOLLOW: i32 = 0o40_0000;
 
 pub struct LcmStore<'db> {
     db: &'db GlobalDb,
     storage_root: PathBuf,
 }
-
-mod rollback;
-pub(crate) use rollback::PayloadFileRollback;
 
 impl<'db> LcmStore<'db> {
     pub(crate) fn new(db: &'db GlobalDb, storage_root: PathBuf) -> Self {
@@ -368,328 +360,6 @@ async fn tombstoned_raw_ref_exists(conn: &Connection, payload_ref: &str) -> Resu
     Ok(false)
 }
 
-pub async fn delete_external_payload(
-    conn: &Connection,
-    storage_root: &Path,
-    payload_ref: &str,
-    opts: &DeleteOpts,
-) -> Result<DeleteOutcome, LcmError> {
-    let transaction = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await?;
-    let outcome =
-        delete_external_payload_in_transaction(&transaction, storage_root, payload_ref, opts)
-            .await?;
-    transaction.commit().await?;
-    Ok(outcome)
-}
-
-pub(crate) async fn delete_external_payload_in_transaction(
-    conn: &Connection,
-    storage_root: &Path,
-    payload_ref: &str,
-    opts: &DeleteOpts,
-) -> Result<DeleteOutcome, LcmError> {
-    validate_payload_ref(payload_ref)?;
-    // The DB-side cleanup below must still run for a store whose payload
-    // directory is gone — the file simply counts as already removed.
-    let dir = existing_payload_dir_opt(storage_root)?;
-    let path = match dir.as_deref() {
-        Some(dir) => {
-            let path = dir.join(payload_ref);
-            ensure_contained(dir, &path)?;
-            Some(path)
-        }
-        None => None,
-    };
-
-    let metadata = match load_payload_metadata(conn, payload_ref).await {
-        Ok(payload) => Some(payload),
-        Err(LcmError::PayloadNotFound) => None,
-        Err(err) => return Err(err),
-    };
-    let (file_existed, file_identity) = match path.as_deref() {
-        Some(path) => inspect_payload_file_for_delete(path)?,
-        None => (false, None),
-    };
-
-    if opts.verify_hash
-        && file_existed
-        && let (Some(metadata), Some(path)) = (metadata.as_ref(), path.as_deref())
-    {
-        let (content, identity) =
-            read_payload_file_for_verify(path)?.ok_or(LcmError::PayloadMissing)?;
-        if Some(identity) != file_identity || util::sha256_hex(&content) != metadata.content_hash {
-            return Err(LcmError::PayloadIntegrityMismatch);
-        }
-    }
-
-    let metadata_row_existed = metadata.is_some();
-    let expected_bytes = metadata.as_ref().map_or(0, |payload| payload.byte_count);
-    let mut placeholders_rewritten = 0usize;
-
-    let tombstone_missing_payload =
-        opts.rewrite_placeholders && !opts.remove_file && !opts.verify_hash;
-    if let Some(metadata) = metadata.as_ref()
-        && gc::referenced_payload_refs(conn, &metadata.provider, None)
-            .await?
-            .contains(payload_ref)
-        && !tombstone_missing_payload
-    {
-        return Err(LcmError::StillReferenced);
-    }
-    conn.execute(
-        "DELETE FROM lcm_external_payloads WHERE payload_ref = ?1",
-        params![payload_ref],
-    )
-    .await?;
-    conn.execute(
-        "DELETE FROM lcm_gc_marks WHERE payload_ref = ?1",
-        params![payload_ref],
-    )
-    .await?;
-    if opts.rewrite_placeholders {
-        placeholders_rewritten = tombstone_residual_placeholders(conn, payload_ref).await?;
-    }
-
-    let file_removed = match (dir.as_deref(), opts.remove_file && file_existed) {
-        (Some(dir), true) => {
-            safe_remove_payload_file_checked(dir, payload_ref, file_identity.as_ref())?
-        }
-        _ => false,
-    };
-
-    Ok(DeleteOutcome {
-        metadata_row_existed,
-        file_existed,
-        file_removed,
-        placeholders_rewritten,
-        bytes_freed: if file_removed { expected_bytes } else { 0 },
-    })
-}
-
-async fn tombstone_residual_placeholders(
-    conn: &Connection,
-    payload_ref: &str,
-) -> Result<usize, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT store_id, storage_kind, payload_ref, content, snippet_text, index_text, metadata_json
-             FROM lcm_raw_messages
-             WHERE payload_ref = ?1 OR content LIKE ?2 OR snippet_text LIKE ?2 OR index_text LIKE ?2 OR metadata_json LIKE ?2",
-            params![payload_ref, format!("%{payload_ref}%")],
-        )
-        .await?;
-    let mut updates = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let store_id: i64 = row.get(0)?;
-        let storage_kind: String = row.get(1)?;
-        let raw_payload_ref: Option<String> = row.get(2).unwrap_or(None);
-        let mut changed = 0usize;
-        let content: Option<String> = row.get(3).unwrap_or(None);
-        let snippet_text: String = row.get(4)?;
-        let index_text: String = row.get(5)?;
-        let metadata_json: Option<String> = row.get(6).unwrap_or(None);
-        let new_content = content.map(|text| {
-            let tombstoned = gc::tombstone_placeholder_in_text(&text, payload_ref);
-            if tombstoned != text {
-                changed += 1;
-            }
-            tombstoned
-        });
-        let new_snippet = gc::tombstone_placeholder_in_text(&snippet_text, payload_ref);
-        if new_snippet != snippet_text {
-            changed += 1;
-        }
-        let new_index = gc::tombstone_placeholder_in_text(&index_text, payload_ref);
-        if new_index != index_text {
-            changed += 1;
-        }
-        let new_metadata = metadata_json.map(|text| {
-            let tombstoned = gc::tombstone_placeholder_in_text(&text, payload_ref);
-            if tombstoned != text {
-                changed += 1;
-            }
-            tombstoned
-        });
-        let clear_raw_ref = storage_kind == "external"
-            && raw_payload_ref
-                .as_deref()
-                .is_some_and(|value| value == payload_ref);
-        if clear_raw_ref {
-            changed += 1;
-        }
-        if changed > 0 {
-            updates.push((
-                store_id,
-                clear_raw_ref,
-                new_content,
-                new_snippet,
-                new_index,
-                new_metadata,
-                changed,
-            ));
-        }
-    }
-
-    let mut changed_total = 0usize;
-    for (store_id, clear_raw_ref, content, snippet_text, index_text, metadata_json, changed) in
-        updates
-    {
-        if clear_raw_ref {
-            conn.execute(
-                "UPDATE lcm_raw_messages
-                 SET storage_kind = 'inline', payload_ref = NULL, content = ?2, snippet_text = ?3, index_text = ?4, metadata_json = ?5
-                 WHERE store_id = ?1",
-                params![store_id, util::opt_text(content.as_deref()), snippet_text, index_text, util::opt_text(metadata_json.as_deref())],
-            )
-            .await?;
-        } else {
-            conn.execute(
-                "UPDATE lcm_raw_messages
-                 SET content = ?2, snippet_text = ?3, index_text = ?4, metadata_json = ?5
-                 WHERE store_id = ?1",
-                params![
-                    store_id,
-                    util::opt_text(content.as_deref()),
-                    snippet_text,
-                    index_text,
-                    util::opt_text(metadata_json.as_deref())
-                ],
-            )
-            .await?;
-        }
-        changed_total += changed;
-    }
-    Ok(changed_total)
-}
-
-pub fn safe_remove_payload_file(dir: &Path, payload_ref: &str) -> Result<bool, LcmError> {
-    safe_remove_payload_file_checked(dir, payload_ref, None)
-}
-
-fn safe_remove_payload_file_checked(
-    dir: &Path,
-    payload_ref: &str,
-    expected_identity: Option<&PayloadFileIdentity>,
-) -> Result<bool, LcmError> {
-    validate_payload_ref(payload_ref)?;
-    let path = dir.join(payload_ref);
-    ensure_contained(dir, &path)?;
-    let Some((file, _opened, _lstat, identity)) = open_verified_payload_file(&path)? else {
-        return Ok(false);
-    };
-    if let Some(expected_identity) = expected_identity {
-        same_payload_file_identity(&identity, expected_identity)?;
-    }
-    drop(file);
-    ensure_contained(dir, &path)?;
-    fs::remove_file(&path).map_err(|err| LcmError::Io(err.to_string()))?;
-    Ok(true)
-}
-
-fn inspect_payload_file_for_delete(
-    path: &Path,
-) -> Result<(bool, Option<PayloadFileIdentity>), LcmError> {
-    Ok(match open_verified_payload_file(path)? {
-        Some((_file, _opened, _lstat, identity)) => (true, Some(identity)),
-        None => (false, None),
-    })
-}
-
-fn read_payload_file_for_verify(
-    path: &Path,
-) -> Result<Option<(Vec<u8>, PayloadFileIdentity)>, LcmError> {
-    let Some((mut file, _opened, _lstat, identity)) = open_verified_payload_file(path)? else {
-        return Ok(None);
-    };
-    let mut content = Vec::new();
-    file.read_to_end(&mut content)
-        .map_err(|err| LcmError::Io(err.to_string()))?;
-    Ok(Some((content, identity)))
-}
-
-fn open_verified_payload_file(
-    path: &Path,
-) -> Result<Option<(fs::File, fs::Metadata, fs::Metadata, PayloadFileIdentity)>, LcmError> {
-    let file = match private_file_options().read(true).open(path) {
-        Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            if fs::symlink_metadata(path)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_file())
-            {
-                return Err(LcmError::InvalidPayloadRef);
-            }
-            return Err(LcmError::Io(err.to_string()));
-        }
-    };
-    let opened = file
-        .metadata()
-        .map_err(|err| LcmError::Io(err.to_string()))?;
-    if !opened.is_file() {
-        return Err(LcmError::InvalidPayloadRef);
-    }
-    let lstat = fs::symlink_metadata(path).map_err(|err| LcmError::Io(err.to_string()))?;
-    if lstat.file_type().is_symlink() || !lstat.is_file() {
-        return Err(LcmError::InvalidPayloadRef);
-    }
-    same_file_identity(&opened, &lstat)?;
-    let identity = payload_file_identity(&opened);
-    Ok(Some((file, opened, lstat, identity)))
-}
-
-#[cfg(unix)]
-fn same_file_identity(opened: &fs::Metadata, lstat: &fs::Metadata) -> Result<(), LcmError> {
-    use std::os::unix::fs::MetadataExt;
-
-    if opened.dev() == lstat.dev() && opened.ino() == lstat.ino() {
-        Ok(())
-    } else {
-        Err(LcmError::InvalidPayloadRef)
-    }
-}
-
-#[cfg(unix)]
-fn payload_file_identity(metadata: &fs::Metadata) -> PayloadFileIdentity {
-    use std::os::unix::fs::MetadataExt;
-
-    PayloadFileIdentity {
-        dev: metadata.dev(),
-        ino: metadata.ino(),
-    }
-}
-
-#[cfg(unix)]
-fn same_payload_file_identity(
-    actual: &PayloadFileIdentity,
-    expected: &PayloadFileIdentity,
-) -> Result<(), LcmError> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(LcmError::InvalidPayloadRef)
-    }
-}
-
-#[cfg(not(unix))]
-fn same_file_identity(_opened: &fs::Metadata, _lstat: &fs::Metadata) -> Result<(), LcmError> {
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn payload_file_identity(_metadata: &fs::Metadata) -> PayloadFileIdentity {
-    PayloadFileIdentity {}
-}
-
-#[cfg(not(unix))]
-fn same_payload_file_identity(
-    _actual: &PayloadFileIdentity,
-    _expected: &PayloadFileIdentity,
-) -> Result<(), LcmError> {
-    Ok(())
-}
-
 async fn ensure_current_raw_payload_ref(
     conn: &Connection,
     payload: &LcmPayloadRef,
@@ -777,160 +447,6 @@ pub(crate) async fn load_payload_metadata(
         created_at: row.get(8)?,
         metadata_json: row.get(9)?,
     })
-}
-
-fn prepare_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
-    let root = canonical_storage_root(storage_root)?;
-    let dir = root.join("lcm-payloads");
-    match fs::symlink_metadata(&dir) {
-        Ok(metadata) => ensure_actual_private_dir(&dir, &metadata)?,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir(&dir).map_err(|err| LcmError::Io(err.to_string()))?;
-            set_private_dir_permissions(&dir)?;
-        }
-        Err(err) => return Err(LcmError::Io(err.to_string())),
-    }
-    ensure_payload_dir_under_root(&root, &dir)?;
-    Ok(dir)
-}
-
-pub(crate) fn existing_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
-    existing_payload_dir_opt(storage_root)?.ok_or_else(|| {
-        LcmError::Io(format!(
-            "payload directory missing under {}",
-            storage_root.display()
-        ))
-    })
-}
-
-/// Like `existing_payload_dir`, but a payload directory that was never
-/// created (it is made lazily on first externalization) or has been removed
-/// reports as `None` instead of an I/O error. Invalid configurations —
-/// symlinked dir, wrong file type, dir escaping the storage root — still
-/// error.
-pub(crate) fn existing_payload_dir_opt(storage_root: &Path) -> Result<Option<PathBuf>, LcmError> {
-    let root = canonical_storage_root(storage_root)?;
-    let dir = root.join("lcm-payloads");
-    let metadata = match fs::symlink_metadata(&dir) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(LcmError::Io(err.to_string())),
-    };
-    ensure_actual_private_dir(&dir, &metadata)?;
-    ensure_payload_dir_under_root(&root, &dir)?;
-    Ok(Some(dir))
-}
-
-pub(crate) fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
-    let metadata =
-        fs::symlink_metadata(storage_root).map_err(|err| LcmError::Io(err.to_string()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(LcmError::InvalidPayloadRef);
-    }
-    storage_root
-        .canonicalize()
-        .map_err(|err| LcmError::Io(err.to_string()))
-}
-
-fn ensure_actual_private_dir(dir: &Path, metadata: &fs::Metadata) -> Result<(), LcmError> {
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(LcmError::InvalidPayloadRef);
-    }
-    set_private_dir_permissions(dir)?;
-    Ok(())
-}
-
-fn ensure_payload_dir_under_root(root: &Path, dir: &Path) -> Result<(), LcmError> {
-    let canonical_dir = dir
-        .canonicalize()
-        .map_err(|err| LcmError::Io(err.to_string()))?;
-    if canonical_dir.parent() == Some(root) {
-        Ok(())
-    } else {
-        Err(LcmError::InvalidPayloadRef)
-    }
-}
-
-pub(crate) fn ensure_contained(root: &Path, path: &Path) -> Result<(), LcmError> {
-    let parent = path.parent().ok_or(LcmError::InvalidPayloadRef)?;
-    if parent == root {
-        Ok(())
-    } else {
-        Err(LcmError::InvalidPayloadRef)
-    }
-}
-
-fn write_private_file(path: &Path, content: &[u8]) -> Result<bool, LcmError> {
-    let mut file = match private_file_options()
-        .create_new(true)
-        .write(true)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            ensure_existing_payload_matches(path, content)?;
-            return Ok(false);
-        }
-        Err(err) => return Err(LcmError::Io(err.to_string())),
-    };
-    if let Err(error) = file.write_all(content).and_then(|()| file.sync_all()) {
-        drop(file);
-        let _ = fs::remove_file(path);
-        return Err(LcmError::Io(error.to_string()));
-    }
-    Ok(true)
-}
-
-fn ensure_existing_payload_matches(path: &Path, content: &[u8]) -> Result<(), LcmError> {
-    let mut file = private_file_options()
-        .read(true)
-        .open(path)
-        .map_err(|err| LcmError::Io(err.to_string()))?;
-    let mut existing = Vec::new();
-    file.read_to_end(&mut existing)
-        .map_err(|err| LcmError::Io(err.to_string()))?;
-    if existing == content {
-        Ok(())
-    } else {
-        Err(LcmError::PayloadIntegrityMismatch)
-    }
-}
-
-fn read_payload_file(path: &Path) -> Result<String, LcmError> {
-    let mut file = private_file_options()
-        .read(true)
-        .open(path)
-        .map_err(|err| {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                LcmError::PayloadMissing
-            } else {
-                LcmError::Io(err.to_string())
-            }
-        })?;
-    let mut content = String::new();
-    file.read_to_string(&mut content)
-        .map_err(|err| LcmError::Io(err.to_string()))?;
-    Ok(content)
-}
-
-#[cfg(unix)]
-fn private_file_options() -> fs::OpenOptions {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut options = fs::OpenOptions::new();
-    options.mode(0o600);
-    #[cfg(target_os = "linux")]
-    options.custom_flags(O_NOFOLLOW);
-    options
-}
-
-#[cfg(not(unix))]
-fn private_file_options() -> fs::OpenOptions {
-    fs::OpenOptions::new()
-}
-
-fn set_private_dir_permissions(path: &Path) -> Result<(), LcmError> {
-    crate::storage::set_private_dir_permissions(path).map_err(|err| LcmError::Io(err.to_string()))
 }
 
 #[cfg(test)]

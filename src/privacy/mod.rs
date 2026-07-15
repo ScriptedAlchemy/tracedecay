@@ -9,6 +9,7 @@ pub(crate) mod detector_kernel;
 mod parse;
 mod sanitize;
 
+pub(crate) use detect::sanitize_provider_metadata_text;
 pub use detect::{
     DetectionConfidenceV1, PrivacyDetectorV1, SanitizationActionV1, SanitizationFindingV1,
 };
@@ -18,7 +19,7 @@ pub use parse::{
 };
 pub use sanitize::{
     ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1,
-    PR5_CLAUDE_SANITIZER_VERSION, PrivacySanitizerError,
+    PR5_CLAUDE_SANITIZER_VERSION, PrivacySanitizerError, SanitizedClaudeRecordV1,
 };
 
 #[cfg(test)]

@@ -456,9 +456,36 @@ pub(super) async fn handle_health(
 /// Issue #80 — surface process and database telemetry so users hitting
 /// unexpected CPU/RAM pressure can attach a structured snapshot to a
 /// bug report. The MCP wrapper just delegates to `runtime_telemetry`.
-pub(super) async fn handle_runtime(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_runtime(
+    cg: &TraceDecay,
+    args: Value,
+    registry: Option<&crate::global_db::GlobalDb>,
+) -> Result<ToolResult> {
     let snap = crate::runtime_telemetry::collect(cg).await?;
-    let value = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
+    let mut value = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
+    if args
+        .get("authority_audit")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let (authority_audit_ok, authority_audit_error) = match registry {
+            Some(registry) => match registry.audit_observation_authority().await {
+                Ok(()) => (Some(true), None),
+                Err(error) => (Some(false), Some(error.to_string())),
+            },
+            None => (
+                None,
+                Some("authoritative global registry is unavailable".to_string()),
+            ),
+        };
+        if let Some(database) = value.get_mut("database").and_then(Value::as_object_mut) {
+            database.insert("authority_audit_ok".to_string(), json!(authority_audit_ok));
+            database.insert(
+                "authority_audit_error".to_string(),
+                json!(authority_audit_error),
+            );
+        }
+    }
     let text = render::finalize(Some(cg.project_root()), &args, &value, || {
         render::generic_md(&value)
     });

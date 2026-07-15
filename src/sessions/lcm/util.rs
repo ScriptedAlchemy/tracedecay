@@ -3,6 +3,22 @@ use sha2::{Digest, Sha256};
 
 use super::LcmError;
 
+#[cfg(unix)]
+pub(crate) fn file_mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.mtime()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn file_mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
+}
+
 pub(crate) fn opt_text(value: Option<&str>) -> Value {
     value.map_or(Value::Null, |s| Value::Text(s.to_string()))
 }

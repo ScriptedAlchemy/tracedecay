@@ -9,8 +9,8 @@ use crate::sessions::shared::{content_storage_text_and_tools, preview_truncated}
 use crate::sessions::source::{RawJsonlFrame, RawJsonlFrameReader, SessionDraft};
 
 use super::record_metadata::{
-    SessionAccumulator, compact_boundary_row, message_metadata, model_fallback_row, pr_link_row,
-    record_timestamp,
+    SessionAccumulator, compact_boundary_row, is_redaction_marker, message_metadata,
+    model_fallback_row, pr_link_row, record_timestamp, source_position_message_id,
 };
 use super::{CWD_PROBE_LINES, KIND_REASONING, MARKER_PREVIEW_BYTES, PROVIDER};
 
@@ -22,6 +22,8 @@ pub(crate) struct ClaudeRecordContext<'a> {
     pub file_generation: u64,
     pub offset: u64,
     pub session_cwd: Option<&'a Path>,
+    pub raw_message_id: Option<&'a str>,
+    pub raw_tool_event_ids: &'a [String],
 }
 
 /// Minimal PR5 projection result. Rich reasoning/marker families remain V1
@@ -31,9 +33,7 @@ pub(crate) enum ClaudeRecordDisposition {
         draft: Box<SessionDraft>,
         message: Box<SessionMessageRecord>,
     },
-    NonConversational {
-        record_type: Option<String>,
-    },
+    NonConversational,
 }
 
 /// Map one sanitized Claude record to the canonical conversational V1 row.
@@ -43,12 +43,7 @@ pub(crate) fn map_sanitized_claude_record(
     context: &ClaudeRecordContext<'_>,
 ) -> ClaudeRecordDisposition {
     let Ok(offset) = i64::try_from(context.offset) else {
-        return ClaudeRecordDisposition::NonConversational {
-            record_type: record
-                .get("type")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        };
+        return ClaudeRecordDisposition::NonConversational;
     };
     let mut accumulator = SessionAccumulator::default();
     let source_id = format!("claude:{}", context.session_id);
@@ -60,13 +55,9 @@ pub(crate) fn map_sanitized_claude_record(
         context.session_cwd,
         &mut accumulator,
     ) else {
-        return ClaudeRecordDisposition::NonConversational {
-            record_type: record
-                .get("type")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        };
+        return ClaudeRecordDisposition::NonConversational;
     };
+    message.message_id = durable_record_message_id(record, context, offset);
     let mut metadata = message
         .metadata_json
         .as_deref()
@@ -76,6 +67,7 @@ pub(crate) fn map_sanitized_claude_record(
         "source_generation".to_string(),
         Value::from(context.file_generation),
     );
+    retain_unchanged_tool_event_ids(&mut metadata, context.raw_tool_event_ids);
     message.metadata_json = serde_json::to_string(&metadata).ok();
     let draft = SessionDraft {
         session_id: context.session_id.to_owned(),
@@ -94,6 +86,47 @@ pub(crate) fn map_sanitized_claude_record(
     }
 }
 
+fn durable_record_message_id(
+    record: &Value,
+    context: &ClaudeRecordContext<'_>,
+    offset: i64,
+) -> String {
+    let sanitized_message_id = record
+        .pointer("/message/id")
+        .and_then(Value::as_str)
+        .or_else(|| record.get("uuid").and_then(Value::as_str))
+        .filter(|id| !id.is_empty());
+    if context.raw_message_id == sanitized_message_id
+        && sanitized_message_id.is_some_and(|id| !is_redaction_marker(id))
+    {
+        return sanitized_message_id.unwrap_or_default().to_string();
+    }
+    source_position_message_id(context.session_id, context.file_generation, offset)
+}
+
+fn retain_unchanged_tool_event_ids(metadata: &mut Map<String, Value>, raw_ids: &[String]) {
+    let Some(events) = metadata
+        .get_mut("tool_events")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let mut raw_ids = raw_ids.iter();
+    for event in events {
+        let Some(event) = event.as_object_mut() else {
+            continue;
+        };
+        let sanitized = event.get("call_id").and_then(Value::as_str);
+        if sanitized.is_none() {
+            continue;
+        }
+        let raw = raw_ids.next().map(String::as_str);
+        if raw != sanitized || sanitized.is_some_and(is_redaction_marker) {
+            event.remove("call_id");
+        }
+    }
+}
+
 pub(crate) fn transcript_cwd(path: &Path) -> Option<PathBuf> {
     let file = std::fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(file);
@@ -103,7 +136,8 @@ pub(crate) fn transcript_cwd(path: &Path) -> Option<PathBuf> {
         let byte_len = match frames.next_frame().ok()? {
             RawJsonlFrame::Eof
             | RawJsonlFrame::Partial { .. }
-            | RawJsonlFrame::Oversized { .. } => return None,
+            | RawJsonlFrame::Oversized { .. }
+            | RawJsonlFrame::BudgetExhausted { .. } => return None,
             RawJsonlFrame::Complete { byte_len } => byte_len,
         };
         let end_offset = offset.checked_add(byte_len)?;
@@ -242,30 +276,15 @@ fn conversational_message_id(
         .map_or_else(|| format!("{session_id}:{offset}"), ToString::to_string)
 }
 
-/// Emit a separate `kind="reasoning"` row for an assistant message that carries
-/// one or more `thinking` blocks, so the model's reasoning is kind-filterable
-/// and searchable on its own row — matching how Codex
-/// ([`crate::sessions::codex`]) and Cursor ([`crate::sessions::cursor_composer`])
-/// store reasoning as a dedicated row (role "assistant", `kind="reasoning"`)
-/// rather than leaving the thinking text embedded in the serialized
-/// assistant-message content blob.
-///
-/// Multiple `thinking` blocks are concatenated in transcript order. A
-/// `redacted_thinking` block carries no plaintext, so — mirroring Codex's
-/// encrypted-reasoning convention, where
-/// `response_item_reasoning_summary_text` declines to emit a row when there is
-/// no plaintext summary — it never fabricates a body: a message whose only
-/// reasoning is redacted yields no row (the block count is recorded as metadata
-/// only when a plaintext row already exists).
-///
-/// Purely additive: the assistant message row itself is untouched (its content
-/// blob still carries the thinking blocks verbatim in lossless storage).
+/// Emit one searchable reasoning row for plaintext assistant `thinking` blocks.
+/// Redacted-only blocks produce no row; the owning message remains unchanged.
 pub(super) fn reasoning_from_line(
     record: &Value,
-    session_id: &str,
     path: &Path,
-    offset: i64,
+    context: &ClaudeRecordContext<'_>,
+    owning_message_id: Option<&str>,
 ) -> Option<SessionMessageRecord> {
+    let offset = i64::try_from(context.offset).ok()?;
     if record.get("type").and_then(Value::as_str) != Some("assistant") {
         return None;
     }
@@ -289,14 +308,15 @@ pub(super) fn reasoning_from_line(
             _ => {}
         }
     }
-    // No plaintext thinking: mirror Codex, which records nothing for encrypted
-    // reasoning rather than fabricating a body from redacted content.
     if thinking_parts.is_empty() {
         return None;
     }
     let text = thinking_parts.join("\n\n");
 
-    let base_id = conversational_message_id(message, record, session_id, offset);
+    let base_id = owning_message_id.map_or_else(
+        || durable_record_message_id(record, context, offset),
+        str::to_string,
+    );
     let role = message
         .get("role")
         .and_then(Value::as_str)
@@ -335,7 +355,7 @@ pub(super) fn reasoning_from_line(
         // with the owning message row's `{base}` id under the
         // `(provider, message_id)` primary key.
         message_id: format!("{base_id}:thinking"),
-        session_id: session_id.to_string(),
+        session_id: context.session_id.to_string(),
         role,
         timestamp: record_timestamp(record),
         ordinal: offset,
@@ -354,11 +374,11 @@ pub(super) fn reasoning_from_line(
 /// summaries that carry no error/interruption signal.
 pub(super) fn system_hook_message_from_line(
     record: &Value,
-    session_id: &str,
     path: &Path,
-    offset: i64,
-    _session_cwd: Option<&Path>,
+    context: &ClaudeRecordContext<'_>,
+    trusted_tool_use_id: Option<&str>,
 ) -> Option<SessionMessageRecord> {
+    let offset = i64::try_from(context.offset).ok()?;
     if record.get("type").and_then(Value::as_str) != Some("system") {
         return None;
     }
@@ -381,7 +401,7 @@ pub(super) fn system_hook_message_from_line(
     }
 
     let subtype = record.get("subtype").and_then(Value::as_str).unwrap_or("");
-    let tool_use_id = record.get("toolUseID").and_then(Value::as_str);
+    let tool_use_id = trusted_tool_use_id;
 
     let mut lines = vec![format!("Claude hook event: {subtype}")];
     if let Some(tool_use_id) = tool_use_id {
@@ -408,11 +428,7 @@ pub(super) fn system_hook_message_from_line(
     let joined = lines.join("\n");
     let text = preview_truncated(&joined, MARKER_PREVIEW_BYTES);
 
-    let message_id = record
-        .get("uuid")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map_or_else(|| format!("{session_id}:{offset}"), ToString::to_string);
+    let message_id = durable_record_message_id(record, context, offset);
     let timestamp = record
         .get("timestamp")
         .and_then(Value::as_str)
@@ -444,7 +460,7 @@ pub(super) fn system_hook_message_from_line(
     Some(SessionMessageRecord {
         provider: PROVIDER.to_string(),
         message_id,
-        session_id: session_id.to_string(),
+        session_id: context.session_id.to_string(),
         // role "tool" keeps transient hook telemetry out of LCM policy anchors, which pin role system/developer.
         role: "tool".to_string(),
         timestamp,
@@ -465,15 +481,36 @@ pub(super) fn system_hook_message_from_line(
 /// advance without emitting a row).
 pub(super) fn structured_marker_from_line(
     record: &Value,
-    session_id: &str,
     path: &Path,
-    offset: i64,
+    context: &ClaudeRecordContext<'_>,
     accumulator: &mut SessionAccumulator,
 ) -> Option<SessionMessageRecord> {
+    let offset = i64::try_from(context.offset).ok()?;
     match record.get("type").and_then(Value::as_str)? {
-        "pr-link" => pr_link_row(record, session_id, path, offset, accumulator),
-        "system" => compact_boundary_row(record, session_id, path, offset)
-            .or_else(|| model_fallback_row(record, session_id, path, offset)),
+        "pr-link" => pr_link_row(
+            record,
+            context.session_id,
+            context.file_generation,
+            path,
+            offset,
+            accumulator,
+        ),
+        "system" => compact_boundary_row(
+            record,
+            context.session_id,
+            context.file_generation,
+            path,
+            offset,
+        )
+        .or_else(|| {
+            model_fallback_row(
+                record,
+                context.session_id,
+                context.file_generation,
+                path,
+                offset,
+            )
+        }),
         _ => None,
     }
 }

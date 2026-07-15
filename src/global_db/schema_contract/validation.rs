@@ -1,7 +1,9 @@
 use libsql::{Connection, params};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
-use super::definitions::{Column, INDEXES, Index, TABLES, Table};
+use super::definitions::{
+    Column, INDEXES, Index, OBSERVATIONS_TABLE_NAME, REGISTRY_TABLE_NAMES, TABLES, Table,
+};
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, read_columns, read_foreign_keys, read_indexes,
 };
@@ -172,7 +174,15 @@ pub(in crate::global_db) async fn validate_observation_migration_source(
     conn: &Connection,
     has_legacy_idempotency: bool,
 ) -> crate::errors::Result<()> {
-    let contract = &TABLES[7];
+    let Some(contract) = TABLES
+        .iter()
+        .find(|contract| contract.name == OBSERVATIONS_TABLE_NAME)
+    else {
+        return Err(global_db_operation_message(
+            OPERATION,
+            "canonical observations schema contract is not defined",
+        ));
+    };
     let columns = read_columns(conn, contract.name).await?;
     if columns.len() != contract.columns.len() + usize::from(has_legacy_idempotency)
         || contract.columns.iter().any(|expected| {
@@ -279,12 +289,23 @@ async fn validate_indexes_for_table(conn: &Connection, table: &str) -> crate::er
     Ok(())
 }
 
-async fn validate_trigger(conn: &Connection, name: &str, table: &str) -> crate::errors::Result<()> {
+fn normalize_trigger_sql(sql: &str) -> String {
+    sql.trim_end_matches(';')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+async fn validate_trigger(
+    conn: &Connection,
+    trigger: &super::invariants::Trigger,
+) -> crate::errors::Result<()> {
     let mut rows = conn
         .query(
-            "SELECT tbl_name FROM sqlite_master
+            "SELECT tbl_name, sql FROM sqlite_master
              WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE",
-            params![name],
+            params![trigger.name],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -292,18 +313,21 @@ async fn validate_trigger(conn: &Connection, name: &str, table: &str) -> crate::
         .next()
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .map(|row| row.get::<String>(0))
+        .map(|row| Ok::<_, libsql::Error>((row.get::<String>(0)?, row.get::<String>(1)?)))
         .transpose()
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    if actual
-        .as_deref()
-        .is_some_and(|actual| actual.eq_ignore_ascii_case(table))
-    {
+    if actual.as_ref().is_some_and(|(table, sql)| {
+        table.eq_ignore_ascii_case(trigger.table)
+            && normalize_trigger_sql(sql) == normalize_trigger_sql(trigger.create_sql)
+    }) {
         Ok(())
     } else {
         Err(global_db_operation_message(
             OPERATION,
-            format!("required trigger '{name}' on table '{table}' is missing"),
+            format!(
+                "required trigger '{}' on table '{}' is missing or incompatible",
+                trigger.name, trigger.table
+            ),
         ))
     }
 }
@@ -359,27 +383,47 @@ async fn validate_tables_and_indexes(
     Ok(())
 }
 
+async fn validate_named_tables_and_indexes(
+    conn: &Connection,
+    table_names: &[&str],
+) -> crate::errors::Result<()> {
+    for table_name in table_names {
+        let contract = TABLES
+            .iter()
+            .find(|contract| contract.name.eq_ignore_ascii_case(table_name))
+            .ok_or_else(|| {
+                global_db_operation_message(
+                    OPERATION,
+                    format!("schema contract for table '{table_name}' is not defined"),
+                )
+            })?;
+        validate_table(conn, contract).await?;
+        validate_indexes_for_table(conn, contract.name).await?;
+    }
+    Ok(())
+}
+
 pub(in crate::global_db) async fn validate_registry_schema_contract(
     conn: &Connection,
 ) -> crate::errors::Result<()> {
-    validate_tables_and_indexes(conn, &TABLES[..6]).await
+    validate_named_tables_and_indexes(conn, REGISTRY_TABLE_NAMES).await
 }
 
 /// Validates the composed registry, observation-authority, and projection-authority schemas.
 ///
-/// Transcript, LCM, git-correlation, and workflow-index tables are independently owned and
-/// validated by their schema modules; this validator intentionally does not claim those domains.
+/// Transcript, LCM, git-correlation, and workflow-index tables are independently owned by their
+/// schema modules; this validator intentionally neither claims nor validates those domains.
 pub(in crate::global_db) async fn validate_authority_schema_contract(
     conn: &Connection,
 ) -> crate::errors::Result<()> {
     validate_tables_and_indexes(conn, TABLES).await?;
     for invariant in super::invariants::INVARIANTS {
         for trigger in invariant.triggers {
-            validate_trigger(conn, trigger.name, trigger.table).await?;
+            validate_trigger(conn, trigger).await?;
         }
     }
     validate_observation_autoincrement(conn).await?;
-    super::invariants::validate_invariant_rows(conn).await
+    Ok(())
 }
 
 #[cfg(test)]

@@ -5,25 +5,80 @@ use crate::sessions::{SessionMessageRecord, SessionRecord};
 #[tokio::test]
 async fn identical_message_catch_ups_share_one_leader() {
     let key = format!("test-singleflight-{}", std::process::id());
-    let leader = match claim_message_catch_up(key.clone()) {
+    let leader = match claim_message_catch_up(key.clone(), "all") {
         MessageCatchUpClaim::Leader(leader) => leader,
         MessageCatchUpClaim::Wait(_) => panic!("fresh key unexpectedly had a leader"),
     };
-    let waiter = match claim_message_catch_up(key.clone()) {
+    let waiter = match claim_message_catch_up(key.clone(), "all") {
         MessageCatchUpClaim::Wait(waiter) => waiter,
         MessageCatchUpClaim::Leader(_) => panic!("identical catch-up did not coalesce"),
     };
-    drop(leader);
-    tokio::time::timeout(
+    leader.finish(&[]);
+    let failures = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         wait_for_message_catch_up(waiter),
     )
     .await
     .expect("waiter was not released when leader completed");
+    assert!(failures.is_empty());
     assert!(matches!(
-        claim_message_catch_up(key),
+        claim_message_catch_up(key, "all"),
         MessageCatchUpClaim::Leader(_)
     ));
+}
+
+#[tokio::test]
+async fn message_catch_up_waiter_receives_leader_failures() {
+    let key = format!("test-singleflight-failure-{}", std::process::id());
+    let leader = match claim_message_catch_up(key.clone(), "claude") {
+        MessageCatchUpClaim::Leader(leader) => leader,
+        MessageCatchUpClaim::Wait(_) => panic!("fresh key unexpectedly had a leader"),
+    };
+    let waiter = match claim_message_catch_up(key, "claude") {
+        MessageCatchUpClaim::Wait(waiter) => waiter,
+        MessageCatchUpClaim::Leader(_) => panic!("identical catch-up did not coalesce"),
+    };
+    let failure = TranscriptCatchUpFailure {
+        provider: "claude",
+        source: "observation",
+        reason_code: "observation_storage_failed",
+        retryable: true,
+    };
+    let waiting = tokio::spawn(wait_for_message_catch_up(waiter));
+    tokio::task::yield_now().await;
+    leader.finish(&[failure]);
+
+    let failures = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+        .await
+        .expect("waiter was not released when leader failed")
+        .expect("waiter task failed");
+    assert_eq!(failures, vec![failure]);
+}
+
+#[tokio::test]
+async fn dropped_message_catch_up_leader_reports_retryable_interruption() {
+    let key = format!("test-singleflight-drop-{}", std::process::id());
+    let leader = match claim_message_catch_up(key.clone(), "codex") {
+        MessageCatchUpClaim::Leader(leader) => leader,
+        MessageCatchUpClaim::Wait(_) => panic!("fresh key unexpectedly had a leader"),
+    };
+    let waiter = match claim_message_catch_up(key, "codex") {
+        MessageCatchUpClaim::Wait(waiter) => waiter,
+        MessageCatchUpClaim::Leader(_) => panic!("identical catch-up did not coalesce"),
+    };
+    drop(leader);
+
+    let failures = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        wait_for_message_catch_up(waiter),
+    )
+    .await
+    .expect("waiter was not released when leader dropped");
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].provider, "codex");
+    assert_eq!(failures[0].source, "message_search");
+    assert_eq!(failures[0].reason_code, "message_catch_up_interrupted");
+    assert!(failures[0].retryable);
 }
 
 /// Build a search hit with a given relevance score, message timestamp, and

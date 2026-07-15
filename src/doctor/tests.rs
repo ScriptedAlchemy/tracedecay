@@ -271,6 +271,8 @@ async fn database_check_preserves_corrupt_graph_and_adjacent_stores()
                 "canonical_db_path": layout.graph_db_path,
                 "db_size_bytes": corrupt_db.len(),
                 "quick_check_ok": false,
+                "authority_audit_ok": true,
+                "authority_audit_error": null,
                 "dirty_marker": { "exists": true, "state": "dirty" },
             }
         }),
@@ -336,6 +338,8 @@ async fn database_check_is_read_only_while_a_writer_is_live()
                 "canonical_db_path": db_path,
                 "db_size_bytes": std::fs::metadata(&db_path)?.len(),
                 "quick_check_ok": true,
+                "authority_audit_ok": true,
+                "authority_audit_error": null,
                 "dirty_marker": { "exists": false },
                 "daemon_owner_pid": std::process::id(),
                 "daemon_generation": "test-generation",
@@ -364,6 +368,38 @@ async fn database_check_is_read_only_while_a_writer_is_live()
         "live writer must remain healthy"
     );
     Ok(())
+}
+
+#[test]
+fn database_authority_audit_is_required_and_enforced() {
+    let healthy_status = serde_json::json!({
+        "storage_health": {
+            "quick_check_ok": true,
+            "authority_audit_ok": true,
+            "authority_audit_error": null,
+        }
+    });
+    let mut healthy_counters = DoctorCounters::new();
+    assert!(check_database(&mut healthy_counters, &healthy_status));
+    assert_eq!(healthy_counters.issues, 0);
+
+    let failed_status = serde_json::json!({
+        "storage_health": {
+            "quick_check_ok": true,
+            "authority_audit_ok": false,
+            "authority_audit_error": "multiple writers detected",
+        }
+    });
+    let mut failed_counters = DoctorCounters::new();
+    assert!(!check_database(&mut failed_counters, &failed_status));
+    assert_eq!(failed_counters.issues, 1);
+
+    let mut missing_counters = DoctorCounters::new();
+    assert!(!check_database(
+        &mut missing_counters,
+        &serde_json::json!({ "storage_health": { "quick_check_ok": true } }),
+    ));
+    assert_eq!(missing_counters.issues, 1);
 }
 
 #[tokio::test]
@@ -848,7 +884,7 @@ fn daemon_runtime_parser_extracts_storage_health_and_owner() {
             {"type": "text", "text": "daemon notice"},
             {
                 "type": "text",
-                "text": r#"{"tracedecay_version":"0.0.66","process":{"pid":1234},"database":{"canonical_db_path":"/tmp/project.db","quick_check_ok":true,"dirty_marker":{"exists":false}}}"#
+                "text": r#"{"tracedecay_version":"0.0.66","process":{"pid":1234},"database":{"canonical_db_path":"/tmp/project.db","quick_check_ok":true,"authority_audit_ok":true,"authority_audit_error":null,"dirty_marker":{"exists":false}}}"#
             }
         ]
     }))
@@ -865,6 +901,25 @@ fn daemon_runtime_parser_extracts_storage_health_and_owner() {
     assert_eq!(
         parsed.pointer("/storage_health/daemon_version"),
         Some(&serde_json::json!("0.0.66"))
+    );
+    assert_eq!(
+        parsed.pointer("/storage_health/authority_audit_ok"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert_eq!(
+        parsed.pointer("/storage_health/authority_audit_error"),
+        Some(&serde_json::Value::Null)
+    );
+}
+
+#[test]
+fn daemon_runtime_request_enables_authority_audit() {
+    assert_eq!(
+        super::daemon_runtime_args(),
+        serde_json::json!({
+            "format": "json",
+            "authority_audit": true,
+        })
     );
 }
 

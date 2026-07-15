@@ -139,11 +139,25 @@ fn codex_command_hook_hash_reproduces_live_golden_vectors() {
     ];
     for (event, matcher, command, timeout, expected) in cases {
         assert_eq!(
-            codex_command_hook_hash(event, matcher, &command, timeout, false),
+            codex_command_hook_hash(event, matcher, &command, timeout, false).unwrap(),
             expected,
             "hash mismatch for {event}"
         );
     }
+}
+
+#[test]
+fn codex_command_hook_hash_propagates_canonicalization_failure() {
+    let error = codex_command_hook_hash_with("session_start", None, TEST_BIN, 5, false, |_| {
+        Err("forced canonicalization failure".to_string())
+    })
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        TraceDecayError::Config { message }
+            if message.contains("forced canonicalization failure")
+    ));
 }
 
 #[test]
@@ -192,7 +206,7 @@ fn codex_hook_trust_state_flags_modified_when_hash_drifts() {
     let rendered = codex_plugin_hooks(raw, TEST_BIN).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
     value["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = json!(9);
-    let changed_entries = codex_hook_trust_entries(&value);
+    let changed_entries = codex_hook_trust_entries(&value).unwrap();
 
     // config still records the *original* hashes; against the changed bundle,
     // only session_start drifts.
@@ -445,7 +459,7 @@ fn sync_codex_hook_trust_hashes_the_installed_hook_payload() {
     let mut hooks = load_json_file_strict(&hooks_path).unwrap();
     hooks["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = json!(9);
     safe_write_json_file(&hooks_path, &hooks, None).unwrap();
-    let changed_entries = codex_hook_trust_entries(&hooks);
+    let changed_entries = codex_hook_trust_entries(&hooks).unwrap();
     std::fs::create_dir_all(home.path().join(".codex")).unwrap();
 
     sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
@@ -481,7 +495,8 @@ fn sync_codex_hook_trust_reads_a_custom_marketplace_cache() {
     let mut hooks = load_json_file_strict(&hooks_path).unwrap();
     hooks["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = json!(9);
     safe_write_json_file(&hooks_path, &hooks, None).unwrap();
-    let changed_entries = codex_hook_trust_entries_for_marketplace(&hooks, "my-marketplace");
+    let changed_entries =
+        codex_hook_trust_entries_for_marketplace(&hooks, "my-marketplace").unwrap();
     std::fs::create_dir_all(home.path().join(".codex")).unwrap();
 
     sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();

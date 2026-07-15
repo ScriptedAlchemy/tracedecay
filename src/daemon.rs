@@ -2953,10 +2953,14 @@ fn is_missing_index_error(err: &TraceDecayError) -> bool {
 }
 
 fn is_readonly_database_error(err: &TraceDecayError) -> bool {
+    if !err.is_database_error() {
+        return false;
+    }
     match err {
         TraceDecayError::Database { message, .. } => {
             message.to_ascii_lowercase().contains("readonly database")
         }
+        #[allow(deprecated)]
         TraceDecayError::DatabaseOperation { source, .. } => source
             .to_string()
             .to_ascii_lowercase()

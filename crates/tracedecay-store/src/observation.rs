@@ -5,6 +5,7 @@ use tracedecay_domain::{
     CanonicalObservationIdV1, ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeSourceCursorV1,
     ClaudeSourceIdentityV1, DurableClaudeObservationV1, ObservationCollisionOutcomeV1,
     ObservationContractError, ObservationScopeV1, PayloadDigestV1, SanitizationReceiptV1,
+    SanitizerDispositionV1,
 };
 
 const MAX_REPLAY_LIMIT: usize = 1_000;
@@ -79,11 +80,27 @@ impl ObservationWrite {
 
 /// Fully processed source bytes that intentionally produce no durable observation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NonDurableFrameReason {
     BlankFrame,
     OutOfScope,
+    MalformedFrame,
+    OversizedFrame,
     SanitizerRejected,
     SanitizerQuarantined,
+}
+
+impl NonDurableFrameReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BlankFrame => "blank_frame",
+            Self::OutOfScope => "out_of_scope",
+            Self::MalformedFrame => "malformed_frame",
+            Self::OversizedFrame => "oversized_frame",
+            Self::SanitizerRejected => "sanitizer_rejected",
+            Self::SanitizerQuarantined => "sanitizer_quarantined",
+        }
+    }
 }
 
 /// Validated exact-CAS cursor advance over fully processed non-durable bytes.
@@ -93,6 +110,7 @@ pub struct ObservationCursorAdvance {
     next_cursor: ClaudeSourceCursorV1,
     covered: ClaudeByteRangeV1,
     reason: NonDurableFrameReason,
+    sanitization_receipt: Option<SanitizationReceiptV1>,
 }
 
 impl ObservationCursorAdvance {
@@ -104,6 +122,71 @@ impl ObservationCursorAdvance {
         covered: ClaudeByteRangeV1,
         reason: NonDurableFrameReason,
     ) -> ObservationStoreResult<Self> {
+        Self::build(
+            source,
+            scope,
+            generation,
+            expected_cursor,
+            covered,
+            reason,
+            None,
+        )
+    }
+
+    pub fn new_with_sanitization_receipt(
+        source: ClaudeSourceIdentityV1,
+        scope: ObservationScopeV1,
+        generation: ClaudeFileGenerationV1,
+        expected_cursor: Option<ClaudeSourceCursorV1>,
+        covered: ClaudeByteRangeV1,
+        reason: NonDurableFrameReason,
+        sanitization_receipt: SanitizationReceiptV1,
+    ) -> ObservationStoreResult<Self> {
+        Self::build(
+            source,
+            scope,
+            generation,
+            expected_cursor,
+            covered,
+            reason,
+            Some(sanitization_receipt),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        source: ClaudeSourceIdentityV1,
+        scope: ObservationScopeV1,
+        generation: ClaudeFileGenerationV1,
+        expected_cursor: Option<ClaudeSourceCursorV1>,
+        covered: ClaudeByteRangeV1,
+        reason: NonDurableFrameReason,
+        sanitization_receipt: Option<SanitizationReceiptV1>,
+    ) -> ObservationStoreResult<Self> {
+        let receipt_matches_reason = matches!(
+            (
+                reason,
+                sanitization_receipt
+                    .as_ref()
+                    .map(SanitizationReceiptV1::disposition)
+            ),
+            (
+                NonDurableFrameReason::SanitizerRejected,
+                Some(SanitizerDispositionV1::Rejected)
+            ) | (
+                NonDurableFrameReason::SanitizerQuarantined,
+                Some(SanitizerDispositionV1::Quarantined)
+            ) | (
+                NonDurableFrameReason::BlankFrame
+                    | NonDurableFrameReason::OutOfScope
+                    | NonDurableFrameReason::MalformedFrame
+                    | NonDurableFrameReason::OversizedFrame,
+                None
+            )
+        );
+        if !receipt_matches_reason {
+            return Err(ObservationStoreError::CursorSanitizationReceiptMismatch);
+        }
         let next_cursor = ClaudeSourceCursorV1::new(source, scope, generation, covered.end())
             .map_err(ObservationStoreError::Contract)?;
         let coverage_starts_at_expected = expected_cursor.as_ref().map_or_else(
@@ -128,6 +211,7 @@ impl ObservationCursorAdvance {
             next_cursor,
             covered,
             reason,
+            sanitization_receipt,
         })
     }
 
@@ -145,6 +229,18 @@ impl ObservationCursorAdvance {
 
     pub fn reason(&self) -> NonDurableFrameReason {
         self.reason
+    }
+
+    pub fn sanitization_receipt(&self) -> Option<&SanitizationReceiptV1> {
+        self.sanitization_receipt.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_resume_checkpoint(mut self, file_identity: u64, resume_fingerprint: u64) -> Self {
+        self.next_cursor = self
+            .next_cursor
+            .with_resume_checkpoint(file_identity, resume_fingerprint);
+        self
     }
 }
 
@@ -297,6 +393,7 @@ impl ObservationReplayRequest {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ObservationStoreError {
     #[error("observation cursor does not match its source evidence")]
     CursorObservationMismatch,
@@ -307,6 +404,10 @@ pub enum ObservationStoreError {
         expected: Box<Option<ClaudeSourceCursorV1>>,
         actual: Box<Option<ClaudeSourceCursorV1>>,
     },
+    #[error("source cursor advance receipt collided with different contents")]
+    CursorAdvanceCollision,
+    #[error("source cursor advance reason disagrees with its sanitization receipt")]
+    CursorSanitizationReceiptMismatch,
     #[error(
         "observation {observation_id:?} collided: existing digest {existing_digest:?}, candidate digest {candidate_digest:?}"
     )]

@@ -33,6 +33,7 @@ use crate::sessions::shared::{content_storage_text_and_tools, preview_title};
 use crate::sessions::{
     ProviderScope, SessionMessageRecord, SessionMessageSearchResult, SessionMessageType,
     SessionRecord, SessionSearchFilters, SessionSearchScope, SessionSearchTimeRange,
+    TranscriptCatchUpFailure,
 };
 use crate::timeutil::SearchTimeBound;
 use crate::tracedecay::{TraceDecay, current_timestamp};
@@ -50,16 +51,38 @@ const MAX_LCM_EXPAND_QUERY_SYNTHESIS_PROMPT_CHARS: usize = 2_048;
 
 const MESSAGE_SEARCH_SNIPPET_CHARS: usize = 240;
 
-static MESSAGE_CATCH_UPS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::watch::Sender<bool>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+#[derive(Clone)]
+enum MessageCatchUpStatus {
+    Running { provider: &'static str },
+    Finished(Vec<TranscriptCatchUpFailure>),
+}
+
+static MESSAGE_CATCH_UPS: LazyLock<
+    Mutex<HashMap<String, Arc<tokio::sync::watch::Sender<MessageCatchUpStatus>>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 struct MessageCatchUpLeader {
     key: String,
-    done: Arc<tokio::sync::watch::Sender<bool>>,
+    provider: &'static str,
+    done: Arc<tokio::sync::watch::Sender<MessageCatchUpStatus>>,
+    finished: bool,
+}
+
+impl MessageCatchUpLeader {
+    fn finish(mut self, failures: &[TranscriptCatchUpFailure]) {
+        self.done
+            .send_replace(MessageCatchUpStatus::Finished(failures.to_vec()));
+        self.finished = true;
+    }
 }
 
 impl Drop for MessageCatchUpLeader {
     fn drop(&mut self) {
+        if !self.finished {
+            self.done.send_replace(MessageCatchUpStatus::Finished(vec![
+                message_catch_up_interrupted(self.provider),
+            ]));
+        }
         if let Ok(mut catch_ups) = MESSAGE_CATCH_UPS.lock()
             && catch_ups
                 .get(&self.key)
@@ -67,32 +90,51 @@ impl Drop for MessageCatchUpLeader {
         {
             catch_ups.remove(&self.key);
         }
-        let _ = self.done.send(true);
     }
 }
 
 enum MessageCatchUpClaim {
     Leader(MessageCatchUpLeader),
-    Wait(tokio::sync::watch::Receiver<bool>),
+    Wait(tokio::sync::watch::Receiver<MessageCatchUpStatus>),
 }
 
-fn claim_message_catch_up(key: String) -> MessageCatchUpClaim {
+const fn message_catch_up_interrupted(provider: &'static str) -> TranscriptCatchUpFailure {
+    TranscriptCatchUpFailure {
+        provider,
+        source: "message_search",
+        reason_code: "message_catch_up_interrupted",
+        retryable: true,
+    }
+}
+
+fn claim_message_catch_up(key: String, provider: &'static str) -> MessageCatchUpClaim {
     let mut catch_ups = MESSAGE_CATCH_UPS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(done) = catch_ups.get(&key) {
         return MessageCatchUpClaim::Wait(done.subscribe());
     }
-    let (done, _) = tokio::sync::watch::channel(false);
+    let (done, _) = tokio::sync::watch::channel(MessageCatchUpStatus::Running { provider });
     let done = Arc::new(done);
     catch_ups.insert(key.clone(), Arc::clone(&done));
-    MessageCatchUpClaim::Leader(MessageCatchUpLeader { key, done })
+    MessageCatchUpClaim::Leader(MessageCatchUpLeader {
+        key,
+        provider,
+        done,
+        finished: false,
+    })
 }
 
-async fn wait_for_message_catch_up(mut done: tokio::sync::watch::Receiver<bool>) {
-    while !*done.borrow_and_update() {
+async fn wait_for_message_catch_up(
+    mut done: tokio::sync::watch::Receiver<MessageCatchUpStatus>,
+) -> Vec<TranscriptCatchUpFailure> {
+    loop {
+        let provider = match &*done.borrow_and_update() {
+            MessageCatchUpStatus::Running { provider } => *provider,
+            MessageCatchUpStatus::Finished(failures) => return failures.clone(),
+        };
         if done.changed().await.is_err() {
-            break;
+            return vec![message_catch_up_interrupted(provider)];
         }
     }
 }
@@ -368,10 +410,11 @@ impl<'a> LcmHandlerContext<'a> {
 async fn selected_project_session_db_path(
     project_root: &Path,
     project_session_db_path: &Path,
+    default_project_id: Option<&str>,
     args: &Value,
     global_db: Option<&GlobalDb>,
     allow_default_registry_fallback: bool,
-) -> Result<Option<(PathBuf, PathBuf)>> {
+) -> Result<Option<(PathBuf, PathBuf, Option<String>)>> {
     let Some(context) = project_registry_context(
         args,
         &["project_path", "project_root"],
@@ -383,6 +426,7 @@ async fn selected_project_session_db_path(
         return Ok(Some((
             project_session_db_path.to_path_buf(),
             project_root.to_path_buf(),
+            default_project_id.map(str::to_string),
         )));
     };
     let profile_root = profile_root_for_global_db(global_db, allow_default_registry_fallback)?;
@@ -390,7 +434,11 @@ async fn selected_project_session_db_path(
     let target_root = PathBuf::from(context.project.display_root);
     for db_path in candidates {
         if db_path.is_file() {
-            return Ok(Some((db_path, target_root)));
+            return Ok(Some((
+                db_path,
+                target_root,
+                Some(context.project.project_id.clone()),
+            )));
         }
     }
     Ok(None)
@@ -613,6 +661,7 @@ fn message_search_payload(
     request: &MessageSearchRequest<'_>,
     results: &[SessionMessageSearchResult],
     catch_up_performed: bool,
+    catch_up_failures: &[crate::sessions::TranscriptCatchUpFailure],
 ) -> Value {
     let mut payload = json!({
         "status": "ok",
@@ -623,6 +672,7 @@ fn message_search_payload(
         "include_subagents": request.include_subagents,
         "catch_up": request.catch_up,
         "catch_up_performed": catch_up_performed,
+        "catch_up_failures": catch_up_failures,
         "catch_up_provider": request.provider_scope.response_label(),
         "scope": request.scope.as_str(),
         "message_type": request.message_type.as_str(),
@@ -2372,27 +2422,29 @@ pub(super) async fn handle_message_search(
             } else {
                 PathBuf::from(&context.project.canonical_root)
             };
-            destinations.push((db, project_root, has_write_authority));
+            destinations.push((
+                db,
+                project_root,
+                context.project.project_id.clone(),
+                has_write_authority,
+            ));
         }
         let catch_up_authorized = request.catch_up
             && destinations
                 .iter()
-                .any(|(_, _, has_write_authority)| *has_write_authority);
-        let catch_up_leader = if catch_up_authorized {
-            let key = format!(
-                "all-registered:{}:{}",
-                profile_root.display(),
-                request.provider_scope.response_label()
-            );
-            match claim_message_catch_up(key) {
+                .any(|(_, _, _, has_write_authority)| *has_write_authority);
+        let (catch_up_leader, mut catch_up_failures) = if catch_up_authorized {
+            let provider = request.provider_scope.response_label();
+            let key = format!("all-registered:{}:{}", profile_root.display(), provider);
+            match claim_message_catch_up(key, provider) {
                 MessageCatchUpClaim::Wait(done) => {
-                    wait_for_message_catch_up(done).await;
-                    None
+                    let failures = wait_for_message_catch_up(done).await;
+                    (None, failures)
                 }
-                MessageCatchUpClaim::Leader(leader) => Some(leader),
+                MessageCatchUpClaim::Leader(leader) => (Some(leader), Vec::new()),
             }
         } else {
-            None
+            (None, Vec::new())
         };
         let perform_catch_up = catch_up_leader.is_some();
         if perform_catch_up {
@@ -2400,56 +2452,68 @@ pub(super) async fn handle_message_search(
             if let Some(user_db) = retained_user_db
                 && let Some(user_profile_root) = user_db.db_path().parent()
             {
-                let _ = crate::sessions::ingest_user_global_sources_for_provider_at_with_db(
-                    user_db.as_ref(),
-                    user_profile_root,
-                    provider,
-                )
-                .await;
+                let outcome =
+                    crate::sessions::ingest_user_global_sources_for_provider_with_authorities(
+                        user_db.as_ref(),
+                        global,
+                        user_profile_root,
+                        provider,
+                    )
+                    .await;
+                catch_up_failures.extend(outcome.failures);
             } else if allow_default_registry_fallback {
                 let _ = crate::sessions::ingest_user_global_sources_for_provider(provider).await;
             }
             if provider.is_none() || provider == Some(crate::sessions::SessionProvider::Hermes) {
                 let hermes_destinations = destinations
                     .iter()
-                    .filter(|(_, _, has_write_authority)| *has_write_authority)
-                    .map(|(db, project_root, _)| {
+                    .filter(|(_, _, _, has_write_authority)| *has_write_authority)
+                    .map(|(db, project_root, _, _)| {
                         crate::sessions::hermes::ProjectIngestDestination { db, project_root }
                     })
                     .collect::<Vec<_>>();
                 let _ = crate::sessions::hermes::ingest_for_projects(&hermes_destinations).await;
             }
             if provider == Some(crate::sessions::SessionProvider::Hermes) {
-                for (db, project_root, _) in destinations
+                for (db, project_root, _, _) in destinations
                     .iter()
-                    .filter(|(_, _, has_write_authority)| *has_write_authority)
+                    .filter(|(_, _, _, has_write_authority)| *has_write_authority)
                 {
                     crate::sessions::finalize_project_ingest(db, project_root).await;
                 }
             } else {
-                for (db, project_root, _) in destinations
+                for (db, project_root, project_id, _) in destinations
                     .iter()
-                    .filter(|(_, _, has_write_authority)| *has_write_authority)
+                    .filter(|(_, _, _, has_write_authority)| *has_write_authority)
                 {
-                    let _ = crate::sessions::ingest_project_sources_for_provider(
+                    let outcome = crate::sessions::ingest_project_sources_for_provider(
                         db,
                         project_root,
+                        Some(project_id.as_str()),
                         provider,
                         false,
                     )
                     .await;
+                    catch_up_failures.extend(outcome.failures);
                 }
             }
         }
-        drop(catch_up_leader);
+        if let Some(leader) = catch_up_leader {
+            leader.finish(&catch_up_failures);
+        }
         let searched_project_count = destinations.len();
         let mut results = Vec::new();
-        for (db, _, _) in &destinations {
+        for (db, _, _, _) in &destinations {
             let mut project_results = search_session_messages_in_db(db, &request).await;
             results.append(&mut project_results);
         }
         sort_and_truncate_message_results_by_relevance(&mut results, request.limit);
-        let mut payload = message_search_payload(&request, &results, catch_up_authorized);
+        let mut payload = message_search_payload(
+            &request,
+            &results,
+            catch_up_authorized && catch_up_failures.is_empty(),
+            &catch_up_failures,
+        );
         if let Some(map) = payload.as_object_mut() {
             map.insert(
                 "project_scope".to_string(),
@@ -2476,9 +2540,10 @@ pub(super) async fn handle_message_search(
         ));
     }
 
-    let Some((db_path, target_root)) = selected_project_session_db_path(
+    let Some((db_path, target_root, target_project_id)) = selected_project_session_db_path(
         cg.project_root(),
         &cg.store_layout().sessions_db_path,
+        cg.store_layout().identity.project_id.as_deref(),
         &args,
         global_db,
         allow_default_registry_fallback,
@@ -2505,25 +2570,22 @@ pub(super) async fn handle_message_search(
         });
     let catch_up_authorized =
         request.catch_up && (retained_project_db.is_some() || allow_default_registry_fallback);
-    let catch_up_leader = if catch_up_authorized {
-        let key = format!(
-            "project:{}:{}",
-            db_path.display(),
-            request.provider_scope.response_label()
-        );
-        match claim_message_catch_up(key) {
+    let (catch_up_leader, mut catch_up_failures) = if catch_up_authorized {
+        let provider = request.provider_scope.response_label();
+        let key = format!("project:{}:{}", db_path.display(), provider);
+        match claim_message_catch_up(key, provider) {
             MessageCatchUpClaim::Wait(done) => {
-                wait_for_message_catch_up(done).await;
-                None
+                let failures = wait_for_message_catch_up(done).await;
+                (None, failures)
             }
-            MessageCatchUpClaim::Leader(leader) => Some(leader),
+            MessageCatchUpClaim::Leader(leader) => (Some(leader), Vec::new()),
         }
     } else {
-        None
+        (None, Vec::new())
     };
     let perform_catch_up = catch_up_leader.is_some();
     if !request.catch_up && retained_project_db.is_none() && !db_path.is_file() {
-        let mut payload = message_search_payload(&request, &[], false);
+        let mut payload = message_search_payload(&request, &[], false, &[]);
         if let Some(map) = payload.as_object_mut() {
             map.insert("selected_project_root".to_string(), json!(target_root));
         }
@@ -2558,26 +2620,45 @@ pub(super) async fn handle_message_search(
         opened_db = db;
         &opened_db
     };
-    let catch_up_performed = catch_up_authorized;
     if perform_catch_up {
         let provider = request.provider_scope.provider();
         if let Some(user_db) = retained_user_db
             && let Some(profile_root) = user_db.db_path().parent()
         {
-            let _ = crate::sessions::ingest_user_global_sources_for_provider_at_with_db(
-                user_db.as_ref(),
-                profile_root,
-                provider,
-            )
-            .await;
+            let outcome = if let Some(registry_db) = global_db {
+                crate::sessions::ingest_user_global_sources_for_provider_with_authorities(
+                    user_db.as_ref(),
+                    registry_db,
+                    profile_root,
+                    provider,
+                )
+                .await
+            } else {
+                crate::sessions::ingest_user_global_sources_for_provider_at_with_db(
+                    user_db.as_ref(),
+                    profile_root,
+                    provider,
+                )
+                .await
+            };
+            catch_up_failures.extend(outcome.failures);
         } else if allow_default_registry_fallback {
             let _ = crate::sessions::ingest_user_global_sources_for_provider(provider).await;
         }
-        let _ =
-            crate::sessions::ingest_project_sources_for_provider(db, &target_root, provider, true)
-                .await;
+        let outcome = crate::sessions::ingest_project_sources_for_provider(
+            db,
+            &target_root,
+            target_project_id.as_deref(),
+            provider,
+            true,
+        )
+        .await;
+        catch_up_failures.extend(outcome.failures);
     }
-    drop(catch_up_leader);
+    if let Some(leader) = catch_up_leader {
+        leader.finish(&catch_up_failures);
+    }
+    let catch_up_performed = catch_up_authorized && catch_up_failures.is_empty();
     // Build the workflow-run scope filter and, separately, resolve the run's
     // parent thread purely for the echoed `workflow_run_parent_session` field
     // (the scope itself is authoritative via the `workflow_agents` EXISTS
@@ -2595,7 +2676,8 @@ pub(super) async fn handle_message_search(
     } else {
         search_session_messages_in_db(db, &request).await
     };
-    let mut payload = message_search_payload(&request, &results, catch_up_performed);
+    let mut payload =
+        message_search_payload(&request, &results, catch_up_performed, &catch_up_failures);
     if let Some(map) = payload.as_object_mut() {
         map.insert("selected_project_root".to_string(), json!(target_root));
         if request.workflow_scope.is_some() {
@@ -2617,6 +2699,7 @@ pub(super) async fn handle_user_message_search(
     profile_root: &Path,
     args: Value,
     retained_session_db: Option<&Arc<GlobalDb>>,
+    registry_db: Option<&GlobalDb>,
     allow_owned_session_db: bool,
 ) -> Result<ToolResult> {
     let request = parse_message_search_request(&args)?;
@@ -2624,30 +2707,38 @@ pub(super) async fn handle_user_message_search(
     let retained_session_db = retained_session_db.filter(|db| db.db_path() == sessions_db_path);
     let catch_up_authorized =
         request.catch_up && (retained_session_db.is_some() || allow_owned_session_db);
-    let catch_up_leader = if catch_up_authorized {
-        let key = format!(
-            "user:{}:{}",
-            sessions_db_path.display(),
-            request.provider_scope.response_label()
-        );
-        match claim_message_catch_up(key) {
+    let (catch_up_leader, mut catch_up_failures) = if catch_up_authorized {
+        let provider = request.provider_scope.response_label();
+        let key = format!("user:{}:{}", sessions_db_path.display(), provider);
+        match claim_message_catch_up(key, provider) {
             MessageCatchUpClaim::Wait(done) => {
-                wait_for_message_catch_up(done).await;
-                None
+                let failures = wait_for_message_catch_up(done).await;
+                (None, failures)
             }
-            MessageCatchUpClaim::Leader(leader) => Some(leader),
+            MessageCatchUpClaim::Leader(leader) => (Some(leader), Vec::new()),
         }
     } else {
-        None
+        (None, Vec::new())
     };
     if catch_up_leader.is_some() {
         if let Some(db) = retained_session_db {
-            let _ = crate::sessions::ingest_user_global_sources_for_provider_at_with_db(
-                db.as_ref(),
-                profile_root,
-                request.provider_scope.provider(),
-            )
-            .await;
+            let outcome = if let Some(registry_db) = registry_db {
+                crate::sessions::ingest_user_global_sources_for_provider_with_authorities(
+                    db.as_ref(),
+                    registry_db,
+                    profile_root,
+                    request.provider_scope.provider(),
+                )
+                .await
+            } else {
+                crate::sessions::ingest_user_global_sources_for_provider_at_with_db(
+                    db.as_ref(),
+                    profile_root,
+                    request.provider_scope.provider(),
+                )
+                .await
+            };
+            catch_up_failures.extend(outcome.failures);
         } else if allow_owned_session_db {
             let _ = crate::sessions::ingest_user_global_sources_for_provider_at(
                 profile_root,
@@ -2656,7 +2747,9 @@ pub(super) async fn handle_user_message_search(
             .await;
         }
     }
-    drop(catch_up_leader);
+    if let Some(leader) = catch_up_leader {
+        leader.finish(&catch_up_failures);
+    }
     let opened_db;
     let db = if let Some(db) = retained_session_db {
         db.as_ref()
@@ -2682,7 +2775,12 @@ pub(super) async fn handle_user_message_search(
     } else {
         search_session_messages_in_db(db, &request).await
     };
-    let payload = message_search_payload(&request, &results, catch_up_authorized);
+    let payload = message_search_payload(
+        &request,
+        &results,
+        catch_up_authorized && catch_up_failures.is_empty(),
+        &catch_up_failures,
+    );
     Ok(tool_json_with_md(None, &args, &payload, || {
         render_message_search_md(&payload)
     }))

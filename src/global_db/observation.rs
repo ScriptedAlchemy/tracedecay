@@ -1,9 +1,10 @@
 use std::collections::BTreeSet;
 
-use libsql::{Connection, TransactionBehavior, params};
+use libsql::{Connection, params};
 use tracedecay_domain::{
     CanonicalObservationIdV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
-    ObservationCollisionOutcomeV1, ObservationScopeV1, classify_observation_collision,
+    ObservationCollisionOutcomeV1, ObservationScopeV1, SanitizationReceiptV1,
+    classify_observation_collision,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
@@ -104,13 +105,8 @@ async fn migrate_observation_schema(
         return Ok(());
     }
 
-    let transaction = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-    transaction
-        .execute_batch(
-            "PRAGMA defer_foreign_keys = ON;
+    conn.execute_batch(
+        "PRAGMA defer_foreign_keys = ON;
              DROP TRIGGER IF EXISTS observations_immutable_update;
              DROP TRIGGER IF EXISTS observations_immutable_delete;
              DROP TABLE IF EXISTS observations_canonical_v2;
@@ -131,20 +127,16 @@ async fn migrate_observation_schema(
              FROM observations;
              DROP TABLE observations;
              ALTER TABLE observations_canonical_v2 RENAME TO observations;",
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-    transaction
-        .execute(
-            "INSERT OR REPLACE INTO global_schema_migrations(migration) VALUES (?1)",
-            params![OBSERVATION_SCHEMA_MIGRATION],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-    transaction
-        .commit()
-        .await
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO global_schema_migrations(migration) VALUES (?1)",
+        params![OBSERVATION_SCHEMA_MIGRATION],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
 }
 
 pub(super) async fn ensure_observation_schema(conn: &Connection) -> crate::errors::Result<()> {
@@ -174,19 +166,35 @@ pub(super) async fn ensure_observation_schema(conn: &Connection) -> crate::error
             cursor_json TEXT NOT NULL,
             PRIMARY KEY(source_json, scope_json)
         );
+        CREATE TABLE IF NOT EXISTS source_cursor_advances (
+            source_json TEXT NOT NULL,
+            scope_json TEXT NOT NULL,
+            file_generation TEXT NOT NULL,
+            start_offset TEXT NOT NULL,
+            end_offset TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            receipt_id TEXT,
+            PRIMARY KEY(
+                source_json, scope_json, file_generation, start_offset, end_offset
+            ),
+            FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
+        );
         CREATE TABLE IF NOT EXISTS projection_queue (
             observation_id TEXT PRIMARY KEY,
             observation_sequence INTEGER NOT NULL UNIQUE,
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id)
-        );
-        CREATE TRIGGER IF NOT EXISTS observations_immutable_update
-            BEFORE UPDATE ON observations BEGIN
-                SELECT RAISE(ABORT, 'observations are immutable');
-            END;
-        CREATE TRIGGER IF NOT EXISTS observations_immutable_delete
-            BEFORE DELETE ON observations BEGIN
-                SELECT RAISE(ABORT, 'observations are immutable');
-            END;",
+        );",
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    super::ensure_table_columns(
+        conn,
+        "source_cursor_advances",
+        &[(
+            "receipt_id",
+            "ALTER TABLE source_cursor_advances
+             ADD COLUMN receipt_id TEXT REFERENCES sanitization_receipts(receipt_id)",
+        )],
     )
     .await
     .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
@@ -207,27 +215,53 @@ fn storage_message(operation: &'static str, message: impl Into<String>) -> Obser
     storage(operation, std::io::Error::other(message.into()))
 }
 
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(tracedecay_observation_fault_harness)]
 const TEST_OBSERVATION_PERSIST_BARRIER_DIR_ENV: &str =
     "TRACEDECAY_TEST_OBSERVATION_PERSIST_BARRIER_DIR";
 
-/// One-shot, cross-process test barrier after the authoritative transaction begins.
+#[cfg(tracedecay_observation_fault_harness)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObservationPersistTestBarrierStage {
+    PostWritePreCommit,
+    PostCommitPreAck,
+}
+
+#[cfg(tracedecay_observation_fault_harness)]
+impl ObservationPersistTestBarrierStage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::PostWritePreCommit => "post-write-pre-commit",
+            Self::PostCommitPreAck => "post-commit-pre-ack",
+        }
+    }
+}
+
+/// One-shot, cross-process test barrier at a selected authoritative boundary.
 ///
 /// The daemon atomically claims an `armed` file, publishes `arrived`, and waits for `release`.
 /// The wait is bounded so a failed test cannot leave a live daemon blocked indefinitely.
-#[cfg(any(test, feature = "test-transport"))]
-async fn wait_at_observation_persist_test_barrier(session_id: &str) -> ObservationStoreResult<()> {
+#[cfg(tracedecay_observation_fault_harness)]
+async fn wait_at_observation_persist_test_barrier(
+    stage: ObservationPersistTestBarrierStage,
+    session_id: &str,
+) -> ObservationStoreResult<()> {
     let Some(root) = std::env::var_os(TEST_OBSERVATION_PERSIST_BARRIER_DIR_ENV) else {
         return Ok(());
     };
     let root = std::path::PathBuf::from(root);
     let armed = root.join("armed");
-    let expected_session = match std::fs::read_to_string(&armed) {
+    let expected = match std::fs::read_to_string(&armed) {
         Ok(expected) => expected,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(storage("read observation test barrier", error)),
     };
-    if expected_session.trim() != session_id {
+    let Some((expected_stage, expected_session)) = expected.split_once('\n') else {
+        return Err(storage_message(
+            "read observation test barrier",
+            "armed barrier must contain a stage and session identifier",
+        ));
+    };
+    if expected_stage.trim() != stage.as_str() || expected_session.trim() != session_id {
         return Ok(());
     }
     let claimed = root.join("claimed");
@@ -350,6 +384,93 @@ async fn read_cursor(
     decode(&cursor_json, "decode observation source cursor").map(Some)
 }
 
+async fn cursor_advance_receipt_matches(
+    conn: &Connection,
+    source_json: &str,
+    scope_json: &str,
+    advance: &ObservationCursorAdvance,
+) -> ObservationStoreResult<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT reason, receipt_id FROM source_cursor_advances
+             WHERE source_json = ?1 AND scope_json = ?2
+               AND file_generation = ?3 AND start_offset = ?4 AND end_offset = ?5",
+            params![
+                source_json,
+                scope_json,
+                advance.next_cursor().generation().file_id().to_string(),
+                advance.covered().start().to_string(),
+                advance.covered().end().to_string()
+            ],
+        )
+        .await
+        .map_err(|error| storage("read source cursor advance receipt", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read source cursor advance receipt", error))?
+    else {
+        return Ok(false);
+    };
+    let reason = row
+        .get::<String>(0)
+        .map_err(|error| storage("read source cursor advance receipt", error))?;
+    let receipt_id = row
+        .get::<Option<String>>(1)
+        .map_err(|error| storage("read source cursor advance receipt", error))?;
+    Ok(reason == advance.reason().as_str()
+        && receipt_id.as_deref()
+            == advance
+                .sanitization_receipt()
+                .map(|receipt| receipt.receipt().receipt_id().as_str()))
+}
+
+async fn persist_sanitization_receipt(
+    conn: &Connection,
+    receipt: &SanitizationReceiptV1,
+) -> ObservationStoreResult<()> {
+    let receipt_json = encode(receipt, "encode sanitization receipt")?;
+    let receipt_id = receipt.receipt().receipt_id().as_str();
+    let sanitizer_version = receipt.receipt().sanitizer_version().as_str();
+    let payload_digest = receipt
+        .payload()
+        .map_or("", |payload| payload.digest().as_str());
+    conn.execute(
+        "INSERT INTO sanitization_receipts
+            (receipt_id, sanitizer_version, payload_digest, receipt_json)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(receipt_id) DO NOTHING",
+        params![
+            receipt_id,
+            sanitizer_version,
+            payload_digest,
+            receipt_json.as_str()
+        ],
+    )
+    .await
+    .map_err(|error| storage("insert sanitization receipt", error))?;
+    let mut rows = conn
+        .query(
+            "SELECT receipt_json FROM sanitization_receipts WHERE receipt_id = ?1",
+            params![receipt_id],
+        )
+        .await
+        .map_err(|error| storage("verify sanitization receipt", error))?;
+    let stored = rows
+        .next()
+        .await
+        .map_err(|error| storage("verify sanitization receipt", error))?
+        .ok_or_else(|| {
+            storage_message("verify sanitization receipt", "receipt insert disappeared")
+        })?
+        .get::<String>(0)
+        .map_err(|error| storage("verify sanitization receipt", error))?;
+    if stored != receipt_json {
+        return Err(ObservationStoreError::SanitizationReceiptCollision);
+    }
+    Ok(())
+}
+
 async fn write_cursor(
     conn: &Connection,
     source_json: &str,
@@ -410,12 +531,6 @@ impl GlobalDb {
             .begin_authoritative_transaction()
             .await
             .map_err(|error| storage("begin observation transaction", error))?;
-        #[cfg(any(test, feature = "test-transport"))]
-        wait_at_observation_persist_test_barrier(
-            write.observation().source().session_id().as_str(),
-        )
-        .await?;
-
         let candidate = write.observation();
         if let Some(existing) =
             read_by_observation_id(&transaction, candidate.observation_id()).await?
@@ -460,46 +575,9 @@ impl GlobalDb {
         let observation_json = encode(candidate, "encode observation")?;
         let cursor_json = encode(write.next_cursor(), "encode committed observation cursor")?;
         let receipt = candidate.receipt();
-        let receipt_json = encode(receipt, "encode sanitization receipt")?;
         let receipt_id = receipt.receipt().receipt_id().as_str();
-        let sanitizer_version = receipt.receipt().sanitizer_version().as_str();
         let payload_digest = candidate.payload_reference().digest().as_str();
-
-        transaction
-            .execute(
-                "INSERT INTO sanitization_receipts
-                    (receipt_id, sanitizer_version, payload_digest, receipt_json)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(receipt_id) DO NOTHING",
-                params![
-                    receipt_id,
-                    sanitizer_version,
-                    payload_digest,
-                    receipt_json.as_str()
-                ],
-            )
-            .await
-            .map_err(|error| storage("insert sanitization receipt", error))?;
-        let mut receipt_rows = transaction
-            .query(
-                "SELECT receipt_json FROM sanitization_receipts WHERE receipt_id = ?1",
-                params![receipt_id],
-            )
-            .await
-            .map_err(|error| storage("verify sanitization receipt", error))?;
-        let stored_receipt_json = receipt_rows
-            .next()
-            .await
-            .map_err(|error| storage("verify sanitization receipt", error))?
-            .ok_or_else(|| {
-                storage_message("verify sanitization receipt", "receipt insert disappeared")
-            })?
-            .get::<String>(0)
-            .map_err(|error| storage("verify sanitization receipt", error))?;
-        drop(receipt_rows);
-        if stored_receipt_json != receipt_json {
-            return Err(ObservationStoreError::SanitizationReceiptCollision);
-        }
+        persist_sanitization_receipt(&transaction, receipt).await?;
 
         transaction
             .execute(
@@ -542,10 +620,23 @@ impl GlobalDb {
             .await
             .map_err(|error| storage("enqueue observation projection", error))?;
 
+        #[cfg(tracedecay_observation_fault_harness)]
+        wait_at_observation_persist_test_barrier(
+            ObservationPersistTestBarrierStage::PostWritePreCommit,
+            candidate.source().session_id().as_str(),
+        )
+        .await?;
+
         transaction
             .commit()
             .await
             .map_err(|error| storage("commit observation transaction", error))?;
+        #[cfg(tracedecay_observation_fault_harness)]
+        wait_at_observation_persist_test_barrier(
+            ObservationPersistTestBarrierStage::PostCommitPreAck,
+            candidate.source().session_id().as_str(),
+        )
+        .await?;
         Ok(ObservationPersistOutcome::Committed(committed))
     }
 
@@ -573,13 +664,53 @@ impl GlobalDb {
         let scope_json = encode(advance.next_cursor().scope(), "encode observation scope")?;
         let actual_cursor = read_cursor(&transaction, &source_json, &scope_json).await?;
         if actual_cursor.as_ref() == Some(advance.next_cursor()) {
-            return Ok(CursorAdvanceOutcome::ExactDuplicate);
+            return if cursor_advance_receipt_matches(
+                &transaction,
+                &source_json,
+                &scope_json,
+                &advance,
+            )
+            .await?
+            {
+                Ok(CursorAdvanceOutcome::ExactDuplicate)
+            } else {
+                Err(ObservationStoreError::CursorAdvanceCollision)
+            };
         }
         if actual_cursor.as_ref() != advance.expected_cursor() {
             return Err(ObservationStoreError::CursorConflict {
                 expected: Box::new(advance.expected_cursor().cloned()),
                 actual: Box::new(actual_cursor),
             });
+        }
+        if let Some(receipt) = advance.sanitization_receipt() {
+            persist_sanitization_receipt(&transaction, receipt).await?;
+        }
+        let receipt_id = advance
+            .sanitization_receipt()
+            .map(|receipt| receipt.receipt().receipt_id().as_str());
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO source_cursor_advances(
+                    source_json, scope_json, file_generation,
+                    start_offset, end_offset, reason, receipt_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    source_json.as_str(),
+                    scope_json.as_str(),
+                    advance.next_cursor().generation().file_id().to_string(),
+                    advance.covered().start().to_string(),
+                    advance.covered().end().to_string(),
+                    advance.reason().as_str(),
+                    receipt_id,
+                ],
+            )
+            .await
+            .map_err(|error| storage("persist non-durable cursor receipt", error))?;
+        if !cursor_advance_receipt_matches(&transaction, &source_json, &scope_json, &advance)
+            .await?
+        {
+            return Err(ObservationStoreError::CursorAdvanceCollision);
         }
         let cursor_json = encode(advance.next_cursor(), "encode committed observation cursor")?;
         write_cursor(&transaction, &source_json, &scope_json, &cursor_json).await?;

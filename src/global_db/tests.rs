@@ -1,4 +1,18 @@
 use super::*;
+use serde_json::json;
+use tracedecay_domain::{
+    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
+    ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
+    ObservationScopeV1, PayloadReferenceV1, ProjectId, RetentionClass, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    SessionId,
+};
+use tracedecay_store::observation::{
+    CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
+};
+use tracedecay_store::{
+    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationStoreError, ProjectionSkipReason,
+};
 
 #[cfg(unix)]
 fn colliding_non_unicode_project_paths(root: &Path) -> (PathBuf, PathBuf) {
@@ -9,6 +23,66 @@ fn colliding_non_unicode_project_paths(root: &Path) -> (PathBuf, PathBuf) {
         root.join(OsString::from_vec(vec![b'p', 0x80])),
         root.join(OsString::from_vec(vec![b'p', 0x81])),
     )
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn native_project_path_alias_uses_canonical_native_decoder() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let (path, _) = colliding_non_unicode_project_paths(dir.path());
+    let native_bytes = encode_native_project_path(&path);
+    let alias = encode_native_project_path_alias(native_project_path_platform(), &native_bytes);
+
+    assert_eq!(
+        decode_native_project_path(native_project_path_platform(), native_bytes).unwrap(),
+        path
+    );
+    assert_eq!(
+        decode_native_project_path_alias(&alias).unwrap(),
+        Some(path)
+    );
+    assert_eq!(
+        decode_native_project_path_alias("ordinary-path").unwrap(),
+        None
+    );
+
+    let other_platform = if cfg!(unix) {
+        "windows-utf16le"
+    } else {
+        "unix-bytes"
+    };
+    let other_alias = encode_native_project_path_alias(other_platform, b"path");
+    assert_eq!(
+        decode_native_project_path_alias(&other_alias).unwrap_err(),
+        "native project path alias belongs to another platform"
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn native_project_path_alias_preserves_hex_decode_errors() {
+    let alias = format!(
+        "{NATIVE_PROJECT_PATH_ALIAS_PREFIX}-{}-zz",
+        native_project_path_platform()
+    );
+    assert_eq!(
+        decode_native_project_path_alias(&alias).unwrap_err(),
+        hex::decode("zz").unwrap_err().to_string()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn native_project_path_alias_preserves_windows_odd_length_error() {
+    let alias = encode_native_project_path_alias(native_project_path_platform(), &[0]);
+    assert_eq!(
+        decode_native_project_path_alias(&alias).unwrap_err(),
+        "native Windows project path alias has odd byte length"
+    );
+    assert_eq!(
+        decode_native_project_path(native_project_path_platform(), vec![0]).unwrap_err(),
+        "native Windows project path has odd byte length"
+    );
 }
 
 #[cfg(windows)]
@@ -66,13 +140,86 @@ async fn require_schema_reensure(db: &GlobalDb) {
     slot.lock().await.ensured = false;
 }
 
-async fn seed_observation(conn: &Connection, sequence: i64, observation_id: &str) {
-    let receipt_id = format!("receipt_{sequence}");
+fn schema_authority_fixture(
+    sequence: i64,
+    label: &str,
+) -> (DurableClaudeObservationV1, ClaudeSourceCursorV1) {
+    schema_authority_fixture_with_scope(sequence, label, ObservationScopeV1::Profile)
+}
+
+fn schema_authority_fixture_with_scope(
+    sequence: i64,
+    label: &str,
+    scope: ObservationScopeV1,
+) -> (DurableClaudeObservationV1, ClaudeSourceCursorV1) {
+    assert!(sequence > 0);
+    let source =
+        ClaudeSourceIdentityV1::new(SessionId::new("session.schema-contract").unwrap()).unwrap();
+    let generation = ClaudeFileGenerationV1::new(7).unwrap();
+    let start = u64::try_from(sequence - 1).unwrap() * 100;
+    let end = start + 100;
+    let identity = ClaudeObservationIdentityMaterialV1::new(
+        source.clone(),
+        scope.clone(),
+        generation,
+        ClaudeByteRangeV1::new(start, end).unwrap(),
+    )
+    .unwrap();
+    let payload = json!({"kind": "schema_contract_fixture", "label": label});
+    let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
+    let receipt = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new(format!("receipt.schema-contract.{sequence}")).unwrap(),
+            ComponentVersion::new("sanitizer.schema-contract.v1").unwrap(),
+        )
+        .unwrap(),
+        SanitizerDispositionV1::Accepted,
+        SensitivityV1::NonSensitive,
+        Some(payload_reference),
+    )
+    .unwrap();
+    let observation = DurableClaudeObservationV1::new(
+        identity,
+        receipt,
+        RetentionClass::new("retention.schema-contract").unwrap(),
+        payload,
+    )
+    .unwrap();
+    let cursor = ClaudeSourceCursorV1::new(source, scope, generation, end).unwrap();
+    (observation, cursor)
+}
+
+async fn seed_observation(
+    conn: &Connection,
+    sequence: i64,
+    label: &str,
+) -> (DurableClaudeObservationV1, ClaudeSourceCursorV1) {
+    seed_observation_with_scope(conn, sequence, label, ObservationScopeV1::Profile).await
+}
+
+async fn seed_observation_with_scope(
+    conn: &Connection,
+    sequence: i64,
+    label: &str,
+    scope: ObservationScopeV1,
+) -> (DurableClaudeObservationV1, ClaudeSourceCursorV1) {
+    let (observation, cursor) = schema_authority_fixture_with_scope(sequence, label, scope);
+    let receipt = observation.receipt();
+    let receipt_id = receipt.receipt().receipt_id().as_str();
+    let payload_digest = observation.payload_reference().digest().as_str();
+    let receipt_json = serde_json::to_string(receipt).unwrap();
+    let observation_json = serde_json::to_string(&observation).unwrap();
+    let cursor_json = serde_json::to_string(&cursor).unwrap();
     conn.execute(
         "INSERT INTO sanitization_receipts
          (receipt_id, sanitizer_version, payload_digest, receipt_json)
-         VALUES (?1, 'v1', ?2, '{}')",
-        params![receipt_id.as_str(), format!("digest_{sequence}")],
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            receipt_id,
+            receipt.receipt().sanitizer_version().as_str(),
+            payload_digest,
+            receipt_json
+        ],
     )
     .await
     .unwrap();
@@ -80,12 +227,31 @@ async fn seed_observation(conn: &Connection, sequence: i64, observation_id: &str
         "INSERT INTO observations
          (sequence, observation_id, payload_digest, receipt_id,
           observation_json, committed_cursor_json)
-         VALUES (?1, ?2, ?3, ?4, '{}', '{}')",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             sequence,
-            observation_id,
-            format!("digest_{sequence}"),
-            receipt_id
+            observation.observation_id().as_str(),
+            payload_digest,
+            receipt_id,
+            observation_json,
+            cursor_json
+        ],
+    )
+    .await
+    .unwrap();
+    (observation, cursor)
+}
+
+async fn seed_skip_projection(conn: &Connection, observation: &DurableClaudeObservationV1) {
+    conn.execute(
+        "INSERT INTO observation_projection_dispositions
+         (projector_version, observation_id, receipt_id, reason)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+            observation.observation_id().as_str(),
+            observation.receipt().receipt().receipt_id().as_str(),
+            ProjectionSkipReason::NonConversationalRecord.as_str()
         ],
     )
     .await
@@ -101,11 +267,10 @@ async fn try_open_at_reports_observation_schema_failure() {
     let Err(error) = GlobalDb::try_open_at(&db_path).await else {
         panic!("observation schema conflict unexpectedly opened");
     };
-    let TraceDecayError::DatabaseOperation { operation, source } = error else {
+    let TraceDecayError::Database { operation, message } = error else {
         panic!("unexpected error: {error}");
     };
     assert_eq!(operation, "migrate observation authority schema");
-    let message = source.to_string();
     assert!(message.contains("observations"), "{message}");
     assert!(GlobalDb::open_at(&db_path).await.is_none());
 }
@@ -119,11 +284,10 @@ async fn try_open_at_reports_observation_projection_schema_failure() {
     let Err(error) = GlobalDb::try_open_at(&db_path).await else {
         panic!("observation projection schema conflict unexpectedly opened");
     };
-    let TraceDecayError::DatabaseOperation { operation, source } = error else {
+    let TraceDecayError::Database { operation, message } = error else {
         panic!("unexpected error: {error}");
     };
     assert_eq!(operation, "initialize observation projection schema");
-    let message = source.to_string();
     assert!(message.contains("view"), "{message}");
     assert!(GlobalDb::open_at(&db_path).await.is_none());
 }
@@ -158,12 +322,38 @@ async fn try_open_at_rejects_observation_table_without_authority_constraints() {
     };
     assert_eq!(operation, "validate global database authority schema");
     assert!(message.contains("observations"), "{message}");
+
+    let raw_db = Builder::new_local(&db_path).build().await.unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    let mut rows = raw_conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE name IN (
+                'sanitization_receipts', 'source_cursors', 'projection_queue',
+                'observation_projection_provenance',
+                'observation_projection_checkpoints',
+                'observation_projection_aliases',
+                'observation_projection_dispositions',
+                'authority_audit_checkpoints',
+                'observations_immutable_update', 'observations_immutable_delete'
+             )",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        0,
+        "rejected authority schema changes must roll back atomically"
+    );
 }
 
 #[tokio::test]
 async fn legacy_idempotency_and_non_autoincrement_observations_migrate_canonically() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
+    let (legacy_observation, legacy_cursor) = schema_authority_fixture(41, "legacy");
+    let legacy_receipt = legacy_observation.receipt();
     let raw_db = Builder::new_local(&db_path).build().await.unwrap();
     let raw_conn = raw_db.connect().unwrap();
     raw_conn
@@ -183,10 +373,34 @@ async fn legacy_idempotency_and_non_autoincrement_observations_migrate_canonical
                 observation_json TEXT NOT NULL,
                 committed_cursor_json TEXT NOT NULL,
                 FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
-             );
-             INSERT INTO sanitization_receipts VALUES ('receipt_41', 'v1', 'digest_41', '{}');
-             INSERT INTO observations VALUES
-                (41, 'observation_41', 'legacy-key', 'digest_41', 'receipt_41', '{}', '{}');",
+             );",
+        )
+        .await
+        .unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO sanitization_receipts VALUES (?1, ?2, ?3, ?4)",
+            params![
+                legacy_receipt.receipt().receipt_id().as_str(),
+                legacy_receipt.receipt().sanitizer_version().as_str(),
+                legacy_observation.payload_reference().digest().as_str(),
+                serde_json::to_string(legacy_receipt).unwrap()
+            ],
+        )
+        .await
+        .unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO observations VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                41_i64,
+                legacy_observation.observation_id().as_str(),
+                legacy_observation.idempotency_key().as_str(),
+                legacy_observation.payload_reference().digest().as_str(),
+                legacy_receipt.receipt().receipt_id().as_str(),
+                serde_json::to_string(&legacy_observation).unwrap(),
+                serde_json::to_string(&legacy_cursor).unwrap()
+            ],
         )
         .await
         .unwrap();
@@ -226,24 +440,47 @@ async fn legacy_idempotency_and_non_autoincrement_observations_migrate_canonical
         .await
         .unwrap();
     let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<String>(0).unwrap(), "observation_41");
+    assert_eq!(
+        row.get::<String>(0).unwrap(),
+        legacy_observation.observation_id().as_str()
+    );
     assert_eq!(row.get::<i64>(1).unwrap(), 41);
 
+    let (next_observation, next_cursor) = schema_authority_fixture(42, "next");
+    let next_receipt = next_observation.receipt();
     db.conn
-        .execute_batch(
-            "INSERT INTO sanitization_receipts VALUES ('receipt_42', 'v1', 'digest_42', '{}');
-             INSERT INTO observations
+        .execute(
+            "INSERT INTO sanitization_receipts VALUES (?1, ?2, ?3, ?4)",
+            params![
+                next_receipt.receipt().receipt_id().as_str(),
+                next_receipt.receipt().sanitizer_version().as_str(),
+                next_observation.payload_reference().digest().as_str(),
+                serde_json::to_string(next_receipt).unwrap()
+            ],
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO observations
                 (observation_id, payload_digest, receipt_id, observation_json,
                  committed_cursor_json)
-             VALUES ('observation_42', 'digest_42', 'receipt_42', '{}', '{}');",
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                next_observation.observation_id().as_str(),
+                next_observation.payload_reference().digest().as_str(),
+                next_receipt.receipt().receipt_id().as_str(),
+                serde_json::to_string(&next_observation).unwrap(),
+                serde_json::to_string(&next_cursor).unwrap()
+            ],
         )
         .await
         .unwrap();
     let mut rows = db
         .conn
         .query(
-            "SELECT sequence FROM observations WHERE observation_id = 'observation_42'",
-            (),
+            "SELECT sequence FROM observations WHERE observation_id = ?1",
+            params![next_observation.observation_id().as_str()],
         )
         .await
         .unwrap();
@@ -483,13 +720,13 @@ async fn malformed_same_name_invariant_trigger_is_replaced() {
     drop(db);
 
     let reopened = GlobalDb::open_at(&db_path).await.unwrap();
-    seed_observation(&reopened.conn, 1, "observation_trigger").await;
+    let (observation, _) = seed_observation(&reopened.conn, 1, "observation_trigger").await;
     let error = reopened
         .conn
         .execute(
             "INSERT INTO projection_queue(observation_id, observation_sequence)
-             VALUES ('observation_trigger', 2)",
-            (),
+             VALUES (?1, 2)",
+            params![observation.observation_id().as_str()],
         )
         .await
         .unwrap_err();
@@ -538,14 +775,35 @@ async fn schema_reensure_repairs_projection_queue_to_checkpoint_frontier() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
-    seed_observation(&db.conn, 1, "observation_one").await;
-    seed_observation(&db.conn, 2, "observation_two").await;
+    let (first, _) = seed_observation(&db.conn, 1, "observation_one").await;
+    let (second, _) = seed_observation(&db.conn, 2, "observation_two").await;
     db.conn
-        .execute_batch(
+        .execute(
+            "INSERT INTO observation_projection_dispositions
+             (projector_version, observation_id, receipt_id, reason)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                first.observation_id().as_str(),
+                first.receipt().receipt().receipt_id().as_str(),
+                ProjectionSkipReason::NonConversationalRecord.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
             "INSERT INTO observation_projection_checkpoints(projector_version, last_sequence)
-             VALUES ('claude-session-message-v1', 1);
-             INSERT INTO projection_queue(observation_id, observation_sequence)
-             VALUES ('observation_one', 1);",
+             VALUES (?1, 1)",
+            params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO projection_queue(observation_id, observation_sequence)
+             VALUES (?1, 1)",
+            params![first.observation_id().as_str()],
         )
         .await
         .unwrap();
@@ -562,17 +820,20 @@ async fn schema_reensure_repairs_projection_queue_to_checkpoint_frontier() {
         .await
         .unwrap();
     let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<String>(0).unwrap(), "observation_two");
+    assert_eq!(
+        row.get::<String>(0).unwrap(),
+        second.observation_id().as_str()
+    );
     assert_eq!(row.get::<i64>(1).unwrap(), 2);
     assert!(rows.next().await.unwrap().is_none());
 }
 
 #[tokio::test]
-async fn schema_reensure_rejects_checkpoint_beyond_committed_frontier() {
+async fn schema_reensure_lowers_checkpoint_without_contiguous_projection_evidence() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
-    seed_observation(&db.conn, 1, "observation_one").await;
+    let (observation, _) = seed_observation(&db.conn, 1, "observation_one").await;
     db.conn
         .execute(
             "INSERT INTO observation_projection_checkpoints(projector_version, last_sequence)
@@ -584,13 +845,952 @@ async fn schema_reensure_rejects_checkpoint_beyond_committed_frontier() {
     require_schema_reensure(&db).await;
     drop(db);
 
+    let reopened = GlobalDb::try_open_at(&db_path)
+        .await
+        .expect("invalid checkpoint should be repairable")
+        .expect("global database");
+    let mut rows = reopened
+        .conn
+        .query(
+            "SELECT last_sequence FROM observation_projection_checkpoints
+             WHERE projector_version = ?1",
+            params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        0
+    );
+    drop(rows);
+    let mut rows = reopened
+        .conn
+        .query(
+            "SELECT observation_id FROM projection_queue WHERE observation_sequence = 1",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        observation.observation_id().as_str()
+    );
+}
+
+#[tokio::test]
+async fn schema_reensure_adds_receipt_id_to_legacy_cursor_advances() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at_without_structured_backfill(&db_path)
+        .await
+        .unwrap();
+    db.conn
+        .execute_batch(
+            "DROP TABLE source_cursor_advances;
+             CREATE TABLE source_cursor_advances (
+                 source_json TEXT NOT NULL,
+                 scope_json TEXT NOT NULL,
+                 file_generation TEXT NOT NULL,
+                 start_offset TEXT NOT NULL,
+                 end_offset TEXT NOT NULL,
+                 reason TEXT NOT NULL,
+                 PRIMARY KEY(
+                     source_json, scope_json, file_generation, start_offset, end_offset
+                 )
+             );",
+        )
+        .await
+        .unwrap();
+    db.close();
+
+    let reopened = GlobalDb::open_at_without_structured_backfill(&db_path)
+        .await
+        .unwrap();
+    assert!(
+        table_column_exists(reopened.conn(), "source_cursor_advances", "receipt_id")
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn schema_reensure_preserves_valid_nondurable_cursor_progress() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (_, committed_cursor) = seed_observation(&db.conn, 1, "durable").await;
+    let advanced_cursor = ClaudeSourceCursorV1::new(
+        committed_cursor.source().clone(),
+        committed_cursor.scope().clone(),
+        committed_cursor.generation(),
+        committed_cursor.byte_offset() + 50,
+    )
+    .unwrap();
+    let source_json = serde_json::to_string(advanced_cursor.source()).unwrap();
+    let scope_json = serde_json::to_string(advanced_cursor.scope()).unwrap();
+    let advanced_json = serde_json::to_string(&advanced_cursor).unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+             VALUES (?1, ?2, ?3)",
+            params![source_json.as_str(), scope_json.as_str(), advanced_json],
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO source_cursor_advances(
+                source_json, scope_json, file_generation,
+                start_offset, end_offset, reason
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'blank_frame')",
+            params![
+                source_json.as_str(),
+                scope_json.as_str(),
+                advanced_cursor.generation().file_id().to_string(),
+                committed_cursor.byte_offset().to_string(),
+                advanced_cursor.byte_offset().to_string()
+            ],
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
+    let mut rows = reopened
+        .conn
+        .query(
+            "SELECT cursor_json FROM source_cursors
+             WHERE source_json = ?1 AND scope_json = ?2",
+            params![source_json, scope_json],
+        )
+        .await
+        .unwrap();
+    let cursor_json = rows
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<ClaudeSourceCursorV1>(&cursor_json).unwrap(),
+        advanced_cursor
+    );
+}
+
+#[tokio::test]
+async fn schema_reensure_repairs_a_stale_present_committed_source_cursor() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (_, committed_cursor) = seed_observation(&db.conn, 1, "stale-present-cursor").await;
+    let stale_cursor = ClaudeSourceCursorV1::new(
+        committed_cursor.source().clone(),
+        committed_cursor.scope().clone(),
+        committed_cursor.generation(),
+        committed_cursor.byte_offset() - 1,
+    )
+    .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+             VALUES (?1, ?2, ?3)",
+            params![
+                serde_json::to_string(stale_cursor.source()).unwrap(),
+                serde_json::to_string(stale_cursor.scope()).unwrap(),
+                serde_json::to_string(&stale_cursor).unwrap()
+            ],
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
+    let mut rows = reopened
+        .conn
+        .query("SELECT cursor_json FROM source_cursors", ())
+        .await
+        .unwrap();
+    let cursor_json = rows
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<ClaudeSourceCursorV1>(&cursor_json).unwrap(),
+        committed_cursor
+    );
+}
+
+#[tokio::test]
+async fn schema_reensure_reconstructs_a_missing_committed_source_cursor() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (_, committed_cursor) = seed_observation(&db.conn, 1, "missing-cursor").await;
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
+    let mut rows = reopened
+        .conn
+        .query("SELECT cursor_json FROM source_cursors", ())
+        .await
+        .unwrap();
+    let cursor_json = rows
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<ClaudeSourceCursorV1>(&cursor_json).unwrap(),
+        committed_cursor
+    );
+    assert!(rows.next().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn source_cursor_repair_canonicalizes_reordered_project_scope_json() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let scope = ObservationScopeV1::Project {
+        project_id: ProjectId::new("project.schema-contract").unwrap(),
+    };
+    let (observation, cursor) =
+        seed_observation_with_scope(&db.conn, 1, "reordered-scope", scope.clone()).await;
+    let canonical_observation_json = serde_json::to_string(&observation).unwrap();
+    let reordered_observation_json = canonical_observation_json.replace(
+        "\"scope\":{\"kind\":\"project\",\"project_id\":\"project.schema-contract\"}",
+        "\"scope\":{\"project_id\":\"project.schema-contract\",\"kind\":\"project\"}",
+    );
+    assert_ne!(reordered_observation_json, canonical_observation_json);
+    db.conn
+        .execute_batch(
+            "DROP TRIGGER observations_immutable_update;
+             DROP TRIGGER observations_immutable_delete;",
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE observations SET observation_json = ?2 WHERE observation_id = ?1",
+            params![
+                observation.observation_id().as_str(),
+                reordered_observation_json
+            ],
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
+    let mut rows = reopened
+        .conn
+        .query(
+            "SELECT source_json, scope_json, cursor_json FROM source_cursors",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(
+        row.get::<String>(0).unwrap(),
+        serde_json::to_string(observation.source()).unwrap()
+    );
+    assert_eq!(
+        row.get::<String>(1).unwrap(),
+        serde_json::to_string(&scope).unwrap()
+    );
+    assert_eq!(
+        row.get::<String>(2).unwrap(),
+        serde_json::to_string(&cursor).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn malformed_source_cursor_fails_before_missing_authority_is_repaired() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (_, cursor) = seed_observation(&db.conn, 1, "malformed-cursor").await;
+    db.conn
+        .execute(
+            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+             VALUES (?1, ?2, '{}')",
+            params![
+                serde_json::to_string(cursor.source()).unwrap(),
+                serde_json::to_string(cursor.scope()).unwrap()
+            ],
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
     let Err(error) = GlobalDb::try_open_at(&db_path).await else {
-        panic!("checkpoint beyond committed frontier unexpectedly opened");
+        panic!("malformed source cursor unexpectedly opened");
     };
     assert!(
         error
             .to_string()
-            .contains("checkpoint exceeds the committed observation frontier"),
+            .contains("invalid source cursor authority JSON"),
+        "{error}"
+    );
+    let raw_db = Builder::new_local(&db_path).build().await.unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    let mut rows = raw_conn
+        .query(
+            "SELECT (SELECT COUNT(*) FROM source_cursors),
+                    (SELECT COUNT(*) FROM projection_queue)",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 1);
+    assert_eq!(row.get::<i64>(1).unwrap(), 0);
+}
+
+#[tokio::test]
+async fn source_cursor_authority_keys_are_cross_checked() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (_, cursor) = seed_observation(&db.conn, 1, "cursor-key-mismatch").await;
+    let other_source =
+        ClaudeSourceIdentityV1::new(SessionId::new("session.other").unwrap()).unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+             VALUES (?1, ?2, ?3)",
+            params![
+                serde_json::to_string(&other_source).unwrap(),
+                serde_json::to_string(cursor.scope()).unwrap(),
+                serde_json::to_string(&cursor).unwrap()
+            ],
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("mismatched source cursor authority unexpectedly opened");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("source cursor authority keys disagree with cursor JSON"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn source_cursor_advance_authority_is_cross_checked() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (_, cursor) = seed_observation(&db.conn, 1, "invalid-advance").await;
+    db.conn
+        .execute(
+            "INSERT INTO source_cursor_advances(
+                 source_json, scope_json, file_generation,
+                 start_offset, end_offset, reason
+             ) VALUES (?1, ?2, '7', '0', '10', 'unknown_reason')",
+            params![
+                serde_json::to_string(cursor.source()).unwrap(),
+                serde_json::to_string(cursor.scope()).unwrap()
+            ],
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("invalid source cursor advance unexpectedly opened");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("source cursor advance contains invalid authority evidence"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn source_cursor_advance_duplicate_requires_the_same_reason() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let source =
+        ClaudeSourceIdentityV1::new(SessionId::new("session.advance-retry").unwrap()).unwrap();
+    let scope = ObservationScopeV1::Profile;
+    let generation = ClaudeFileGenerationV1::new(11).unwrap();
+    let covered = ClaudeByteRangeV1::new(0, 10).unwrap();
+    let advance = |reason| {
+        ObservationCursorAdvance::new(
+            source.clone(),
+            scope.clone(),
+            generation,
+            None,
+            covered,
+            reason,
+        )
+        .unwrap()
+    };
+
+    assert_eq!(
+        db.advance_observation_source_cursor_result(advance(NonDurableFrameReason::BlankFrame))
+            .await
+            .unwrap(),
+        CursorAdvanceOutcome::Committed
+    );
+    assert_eq!(
+        db.advance_observation_source_cursor_result(advance(NonDurableFrameReason::BlankFrame))
+            .await
+            .unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate
+    );
+    assert!(matches!(
+        db.advance_observation_source_cursor_result(advance(NonDurableFrameReason::OutOfScope))
+            .await,
+        Err(ObservationStoreError::CursorAdvanceCollision)
+    ));
+    let update = db
+        .conn
+        .execute(
+            "UPDATE source_cursor_advances SET reason = 'out_of_scope'",
+            (),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        update
+            .to_string()
+            .contains("source cursor advances are immutable")
+    );
+    let delete = db
+        .conn
+        .execute("DELETE FROM source_cursor_advances", ())
+        .await
+        .unwrap_err();
+    assert!(
+        delete
+            .to_string()
+            .contains("source cursor advances are immutable")
+    );
+}
+
+#[tokio::test]
+async fn malformed_receipt_authority_json_is_rejected_before_repair() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (observation, _) = seed_observation(&db.conn, 1, "malformed-receipt").await;
+    db.conn
+        .execute_batch(
+            "DROP TRIGGER sanitization_receipts_immutable_update_v1;
+             DROP TRIGGER sanitization_receipts_immutable_delete_v1;",
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE sanitization_receipts SET receipt_json = '{}'
+             WHERE receipt_id = ?1",
+            params![observation.receipt().receipt().receipt_id().as_str()],
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("malformed receipt unexpectedly opened");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("invalid sanitization receipt authority JSON"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn redundant_receipt_authority_columns_are_cross_checked() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (observation, _) = seed_observation(&db.conn, 1, "receipt-column-mismatch").await;
+    db.conn
+        .execute_batch(
+            "DROP TRIGGER sanitization_receipts_immutable_update_v1;
+             DROP TRIGGER sanitization_receipts_immutable_delete_v1;",
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE sanitization_receipts SET sanitizer_version = 'sanitizer.other.v1'
+             WHERE receipt_id = ?1",
+            params![observation.receipt().receipt().receipt_id().as_str()],
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("mismatched receipt authority unexpectedly opened");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("receipt authority columns disagree with receipt JSON"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn sanitization_receipts_are_immutable_after_commit() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let (observation, _) = seed_observation(&db.conn, 1, "immutable-receipt").await;
+    let receipt_id = observation.receipt().receipt().receipt_id().as_str();
+    for statement in [
+        "UPDATE sanitization_receipts SET payload_digest = payload_digest WHERE receipt_id = ?1",
+        "DELETE FROM sanitization_receipts WHERE receipt_id = ?1",
+    ] {
+        let error = db
+            .conn
+            .execute(statement, params![receipt_id])
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("sanitization receipts are immutable"),
+            "{error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn redundant_observation_authority_columns_are_cross_checked() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (observation, _) = seed_observation(&db.conn, 1, "column-mismatch").await;
+    db.conn
+        .execute_batch(
+            "DROP TRIGGER observations_immutable_update;
+             DROP TRIGGER observations_immutable_delete;",
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE observations SET payload_digest = ?2 WHERE observation_id = ?1",
+            params![
+                observation.observation_id().as_str(),
+                format!("sha256:{}", "0".repeat(64))
+            ],
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("mismatched observation authority unexpectedly opened");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("authority columns disagree with observation JSON"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn committed_cursor_is_cross_checked_against_observation_evidence() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (observation, cursor) = seed_observation(&db.conn, 1, "cursor-mismatch").await;
+    let mismatched = ClaudeSourceCursorV1::new(
+        cursor.source().clone(),
+        cursor.scope().clone(),
+        ClaudeFileGenerationV1::new(cursor.generation().file_id() + 1).unwrap(),
+        cursor.byte_offset(),
+    )
+    .unwrap();
+    db.conn
+        .execute_batch(
+            "DROP TRIGGER observations_immutable_update;
+             DROP TRIGGER observations_immutable_delete;",
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE observations SET committed_cursor_json = ?2 WHERE observation_id = ?1",
+            params![
+                observation.observation_id().as_str(),
+                serde_json::to_string(&mismatched).unwrap()
+            ],
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("mismatched committed cursor unexpectedly opened");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("committed source cursor disagrees"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_with_a_missing_disposition_requeues_the_entire_suffix() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (first, _) = seed_observation(&db.conn, 1, "first").await;
+    let (second, _) = seed_observation(&db.conn, 2, "second").await;
+    let (third, _) = seed_observation(&db.conn, 3, "third").await;
+    for observation in [&first, &third] {
+        db.conn
+            .execute(
+                "INSERT INTO observation_projection_dispositions
+                 (projector_version, observation_id, receipt_id, reason)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                    observation.observation_id().as_str(),
+                    observation.receipt().receipt().receipt_id().as_str(),
+                    ProjectionSkipReason::NonConversationalRecord.as_str()
+                ],
+            )
+            .await
+            .unwrap();
+    }
+    db.conn
+        .execute(
+            "INSERT INTO observation_projection_checkpoints(projector_version, last_sequence)
+             VALUES (?1, 3)",
+            params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
+    let mut rows = reopened
+        .conn
+        .query(
+            "SELECT last_sequence FROM observation_projection_checkpoints
+             WHERE projector_version = ?1",
+            params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        1
+    );
+    drop(rows);
+    let mut rows = reopened
+        .conn
+        .query(
+            "SELECT observation_id FROM projection_queue ORDER BY observation_sequence",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        second.observation_id().as_str()
+    );
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        third.observation_id().as_str()
+    );
+    assert!(rows.next().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn conflicting_projection_outcomes_are_rejected_atomically() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (observation, _) = seed_observation(&db.conn, 1, "conflicting-effects").await;
+    seed_skip_projection(&db.conn, &observation).await;
+    db.conn
+        .execute(
+            "INSERT INTO observation_projection_provenance
+             (projector_version, observation_id, receipt_id, output_provider,
+              output_message_id, output_digest, message_created)
+             VALUES (?1, ?2, ?3, 'claude', 'invalid', 'sha256:invalid', 0)",
+            params![
+                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation.observation_id().as_str(),
+                observation.receipt().receipt().receipt_id().as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("conflicting projection outcomes unexpectedly opened");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("exactly one skip outcome without an alias"),
+        "{error}"
+    );
+    let raw_db = Builder::new_local(&db_path).build().await.unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    let mut rows = raw_conn
+        .query("SELECT COUNT(*) FROM projection_queue", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn invalid_projection_skip_reason_is_rejected() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (observation, _) = seed_observation(&db.conn, 1, "invalid-skip-reason").await;
+    db.conn
+        .execute(
+            "INSERT INTO observation_projection_dispositions
+             (projector_version, observation_id, receipt_id, reason)
+             VALUES (?1, ?2, ?3, 'invented_reason')",
+            params![
+                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation.observation_id().as_str(),
+                observation.receipt().receipt().receipt_id().as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("invalid projection skip reason unexpectedly opened");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("disposition disagrees with deterministic skip reason"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn projection_alias_on_skipped_observation_is_rejected() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (observation, _) = seed_observation(&db.conn, 1, "alias-on-skip").await;
+    seed_skip_projection(&db.conn, &observation).await;
+    db.conn
+        .execute(
+            "INSERT INTO observation_projection_aliases
+             (projector_version, observation_id, output_provider, output_message_id)
+             VALUES (?1, ?2, 'claude', 'consolidated/source/invalid')",
+            params![
+                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation.observation_id().as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("projection alias on skipped observation unexpectedly opened");
+    };
+    assert!(
+        error.to_string().contains("invalid projection authority"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn authority_reensure_audits_only_new_append_suffixes() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    for sequence in 1..=64 {
+        let (observation, _) =
+            seed_observation(&db.conn, sequence, &format!("bounded-{sequence}")).await;
+        seed_skip_projection(&db.conn, &observation).await;
+    }
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let mut rows = db
+        .conn
+        .query(
+            "SELECT last_receipts_audited, last_observations_audited,
+                    last_dispositions_audited
+             FROM authority_audit_checkpoints
+             WHERE audit_name = 'observation-authority'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 64);
+    assert_eq!(row.get::<i64>(1).unwrap(), 64);
+    assert_eq!(row.get::<i64>(2).unwrap(), 64);
+    drop(rows);
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let mut rows = db
+        .conn
+        .query(
+            "SELECT last_receipts_audited, last_observations_audited,
+                    last_dispositions_audited
+             FROM authority_audit_checkpoints
+             WHERE audit_name = 'observation-authority'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 0);
+    assert_eq!(row.get::<i64>(1).unwrap(), 0);
+    assert_eq!(row.get::<i64>(2).unwrap(), 0);
+}
+
+#[tokio::test]
+async fn authority_reensure_rejects_checkpoint_beyond_current_frontiers() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (observation, _) = seed_observation(&db.conn, 1, "inflated-checkpoint").await;
+    seed_skip_projection(&db.conn, &observation).await;
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    db.conn
+        .execute(
+            "UPDATE authority_audit_checkpoints SET
+                receipt_rowid = 1000000,
+                observation_sequence = 1000000,
+                provenance_rowid = 1000000,
+                disposition_rowid = 1000000,
+                alias_rowid = 1000000,
+                projection_checkpoint = 1000000
+             WHERE audit_name = 'observation-authority'",
+            (),
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let mut rows = db
+        .conn
+        .query(
+            "SELECT last_receipts_audited, last_observations_audited,
+                    last_dispositions_audited
+             FROM authority_audit_checkpoints
+             WHERE audit_name = 'observation-authority'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 1);
+    assert_eq!(row.get::<i64>(1).unwrap(), 1);
+    assert_eq!(row.get::<i64>(2).unwrap(), 1);
+}
+
+#[tokio::test]
+async fn periodic_exhaustive_audit_rejects_old_row_corruption_at_equal_frontier() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (observation, _) = seed_observation(&db.conn, 1, "periodic-exhaustive").await;
+    seed_skip_projection(&db.conn, &observation).await;
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    db.conn
+        .execute_batch(
+            "DROP TRIGGER sanitization_receipts_immutable_update_v1;
+             UPDATE sanitization_receipts SET receipt_json = '{}';
+             CREATE TRIGGER sanitization_receipts_immutable_update_v1
+             BEFORE UPDATE ON sanitization_receipts BEGIN
+                SELECT RAISE(ABORT, 'sanitization receipts are immutable');
+             END;
+             UPDATE authority_audit_checkpoints
+             SET bounded_passes_since_exhaustive = 64
+             WHERE audit_name = 'observation-authority';",
+        )
+        .await
+        .unwrap();
+    drop(db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("old receipt corruption unexpectedly bypassed periodic exhaustive audit");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("sanitization receipt authority JSON"),
         "{error}"
     );
 }
@@ -793,6 +1993,31 @@ async fn bulk_project_deletion_preserves_native_non_unicode_aliases() {
 
 #[cfg(any(unix, windows))]
 #[tokio::test]
+async fn lossless_project_path_listing_decodes_native_aliases() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .expect("open global db");
+    let (project, _) = colliding_non_unicode_project_paths(dir.path());
+    db.upsert(&project, 11).await;
+    db.upsert_code_project("proj_lossless_listing", &project, None, None, None)
+        .await
+        .expect("register project");
+
+    assert_eq!(
+        db.try_list_project_paths().await.unwrap(),
+        vec![project.clone()]
+    );
+    assert!(
+        db.try_list_project_alias_paths()
+            .await
+            .unwrap()
+            .contains(&project)
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
 async fn code_project_listing_uses_latest_lossless_primary_root() {
     let dir = tempfile::TempDir::new().unwrap();
     let db = GlobalDb::open_at(&dir.path().join("global.db"))
@@ -941,6 +2166,27 @@ async fn legacy_code_project_listing_fails_closed_on_ambiguous_native_roots() {
     db.upsert_project_alias(&second, "proj_legacy")
         .await
         .expect("register historical alias");
+    let current_evidence_at = 42;
+    db.conn
+        .execute(
+            "UPDATE code_projects SET last_seen_at = ?2 WHERE project_id = ?1",
+            params!["proj_legacy", current_evidence_at],
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE project_aliases SET last_seen_at = ?2
+             WHERE project_id = ?1 AND alias_path IN (?3, ?4)",
+            params![
+                "proj_legacy",
+                current_evidence_at,
+                project_path_alias_key(&first),
+                project_path_alias_key(&second)
+            ],
+        )
+        .await
+        .unwrap();
     db.conn
         .execute(
             "UPDATE code_projects SET primary_root_platform = NULL,

@@ -1,10 +1,7 @@
-use std::cmp::Ordering;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use libsql::{Connection, params};
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ObservationScopeV1};
 
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
@@ -12,8 +9,12 @@ use crate::global_db::GlobalDb;
 use crate::memory::store::MemoryStore;
 
 mod inspect;
+mod observation;
 pub(super) mod projection;
 mod verify;
+
+use observation::merge_observation_authority;
+pub(super) use observation::{preflight_observation_merge, verify_observation_merge};
 
 #[cfg(test)]
 pub(super) use inspect::count_rows;
@@ -434,7 +435,15 @@ pub(super) async fn merge_sessions(
             .await;
         return Err(error);
     }
-    let result = merge_sessions_tx(target.conn(), offsets).await;
+    let result = match merge_sessions_tx(target.conn(), offsets).await {
+        Ok(()) => match verify_observation_merge(target.conn()).await {
+            Ok(()) => crate::sessions::lcm::schema::rebuild_raw_fts(target.conn())
+                .await
+                .ok_or_else(|| db_message("merge_sessions", "could not rebuild raw-message FTS")),
+            Err(error) => Err(error),
+        },
+        Err(error) => Err(error),
+    };
     match result {
         Ok(()) => target
             .conn()
@@ -451,19 +460,13 @@ pub(super) async fn merge_sessions(
             return Err(error);
         }
     };
-    target
-        .conn()
-        .execute("DETACH DATABASE source", ())
-        .await
-        .map_err(|error| db_error("merge_sessions", error))?;
-    target
+    // The merge is durable once COMMIT succeeds. Cleanup cannot turn that success into
+    // an ambiguous error that callers might retry as if the merge had rolled back.
+    let _ = target.conn().execute("DETACH DATABASE source", ()).await;
+    let _ = target
         .conn()
         .execute("DETACH DATABASE target_input", ())
-        .await
-        .map_err(|error| db_error("merge_sessions", error))?;
-    crate::sessions::lcm::schema::rebuild_raw_fts(target.conn())
-        .await
-        .ok_or_else(|| db_message("merge_sessions", "could not rebuild raw-message FTS"))?;
+        .await;
     target.checkpoint().await;
     target.close();
     Ok(())
@@ -1099,183 +1102,6 @@ async fn merge_sessions_tx(conn: &Connection, offsets: &SessionMergeOffsets) -> 
     .map_err(|error| db_error("merge_sessions", error))?;
     merge_observation_authority(conn).await?;
     Ok(())
-}
-
-async fn merge_observation_authority(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "INSERT OR IGNORE INTO sanitization_receipts(
-             receipt_id, sanitizer_version, payload_digest, receipt_json
-         )
-         SELECT receipt_id, sanitizer_version, payload_digest, receipt_json
-         FROM source.sanitization_receipts;
-
-         WITH target_frontier(last_sequence) AS (
-             SELECT COALESCE(MAX(sequence), 0) FROM observations
-         ), source_only AS (
-             SELECT s.observation_id, s.payload_digest, s.receipt_id,
-                    s.observation_json, s.committed_cursor_json,
-                    ROW_NUMBER() OVER (ORDER BY s.sequence, s.observation_id) AS ordinal
-             FROM source.observations AS s
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM observations AS t
-                 WHERE t.observation_id = s.observation_id
-             )
-         )
-         INSERT INTO observations(
-             sequence, observation_id, payload_digest, receipt_id,
-             observation_json, committed_cursor_json
-         )
-         SELECT target_frontier.last_sequence + source_only.ordinal,
-                source_only.observation_id, source_only.payload_digest,
-                source_only.receipt_id, source_only.observation_json,
-                source_only.committed_cursor_json
-         FROM source_only CROSS JOIN target_frontier
-         ORDER BY source_only.ordinal;",
-    )
-    .await
-    .map_err(|error| db_error("merge_observation_authority", error))?;
-
-    merge_source_cursors(conn).await?;
-    projection::merge(conn).await
-}
-
-pub(super) async fn preflight_observation_merge(conn: &Connection) -> Result<()> {
-    let receipt_conflicts = query_i64(
-        conn,
-        "SELECT COUNT(*)
-         FROM source.sanitization_receipts AS s
-         JOIN main.sanitization_receipts AS t USING(receipt_id)
-         WHERE t.sanitizer_version IS NOT s.sanitizer_version
-            OR t.payload_digest IS NOT s.payload_digest
-            OR t.receipt_json IS NOT s.receipt_json",
-    )
-    .await?;
-    if receipt_conflicts != 0 {
-        return Err(db_message(
-            "merge_observation_authority",
-            "sanitization receipt identity collision",
-        ));
-    }
-
-    let observation_conflicts = query_i64(
-        conn,
-        "SELECT COUNT(*)
-         FROM source.observations AS s
-         JOIN main.observations AS t USING(observation_id)
-         WHERE t.payload_digest IS NOT s.payload_digest
-            OR t.receipt_id IS NOT s.receipt_id
-            OR t.observation_json IS NOT s.observation_json
-            OR t.committed_cursor_json IS NOT s.committed_cursor_json",
-    )
-    .await?;
-    if observation_conflicts != 0 {
-        return Err(db_message(
-            "merge_observation_authority",
-            "observation identity collision",
-        ));
-    }
-
-    let target_cursors = read_source_cursor_rows(conn, "target_input").await?;
-    let source_cursors = read_source_cursor_rows(conn, "source").await?;
-    for (key, (_, source_cursor)) in &source_cursors {
-        if let Some((_, target_cursor)) = target_cursors.get(key) {
-            source_cursor.checked_cmp(target_cursor).map_err(|_| {
-                db_message(
-                    "merge_source_cursors",
-                    "cursor generations are not comparable",
-                )
-            })?;
-        }
-    }
-
-    projection::preflight(conn).await
-}
-
-async fn merge_source_cursors(conn: &Connection) -> Result<()> {
-    let target_rows = read_source_cursor_rows(conn, "main").await?;
-    let source_rows = read_source_cursor_rows(conn, "source").await?;
-    for ((source_json, scope_json), (cursor_json, source_cursor)) in source_rows {
-        let replace = match target_rows.get(&(source_json.clone(), scope_json.clone())) {
-            None => true,
-            Some((_, target_cursor)) => {
-                matches!(
-                    source_cursor.checked_cmp(target_cursor).map_err(|_| {
-                        db_message(
-                            "merge_source_cursors",
-                            "cursor generations are not comparable",
-                        )
-                    })?,
-                    Ordering::Greater
-                )
-            }
-        };
-        if replace {
-            conn.execute(
-                "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(source_json, scope_json) DO UPDATE SET
-                     cursor_json = excluded.cursor_json",
-                params![source_json, scope_json, cursor_json],
-            )
-            .await
-            .map_err(|error| db_error("merge_source_cursors", error))?;
-        }
-    }
-    Ok(())
-}
-
-pub(super) async fn read_source_cursor_rows(
-    conn: &Connection,
-    schema: &str,
-) -> Result<BTreeMap<(String, String), (String, ClaudeSourceCursorV1)>> {
-    let sql = format!(
-        "SELECT source_json, scope_json, cursor_json
-         FROM {}.source_cursors ORDER BY source_json, scope_json",
-        quote_identifier(schema)
-    );
-    let mut rows = conn
-        .query(&sql, ())
-        .await
-        .map_err(|error| db_error("read_source_cursor_rows", error))?;
-    let mut cursors = BTreeMap::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| db_error("read_source_cursor_rows", error))?
-    {
-        let source_json = row
-            .get::<String>(0)
-            .map_err(|error| db_error("read_source_cursor_rows", error))?;
-        let scope_json = row
-            .get::<String>(1)
-            .map_err(|error| db_error("read_source_cursor_rows", error))?;
-        let cursor_json = row
-            .get::<String>(2)
-            .map_err(|error| db_error("read_source_cursor_rows", error))?;
-        let cursor = decode_source_cursor(&source_json, &scope_json, &cursor_json)?;
-        cursors.insert((source_json, scope_json), (cursor_json, cursor));
-    }
-    Ok(cursors)
-}
-
-fn decode_source_cursor(
-    source_json: &str,
-    scope_json: &str,
-    cursor_json: &str,
-) -> Result<ClaudeSourceCursorV1> {
-    let source = serde_json::from_str::<ClaudeSourceIdentityV1>(source_json)
-        .map_err(|error| db_error("decode_source_cursor", error))?;
-    let scope = serde_json::from_str::<ObservationScopeV1>(scope_json)
-        .map_err(|error| db_error("decode_source_cursor", error))?;
-    let cursor = serde_json::from_str::<ClaudeSourceCursorV1>(cursor_json)
-        .map_err(|error| db_error("decode_source_cursor", error))?;
-    if cursor.source() != &source || cursor.scope() != &scope {
-        return Err(db_message(
-            "decode_source_cursor",
-            "cursor authority does not match its storage key",
-        ));
-    }
-    Ok(cursor)
 }
 
 async fn attach(conn: &Connection, path: &Path) -> Result<()> {

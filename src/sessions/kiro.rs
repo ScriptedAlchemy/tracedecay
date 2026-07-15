@@ -30,7 +30,8 @@ use crate::sessions::shared::{
     content_storage_text_and_tools, path_belongs_to_project, title_from_messages,
 };
 use crate::sessions::source::{
-    ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, read_changed_file,
+    ParsedTranscript, SessionDraft, TranscriptIngestResult, TranscriptSource,
+    collect_files_with_ext, read_changed_file,
 };
 
 const PROVIDER: &str = "kiro";
@@ -239,10 +240,28 @@ pub async fn ingest_kiro_for_project(
     project_root: &Path,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestStats {
+    match try_ingest_kiro_for_project(db, project_root, max_new_bytes).await {
+        Ok(stats) => stats,
+        Err(error) => {
+            tracing::error!(
+                project_root = %project_root.display(),
+                error = %error,
+                "Kiro transcript ingest failed"
+            );
+            TranscriptIngestStats::default()
+        }
+    }
+}
+
+pub async fn try_ingest_kiro_for_project(
+    db: &crate::global_db::GlobalDb,
+    project_root: &Path,
+    max_new_bytes: Option<u64>,
+) -> TranscriptIngestResult<TranscriptIngestStats> {
     let Some(source) = KiroSource::new() else {
-        return TranscriptIngestStats::default();
+        return Ok(TranscriptIngestStats::default());
     };
-    crate::sessions::source::ingest_source(db, &source, project_root, max_new_bytes).await
+    crate::sessions::source::try_ingest_source(db, &source, project_root, max_new_bytes).await
 }
 
 fn empty_changed_transcript(

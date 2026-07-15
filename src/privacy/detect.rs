@@ -7,7 +7,7 @@ use thiserror::Error;
 use super::detector_kernel::{
     CredentialPattern, CredentialPatternKind, CredentialPatternProfile, JsonPathSegment,
     JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy, compile_credential_patterns,
-    high_entropy_ranges, visit_sensitive_json_mut,
+    high_entropy_ranges, visit_json_object_keys, visit_sensitive_json_mut,
 };
 
 const REDACTED_EXACT: &str = "[TraceDecay redacted: exact credential]";
@@ -96,6 +96,7 @@ pub(crate) enum DetectionError {
 pub(crate) struct DetectionResult {
     pub payload: Value,
     pub findings: Vec<SanitizationFindingV1>,
+    pub quarantine_findings: Vec<SanitizationFindingV1>,
 }
 
 struct ConfiguredSensitiveKeyPolicy<'a>(&'a BTreeSet<String>);
@@ -104,8 +105,38 @@ impl SensitiveKeyPolicy for ConfiguredSensitiveKeyPolicy<'_> {
     type Match = ();
 
     fn classify(&self, key: &NormalizedSensitiveKey) -> Option<Self::Match> {
-        self.0.contains(key.ascii_compact()).then_some(())
+        (self.0.contains(key.ascii_compact()) || is_semantically_sensitive_key(key)).then_some(())
     }
+}
+
+fn is_semantically_sensitive_key(key: &NormalizedSensitiveKey) -> bool {
+    const SAFE_METADATA_KEYS: &[&str] = &[
+        "api_key_hint",
+        "credential_type",
+        "password_policy",
+        "token_budget",
+        "token_count",
+        "token_counts",
+        "token_limit",
+        "token_type",
+        "token_usage",
+    ];
+
+    let separated = key.separated();
+    if SAFE_METADATA_KEYS.contains(&separated) {
+        return false;
+    }
+
+    let suffix = separated.rsplit('_').next().unwrap_or(separated);
+    matches!(
+        suffix,
+        "credential" | "passphrase" | "passwd" | "password" | "secret" | "token"
+    ) || matches!(
+        separated,
+        "access_key" | "api_key" | "private_key" | "secret_key"
+    ) || ["_access_key", "_api_key", "_private_key", "_secret_key"]
+        .iter()
+        .any(|compound| separated.ends_with(compound))
 }
 
 pub(crate) fn redact_sensitive_values(
@@ -114,26 +145,57 @@ pub(crate) fn redact_sensitive_values(
 ) -> Result<DetectionResult, DetectionError> {
     let patterns = patterns()?;
     let mut findings = Vec::new();
+    let mut quarantine_findings = Vec::new();
     let policy = ConfiguredSensitiveKeyPolicy(sensitive_keys);
-    visit_sensitive_json_mut(&mut payload, &policy, |value, path| match value {
-        JsonVisitMut::SensitiveValue(child, ()) if !child.is_null() => {
-            *child = Value::String(REDACTED_SENSITIVE_FIELD.to_string());
-            findings.push(SanitizationFindingV1::new(
-                PrivacyDetectorV1::SensitiveField,
-                structural_location(path),
-                DetectionConfidenceV1::Contextual,
-                SanitizationActionV1::Redacted,
-            ));
-            true
-        }
-        JsonVisitMut::SensitiveValue(_, ()) => false,
-        JsonVisitMut::String(text) => {
-            redact_text(text, &structural_location(path), patterns, &mut findings)
-        }
+    visit_json_object_keys(&payload, &policy, |key, path| {
+        let mut key_evidence = key.to_string();
+        redact_text(
+            &mut key_evidence,
+            &structural_location(path),
+            patterns,
+            &mut quarantine_findings,
+            SanitizationActionV1::Quarantined,
+        )
     });
+    if quarantine_findings.is_empty() {
+        visit_sensitive_json_mut(&mut payload, &policy, |value, path| match value {
+            JsonVisitMut::SensitiveValue(child, ()) if !child.is_null() => {
+                *child = Value::String(REDACTED_SENSITIVE_FIELD.to_string());
+                findings.push(SanitizationFindingV1::new(
+                    PrivacyDetectorV1::SensitiveField,
+                    structural_location(path),
+                    DetectionConfidenceV1::Contextual,
+                    SanitizationActionV1::Redacted,
+                ));
+                true
+            }
+            JsonVisitMut::SensitiveValue(_, ()) => false,
+            JsonVisitMut::String(text) => redact_text(
+                text,
+                &structural_location(path),
+                patterns,
+                &mut findings,
+                SanitizationActionV1::Redacted,
+            ),
+        });
+    }
     findings.sort();
     findings.dedup();
-    Ok(DetectionResult { payload, findings })
+    quarantine_findings.sort();
+    quarantine_findings.dedup();
+    Ok(DetectionResult {
+        payload,
+        findings,
+        quarantine_findings,
+    })
+}
+
+pub(crate) fn sanitize_provider_metadata_text(text: &str) -> Option<String> {
+    let result = redact_sensitive_values(Value::String(text.to_owned()), &BTreeSet::new()).ok()?;
+    if !result.quarantine_findings.is_empty() {
+        return None;
+    }
+    result.payload.as_str().map(str::to_owned)
 }
 
 fn redact_text(
@@ -141,18 +203,19 @@ fn redact_text(
     path: &str,
     patterns: &[CredentialPattern],
     findings: &mut Vec<SanitizationFindingV1>,
+    action: SanitizationActionV1,
 ) -> bool {
     let mut changed = false;
     for pattern in patterns {
-        if pattern.regex().is_match(text) {
+        let ranges = pattern.ranges(text);
+        if !ranges.is_empty() {
             let (detector, confidence, replacement) = pattern_metadata(pattern.kind());
-            *text = pattern.regex().replace_all(text, replacement).into_owned();
+            for range in ranges.into_iter().rev() {
+                text.replace_range(range, replacement);
+            }
             changed = true;
             findings.push(SanitizationFindingV1::new(
-                detector,
-                path,
-                confidence,
-                SanitizationActionV1::Redacted,
+                detector, path, confidence, action,
             ));
         }
     }
@@ -167,7 +230,7 @@ fn redact_text(
             PrivacyDetectorV1::HighEntropyToken,
             path,
             DetectionConfidenceV1::Heuristic,
-            SanitizationActionV1::Redacted,
+            action,
         ));
     }
     changed

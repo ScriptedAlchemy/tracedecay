@@ -103,13 +103,44 @@ fn cursor_advance(
     end: u64,
     reason: NonDurableFrameReason,
 ) -> ObservationCursorAdvance {
-    ObservationCursorAdvance::new(
+    let generation = ClaudeFileGenerationV1::new(GENERATION).unwrap();
+    let covered = ClaudeByteRangeV1::new(start, end).unwrap();
+    let disposition = match reason {
+        NonDurableFrameReason::SanitizerRejected => Some(SanitizerDispositionV1::Rejected),
+        NonDurableFrameReason::SanitizerQuarantined => Some(SanitizerDispositionV1::Quarantined),
+        _ => None,
+    };
+    let Some(disposition) = disposition else {
+        return ObservationCursorAdvance::new(
+            source(),
+            scope(),
+            generation,
+            expected_cursor,
+            covered,
+            reason,
+        )
+        .unwrap();
+    };
+    let receipt = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new(format!("receipt.cursor.{start}.{end}.{}", reason.as_str()))
+                .unwrap(),
+            ComponentVersion::new("sanitizer.test.v1").unwrap(),
+        )
+        .unwrap(),
+        disposition,
+        SensitivityV1::Sensitive,
+        None,
+    )
+    .unwrap();
+    ObservationCursorAdvance::new_with_sanitization_receipt(
         source(),
         scope(),
-        ClaudeFileGenerationV1::new(GENERATION).unwrap(),
+        generation,
         expected_cursor,
-        ClaudeByteRangeV1::new(start, end).unwrap(),
+        covered,
         reason,
+        receipt,
     )
     .unwrap()
 }
@@ -491,7 +522,7 @@ async fn exact_duplicate_returns_original_receipt_without_mutating_cursor_or_sto
 }
 
 #[tokio::test]
-async fn cursor_only_progress_persists_no_skipped_rows_and_retries_idempotently() {
+async fn cursor_only_progress_persists_non_payload_receipt_and_retries_idempotently() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     let store = GlobalDbObservationStore::new(&db);
@@ -521,7 +552,95 @@ async fn cursor_only_progress_persists_no_skipped_rows_and_retries_idempotently(
     );
     assert_eq!(
         table_deltas(&before, &user_table_counts(&tmp).await),
-        BTreeMap::from([("source_cursors".to_owned(), 1)])
+        BTreeMap::from([
+            ("source_cursor_advances".to_owned(), 1),
+            ("source_cursors".to_owned(), 1),
+        ])
+    );
+
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let conn = raw_db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT start_offset, end_offset, reason
+             FROM source_cursor_advances",
+            (),
+        )
+        .await
+        .unwrap();
+    let receipt = rows.next().await.unwrap().expect("cursor advance receipt");
+    assert_eq!(receipt.get::<String>(0).unwrap(), "0");
+    assert_eq!(receipt.get::<String>(1).unwrap(), "10");
+    assert_eq!(receipt.get::<String>(2).unwrap(), "blank_frame");
+    assert!(rows.next().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn cursor_only_retry_rejects_same_cursor_with_different_reason() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+
+    store
+        .advance_source_cursor(cursor_advance(
+            None,
+            0,
+            10,
+            NonDurableFrameReason::BlankFrame,
+        ))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        store
+            .advance_source_cursor(cursor_advance(
+                None,
+                0,
+                10,
+                NonDurableFrameReason::OutOfScope,
+            ))
+            .await,
+        Err(ObservationStoreError::CursorAdvanceCollision)
+    ));
+    assert_eq!(
+        store.get_source_cursor(&source(), &scope()).await.unwrap(),
+        Some(cursor(10))
+    );
+}
+
+#[tokio::test]
+async fn cursor_only_retry_rejects_same_cursor_with_different_coverage() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+
+    store
+        .advance_source_cursor(cursor_advance(
+            None,
+            0,
+            10,
+            NonDurableFrameReason::BlankFrame,
+        ))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        store
+            .advance_source_cursor(cursor_advance(
+                Some(cursor(5)),
+                5,
+                10,
+                NonDurableFrameReason::BlankFrame,
+            ))
+            .await,
+        Err(ObservationStoreError::CursorAdvanceCollision)
+    ));
+    assert_eq!(
+        store.get_source_cursor(&source(), &scope()).await.unwrap(),
+        Some(cursor(10))
     );
 }
 
@@ -623,7 +742,7 @@ async fn cursor_only_progress_rejects_non_contiguous_and_stale_coverage() {
             ClaudeFileGenerationV1::new(GENERATION).unwrap(),
             Some(cursor(10)),
             ClaudeByteRangeV1::new(11, 20).unwrap(),
-            NonDurableFrameReason::SanitizerRejected,
+            NonDurableFrameReason::BlankFrame,
         ),
         Err(ObservationStoreError::CursorCoverageMismatch)
     ));
@@ -631,6 +750,48 @@ async fn cursor_only_progress_rejects_non_contiguous_and_stale_coverage() {
         store.get_source_cursor(&source(), &scope()).await.unwrap(),
         Some(cursor(10))
     );
+}
+
+#[tokio::test]
+async fn sanitizer_cursor_progress_persists_typed_nonpayload_receipt_atomically() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_lcm_db_path(&tmp);
+    {
+        let db = open_lcm_db(&tmp).await;
+        let store = GlobalDbObservationStore::new(&db);
+        let advance = cursor_advance(None, 0, 10, NonDurableFrameReason::SanitizerRejected);
+        assert_eq!(
+            store.advance_source_cursor(advance.clone()).await.unwrap(),
+            CursorAdvanceOutcome::Committed
+        );
+        assert_eq!(
+            store.advance_source_cursor(advance).await.unwrap(),
+            CursorAdvanceOutcome::ExactDuplicate
+        );
+    }
+
+    let raw_db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = raw_db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT advance.reason, advance.receipt_id,
+                    receipt.payload_digest, receipt.receipt_json
+             FROM source_cursor_advances AS advance
+             JOIN sanitization_receipts AS receipt
+               ON receipt.receipt_id = advance.receipt_id",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "sanitizer_rejected");
+    let receipt_id = row.get::<String>(1).unwrap();
+    assert!(receipt_id.starts_with("receipt.cursor.0.10."));
+    assert_eq!(row.get::<String>(2).unwrap(), "");
+    let receipt: SanitizationReceiptV1 =
+        serde_json::from_str(&row.get::<String>(3).unwrap()).unwrap();
+    assert_eq!(receipt.disposition(), SanitizerDispositionV1::Rejected);
+    assert!(receipt.payload().is_none());
 }
 
 #[tokio::test]

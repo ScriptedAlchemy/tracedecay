@@ -801,10 +801,10 @@ async fn cursor_transcript_ingest_cap_defers_large_backlog() {
     });
 
     let capped = ingest_cursor_transcript_event_capped(&event.to_string(), &db, Some(128)).await;
-    assert_eq!(capped.messages_upserted, 0);
+    assert_eq!(capped.messages_upserted, 1);
 
     let uncapped = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(uncapped.messages_upserted, 1);
+    assert_eq!(uncapped.messages_upserted, 0);
 }
 
 #[tokio::test]

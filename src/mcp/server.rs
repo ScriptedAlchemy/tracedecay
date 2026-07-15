@@ -610,6 +610,20 @@ fn mark_semantic_tool_error(result: &mut ToolResult) {
 /// Map response-handle failures onto actionable JSON-RPC errors at the MCP
 /// boundary so clients can distinguish bad input from cache/runtime problems.
 fn tool_error_response(id: Value, tool_name: &str, error: &TraceDecayError) -> JsonRpcResponse {
+    if tool_name == "tracedecay_hook_runtime"
+        && let Some(data) = crate::mcp::tools::structured_hook_error_data(error)
+    {
+        let detail = data
+            .get("detail")
+            .and_then(Value::as_str)
+            .unwrap_or("Claude observation ingest failed");
+        return JsonRpcResponse::error_with_data(
+            id,
+            ErrorCode::InternalError,
+            format!("tool execution failed: {detail}"),
+            Some(data),
+        );
+    }
     if tool_name == RESPONSE_RETRIEVE_TOOL {
         match error {
             TraceDecayError::Config { message }
@@ -1190,6 +1204,7 @@ async fn run_startup_session_catch_up(
     user_session_db: Option<Arc<GlobalDb>>,
     registry_db: Option<Arc<GlobalDb>>,
     project_root: &Path,
+    project_id: Option<&str>,
 ) -> Option<Arc<GlobalDb>> {
     let Some(db) = session_db else {
         eprintln!(
@@ -1198,17 +1213,34 @@ async fn run_startup_session_catch_up(
         );
         return None;
     };
-    let _ =
-        crate::sessions::ingest_project_sources_for_provider(db.as_ref(), project_root, None, true)
-            .await;
+    let project_outcome = crate::sessions::ingest_project_sources_for_provider(
+        db.as_ref(),
+        project_root,
+        project_id,
+        None,
+        true,
+    )
+    .await;
+    for failure in &project_outcome.failures {
+        eprintln!(
+            "[tracedecay] startup project transcript ingest incomplete: provider={} source={} reason_code={} retryable={}",
+            failure.provider, failure.source, failure.reason_code, failure.retryable
+        );
+    }
     if let (Some(user_db), Some(registry_db)) = (user_session_db, registry_db) {
         if let Some(profile_root) = user_db.db_path().parent() {
-            let _ = crate::sessions::ingest_user_global_sources_for_startup_with_db(
+            let outcome = crate::sessions::ingest_user_global_sources_for_startup_with_db(
                 user_db.as_ref(),
                 registry_db.as_ref(),
                 profile_root,
             )
             .await;
+            for failure in &outcome.failures {
+                eprintln!(
+                    "[tracedecay] startup user transcript ingest incomplete: provider={} source={} reason_code={} retryable={}",
+                    failure.provider, failure.source, failure.reason_code, failure.retryable
+                );
+            }
         } else {
             eprintln!(
                 "[tracedecay] startup user transcript ingest skipped: authoritative user session storage has no profile root"
@@ -1219,7 +1251,7 @@ async fn run_startup_session_catch_up(
             "[tracedecay] startup user transcript ingest skipped: authoritative user session or registry storage is unavailable"
         );
     }
-    Some(db)
+    project_outcome.is_success().then_some(db)
 }
 
 impl McpServer {
@@ -1771,6 +1803,7 @@ impl McpServer {
         // flags via `wait_for_startup_catch_up`.
         {
             let project_root = cg.project_root().to_path_buf();
+            let project_id = cg.store_layout().identity.project_id.clone();
             let session_db = self.session_db.clone();
             let user_session_db = self.user_session_db.clone();
             let registry_db = self.registry_db.clone();
@@ -1782,6 +1815,7 @@ impl McpServer {
                     user_session_db,
                     registry_db,
                     &project_root,
+                    project_id.as_deref(),
                 )
                 .await
                 {

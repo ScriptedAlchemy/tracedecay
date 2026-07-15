@@ -1,13 +1,56 @@
 use std::ffi::OsStr;
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
+
 use crate::sessions::source::TranscriptCursorKey;
 
 const CLAUDE_CURSOR_KEY_PREFIX: &str = "tracedecay-claude-cursor-v1";
 const CLAUDE_SOURCE_ID_PREFIX: &str = "tracedecay-claude-source-v1";
+const CLAUDE_OBSERVATION_SOURCE_ID_PREFIX: &str = "tracedecay-claude-observation-source-v1-sha256";
+const CLAUDE_OBSERVATION_SOURCE_ID_DOMAIN: &[u8] = b"tracedecay.claude.observation-source.v1\0";
 
 pub(super) fn claude_source_id(path: &Path) -> Option<String> {
     path.file_stem().map(claude_source_component)
+}
+
+pub(super) fn claude_observation_source_id(path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        digest_claude_observation_source_id("unix-path", canonical.as_os_str().as_bytes())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let bytes: Vec<u8> = canonical
+            .as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        digest_claude_observation_source_id("windows-path-utf16le", &bytes)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        digest_claude_observation_source_id("rust-path", canonical.as_os_str().as_encoded_bytes())
+    }
+}
+
+fn digest_claude_observation_source_id(platform: &str, native_path: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    for frame in [
+        CLAUDE_OBSERVATION_SOURCE_ID_DOMAIN,
+        platform.as_bytes(),
+        native_path,
+    ] {
+        hasher.update((frame.len() as u64).to_be_bytes());
+        hasher.update(frame);
+    }
+    format!(
+        "{CLAUDE_OBSERVATION_SOURCE_ID_PREFIX}-{}",
+        hex::encode(hasher.finalize())
+    )
 }
 
 pub(super) fn claude_source_component(component: &OsStr) -> String {

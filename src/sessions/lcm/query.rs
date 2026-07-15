@@ -22,8 +22,8 @@ use super::{
     LcmLoadSessionPage, LcmLoadSessionRequest, LcmRawMessage, LcmRawMessageOverview,
     LcmRecentSession, LcmReplayMessage, LcmReplaySummaryNode, LcmScope, LcmSessionReplayRequest,
     LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmStorageKind, LcmStoreStatus,
-    LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeOverview, compression, dag, gc, payload,
-    raw, schema, util,
+    LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeOverview, compression, dag, gc, maintenance,
+    payload, raw, schema, util,
 };
 
 const MAX_PAGE_LIMIT: usize = 100;
@@ -2448,7 +2448,8 @@ pub(crate) async fn payload_health_detail(
     let gc_config = gc_config.clone().normalized();
     let now = current_timestamp();
     let sample_limit = sample_limit.max(1);
-    let metadata_refs = metadata_refs_for_scope(conn, provider, session_id).await?;
+    let metadata_refs =
+        maintenance::payload_metadata_refs_for_scope(conn, provider, session_id).await?;
     let metadata_bytes = payload_byte_counts_for_scope(conn, provider, session_id).await?;
     let payload_locations = payload_ref_locations_for_scope(conn, provider, session_id).await?;
     let referenced_refs = gc::referenced_payload_refs(conn, provider, session_id).await?;
@@ -2463,7 +2464,7 @@ pub(crate) async fn payload_health_detail(
     )
     .await?;
     let file_owner_refs = if session_id.is_some() {
-        gc::all_payload_metadata_refs(conn).await?
+        maintenance::all_payload_metadata_refs(conn).await?
     } else {
         metadata_refs.clone()
     };
@@ -2580,8 +2581,9 @@ pub(crate) async fn payload_health_detail(
             orphan_file_bytes = orphan_file_bytes.saturating_add(metadata.len());
             reclaimable_bytes_after_grace =
                 reclaimable_bytes_after_grace.saturating_add(metadata.len());
-            let age_seconds = now.saturating_sub(file_mtime_seconds(&metadata));
-            let eligible_at = file_mtime_seconds(&metadata).saturating_add(grace_seconds_i64);
+            let mtime = util::file_mtime_seconds(&metadata);
+            let age_seconds = now.saturating_sub(mtime);
+            let eligible_at = mtime.saturating_add(grace_seconds_i64);
             next_run_eligible_at =
                 Some(next_run_eligible_at.map_or(eligible_at, |current| current.min(eligible_at)));
             if age_seconds >= grace_seconds_i64 && last_gc_at.is_some() {
@@ -2929,27 +2931,6 @@ async fn placeholder_payload_status(
     })
 }
 
-async fn metadata_refs_for_scope(
-    conn: &Connection,
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<BTreeSet<String>, LcmError> {
-    let mut refs = BTreeSet::new();
-    let mut rows = conn
-        .query(
-            "SELECT payload_ref
-             FROM lcm_external_payloads
-             WHERE (?1 = 'all' OR provider = ?1)
-               AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, util::opt_text(session_id)],
-        )
-        .await?;
-    while let Some(row) = rows.next().await? {
-        refs.insert(row.get(0)?);
-    }
-    Ok(refs)
-}
-
 async fn placeholder_refs_for_scope(
     conn: &Connection,
     provider: &str,
@@ -3041,22 +3022,6 @@ fn payload_root_contained(storage_root: &Path) -> bool {
         return false;
     };
     canonical_dir.parent() == Some(root.as_path())
-}
-
-#[cfg(unix)]
-fn file_mtime_seconds(metadata: &fs::Metadata) -> i64 {
-    use std::os::unix::fs::MetadataExt;
-    metadata.mtime()
-}
-
-#[cfg(not(unix))]
-fn file_mtime_seconds(metadata: &fs::Metadata) -> i64 {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or_default()
 }
 
 async fn load_lifecycle_metadata(

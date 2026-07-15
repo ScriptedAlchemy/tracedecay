@@ -33,11 +33,21 @@ use crate::sessions::{
 mod observation;
 mod observation_projection;
 mod observation_store;
+mod project_registry;
 mod schema_contract;
-mod schema_stages;
+pub(crate) mod schema_stages;
 mod transcript;
 
 pub use observation_store::{ProjectObservationStoreError, ProjectObservationStoreResolution};
+use project_registry::{
+    LegacyPathAliasKind, canonical_project_path, encode_native_project_path,
+    native_project_path_platform, project_path_alias_key,
+};
+#[cfg(test)]
+use project_registry::{
+    NATIVE_PROJECT_PATH_ALIAS_PREFIX, decode_native_project_path, decode_native_project_path_alias,
+    encode_native_project_path_alias,
+};
 pub(crate) use transcript::TranscriptPersistenceError;
 
 const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
@@ -410,10 +420,7 @@ fn global_db_operation_error(
     operation: &'static str,
     source: impl std::error::Error + Send + Sync + 'static,
 ) -> TraceDecayError {
-    TraceDecayError::DatabaseOperation {
-        operation: operation.to_string(),
-        source: Box::new(source),
-    }
+    TraceDecayError::database_operation(operation, source)
 }
 
 fn global_db_operation_message(
@@ -825,197 +832,6 @@ fn git_remote_search_alias(remote: Option<&str>) -> Option<String> {
     Some(format!("git-remote-name:{}", name.to_ascii_lowercase()))
 }
 
-const NATIVE_PROJECT_PATH_ALIAS_PREFIX: &str = "tracedecay-project-path-v1";
-
-#[derive(Clone, Copy)]
-enum LegacyPathAliasKind {
-    ProjectRoot,
-    GitCommonDir,
-}
-
-impl LegacyPathAliasKind {
-    fn prefix(self) -> &'static str {
-        match self {
-            Self::ProjectRoot => "",
-            Self::GitCommonDir => "git-common-dir:",
-        }
-    }
-
-    fn owner_query(self) -> &'static str {
-        match self {
-            Self::ProjectRoot => {
-                "SELECT project_id FROM code_projects WHERE canonical_root = ?1 ORDER BY project_id"
-            }
-            Self::GitCommonDir => {
-                "SELECT project_id FROM code_projects WHERE git_common_dir = ?1 ORDER BY project_id"
-            }
-        }
-    }
-}
-
-fn canonical_project_path(project_path: &Path) -> PathBuf {
-    std::fs::canonicalize(project_path).unwrap_or_else(|_| project_path.to_path_buf())
-}
-
-fn project_path_alias_key(project_path: &Path) -> String {
-    let canonical = canonical_project_path(project_path);
-    if let Some(path) = canonical.to_str() {
-        return path.to_string();
-    }
-    native_project_path_alias_key(&canonical)
-}
-
-#[cfg(unix)]
-fn native_project_path_alias_key(path: &Path) -> String {
-    encode_native_project_path_alias(
-        native_project_path_platform(),
-        &encode_native_project_path(path),
-    )
-}
-
-#[cfg(windows)]
-fn native_project_path_alias_key(path: &Path) -> String {
-    encode_native_project_path_alias(
-        native_project_path_platform(),
-        &encode_native_project_path(path),
-    )
-}
-
-#[cfg(not(any(unix, windows)))]
-fn native_project_path_alias_key(path: &Path) -> String {
-    encode_native_project_path_alias(
-        native_project_path_platform(),
-        &encode_native_project_path(path),
-    )
-}
-
-#[cfg(unix)]
-fn native_project_path_platform() -> &'static str {
-    "unix-bytes"
-}
-
-#[cfg(windows)]
-fn native_project_path_platform() -> &'static str {
-    "windows-utf16le"
-}
-
-#[cfg(not(any(unix, windows)))]
-fn native_project_path_platform() -> &'static str {
-    "rust-os-str"
-}
-
-#[cfg(unix)]
-fn encode_native_project_path(path: &Path) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt as _;
-    path.as_os_str().as_bytes().to_vec()
-}
-
-#[cfg(windows)]
-fn encode_native_project_path(path: &Path) -> Vec<u8> {
-    use std::os::windows::ffi::OsStrExt as _;
-    path.as_os_str()
-        .encode_wide()
-        .flat_map(u16::to_le_bytes)
-        .collect()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn encode_native_project_path(path: &Path) -> Vec<u8> {
-    path.as_os_str().as_encoded_bytes().to_vec()
-}
-
-#[cfg(unix)]
-fn decode_native_project_path(platform: &str, bytes: Vec<u8>) -> Result<PathBuf, String> {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt as _;
-
-    if platform != native_project_path_platform() {
-        return Err(format!(
-            "native project path belongs to platform '{platform}'"
-        ));
-    }
-    Ok(PathBuf::from(OsString::from_vec(bytes)))
-}
-
-#[cfg(windows)]
-fn decode_native_project_path(platform: &str, bytes: Vec<u8>) -> Result<PathBuf, String> {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt as _;
-
-    if platform != native_project_path_platform() {
-        return Err(format!(
-            "native project path belongs to platform '{platform}'"
-        ));
-    }
-    if bytes.len() % 2 != 0 {
-        return Err("native Windows project path has odd byte length".to_string());
-    }
-    let wide = bytes
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect::<Vec<_>>();
-    Ok(PathBuf::from(OsString::from_wide(&wide)))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn decode_native_project_path(_platform: &str, _bytes: Vec<u8>) -> Result<PathBuf, String> {
-    Err("native project paths are unsupported on this platform".to_string())
-}
-
-fn encode_native_project_path_alias(platform: &str, native_path: &[u8]) -> String {
-    format!(
-        "{NATIVE_PROJECT_PATH_ALIAS_PREFIX}-{platform}-{}",
-        hex::encode(native_path)
-    )
-}
-
-#[cfg(unix)]
-fn decode_native_project_path_alias(alias: &str) -> Result<Option<PathBuf>, String> {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt as _;
-
-    let prefix = format!("{NATIVE_PROJECT_PATH_ALIAS_PREFIX}-unix-bytes-");
-    if let Some(encoded) = alias.strip_prefix(&prefix) {
-        let bytes = hex::decode(encoded).map_err(|error| error.to_string())?;
-        return Ok(Some(PathBuf::from(OsString::from_vec(bytes))));
-    }
-    if alias.starts_with(NATIVE_PROJECT_PATH_ALIAS_PREFIX) {
-        return Err("native project path alias belongs to another platform".to_string());
-    }
-    Ok(None)
-}
-
-#[cfg(windows)]
-fn decode_native_project_path_alias(alias: &str) -> Result<Option<PathBuf>, String> {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt as _;
-
-    let prefix = format!("{NATIVE_PROJECT_PATH_ALIAS_PREFIX}-windows-utf16le-");
-    if let Some(encoded) = alias.strip_prefix(&prefix) {
-        let bytes = hex::decode(encoded).map_err(|error| error.to_string())?;
-        if bytes.len() % 2 != 0 {
-            return Err("native Windows project path alias has odd byte length".to_string());
-        }
-        let wide = bytes
-            .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect::<Vec<_>>();
-        return Ok(Some(PathBuf::from(OsString::from_wide(&wide))));
-    }
-    if alias.starts_with(NATIVE_PROJECT_PATH_ALIAS_PREFIX) {
-        return Err("native project path alias belongs to another platform".to_string());
-    }
-    Ok(None)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn decode_native_project_path_alias(alias: &str) -> Result<Option<PathBuf>, String> {
-    if alias.starts_with(NATIVE_PROJECT_PATH_ALIAS_PREFIX) {
-        return Err("native project path aliases are unsupported on this platform".to_string());
-    }
-    Ok(None)
-}
-
 fn normalize_git_remote_url(remote: &str) -> Option<String> {
     let remote = remote.trim();
     if remote.is_empty() {
@@ -1336,6 +1152,7 @@ impl GlobalDb {
             drop(schema);
             let db = Self::open_local(&canonical_path, false, authority, Some(Arc::clone(&slot)))
                 .await?;
+            db.recover_pending_payload_deletes().await?;
             if spawn_structured_backfill {
                 db.spawn_structured_backfill();
             }
@@ -1369,6 +1186,7 @@ impl GlobalDb {
         schema_stages::ensure_transcript(&db).await?;
         schema_stages::ensure_observation_authority(&db).await?;
         schema_stages::ensure_composed_context(&db).await?;
+        db.recover_pending_payload_deletes().await?;
         // Recover structured rows skipped by legacy transcript parsers. This
         // runs on every open (per hook event, per CLI/MCP invocation), so it
         // must not block: schedule it on a detached background task rather than
@@ -1445,6 +1263,18 @@ impl GlobalDb {
 
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    async fn recover_pending_payload_deletes(&self) -> crate::errors::Result<()> {
+        crate::sessions::lcm::gc::drain_pending_payload_deletes(&self.conn, &self.storage_root)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                global_db_operation_message(
+                    "recover committed payload deletions",
+                    error.to_string(),
+                )
+            })
     }
 
     /// Opens an isolated writer connection and starts a cancellation-safe
@@ -1654,35 +1484,7 @@ impl GlobalDb {
     }
 
     async fn migrate_project_rows_to_canonical_keys(&self) -> Result<(), libsql::Error> {
-        let transaction = self.begin_authoritative_transaction().await?;
-        let mut rows = transaction
-            .query("SELECT path, tokens_saved FROM projects", ())
-            .await?;
-        let mut replacements = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let old_path: String = row.get(0)?;
-            let tokens_saved: i64 = row.get(1)?;
-            let canonical_path = Self::canonical_project_key(Path::new(&old_path));
-            if old_path != canonical_path {
-                replacements.push((old_path, canonical_path, tokens_saved));
-            }
-        }
-        drop(rows);
-
-        for (old_path, canonical_path, tokens_saved) in replacements {
-            transaction
-                .execute(
-                    "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)
-                     ON CONFLICT(path) DO UPDATE SET
-                        tokens_saved = MAX(tokens_saved, excluded.tokens_saved)",
-                    params![canonical_path, tokens_saved],
-                )
-                .await?;
-            transaction
-                .execute("DELETE FROM projects WHERE path = ?1", params![old_path])
-                .await?;
-        }
-        transaction.commit().await
+        project_registry::migrate_project_rows_to_canonical_keys(self).await
     }
 
     pub async fn upsert_code_project(
@@ -2041,229 +1843,7 @@ impl GlobalDb {
         &self,
         limit: usize,
     ) -> crate::errors::Result<Vec<PathBuf>> {
-        const OPERATION: &str = "list native code project paths";
-
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT project_id, canonical_root, display_root, primary_root_platform,
-                        primary_root_bytes, primary_root_last_seen_at, last_seen_at
-                 FROM code_projects
-                 ORDER BY last_seen_at DESC, project_id
-                 LIMIT ?1",
-                params![limit],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let mut roots = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-        {
-            let project_id = row
-                .get::<String>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let canonical_root = row
-                .get::<String>(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let display_root = row
-                .get::<String>(2)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let platform = row
-                .get::<Option<String>>(3)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let bytes = row
-                .get::<Option<Vec<u8>>>(4)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let primary_root_last_seen_at = row
-                .get::<Option<i64>>(5)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let last_seen_at = row
-                .get::<i64>(6)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            roots.push((
-                project_id,
-                canonical_root,
-                display_root,
-                platform,
-                bytes,
-                primary_root_last_seen_at,
-                last_seen_at,
-            ));
-        }
-        drop(rows);
-
-        let mut paths = Vec::with_capacity(roots.len());
-        for (
-            project_id,
-            canonical_root,
-            display_root,
-            platform,
-            bytes,
-            primary_root_last_seen_at,
-            last_seen_at,
-        ) in roots
-        {
-            let path = match (platform, bytes, primary_root_last_seen_at) {
-                (Some(platform), Some(bytes), Some(primary_last_seen)) => {
-                    let path = decode_native_project_path(&platform, bytes).map_err(|error| {
-                        global_db_operation_message(
-                            OPERATION,
-                            format!("invalid primary root for project '{project_id}': {error}"),
-                        )
-                    })?;
-                    let display_evidence = path.to_string_lossy();
-                    if primary_last_seen != last_seen_at
-                        || (display_evidence != canonical_root && display_evidence != display_root)
-                        || !self
-                            .project_alias_is_current(&project_id, &path, last_seen_at)
-                            .await?
-                    {
-                        return Err(global_db_operation_message(
-                            OPERATION,
-                            format!("project '{project_id}' has a stale primary root"),
-                        ));
-                    }
-                    path
-                }
-                (None, None, None) => {
-                    self.legacy_code_project_path(
-                        &project_id,
-                        &canonical_root,
-                        &display_root,
-                        last_seen_at,
-                    )
-                    .await?
-                }
-                _ => {
-                    return Err(global_db_operation_message(
-                        OPERATION,
-                        format!("project '{project_id}' has an incomplete primary root"),
-                    ));
-                }
-            };
-            if !path.is_absolute() {
-                return Err(global_db_operation_message(
-                    OPERATION,
-                    format!("project '{project_id}' has a non-absolute root"),
-                ));
-            }
-            paths.push(path);
-        }
-        Ok(paths)
-    }
-
-    async fn project_alias_is_current(
-        &self,
-        project_id: &str,
-        path: &Path,
-        last_seen_at: i64,
-    ) -> crate::errors::Result<bool> {
-        const OPERATION: &str = "list native code project paths";
-        let alias = project_path_alias_key(path);
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT 1 FROM project_aliases
-                 WHERE project_id = ?1 AND alias_path = ?2 AND last_seen_at = ?3",
-                params![project_id, alias, last_seen_at],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        rows.next()
-            .await
-            .map(|row| row.is_some())
-            .map_err(|error| global_db_operation_error(OPERATION, error))
-    }
-
-    async fn legacy_code_project_path(
-        &self,
-        project_id: &str,
-        canonical_root: &str,
-        display_root: &str,
-        last_seen_at: i64,
-    ) -> crate::errors::Result<PathBuf> {
-        const OPERATION: &str = "list native code project paths";
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT alias_path, last_seen_at FROM project_aliases
-                 WHERE project_id = ?1 ORDER BY alias_path",
-                params![project_id],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let mut candidates = BTreeMap::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-        {
-            let alias = row
-                .get::<String>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let alias_last_seen = row
-                .get::<i64>(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            if alias_last_seen != last_seen_at {
-                continue;
-            }
-            let path = match decode_native_project_path_alias(&alias) {
-                Ok(Some(path)) => path,
-                Ok(None) if Path::new(&alias).is_absolute() => PathBuf::from(&alias),
-                Ok(None) | Err(_) => continue,
-            };
-            let display_evidence = path.to_string_lossy();
-            if display_evidence != canonical_root && display_evidence != display_root {
-                continue;
-            }
-            let identity = format!(
-                "{}:{}",
-                native_project_path_platform(),
-                hex::encode(encode_native_project_path(&path))
-            );
-            candidates.insert(identity, path);
-        }
-        let mut candidates = candidates.into_values();
-        let Some(path) = candidates.next() else {
-            return Err(global_db_operation_message(
-                OPERATION,
-                format!("project '{project_id}' has no current lossless legacy root evidence"),
-            ));
-        };
-        if candidates.next().is_some() {
-            return Err(global_db_operation_message(
-                OPERATION,
-                format!("project '{project_id}' has ambiguous legacy current roots"),
-            ));
-        }
-        let updated = self
-            .conn
-            .execute(
-                "UPDATE code_projects
-                 SET primary_root_platform = ?1, primary_root_bytes = ?2,
-                     primary_root_last_seen_at = ?3
-                 WHERE project_id = ?4 AND last_seen_at = ?3
-                   AND primary_root_platform IS NULL AND primary_root_bytes IS NULL
-                   AND primary_root_last_seen_at IS NULL",
-                params![
-                    native_project_path_platform(),
-                    encode_native_project_path(&path),
-                    last_seen_at,
-                    project_id
-                ],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        if updated != 1 {
-            return Err(global_db_operation_message(
-                OPERATION,
-                format!("project '{project_id}' changed while resolving its legacy root"),
-            ));
-        }
-        Ok(path)
+        project_registry::list_code_project_paths(self, limit).await
     }
 
     /// Lists registered code projects on the daemon's best-effort path.
@@ -3086,43 +2666,46 @@ impl GlobalDb {
         .await
     }
 
-    /// Returns all tracked project paths.
-    pub async fn list_project_paths(&self) -> Vec<String> {
-        let Ok(mut rows) = self.conn.query("SELECT path FROM projects", ()).await else {
-            return Vec::new();
-        };
-        let mut paths = Vec::new();
-        while let Ok(Some(row)) = rows.next().await {
-            if let Ok(path) = row.get::<String>(0) {
-                paths.push(path);
-            }
-        }
-        paths
+    /// Compatibility read for callers that historically treat registry errors as empty.
+    ///
+    /// New authority-sensitive code must use [`Self::try_list_project_paths`].
+    pub async fn list_project_paths_compat(&self) -> Vec<String> {
+        project_registry::list_project_paths_compat(self).await
     }
 
-    /// Returns filesystem aliases from the modern project registry.
+    /// Compatibility read for callers that historically treat registry errors as empty.
+    ///
     /// Synthetic identity aliases (for example `git-common-dir:...`) are
-    /// intentionally excluded because transcript attribution requires paths.
-    pub async fn list_project_alias_paths(&self) -> Vec<String> {
-        let Ok(mut rows) = self
-            .conn
-            .query(
-                "SELECT alias_path FROM project_aliases ORDER BY alias_path",
-                (),
-            )
-            .await
-        else {
-            return Vec::new();
-        };
-        let mut paths = Vec::new();
-        while let Ok(Some(row)) = rows.next().await {
-            if let Ok(path) = row.get::<String>(0)
-                && Path::new(&path).is_absolute()
-            {
-                paths.push(path);
-            }
-        }
-        paths
+    /// intentionally excluded. New authority-sensitive code must use
+    /// [`Self::try_list_project_alias_paths`].
+    pub async fn list_project_alias_paths_compat(&self) -> Vec<String> {
+        project_registry::list_project_alias_paths_compat(self).await
+    }
+
+    /// Returns legacy project paths with native path bytes preserved.
+    ///
+    /// Unlike [`Self::list_project_paths_compat`], malformed native encodings and
+    /// query failures are reported so attribution callers can fail closed.
+    pub async fn try_list_project_paths(&self) -> crate::errors::Result<Vec<PathBuf>> {
+        project_registry::list_lossless_paths(
+            self,
+            "SELECT path FROM projects ORDER BY path",
+            "list lossless legacy project paths",
+        )
+        .await
+    }
+
+    /// Returns filesystem aliases from the modern registry losslessly.
+    ///
+    /// Synthetic identity aliases are excluded. Malformed native encodings
+    /// and query failures are reported so attribution callers can fail closed.
+    pub async fn try_list_project_alias_paths(&self) -> crate::errors::Result<Vec<PathBuf>> {
+        project_registry::list_lossless_paths(
+            self,
+            "SELECT alias_path FROM project_aliases ORDER BY alias_path",
+            "list lossless project aliases",
+        )
+        .await
     }
 
     /// Inserts or replaces a provider session. Returns `false` on any DB error.
@@ -4370,10 +3953,11 @@ impl GlobalDb {
         now: i64,
     ) -> Result<crate::sessions::lcm::LcmGcReport, crate::sessions::lcm::LcmError> {
         let _writer = self.transaction.lock().await;
-        crate::sessions::lcm::gc::prepare_payload_gc_apply(&self.conn, storage_root, gc_config)
-            .await?;
+        let mut drain =
+            crate::sessions::lcm::gc::prepare_payload_gc_apply(&self.conn, storage_root, gc_config)
+                .await?;
         let transaction = self.begin_authoritative_transaction().await?;
-        let report = crate::sessions::lcm::gc::run_payload_gc_in_transaction(
+        let mut report = crate::sessions::lcm::gc::run_payload_gc_in_transaction(
             &transaction,
             storage_root,
             provider,
@@ -4384,6 +3968,11 @@ impl GlobalDb {
         )
         .await?;
         transaction.commit().await?;
+        drain.merge(
+            crate::sessions::lcm::gc::drain_pending_payload_deletes(&self.conn, storage_root)
+                .await?,
+        );
+        crate::sessions::lcm::gc::finalize_gc_report(&self.conn, &mut report, drain).await?;
         Ok(report)
     }
 
@@ -4413,9 +4002,38 @@ impl GlobalDb {
         }
 
         crate::sessions::lcm::doctor::prepare_apply(&self.conn).await?;
+        let applies_payload_gc = apply && mode == "gc";
+        let mut gc_drain = if applies_payload_gc {
+            Some(
+                crate::sessions::lcm::gc::drain_pending_payload_deletes(
+                    &self.conn,
+                    &self.storage_root,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         let transaction = self.begin_authoritative_transaction().await?;
-        let result = crate::sessions::lcm::doctor::doctor(&transaction, request).await?;
+        let mut result = crate::sessions::lcm::doctor::doctor(&transaction, request).await?;
         transaction.commit().await?;
+        if let Some(drain) = gc_drain.as_mut() {
+            drain.merge(
+                crate::sessions::lcm::gc::drain_pending_payload_deletes(
+                    &self.conn,
+                    &self.storage_root,
+                )
+                .await?,
+            );
+            if let Some(report) = result.pointer_mut("/repairs/gc_report") {
+                crate::sessions::lcm::gc::finalize_gc_report_value(
+                    &self.conn,
+                    report,
+                    std::mem::take(drain),
+                )
+                .await?;
+            }
+        }
         Ok(result)
     }
 

@@ -58,13 +58,21 @@ enum AdminCliAction {
 struct AdminCliContext<'a> {
     global_db: &'a GlobalDb,
     project: Option<&'a TraceDecay>,
+    project_session_db: Option<&'a GlobalDb>,
+    user_session_db: Option<&'a GlobalDb>,
 }
 
 impl<'a> AdminCliContext<'a> {
-    fn with_project(cg: &'a TraceDecay, global_db: &'a GlobalDb) -> Self {
+    fn with_project(
+        cg: &'a TraceDecay,
+        global_db: &'a GlobalDb,
+        session_authorities: super::SessionAuthorities<'a>,
+    ) -> Self {
         Self {
             global_db,
             project: Some(cg),
+            project_session_db: session_authorities.project.map(AsRef::as_ref),
+            user_session_db: session_authorities.user.map(AsRef::as_ref),
         }
     }
 
@@ -72,6 +80,8 @@ impl<'a> AdminCliContext<'a> {
         Self {
             global_db,
             project: None,
+            project_session_db: None,
+            user_session_db: None,
         }
     }
 
@@ -84,18 +94,36 @@ impl<'a> AdminCliContext<'a> {
     fn project_root(&self) -> Option<&'a Path> {
         self.project.map(TraceDecay::project_root)
     }
+
+    fn require_project_session_db(&self) -> Result<&'a GlobalDb> {
+        self.project_session_db
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "daemon project session database is unavailable".to_string(),
+            })
+    }
+
+    fn require_user_session_db(&self) -> Result<&'a GlobalDb> {
+        self.user_session_db.ok_or_else(|| TraceDecayError::Config {
+            message: "daemon user session database is unavailable".to_string(),
+        })
+    }
 }
 
 pub(super) async fn handle_admin_cli(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&GlobalDb>,
+    session_authorities: super::SessionAuthorities<'_>,
 ) -> Result<ToolResult> {
     let action = parse_admin_cli_action(args)?;
     let global_db = global_db.ok_or_else(|| TraceDecayError::Config {
         message: "daemon global database is unavailable".to_string(),
     })?;
-    dispatch_admin_cli(AdminCliContext::with_project(cg, global_db), action).await
+    dispatch_admin_cli(
+        AdminCliContext::with_project(cg, global_db, session_authorities),
+        action,
+    )
+    .await
 }
 
 pub(crate) async fn handle_projectless_admin_cli(
@@ -119,7 +147,15 @@ async fn dispatch_admin_cli(
     let global_db = context.global_db;
     let value = match action {
         AdminCliAction::CostSummary { range } => cost_summary(global_db, &range).await,
-        AdminCliAction::SessionsIngest => sessions_ingest(context.require_project()?).await?,
+        AdminCliAction::SessionsIngest => {
+            sessions_ingest(
+                context.require_project()?,
+                context.global_db,
+                context.require_project_session_db()?,
+                context.require_user_session_db()?,
+            )
+            .await?
+        }
         AdminCliAction::SessionsGitBackfill {
             since,
             limit_sessions,
@@ -128,6 +164,7 @@ async fn dispatch_admin_cli(
             sessions_git_backfill(
                 context.require_project()?,
                 global_db,
+                context.require_project_session_db()?,
                 since,
                 limit_sessions,
                 dry_run,
@@ -135,7 +172,7 @@ async fn dispatch_admin_cli(
             .await?
         }
         AdminCliAction::SessionsUnfinished { limit } => {
-            sessions_unfinished(context.require_project()?, limit).await?
+            sessions_unfinished(context.require_project_session_db()?, limit).await?
         }
         AdminCliAction::AnalyticsSync => {
             crate::analytics_bridge::analytics_sync_with_db(global_db, context.project_root()).await
@@ -341,20 +378,48 @@ async fn cost_summary(global_db: &GlobalDb, range: &str) -> Value {
     })
 }
 
-async fn open_session_db(cg: &TraceDecay) -> Result<GlobalDb> {
-    GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
+async fn sessions_ingest(
+    cg: &TraceDecay,
+    registry_db: &GlobalDb,
+    project_db: &GlobalDb,
+    user_db: &GlobalDb,
+) -> Result<Value> {
+    let profile_root = user_db
+        .db_path()
+        .parent()
         .ok_or_else(|| TraceDecayError::Config {
+            message: "daemon user session database has no profile root".to_string(),
+        })?;
+    let user_outcome = crate::sessions::ingest_user_global_sources_for_provider_with_authorities(
+        user_db,
+        registry_db,
+        profile_root,
+        None,
+    )
+    .await;
+    let project_outcome = crate::sessions::ingest_project_sources_for_provider(
+        project_db,
+        cg.project_root(),
+        cg.store_layout().identity.project_id.as_deref(),
+        None,
+        true,
+    )
+    .await;
+    if !user_outcome.is_success() || !project_outcome.is_success() {
+        let reason_codes = user_outcome
+            .failures
+            .iter()
+            .chain(&project_outcome.failures)
+            .map(|failure| failure.reason_code)
+            .collect::<Vec<_>>()
+            .join(",");
+        return Err(TraceDecayError::Config {
             message: format!(
-                "daemon could not open project session database for {}",
-                cg.project_root().display()
+                "session ingest remained incomplete ({reason_codes}); retry after resolving the provider or store failure"
             ),
-        })
-}
-
-async fn sessions_ingest(cg: &TraceDecay) -> Result<Value> {
-    let db = open_session_db(cg).await?;
-    let stats = crate::sessions::ingest_global_sources(&db, cg.project_root()).await;
+        });
+    }
+    let stats = user_outcome.stats.merge(project_outcome.stats);
     Ok(json!({
         "sessions_upserted": stats.sessions_upserted,
         "messages_upserted": stats.messages_upserted,
@@ -364,6 +429,7 @@ async fn sessions_ingest(cg: &TraceDecay) -> Result<Value> {
 async fn sessions_git_backfill(
     cg: &TraceDecay,
     global_db: &GlobalDb,
+    session_db: &GlobalDb,
     since: i64,
     limit_sessions: usize,
     dry_run: bool,
@@ -372,7 +438,6 @@ async fn sessions_git_backfill(
         BackfillOptions, DEFAULT_SPAN_MERGE_GAP_SECS, SystemGit, run_backfill,
     };
 
-    let session_db = open_session_db(cg).await?;
     let project_id = GlobalDb::canonical_project_key(cg.project_root());
     let analytics_events = global_db
         .query_analytics_events(&AnalyticsEventQuery {
@@ -384,7 +449,7 @@ async fn sessions_git_backfill(
         .await
         .unwrap_or_default();
     let stats = run_backfill(
-        &session_db,
+        session_db,
         &analytics_events,
         &SystemGit,
         &BackfillOptions {
@@ -411,9 +476,8 @@ async fn sessions_git_backfill(
     }))
 }
 
-async fn sessions_unfinished(cg: &TraceDecay, limit: usize) -> Result<Value> {
-    let db = open_session_db(cg).await?;
-    let items = crate::sessions::workflow_state::list_unfinished(&db, limit)
+async fn sessions_unfinished(db: &GlobalDb, limit: usize) -> Result<Value> {
+    let items = crate::sessions::workflow_state::list_unfinished(db, limit)
         .await
         .map_err(|message| TraceDecayError::Config { message })?;
     Ok(json!({ "items": items }))

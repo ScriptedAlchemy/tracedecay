@@ -22,6 +22,7 @@ pub(crate) enum CredentialPatternProfile {
 pub(crate) struct CredentialPattern {
     kind: CredentialPatternKind,
     regex: Regex,
+    assignment_min_len: Option<usize>,
 }
 
 impl CredentialPattern {
@@ -29,8 +30,23 @@ impl CredentialPattern {
         self.kind
     }
 
-    pub(crate) fn regex(&self) -> &Regex {
-        &self.regex
+    pub(crate) fn is_match(&self, text: &str) -> bool {
+        if let Some(min_len) = self.assignment_min_len {
+            return credential_assignment_ranges(text, &self.regex, min_len)
+                .next()
+                .is_some();
+        }
+        self.regex.is_match(text)
+    }
+
+    pub(crate) fn ranges(&self, text: &str) -> Vec<Range<usize>> {
+        if let Some(min_len) = self.assignment_min_len {
+            return credential_assignment_ranges(text, &self.regex, min_len).collect();
+        }
+        self.regex
+            .find_iter(text)
+            .map(|matched| matched.range())
+            .collect()
     }
 }
 
@@ -39,32 +55,27 @@ pub(crate) fn compile_credential_patterns(
 ) -> Result<Vec<CredentialPattern>, regex::Error> {
     pattern_specs(profile)
         .iter()
-        .map(|&(kind, pattern)| compile_pattern(kind, pattern))
-        .collect()
-}
-
-pub(crate) fn compile_credential_patterns_lossy(
-    profile: CredentialPatternProfile,
-) -> Vec<CredentialPattern> {
-    pattern_specs(profile)
-        .iter()
-        .filter_map(|&(kind, pattern)| compile_pattern(kind, pattern).ok())
+        .map(|&(kind, pattern, assignment_min_len)| {
+            compile_pattern(kind, pattern, assignment_min_len)
+        })
         .collect()
 }
 
 fn compile_pattern(
     kind: CredentialPatternKind,
     pattern: &str,
+    assignment_min_len: Option<usize>,
 ) -> Result<CredentialPattern, regex::Error> {
     Ok(CredentialPattern {
         kind,
         regex: Regex::new(pattern)?,
+        assignment_min_len,
     })
 }
 
 fn pattern_specs(
     profile: CredentialPatternProfile,
-) -> &'static [(CredentialPatternKind, &'static str)] {
+) -> &'static [(CredentialPatternKind, &'static str, Option<usize>)] {
     use CredentialPatternKind::{BearerToken, CredentialAssignment, KnownCredential, PrivateKey};
 
     match profile {
@@ -72,27 +83,93 @@ fn pattern_specs(
             (
                 PrivateKey,
                 r"(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|$)",
+                None,
             ),
-            (BearerToken, r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{12,}"),
-            (KnownCredential, KNOWN_CREDENTIAL_PATTERN),
+            (BearerToken, r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{12,}", None),
+            (KnownCredential, KNOWN_CREDENTIAL_PATTERN, None),
             (
                 CredentialAssignment,
-                r#"(?i)\b(?:api[_ -]?key|secret|token|passwd|password|credential|private[_ -]?key|access[_ -]?key)\b\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{6,}"#,
+                r"(?i)\b(?:api[_ -]?key|secret|token|passwd|password|credential|private[_ -]?key|access[_ -]?key)\b[ \t]*[:=][ \t]*",
+                Some(6),
             ),
         ],
         CredentialPatternProfile::Memory => &[
             (
                 PrivateKey,
                 r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----",
+                None,
             ),
-            (BearerToken, r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}"),
-            (KnownCredential, KNOWN_CREDENTIAL_PATTERN),
+            (BearerToken, r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}", None),
+            (KnownCredential, KNOWN_CREDENTIAL_PATTERN, None),
             (
                 CredentialAssignment,
-                r#"(?i)\b(?:api[_-]?key|secret|token|passwd|password|credential|private[_-]?key|access[_-]?key)\b\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{16,}"#,
+                r"(?i)\b(?:api[_-]?key|secret|token|passwd|password|credential|private[_-]?key|access[_-]?key)\b[ \t]*[:=][ \t]*",
+                Some(16),
             ),
         ],
     }
+}
+
+const MAX_ASSIGNMENT_SCAN_BYTES: usize = 1_048_576;
+
+fn credential_assignment_ranges<'a>(
+    text: &'a str,
+    prefix: &'a Regex,
+    min_len: usize,
+) -> impl Iterator<Item = Range<usize>> + 'a {
+    prefix.find_iter(text).filter_map(move |matched| {
+        let value_start = matched.end();
+        let limit = value_start
+            .saturating_add(MAX_ASSIGNMENT_SCAN_BYTES)
+            .min(text.len());
+        let bytes = text.as_bytes();
+        let quote = bytes
+            .get(value_start)
+            .copied()
+            .filter(|byte| matches!(byte, b'"' | b'\''));
+        let content_start = value_start + usize::from(quote.is_some());
+        let mut cursor = content_start;
+        let mut closed = false;
+
+        while cursor < limit {
+            let byte = bytes[cursor];
+            if matches!(byte, b'\r' | b'\n') {
+                break;
+            }
+            let escaped = quote.is_some_and(|quote| {
+                byte == quote
+                    && bytes[content_start..cursor]
+                        .iter()
+                        .rev()
+                        .take_while(|&&previous| previous == b'\\')
+                        .count()
+                        % 2
+                        == 1
+            });
+            if quote.is_some_and(|quote| byte == quote) && !escaped {
+                closed = true;
+                break;
+            }
+            if quote.is_none()
+                && matches!(
+                    byte,
+                    b' ' | b'\t' | b',' | b';' | b'}' | b']' | b'"' | b'\''
+                )
+            {
+                break;
+            }
+            cursor += 1;
+        }
+
+        while !text.is_char_boundary(cursor) {
+            cursor -= 1;
+        }
+        if cursor.saturating_sub(content_start) < min_len {
+            return None;
+        }
+        let end = cursor + usize::from(closed);
+        Some(matched.start()..end)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,10 +187,23 @@ impl NormalizedSensitiveKey {
             .map(|character| character.to_ascii_lowercase())
             .collect();
 
+        let characters: Vec<_> = key.chars().collect();
         let mut separated = String::with_capacity(key.len());
-        for character in key.to_lowercase().chars() {
+        for (index, &character) in characters.iter().enumerate() {
+            let previous = index.checked_sub(1).and_then(|index| characters.get(index));
+            let next = characters.get(index + 1);
+            let word_boundary = character.is_ascii_uppercase()
+                && previous.is_some_and(|previous| {
+                    previous.is_ascii_lowercase()
+                        || previous.is_ascii_digit()
+                        || (previous.is_ascii_uppercase()
+                            && next.is_some_and(char::is_ascii_lowercase))
+                });
+            if word_boundary && !separated.ends_with('_') {
+                separated.push('_');
+            }
             if character.is_ascii_alphanumeric() {
-                separated.push(character);
+                separated.push(character.to_ascii_lowercase());
             } else if !separated.ends_with('_') {
                 separated.push('_');
             }
@@ -158,6 +248,45 @@ pub(crate) enum JsonVisitMut<'a, M> {
     String(&'a mut String),
 }
 
+pub(crate) fn visit_json_object_keys<P, V>(value: &Value, policy: &P, mut visit: V) -> bool
+where
+    P: SensitiveKeyPolicy,
+    V: FnMut(&str, &[JsonPathSegment]) -> bool,
+{
+    fn walk<P, V>(value: &Value, policy: &P, path: &mut Vec<JsonPathSegment>, visit: &mut V) -> bool
+    where
+        P: SensitiveKeyPolicy,
+        V: FnMut(&str, &[JsonPathSegment]) -> bool,
+    {
+        match value {
+            Value::Object(fields) => {
+                let mut matched = false;
+                for (index, (key, child)) in fields.iter().enumerate() {
+                    path.push(JsonPathSegment::Field(index));
+                    matched |= visit(key, path);
+                    if policy.classify(&NormalizedSensitiveKey::new(key)).is_none() {
+                        matched |= walk(child, policy, path, visit);
+                    }
+                    path.pop();
+                }
+                matched
+            }
+            Value::Array(items) => {
+                let mut matched = false;
+                for (index, child) in items.iter().enumerate() {
+                    path.push(JsonPathSegment::Index(index));
+                    matched |= walk(child, policy, path, visit);
+                    path.pop();
+                }
+                matched
+            }
+            _ => false,
+        }
+    }
+
+    walk(value, policy, &mut Vec::new(), &mut visit)
+}
+
 pub(crate) fn visit_sensitive_json_mut<P, V>(value: &mut Value, policy: &P, mut visit: V) -> bool
 where
     P: SensitiveKeyPolicy,
@@ -183,7 +312,9 @@ where
                         visit(JsonVisitMut::SensitiveValue(child, matched), path)
                     });
                     changed |= redacted;
-                    changed |= walk(child, policy, path, visit);
+                    if !redacted {
+                        changed |= walk(child, policy, path, visit);
+                    }
                     path.pop();
                 }
                 changed
@@ -243,16 +374,31 @@ pub(crate) fn looks_high_entropy_token(token: &str) -> bool {
     for byte in token.bytes() {
         counts[byte as usize] += 1;
     }
-    let len = token.len() as f64;
-    counts
-        .into_iter()
-        .filter(|count| *count != 0)
-        .map(|count| {
-            let probability = count as f64 / len;
-            -probability * probability.log2()
-        })
-        .sum::<f64>()
-        >= 4.2
+    let len = token.len() as u128;
+    let entropy_sum = len * fixed_log2(token.len())
+        - counts
+            .into_iter()
+            .filter(|count| *count != 0)
+            .map(|count| count as u128 * fixed_log2(count))
+            .sum::<u128>();
+    entropy_sum * 10 >= len * 42 * ENTROPY_SCALE
+}
+
+const ENTROPY_SCALE: u128 = 1 << 20;
+
+fn fixed_log2(value: usize) -> u128 {
+    debug_assert!(value > 0);
+    let integer = usize::BITS - 1 - value.leading_zeros();
+    let mut result = u128::from(integer) * ENTROPY_SCALE;
+    let mut normalized = (value as u128) << (63 - integer);
+    for bit in 1..=20 {
+        normalized = (normalized * normalized) >> 63;
+        if normalized >= (2_u128 << 63) {
+            normalized >>= 1;
+            result += ENTROPY_SCALE >> bit;
+        }
+    }
+    result
 }
 
 fn token_byte(byte: u8) -> bool {
@@ -283,6 +429,17 @@ mod tests {
         assert_eq!(key.ascii_compact(), "clientsecret");
         assert_eq!(key.separated(), "client_secret");
         assert_eq!(key.compact(), "clientsecret");
+
+        let camel_case = NormalizedSensitiveKey::new("refreshToken");
+        assert_eq!(camel_case.separated(), "refresh_token");
+        assert_eq!(
+            NormalizedSensitiveKey::new("vendorAPIKey").separated(),
+            "vendor_api_key"
+        );
+        assert_eq!(
+            NormalizedSensitiveKey::new("JWTToken").separated(),
+            "jwt_token"
+        );
     }
 
     #[test]
@@ -314,18 +471,53 @@ mod tests {
         assert_eq!(value["safe"], "kept");
         assert_eq!(
             visited,
-            vec![
-                (
-                    "redacted".to_string(),
-                    vec![
-                        JsonPathSegment::Field(0),
-                        JsonPathSegment::Index(0),
-                        JsonPathSegment::Field(0)
-                    ]
-                ),
-                ("kept".to_string(), vec![JsonPathSegment::Field(1)])
-            ]
+            vec![("kept".to_string(), vec![JsonPathSegment::Field(1)])]
         );
+    }
+
+    #[test]
+    fn replaced_sensitive_values_are_not_visited_recursively() {
+        let policy = KeySet(BTreeSet::from(["credential".to_string()]));
+        let mut value = json!({
+            "credential": {"nested": "secret = p@ssw0rd!"},
+            "safe": "kept"
+        });
+        let mut strings = Vec::new();
+
+        visit_sensitive_json_mut(&mut value, &policy, |value, _| match value {
+            JsonVisitMut::SensitiveValue(child, ()) => {
+                *child = Value::String("redacted".to_string());
+                true
+            }
+            JsonVisitMut::String(text) => {
+                strings.push(text.clone());
+                false
+            }
+        });
+
+        assert_eq!(strings, ["kept"]);
+    }
+
+    #[test]
+    fn assignment_patterns_include_bounded_quoted_punctuation() {
+        let patterns = compile_credential_patterns(CredentialPatternProfile::Observation)
+            .expect("valid observation patterns");
+        let assignment = patterns
+            .iter()
+            .find(|pattern| pattern.kind() == CredentialPatternKind::CredentialAssignment)
+            .expect("credential assignment pattern");
+
+        assert!(assignment.is_match(r#"password = "p@ssw0rd!""#));
+        assert!(assignment.is_match("password = p@ssw0rd!"));
+        assert!(assignment.is_match("password = \"truncated!"));
+
+        let escaped_quote = r#"password = "abcdef\"tailsecret""#;
+        assert_eq!(
+            assignment.ranges(escaped_quote),
+            vec![0..escaped_quote.len()]
+        );
+        let truncated = "password = \"truncated!";
+        assert_eq!(assignment.ranges(truncated), vec![0..truncated.len()]);
     }
 
     #[test]
@@ -339,5 +531,10 @@ mod tests {
         assert!(!looks_high_entropy_token(
             "3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"
         ));
+
+        let below_threshold = "abcdefghi123456789".repeat(2);
+        let above_threshold = "abcdefghij123456789".repeat(2);
+        assert!(!looks_high_entropy_token(&below_threshold));
+        assert!(looks_high_entropy_token(&above_threshold));
     }
 }

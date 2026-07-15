@@ -1,13 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use libsql::{Connection, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use super::{LcmError, LcmGcConfig, payload, schema, util};
+use super::{LcmError, LcmGcConfig, maintenance, payload, schema, util};
+
+mod orphan_scan;
+mod pending_delete;
+use orphan_scan::{payload_file_present, preview_orphan_files, stage_orphan_files};
+pub(crate) use pending_delete::{
+    PayloadDeleteDrain, drain_pending_payload_delete, drain_pending_payload_deletes,
+    stage_payload_delete,
+};
 
 const GC_PAYLOAD_PREFIX: &str = "[gc'd externalized payload:";
 const GC_TOOL_OUTPUT_PREFIX: &str = "[gc'd externalized tool output:";
@@ -33,6 +40,23 @@ impl LcmGcPhaseReport {
         if self.refs.len() < MAX_SAMPLES {
             self.refs.push(payload_ref.to_string());
         }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.count += other.count;
+        self.bytes = self.bytes.saturating_add(other.bytes);
+        for payload_ref in other.refs {
+            if self.refs.len() >= MAX_SAMPLES {
+                break;
+            }
+            if !self.refs.contains(&payload_ref) {
+                self.refs.push(payload_ref);
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.count == 0
     }
 }
 
@@ -121,18 +145,34 @@ impl LcmGcReport {
     }
 
     fn add_error(&mut self, payload_ref: &str, kind: &str, detail: String) {
-        self.errors.push(LcmGcError {
-            payload_ref: payload_ref.to_string(),
-            kind: kind.to_string(),
-            detail,
-        });
-        self.status = if self.apply { "applied" } else { "dry_run" }.to_string();
+        if self.errors.len() < MAX_SAMPLES {
+            self.errors.push(LcmGcError {
+                payload_ref: payload_ref.to_string(),
+                kind: kind.to_string(),
+                detail,
+            });
+        }
+        self.status = if self.apply { "partial" } else { "dry_run" }.to_string();
     }
 
     fn batch_cap(&mut self, count: usize) {
         if count > 0 {
             self.deferred.count += count;
             self.deferred.reason = Some("batch_cap".to_string());
+        }
+    }
+
+    fn reconcile_file_drain(&mut self, drain: PayloadDeleteDrain) {
+        self.totals.files = self
+            .totals
+            .files
+            .saturating_add(drain.outcomes.removed.count);
+        self.totals.bytes = self
+            .totals
+            .bytes
+            .saturating_add(drain.outcomes.removed.bytes);
+        for error in drain.errors {
+            self.add_error(&error.payload_ref, &error.kind, error.detail);
         }
     }
 }
@@ -146,9 +186,9 @@ pub async fn referenced_payload_refs(
     let mut rows = conn
         .query(
             "SELECT storage_kind, payload_ref, content, snippet_text, index_text, metadata_json
-             FROM lcm_raw_messages
-             WHERE (?1 = 'all' OR provider = ?1)
-               AND (?2 IS NULL OR session_id = ?2)",
+         FROM lcm_raw_messages
+         WHERE (?1 = 'all' OR provider = ?1)
+           AND (?2 IS NULL OR session_id = ?2)",
             params![provider, util::opt_text(session_id)],
         )
         .await?;
@@ -262,36 +302,12 @@ fn tombstone_placeholder(placeholder: &str) -> String {
     placeholder.to_string()
 }
 
-pub async fn all_payload_metadata_refs(conn: &Connection) -> Result<BTreeSet<String>, LcmError> {
-    let mut refs = BTreeSet::new();
-    let mut rows = conn
-        .query("SELECT payload_ref FROM lcm_external_payloads", ())
-        .await?;
-    while let Some(row) = rows.next().await? {
-        refs.insert(row.get(0)?);
-    }
-    Ok(refs)
-}
-
 pub async fn payload_metadata_refs_for_scope(
     conn: &Connection,
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeSet<String>, LcmError> {
-    let mut refs = BTreeSet::new();
-    let mut rows = conn
-        .query(
-            "SELECT payload_ref
-             FROM lcm_external_payloads
-             WHERE (?1 = 'all' OR provider = ?1)
-               AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, util::opt_text(session_id)],
-        )
-        .await?;
-    while let Some(row) = rows.next().await? {
-        refs.insert(row.get(0)?);
-    }
-    Ok(refs)
+    maintenance::payload_metadata_refs_for_scope(conn, provider, session_id).await
 }
 
 async fn payload_metadata_bytes(conn: &Connection) -> Result<BTreeMap<String, u64>, LcmError> {
@@ -343,11 +359,11 @@ pub async fn run_payload_gc_with_apply(
         .await;
     }
 
-    prepare_payload_gc_apply(conn, storage_root, cfg).await?;
+    let mut drain = prepare_payload_gc_apply(conn, storage_root, cfg).await?;
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;
-    let report = run_payload_gc_in_transaction(
+    let mut report = run_payload_gc_in_transaction(
         &transaction,
         storage_root,
         provider,
@@ -358,6 +374,8 @@ pub async fn run_payload_gc_with_apply(
     )
     .await?;
     transaction.commit().await?;
+    drain.merge(drain_pending_payload_deletes(conn, storage_root).await?);
+    finalize_gc_report(conn, &mut report, drain).await?;
     Ok(report)
 }
 
@@ -365,15 +383,53 @@ pub(crate) async fn prepare_payload_gc_apply(
     conn: &Connection,
     storage_root: &Path,
     cfg: &LcmGcConfig,
-) -> Result<(), LcmError> {
+) -> Result<PayloadDeleteDrain, LcmError> {
+    // Recover a process that committed metadata deletion but stopped before
+    // unlinking its now-orphaned payload files.
+    let drain = drain_pending_payload_deletes(conn, storage_root).await?;
     if !cfg.backup_before_reap {
-        return Ok(());
+        return Ok(drain);
     }
     let dir = payload::existing_payload_dir_opt(storage_root)?;
-    let all_metadata_refs = all_payload_metadata_refs(conn).await?;
+    let all_metadata_refs = maintenance::all_payload_metadata_refs(conn).await?;
     if dir.is_some() || !all_metadata_refs.is_empty() {
-        checkpoint_wal_for_backup(conn).await?;
+        maintenance::checkpoint_wal_for_backup(conn, maintenance::BackupKind::Gc).await?;
     }
+    Ok(drain)
+}
+
+pub(crate) async fn finalize_gc_report(
+    conn: &Connection,
+    report: &mut LcmGcReport,
+    drain: PayloadDeleteDrain,
+) -> Result<(), LcmError> {
+    let had_delete_failures = drain.has_failures();
+    report.reconcile_file_drain(drain);
+    schema::set_gc_meta(conn, "last_reaped_refs", &report.totals.files.to_string()).await?;
+    schema::set_gc_meta(conn, "last_reaped_bytes", &report.totals.bytes.to_string()).await?;
+    if had_delete_failures {
+        schema::set_gc_meta(conn, "last_gc_status", "partial").await?;
+    } else if report.errors.is_empty() {
+        schema::set_gc_meta(conn, "last_gc_status", "ok").await?;
+        schema::clear_gc_meta(conn, "last_error").await?;
+    } else {
+        schema::set_gc_meta(conn, "last_gc_status", "partial").await?;
+        schema::set_gc_meta(conn, "last_error", "partial").await?;
+    }
+    report.last_error = schema::get_gc_meta(conn, "last_error").await?;
+    Ok(())
+}
+
+pub(crate) async fn finalize_gc_report_value(
+    conn: &Connection,
+    report_value: &mut Value,
+    drain: PayloadDeleteDrain,
+) -> Result<(), LcmError> {
+    let mut report: LcmGcReport = serde_json::from_value(report_value.clone())
+        .map_err(|err| LcmError::Db(format!("invalid GC report: {err}")))?;
+    finalize_gc_report(conn, &mut report, drain).await?;
+    *report_value = serde_json::to_value(report)
+        .map_err(|err| LcmError::Db(format!("serialize GC report: {err}")))?;
     Ok(())
 }
 
@@ -399,12 +455,13 @@ pub(crate) async fn run_payload_gc_in_transaction(
     // while the DB-side phases below still run (missing payloads, stale
     // marks, dangling placeholders).
     let dir = payload::existing_payload_dir_opt(storage_root)?;
-    let all_metadata_refs = all_payload_metadata_refs(conn).await?;
+    let all_metadata_refs = maintenance::all_payload_metadata_refs(conn).await?;
 
     if apply && cfg.backup_before_reap && (dir.is_some() || !all_metadata_refs.is_empty()) {
-        report.backup = Some(backup_database(
+        report.backup = Some(maintenance::backup_database(
             &gc_database_path(storage_root),
             storage_root,
+            maintenance::BackupKind::Gc,
         )?);
     }
 
@@ -417,15 +474,27 @@ pub(crate) async fn run_payload_gc_in_transaction(
     // provider/session. Include them in every scoped GC preview/apply just as
     // the payload-health surface includes them for scoped drill-downs.
     if let Some(dir) = dir.as_deref() {
-        reap_orphan_files(
-            dir,
-            &all_metadata_refs,
-            now,
-            &cfg,
-            apply,
-            &mut remaining,
-            &mut report,
-        )?;
+        if apply {
+            stage_orphan_files(
+                conn,
+                dir,
+                &all_metadata_refs,
+                now,
+                &cfg,
+                &mut remaining,
+                &mut report,
+            )
+            .await?;
+        } else {
+            preview_orphan_files(
+                dir,
+                &all_metadata_refs,
+                now,
+                &cfg,
+                &mut remaining,
+                &mut report,
+            )?;
+        }
     }
     reap_unreferenced_metadata(ReapUnreferencedMetadataRequest {
         conn,
@@ -483,66 +552,6 @@ pub(crate) async fn run_payload_gc_in_transaction(
         }
     }
     Ok(report)
-}
-
-pub fn reap_orphan_files(
-    dir: &Path,
-    metadata_refs: &BTreeSet<String>,
-    now: i64,
-    cfg: &LcmGcConfig,
-    apply: bool,
-    remaining: &mut usize,
-    report: &mut LcmGcReport,
-) -> Result<(), LcmError> {
-    let mut candidates = Vec::new();
-    for entry in fs::read_dir(dir).map_err(|err| LcmError::Io(err.to_string()))? {
-        let entry = entry.map_err(|err| LcmError::Io(err.to_string()))?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !is_payload_filename(&name) || payload::validate_payload_ref(&name).is_err() {
-            continue;
-        }
-        if metadata_refs.contains(&name) {
-            continue;
-        }
-        let path = dir.join(&name);
-        payload::ensure_contained(dir, &path)?;
-        let metadata = fs::symlink_metadata(&path).map_err(|err| LcmError::Io(err.to_string()))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            continue;
-        }
-        let age = now.saturating_sub(file_mtime_seconds(&metadata));
-        if age < cfg.grace_seconds as i64 {
-            report.deferred.count += 1;
-            report
-                .deferred
-                .reason
-                .get_or_insert_with(|| "within_grace".to_string());
-            continue;
-        }
-        candidates.push((name, metadata.len()));
-    }
-    for (payload_ref, bytes) in candidates {
-        if *remaining == 0 {
-            report.batch_cap(1);
-            continue;
-        }
-        if apply {
-            match payload::safe_remove_payload_file(dir, &payload_ref) {
-                Ok(true) => {
-                    report.totals.files += 1;
-                    report.totals.bytes = report.totals.bytes.saturating_add(bytes);
-                }
-                Ok(false) => {}
-                Err(err) => {
-                    report.add_error(&payload_ref, "orphan_remove_failed", err.to_string());
-                    continue;
-                }
-            }
-        }
-        report.orphans.add(&payload_ref, bytes);
-        *remaining -= 1;
-    }
-    Ok(())
 }
 
 struct ReapUnreferencedMetadataRequest<'a> {
@@ -624,12 +633,8 @@ async fn reap_unreferenced_metadata(
             )
             .await
             {
-                Ok(outcome) => {
-                    if outcome.file_removed {
-                        report.totals.files += 1;
-                        report.totals.bytes =
-                            report.totals.bytes.saturating_add(outcome.bytes_freed);
-                    }
+                Ok(prepared) => {
+                    let outcome = prepared.outcome;
                     if outcome.metadata_row_existed {
                         report.totals.rows_deleted += 1;
                     }
@@ -689,7 +694,14 @@ async fn reap_missing_metadata(request: ReapMissingMetadataRequest<'_>) -> Resul
     } = request;
     let dir = payload::existing_payload_dir_opt(storage_root)?;
     for payload_ref in metadata_refs.intersection(referenced) {
-        if payload_file_present(dir.as_deref(), payload_ref)? {
+        let file_present = match payload_file_present(dir.as_deref(), payload_ref) {
+            Ok(present) => present,
+            Err(err) => {
+                report.add_error(payload_ref, "payload_stat_failed", err.to_string());
+                continue;
+            }
+        };
+        if file_present {
             if apply {
                 conn.execute(
                     "DELETE FROM lcm_gc_marks WHERE payload_ref = ?1 AND state = 'missing'",
@@ -730,7 +742,8 @@ async fn reap_missing_metadata(request: ReapMissingMetadataRequest<'_>) -> Resul
         )
         .await
         {
-            Ok(outcome) => {
+            Ok(prepared) => {
+                let outcome = prepared.outcome;
                 if outcome.metadata_row_existed {
                     report.totals.rows_deleted += 1;
                 }
@@ -746,17 +759,6 @@ async fn reap_missing_metadata(request: ReapMissingMetadataRequest<'_>) -> Resul
     Ok(())
 }
 
-/// True when the payload file exists as a regular (non-symlink) file; a
-/// missing payload directory means no payload file can exist.
-fn payload_file_present(dir: Option<&Path>, payload_ref: &str) -> Result<bool, LcmError> {
-    let Some(dir) = dir else {
-        return Ok(false);
-    };
-    let path = dir.join(payload_ref);
-    payload::ensure_contained(dir, &path)?;
-    Ok(fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink()))
-}
-
 pub async fn rewrite_dangling_placeholders(
     conn: &Connection,
     dir: Option<&Path>,
@@ -768,8 +770,13 @@ pub async fn rewrite_dangling_placeholders(
 ) -> Result<(), LcmError> {
     let referenced = referenced_payload_refs(conn, provider, session_id).await?;
     for payload_ref in referenced.difference(metadata_refs) {
-        if payload_file_present(dir, payload_ref)? {
-            continue;
+        match payload_file_present(dir, payload_ref) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(err) => {
+                report.add_error(payload_ref, "dangling_payload_stat_failed", err.to_string());
+                continue;
+            }
         }
         let changed = if apply {
             tombstone_dangling_ref_in_transaction(conn, payload_ref, provider, session_id).await?
@@ -791,14 +798,14 @@ async fn tombstone_dangling_ref_in_transaction(
     session_id: Option<&str>,
 ) -> Result<usize, LcmError> {
     let mut rows = conn
-        .query(
-            "SELECT store_id, content, snippet_text, index_text, metadata_json
-                 FROM lcm_raw_messages
-                 WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
-                   AND (content LIKE ?3 OR snippet_text LIKE ?3 OR index_text LIKE ?3 OR metadata_json LIKE ?3)",
-            params![provider, util::opt_text(session_id), format!("%{payload_ref}%")],
-        )
-        .await?;
+    .query(
+        "SELECT store_id, content, snippet_text, index_text, metadata_json
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
+               AND (content LIKE ?3 OR snippet_text LIKE ?3 OR index_text LIKE ?3 OR metadata_json LIKE ?3)",
+        params![provider, util::opt_text(session_id), format!("%{payload_ref}%")],
+    )
+    .await?;
     let mut updates = Vec::new();
     while let Some(row) = rows.next().await? {
         let store_id: i64 = row.get(0)?;
@@ -844,8 +851,8 @@ async fn tombstone_dangling_ref_in_transaction(
     for (store_id, content, snippet_text, index_text, metadata_json, changed) in updates {
         conn.execute(
             "UPDATE lcm_raw_messages
-                 SET content = ?2, snippet_text = ?3, index_text = ?4, metadata_json = ?5
-                 WHERE store_id = ?1",
+             SET content = ?2, snippet_text = ?3, index_text = ?4, metadata_json = ?5
+             WHERE store_id = ?1",
             params![
                 store_id,
                 util::opt_text(content.as_deref()),
@@ -881,38 +888,13 @@ async fn upsert_gc_mark(
     now: i64,
 ) -> Result<(), LcmError> {
     conn.execute(
-        "INSERT INTO lcm_gc_marks(payload_ref, state, first_seen_at, updated_at)
-         VALUES (?1, ?2, ?3, ?3)
-         ON CONFLICT(payload_ref) DO UPDATE SET state = excluded.state, first_seen_at = excluded.first_seen_at, updated_at = excluded.updated_at",
-        params![payload_ref, state, now],
-    )
-    .await?;
+    "INSERT INTO lcm_gc_marks(payload_ref, state, first_seen_at, updated_at)
+     VALUES (?1, ?2, ?3, ?3)
+     ON CONFLICT(payload_ref) DO UPDATE SET state = excluded.state, first_seen_at = excluded.first_seen_at, updated_at = excluded.updated_at",
+    params![payload_ref, state, now],
+)
+.await?;
     Ok(())
-}
-
-fn is_payload_filename(name: &str) -> bool {
-    name.len() == "payload_".len() + 64 + ".payload".len()
-        && name.starts_with("payload_")
-        && name.ends_with(".payload")
-        && name["payload_".len().."payload_".len() + 64]
-            .chars()
-            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
-}
-
-#[cfg(unix)]
-fn file_mtime_seconds(metadata: &fs::Metadata) -> i64 {
-    use std::os::unix::fs::MetadataExt;
-    metadata.mtime()
-}
-
-#[cfg(not(unix))]
-fn file_mtime_seconds(metadata: &fs::Metadata) -> i64 {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or_default()
 }
 
 fn gc_database_path(storage_root: &Path) -> PathBuf {
@@ -927,1056 +909,5 @@ fn gc_database_path(storage_root: &Path) -> PathBuf {
     sessions
 }
 
-fn backup_database(db_path: &Path, storage_root: &Path) -> Result<Value, LcmError> {
-    let backup_dir = storage_root.join("lcm-clean-backups");
-    fs::create_dir_all(&backup_dir).map_err(|err| LcmError::Io(err.to_string()))?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default();
-    let backup_path = backup_dir.join(format!("sessions-gc-{stamp}-{}.db", std::process::id()));
-    let byte_count = copy_sqlite_file_set(db_path, &backup_path)?;
-    Ok(json!({ "ok": true, "path": backup_path, "byte_count": byte_count }))
-}
-
-fn copy_sqlite_file_set(db_path: &Path, backup_path: &Path) -> Result<u64, LcmError> {
-    let mut byte_count =
-        fs::copy(db_path, backup_path).map_err(|err| LcmError::Io(err.to_string()))?;
-    let source = sqlite_sidecar_path(db_path, "-wal");
-    if source.is_file() {
-        let target = sqlite_sidecar_path(backup_path, "-wal");
-        byte_count += fs::copy(&source, target).map_err(|err| LcmError::Io(err.to_string()))?;
-    }
-    Ok(byte_count)
-}
-
-fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut sidecar = path.as_os_str().to_os_string();
-    sidecar.push(suffix);
-    PathBuf::from(sidecar)
-}
-
-async fn checkpoint_wal_for_backup(conn: &Connection) -> Result<(), LcmError> {
-    let mut rows = conn.query("PRAGMA wal_checkpoint(TRUNCATE);", ()).await?;
-    let row = rows
-        .next()
-        .await?
-        .ok_or_else(|| LcmError::Db("WAL checkpoint returned no status row".to_string()))?;
-    let busy: i64 = row.get(0)?;
-    let log_frames: i64 = row.get(1)?;
-    let checkpointed_frames: i64 = row.get(2)?;
-    if busy != 0 || checkpointed_frames < log_frames {
-        return Err(LcmError::Db(format!(
-            "WAL checkpoint incomplete before GC backup: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
-        )));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use libsql::Connection;
-
-    use crate::sessions::lcm::schema;
-
-    use super::*;
-
-    const PROVIDER: &str = "cursor";
-    const PRIMARY_REF: &str =
-        "payload_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.payload";
-    const SECONDARY_REF: &str =
-        "payload_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.payload";
-
-    struct TestStore {
-        _temp: tempfile::TempDir,
-        storage_root: PathBuf,
-        conn: Connection,
-    }
-
-    async fn test_store() -> Result<TestStore, String> {
-        let temp = tempfile::tempdir().map_err(|err| format!("create tempdir: {err}"))?;
-        let storage_root = temp.path().to_path_buf();
-        // In-memory DB: every test here disables backup_before_reap, so
-        // nothing reads the sessions.db file itself — only the payload files
-        // under storage_root. Skipping the on-disk DB (and its FTS5-heavy
-        // schema I/O) keeps each test's setup cheap, which matters on the
-        // Windows CI runners where per-test sqlite file churn dominated.
-        let conn = in_memory_conn().await?;
-        conn.busy_timeout(Duration::from_secs(5))
-            .map_err(|err| format!("set test busy timeout: {err}"))?;
-        ensure_gc_test_schema(&conn).await?;
-        Ok(TestStore {
-            _temp: temp,
-            storage_root,
-            conn,
-        })
-    }
-
-    async fn ensure_gc_test_schema(conn: &Connection) -> Result<(), String> {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS sessions (
-                provider TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                project_key TEXT NOT NULL,
-                project_path TEXT NOT NULL,
-                title TEXT,
-                started_at INTEGER,
-                PRIMARY KEY(provider, session_id)
-            );
-            CREATE TABLE IF NOT EXISTS session_messages (
-                provider TEXT NOT NULL,
-                message_id TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                timestamp INTEGER,
-                ordinal INTEGER NOT NULL,
-                text TEXT NOT NULL,
-                metadata_json TEXT,
-                PRIMARY KEY(provider, message_id),
-                FOREIGN KEY(provider, session_id)
-                    REFERENCES sessions(provider, session_id) ON DELETE CASCADE
-            );",
-        )
-        .await
-        .map_err(|err| format!("create gc test sessions table: {err}"))?;
-        schema::ensure_lcm_schema(conn)
-            .await
-            .map_err(|err| format!("ensure lcm schema: {err}"))?;
-        Ok(())
-    }
-
-    async fn in_memory_conn() -> Result<Connection, String> {
-        let db = libsql::Builder::new_local(":memory:")
-            .build()
-            .await
-            .map_err(|err| format!("build in-memory test database: {err}"))?;
-        let conn = db
-            .connect()
-            .map_err(|err| format!("connect to in-memory test database: {err}"))?;
-        Ok(conn)
-    }
-
-    async fn insert_session(
-        conn: &Connection,
-        storage_root: &Path,
-        session_id: &str,
-    ) -> Result<(), String> {
-        let project_key = storage_root.to_string_lossy().to_string();
-        conn.execute(
-            "INSERT INTO sessions (provider, session_id, project_key, project_path, title, started_at)
-             VALUES (?1, ?2, ?3, ?3, ?4, 1)
-             ON CONFLICT(provider, session_id) DO NOTHING",
-            params![PROVIDER, session_id, project_key, session_id],
-        )
-        .await
-        .map_err(|err| format!("insert session {session_id}: {err}"))?;
-        Ok(())
-    }
-
-    struct RawMessage<'a> {
-        session_id: &'a str,
-        message_id: &'a str,
-        storage_kind: &'a str,
-        payload_ref: Option<&'a str>,
-        content: Option<&'a str>,
-        snippet_text: &'a str,
-        index_text: &'a str,
-        metadata_json: Option<&'a str>,
-    }
-
-    async fn insert_raw_message(conn: &Connection, message: RawMessage<'_>) -> Result<(), String> {
-        conn.execute(
-            "INSERT INTO lcm_raw_messages (
-                provider, message_id, session_id, role, ordinal, timestamp,
-                content, content_hash, storage_kind, payload_ref, snippet_text,
-                index_text, legacy_source, legacy_truncated, metadata_json
-             ) VALUES (?1, ?2, ?3, 'assistant', 1, 2, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, ?10)",
-            params![
-                PROVIDER,
-                message.message_id,
-                message.session_id,
-                util::opt_text(message.content),
-                format!("{}-hash", message.message_id),
-                message.storage_kind,
-                message.payload_ref,
-                message.snippet_text,
-                message.index_text,
-                message.metadata_json
-            ],
-        )
-        .await
-        .map_err(|err| format!("insert raw message {}: {err}", message.message_id))?;
-        Ok(())
-    }
-
-    async fn seed_payload(
-        store: &TestStore,
-        message_id: &str,
-        content: &str,
-    ) -> Result<String, String> {
-        insert_session(&store.conn, &store.storage_root, "session-a").await?;
-        let payload_ref = payload::write_external_payload(
-            &store.storage_root,
-            PROVIDER,
-            "session-a",
-            message_id,
-            "message",
-            content,
-            None,
-        )
-        .map_err(|err| err.to_string())?;
-        payload::upsert_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .map_err(|err| err.to_string())?;
-        let placeholder = format!(
-            "[externalized payload: bytes={} ref={}; content]",
-            content.len(),
-            payload_ref.payload_ref
-        );
-        insert_raw_message(
-            &store.conn,
-            RawMessage {
-                session_id: "session-a",
-                message_id,
-                storage_kind: "external",
-                payload_ref: Some(&payload_ref.payload_ref),
-                content: None,
-                snippet_text: &placeholder,
-                index_text: &placeholder,
-                metadata_json: Some(&placeholder),
-            },
-        )
-        .await?;
-        Ok(payload_ref.payload_ref)
-    }
-
-    fn payload_path(store: &TestStore, payload_ref: &str) -> PathBuf {
-        payload::payload_dir(&store.storage_root).join(payload_ref)
-    }
-
-    async fn drop_raw_reference(store: &TestStore, payload_ref: &str) -> Result<(), String> {
-        store
-            .conn
-            .execute(
-                "DELETE FROM lcm_raw_messages WHERE payload_ref = ?1",
-                params![payload_ref],
-            )
-            .await
-            .map_err(|err| format!("drop raw reference: {err}"))?;
-        Ok(())
-    }
-
-    async fn insert_gc_mark(
-        store: &TestStore,
-        payload_ref: &str,
-        state: &str,
-        first_seen_at: i64,
-    ) -> Result<(), String> {
-        store
-            .conn
-            .execute(
-                "INSERT INTO lcm_gc_marks(payload_ref, state, first_seen_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?3)",
-                params![payload_ref, state, first_seen_at],
-            )
-            .await
-            .map_err(|err| format!("insert gc mark: {err}"))?;
-        Ok(())
-    }
-
-    #[test]
-    fn tombstone_helper_rewrites_all_live_prefixes() {
-        let cases = [
-            (
-                format!("[externalized payload: bytes=12 ref={PRIMARY_REF}; note=body]"),
-                format!("[gc'd externalized payload: bytes=12 ref={PRIMARY_REF}; note=body]"),
-            ),
-            (
-                format!("[externalized lcm ingest payload: bytes=12 ref={PRIMARY_REF}; note=body]"),
-                format!("[gc'd externalized payload: bytes=12 ref={PRIMARY_REF}; note=body]"),
-            ),
-            (
-                format!("[externalized tool output: bytes=12 ref={PRIMARY_REF}; note=body]"),
-                format!("[gc'd externalized tool output: bytes=12 ref={PRIMARY_REF}; note=body]"),
-            ),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(tombstone_placeholder_in_text(&input, PRIMARY_REF), expected);
-        }
-    }
-
-    #[test]
-    fn tombstone_helper_rewrites_repeated_refs_and_is_idempotent() {
-        let input = format!(
-            "one [externalized payload: bytes=12 ref={PRIMARY_REF}; a] two [externalized tool output: bytes=8 ref={PRIMARY_REF}; b]"
-        );
-        let expected = format!(
-            "one [gc'd externalized payload: bytes=12 ref={PRIMARY_REF}; a] two [gc'd externalized tool output: bytes=8 ref={PRIMARY_REF}; b]"
-        );
-        assert_eq!(tombstone_placeholder_in_text(&input, PRIMARY_REF), expected);
-        assert_eq!(
-            tombstone_placeholder_in_text(&expected, PRIMARY_REF),
-            expected
-        );
-    }
-
-    #[tokio::test]
-    async fn referenced_payload_refs_ignores_tombstoned_placeholders() -> Result<(), String> {
-        let store = test_store().await?;
-        insert_session(&store.conn, &store.storage_root, "session-a").await?;
-        let live =
-            format!("prefix [externalized payload: bytes=12 ref={PRIMARY_REF}; marker] suffix");
-        let tombstoned = format!(
-            "prefix [gc'd externalized payload: bytes=12 ref={SECONDARY_REF}; marker] suffix"
-        );
-        insert_raw_message(
-            &store.conn,
-            RawMessage {
-                session_id: "session-a",
-                message_id: "message-1",
-                storage_kind: "inline",
-                payload_ref: None,
-                content: Some(&live),
-                snippet_text: &live,
-                index_text: &live,
-                metadata_json: None,
-            },
-        )
-        .await?;
-        insert_raw_message(
-            &store.conn,
-            RawMessage {
-                session_id: "session-a",
-                message_id: "message-2",
-                storage_kind: "inline",
-                payload_ref: None,
-                content: Some(&tombstoned),
-                snippet_text: &tombstoned,
-                index_text: &tombstoned,
-                metadata_json: None,
-            },
-        )
-        .await?;
-
-        let refs = referenced_payload_refs(&store.conn, PROVIDER, Some("session-a"))
-            .await
-            .map_err(|err| err.to_string())?;
-        assert_eq!(refs, BTreeSet::from([PRIMARY_REF.to_string()]));
-        assert!(text_has_tombstoned_payload_ref(&tombstoned, SECONDARY_REF));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn delete_external_payload_aborts_when_still_referenced() -> Result<(), String> {
-        let store = test_store().await?;
-        let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
-        let Err(err) = payload::delete_external_payload(
-            &store.conn,
-            &store.storage_root,
-            &payload_ref,
-            &payload::DeleteOpts::default(),
-        )
-        .await
-        else {
-            return Err("live payload must not be deleted".to_string());
-        };
-        assert_eq!(err, LcmError::StillReferenced);
-        assert!(
-            payload::load_payload_metadata(&store.conn, &payload_ref)
-                .await
-                .is_ok()
-        );
-        assert!(
-            payload::payload_dir(&store.storage_root)
-                .join(&payload_ref)
-                .is_file()
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn delete_external_payload_applies_db_then_file_and_is_idempotent() -> Result<(), String>
-    {
-        let store = test_store().await?;
-        let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
-        drop_raw_reference(&store, &payload_ref).await?;
-
-        let outcome = payload::delete_external_payload(
-            &store.conn,
-            &store.storage_root,
-            &payload_ref,
-            &payload::DeleteOpts::default(),
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        assert!(outcome.metadata_row_existed);
-        assert!(outcome.file_existed);
-        assert!(outcome.file_removed);
-        assert!(outcome.bytes_freed > 0);
-        assert!(
-            payload::load_payload_metadata(&store.conn, &payload_ref)
-                .await
-                .is_err()
-        );
-        assert!(!payload_path(&store, &payload_ref).exists());
-
-        let second = payload::delete_external_payload(
-            &store.conn,
-            &store.storage_root,
-            &payload_ref,
-            &payload::DeleteOpts::default(),
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        assert_eq!(second, payload::DeleteOutcome::default());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn delete_external_payload_db_only_leaves_orphan_for_crash_convergence()
-    -> Result<(), String> {
-        let store = test_store().await?;
-        let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
-        drop_raw_reference(&store, &payload_ref).await?;
-
-        let outcome = payload::delete_external_payload(
-            &store.conn,
-            &store.storage_root,
-            &payload_ref,
-            &payload::DeleteOpts {
-                rewrite_placeholders: true,
-                remove_file: false,
-                verify_hash: false,
-            },
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        assert!(outcome.metadata_row_existed);
-        assert!(outcome.file_existed);
-        assert!(!outcome.file_removed);
-        assert_eq!(outcome.bytes_freed, 0);
-        assert!(payload_path(&store, &payload_ref).is_file());
-
-        let metadata_refs = all_payload_metadata_refs(&store.conn)
-            .await
-            .map_err(|err| err.to_string())?;
-        let file_mtime = file_mtime_seconds(
-            &fs::symlink_metadata(payload_path(&store, &payload_ref))
-                .map_err(|err| err.to_string())?,
-        );
-        let cfg = LcmGcConfig {
-            grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-            backup_before_reap: false,
-            ..Default::default()
-        }
-        .normalized();
-        let mut report = LcmGcReport::new(PROVIDER, None, &cfg, true, file_mtime);
-        let mut remaining = 10;
-        reap_orphan_files(
-            &payload::payload_dir(&store.storage_root),
-            &metadata_refs,
-            file_mtime + LcmGcConfig::MIN_GRACE_SECONDS as i64,
-            &cfg,
-            true,
-            &mut remaining,
-            &mut report,
-        )
-        .map_err(|err| err.to_string())?;
-        assert_eq!(report.orphans.count, 1);
-        assert!(!payload_path(&store, &payload_ref).exists());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn delete_external_payload_hash_gate_preserves_corrupted_payload() -> Result<(), String> {
-        let store = test_store().await?;
-        let payload_ref = seed_payload(&store, "message-1", "trusted body").await?;
-        drop_raw_reference(&store, &payload_ref).await?;
-        fs::write(payload_path(&store, &payload_ref), b"tampered body")
-            .map_err(|err| err.to_string())?;
-
-        let Err(err) = payload::delete_external_payload(
-            &store.conn,
-            &store.storage_root,
-            &payload_ref,
-            &payload::DeleteOpts::default(),
-        )
-        .await
-        else {
-            return Err("corrupted payload must not be reaped".to_string());
-        };
-        assert_eq!(err, LcmError::PayloadIntegrityMismatch);
-        assert!(
-            payload::load_payload_metadata(&store.conn, &payload_ref)
-                .await
-                .is_ok()
-        );
-        assert!(payload_path(&store, &payload_ref).is_file());
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn delete_external_payload_rejects_symlink_payload_at_hash_gate() -> Result<(), String> {
-        let store = test_store().await?;
-        let payload_ref = seed_payload(&store, "message-1", "trusted body").await?;
-        drop_raw_reference(&store, &payload_ref).await?;
-        let path = payload_path(&store, &payload_ref);
-        fs::remove_file(&path).map_err(|err| err.to_string())?;
-        let outside = store.storage_root.join("outside-payload-body.txt");
-        fs::write(&outside, b"trusted body").map_err(|err| err.to_string())?;
-        std::os::unix::fs::symlink(&outside, &path).map_err(|err| err.to_string())?;
-
-        let Err(err) = payload::delete_external_payload(
-            &store.conn,
-            &store.storage_root,
-            &payload_ref,
-            &payload::DeleteOpts::default(),
-        )
-        .await
-        else {
-            return Err("symlink payload must be rejected before DB mutation".to_string());
-        };
-        assert_eq!(err, LcmError::InvalidPayloadRef);
-        assert!(
-            payload::load_payload_metadata(&store.conn, &payload_ref)
-                .await
-                .is_ok()
-        );
-        assert!(
-            fs::symlink_metadata(&path)
-                .map_err(|err| err.to_string())?
-                .file_type()
-                .is_symlink()
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn delete_external_payload_rejects_invalid_refs() -> Result<(), String> {
-        let conn = in_memory_conn().await?;
-        let temp = tempfile::tempdir().map_err(|err| format!("create tempdir: {err}"))?;
-        for invalid in [
-            "",
-            ".",
-            "..",
-            "../evil",
-            "/etc/passwd",
-            "payload_../x.payload",
-        ] {
-            let Err(err) = payload::delete_external_payload(
-                &conn,
-                temp.path(),
-                invalid,
-                &payload::DeleteOpts::default(),
-            )
-            .await
-            else {
-                return Err("invalid ref should fail before path access".to_string());
-            };
-            assert_eq!(err, LcmError::InvalidPayloadRef, "invalid ref {invalid}");
-        }
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn safe_remove_payload_file_rejects_symlink_and_directory_payloads() -> Result<(), String> {
-        let temp = tempfile::tempdir().map_err(|err| err.to_string())?;
-        let dir = temp.path();
-        let outside = temp.path().join("outside.txt");
-        fs::write(&outside, b"outside").map_err(|err| err.to_string())?;
-        std::os::unix::fs::symlink(&outside, dir.join(PRIMARY_REF))
-            .map_err(|err| err.to_string())?;
-        let Err(err) = payload::safe_remove_payload_file(dir, PRIMARY_REF) else {
-            return Err("symlink payload should not be removed".to_string());
-        };
-        assert_eq!(err, LcmError::InvalidPayloadRef);
-        assert!(outside.is_file());
-
-        fs::create_dir(dir.join(SECONDARY_REF)).map_err(|err| err.to_string())?;
-        let Err(err) = payload::safe_remove_payload_file(dir, SECONDARY_REF) else {
-            return Err("directory payload should not be removed".to_string());
-        };
-        assert_eq!(err, LcmError::InvalidPayloadRef);
-        assert!(dir.join(SECONDARY_REF).is_dir());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn gc_on_store_without_payload_dir_reports_empty_run() -> Result<(), String> {
-        let store = test_store().await?;
-        assert!(!payload::payload_dir(&store.storage_root).exists());
-        let cfg = LcmGcConfig {
-            backup_before_reap: false,
-            ..Default::default()
-        }
-        .normalized();
-        for apply in [false, true] {
-            let report = run_payload_gc_with_apply(
-                &store.conn,
-                &store.storage_root,
-                PROVIDER,
-                None,
-                &cfg,
-                apply,
-                1_000,
-            )
-            .await
-            .map_err(|err| err.to_string())?;
-            assert_eq!(report.orphans.count, 0);
-            assert_eq!(report.unreferenced.count, 0);
-            assert_eq!(report.missing.count, 0);
-            assert_eq!(report.totals.files, 0);
-            assert!(report.errors.is_empty());
-        }
-        assert!(!payload::payload_dir(&store.storage_root).exists());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn gc_reports_missing_payloads_when_payload_dir_was_deleted() -> Result<(), String> {
-        let store = test_store().await?;
-        let payload_ref = seed_payload(&store, "msg-1", "externalized content").await?;
-        std::fs::remove_dir_all(payload::payload_dir(&store.storage_root))
-            .map_err(|err| format!("remove payload dir: {err}"))?;
-        let cfg = LcmGcConfig {
-            backup_before_reap: false,
-            ..Default::default()
-        }
-        .normalized();
-        let report = run_payload_gc_with_apply(
-            &store.conn,
-            &store.storage_root,
-            PROVIDER,
-            None,
-            &cfg,
-            false,
-            1_000,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        assert_eq!(report.missing.count, 1);
-        assert_eq!(report.missing.refs, vec![payload_ref]);
-        assert!(report.errors.is_empty());
-        assert!(!payload::payload_dir(&store.storage_root).exists());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn unreferenced_payload_two_scan_reaps_after_grace() -> Result<(), String> {
-        let store = test_store().await?;
-        let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
-        drop_raw_reference(&store, &payload_ref).await?;
-        let cfg = LcmGcConfig {
-            grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-            backup_before_reap: false,
-            ..Default::default()
-        }
-        .normalized();
-        let first = run_payload_gc_with_apply(
-            &store.conn,
-            &store.storage_root,
-            PROVIDER,
-            None,
-            &cfg,
-            true,
-            1_000,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        assert_eq!(first.unreferenced.count, 0);
-        assert!(
-            payload::load_payload_metadata(&store.conn, &payload_ref)
-                .await
-                .is_ok()
-        );
-
-        let second = run_payload_gc_with_apply(
-            &store.conn,
-            &store.storage_root,
-            PROVIDER,
-            None,
-            &cfg,
-            true,
-            1_000 + LcmGcConfig::MIN_GRACE_SECONDS as i64,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        assert_eq!(second.unreferenced.count, 1);
-        assert!(
-            payload::load_payload_metadata(&store.conn, &payload_ref)
-                .await
-                .is_err()
-        );
-        assert!(
-            !payload::payload_dir(&store.storage_root)
-                .join(&payload_ref)
-                .exists()
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn session_scoped_unreferenced_payload_reaps_after_grace() -> Result<(), String> {
-        let store = test_store().await?;
-        let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
-        drop_raw_reference(&store, &payload_ref).await?;
-        let cfg = LcmGcConfig {
-            grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-            backup_before_reap: false,
-            ..Default::default()
-        }
-        .normalized();
-        let first = run_payload_gc_with_apply(
-            &store.conn,
-            &store.storage_root,
-            PROVIDER,
-            Some("session-a"),
-            &cfg,
-            true,
-            1_000,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        assert_eq!(first.unreferenced.count, 0);
-        assert!(
-            payload::load_payload_metadata(&store.conn, &payload_ref)
-                .await
-                .is_ok()
-        );
-
-        let second = run_payload_gc_with_apply(
-            &store.conn,
-            &store.storage_root,
-            PROVIDER,
-            Some("session-a"),
-            &cfg,
-            true,
-            1_000 + LcmGcConfig::MIN_GRACE_SECONDS as i64,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        assert_eq!(second.unreferenced.count, 1);
-        assert!(
-            payload::load_payload_metadata(&store.conn, &payload_ref)
-                .await
-                .is_err()
-        );
-        assert!(
-            !payload::payload_dir(&store.storage_root)
-                .join(&payload_ref)
-                .exists()
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn run_payload_gc_dry_run_does_not_mutate() -> Result<(), String> {
-        let store = test_store().await?;
-        let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
-        drop_raw_reference(&store, &payload_ref).await?;
-        insert_gc_mark(&store, &payload_ref, "unreferenced", 1).await?;
-        let cfg = LcmGcConfig {
-            grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-            backup_before_reap: false,
-            ..Default::default()
-        }
-        .normalized();
-        let report = run_payload_gc(
-            &store.conn,
-            &store.storage_root,
-            PROVIDER,
-            None,
-            &cfg,
-            1_000,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        assert_eq!(report.status, "dry_run");
-        assert_eq!(report.unreferenced.count, 1);
-        assert!(
-            payload::load_payload_metadata(&store.conn, &payload_ref)
-                .await
-                .is_ok()
-        );
-        assert!(
-            payload::payload_dir(&store.storage_root)
-                .join(&payload_ref)
-                .is_file()
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn orphan_phase_honors_mtime_grace_then_reaps() -> Result<(), String> {
-        let store = test_store().await?;
-        let payload_ref = seed_payload(&store, "message-1", "orphan body").await?;
-        drop_raw_reference(&store, &payload_ref).await?;
-        store
-            .conn
-            .execute(
-                "DELETE FROM lcm_external_payloads WHERE payload_ref = ?1",
-                params![payload_ref.as_str()],
-            )
-            .await
-            .map_err(|err| err.to_string())?;
-        let metadata_refs = all_payload_metadata_refs(&store.conn)
-            .await
-            .map_err(|err| err.to_string())?;
-        let file_mtime = file_mtime_seconds(
-            &fs::symlink_metadata(payload_path(&store, &payload_ref))
-                .map_err(|err| err.to_string())?,
-        );
-        let cfg = LcmGcConfig {
-            grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-            backup_before_reap: false,
-            ..Default::default()
-        }
-        .normalized();
-        let mut report = LcmGcReport::new(PROVIDER, None, &cfg, true, file_mtime);
-        let mut remaining = 10;
-        reap_orphan_files(
-            &payload::payload_dir(&store.storage_root),
-            &metadata_refs,
-            file_mtime + LcmGcConfig::MIN_GRACE_SECONDS as i64 - 1,
-            &cfg,
-            true,
-            &mut remaining,
-            &mut report,
-        )
-        .map_err(|err| err.to_string())?;
-        assert_eq!(report.orphans.count, 0);
-        assert!(payload_path(&store, &payload_ref).is_file());
-
-        reap_orphan_files(
-            &payload::payload_dir(&store.storage_root),
-            &metadata_refs,
-            file_mtime + LcmGcConfig::MIN_GRACE_SECONDS as i64,
-            &cfg,
-            true,
-            &mut remaining,
-            &mut report,
-        )
-        .map_err(|err| err.to_string())?;
-        assert_eq!(report.orphans.count, 1);
-        assert!(!payload_path(&store, &payload_ref).exists());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn missing_metadata_defaults_to_report_only_and_opt_in_tombstones_after_window()
-    -> Result<(), String> {
-        let store = test_store().await?;
-        let payload_ref = seed_payload(&store, "message-1", "missing body").await?;
-        fs::remove_file(payload_path(&store, &payload_ref)).map_err(|err| err.to_string())?;
-        let cfg = LcmGcConfig {
-            reap_missing_enabled: false,
-            reap_missing_after: 10,
-            backup_before_reap: false,
-            ..Default::default()
-        }
-        .normalized();
-        let first = run_payload_gc_with_apply(
-            &store.conn,
-            &store.storage_root,
-            PROVIDER,
-            None,
-            &cfg,
-            true,
-            100,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        assert_eq!(first.missing.count, 1);
-        let later = run_payload_gc_with_apply(
-            &store.conn,
-            &store.storage_root,
-            PROVIDER,
-            None,
-            &cfg,
-            true,
-            1_000,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        assert_eq!(later.missing.count, 1);
-        assert!(
-            payload::load_payload_metadata(&store.conn, &payload_ref)
-                .await
-                .is_ok()
-        );
-
-        let cfg = LcmGcConfig {
-            reap_missing_enabled: true,
-            reap_missing_after: 10,
-            backup_before_reap: false,
-            ..Default::default()
-        }
-        .normalized();
-        let marked = run_payload_gc_with_apply(
-            &store.conn,
-            &store.storage_root,
-            PROVIDER,
-            None,
-            &cfg,
-            true,
-            2_000,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        assert_eq!(marked.missing.count, 1);
-        assert!(
-            payload::load_payload_metadata(&store.conn, &payload_ref)
-                .await
-                .is_ok()
-        );
-
-        let reaped = run_payload_gc_with_apply(
-            &store.conn,
-            &store.storage_root,
-            PROVIDER,
-            None,
-            &cfg,
-            true,
-            2_010,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        assert_eq!(reaped.missing.count, 1);
-        assert!(
-            payload::load_payload_metadata(&store.conn, &payload_ref)
-                .await
-                .is_err()
-        );
-        let refs = referenced_payload_refs(&store.conn, PROVIDER, None)
-            .await
-            .map_err(|err| err.to_string())?;
-        assert!(!refs.contains(&payload_ref));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn missing_metadata_clears_mark_when_file_reappears() -> Result<(), String> {
-        let store = test_store().await?;
-        let payload_ref = seed_payload(&store, "message-1", "restored body").await?;
-        fs::remove_file(payload_path(&store, &payload_ref)).map_err(|err| err.to_string())?;
-        let cfg = LcmGcConfig {
-            reap_missing_enabled: true,
-            reap_missing_after: 10,
-            backup_before_reap: false,
-            ..Default::default()
-        }
-        .normalized();
-        run_payload_gc_with_apply(
-            &store.conn,
-            &store.storage_root,
-            PROVIDER,
-            None,
-            &cfg,
-            true,
-            100,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-        assert_eq!(
-            gc_mark(&store.conn, &payload_ref)
-                .await
-                .map_err(|err| err.to_string())?
-                .map(|mark| mark.0),
-            Some("missing".to_string())
-        );
-
-        fs::write(payload_path(&store, &payload_ref), b"restored body")
-            .map_err(|err| err.to_string())?;
-        let report = run_payload_gc_with_apply(
-            &store.conn,
-            &store.storage_root,
-            PROVIDER,
-            None,
-            &cfg,
-            true,
-            1_000,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-
-        assert_eq!(report.missing.count, 0);
-        assert!(
-            gc_mark(&store.conn, &payload_ref)
-                .await
-                .map_err(|err| err.to_string())?
-                .is_none()
-        );
-        assert!(
-            payload::load_payload_metadata(&store.conn, &payload_ref)
-                .await
-                .is_ok()
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn run_payload_gc_isolates_corrupted_ref_errors_while_reaping_orphans()
-    -> Result<(), String> {
-        let store = test_store().await?;
-        let corrupted_ref = seed_payload(&store, "message-1", "trusted body").await?;
-        drop_raw_reference(&store, &corrupted_ref).await?;
-        fs::write(payload_path(&store, &corrupted_ref), b"tampered body")
-            .map_err(|err| err.to_string())?;
-        insert_gc_mark(&store, &corrupted_ref, "unreferenced", 1).await?;
-
-        let orphan_a =
-            "payload_1111111111111111111111111111111111111111111111111111111111111111.payload";
-        let orphan_b =
-            "payload_2222222222222222222222222222222222222222222222222222222222222222.payload";
-        fs::write(payload_path(&store, orphan_a), b"orphan-a").map_err(|err| err.to_string())?;
-        fs::write(payload_path(&store, orphan_b), b"orphan-b").map_err(|err| err.to_string())?;
-        let orphan_a_mtime = file_mtime_seconds(
-            &fs::symlink_metadata(payload_path(&store, orphan_a)).map_err(|err| err.to_string())?,
-        );
-        let orphan_b_mtime = file_mtime_seconds(
-            &fs::symlink_metadata(payload_path(&store, orphan_b)).map_err(|err| err.to_string())?,
-        );
-        let newest_orphan_mtime = orphan_a_mtime.max(orphan_b_mtime);
-        let cfg = LcmGcConfig {
-            grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-            backup_before_reap: false,
-            ..Default::default()
-        }
-        .normalized();
-        let report = run_payload_gc_with_apply(
-            &store.conn,
-            &store.storage_root,
-            PROVIDER,
-            None,
-            &cfg,
-            true,
-            newest_orphan_mtime + LcmGcConfig::MIN_GRACE_SECONDS as i64,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-
-        assert_eq!(report.orphans.count, 2);
-        assert_eq!(report.errors.len(), 1);
-        assert_eq!(report.errors[0].payload_ref, corrupted_ref);
-        assert_eq!(report.errors[0].kind, "integrity_mismatch");
-        assert_eq!(
-            schema::get_gc_meta(&store.conn, "last_gc_status")
-                .await
-                .map_err(|err| err.to_string())?
-                .as_deref(),
-            Some("partial")
-        );
-        assert!(
-            payload::load_payload_metadata(&store.conn, &corrupted_ref)
-                .await
-                .is_ok()
-        );
-        assert!(!payload_path(&store, orphan_a).exists());
-        assert!(!payload_path(&store, orphan_b).exists());
-        Ok(())
-    }
-}
+mod tests;

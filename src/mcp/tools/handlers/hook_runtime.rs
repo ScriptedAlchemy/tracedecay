@@ -1,7 +1,6 @@
 use serde_json::{Value, json};
 use std::path::Path;
 
-use crate::application::observation::ObservationApplicationError;
 use crate::automation::config_error;
 use crate::automation::run_ledger::AutomationRunStatus;
 use crate::errors::{Result, TraceDecayError};
@@ -115,7 +114,9 @@ fn required_user_db(authorities: SessionAuthorities<'_>) -> Result<&GlobalDb> {
 async fn codex_compact(cg: &TraceDecay, args: &Value, db: &GlobalDb) -> Result<Value> {
     let event_json = required_str(args, "event_json")?;
     if let Some(source) = crate::sessions::codex::CodexSource::new() {
-        let _ = crate::sessions::source::ingest_source(db, &source, cg.project_root(), None).await;
+        crate::sessions::source::try_ingest_source(db, &source, cg.project_root(), None)
+            .await
+            .map_err(|error| map_transcript_ingest_error(&error))?;
     }
     let session_id = serde_json::from_str::<Value>(event_json)
         .ok()
@@ -167,7 +168,9 @@ async fn cursor_compact(args: &Value, db: &GlobalDb) -> Result<Value> {
         .filter(|value| !value.is_empty())
         .ok_or_else(|| config_error("Cursor preCompact event omitted session id"))?;
     let ingest =
-        crate::sessions::cursor::ingest_cursor_transcript_event_capped(event_json, db, None).await;
+        crate::sessions::cursor::try_ingest_cursor_transcript_event_capped(event_json, db, None)
+            .await
+            .map_err(|error| map_transcript_ingest_error(&error))?;
     let messages_to_compact = event_usize(&parsed, &["messages_to_compact", "compact_count"]);
     if messages_to_compact == Some(0) {
         return Ok(cursor_compact_skipped("no messages to compact"));
@@ -335,7 +338,7 @@ async fn ingest_transcript(
                 crate::application::observation::ObservationCancellation::default(),
             )
             .await
-            .map_err(map_claude_observation_ingest_error)?;
+            .map_err(|error| map_claude_observation_ingest_error(&error))?;
             let messages_upserted = stats.transcript.messages_upserted;
             claude_observation_stats = Some(stats);
             messages_upserted
@@ -348,13 +351,14 @@ async fn ingest_transcript(
             let roots = crate::sessions::registered_project_roots_from(global_db)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
-            crate::sessions::ingest_user_codex_sessions_with_db(
+            crate::sessions::try_ingest_user_codex_sessions_with_db(
                 required_user_db(session_authorities)?,
                 profile_root,
                 Some(session_id),
                 roots,
             )
             .await
+            .map_err(|error| map_transcript_ingest_error(&error))?
             .messages_upserted
         }
         ("cursor", true) => {
@@ -365,25 +369,27 @@ async fn ingest_transcript(
             let roots = crate::sessions::registered_project_roots_from(global_db)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
-            crate::sessions::cursor::ingest_cursor_user_transcript_event_capped_with_registered_roots(
+            crate::sessions::cursor::try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
                 event_json,
                 db,
                 max_new_bytes,
                 &roots,
             )
             .await
+            .map_err(|error| map_transcript_ingest_error(&error))?
             .messages_upserted
         }
         ("cursor", false) => {
             cg.ok_or_else(|| config_error("project transcript ingest requires a project"))?;
             let event_json = required_str(args, "event_json")?;
             let db = required_project_db(session_authorities)?;
-            crate::sessions::cursor::ingest_cursor_transcript_event_capped(
+            crate::sessions::cursor::try_ingest_cursor_transcript_event_capped(
                 event_json,
                 db,
                 max_new_bytes,
             )
             .await
+            .map_err(|error| map_transcript_ingest_error(&error))?
             .messages_upserted
         }
         ("kiro", true) => {
@@ -396,21 +402,23 @@ async fn ingest_transcript(
             let roots = crate::sessions::registered_project_roots_from(global_db)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
-            crate::sessions::source::ingest_source(
+            crate::sessions::source::try_ingest_source(
                 db,
                 &source.for_user_scope(roots),
                 profile_root,
                 max_new_bytes,
             )
             .await
+            .map_err(|error| map_transcript_ingest_error(&error))?
             .messages_upserted
         }
         ("kiro", false) => {
             let cg =
                 cg.ok_or_else(|| config_error("project transcript ingest requires a project"))?;
             let db = required_project_db(session_authorities)?;
-            crate::sessions::kiro::ingest_kiro_for_project(db, cg.project_root(), max_new_bytes)
+            crate::sessions::kiro::try_ingest_kiro_for_project(db, cg.project_root(), max_new_bytes)
                 .await
+                .map_err(|error| map_transcript_ingest_error(&error))?
                 .messages_upserted
         }
         _ => {
@@ -437,27 +445,35 @@ async fn ingest_transcript(
         output["projections_skipped"] = json!(stats.projections_skipped);
         output["projection_duplicates"] = json!(stats.projection_duplicates);
         output["deferred_sources"] = json!(stats.deferred_sources);
+        output["source_bytes_scanned"] = json!(stats.source_bytes_scanned);
     }
     Ok(output)
 }
 
-fn map_claude_observation_ingest_error(error: ClaudeObservationIngestError) -> TraceDecayError {
-    match error {
-        error @ ClaudeObservationIngestError::Projection(_) => TraceDecayError::Database {
-            message: error.to_string(),
-            operation: "project Claude observations".to_string(),
-        },
-        error @ (ClaudeObservationIngestError::Store(_)
-        | ClaudeObservationIngestError::TranscriptCursorUnavailable
-        | ClaudeObservationIngestError::Application(
-            ObservationApplicationError::Store(_)
-            | ObservationApplicationError::PersistedObservationUnavailable,
-        )) => TraceDecayError::Database {
-            message: error.to_string(),
-            operation: "ingest Claude observations".to_string(),
-        },
-        error => config_error(error.to_string()),
-    }
+fn map_transcript_ingest_error(
+    error: &crate::sessions::source::TranscriptIngestError,
+) -> TraceDecayError {
+    let failure = crate::sessions::classify_transcript_ingest_failure("requested", "hook", error);
+    TraceDecayError::hook_runtime(
+        failure.reason_code,
+        failure.retryable,
+        format!("transcript ingest failed: {}", failure.reason_code),
+    )
+}
+
+fn map_claude_observation_ingest_error(error: &ClaudeObservationIngestError) -> TraceDecayError {
+    let failure = crate::sessions::classify_claude_observation_failure(error);
+    TraceDecayError::hook_runtime(failure.reason_code, failure.retryable, error.to_string())
+}
+
+pub(crate) fn structured_hook_error_data(error: &TraceDecayError) -> Option<Value> {
+    let (reason_code, retryable, detail) = error.hook_runtime_context()?;
+    Some(json!({
+        "tool": "tracedecay_hook_runtime",
+        "reason_code": reason_code,
+        "retryable": retryable,
+        "detail": detail,
+    }))
 }
 
 async fn user_review(args: &Value, profile_root: &Path) -> Result<Value> {
@@ -627,10 +643,15 @@ async fn hermes_receipt(args: &Value, profile_root: &Path, session_db: &GlobalDb
 mod tests {
     use std::io;
 
+    use tracedecay_domain::{
+        CanonicalObservationIdV1, ObservationCollisionOutcomeV1, PayloadDigestV1,
+    };
     use tracedecay_store::{ObservationStoreError, ProjectionStoreError};
 
     use super::*;
-    use crate::application::observation::CaptureClaudeObservationRequestError;
+    use crate::application::observation::{
+        CaptureClaudeObservationRequestError, ObservationApplicationError,
+    };
 
     #[test]
     fn required_str_rejects_missing_and_empty_values() {
@@ -680,91 +701,150 @@ mod tests {
     }
 
     #[test]
-    fn claude_observation_request_errors_are_bounded_config_errors() {
+    fn claude_observation_request_errors_are_bounded_hook_errors() {
         let error = ClaudeObservationIngestError::Request(
             CaptureClaudeObservationRequestError::SourceRangeMismatch,
         );
-        let mapped = map_claude_observation_ingest_error(error);
+        let mapped = map_claude_observation_ingest_error(&error);
         let rendered = mapped.to_string();
 
-        assert!(matches!(mapped, TraceDecayError::Config { .. }));
         assert!(rendered.contains("Claude observation request is invalid"));
         assert!(!rendered.contains("source range"));
+        let data = structured_hook_error_data(&mapped).unwrap();
+        assert_eq!(data["reason_code"], "observation_request_invalid");
+        assert_eq!(data["retryable"], false);
     }
 
     #[test]
-    fn claude_observation_store_errors_keep_database_category_without_source_detail() {
+    fn claude_observation_store_errors_keep_bounded_context_without_source_detail() {
         let error = ClaudeObservationIngestError::Store(ObservationStoreError::Storage {
             operation: "private store operation",
             source: Box::new(io::Error::other("private store source detail")),
         });
-        let mapped = map_claude_observation_ingest_error(error);
+        let mapped = map_claude_observation_ingest_error(&error);
         let rendered = mapped.to_string();
 
-        assert!(matches!(
-            mapped,
-            TraceDecayError::Database { ref operation, .. }
-                if operation == "ingest Claude observations"
-        ));
         assert!(rendered.contains("Claude observation store operation failed"));
         assert!(!rendered.contains("private store operation"));
         assert!(!rendered.contains("private store source detail"));
+        let data = structured_hook_error_data(&mapped).unwrap();
+        assert_eq!(data["reason_code"], "observation_storage_failed");
+        assert_eq!(data["retryable"], true);
     }
 
     #[test]
-    fn claude_observation_application_store_errors_keep_database_category_without_source_detail() {
+    fn claude_observation_application_store_errors_keep_bounded_context() {
         let error = ClaudeObservationIngestError::Application(ObservationApplicationError::Store(
             ObservationStoreError::Storage {
                 operation: "private application store operation",
                 source: Box::new(io::Error::other("private application store source detail")),
             },
         ));
-        let mapped = map_claude_observation_ingest_error(error);
+        let mapped = map_claude_observation_ingest_error(&error);
         let rendered = mapped.to_string();
 
-        assert!(matches!(
-            mapped,
-            TraceDecayError::Database { ref operation, .. }
-                if operation == "ingest Claude observations"
-        ));
         assert!(rendered.contains("Claude observation application failed"));
         assert!(!rendered.contains("private application store operation"));
         assert!(!rendered.contains("private application store source detail"));
     }
 
     #[test]
-    fn unavailable_persisted_observation_is_a_bounded_database_error() {
+    fn unavailable_persisted_observation_is_a_bounded_hook_error() {
         let error = ClaudeObservationIngestError::Application(
             ObservationApplicationError::PersistedObservationUnavailable,
         );
-        let mapped = map_claude_observation_ingest_error(error);
+        let mapped = map_claude_observation_ingest_error(&error);
         let rendered = mapped.to_string();
 
-        assert!(matches!(
-            mapped,
-            TraceDecayError::Database { ref operation, .. }
-                if operation == "ingest Claude observations"
-        ));
         assert!(rendered.contains("Claude observation application failed"));
         assert!(!rendered.contains("persisted Claude observation"));
     }
 
     #[test]
-    fn claude_observation_projection_errors_keep_database_category_without_source_detail() {
+    fn claude_observation_projection_errors_keep_bounded_context_without_source_detail() {
         let error = ClaudeObservationIngestError::Projection(ProjectionStoreError::Storage {
             operation: "private projection operation",
             source: Box::new(io::Error::other("private projection source detail")),
         });
-        let mapped = map_claude_observation_ingest_error(error);
+        let mapped = map_claude_observation_ingest_error(&error);
         let rendered = mapped.to_string();
 
-        assert!(matches!(
-            mapped,
-            TraceDecayError::Database { ref operation, .. }
-                if operation == "project Claude observations"
-        ));
         assert!(rendered.contains("Claude observation projection failed"));
         assert!(!rendered.contains("private projection operation"));
         assert!(!rendered.contains("private projection source detail"));
+    }
+
+    #[test]
+    fn claude_observation_failures_expose_stable_retry_contracts() {
+        let cases = [
+            (
+                ClaudeObservationIngestError::Store(ObservationStoreError::CursorConflict {
+                    expected: Box::new(None),
+                    actual: Box::new(None),
+                }),
+                "observation_cursor_conflict",
+                true,
+            ),
+            (
+                ClaudeObservationIngestError::Store(ObservationStoreError::ObservationCollision {
+                    observation_id: Box::new(
+                        CanonicalObservationIdV1::new(format!("sha256:{}", "1".repeat(64)))
+                            .unwrap(),
+                    ),
+                    existing_digest: Box::new(
+                        PayloadDigestV1::new(format!("sha256:{}", "2".repeat(64))).unwrap(),
+                    ),
+                    candidate_digest: Box::new(
+                        PayloadDigestV1::new(format!("sha256:{}", "3".repeat(64))).unwrap(),
+                    ),
+                    outcome: ObservationCollisionOutcomeV1::IdentityCollision,
+                }),
+                "observation_identity_collision",
+                false,
+            ),
+            (
+                ClaudeObservationIngestError::Store(
+                    ObservationStoreError::SanitizationReceiptCollision,
+                ),
+                "sanitization_receipt_collision",
+                false,
+            ),
+            (
+                ClaudeObservationIngestError::Application(ObservationApplicationError::Cancelled),
+                "observation_cancelled",
+                true,
+            ),
+            (
+                ClaudeObservationIngestError::Projection(ProjectionStoreError::Gap {
+                    expected: 4,
+                    actual: 6,
+                }),
+                "observation_projection_checkpoint_gap",
+                false,
+            ),
+        ];
+
+        for (error, reason_code, retryable) in cases {
+            let mapped = map_claude_observation_ingest_error(&error);
+            let data = structured_hook_error_data(&mapped).unwrap();
+            assert_eq!(data["reason_code"], reason_code);
+            assert_eq!(data["retryable"], retryable);
+        }
+    }
+
+    #[test]
+    fn transcript_hook_errors_keep_bounded_retry_data_without_cursor_detail() {
+        let error = crate::sessions::source::TranscriptIngestError::CursorKeyMismatch {
+            expected: "private expected cursor".to_string(),
+            actual: "private actual cursor".to_string(),
+        };
+        let mapped = map_transcript_ingest_error(&error);
+        let data = structured_hook_error_data(&mapped).unwrap();
+
+        assert_eq!(data["reason_code"], "transcript_cursor_key_mismatch");
+        assert_eq!(data["retryable"], false);
+        let rendered = data.to_string();
+        assert!(!rendered.contains("private expected cursor"));
+        assert!(!rendered.contains("private actual cursor"));
     }
 }

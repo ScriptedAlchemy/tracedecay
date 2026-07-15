@@ -85,6 +85,7 @@ pub(super) fn record_timestamp(record: &Value) -> Option<i64> {
 pub(super) fn pr_link_row(
     record: &Value,
     session_id: &str,
+    file_generation: u64,
     path: &Path,
     offset: i64,
     accumulator: &mut SessionAccumulator,
@@ -139,7 +140,7 @@ pub(super) fn pr_link_row(
         metadata.insert(key.clone(), value.clone());
     }
 
-    let message_id = marker_message_id(record, session_id, KIND_PR_LINK, offset);
+    let message_id = marker_message_id(record, session_id, file_generation, KIND_PR_LINK, offset);
     Some(SessionMessageRecord {
         provider: PROVIDER.to_string(),
         message_id,
@@ -164,6 +165,7 @@ pub(super) fn pr_link_row(
 pub(super) fn compact_boundary_row(
     record: &Value,
     session_id: &str,
+    file_generation: u64,
     path: &Path,
     offset: i64,
 ) -> Option<SessionMessageRecord> {
@@ -214,7 +216,13 @@ pub(super) fn compact_boundary_row(
         );
     }
 
-    let message_id = marker_message_id(record, session_id, KIND_COMPACT_BOUNDARY, offset);
+    let message_id = marker_message_id(
+        record,
+        session_id,
+        file_generation,
+        KIND_COMPACT_BOUNDARY,
+        offset,
+    );
     Some(SessionMessageRecord {
         provider: PROVIDER.to_string(),
         message_id,
@@ -238,6 +246,7 @@ pub(super) fn compact_boundary_row(
 pub(super) fn model_fallback_row(
     record: &Value,
     session_id: &str,
+    file_generation: u64,
     path: &Path,
     offset: i64,
 ) -> Option<SessionMessageRecord> {
@@ -300,7 +309,13 @@ pub(super) fn model_fallback_row(
         );
     }
 
-    let message_id = marker_message_id(record, session_id, KIND_MODEL_FALLBACK, offset);
+    let message_id = marker_message_id(
+        record,
+        session_id,
+        file_generation,
+        KIND_MODEL_FALLBACK,
+        offset,
+    );
     Some(SessionMessageRecord {
         provider: PROVIDER.to_string(),
         message_id,
@@ -318,18 +333,35 @@ pub(super) fn model_fallback_row(
     })
 }
 
-/// Stable, unique message id for a marker row: prefer the record `uuid`, else
-/// synthesize one keyed by kind+offset so it stays stable across re-ingest and
-/// never collides with a conversational row's `{session}:{offset}` id.
-fn marker_message_id(record: &Value, session_id: &str, kind: &str, offset: i64) -> String {
+/// Stable marker identity: prefer a usable record `uuid`, otherwise use the
+/// source generation and offset shared by every sanitized Claude row.
+fn marker_message_id(
+    record: &Value,
+    session_id: &str,
+    file_generation: u64,
+    kind: &str,
+    offset: i64,
+) -> String {
     record
         .get("uuid")
         .and_then(Value::as_str)
-        .filter(|uuid| !uuid.is_empty())
+        .filter(|uuid| !uuid.is_empty() && !is_redaction_marker(uuid))
         .map_or_else(
-            || format!("{session_id}:{kind}:{offset}"),
+            || source_position_message_id(session_id, file_generation, offset),
             |uuid| format!("{kind}:{uuid}"),
         )
+}
+
+pub(super) fn source_position_message_id(
+    session_id: &str,
+    file_generation: u64,
+    offset: i64,
+) -> String {
+    format!("{session_id}:{file_generation}:{offset}")
+}
+
+pub(super) fn is_redaction_marker(value: &str) -> bool {
+    value.starts_with("[TraceDecay redacted:")
 }
 
 /// Render a JSON scalar (number/string/bool) as plain text for a marker preview.
@@ -340,7 +372,7 @@ fn render_scalar(value: &Value) -> String {
 }
 
 pub(super) fn session_metadata(
-    session_cwd: Option<&Path>,
+    sanitized_session_cwd: Option<&Path>,
     subagent: Option<&ClaudeSubagentInfo>,
     accumulator: &SessionAccumulator,
 ) -> Value {
@@ -352,7 +384,7 @@ pub(super) fn session_metadata(
     append_location_metadata(
         &mut metadata,
         CLAUDE_SESSION_LOCATION_KEYS,
-        TranscriptLocation::new(session_cwd, "transcript_session"),
+        TranscriptLocation::new(sanitized_session_cwd, "transcript_session"),
     );
 
     // Subagent spawn provenance (from the sibling agent-<id>.meta.json and the
@@ -402,7 +434,7 @@ pub(super) fn message_metadata(
     record: &Value,
     message: &Value,
     content: &Value,
-    session_cwd: Option<&Path>,
+    sanitized_session_cwd: Option<&Path>,
     accumulator: &mut SessionAccumulator,
 ) -> Value {
     let mut metadata = Map::new();
@@ -415,7 +447,7 @@ pub(super) fn message_metadata(
     let (location_cwd, location_provenance) = if record_cwd.is_some() {
         (record_cwd.as_deref(), "transcript_record")
     } else {
-        (session_cwd, "transcript_session")
+        (sanitized_session_cwd, "transcript_session")
     };
     append_location_metadata(
         &mut metadata,
@@ -435,7 +467,8 @@ pub(super) fn message_metadata(
     // output_tokens, cache_creation_input_tokens, cache_read_input_tokens}`.
     append_usage_metadata(&mut metadata, &[message]);
     // Per-turn adoption ground truth: which MCP server/tool/skill produced this
-    // assistant turn. Top-level on the assistant record, copied verbatim.
+    // assistant turn. The caller supplies the sanitizer-issued record, so these
+    // top-level fields have already crossed the mandatory privacy boundary.
     if kind == "assistant" {
         append_attribution_metadata(&mut metadata, record);
     }

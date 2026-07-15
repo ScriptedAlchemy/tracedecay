@@ -87,28 +87,6 @@ async fn load_only_goal_row(project: &std::path::Path) -> (String, Option<String
     )
 }
 
-async fn load_row_by_role(
-    project: &std::path::Path,
-    provider: &str,
-    role: &str,
-) -> (Option<i64>, String, Option<String>) {
-    let conn = raw_conn(project).await;
-    let mut rows = conn
-        .query(
-            "SELECT timestamp, text, metadata_json FROM session_messages
-             WHERE provider = ?1 AND role = ?2",
-            libsql::params![provider, role],
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().expect("one row for role");
-    (
-        row.get::<Option<i64>>(0).unwrap(),
-        row.get::<String>(1).unwrap(),
-        row.get::<Option<String>>(2).unwrap(),
-    )
-}
-
 /// Reads a provider's per-provider structured-backfill marker version, or the
 /// retired global marker when `provider` is `None`.
 async fn structured_marker_version(
@@ -124,25 +102,6 @@ async fn structured_marker_version(
         .query(
             "SELECT version FROM session_schema_migrations WHERE name = ?1",
             libsql::params![name],
-        )
-        .await
-        .unwrap();
-    rows.next().await.unwrap().and_then(|row| row.get(0).ok())
-}
-
-/// Reads a provider's version-namespaced structured-backfill cursor value, or
-/// the empty string when no such row exists.
-async fn structured_cursor_value(
-    project: &std::path::Path,
-    provider: &str,
-    version: i64,
-) -> Option<String> {
-    let key = format!("structured_backfill_cursor:{provider}:v{version}");
-    let conn = raw_conn(project).await;
-    let mut rows = conn
-        .query(
-            "SELECT value FROM session_backfill_meta WHERE key = ?1",
-            libsql::params![key],
         )
         .await
         .unwrap();
@@ -196,53 +155,6 @@ fn write_codex_rollout_with_goal(
     path
 }
 
-fn write_claude_transcript_with_pr_link(
-    home: &std::path::Path,
-    project: &std::path::Path,
-    session: &str,
-) -> std::path::PathBuf {
-    let dir = home.join(".claude/projects/-backfill-slug");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{session}.jsonl"));
-    let cwd = project.to_string_lossy();
-    let contents = format!(
-        "{}\n{}\n{}\n",
-        serde_json::json!({
-            "type": "user",
-            "cwd": cwd,
-            "sessionId": session,
-            "uuid": "u1",
-            "timestamp": "2026-01-01T00:00:00.000Z",
-            "message": {"role": "user", "content": "Open the PR"}
-        }),
-        serde_json::json!({
-            "type": "assistant",
-            "cwd": cwd,
-            "sessionId": session,
-            "uuid": "u2",
-            "timestamp": "2026-01-01T00:00:05.000Z",
-            "message": {
-                "id": "msg_claude_1",
-                "role": "assistant",
-                "model": "claude-opus-4-8",
-                "content": [{"type": "text", "text": "Opened it."}]
-            }
-        }),
-        serde_json::json!({
-            "type": "pr-link",
-            "cwd": cwd,
-            "sessionId": session,
-            "uuid": "pr-1",
-            "timestamp": "2026-01-01T00:00:06.000Z",
-            "prNumber": 321,
-            "prUrl": "https://github.com/ScriptedAlchemy/tracedecay/pull/321",
-            "prRepository": "ScriptedAlchemy/tracedecay"
-        }),
-    );
-    std::fs::write(&path, contents).unwrap();
-    path
-}
-
 fn write_claude_transcript_with_thinking(
     home: &std::path::Path,
     project: &std::path::Path,
@@ -284,7 +196,7 @@ fn write_claude_transcript_with_thinking(
 }
 
 #[tokio::test]
-async fn structured_backfill_inserts_claude_reasoning_rows_once() {
+async fn structured_backfill_never_replays_claude_transcripts() {
     tracedecay::global_db::set_background_structured_backfill_enabled(false);
     let tmp = TempDir::new().unwrap();
     let (home, project) = init_project(&tmp);
@@ -293,8 +205,8 @@ async fn structured_backfill_inserts_claude_reasoning_rows_once() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
     ingest_source(&db, &source, &project, None).await;
-    // Live ingest already emits the reasoning row; drive one sweep so the
-    // backfill meta table exists (see the note in the goal test).
+    // Live ingest emits the reasoning row. The structured backfill only sets
+    // up its Codex state and must not claim a Claude marker.
     db.run_structured_backfill().await;
     assert_eq!(count_kind(&project, "claude", "reasoning").await, 1);
     // The user + assistant conversational rows (both kind "message") coexist
@@ -302,8 +214,9 @@ async fn structured_backfill_inserts_claude_reasoning_rows_once() {
     assert_eq!(count_kind(&project, "claude", "message").await, 2);
     drop(db);
 
-    // Simulate a legacy store written before reasoning rows existed: drop them
-    // and reset the marker so the version-bumped sweep re-enters from the start.
+    // Remove the row and reset legacy backfill state. A second Claude parser
+    // would recreate it; the observation pipeline must remain the sole
+    // production Claude cursor authority, so the backfill leaves it absent.
     simulate_old_parser_store(&project, "claude", "reasoning").await;
     assert_eq!(count_kind(&project, "claude", "reasoning").await, 0);
     // Dropping reasoning rows leaves the conversational message rows untouched.
@@ -311,19 +224,12 @@ async fn structured_backfill_inserts_claude_reasoning_rows_once() {
 
     let db = open_project_session_db(&project).await.unwrap();
     db.run_structured_backfill().await;
-    assert_eq!(count_kind(&project, "claude", "reasoning").await, 1);
-    // The reasoning backfill is additive: it did not duplicate the message rows.
+    assert_eq!(count_kind(&project, "claude", "reasoning").await, 0);
     assert_eq!(count_kind(&project, "claude", "message").await, 2);
-    drop(db);
-
-    // Idempotent: a second sweep inserts nothing more.
-    let db = open_project_session_db(&project).await.unwrap();
-    db.run_structured_backfill().await;
-    assert_eq!(count_kind(&project, "claude", "reasoning").await, 1);
     drop(db);
     assert_eq!(
         structured_marker_version(&project, Some("claude")).await,
-        Some(3)
+        None
     );
 }
 
@@ -398,42 +304,6 @@ async fn structured_backfill_preserves_existing_rows() {
     assert_eq!(before.started_at, after.started_at);
     assert_eq!(before.ended_at, after.ended_at);
     assert_eq!(before.title, after.title);
-}
-
-#[tokio::test]
-async fn structured_backfill_inserts_claude_marker_rows_once() {
-    tracedecay::global_db::set_background_structured_backfill_enabled(false);
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = init_project(&tmp);
-    write_claude_transcript_with_pr_link(&home, &project, "claude-backfill");
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let source = ClaudeSource::with_home(&home);
-    ingest_source(&db, &source, &project, None).await;
-    // Create the backfill meta table up front (see the note in the goal test).
-    db.run_structured_backfill().await;
-    assert_eq!(count_kind(&project, "claude", "pr_link").await, 1);
-    let assistant_before = load_row_by_role(&project, "claude", "assistant").await;
-    drop(db);
-
-    simulate_old_parser_store(&project, "claude", "pr_link").await;
-    assert_eq!(count_kind(&project, "claude", "pr_link").await, 0);
-
-    let db = open_project_session_db(&project).await.unwrap();
-    db.run_structured_backfill().await;
-    assert_eq!(count_kind(&project, "claude", "pr_link").await, 1);
-    let assistant_after = load_row_by_role(&project, "claude", "assistant").await;
-    assert_eq!(assistant_before, assistant_after);
-    drop(db);
-
-    let db = open_project_session_db(&project).await.unwrap();
-    db.run_structured_backfill().await;
-    assert_eq!(count_kind(&project, "claude", "pr_link").await, 1);
-    drop(db);
-    assert_eq!(
-        structured_marker_version(&project, Some("claude")).await,
-        Some(3)
-    );
 }
 
 /// Regression for the stale-cursor-vs-version-bump defect: the sweep's path
@@ -530,93 +400,6 @@ async fn structured_backfill_version_bump_reparses_from_start() {
     );
 }
 
-/// Per-provider isolation: bumping one provider's version (modeled by resetting
-/// only claude's marker on a store where codex is already at its target) must
-/// re-sweep ONLY claude. Codex's marker, cursor, and rows stay untouched — the
-/// former global-cursor design would have re-parsed every provider's history.
-#[tokio::test]
-async fn structured_backfill_provider_bump_isolates_other_providers() {
-    tracedecay::global_db::set_background_structured_backfill_enabled(false);
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = init_project(&tmp);
-    write_claude_transcript_with_thinking(&home, &project, "claude-isolate");
-    write_codex_rollout_with_goal(&home, &project, "codex-isolate");
-
-    // Ingest both providers and drive the sweep to completion: claude reaches
-    // v3, codex reaches v4, and both version-namespaced cursors are cleared.
-    let db = open_project_session_db(&project).await.unwrap();
-    ingest_source(&db, &ClaudeSource::with_home(&home), &project, None).await;
-    ingest_source(&db, &CodexSource::with_home(&home), &project, None).await;
-    db.run_structured_backfill().await; // parses both, advances both cursors
-    db.run_structured_backfill().await; // no candidates: marks both complete
-    assert_eq!(
-        structured_marker_version(&project, Some("claude")).await,
-        Some(3)
-    );
-    assert_eq!(
-        structured_marker_version(&project, Some("codex")).await,
-        Some(4)
-    );
-    // Codex's cursor was cleared on completion; capture that baseline.
-    assert_eq!(structured_cursor_value(&project, "codex", 4).await, None);
-    let codex_goal_before = load_only_goal_row(&project).await;
-    drop(db);
-
-    // Model a claude-only version bump: reset ONLY claude's marker and drop its
-    // reasoning rows. Codex's marker (v4) and goal row are left fully intact.
-    // Drop the raw connection before reopening GlobalDb (busy_timeout contention).
-    {
-        let conn = raw_conn(&project).await;
-        conn.execute(
-            "DELETE FROM lcm_raw_messages
-             WHERE provider = 'claude'
-               AND message_id IN (
-                   SELECT message_id FROM session_messages
-                   WHERE provider = 'claude' AND kind = 'reasoning')",
-            (),
-        )
-        .await
-        .unwrap();
-        conn.execute(
-            "DELETE FROM session_messages WHERE provider = 'claude' AND kind = 'reasoning'",
-            (),
-        )
-        .await
-        .unwrap();
-        conn.execute(
-            "DELETE FROM session_schema_migrations WHERE name = 'structured_rows_backfill:claude'",
-            (),
-        )
-        .await
-        .unwrap();
-    }
-    assert_eq!(count_kind(&project, "claude", "reasoning").await, 0);
-
-    // Re-sweep to completion. Claude re-enters (its marker fell behind v3);
-    // codex is skipped outright (marker v4 >= target v4).
-    let db = open_project_session_db(&project).await.unwrap();
-    db.run_structured_backfill().await;
-    db.run_structured_backfill().await;
-    drop(db);
-
-    // Claude re-swept: the reasoning row is back.
-    assert_eq!(count_kind(&project, "claude", "reasoning").await, 1);
-    assert_eq!(
-        structured_marker_version(&project, Some("claude")).await,
-        Some(3)
-    );
-    // Codex was never touched: its marker, cleared cursor, and goal row are all
-    // exactly as they were — no re-parse occurred (a re-parse would have written
-    // codex's cursor row).
-    assert_eq!(
-        structured_marker_version(&project, Some("codex")).await,
-        Some(4)
-    );
-    assert_eq!(structured_cursor_value(&project, "codex", 4).await, None);
-    assert_eq!(count_kind(&project, "codex", "goal").await, 1);
-    assert_eq!(load_only_goal_row(&project).await, codex_goal_before);
-}
-
 /// Migration: a store carrying the retired global `structured_rows_backfill`
 /// marker at version N seeds every provider's marker to N, retires the global
 /// marker and its legacy cursor rows, and triggers no spurious re-sweep.
@@ -682,9 +465,9 @@ async fn structured_backfill_migrates_legacy_global_marker() {
         None
     );
 
-    // The bounded sweep first migrates: seed every provider to N=3 and retire
-    // the global marker/cursors. Claude is already current; Codex alone parses
-    // at its v4 custom-exec target, then the empty follow-up batch marks v4.
+    // The bounded sweep seeds the tracked Codex provider to N=3 and retires
+    // the global marker/cursors. Codex then parses at its v4 custom-exec target;
+    // Claude remains outside this legacy cursor authority entirely.
     let db = open_project_session_db(&project).await.unwrap();
     db.run_structured_backfill().await;
     db.run_structured_backfill().await;
@@ -692,8 +475,8 @@ async fn structured_backfill_migrates_legacy_global_marker() {
 
     assert_eq!(
         structured_marker_version(&project, Some("claude")).await,
-        Some(3),
-        "claude marker seeded to the legacy global version"
+        None,
+        "legacy migration must not create a Claude backfill authority"
     );
     assert_eq!(
         structured_marker_version(&project, Some("codex")).await,

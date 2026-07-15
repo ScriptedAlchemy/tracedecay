@@ -1,6 +1,8 @@
 use std::cmp::Ordering;
+use std::fmt::Write as _;
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CanonicalClaudeSanitizationReceiptMaterialV1, CanonicalObservationIdV1, ClaudeByteRangeV1,
     ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1,
@@ -85,25 +87,92 @@ fn observation_ids_are_stable_and_payload_objects_are_canonical() {
 }
 
 #[test]
-fn receipt_derivation_is_canonical_and_preserves_existing_ids() {
-    let material = CanonicalClaudeSanitizationReceiptMaterialV1::new(
-        &profile_material(),
+fn receipt_derivation_is_canonical_and_generation_bound() {
+    let identity = profile_material();
+    let payload = PayloadReferenceV1::for_payload(&json!({"message": "safe"})).unwrap();
+    let material = CanonicalClaudeSanitizationReceiptMaterialV1::for_durable_payload(
+        &identity,
         ComponentVersion::new("sanitizer.fixture.v1").unwrap(),
         SanitizerDispositionV1::Accepted,
-        b"evidence.fixture",
+        &[7; 32],
+        &payload,
     )
     .unwrap();
     let receipt = material.derive_receipt_ref().unwrap();
 
     assert_eq!(
         receipt.receipt_id().as_str(),
-        "privacy.claude.v1.cd2fffcfc651eafe4c7f923686dd238c7791b9355600cf82b7b0707a049d7a0d"
+        "privacy.claude.v1.2ef774a1d81493c05616a42ac8cf08856f230c7aa4f4e9d8224512d05ded88a8"
     );
     assert_eq!(receipt.sanitizer_version().as_str(), "sanitizer.fixture.v1");
     assert_eq!(SanitizerDispositionV1::Accepted.as_str(), "accepted");
     assert_eq!(SanitizerDispositionV1::Redacted.as_str(), "redacted");
     assert_eq!(SanitizerDispositionV1::Rejected.as_str(), "rejected");
     assert_eq!(SanitizerDispositionV1::Quarantined.as_str(), "quarantined");
+
+    let changed_generation = ClaudeObservationIdentityMaterialV1::new(
+        source("session.fixture"),
+        ObservationScopeV1::Profile,
+        ClaudeFileGenerationV1::new(8).unwrap(),
+        ClaudeByteRangeV1::new(12, 34).unwrap(),
+    )
+    .unwrap();
+    let changed = CanonicalClaudeSanitizationReceiptMaterialV1::for_durable_payload(
+        &changed_generation,
+        ComponentVersion::new("sanitizer.fixture.v1").unwrap(),
+        SanitizerDispositionV1::Accepted,
+        &[7; 32],
+        &payload,
+    )
+    .unwrap()
+    .derive_receipt_ref()
+    .unwrap();
+    assert_ne!(receipt.receipt_id(), changed.receipt_id());
+
+    let changed_sensitivity =
+        CanonicalClaudeSanitizationReceiptMaterialV1::for_durable_payload_with_sensitivity(
+            &identity,
+            ComponentVersion::new("sanitizer.fixture.v1").unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::Sensitive,
+            &[7; 32],
+            &payload,
+        )
+        .unwrap()
+        .derive_receipt_ref()
+        .unwrap();
+    assert_ne!(receipt.receipt_id(), changed_sensitivity.receipt_id());
+}
+
+#[test]
+#[allow(deprecated)]
+fn legacy_receipt_constructor_accepts_arbitrary_evidence_and_keeps_its_id() {
+    let identity = profile_material();
+    let version = ComponentVersion::new("sanitizer.legacy.v1").unwrap();
+    let evidence = b"arbitrary legacy evidence, not a digest";
+    let receipt = CanonicalClaudeSanitizationReceiptMaterialV1::new(
+        &identity,
+        version.clone(),
+        SanitizerDispositionV1::Rejected,
+        evidence,
+    )
+    .unwrap()
+    .derive_receipt_ref()
+    .unwrap();
+
+    let observation_id = CanonicalObservationIdV1::derive(&identity).unwrap();
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.privacy.claude.receipt.v1\0");
+    hasher.update(version.as_str().as_bytes());
+    hasher.update(observation_id.as_str().as_bytes());
+    hasher.update(b"rejected");
+    hasher.update(evidence);
+    let mut digest = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        write!(&mut digest, "{byte:02x}").unwrap();
+    }
+    let expected = format!("privacy.claude.v1.{digest}");
+    assert_eq!(receipt.receipt_id().as_str(), expected);
 }
 
 #[test]
@@ -204,6 +273,30 @@ fn source_cursors_enforce_their_comparison_domain() {
             ))
             .is_err()
     );
+}
+
+#[test]
+fn source_cursor_resume_checkpoints_round_trip_without_breaking_legacy_json() {
+    let legacy = ClaudeSourceCursorV1::new(
+        source("session.fixture"),
+        ObservationScopeV1::Profile,
+        ClaudeFileGenerationV1::new(2).unwrap(),
+        20,
+    )
+    .unwrap();
+    let legacy_json = serde_json::to_value(&legacy).unwrap();
+    assert!(legacy_json.get("file_identity").is_none());
+    assert!(legacy_json.get("resume_fingerprint").is_none());
+    let legacy_round_trip: ClaudeSourceCursorV1 = serde_json::from_value(legacy_json).unwrap();
+    assert_eq!(legacy_round_trip.file_identity(), None);
+    assert_eq!(legacy_round_trip.resume_fingerprint(), None);
+
+    let checkpoint = legacy.with_resume_checkpoint(41, 73);
+    let checkpoint_json = serde_json::to_value(&checkpoint).unwrap();
+    assert_eq!(checkpoint_json["file_identity"], 41);
+    assert_eq!(checkpoint_json["resume_fingerprint"], 73);
+    let round_trip: ClaudeSourceCursorV1 = serde_json::from_value(checkpoint_json).unwrap();
+    assert_eq!(round_trip, checkpoint);
 }
 
 #[test]

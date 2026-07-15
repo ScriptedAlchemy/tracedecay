@@ -1,8 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::future::Future;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 #[cfg(test)]
 use libsql::TransactionBehavior;
@@ -12,7 +10,8 @@ use serde_json::{Value, json};
 use crate::tracedecay::current_timestamp;
 
 use super::{
-    LCM_SCHEMA_VERSION, LcmCleanConfig, LcmError, LcmGcConfig, gc, query, schema, security, util,
+    LCM_SCHEMA_VERSION, LcmCleanConfig, LcmError, LcmGcConfig, gc, maintenance, query, schema,
+    security, util,
 };
 
 const MAX_SAMPLES: usize = 20;
@@ -40,7 +39,7 @@ pub(crate) fn request_mutates(request: &DoctorRequest<'_>) -> bool {
 }
 
 pub(crate) async fn prepare_apply(conn: &Connection) -> Result<(), LcmError> {
-    checkpoint_wal_for_backup(conn).await
+    maintenance::checkpoint_wal_for_backup(conn, maintenance::BackupKind::Clean).await
 }
 
 struct RepairRequest<'a> {
@@ -175,7 +174,8 @@ async fn plan_and_apply_repairs(
         .as_bool()
         .unwrap_or(false);
     if mode == "repair" && apply && (raw_rebuild_needed || summary_rebuild_needed) {
-        backup = backup_database(db_path, storage_root)?;
+        backup =
+            maintenance::backup_database(db_path, storage_root, maintenance::BackupKind::Clean)?;
     }
 
     if mode == "repair" && raw_rebuild_needed {
@@ -400,20 +400,9 @@ async fn payload_diagnostics(
         "reclaimable_bytes_after_grace": detail.payload.reclaimable_bytes_after_grace,
         "integrity_mismatch_count": detail.payload.integrity_mismatch_count,
         "integrity_mismatch_refs": detail.integrity_mismatch_refs,
+        "last_gc_status": detail.payload_gc.last_gc_status,
+        "last_gc_error": detail.payload_gc.last_gc_error,
     }))
-}
-
-#[allow(dead_code)]
-async fn all_payload_metadata_refs(conn: &Connection) -> Result<BTreeSet<String>, LcmError> {
-    let mut refs = BTreeSet::new();
-    let mut rows = conn
-        .query("SELECT payload_ref FROM lcm_external_payloads", ())
-        .await?;
-    while let Some(row) = rows.next().await? {
-        let payload_ref: String = row.get(0)?;
-        refs.insert(payload_ref);
-    }
-    Ok(refs)
 }
 
 #[allow(dead_code)]
@@ -988,60 +977,6 @@ async fn cleanup_candidates(
     }))
 }
 
-fn backup_database(db_path: &Path, storage_root: &Path) -> Result<Value, LcmError> {
-    let backup_dir = storage_root.join("lcm-clean-backups");
-    fs::create_dir_all(&backup_dir).map_err(|err| LcmError::Io(err.to_string()))?;
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default();
-    let backup_path = backup_dir.join(format!("sessions-clean-{stamp}-{}.db", std::process::id()));
-    let byte_count = copy_sqlite_file_set(db_path, &backup_path)?;
-    Ok(json!({
-        "ok": true,
-        "path": backup_path,
-        "byte_count": byte_count,
-    }))
-}
-
-fn copy_sqlite_file_set(db_path: &Path, backup_path: &Path) -> Result<u64, LcmError> {
-    let mut byte_count =
-        fs::copy(db_path, backup_path).map_err(|err| LcmError::Io(err.to_string()))?;
-    // Copy only the WAL sidecar. The -shm file is rebuildable shared memory
-    // that SQLite never reads from a backup, and its live byte-range locks
-    // make plain file reads fail with ERROR_LOCK_VIOLATION (os error 33) on
-    // Windows while any connection is open.
-    let source = sqlite_sidecar_path(db_path, "-wal");
-    if source.is_file() {
-        let target = sqlite_sidecar_path(backup_path, "-wal");
-        byte_count += fs::copy(&source, target).map_err(|err| LcmError::Io(err.to_string()))?;
-    }
-    Ok(byte_count)
-}
-
-fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut sidecar = path.as_os_str().to_os_string();
-    sidecar.push(suffix);
-    PathBuf::from(sidecar)
-}
-
-async fn checkpoint_wal_for_backup(conn: &Connection) -> Result<(), LcmError> {
-    let mut rows = conn.query("PRAGMA wal_checkpoint(TRUNCATE);", ()).await?;
-    let row = rows
-        .next()
-        .await?
-        .ok_or_else(|| LcmError::Db("WAL checkpoint returned no status row".to_string()))?;
-    let busy: i64 = row.get(0)?;
-    let log_frames: i64 = row.get(1)?;
-    let checkpointed_frames: i64 = row.get(2)?;
-    if busy != 0 || checkpointed_frames < log_frames {
-        return Err(LcmError::Db(format!(
-            "WAL checkpoint incomplete before clean backup: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
-        )));
-    }
-    Ok(())
-}
-
 async fn backup_and_delete_clean_candidates_in_transaction(
     conn: &Connection,
     db_path: &Path,
@@ -1055,7 +990,9 @@ async fn backup_and_delete_clean_candidates_in_transaction(
         provider,
         session_id,
         clean_config,
-        || async { backup_database(db_path, storage_root) },
+        || async {
+            maintenance::backup_database(db_path, storage_root, maintenance::BackupKind::Clean)
+        },
     )
     .await
 }
@@ -1072,7 +1009,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<Value, LcmError>>,
 {
-    checkpoint_wal_for_backup(conn).await?;
+    maintenance::checkpoint_wal_for_backup(conn, maintenance::BackupKind::Clean).await?;
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;

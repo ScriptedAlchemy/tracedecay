@@ -84,6 +84,8 @@ jobs:
     name: Test ${{ matrix.name }}
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ${{ fromJSON(matrix.runner) }}
+    env:
+      RUSTFLAGS: ${{ matrix.name == 'Linux' && '--cfg tracedecay_observation_fault_harness' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -124,6 +126,14 @@ jobs:
 
       - name: Run tests
         run: cargo nextest run --workspace --profile ci --locked
+
+      - name: Run in-flight observation crash harness
+        if: matrix.name == 'Linux'
+        run: >-
+          cargo test --locked --features test-transport
+          --test daemon_fault_harness_test
+          killed_daemon_retries_in_flight_claude_observation_once_via_public_apis
+          -- --exact
 
   windows-build:
     name: Build Windows tests
@@ -320,6 +330,40 @@ jobs:
             exit 1
           fi
           echo "All Windows shards passed."
+
+  release-compatibility:
+    name: Release compatibility
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build packaged dashboard assets
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - name: Validate publishable package manifests
+        # Package the workspace as one dependency-ordered batch because the V2
+        # crates do not exist in the registry until release-plz publishes them.
+        run: cargo package --workspace --locked --allow-dirty --no-verify
+
+      - name: Check root crate API compatibility
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: tracedecay
+          rust-toolchain: manual
 
   clippy:
     name: Clippy

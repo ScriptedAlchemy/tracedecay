@@ -10,8 +10,8 @@ use crate::sessions::shared::{
     content_storage_text_and_tools, paths_equal, title_from_messages,
 };
 use crate::sessions::source::{
-    ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, ingest_source,
-    stream_new_jsonl,
+    ParsedTranscript, SessionDraft, TranscriptIngestResult, TranscriptSource,
+    collect_files_with_ext, stream_new_jsonl, try_ingest_source,
 };
 use crate::storage::{
     SESSIONS_DB_FILENAME, default_profile_project_id, default_profile_root,
@@ -283,7 +283,14 @@ pub async fn ingest_cursor_transcript_event(
     event_json: &str,
     db: &GlobalDb,
 ) -> CursorTranscriptIngestStats {
-    ingest_cursor_transcript_event_capped(event_json, db, None).await
+    cursor_ingest_or_default(try_ingest_cursor_transcript_event(event_json, db).await)
+}
+
+pub async fn try_ingest_cursor_transcript_event(
+    event_json: &str,
+    db: &GlobalDb,
+) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
+    try_ingest_cursor_transcript_event_capped(event_json, db, None).await
 }
 
 /// Like [`ingest_cursor_transcript_event`], but bounds how many newly-appended
@@ -295,8 +302,18 @@ pub async fn ingest_cursor_transcript_event_capped(
     db: &GlobalDb,
     max_new_bytes: Option<u64>,
 ) -> CursorTranscriptIngestStats {
+    cursor_ingest_or_default(
+        try_ingest_cursor_transcript_event_capped(event_json, db, max_new_bytes).await,
+    )
+}
+
+pub async fn try_ingest_cursor_transcript_event_capped(
+    event_json: &str,
+    db: &GlobalDb,
+    max_new_bytes: Option<u64>,
+) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
     let Ok(event) = serde_json::from_str::<Value>(event_json) else {
-        return CursorTranscriptIngestStats::default();
+        return Ok(CursorTranscriptIngestStats::default());
     };
     let Some(transcript_path) = event
         .get("transcript_path")
@@ -304,7 +321,7 @@ pub async fn ingest_cursor_transcript_event_capped(
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
     else {
-        return CursorTranscriptIngestStats::default();
+        return Ok(CursorTranscriptIngestStats::default());
     };
 
     // Cursor derives its project from the event, so the driver's project_root
@@ -319,11 +336,11 @@ pub async fn ingest_cursor_transcript_event_capped(
         include_subagents: true,
         user_scope: false,
     };
-    let stats = ingest_source(db, &source, &project_root, max_new_bytes).await;
-    CursorTranscriptIngestStats {
+    let stats = try_ingest_source(db, &source, &project_root, max_new_bytes).await?;
+    Ok(CursorTranscriptIngestStats {
         sessions_upserted: stats.sessions_upserted,
         messages_upserted: stats.messages_upserted,
-    }
+    })
 }
 
 pub async fn ingest_cursor_user_transcript_event_capped(
@@ -331,7 +348,17 @@ pub async fn ingest_cursor_user_transcript_event_capped(
     db: &GlobalDb,
     max_new_bytes: Option<u64>,
 ) -> CursorTranscriptIngestStats {
-    ingest_cursor_user_transcript_event_capped_with_registered_roots(
+    cursor_ingest_or_default(
+        try_ingest_cursor_user_transcript_event_capped(event_json, db, max_new_bytes).await,
+    )
+}
+
+pub async fn try_ingest_cursor_user_transcript_event_capped(
+    event_json: &str,
+    db: &GlobalDb,
+    max_new_bytes: Option<u64>,
+) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
+    try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
         event_json,
         db,
         max_new_bytes,
@@ -348,8 +375,25 @@ pub async fn ingest_cursor_user_transcript_event_capped_with_registered_roots(
     max_new_bytes: Option<u64>,
     registered_roots: &[PathBuf],
 ) -> CursorTranscriptIngestStats {
+    cursor_ingest_or_default(
+        try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
+            event_json,
+            db,
+            max_new_bytes,
+            registered_roots,
+        )
+        .await,
+    )
+}
+
+pub async fn try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
+    event_json: &str,
+    db: &GlobalDb,
+    max_new_bytes: Option<u64>,
+    registered_roots: &[PathBuf],
+) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
     let Ok(event) = serde_json::from_str::<Value>(event_json) else {
-        return CursorTranscriptIngestStats::default();
+        return Ok(CursorTranscriptIngestStats::default());
     };
     let Some(transcript_path) = event
         .get("transcript_path")
@@ -357,7 +401,7 @@ pub async fn ingest_cursor_user_transcript_event_capped_with_registered_roots(
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
     else {
-        return CursorTranscriptIngestStats::default();
+        return Ok(CursorTranscriptIngestStats::default());
     };
     let event_workspaces = cursor_event_workspace_roots(&event);
     let belongs_to_registered_project = if event_workspaces.is_empty() {
@@ -382,7 +426,7 @@ pub async fn ingest_cursor_user_transcript_event_capped_with_registered_roots(
         })
     };
     if belongs_to_registered_project {
-        return CursorTranscriptIngestStats::default();
+        return Ok(CursorTranscriptIngestStats::default());
     }
     let placeholder = transcript_path
         .parent()
@@ -393,10 +437,22 @@ pub async fn ingest_cursor_user_transcript_event_capped_with_registered_roots(
         include_subagents: true,
         user_scope: true,
     };
-    let stats = ingest_source(db, &source, &placeholder, max_new_bytes).await;
-    CursorTranscriptIngestStats {
+    let stats = try_ingest_source(db, &source, &placeholder, max_new_bytes).await?;
+    Ok(CursorTranscriptIngestStats {
         sessions_upserted: stats.sessions_upserted,
         messages_upserted: stats.messages_upserted,
+    })
+}
+
+fn cursor_ingest_or_default(
+    result: TranscriptIngestResult<CursorTranscriptIngestStats>,
+) -> CursorTranscriptIngestStats {
+    match result {
+        Ok(stats) => stats,
+        Err(error) => {
+            tracing::error!(error = %error, "Cursor transcript ingest failed");
+            CursorTranscriptIngestStats::default()
+        }
     }
 }
 

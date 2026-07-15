@@ -1,12 +1,13 @@
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay::global_db::GlobalDb;
 use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
-    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
-    ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
-    ObservationScopeV1, PayloadDigestV1, PayloadReferenceV1, RetentionClass, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId,
+    CanonicalObservationIdV1, ClaudeByteRangeV1, ClaudeFileGenerationV1,
+    ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
+    ComponentVersion, DurableClaudeObservationV1, ObservationScopeV1, PayloadDigestV1,
+    PayloadReferenceV1, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
+    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId,
 };
 use tracedecay_store::{
     CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationPersistOutcome,
@@ -148,14 +149,24 @@ async fn table_count(tmp: &TempDir, table: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
-async fn reinstall_legacy_projection_provenance_schema(tmp: &TempDir) {
+async fn reinstall_projection_provenance_schema(tmp: &TempDir, extra_column: &str) {
+    reinstall_projection_provenance_schema_with_options(tmp, extra_column, "").await;
+}
+
+async fn reinstall_projection_provenance_schema_with_options(
+    tmp: &TempDir,
+    extra_column: &str,
+    table_options: &str,
+) {
     let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
         .build()
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    conn.execute_batch(
+    conn.execute_batch(&format!(
         "BEGIN IMMEDIATE;
+         DROP TRIGGER IF EXISTS projection_output_audit_invalidate_update_v1;
+         DROP TRIGGER IF EXISTS projection_output_audit_invalidate_delete_v1;
          CREATE TABLE observation_projection_provenance_legacy (
             projector_version TEXT NOT NULL,
             observation_id TEXT NOT NULL,
@@ -164,11 +175,12 @@ async fn reinstall_legacy_projection_provenance_schema(tmp: &TempDir) {
             output_message_id TEXT NOT NULL,
             output_digest TEXT NOT NULL,
             message_created INTEGER NOT NULL CHECK(message_created IN (0, 1)),
+            {extra_column}
             PRIMARY KEY(projector_version, observation_id),
             UNIQUE(projector_version, output_provider, output_message_id),
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
-         );
+         ) {table_options};
          INSERT INTO observation_projection_provenance_legacy
             (projector_version, observation_id, receipt_id, output_provider,
              output_message_id, output_digest, message_created)
@@ -178,10 +190,60 @@ async fn reinstall_legacy_projection_provenance_schema(tmp: &TempDir) {
          DROP TABLE observation_projection_provenance;
          ALTER TABLE observation_projection_provenance_legacy
             RENAME TO observation_projection_provenance;
-         COMMIT;",
-    )
+         COMMIT;"
+    ))
     .await
     .unwrap();
+}
+
+async fn reinstall_legacy_projection_provenance_schema(tmp: &TempDir) {
+    reinstall_projection_provenance_schema(tmp, "").await;
+}
+
+async fn add_other_projector_owner(tmp: &TempDir, observation_id: &CanonicalObservationIdV1) {
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO observation_projection_provenance (
+                projector_version, observation_id, receipt_id, output_provider,
+                output_message_id, output_digest, message_created
+             ) SELECT 'test-projector-v2', observation_id, receipt_id, output_provider,
+                      output_message_id, output_digest, 0
+               FROM observation_projection_provenance
+               WHERE projector_version = ?1 AND observation_id = ?2",
+            libsql::params![
+                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation_id.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+}
+
+async fn audited_projection_fixture(session_id: &str, message_id: &str) -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let candidate = observation(
+        session_id,
+        0,
+        100,
+        &format!("receipt.{message_id}"),
+        conversational_payload(message_id, "audited projection body"),
+    );
+    persist(&store, candidate, None).await;
+    drain_projection_queue(&store).await;
+    drop(db);
+
+    let audited = GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
+        .await
+        .expect("projected authority must pass its exhaustive audit");
+    drop(audited);
+    tmp
 }
 
 async fn projection_counts(tmp: &TempDir) -> (i64, i64, i64, i64, i64, i64) {
@@ -266,6 +328,12 @@ async fn projection_ownership_rows(tmp: &TempDir) -> Vec<i64> {
         ownership.push(row.get(0).unwrap());
     }
     ownership
+}
+
+fn projection_output_ids(rows: &[(String, String, String, String, String, String)]) -> Vec<String> {
+    let mut ids = rows.iter().map(|row| row.4.clone()).collect::<Vec<_>>();
+    ids.sort();
+    ids
 }
 
 #[tokio::test]
@@ -358,6 +426,119 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
     ));
     assert_eq!(replay.checkpoint(), projected.checkpoint());
     assert_eq!(projection_counts(&tmp).await, before);
+}
+
+#[tokio::test]
+async fn safe_sanitized_uuid_remains_the_v1_message_id() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let payload = json!({
+        "type": "assistant",
+        "uuid": "safe-sanitized-uuid",
+        "timestamp": "2025-06-15T15:06:40Z",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "safe UUID body"}],
+            "model": "claude-sonnet-4"
+        }
+    });
+    persist(
+        &store,
+        observation("session-safe-uuid", 0, 100, "receipt.safe-uuid", payload),
+        None,
+    )
+    .await;
+    drain_projection_queue(&store).await;
+
+    assert_eq!(
+        projection_output_ids(&projection_provenance_rows(&tmp).await),
+        ["safe-sanitized-uuid"]
+    );
+}
+
+#[tokio::test]
+async fn redacted_message_ids_use_injective_v1_fallbacks() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let marker = "[TraceDecay redacted:message-id]";
+    let mut first = conversational_payload(marker, "first redacted message ID");
+    first["uuid"] = Value::from("record-first-redacted-message-id");
+    let mut second = conversational_payload(marker, "second redacted message ID");
+    second["uuid"] = Value::from("record-second-redacted-message-id");
+    persist(
+        &store,
+        observation(
+            "session-redacted-message-id",
+            0,
+            100,
+            "receipt.redacted-message-id-first",
+            first,
+        ),
+        None,
+    )
+    .await;
+    persist(
+        &store,
+        observation(
+            "session-redacted-message-id",
+            100,
+            200,
+            "receipt.redacted-message-id-second",
+            second,
+        ),
+        Some(cursor("session-redacted-message-id", 100)),
+    )
+    .await;
+    drain_projection_queue(&store).await;
+
+    assert_eq!(
+        projection_output_ids(&projection_provenance_rows(&tmp).await),
+        [
+            "session-redacted-message-id:11:0",
+            "session-redacted-message-id:11:100",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn redacted_uuid_ids_use_injective_v1_fallbacks() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    for (start, end, receipt_id, text) in [
+        (0, 100, "receipt.redacted-uuid-first", "first redacted UUID"),
+        (
+            100,
+            200,
+            "receipt.redacted-uuid-second",
+            "second redacted UUID",
+        ),
+    ] {
+        let payload = json!({
+            "type": "assistant",
+            "uuid": "[TraceDecay redacted:uuid]",
+            "timestamp": "2025-06-15T15:06:40Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+                "model": "claude-sonnet-4"
+            }
+        });
+        persist(
+            &store,
+            observation("session-redacted-uuid", start, end, receipt_id, payload),
+            (start != 0).then(|| cursor("session-redacted-uuid", start)),
+        )
+        .await;
+    }
+    drain_projection_queue(&store).await;
+
+    assert_eq!(
+        projection_output_ids(&projection_provenance_rows(&tmp).await),
+        ["session-redacted-uuid:11:0", "session-redacted-uuid:11:100",]
+    );
 }
 
 #[tokio::test]
@@ -1276,4 +1457,511 @@ async fn durable_projection_alias_survives_rebuild_without_rewriting_observation
     let provenance = projection_provenance_rows(&tmp).await;
     assert_eq!(provenance[0].4, "consolidated/source/message-alias");
     assert_eq!(projected_message_texts(&tmp).await.len(), 1);
+}
+
+#[tokio::test]
+async fn rebuild_preserves_output_referenced_by_another_projector_version() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let candidate = observation(
+        "session-shared-output",
+        0,
+        100,
+        "receipt.shared-output",
+        conversational_payload("message-shared-output", "shared output canary"),
+    );
+    persist(&store, candidate.clone(), None).await;
+    drain_projection_queue(&store).await;
+    add_other_projector_owner(&tmp, candidate.observation_id()).await;
+
+    store.rebuild_projection(0).await.unwrap();
+    assert_eq!(table_count(&tmp, "session_messages").await, 1);
+    assert_eq!(
+        table_count(&tmp, "observation_projection_provenance").await,
+        2
+    );
+
+    store.rebuild_projection(1).await.unwrap();
+    assert_eq!(table_count(&tmp, "session_messages").await, 1);
+    assert_eq!(
+        table_count(&tmp, "observation_projection_provenance").await,
+        2
+    );
+    assert_eq!(projected_message_texts(&tmp).await.len(), 1);
+}
+
+#[tokio::test]
+async fn cross_projector_owner_blocks_incompatible_generation_rollover() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let original = observation_in_generation(
+        "session-global-owner",
+        GENERATION,
+        0,
+        100,
+        "receipt.global-owner-original",
+        conversational_payload("message-global-owner", "global owner original"),
+    );
+    persist(&store, original.clone(), None).await;
+    drain_projection_queue(&store).await;
+
+    add_other_projector_owner(&tmp, original.observation_id()).await;
+
+    let replacement = observation_in_generation(
+        "session-global-owner",
+        GENERATION + 1,
+        0,
+        100,
+        "receipt.global-owner-replacement",
+        conversational_payload("message-global-owner", "global owner replacement"),
+    );
+    persist(
+        &store,
+        replacement.clone(),
+        Some(cursor_in_generation(
+            "session-global-owner",
+            GENERATION,
+            100,
+        )),
+    )
+    .await;
+    assert!(matches!(
+        store
+            .project_observation(replacement.observation_id())
+            .await
+            .unwrap_err(),
+        ProjectionStoreError::OutputCollision { .. }
+    ));
+    assert!(projected_message_texts(&tmp).await[0].contains("global owner original"));
+    assert_eq!(table_count(&tmp, "projection_queue").await, 1);
+}
+
+#[tokio::test]
+async fn rebuild_freezes_cross_projector_multi_generation_ownership() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let original = observation_in_generation(
+        "session-retained-generations",
+        GENERATION,
+        0,
+        100,
+        "receipt.retained-generation-original",
+        conversational_payload(
+            "message-retained-generations",
+            "retained generation original",
+        ),
+    );
+    let replacement = observation_in_generation(
+        "session-retained-generations",
+        GENERATION + 1,
+        0,
+        100,
+        "receipt.retained-generation-replacement",
+        conversational_payload(
+            "message-retained-generations",
+            "retained generation replacement",
+        ),
+    );
+    persist(&store, original.clone(), None).await;
+    persist(
+        &store,
+        replacement.clone(),
+        Some(cursor_in_generation(
+            "session-retained-generations",
+            GENERATION,
+            100,
+        )),
+    )
+    .await;
+    drain_projection_queue(&store).await;
+
+    add_other_projector_owner(&tmp, replacement.observation_id()).await;
+
+    let rebuilt = store.rebuild_projection(1).await.unwrap();
+    assert_eq!(rebuilt.projected_rows(), 1);
+    assert!(projected_message_texts(&tmp).await[0].contains("retained generation replacement"));
+    assert_eq!(
+        table_count(&tmp, "observation_projection_provenance").await,
+        3
+    );
+    drain_projection_queue(&store).await;
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        2
+    );
+    assert!(projected_message_texts(&tmp).await[0].contains("retained generation replacement"));
+}
+
+#[tokio::test]
+async fn projection_owner_cache_refreshes_after_another_connection_commits() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let first = observation(
+        "session-data-version",
+        0,
+        100,
+        "receipt.data-version-first",
+        conversational_payload("message-data-version-first", "data version first"),
+    );
+    let second = observation(
+        "session-data-version",
+        100,
+        200,
+        "receipt.data-version-second",
+        conversational_payload("message-data-version-second", "data version second"),
+    );
+    persist(&store, first.clone(), None).await;
+    store
+        .project_observation(first.observation_id())
+        .await
+        .unwrap();
+    persist(
+        &store,
+        second.clone(),
+        Some(cursor("session-data-version", 100)),
+    )
+    .await;
+
+    let other_db = GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
+        .await
+        .unwrap();
+    let other_store = GlobalDbObservationStore::new(&other_db);
+    other_store
+        .project_observation(second.observation_id())
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .project_observation(second.observation_id())
+            .await
+            .unwrap(),
+        ProjectionPersistOutcome::ExactDuplicate(_)
+    ));
+}
+
+#[tokio::test]
+async fn rebuild_processes_more_than_two_pages_at_one_frozen_frontier() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let mut expected_cursor = None;
+    for index in 0..257_u64 {
+        let start = index * 100;
+        let end = start + 100;
+        let candidate = observation(
+            "session-paged-rebuild",
+            start,
+            end,
+            &format!("receipt.paged-rebuild-{index}"),
+            conversational_payload(
+                &format!("message-paged-rebuild-{index}"),
+                &format!("paged rebuild canary {index}"),
+            ),
+        );
+        persist(&store, candidate, expected_cursor.clone()).await;
+        expected_cursor = Some(cursor("session-paged-rebuild", end));
+    }
+
+    let rebuilt = store.rebuild_projection(257).await.unwrap();
+    assert_eq!(rebuilt.projected_rows(), 257);
+    assert_eq!(rebuilt.skipped_observations(), 0);
+    assert_eq!(projection_counts(&tmp).await, (1, 257, 257, 1, 0, 0));
+}
+
+#[tokio::test]
+async fn high_generation_output_uses_constant_size_owner_state() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let mut expected_cursor = None;
+    for generation_offset in 0..257_u64 {
+        let generation = GENERATION + generation_offset;
+        let candidate = observation_in_generation(
+            "session-high-generation",
+            generation,
+            0,
+            100,
+            &format!("receipt.high-generation-{generation}"),
+            conversational_payload(
+                "message-high-generation",
+                &format!("high generation canary {generation}"),
+            ),
+        );
+        persist(&store, candidate, expected_cursor.clone()).await;
+        expected_cursor = Some(cursor_in_generation(
+            "session-high-generation",
+            generation,
+            100,
+        ));
+    }
+    drain_projection_queue(&store).await;
+
+    assert_eq!(projection_counts(&tmp).await, (1, 1, 257, 1, 0, 0));
+    assert!(projected_message_texts(&tmp).await[0].contains("high generation canary 267"));
+}
+
+#[tokio::test]
+async fn authority_reopen_accepts_historical_generation_after_supersession() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let original = observation_in_generation(
+        "session-authority-supersession",
+        GENERATION,
+        0,
+        100,
+        "receipt.authority-supersession-original",
+        conversational_payload("message-authority-supersession", "superseded body"),
+    );
+    let replacement = observation_in_generation(
+        "session-authority-supersession",
+        GENERATION + 1,
+        0,
+        100,
+        "receipt.authority-supersession-replacement",
+        conversational_payload("message-authority-supersession", "current body"),
+    );
+    persist(&store, original, None).await;
+    persist(
+        &store,
+        replacement,
+        Some(cursor_in_generation(
+            "session-authority-supersession",
+            GENERATION,
+            100,
+        )),
+    )
+    .await;
+    drain_projection_queue(&store).await;
+    drop(db);
+
+    let reopened = GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
+        .await
+        .expect("historical provenance must validate against the current output owner");
+    drop(reopened);
+    assert!(projected_message_texts(&tmp).await[0].contains("current body"));
+    assert_eq!(
+        table_count(&tmp, "observation_projection_provenance").await,
+        2
+    );
+}
+
+#[tokio::test]
+async fn projected_message_update_invalidates_audit_and_fails_reopen() {
+    let tmp = audited_projection_fixture("session-audit-update", "message-audit-update").await;
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute(
+            "UPDATE session_messages SET text = 'tampered projection body'
+             WHERE provider = 'claude' AND message_id = 'message-audit-update'",
+            (),
+        )
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    assert!(
+        GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn projected_message_delete_invalidates_audit_and_fails_reopen() {
+    let tmp = audited_projection_fixture("session-audit-delete", "message-audit-delete").await;
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute(
+            "DELETE FROM session_messages
+             WHERE provider = 'claude' AND message_id = 'message-audit-delete'",
+            (),
+        )
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    assert!(
+        GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn unsupported_legacy_provenance_shape_is_rejected_before_drop() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let candidate = observation(
+        "session-forward-legacy",
+        0,
+        100,
+        "receipt.forward-legacy",
+        conversational_payload("message-forward-legacy", "forward legacy canary"),
+    );
+    persist(&store, candidate, None).await;
+    drain_projection_queue(&store).await;
+    drop(db);
+
+    reinstall_projection_provenance_schema(&tmp, "forward_owner TEXT,").await;
+    assert!(
+        GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
+            .await
+            .is_none()
+    );
+
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    let mut columns = raw_conn
+        .query(
+            "SELECT name FROM pragma_table_xinfo('observation_projection_provenance')
+             WHERE name = 'forward_owner'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert!(columns.next().await.unwrap().is_some());
+    drop(columns);
+    drop(raw_conn);
+    drop(raw_db);
+    assert_eq!(
+        table_count(&tmp, "observation_projection_provenance").await,
+        1
+    );
+    assert_eq!(table_count(&tmp, "session_messages").await, 1);
+}
+
+#[tokio::test]
+async fn unsupported_legacy_provenance_table_options_are_rejected_before_drop() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    drop(db);
+    reinstall_projection_provenance_schema_with_options(&tmp, "", "STRICT").await;
+
+    assert!(
+        GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
+            .await
+            .is_none()
+    );
+
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    let mut rows = raw_conn
+        .query(
+            "SELECT strict FROM pragma_table_list
+             WHERE name = 'observation_projection_provenance'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn supported_legacy_provenance_trigger_survives_table_replacement() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    drop(db);
+    reinstall_legacy_projection_provenance_schema(&tmp).await;
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute_batch(
+            "CREATE TRIGGER projection_provenance_message_created_insert_v1
+             BEFORE INSERT ON observation_projection_provenance
+             WHEN NEW.message_created NOT IN (0, 1)
+             BEGIN SELECT RAISE(ABORT, 'invalid projection message_created'); END;",
+        )
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    let reopened = GlobalDb::open_at(&isolated_lcm_db_path(&tmp)).await;
+    assert!(reopened.is_some());
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    let mut triggers = raw_conn
+        .query(
+            "SELECT 1 FROM sqlite_schema
+             WHERE type = 'trigger'
+               AND name = 'projection_provenance_message_created_insert_v1'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert!(triggers.next().await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn unknown_legacy_provenance_trigger_is_rejected_before_drop() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    drop(db);
+    reinstall_legacy_projection_provenance_schema(&tmp).await;
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute_batch(
+            "CREATE TRIGGER unknown_projection_provenance_trigger
+             BEFORE DELETE ON observation_projection_provenance
+             BEGIN SELECT RAISE(ABORT, 'must survive failed migration'); END;",
+        )
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    assert!(
+        GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
+            .await
+            .is_none()
+    );
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    let mut triggers = raw_conn
+        .query(
+            "SELECT 1 FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'unknown_projection_provenance_trigger'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert!(triggers.next().await.unwrap().is_some());
 }

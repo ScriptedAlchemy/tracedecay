@@ -5,6 +5,7 @@ pub mod doctor;
 pub mod extraction;
 pub mod gc;
 pub mod hermes;
+mod maintenance;
 pub mod payload;
 pub mod query;
 pub mod raw;

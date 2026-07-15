@@ -2834,7 +2834,12 @@ async fn pending_target_observation_does_not_suppress_source_projection_claim() 
         .unwrap();
     persist_migration_observation(&source, observation, None).await;
     assert_eq!(project_all_migration_observations(&source).await, 1);
-    insert_projection_alias(&source, &observation_id, "pending-source-output").await;
+    insert_projection_alias(
+        &source,
+        &observation_id,
+        "consolidated/fixture/pending-target-message",
+    )
+    .await;
     source.checkpoint().await;
     source.close();
 
@@ -2851,16 +2856,26 @@ async fn pending_target_observation_does_not_suppress_source_projection_claim() 
     )
     .await
     .unwrap();
-    assert_projection_alias(&target_path, &observation_id, "pending-source-output").await;
+    assert_projection_alias(
+        &target_path,
+        &observation_id,
+        "consolidated/fixture/pending-target-message",
+    )
+    .await;
     assert_message_absent(&target_path, "pending-target-message").await;
-    assert_message_absent(&target_path, "pending-source-output").await;
+    assert_message_absent(&target_path, "consolidated/fixture/pending-target-message").await;
 
     let merged = GlobalDb::open_at_without_structured_backfill(&target_path)
         .await
         .unwrap();
     assert_eq!(project_all_migration_observations(&merged).await, 1);
     merged.close();
-    assert_projection_output(&target_path, &observation_id, "pending-source-output").await;
+    assert_projection_output(
+        &target_path,
+        &observation_id,
+        "consolidated/fixture/pending-target-message",
+    )
+    .await;
     assert_no_orphaned_projection_provenance(&target_path).await;
 }
 
@@ -2900,7 +2915,12 @@ async fn another_projector_claim_does_not_suppress_source_projection_claim() {
         .unwrap();
     persist_migration_observation(&source, observation, None).await;
     assert_eq!(project_all_migration_observations(&source).await, 1);
-    insert_projection_alias(&source, &observation_id, "second-projector-output").await;
+    insert_projection_alias(
+        &source,
+        &observation_id,
+        "consolidated/fixture/second-projector-message",
+    )
+    .await;
     source.checkpoint().await;
     source.close();
 
@@ -2917,14 +2937,23 @@ async fn another_projector_claim_does_not_suppress_source_projection_claim() {
     )
     .await
     .unwrap();
-    assert_projection_alias(&target_path, &observation_id, "second-projector-output").await;
+    assert_projection_alias(
+        &target_path,
+        &observation_id,
+        "consolidated/fixture/second-projector-message",
+    )
+    .await;
     assert_message_text(
         &target_path,
         "second-projector-message",
         "second projector body",
     )
     .await;
-    assert_message_absent(&target_path, "second-projector-output").await;
+    assert_message_absent(
+        &target_path,
+        "consolidated/fixture/second-projector-message",
+    )
+    .await;
 
     let merged = GlobalDb::open_at_without_structured_backfill(&target_path)
         .await
@@ -2933,7 +2962,7 @@ async fn another_projector_claim_does_not_suppress_source_projection_claim() {
     merged.close();
     assert_message_text(
         &target_path,
-        "second-projector-output",
+        "consolidated/fixture/second-projector-message",
         "second projector body",
     )
     .await;
@@ -3027,37 +3056,242 @@ async fn observation_authority_collision_fails_before_session_merge_mutation() {
 }
 
 #[tokio::test]
-async fn malformed_target_only_cursor_fails_before_consolidation_mutation() {
+async fn typed_duplicate_authority_repairs_noncanonical_target_json() {
     let temp = TempDir::new().unwrap();
     let target_path = temp.path().join("target-sessions.db");
     let source_path = temp.path().join("source-sessions.db");
     let target_input_path = temp.path().join("target-input-sessions.db");
+    let observation = migration_observation_for(
+        "session.migration.typed-duplicate",
+        "receipt.migration.typed-duplicate",
+        "typed-duplicate-message",
+        "typed duplicate body",
+    );
+    for path in [&target_path, &source_path] {
+        let db = GlobalDb::open_at_without_structured_backfill(path)
+            .await
+            .unwrap();
+        persist_migration_observation(&db, observation.clone(), None).await;
+        db.checkpoint().await;
+        db.close();
+    }
+
+    let raw = libsql::Builder::new_local(&target_path)
+        .build()
+        .await
+        .unwrap();
+    let conn = raw.connect().unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER observations_immutable_update;
+         DROP TRIGGER observations_immutable_delete;
+         DROP TRIGGER sanitization_receipts_immutable_update_v1;
+         DROP TRIGGER sanitization_receipts_immutable_delete_v1;",
+    )
+    .await
+    .unwrap();
+    let canonical_receipt = serde_json::to_string(observation.receipt()).unwrap();
+    let canonical_observation = serde_json::to_string(&observation).unwrap();
+    let canonical_cursor = serde_json::to_string(&migration_cursor_for(
+        observation.source().session_id().as_str(),
+        observation.identity().position().end(),
+    ))
+    .unwrap();
+    let noncanonical_receipt = serde_json::to_string_pretty(observation.receipt()).unwrap();
+    let noncanonical_observation = serde_json::to_string_pretty(&observation).unwrap();
+    let noncanonical_cursor = serde_json::to_string_pretty(
+        &serde_json::from_str::<ClaudeSourceCursorV1>(&canonical_cursor).unwrap(),
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE sanitization_receipts SET receipt_json=?1",
+        libsql::params![noncanonical_receipt],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "UPDATE observations SET observation_json=?1, committed_cursor_json=?2",
+        libsql::params![noncanonical_observation, noncanonical_cursor],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(raw);
+
+    let offsets = sqlite::plan_session_offsets(&target_path, &source_path)
+        .await
+        .unwrap();
+    copy_sqlite_family_exact(&target_path, &target_input_path).unwrap();
+    sqlite::merge_sessions(
+        &target_path,
+        &source_path,
+        &target_input_path,
+        "proj_source",
+        &offsets,
+    )
+    .await
+    .unwrap();
+
+    let raw = libsql::Builder::new_local(&target_path)
+        .build()
+        .await
+        .unwrap();
+    let conn = raw.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT receipt.receipt_json, observation.observation_json,
+                    observation.committed_cursor_json
+             FROM observations AS observation
+             JOIN sanitization_receipts AS receipt USING(receipt_id)",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), canonical_receipt);
+    assert_eq!(row.get::<String>(1).unwrap(), canonical_observation);
+    assert_eq!(row.get::<String>(2).unwrap(), canonical_cursor);
+}
+
+#[tokio::test]
+async fn source_cursor_advance_receipts_merge_losslessly_and_idempotently() {
+    let temp = TempDir::new().unwrap();
+    let target_path = temp.path().join("target-sessions.db");
+    let source_path = temp.path().join("source-sessions.db");
+    let target_input_path = temp.path().join("target-input-sessions.db");
+    let source_json = serde_json::to_string(&migration_source()).unwrap();
+    let scope_json = serde_json::to_string(&ObservationScopeV1::Profile).unwrap();
     let target = GlobalDb::open_at_without_structured_backfill(&target_path)
         .await
         .unwrap();
-    persist_migration_observation(
-        &target,
-        migration_observation(0, 10, "receipt.migration.target", "target-message"),
-        None,
-    )
-    .await;
-    let wrong_cursor = migration_cursor_for("session.migration.wrong", 10);
     target
         .conn()
         .execute(
-            "UPDATE source_cursors SET cursor_json=?1",
-            libsql::params![serde_json::to_string(&wrong_cursor).unwrap()],
+            "INSERT INTO source_cursor_advances(
+                 source_json, scope_json, file_generation,
+                 start_offset, end_offset, reason
+             ) VALUES (?1, ?2, '17', '0', '5', 'blank_frame')",
+            libsql::params![source_json.as_str(), scope_json.as_str()],
         )
         .await
         .unwrap();
     target.checkpoint().await;
     target.close();
-
     let source = GlobalDb::open_at_without_structured_backfill(&source_path)
+        .await
+        .unwrap();
+    let receipt = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new("receipt.cursor.consolidation").unwrap(),
+            ComponentVersion::new("sanitizer.migration-test.v1").unwrap(),
+        )
+        .unwrap(),
+        SanitizerDispositionV1::Rejected,
+        SensitivityV1::Sensitive,
+        None,
+    )
+    .unwrap();
+    let receipt_json = serde_json::to_string(&receipt).unwrap();
+    source
+        .conn()
+        .execute(
+            "INSERT INTO sanitization_receipts(
+                 receipt_id, sanitizer_version, payload_digest, receipt_json
+             ) VALUES ('receipt.cursor.consolidation',
+                       'sanitizer.migration-test.v1', '', ?1)",
+            libsql::params![receipt_json.as_str()],
+        )
+        .await
+        .unwrap();
+    source
+        .conn()
+        .execute(
+            "INSERT INTO source_cursor_advances(
+                 source_json, scope_json, file_generation,
+                 start_offset, end_offset, reason, receipt_id
+             ) VALUES (?1, ?2, '17', '5', '10', 'sanitizer_rejected',
+                       'receipt.cursor.consolidation')",
+            libsql::params![source_json.as_str(), scope_json.as_str()],
+        )
         .await
         .unwrap();
     source.checkpoint().await;
     source.close();
+
+    let offsets = sqlite::plan_session_offsets(&target_path, &source_path)
+        .await
+        .unwrap();
+    copy_sqlite_family_exact(&target_path, &target_input_path).unwrap();
+    for _ in 0..2 {
+        sqlite::merge_sessions(
+            &target_path,
+            &source_path,
+            &target_input_path,
+            "proj_source",
+            &offsets,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        sqlite::count_rows(&target_path, "source_cursor_advances")
+            .await
+            .unwrap(),
+        2
+    );
+    let target = GlobalDb::open_at_without_structured_backfill(&target_path)
+        .await
+        .unwrap();
+    let mut rows = target
+        .conn()
+        .query(
+            "SELECT receipt_json FROM sanitization_receipts
+             WHERE receipt_id = 'receipt.cursor.consolidation'",
+            (),
+        )
+        .await
+        .unwrap();
+    let stored: SanitizationReceiptV1 = serde_json::from_str(
+        &rows
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored, receipt);
+}
+
+#[tokio::test]
+async fn source_cursor_advance_identity_collision_rolls_back_merge() {
+    let temp = TempDir::new().unwrap();
+    let target_path = temp.path().join("target-sessions.db");
+    let source_path = temp.path().join("source-sessions.db");
+    let target_input_path = temp.path().join("target-input-sessions.db");
+    let source_json = serde_json::to_string(&migration_source()).unwrap();
+    let scope_json = serde_json::to_string(&ObservationScopeV1::Profile).unwrap();
+    for (path, reason) in [
+        (&target_path, "blank_frame"),
+        (&source_path, "out_of_scope"),
+    ] {
+        let db = GlobalDb::open_at_without_structured_backfill(path)
+            .await
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO source_cursor_advances(
+                     source_json, scope_json, file_generation,
+                     start_offset, end_offset, reason
+                 ) VALUES (?1, ?2, '17', '0', '5', ?3)",
+                libsql::params![source_json.as_str(), scope_json.as_str(), reason],
+            )
+            .await
+            .unwrap();
+        db.checkpoint().await;
+        db.close();
+    }
+
     let offsets = sqlite::plan_session_offsets(&target_path, &source_path)
         .await
         .unwrap();
@@ -3074,10 +3308,11 @@ async fn malformed_target_only_cursor_fails_before_consolidation_mutation() {
     assert!(
         error
             .to_string()
-            .contains("cursor authority does not match its storage key")
+            .contains("source cursor advance identity collision"),
+        "{error}"
     );
     assert_eq!(
-        sqlite::count_rows(&target_path, "observations")
+        sqlite::count_rows(&target_path, "source_cursor_advances")
             .await
             .unwrap(),
         1
@@ -3085,7 +3320,193 @@ async fn malformed_target_only_cursor_fails_before_consolidation_mutation() {
 }
 
 #[tokio::test]
-async fn unrepresentable_projection_alias_fails_before_consolidation_mutation() {
+async fn post_merge_projection_verification_rolls_back_transaction() {
+    let temp = TempDir::new().unwrap();
+    let target_path = temp.path().join("target-sessions.db");
+    let source_path = temp.path().join("source-sessions.db");
+    let target_input_path = temp.path().join("target-input-sessions.db");
+    let target = GlobalDb::open_at_without_structured_backfill(&target_path)
+        .await
+        .unwrap();
+    persist_migration_observation(
+        &target,
+        migration_observation_for(
+            "session.migration.rollback",
+            "receipt.migration.rollback",
+            "rollback-message",
+            "rollback body",
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(project_all_migration_observations(&target).await, 1);
+    let mut rows = target
+        .conn()
+        .query(
+            "SELECT output_digest FROM observation_projection_provenance",
+            (),
+        )
+        .await
+        .unwrap();
+    let original_digest = rows
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap();
+    drop(rows);
+    target
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER corrupt_consolidated_projection_test
+             AFTER INSERT ON observation_projection_provenance BEGIN
+                 UPDATE observation_projection_provenance
+                 SET output_digest = 'sha256:corrupt'
+                 WHERE projector_version = NEW.projector_version
+                   AND observation_id = NEW.observation_id;
+             END;",
+        )
+        .await
+        .unwrap();
+    target.checkpoint().await;
+    target.close();
+    let source = GlobalDb::open_at_without_structured_backfill(&source_path)
+        .await
+        .unwrap();
+    source.checkpoint().await;
+    source.close();
+
+    let offsets = sqlite::plan_session_offsets(&target_path, &source_path)
+        .await
+        .unwrap();
+    copy_sqlite_family_exact(&target_path, &target_input_path).unwrap();
+    let error = sqlite::merge_sessions(
+        &target_path,
+        &source_path,
+        &target_input_path,
+        "proj_source",
+        &offsets,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("destination projection provenance differs"),
+        "{error}"
+    );
+
+    let raw = libsql::Builder::new_local(&target_path)
+        .build()
+        .await
+        .unwrap();
+    let conn = raw.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT output_digest FROM observation_projection_provenance",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        original_digest
+    );
+}
+
+#[tokio::test]
+async fn malformed_target_only_cursor_fails_before_consolidation_mutation() {
+    let temp = TempDir::new().unwrap();
+    let target_path = temp.path().join("target-sessions.db");
+    let source_path = temp.path().join("source-sessions.db");
+    let target = GlobalDb::open_at_without_structured_backfill(&target_path)
+        .await
+        .unwrap();
+    persist_migration_observation(
+        &target,
+        migration_observation(0, 10, "receipt.migration.target", "target-message"),
+        None,
+    )
+    .await;
+    let wrong_cursor = migration_cursor_for("session.migration.wrong", 10);
+    let wrong_cursor_json = serde_json::to_string(&wrong_cursor).unwrap();
+    target
+        .conn()
+        .execute(
+            "UPDATE source_cursors SET cursor_json=?1",
+            libsql::params![wrong_cursor_json.clone()],
+        )
+        .await
+        .unwrap();
+    target.checkpoint().await;
+    target.close();
+
+    let source = GlobalDb::open_at_without_structured_backfill(&source_path)
+        .await
+        .unwrap();
+    source.checkpoint().await;
+    source.close();
+    let before = (
+        sqlite::count_rows(&target_path, "sanitization_receipts")
+            .await
+            .unwrap(),
+        sqlite::count_rows(&target_path, "observations")
+            .await
+            .unwrap(),
+        sqlite::count_rows(&target_path, "source_cursors")
+            .await
+            .unwrap(),
+    );
+    let error = sqlite::plan_session_offsets(&target_path, &source_path)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("source cursor authority keys disagree with cursor JSON")
+    );
+    assert_eq!(
+        (
+            sqlite::count_rows(&target_path, "sanitization_receipts")
+                .await
+                .unwrap(),
+            sqlite::count_rows(&target_path, "observations")
+                .await
+                .unwrap(),
+            sqlite::count_rows(&target_path, "source_cursors")
+                .await
+                .unwrap(),
+        ),
+        before
+    );
+    let raw = libsql::Builder::new_local(&target_path)
+        .build()
+        .await
+        .unwrap();
+    let conn = raw.connect().unwrap();
+    let mut rows = conn
+        .query("SELECT cursor_json FROM source_cursors", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        wrong_cursor_json
+    );
+}
+
+#[tokio::test]
+async fn projection_alias_represents_source_output_collision() {
     let temp = TempDir::new().unwrap();
     let target_path = temp.path().join("target-sessions.db");
     let source_path = temp.path().join("source-sessions.db");
@@ -3116,7 +3537,12 @@ async fn unrepresentable_projection_alias_fails_before_consolidation_mutation() 
         .unwrap();
     persist_migration_observation(&source, source_observation, None).await;
     assert_eq!(project_all_migration_observations(&source).await, 1);
-    insert_projection_alias(&source, &observation_id, "source-output").await;
+    insert_projection_alias(
+        &source,
+        &observation_id,
+        "consolidated/fixture/alias-conflict-message",
+    )
+    .await;
     source.checkpoint().await;
     source.close();
 
@@ -3124,7 +3550,7 @@ async fn unrepresentable_projection_alias_fails_before_consolidation_mutation() 
         .await
         .unwrap();
     copy_sqlite_family_exact(&target_path, &target_input_path).unwrap();
-    let error = sqlite::merge_sessions(
+    sqlite::merge_sessions(
         &target_path,
         &source_path,
         &target_input_path,
@@ -3132,13 +3558,102 @@ async fn unrepresentable_projection_alias_fails_before_consolidation_mutation() 
         &offsets,
     )
     .await
-    .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("projection output collision cannot be represented")
+    .unwrap();
+    assert_projection_alias(
+        &target_path,
+        &observation_id,
+        "consolidated/fixture/alias-conflict-message",
+    )
+    .await;
+    assert_message_text(&target_path, "alias-conflict-message", "target alias body").await;
+    assert_message_absent(&target_path, "consolidated/fixture/alias-conflict-message").await;
+
+    let merged = GlobalDb::open_at_without_structured_backfill(&target_path)
+        .await
+        .unwrap();
+    assert_eq!(project_all_migration_observations(&merged).await, 2);
+    merged.close();
+    assert_message_text(
+        &target_path,
+        "consolidated/fixture/alias-conflict-message",
+        "source alias body",
+    )
+    .await;
+    assert_no_orphaned_projection_provenance(&target_path).await;
+}
+
+#[tokio::test]
+async fn inconsistent_projection_alias_fails_authority_preflight_without_target_mutation() {
+    let temp = TempDir::new().unwrap();
+    let target_path = temp.path().join("target-sessions.db");
+    let source_path = temp.path().join("source-sessions.db");
+    let observation = migration_observation_for(
+        "session.migration.invalid-alias",
+        "receipt.migration.invalid-alias",
+        "invalid-alias-message",
+        "invalid alias body",
     );
-    assert_no_projection_alias(&target_path, &observation_id).await;
+    let observation_id = observation.observation_id().as_str().to_owned();
+
+    let target = GlobalDb::open_at_without_structured_backfill(&target_path)
+        .await
+        .unwrap();
+    target.checkpoint().await;
+    target.close();
+    let source = GlobalDb::open_at_without_structured_backfill(&source_path)
+        .await
+        .unwrap();
+    persist_migration_observation(&source, observation, None).await;
+    assert_eq!(project_all_migration_observations(&source).await, 1);
+    source
+        .conn()
+        .execute(
+            "INSERT INTO observation_projection_aliases(
+                 projector_version, observation_id, output_provider, output_message_id
+             ) VALUES ('claude-session-message-v1', ?1, 'claude', ?2)",
+            libsql::params![observation_id, "consolidated/fixture/invalid-alias-message"],
+        )
+        .await
+        .unwrap();
+    source.checkpoint().await;
+    source.close();
+
+    let before = (
+        sqlite::count_rows(&target_path, "observations")
+            .await
+            .unwrap(),
+        sqlite::count_rows(&target_path, "observation_projection_provenance")
+            .await
+            .unwrap(),
+        sqlite::count_rows(&target_path, "session_messages")
+            .await
+            .unwrap(),
+    );
+    let error = sqlite::plan_session_offsets(&target_path, &source_path)
+        .await
+        .unwrap_err();
+    let crate::errors::TraceDecayError::Database { message, operation } = error else {
+        panic!("authority preflight must return a typed database error");
+    };
+    assert_eq!(operation, "ensure global database authority invariants");
+    assert_eq!(
+        message,
+        "projection provenance disagrees with deterministic output"
+    );
+    assert_eq!(
+        (
+            sqlite::count_rows(&target_path, "observations")
+                .await
+                .unwrap(),
+            sqlite::count_rows(&target_path, "observation_projection_provenance")
+                .await
+                .unwrap(),
+            sqlite::count_rows(&target_path, "session_messages")
+                .await
+                .unwrap(),
+        ),
+        before
+    );
 }
 
 fn migration_source() -> ClaudeSourceIdentityV1 {
@@ -3555,6 +4070,10 @@ async fn insert_projection_alias(db: &GlobalDb, observation_id: &str, output_mes
         )
         .await
         .unwrap();
+    GlobalDbObservationStore::new(db)
+        .rebuild_projection(0)
+        .await
+        .unwrap();
 }
 
 async fn unknown_tables(path: &Path, classify: fn(&str) -> Option<&'static str>) -> Vec<String> {
@@ -3630,11 +4149,15 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
         | "session_messages"
         | "session_schema_migrations"
         | "sessions"
+        | "source_cursor_advances"
         | "source_cursors"
         | "turns"
         | "workflow_agents"
         | "workflow_index_meta"
         | "workflow_runs" => Some("merged"),
+        "authority_audit_checkpoints" | "global_schema_migrations" => {
+            Some("target-local schema ledger")
+        }
         "observation_projection_checkpoints" | "projection_queue" => Some("derived/rebuilt"),
         "code_projects" | "graph_scopes" | "project_aliases" | "store_artifacts"
         | "store_instances" => Some("rejected registry-only"),

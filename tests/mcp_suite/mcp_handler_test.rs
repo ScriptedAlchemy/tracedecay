@@ -6650,6 +6650,32 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     );
     // journal_mode pragma should be readable on a libsql connection.
     assert!(db["journal_mode"].is_string() || db["journal_mode"].is_null());
+    assert!(db.get("authority_audit_ok").is_none());
+    assert!(db.get("authority_audit_error").is_none());
+}
+
+#[tokio::test]
+async fn test_runtime_snapshot_runs_authority_audit_only_when_requested() {
+    let (cg, _dir) = setup_project().await;
+    let registry_dir = test_temp_dir();
+    let registry = GlobalDb::open_at(&registry_dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let result = tracedecay::mcp::tools::handle_tool_call_with_registry(
+        &cg,
+        "tracedecay_runtime",
+        json!({ "authority_audit": true, "format": "json" }),
+        None,
+        None,
+        Some(&registry),
+        false,
+    )
+    .await
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let db = &parsed["database"];
+    assert_eq!(db["authority_audit_ok"], true);
+    assert!(db["authority_audit_error"].is_null());
 }
 
 /// Issue #82: `details=true` must surface raw counts + interpretation per

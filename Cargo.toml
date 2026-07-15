@@ -119,7 +119,7 @@ tree-sitter-language = "0.1"
 # crates are pulled in and no external `ast-grep` binary is required. Pinned to
 # tree-sitter ^0.26.3, ABI-compatible with the 0.26 grammars this repo builds.
 ast-grep-core = "0.44"
-tracedecay-domain = { path = "crates/tracedecay-domain" }
+tracedecay-domain = { path = "crates/tracedecay-domain", version = "0.1.0" }
 tracedecay-store = { path = "crates/tracedecay-store", version = "0.1.0" }
 tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", version = "0.2.0", optional = true }
 tracedecay-large-treesitters = { package = "tokensave-large-treesitters", version = "0.5.0", optional = true }
@@ -184,6 +184,9 @@ criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 # sleeps.
 tokio = { version = "1", features = ["full", "test-util"] }
 jsonschema = { version = "0.46.8", default-features = false }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
 
 [[bench]]
 name = "large_repos"

@@ -26,17 +26,19 @@
 //!   `session-store.db`). `position` is the last-seen `rowid`; we select rows
 //!   with a greater `rowid`.
 //!
-//! All three are fail-open: any I/O or parse error yields "nothing new" rather
-//! than propagating, so ingestion never blocks an agent. Shared cursor/title/
-//! content helpers live in [`crate::sessions::shared`] so the Hermes `SQLite`
-//! sweep can reuse them without importing from this driver module.
+//! Source I/O and parse misses remain fail-open, but authoritative store errors
+//! propagate so catch-up cannot report stale data as a successful zero-work
+//! pass. Shared cursor/title/content helpers live in
+//! [`crate::sessions::shared`] so the Hermes `SQLite` sweep can reuse them
+//! without importing from this driver module.
 
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tracedecay_store::{ParseOffset, TranscriptWriteBatch};
+use thiserror::Error;
+use tracedecay_store::{ParseOffset, TranscriptStoreError, TranscriptWriteBatch};
 
 use crate::global_db::GlobalDb;
 pub use crate::sessions::shared::{NewRows, StoredCursor, TranscriptIngestStats};
@@ -48,6 +50,56 @@ pub(crate) use crate::sessions::shared::{
 };
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 use crate::store::{GlobalDbTranscriptStore, TranscriptIngestStore};
+
+pub type TranscriptIngestResult<T> = Result<T, TranscriptIngestError>;
+
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum TranscriptIngestError {
+    #[error(transparent)]
+    Store(#[from] TranscriptStoreError),
+    #[error("transcript scan failed to {operation} {path}")]
+    ScanIo {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("transcript changed generation while scanning {path}")]
+    ScanGenerationChanged { path: PathBuf },
+    #[error(transparent)]
+    Privacy(#[from] crate::privacy::PrivacySanitizerError),
+    #[error(transparent)]
+    Domain(#[from] tracedecay_domain::DomainError),
+    #[error(transparent)]
+    ObservationContract(#[from] tracedecay_domain::ObservationContractError),
+    #[error("{provider} record at {offset}..{end_offset} is non-durable: {reason}")]
+    NonDurableRecord {
+        provider: &'static str,
+        offset: u64,
+        end_offset: u64,
+        reason: &'static str,
+    },
+    #[error("{provider} frame state is invalid")]
+    InvalidFrameState { provider: &'static str },
+    #[error("{provider} transcript has no injective source identity: {path}")]
+    InvalidSourceIdentity {
+        provider: &'static str,
+        path: PathBuf,
+    },
+    #[error("transcript cursor key mismatch: expected {expected}, found {actual}")]
+    CursorKeyMismatch { expected: String, actual: String },
+}
+
+impl TranscriptIngestError {
+    fn scan_io(operation: &'static str, path: &Path, source: std::io::Error) -> Self {
+        Self::ScanIo {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+}
 
 fn log_source_skip(path: &Path, action: &'static str, error: &impl std::fmt::Display) {
     tracing::debug!(
@@ -173,10 +225,10 @@ pub(crate) struct LoadedTranscriptCursor {
 pub(crate) async fn load_transcript_cursor<S: TranscriptIngestStore>(
     store: &S,
     key: TranscriptCursorKey,
-) -> Option<LoadedTranscriptCursor> {
-    let durable_offset = store.get_parse_offset(&key.store_path()).await.ok()?;
+) -> TranscriptIngestResult<LoadedTranscriptCursor> {
+    let durable_offset = store.get_parse_offset(&key.store_path()).await?;
     let legacy_offset = if let Some(legacy_path) = key.legacy_path() {
-        Some(store.get_parse_offset(legacy_path).await.ok()?)
+        Some(store.get_parse_offset(legacy_path).await?)
     } else {
         None
     };
@@ -184,7 +236,7 @@ pub(crate) async fn load_transcript_cursor<S: TranscriptIngestStore>(
     // native paths may share that alias. Replay once into the injective key,
     // then keep mirroring the legacy cursor for health compatibility.
     let effective = durable_offset;
-    Some(LoadedTranscriptCursor {
+    Ok(LoadedTranscriptCursor {
         checkpoint: TranscriptCursorCheckpoint {
             key,
             state: StoredCursor {
@@ -236,10 +288,24 @@ pub trait TranscriptSource: Send + Sync {
         project_root: &Path,
         max_new_bytes: Option<u64>,
     ) -> Option<ParsedTranscript>;
+
+    /// Fallible parse boundary used by production ingestion. Legacy adapters
+    /// inherit their existing fail-open `Option` behavior; adapters with typed
+    /// scanner failures override this method.
+    fn try_parse_new(
+        &self,
+        path: &Path,
+        prev: StoredCursor,
+        project_root: &Path,
+        max_new_bytes: Option<u64>,
+    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
+        Ok(self.parse_new(path, prev, project_root, max_new_bytes))
+    }
 }
 
 /// Drive a single source to completion against `db`, ingesting every transcript
-/// it locates for `project_root`. Fail-open: per-file errors are swallowed.
+/// it locates for `project_root`. Source parse misses are skipped; authoritative
+/// store failures abort the pass.
 ///
 /// `max_new_bytes` bounds how much newly-appended content a byte-offset source
 /// will read in one call (used to keep per-prompt hot paths inside budget);
@@ -254,6 +320,19 @@ pub async fn ingest_source(
     ingest_source_with_store(&store, source, project_root, max_new_bytes).await
 }
 
+/// Fallible production boundary for [`ingest_source`].
+pub async fn try_ingest_source(
+    db: &GlobalDb,
+    source: &dyn TranscriptSource,
+    project_root: &Path,
+    max_new_bytes: Option<u64>,
+) -> TranscriptIngestResult<TranscriptIngestStats> {
+    let store = GlobalDbTranscriptStore::new(db);
+    try_ingest_source_with_store(&store, source, project_root, max_new_bytes).await
+}
+
+/// Compatibility boundary for in-crate adapters that do not expose failures.
+#[allow(dead_code)]
 pub(crate) async fn ingest_source_with_store<S: TranscriptIngestStore>(
     store: &S,
     source: &dyn TranscriptSource,
@@ -262,9 +341,33 @@ pub(crate) async fn ingest_source_with_store<S: TranscriptIngestStore>(
 ) -> TranscriptIngestStats {
     let mut stats = TranscriptIngestStats::default();
     for path in source.transcript_paths(project_root) {
-        stats = stats.merge(ingest_one(store, source, &path, project_root, max_new_bytes).await);
+        match ingest_one(store, source, &path, project_root, max_new_bytes).await {
+            Ok(path_stats) => stats = stats.merge(path_stats),
+            Err(error) => {
+                tracing::error!(
+                    provider = source.provider(),
+                    project_root = %project_root.display(),
+                    transcript_path = %path.display(),
+                    error = %error,
+                    "transcript ingest failed"
+                );
+            }
+        }
     }
     stats
+}
+
+pub(crate) async fn try_ingest_source_with_store<S: TranscriptIngestStore>(
+    store: &S,
+    source: &dyn TranscriptSource,
+    project_root: &Path,
+    max_new_bytes: Option<u64>,
+) -> TranscriptIngestResult<TranscriptIngestStats> {
+    let mut stats = TranscriptIngestStats::default();
+    for path in source.transcript_paths(project_root) {
+        stats = stats.merge(ingest_one(store, source, &path, project_root, max_new_bytes).await?);
+    }
+    Ok(stats)
 }
 
 /// Ingest one transcript file: load the prior durable cursor through the store
@@ -277,13 +380,12 @@ async fn ingest_one<S: TranscriptIngestStore>(
     path: &Path,
     project_root: &Path,
     max_new_bytes: Option<u64>,
-) -> TranscriptIngestStats {
-    let Some(loaded) = load_transcript_cursor(store, source.cursor_key(path)).await else {
-        return TranscriptIngestStats::default();
-    };
+) -> TranscriptIngestResult<TranscriptIngestStats> {
+    let loaded = load_transcript_cursor(store, source.cursor_key(path)).await?;
     let previous = loaded.checkpoint.clone();
-    let Some(parsed) = source.parse_new(path, previous.state, project_root, max_new_bytes) else {
-        return TranscriptIngestStats::default();
+    let Some(parsed) = source.try_parse_new(path, previous.state, project_root, max_new_bytes)?
+    else {
+        return Ok(TranscriptIngestStats::default());
     };
     persist_parsed_transcript(
         store,
@@ -303,18 +405,17 @@ async fn ingest_one<S: TranscriptIngestStore>(
 pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     store: &S,
     provider: &'static str,
-    path: &Path,
+    _path: &Path,
     project_root: &Path,
     loaded: LoadedTranscriptCursor,
     expected_previous: &TranscriptCursorCheckpoint,
     parsed: ParsedTranscript,
-) -> TranscriptIngestStats {
+) -> TranscriptIngestResult<TranscriptIngestStats> {
     if loaded.checkpoint.key != expected_previous.key {
-        tracing::debug!(
-            transcript_path = %path.display(),
-            "rejected transcript batch with mismatched typed cursor"
-        );
-        return TranscriptIngestStats::default();
+        return Err(TranscriptIngestError::CursorKeyMismatch {
+            expected: expected_previous.key.durable_text(),
+            actual: loaded.checkpoint.key.durable_text(),
+        });
     }
 
     let cursor_key = loaded.checkpoint.key;
@@ -334,28 +435,10 @@ pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
         }
     };
     if parsed.messages.is_empty() {
-        let batch =
-            match TranscriptWriteBatch::advance_offset(cursor_path, durable_offset, next_offset) {
-                Ok(batch) => batch,
-                Err(error) => {
-                    tracing::debug!(
-                        transcript_path = %path.display(),
-                        error = %error,
-                        "rejected invalid transcript offset batch"
-                    );
-                    return TranscriptIngestStats::default();
-                }
-            };
-        if let Err(error) = store.persist_transcript_batch(batch).await {
-            tracing::debug!(
-                transcript_path = %path.display(),
-                error = %error,
-                "failed to persist parsed-empty transcript cursor"
-            );
-            return TranscriptIngestStats::default();
-        }
-        mirror_legacy_cursor(store, path, &cursor_key, legacy_offset, next_offset).await;
-        return TranscriptIngestStats::default();
+        let batch = TranscriptWriteBatch::advance_offset(cursor_path, durable_offset, next_offset)?;
+        store.persist_transcript_batch(batch).await?;
+        mirror_legacy_cursor(store, &cursor_key, legacy_offset, next_offset).await?;
+        return Ok(TranscriptIngestStats::default());
     }
 
     let commit_records =
@@ -363,9 +446,7 @@ pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     let span_observations =
         crate::sessions::git_correlation::ingest_span_observations(&parsed.messages);
     let draft = parsed.draft;
-    let Ok(existing) = store.get_session(provider, &draft.session_id).await else {
-        return TranscriptIngestStats::default();
-    };
+    let existing = store.get_session(provider, &draft.session_id).await?;
     let started_at = existing
         .as_ref()
         .and_then(|session| session.started_at)
@@ -387,26 +468,34 @@ pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
         .chain(parsed_ended_at)
         .max();
 
-    let preserve = is_backfill.then_some(existing.as_ref()).flatten();
-    let project_key = preserve
+    let project_key = existing
+        .as_ref()
         .map(|session| session.project_key.clone())
         .unwrap_or(draft.project_key);
-    let project_path = preserve
+    let project_path = existing
+        .as_ref()
         .map(|session| session.project_path.clone())
         .unwrap_or(draft.project_path);
-    let metadata_json = preserve
-        .map(|session| session.metadata_json.clone())
-        .unwrap_or(draft.metadata_json);
-    let parent_session_id = preserve
-        .map(|session| session.parent_session_id.clone())
-        .unwrap_or(draft.parent_session_id);
-    let is_subagent = preserve.map_or(draft.is_subagent, |session| session.is_subagent);
-    let agent_id = preserve
-        .map(|session| session.agent_id.clone())
-        .unwrap_or(draft.agent_id);
-    let parent_tool_use_id = preserve
-        .map(|session| session.parent_tool_use_id.clone())
-        .unwrap_or(draft.parent_tool_use_id);
+    let metadata_json = merge_session_metadata(
+        existing
+            .as_ref()
+            .and_then(|session| session.metadata_json.as_deref()),
+        draft.metadata_json,
+    );
+    let parent_session_id = existing
+        .as_ref()
+        .and_then(|session| session.parent_session_id.clone())
+        .or(draft.parent_session_id);
+    let is_subagent =
+        existing.as_ref().is_some_and(|session| session.is_subagent) || draft.is_subagent;
+    let agent_id = existing
+        .as_ref()
+        .and_then(|session| session.agent_id.clone())
+        .or(draft.agent_id);
+    let parent_tool_use_id = existing
+        .as_ref()
+        .and_then(|session| session.parent_tool_use_id.clone())
+        .or(draft.parent_tool_use_id);
 
     let session = SessionRecord {
         provider: provider.to_string(),
@@ -425,494 +514,120 @@ pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     };
 
     let messages_upserted = parsed.messages.len() as u64;
-    let batch = match TranscriptWriteBatch::upsert_with_cursor(
+    let batch = TranscriptWriteBatch::upsert_with_cursor(
         cursor_path,
         session,
         parsed.messages,
         durable_offset,
         next_offset,
-    ) {
-        Ok(batch) => batch,
-        Err(error) => {
-            tracing::debug!(
-                transcript_path = %path.display(),
-                error = %error,
-                "rejected invalid transcript batch"
-            );
-            return TranscriptIngestStats::default();
-        }
-    };
-    if let Err(error) = store
+    )?;
+    store
         .persist_transcript_batch_with_git_evidence(batch, &commit_records, &span_observations)
-        .await
-    {
-        tracing::debug!(
-            transcript_path = %path.display(),
-            error = %error,
-            "failed to persist transcript batch"
-        );
-        return TranscriptIngestStats::default();
-    }
-    mirror_legacy_cursor(store, path, &cursor_key, legacy_offset, next_offset).await;
-    TranscriptIngestStats {
+        .await?;
+    mirror_legacy_cursor(store, &cursor_key, legacy_offset, next_offset).await?;
+    Ok(TranscriptIngestStats {
         sessions_upserted: 1,
         messages_upserted,
+    })
+}
+
+fn merge_session_metadata(existing: Option<&str>, incoming: Option<String>) -> Option<String> {
+    let previous = existing.and_then(|value| serde_json::from_str::<Value>(value).ok());
+    let next = incoming
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok());
+    match (previous, next) {
+        (Some(Value::Object(mut previous)), Some(Value::Object(next))) => {
+            for (key, value) in next {
+                if matches!(key.as_str(), "pr_links" | "edited_files")
+                    && let Some(Value::Array(existing_values)) = previous.get_mut(&key)
+                {
+                    if let Value::Array(incoming_values) = value {
+                        merge_session_metadata_rollup(&key, existing_values, incoming_values);
+                    }
+                    continue;
+                }
+                previous.entry(key).or_insert(value);
+            }
+            Some(Value::Object(previous).to_string())
+        }
+        (_, Some(next)) => Some(next.to_string()),
+        (Some(previous), None) => Some(previous.to_string()),
+        (None, None) => incoming.or_else(|| existing.map(str::to_string)),
     }
 }
+
+fn merge_session_metadata_rollup(key: &str, existing: &mut Vec<Value>, incoming: Vec<Value>) {
+    for value in incoming {
+        if !existing
+            .iter()
+            .any(|current| session_metadata_rollup_items_match(key, current, &value))
+        {
+            existing.push(value);
+        }
+    }
+}
+
+fn session_metadata_rollup_items_match(key: &str, left: &Value, right: &Value) -> bool {
+    match key {
+        "pr_links" => {
+            let left_identity = (left.get("pr_url"), left.get("pr_number"));
+            let right_identity = (right.get("pr_url"), right.get("pr_number"));
+            if left_identity.0.is_none()
+                && left_identity.1.is_none()
+                && right_identity.0.is_none()
+                && right_identity.1.is_none()
+            {
+                left == right
+            } else {
+                left_identity == right_identity
+            }
+        }
+        "edited_files" => match (left.get("path"), right.get("path")) {
+            (Some(left_path), Some(right_path)) => left_path == right_path,
+            _ => left == right,
+        },
+        _ => left == right,
+    }
+}
+
 async fn mirror_legacy_cursor<S: TranscriptIngestStore>(
     store: &S,
-    transcript_path: &Path,
     cursor_key: &TranscriptCursorKey,
     legacy_offset: Option<ParseOffset>,
     next_offset: ParseOffset,
-) {
+) -> TranscriptIngestResult<()> {
     let (Some(legacy_path), Some(legacy_offset)) = (cursor_key.legacy_path(), legacy_offset) else {
-        return;
+        return Ok(());
     };
     if legacy_offset == next_offset {
-        return;
+        return Ok(());
     }
-    let batch = match TranscriptWriteBatch::advance_offset(
+    let batch = TranscriptWriteBatch::advance_offset(
         legacy_path.to_path_buf(),
         legacy_offset,
         next_offset,
-    ) {
-        Ok(batch) => batch,
-        Err(error) => {
-            tracing::debug!(
-                transcript_path = %transcript_path.display(),
-                error = %error,
-                "rejected legacy transcript cursor mirror"
-            );
-            return;
-        }
-    };
-    if let Err(error) = store.persist_transcript_batch(batch).await {
-        tracing::debug!(
-            transcript_path = %transcript_path.display(),
-            error = %error,
-            "failed to mirror legacy transcript cursor"
-        );
-    }
+    )?;
+    store.persist_transcript_batch(batch).await?;
+    Ok(())
 }
 
-/// One newly-read JSONL line: its exact byte range and decoded value.
-pub struct JsonlLine {
-    pub offset: i64,
-    pub end_offset: i64,
-    pub value: Value,
-}
+mod jsonl;
 
-/// New JSONL content read from a file, plus the advanced cursor.
-pub struct NewJsonl {
-    pub lines: Vec<JsonlLine>,
-    /// First byte covered by this scan after generation/reset checks.
-    pub start_offset: u64,
-    pub new_cursor: StoredCursor,
-}
-
-/// Why strict JSONL framing stopped before consuming the next record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum JsonlFrameDeferral {
-    Partial {
-        offset: u64,
-    },
-    Malformed {
-        offset: u64,
-    },
-    Oversized {
-        offset: u64,
-    },
-    Backlog {
-        offset: u64,
-        unread_bytes: u64,
-        max_new_bytes: u64,
-    },
-}
-
-impl JsonlFrameDeferral {
-    pub(crate) fn offset(self) -> u64 {
-        match self {
-            Self::Partial { offset }
-            | Self::Malformed { offset }
-            | Self::Oversized { offset }
-            | Self::Backlog { offset, .. } => offset,
-        }
-    }
-
-    pub(crate) fn reason_code(self) -> &'static str {
-        match self {
-            Self::Partial { .. } => "partial_jsonl_frame",
-            Self::Malformed { .. } => "malformed_jsonl_frame",
-            Self::Oversized { .. } => "oversized_jsonl_frame",
-            Self::Backlog { .. } => "jsonl_backlog_limit",
-        }
-    }
-}
-
-pub(crate) const MAX_JSONL_RECORD_BYTES: usize = 16 * 1024 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RawJsonlFrame {
-    Eof,
-    Complete { byte_len: u64 },
-    Partial { byte_len: u64 },
-    Oversized { byte_len: u64, terminated: bool },
-}
-
-/// Bounded raw JSONL framing shared by skip and defer policies.
-///
-/// The retained record buffer never exceeds `max_record_bytes`. Oversized
-/// frames are drained in-place so legacy callers can skip complete records and
-/// continue without allocating or parsing them.
-pub(crate) struct RawJsonlFrameReader<R> {
-    reader: R,
-    record: Vec<u8>,
-    max_record_bytes: usize,
-}
-
-impl<R: BufRead> RawJsonlFrameReader<R> {
-    pub(crate) fn new(reader: R, max_record_bytes: usize) -> Self {
-        Self {
-            reader,
-            record: Vec::new(),
-            max_record_bytes,
-        }
-    }
-
-    pub(crate) fn record(&self) -> &[u8] {
-        &self.record
-    }
-
-    pub(crate) fn next_frame(&mut self) -> std::io::Result<RawJsonlFrame> {
-        self.record.clear();
-        let mut byte_len = 0_u64;
-        let mut oversized = false;
-
-        loop {
-            let available = self.reader.fill_buf()?;
-            if available.is_empty() {
-                return Ok(if byte_len == 0 {
-                    RawJsonlFrame::Eof
-                } else if oversized {
-                    RawJsonlFrame::Oversized {
-                        byte_len,
-                        terminated: false,
-                    }
-                } else {
-                    RawJsonlFrame::Partial { byte_len }
-                });
-            }
-
-            let newline = available.iter().position(|byte| *byte == b'\n');
-            let consumed = newline.map_or(available.len(), |index| index + 1);
-            if !oversized {
-                let retained =
-                    consumed.min(self.max_record_bytes.saturating_sub(self.record.len()));
-                self.record.extend_from_slice(&available[..retained]);
-                oversized = retained < consumed;
-            }
-            self.reader.consume(consumed);
-            byte_len = byte_len.saturating_add(consumed as u64);
-
-            if newline.is_some() {
-                return Ok(if oversized {
-                    RawJsonlFrame::Oversized {
-                        byte_len,
-                        terminated: true,
-                    }
-                } else {
-                    RawJsonlFrame::Complete { byte_len }
-                });
-            }
-        }
-    }
-}
-
-/// Strict framing result used by providers that must retry invalid records.
 #[cfg(test)]
-pub(crate) enum StrictJsonlOutcome {
-    Complete(NewJsonl),
-    Deferred {
-        parsed: NewJsonl,
-        reason: JsonlFrameDeferral,
-    },
-}
-
-#[derive(Clone, Copy)]
-enum MalformedJsonlPolicy {
-    Skip,
-    Defer,
-}
-
-/// **`ByteOffset`** reader for append-only JSONL.
-///
-/// Seeks to `prev.position` (when the file has only grown and its mtime has not
-/// regressed) and streams complete, newline-terminated lines, decoding each as
-/// JSON. Blank and undecodable lines still advance the offset (so they are not
-/// re-read) but are omitted from `lines`. A trailing line without a newline is a
-/// partial write and is left unconsumed for the next call.
-///
-/// Returns `None` when the file cannot be stat-ed/opened, or when
-/// `max_new_bytes` is set and the unread tail exceeds it (so a hot path can defer
-/// a large backlog to a lower-frequency caller without advancing the cursor).
-pub fn stream_new_jsonl(
-    path: &Path,
-    prev: StoredCursor,
-    max_new_bytes: Option<u64>,
-) -> Option<NewJsonl> {
-    let (parsed, deferred) = stream_new_jsonl_with_policy(
-        path,
-        prev,
-        max_new_bytes,
-        MalformedJsonlPolicy::Skip,
-        MAX_JSONL_RECORD_BYTES,
-    )?;
-    if matches!(deferred, Some(JsonlFrameDeferral::Backlog { .. })) {
-        None
-    } else {
-        Some(parsed)
-    }
-}
-
-/// Reads complete Claude-style JSONL frames without consuming an invalid one.
-///
-/// Valid records before the deferred frame are returned with a cursor ending
-/// at that frame's start, so they may commit without skipping the blocked
-/// suffix. `max_record_bytes` includes the terminating newline. Other providers
-/// retain [`stream_new_jsonl`]'s skip-and-advance behavior.
+pub(crate) use jsonl::try_stream_new_jsonl_raw_strict;
+pub(crate) use jsonl::{
+    JsonlFrameDeferral, JsonlResumeState, MAX_JSONL_RECORD_BYTES, RawJsonlFrame,
+    RawJsonlFrameReader, RawJsonlSkippedReason, STRICT_JSONL_BATCH_BYTES,
+    try_stream_new_jsonl_raw_strict_with_resume,
+};
+pub use jsonl::{JsonlLine, NewJsonl, stream_new_jsonl};
 #[cfg(test)]
-pub(crate) fn stream_new_jsonl_strict(
-    path: &Path,
-    prev: StoredCursor,
-    max_new_bytes: Option<u64>,
-    max_record_bytes: usize,
-) -> Option<StrictJsonlOutcome> {
-    let (parsed, reason) = stream_new_jsonl_with_policy(
-        path,
-        prev,
-        max_new_bytes,
-        MalformedJsonlPolicy::Defer,
-        max_record_bytes,
-    )?;
-    Some(match reason {
-        Some(reason) => StrictJsonlOutcome::Deferred { parsed, reason },
-        None => StrictJsonlOutcome::Complete(parsed),
-    })
-}
+use jsonl::{
+    MAX_JSONL_FRAMES_PER_BATCH, MalformedJsonlPolicy, StrictJsonlOutcome,
+    stream_new_jsonl_raw_strict, stream_new_jsonl_strict, stream_new_jsonl_with_policy,
+};
 
-fn stream_new_jsonl_with_policy(
-    path: &Path,
-    prev: StoredCursor,
-    max_new_bytes: Option<u64>,
-    malformed_policy: MalformedJsonlPolicy,
-    max_record_bytes: usize,
-) -> Option<(NewJsonl, Option<JsonlFrameDeferral>)> {
-    let mut raw = stream_new_jsonl_raw_with_policy(
-        path,
-        prev,
-        max_new_bytes,
-        malformed_policy,
-        max_record_bytes,
-    )?;
-    let mut lines = Vec::new();
-    let mut covered_through = raw.new_cursor.position;
-
-    for frame in raw.frames.drain(..) {
-        if frame.bytes.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        match serde_json::from_slice::<Value>(&frame.bytes) {
-            Ok(value) => lines.push(JsonlLine {
-                offset: frame.offset as i64,
-                end_offset: frame.end_offset as i64,
-                value,
-            }),
-            Err(error) => match malformed_policy {
-                MalformedJsonlPolicy::Skip => {
-                    log_jsonl_decode_skip(path, frame.offset, &error);
-                }
-                MalformedJsonlPolicy::Defer => {
-                    covered_through = frame.offset;
-                    raw.deferred = Some(JsonlFrameDeferral::Malformed {
-                        offset: frame.offset,
-                    });
-                    break;
-                }
-            },
-        }
-    }
-    raw.new_cursor.position = covered_through;
-
-    Some((
-        NewJsonl {
-            lines,
-            start_offset: raw.start_offset,
-            new_cursor: raw.new_cursor,
-        },
-        raw.deferred,
-    ))
-}
-
-/// One bounded, complete raw JSONL frame with its exact source byte range.
-pub(crate) struct RawJsonlRecord {
-    pub offset: u64,
-    pub end_offset: u64,
-    pub bytes: Vec<u8>,
-}
-
-/// Raw framing result. No JSON parser has inspected these bytes.
-pub(crate) struct RawNewJsonl {
-    pub frames: Vec<RawJsonlRecord>,
-    pub start_offset: u64,
-    pub new_cursor: StoredCursor,
-    pub deferred: Option<JsonlFrameDeferral>,
-}
-
-/// Strict bounded framing used by Claude's single-parse privacy boundary.
-pub(crate) fn stream_new_jsonl_raw_strict(
-    path: &Path,
-    prev: StoredCursor,
-    max_new_bytes: Option<u64>,
-    max_record_bytes: usize,
-) -> Option<RawNewJsonl> {
-    stream_new_jsonl_raw_with_policy(
-        path,
-        prev,
-        max_new_bytes,
-        MalformedJsonlPolicy::Defer,
-        max_record_bytes,
-    )
-}
-
-fn stream_new_jsonl_raw_with_policy(
-    path: &Path,
-    prev: StoredCursor,
-    max_new_bytes: Option<u64>,
-    oversized_policy: MalformedJsonlPolicy,
-    max_record_bytes: usize,
-) -> Option<RawNewJsonl> {
-    let meta = match std::fs::metadata(path) {
-        Ok(meta) => meta,
-        Err(error) => {
-            log_source_skip(path, "stat jsonl transcript", &error);
-            return None;
-        }
-    };
-    let file_size = meta.len();
-    let mtime = file_mtime_secs(&meta);
-    let file_id = stable_jsonl_file_id(path, &meta).unwrap_or(0);
-    let resume = should_resume_jsonl(prev, file_size, mtime, file_id);
-    let seek_to = if resume { prev.position } else { 0 };
-
-    if seek_to >= file_size {
-        return Some(RawNewJsonl {
-            frames: Vec::new(),
-            start_offset: seek_to,
-            new_cursor: StoredCursor {
-                position: seek_to,
-                mtime,
-                file_id,
-            },
-            deferred: None,
-        });
-    }
-
-    if let Some(cap) = max_new_bytes {
-        let unread_bytes = file_size.saturating_sub(seek_to);
-        if unread_bytes > cap {
-            tracing::debug!(
-                transcript_path = %path.display(),
-                unread_bytes,
-                max_new_bytes = cap,
-                "deferring transcript source backlog beyond configured cap"
-            );
-            return Some(RawNewJsonl {
-                frames: Vec::new(),
-                start_offset: seek_to,
-                new_cursor: StoredCursor {
-                    position: seek_to,
-                    mtime,
-                    file_id,
-                },
-                deferred: Some(JsonlFrameDeferral::Backlog {
-                    offset: seek_to,
-                    unread_bytes,
-                    max_new_bytes: cap,
-                }),
-            });
-        }
-    }
-
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) => {
-            log_source_skip(path, "open jsonl transcript", &error);
-            return None;
-        }
-    };
-    let mut reader = BufReader::new(file);
-    if seek_to > 0
-        && let Err(error) = reader.seek(SeekFrom::Start(seek_to))
-    {
-        log_source_skip(path, "seek jsonl transcript", &error);
-        return None;
-    }
-
-    let mut frames = Vec::new();
-    let mut offset = seek_to;
-    let mut reader = RawJsonlFrameReader::new(reader, max_record_bytes);
-    let deferred = loop {
-        let frame = match reader.next_frame() {
-            Ok(frame) => frame,
-            Err(error) => {
-                log_source_skip(path, "read jsonl transcript record", &error);
-                break None;
-            }
-        };
-        match frame {
-            RawJsonlFrame::Eof => break None,
-            RawJsonlFrame::Partial { .. } => {
-                break Some(JsonlFrameDeferral::Partial { offset });
-            }
-            RawJsonlFrame::Oversized {
-                byte_len,
-                terminated,
-            } => match (oversized_policy, terminated) {
-                (MalformedJsonlPolicy::Skip, true) => {
-                    log_jsonl_oversized_skip(path, offset, byte_len);
-                    offset = offset.saturating_add(byte_len);
-                }
-                (MalformedJsonlPolicy::Skip, false) => {
-                    break Some(JsonlFrameDeferral::Partial { offset });
-                }
-                (MalformedJsonlPolicy::Defer, _) => {
-                    break Some(JsonlFrameDeferral::Oversized { offset });
-                }
-            },
-            RawJsonlFrame::Complete { byte_len } => {
-                let next_offset = offset.saturating_add(byte_len);
-                frames.push(RawJsonlRecord {
-                    offset,
-                    end_offset: next_offset,
-                    bytes: reader.record().to_vec(),
-                });
-                offset = next_offset;
-            }
-        }
-    };
-
-    Some(RawNewJsonl {
-        frames,
-        start_offset: seek_to,
-        new_cursor: StoredCursor {
-            position: offset,
-            mtime,
-            file_id,
-        },
-        deferred,
-    })
-}
 /// Full contents of a changed file plus the advanced cursor.
 pub struct ChangedFile {
     pub contents: String,
@@ -1076,7 +791,10 @@ fn should_resume_jsonl(prev: StoredCursor, file_size: u64, mtime: u64, file_id: 
     mtime >= prev.mtime
 }
 
-fn stable_jsonl_file_id(path: &Path, meta: &std::fs::Metadata) -> Option<u64> {
+fn stable_jsonl_file_id(
+    file: &mut std::fs::File,
+    meta: &std::fs::Metadata,
+) -> std::io::Result<u64> {
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay-jsonl-file-id-v1");
     #[cfg(unix)]
@@ -1087,17 +805,10 @@ fn stable_jsonl_file_id(path: &Path, meta: &std::fs::Metadata) -> Option<u64> {
     }
     #[cfg(windows)]
     {
-        use std::hash::{Hash, Hasher};
         use std::os::windows::fs::MetadataExt;
 
-        // `same-file` hashes the native volume serial and file index. Creation
-        // time also protects against the filesystem reusing an index after an
-        // atomic transcript replacement.
-        if let Ok(handle) = same_file::Handle::from_path(path) {
-            let mut native_hasher = std::collections::hash_map::DefaultHasher::new();
-            handle.hash(&mut native_hasher);
-            hasher.update(native_hasher.finish().to_le_bytes());
-        }
+        // Creation time is read from the same open handle as framing, so an
+        // atomic path replacement cannot splice identity from another file.
         hasher.update(meta.creation_time().to_le_bytes());
     }
     #[cfg(not(any(unix, windows)))]
@@ -1105,19 +816,20 @@ fn stable_jsonl_file_id(path: &Path, meta: &std::fs::Metadata) -> Option<u64> {
         // Creation time is stable across appends and changes when a transcript
         // is replaced on platforms without a native file-id implementation.
         if let Ok(created) = meta.created() {
-            let created = created.duration_since(std::time::UNIX_EPOCH).ok()?;
-            hasher.update(created.as_nanos().to_le_bytes());
+            if let Ok(created) = created.duration_since(std::time::UNIX_EPOCH) {
+                hasher.update(created.as_nanos().to_le_bytes());
+            }
         }
     }
-    hasher.update(jsonl_head_fingerprint(path)?.to_le_bytes());
+    hasher.update(jsonl_head_fingerprint(file)?.to_le_bytes());
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
-    Some(u64::from_be_bytes(bytes))
+    Ok(u64::from_be_bytes(bytes))
 }
 
-fn jsonl_head_fingerprint(path: &Path) -> Option<u64> {
-    let file = std::fs::File::open(path).ok()?;
+fn jsonl_head_fingerprint(file: &mut std::fs::File) -> std::io::Result<u64> {
+    file.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(file);
     let mut buf = Vec::new();
     // Hash only the first logical line prefix so append-only writes keep a
@@ -1125,15 +837,14 @@ fn jsonl_head_fingerprint(path: &Path) -> Option<u64> {
     let _ = reader
         .by_ref()
         .take(JSONL_HEAD_FINGERPRINT_BYTES as u64)
-        .read_until(b'\n', &mut buf)
-        .ok()?;
+        .read_until(b'\n', &mut buf)?;
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay-jsonl-head-v1");
     hasher.update(&buf);
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
-    Some(u64::from_be_bytes(bytes))
+    Ok(u64::from_be_bytes(bytes))
 }
 
 /// Stable 64-bit content hash prefix suitable for the existing integer
@@ -1148,358 +859,4 @@ pub(crate) fn content_hash64(contents: &str) -> u64 {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    #[test]
-    fn stream_new_jsonl_reads_only_appended_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.jsonl");
-        std::fs::write(&path, "{\"a\":1}\n{\"a\":2}\n").unwrap();
-
-        let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
-        assert_eq!(first.lines.len(), 2);
-
-        // Re-reading from the advanced cursor yields nothing.
-        let again = stream_new_jsonl(&path, first.new_cursor, None).unwrap();
-        assert_eq!(again.lines.len(), 0);
-
-        // Appending one line yields only that line on the next read.
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap();
-        f.write_all(b"{\"a\":3}\n").unwrap();
-        drop(f);
-        let third = stream_new_jsonl(&path, again.new_cursor, None).unwrap();
-        assert_eq!(third.lines.len(), 1);
-        assert_eq!(third.lines[0].value["a"], 3);
-    }
-
-    #[test]
-    fn stream_new_jsonl_defers_partial_final_line_and_respects_cap() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.jsonl");
-        std::fs::write(&path, "{\"a\":1}\n{\"a\":2}").unwrap(); // second line unterminated
-
-        let read = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
-        assert_eq!(read.lines.len(), 1, "partial final line must be deferred");
-
-        // A cap smaller than the unread tail defers the whole read (no cursor advance).
-        assert!(stream_new_jsonl(&path, StoredCursor::default(), Some(1)).is_none());
-    }
-
-    #[test]
-    fn stream_new_jsonl_strict_defers_oversized_complete_and_partial_records() {
-        const MAX_RECORD_BYTES: usize = 32;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.jsonl");
-        let prefix = "{\"id\":\"prefix\"}\n";
-        let oversized = format!("{{\"payload\":\"{}\"}}", "x".repeat(MAX_RECORD_BYTES));
-
-        for terminator in ["\n", ""] {
-            std::fs::write(&path, format!("{prefix}{oversized}{terminator}")).unwrap();
-
-            let outcome =
-                stream_new_jsonl_strict(&path, StoredCursor::default(), None, MAX_RECORD_BYTES)
-                    .unwrap();
-            let StrictJsonlOutcome::Deferred { parsed, reason } = outcome else {
-                panic!("oversized record must defer");
-            };
-            assert_eq!(
-                reason,
-                JsonlFrameDeferral::Oversized {
-                    offset: prefix.len() as u64
-                }
-            );
-            assert_eq!(parsed.lines.len(), 1);
-            assert_eq!(parsed.lines[0].value["id"], "prefix");
-            assert_eq!(parsed.new_cursor.position, prefix.len() as u64);
-        }
-    }
-
-    #[test]
-    fn stream_new_jsonl_strict_tracks_exact_record_end_offsets() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.jsonl");
-        let first = "{\"id\":1}\n";
-        let blank = "\n";
-        let second = "{\"id\":2}\n";
-        let partial = "{\"id\":3}";
-        std::fs::write(&path, format!("{first}{blank}{second}{partial}")).unwrap();
-
-        let outcome = stream_new_jsonl_strict(&path, StoredCursor::default(), None, 64).unwrap();
-        let StrictJsonlOutcome::Deferred { parsed, reason } = outcome else {
-            panic!("partial final record must defer");
-        };
-        assert_eq!(parsed.lines.len(), 2);
-        assert_eq!(parsed.lines[0].offset, 0);
-        assert_eq!(parsed.lines[0].end_offset, first.len() as i64);
-        assert_eq!(parsed.lines[1].offset, (first.len() + blank.len()) as i64);
-        assert_eq!(
-            parsed.lines[1].end_offset,
-            (first.len() + blank.len() + second.len()) as i64
-        );
-        assert_eq!(
-            reason,
-            JsonlFrameDeferral::Partial {
-                offset: (first.len() + blank.len() + second.len()) as u64
-            }
-        );
-        assert_eq!(
-            parsed.new_cursor.position,
-            parsed.lines[1].end_offset as u64
-        );
-    }
-
-    #[test]
-    fn stream_new_jsonl_strict_blocks_suffix_until_oversized_record_is_repaired() {
-        const MAX_RECORD_BYTES: usize = 40;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.jsonl");
-        let prefix = "{\"id\":\"prefix\"}\n";
-        let suffix = "{\"id\":\"suffix\"}\n";
-        let oversized = format!("{{\"payload\":\"{}\"}}\n", "x".repeat(MAX_RECORD_BYTES));
-        std::fs::write(&path, format!("{prefix}{oversized}{suffix}")).unwrap();
-
-        let first = stream_new_jsonl_strict(&path, StoredCursor::default(), None, MAX_RECORD_BYTES)
-            .unwrap();
-        let StrictJsonlOutcome::Deferred { parsed, reason } = first else {
-            panic!("oversized record must block its suffix");
-        };
-        assert!(matches!(reason, JsonlFrameDeferral::Oversized { .. }));
-        assert_eq!(parsed.lines.len(), 1);
-        assert_eq!(parsed.new_cursor.position, prefix.len() as u64);
-
-        let repaired = "{\"id\":\"repaired\"}\n";
-        std::fs::write(&path, format!("{prefix}{repaired}{suffix}")).unwrap();
-        let retry =
-            stream_new_jsonl_strict(&path, parsed.new_cursor, None, MAX_RECORD_BYTES).unwrap();
-        let StrictJsonlOutcome::Complete(retry) = retry else {
-            panic!("repaired record and suffix must be recoverable");
-        };
-        assert_eq!(retry.lines.len(), 2);
-        assert_eq!(retry.lines[0].value["id"], "repaired");
-        assert_eq!(retry.lines[1].value["id"], "suffix");
-        assert_eq!(
-            retry.new_cursor.position,
-            std::fs::metadata(&path).unwrap().len()
-        );
-    }
-
-    #[test]
-    fn stream_new_jsonl_legacy_skips_oversized_complete_frame_and_reads_suffix() {
-        const MAX_RECORD_BYTES: usize = 32;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.jsonl");
-        let prefix = "{\"id\":\"prefix\"}\n";
-        let suffix = "{\"id\":\"suffix\"}\n";
-        let oversized = format!("{{\"payload\":\"{}\"}}\n", "x".repeat(MAX_RECORD_BYTES));
-        std::fs::write(&path, format!("{prefix}{oversized}{suffix}")).unwrap();
-
-        let (parsed, deferred) = stream_new_jsonl_with_policy(
-            &path,
-            StoredCursor::default(),
-            None,
-            MalformedJsonlPolicy::Skip,
-            MAX_RECORD_BYTES,
-        )
-        .unwrap();
-        assert_eq!(deferred, None);
-        assert_eq!(parsed.lines.len(), 2);
-        assert_eq!(parsed.lines[0].value["id"], "prefix");
-        assert_eq!(parsed.lines[1].value["id"], "suffix");
-        assert_eq!(
-            parsed.new_cursor.position,
-            std::fs::metadata(&path).unwrap().len()
-        );
-    }
-
-    #[test]
-    fn shared_jsonl_framer_applies_invalid_encoding_policy_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.jsonl");
-        let prefix = b"{\"id\":\"prefix\"}\n";
-        let suffix = b"{\"id\":\"suffix\"}\n";
-        let mut contents = prefix.to_vec();
-        contents.extend_from_slice(b"{\"payload\":\"");
-        contents.push(0xff);
-        contents.extend_from_slice(b"\"}\n");
-        contents.extend_from_slice(suffix);
-        std::fs::write(&path, contents).unwrap();
-
-        let legacy = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
-        assert_eq!(legacy.lines.len(), 2);
-        assert_eq!(legacy.lines[1].value["id"], "suffix");
-
-        let strict = stream_new_jsonl_strict(&path, StoredCursor::default(), None, 64).unwrap();
-        let StrictJsonlOutcome::Deferred { parsed, reason } = strict else {
-            panic!("strict policy must defer invalid encoding");
-        };
-        assert_eq!(
-            reason,
-            JsonlFrameDeferral::Malformed {
-                offset: prefix.len() as u64
-            }
-        );
-        assert_eq!(parsed.lines.len(), 1);
-        assert_eq!(parsed.new_cursor.position, prefix.len() as u64);
-    }
-
-    #[test]
-    fn stream_new_jsonl_resets_offset_when_file_identity_changes() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.jsonl");
-        // Keep byte length stable across rewrite to simulate same-size rotation.
-        std::fs::write(&path, "{\"a\":1}\n{\"a\":2}\n").unwrap();
-
-        let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
-        assert_eq!(first.lines.len(), 2);
-
-        std::fs::write(&path, "{\"a\":9}\n{\"a\":8}\n").unwrap();
-        // Simulate a non-regressing mtime guard; identity must still force a reset.
-        let stale = StoredCursor {
-            mtime: 0,
-            ..first.new_cursor
-        };
-        let rewritten = stream_new_jsonl(&path, stale, None).unwrap();
-        assert_eq!(rewritten.lines.len(), 2);
-        assert_eq!(rewritten.lines[0].value["a"], 9);
-        assert_eq!(rewritten.lines[1].value["a"], 8);
-    }
-
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn stream_new_jsonl_resets_when_replaced_file_keeps_same_head() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.jsonl");
-        let replacement = dir.path().join("replacement.jsonl");
-        std::fs::write(&path, "{\"same\":1}\n{\"old\":2}\n").unwrap();
-
-        let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
-        assert_eq!(first.lines.len(), 2);
-
-        // Create the replacement before removing the original so its native
-        // identity cannot be recycled, while retaining the same head line.
-        std::fs::write(&replacement, "{\"same\":1}\n{\"new\":2}\n").unwrap();
-        std::fs::remove_file(&path).unwrap();
-        std::fs::rename(&replacement, &path).unwrap();
-
-        let stale = StoredCursor {
-            mtime: 0,
-            ..first.new_cursor
-        };
-        let rewritten = stream_new_jsonl(&path, stale, None).unwrap();
-        assert_eq!(rewritten.lines.len(), 2);
-        assert_eq!(rewritten.lines[0].value["same"], 1);
-        assert_eq!(rewritten.lines[1].value["new"], 2);
-    }
-
-    #[test]
-    fn read_changed_file_detects_change_and_noops_when_unchanged() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("chat.json");
-        std::fs::write(&path, "[{\"role\":\"user\"}]").unwrap();
-
-        let changed = read_changed_file(&path, StoredCursor::default()).unwrap();
-        assert!(changed.contents.contains("user"));
-        // Unchanged file → None.
-        assert!(read_changed_file(&path, changed.new_cursor).is_none());
-    }
-
-    #[test]
-    fn stream_new_jsonl_returns_none_for_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("missing.jsonl");
-
-        assert!(stream_new_jsonl(&path, StoredCursor::default(), None).is_none());
-    }
-
-    #[test]
-    fn stream_new_jsonl_skips_invalid_json_lines_without_panicking() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("invalid.jsonl");
-        std::fs::write(&path, "not-json\n{\"a\":2}\n").unwrap();
-
-        let read = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
-        assert_eq!(read.lines.len(), 1);
-        assert_eq!(read.lines[0].value["a"], 2);
-    }
-
-    #[test]
-    fn read_changed_file_returns_none_for_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("missing.json");
-
-        assert!(read_changed_file(&path, StoredCursor::default()).is_none());
-    }
-
-    #[tokio::test]
-    async fn read_new_rows_tracks_last_rowid() {
-        // A synthetic SQLite-backed source exercises the RowCursor kind.
-        let db = libsql::Builder::new_local(":memory:")
-            .build()
-            .await
-            .unwrap();
-        let conn = db.connect().unwrap();
-        conn.execute("CREATE TABLE turns (role TEXT, text TEXT)", ())
-            .await
-            .unwrap();
-        conn.execute(
-            "INSERT INTO turns (role, text) VALUES ('user', 'hello'), ('assistant', 'hi')",
-            (),
-        )
-        .await
-        .unwrap();
-
-        let sql = "SELECT rowid, role, text FROM turns WHERE rowid > ? ORDER BY rowid";
-        let map = |_rowid: i64, row: &libsql::Row| row.get::<String>(2).ok();
-        let first = read_new_rows(&conn, sql, StoredCursor::default(), map)
-            .await
-            .unwrap();
-        assert_eq!(first.items, vec!["hello".to_string(), "hi".to_string()]);
-        assert_eq!(first.new_cursor.position, 2);
-
-        // No new rows past the advanced cursor.
-        let again = read_new_rows(&conn, sql, first.new_cursor, map)
-            .await
-            .unwrap();
-        assert_eq!(again.items.len(), 0);
-
-        conn.execute(
-            "INSERT INTO turns (role, text) VALUES ('user', 'again')",
-            (),
-        )
-        .await
-        .unwrap();
-        let third = read_new_rows(&conn, sql, again.new_cursor, map)
-            .await
-            .unwrap();
-        assert_eq!(third.items, vec!["again".to_string()]);
-        assert_eq!(third.new_cursor.position, 3);
-    }
-
-    #[tokio::test]
-    async fn read_new_rows_returns_none_for_invalid_query() {
-        let db = libsql::Builder::new_local(":memory:")
-            .build()
-            .await
-            .unwrap();
-        let conn = db.connect().unwrap();
-
-        let rows = read_new_rows(
-            &conn,
-            "SELECT not_a_column FROM missing_table WHERE rowid > ? ORDER BY rowid",
-            StoredCursor::default(),
-            |_rowid: i64, row: &libsql::Row| row.get::<String>(0).ok(),
-        )
-        .await;
-
-        assert!(rows.is_none());
-    }
-}
+mod tests;

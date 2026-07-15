@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use serde_json::Value;
 use thiserror::Error;
 use tracedecay_domain::{
     CanonicalObservationIdV1, ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1,
@@ -15,7 +14,7 @@ use tracedecay_store::{
 
 use crate::privacy::{
     ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ParsedClaudeRecordV1,
-    PrivacySanitizerError, SanitizationFindingV1,
+    PrivacySanitizerError, SanitizationFindingV1, SanitizedClaudeRecordV1,
 };
 
 /// Cloneable, operation-local cancellation shared by application adapters.
@@ -45,6 +44,7 @@ pub struct CaptureClaudeObservationRequest {
     parsed_record: ParsedClaudeRecordV1,
     identity: ClaudeObservationIdentityMaterialV1,
     expected_cursor: Option<ClaudeSourceCursorV1>,
+    resume_checkpoint: Option<(u64, u64)>,
     retention_class: RetentionClass,
     cancellation: ObservationCancellation,
 }
@@ -65,9 +65,16 @@ impl CaptureClaudeObservationRequest {
             parsed_record,
             identity,
             expected_cursor,
+            resume_checkpoint: None,
             retention_class,
             cancellation,
         })
+    }
+
+    #[must_use]
+    pub fn with_resume_checkpoint(mut self, file_identity: u64, resume_fingerprint: u64) -> Self {
+        self.resume_checkpoint = Some((file_identity, resume_fingerprint));
+        self
     }
 }
 
@@ -93,6 +100,20 @@ pub struct ReplayObservationsRequest {
     cancellation: ObservationCancellation,
 }
 
+pub struct AdvanceNonDurableSourceCursorRequest {
+    advance: ObservationCursorAdvance,
+    cancellation: ObservationCancellation,
+}
+
+impl AdvanceNonDurableSourceCursorRequest {
+    pub fn new(advance: ObservationCursorAdvance, cancellation: ObservationCancellation) -> Self {
+        Self {
+            advance,
+            cancellation,
+        }
+    }
+}
+
 impl ReplayObservationsRequest {
     pub fn new(replay: ObservationReplayRequest, cancellation: ObservationCancellation) -> Self {
         Self {
@@ -108,7 +129,7 @@ pub enum CaptureClaudeObservationOutcome {
     Persisted {
         outcome: ObservationPersistOutcome,
         projection_status: ObservationProjectionStatus,
-        sanitized_record: Value,
+        sanitized_record: SanitizedClaudeRecordV1,
         findings: Vec<SanitizationFindingV1>,
     },
     Rejected {
@@ -214,12 +235,24 @@ impl<S: ObservationStore> ObservationApplication<S> {
     /// Advances a validated non-durable frame cursor without exposing the store.
     pub async fn advance_non_durable_source_cursor(
         &self,
-        advance: ObservationCursorAdvance,
+        request: AdvanceNonDurableSourceCursorRequest,
     ) -> Result<CursorAdvanceOutcome, ObservationApplicationError> {
-        self.store
+        let AdvanceNonDurableSourceCursorRequest {
+            advance,
+            cancellation,
+        } = request;
+        if cancellation.is_cancelled() {
+            return Err(ObservationApplicationError::Cancelled);
+        }
+        let outcome = self
+            .store
             .advance_source_cursor(advance)
             .await
-            .map_err(ObservationApplicationError::from)
+            .map_err(ObservationApplicationError::from)?;
+        if cancellation.is_cancelled() {
+            return Err(ObservationApplicationError::Cancelled);
+        }
+        Ok(outcome)
     }
 
     pub async fn capture_claude_observation(
@@ -230,6 +263,7 @@ impl<S: ObservationStore> ObservationApplication<S> {
             parsed_record,
             identity,
             expected_cursor,
+            resume_checkpoint,
             retention_class,
             cancellation,
         } = request;
@@ -245,16 +279,21 @@ impl<S: ObservationStore> ObservationApplication<S> {
         match sanitized {
             ClaudeSanitizationOutcomeV1::Durable {
                 observation,
+                sanitized_record,
                 findings,
             } => {
                 let identity = observation.identity();
-                let next_cursor = ClaudeSourceCursorV1::new(
+                let mut next_cursor = ClaudeSourceCursorV1::new(
                     identity.source().clone(),
                     identity.scope().clone(),
                     identity.generation(),
                     identity.position().end(),
                 )?;
-                let write = ObservationWrite::new(observation, expected_cursor, next_cursor)?;
+                if let Some((file_identity, resume_fingerprint)) = resume_checkpoint {
+                    next_cursor =
+                        next_cursor.with_resume_checkpoint(file_identity, resume_fingerprint);
+                }
+                let write = ObservationWrite::new(*observation, expected_cursor, next_cursor)?;
                 if cancellation.is_cancelled() {
                     return Err(ObservationApplicationError::Cancelled);
                 }
@@ -262,7 +301,6 @@ impl<S: ObservationStore> ObservationApplication<S> {
                 if cancellation.is_cancelled() {
                     return Err(ObservationApplicationError::Cancelled);
                 }
-                let sanitized_record = outcome.receipt().observation().payload().clone();
                 let observation_id = outcome.receipt().observation().observation_id();
                 let stored = self.store.get_observation(observation_id).await?;
                 if cancellation.is_cancelled() {
@@ -393,6 +431,7 @@ mod tests {
         cancel_on_persist: Mutex<Option<ObservationCancellation>>,
         cancel_on_get: Mutex<Option<ObservationCancellation>>,
         cancel_on_replay: Mutex<Option<ObservationCancellation>>,
+        cancel_on_advance: Mutex<Option<ObservationCancellation>>,
         cursor_advances: Mutex<Vec<ObservationCursorAdvance>>,
     }
 
@@ -474,6 +513,9 @@ mod tests {
                 cursors[index] = advance.next_cursor().clone();
             } else {
                 cursors.push(advance.next_cursor().clone());
+            }
+            if let Some(cancellation) = self.cancel_on_advance.lock().unwrap().take() {
+                cancellation.cancel();
             }
             Ok(CursorAdvanceOutcome::Committed)
         }
@@ -583,7 +625,10 @@ mod tests {
         .unwrap();
 
         let outcome = application
-            .advance_non_durable_source_cursor(advance)
+            .advance_non_durable_source_cursor(AdvanceNonDurableSourceCursorRequest::new(
+                advance,
+                ObservationCancellation::default(),
+            ))
             .await
             .unwrap();
 
@@ -592,6 +637,57 @@ mod tests {
         assert_eq!(advances.len(), 1);
         assert_eq!(advances[0].covered(), ClaudeByteRangeV1::new(0, 4).unwrap());
         assert_eq!(advances[0].reason(), NonDurableFrameReason::BlankFrame);
+    }
+
+    #[tokio::test]
+    async fn non_durable_cursor_advance_honors_cancellation_before_and_after_commit() {
+        let application = application();
+        let source =
+            ClaudeSourceIdentityV1::new(SessionId::new("session.cursor-cancel").unwrap()).unwrap();
+        let advance = ObservationCursorAdvance::new(
+            source,
+            ObservationScopeV1::Profile,
+            ClaudeFileGenerationV1::new(1).unwrap(),
+            None,
+            ClaudeByteRangeV1::new(0, 4).unwrap(),
+            NonDurableFrameReason::BlankFrame,
+        )
+        .unwrap();
+
+        let cancelled = ObservationCancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            application
+                .advance_non_durable_source_cursor(AdvanceNonDurableSourceCursorRequest::new(
+                    advance.clone(),
+                    cancelled,
+                ))
+                .await,
+            Err(ObservationApplicationError::Cancelled)
+        ));
+        assert!(application.store.cursor_advances.lock().unwrap().is_empty());
+
+        let cancelled_after_commit = ObservationCancellation::default();
+        *application.store.cancel_on_advance.lock().unwrap() = Some(cancelled_after_commit.clone());
+        assert!(matches!(
+            application
+                .advance_non_durable_source_cursor(AdvanceNonDurableSourceCursorRequest::new(
+                    advance.clone(),
+                    cancelled_after_commit,
+                ))
+                .await,
+            Err(ObservationApplicationError::Cancelled)
+        ));
+        assert_eq!(application.store.cursor_advances.lock().unwrap().len(), 1);
+
+        let retry = application
+            .advance_non_durable_source_cursor(AdvanceNonDurableSourceCursorRequest::new(
+                advance,
+                ObservationCancellation::default(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(retry, CursorAdvanceOutcome::ExactDuplicate);
     }
 
     #[tokio::test]
@@ -612,7 +708,7 @@ mod tests {
             } => sanitized_record,
             other => panic!("capture must persist, got {other:?}"),
         };
-        assert!(!sanitized_record.to_string().contains(secret));
+        assert!(!sanitized_record.payload().to_string().contains(secret));
         assert!(matches!(
             outcome,
             CaptureClaudeObservationOutcome::Persisted { .. }

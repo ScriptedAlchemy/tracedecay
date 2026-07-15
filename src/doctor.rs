@@ -249,13 +249,17 @@ async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<ser
         false,
         false,
     )?;
-    let result = crate::daemon::call_default_tool(
-        &handshake,
-        "tracedecay_runtime",
-        serde_json::json!({ "format": "json" }),
-    )
-    .await?;
+    let result =
+        crate::daemon::call_default_tool(&handshake, "tracedecay_runtime", daemon_runtime_args())
+            .await?;
     daemon_runtime_status(&result)
+}
+
+fn daemon_runtime_args() -> serde_json::Value {
+    serde_json::json!({
+        "format": "json",
+        "authority_audit": true,
+    })
 }
 
 fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<serde_json::Value> {
@@ -301,7 +305,7 @@ fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
     {
         dc.pass(&format!("DB size: {}", format_bytes(size)));
     }
-    let healthy = match storage
+    let integrity_healthy = match storage
         .get("quick_check_ok")
         .and_then(serde_json::Value::as_bool)
     {
@@ -328,6 +332,35 @@ fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
             false
         }
     };
+    let authority_healthy = match storage
+        .get("authority_audit_ok")
+        .and_then(serde_json::Value::as_bool)
+    {
+        Some(true) => {
+            dc.pass("Observation database authority: ok (checked by daemon owner)");
+            true
+        }
+        Some(false) => {
+            let detail = storage
+                .get("authority_audit_error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("daemon reported an authority audit failure without detail");
+            dc.fail(&format!(
+                "Observation database authority audit failed: {detail}"
+            ));
+            false
+        }
+        None => {
+            let detail = storage
+                .get("authority_audit_error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("daemon did not return an authority audit result");
+            dc.fail(&format!(
+                "Observation database authority diagnostics unavailable: {detail}"
+            ));
+            false
+        }
+    };
     if storage
         .pointer("/dirty_marker/exists")
         .and_then(serde_json::Value::as_bool)
@@ -339,7 +372,7 @@ fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
             .unwrap_or("unparsed");
         dc.warn(&format!("Graph dirty marker present (state={state})"));
     }
-    healthy
+    integrity_healthy && authority_healthy
 }
 
 fn report_daemon_diagnostics_unavailable(

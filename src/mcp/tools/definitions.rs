@@ -1931,10 +1931,15 @@ fn def_runtime() -> ToolDefinition {
     def(
         "tracedecay_runtime",
         "Runtime Snapshot",
-        "Capture a process + database telemetry snapshot for the running tracedecay MCP server: PID, resident memory, virtual size, sustained CPU% (sampled over ~200ms), thread count, system memory, DB / WAL / SHM file sizes, journal mode, and the DB-to-source byte ratio. Use this when triaging unexpected CPU or RAM consumption (issue #80). Single call — output is a JSON object.",
+        "Capture a process + database telemetry snapshot for the running tracedecay MCP server: PID, resident memory, virtual size, sustained CPU% (sampled over ~200ms), thread count, system memory, DB / WAL / SHM file sizes, journal mode, and the DB-to-source byte ratio. Use this when triaging unexpected CPU or RAM consumption (issue #80). Set authority_audit=true only for exhaustive Doctor-style observation-authority validation. Single call — output is a JSON object.",
         json!({
             "type": "object",
-            "properties": {}
+            "properties": {
+                "authority_audit": {
+                    "type": "boolean",
+                    "description": "Run the exhaustive observation-authority audit and include authority_audit_ok/error in database telemetry (default: false)"
+                }
+            }
         }),
     )
 }

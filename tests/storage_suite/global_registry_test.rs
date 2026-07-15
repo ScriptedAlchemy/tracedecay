@@ -216,7 +216,7 @@ async fn open_at_migrates_existing_project_rows_to_canonical_keys() {
 
     assert_eq!(db.get_project_tokens(&project_root).await, 77);
     assert_eq!(
-        db.list_project_paths().await,
+        db.list_project_paths_compat().await,
         vec![project_root.canonicalize().unwrap().to_string_lossy()]
     );
     close_global_db(db).await;
@@ -947,6 +947,6 @@ async fn legacy_projects_tokens_saved_schema_and_queries_still_work() {
     assert_eq!(db.get_project_tokens(&project_one).await, 33);
     assert_eq!(db.get_project_tokens(&project_two.join(".")).await, 22);
     assert_eq!(db.global_tokens_saved().await, Some(55));
-    assert_eq!(db.list_project_paths().await.len(), 2);
+    assert_eq!(db.list_project_paths_compat().await.len(), 2);
     close_global_db(db).await;
 }

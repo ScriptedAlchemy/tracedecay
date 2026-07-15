@@ -172,6 +172,11 @@ fn clean_record_is_accepted_and_receipt_binds_the_payload() {
     );
     assert_eq!(outcome.receipt().sensitivity(), SensitivityV1::NonSensitive);
     assert_eq!(observation.payload(), &expected_payload);
+    let sanitized_record = outcome
+        .sanitized_record()
+        .expect("durable outcome issues an opaque sanitized record");
+    assert_eq!(sanitized_record.payload(), &expected_payload);
+    assert_eq!(sanitized_record.receipt(), outcome.receipt());
     let expected_reference =
         PayloadReferenceV1::for_payload(&expected_payload).expect("reference clean payload");
     assert_eq!(observation.payload_reference(), &expected_reference);
@@ -325,6 +330,168 @@ fn configured_sensitive_keys_redact_nested_values() {
                 .is_some_and(|text| text.starts_with("[TraceDecay redacted:"))
         );
     }
+}
+
+#[test]
+fn normalized_secret_key_variants_and_semantic_suffixes_are_redacted() {
+    let payload = json!({
+        "refreshToken": "refresh-value",
+        "session-token": "session-value",
+        "id_token": "identity-value",
+        "x-api-key": "api-value",
+        "databasePassword": "password-value",
+        "service_secret": "secret-value",
+        "githubCredential": "credential-value",
+        "oauthToken": "token-value",
+        "vendorApiKey": "vendor-value",
+        "vendorAPIKey": "vendor-acronym-value",
+        "JWTToken": "jwt-value",
+        "kmsPrivateKey": "private-key-value",
+        "serviceSecretKey": "secret-key-value",
+        "cloudAccessKey": "access-key-value",
+        "dbPassphrase": "passphrase-value",
+        "token_count": 42,
+        "password_policy": "ordinary policy metadata",
+        "credential_type": "ordinary type metadata",
+        "api_key_hint": "ordinary hint metadata"
+    });
+    let record = serde_json::to_vec(&payload).expect("serialize semantic-key fixture");
+
+    let outcome = sanitize(
+        &ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer"),
+        &record,
+    );
+    let observation = outcome
+        .durable_observation()
+        .expect("semantic sensitive fields remain durable after redaction");
+
+    for key in [
+        "refreshToken",
+        "session-token",
+        "id_token",
+        "x-api-key",
+        "databasePassword",
+        "service_secret",
+        "githubCredential",
+        "oauthToken",
+        "vendorApiKey",
+        "vendorAPIKey",
+        "JWTToken",
+        "kmsPrivateKey",
+        "serviceSecretKey",
+        "cloudAccessKey",
+        "dbPassphrase",
+    ] {
+        assert!(
+            observation.payload()[key]
+                .as_str()
+                .is_some_and(|value| value.starts_with("[TraceDecay redacted:")),
+            "expected {key} to be redacted"
+        );
+    }
+    for key in [
+        "token_count",
+        "password_policy",
+        "credential_type",
+        "api_key_hint",
+    ] {
+        assert_eq!(observation.payload()[key], payload[key]);
+    }
+}
+
+#[test]
+fn quoted_assignments_with_punctuation_are_redacted() {
+    let secrets = [
+        r#"password = "p@ssw0rd!""#,
+        "password = p@ssw0rd!",
+        "password = \"truncated!",
+        r#"password = "abcdef\"tailsecret""#,
+    ];
+    let payload = json!({"messages": secrets});
+    let record = serde_json::to_vec(&payload).expect("serialize quoted-assignment fixture");
+
+    let outcome = sanitize(
+        &ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer"),
+        &record,
+    );
+    let observation = outcome
+        .durable_observation()
+        .expect("redacted quoted assignment remains durable");
+
+    assert!(outcome.findings().iter().any(|finding| {
+        finding.detector() == PrivacyDetectorV1::CredentialAssignment
+            && finding.action() == SanitizationActionV1::Redacted
+    }));
+    let sanitized = observation.payload().to_string();
+    assert!(secrets.iter().all(|secret| !sanitized.contains(secret)));
+    assert!(!sanitized.contains("p@ssw0rd!"));
+    assert!(!sanitized.contains("truncated!"));
+    assert!(!sanitized.contains("tailsecret"));
+}
+
+#[test]
+fn credential_bearing_object_keys_quarantine_without_key_collisions() {
+    let prefix = ["s", "k", "-test-"].concat();
+    let first_key = format!("{prefix}123456");
+    let second_key = format!("{prefix}654321");
+    let payload = Value::Object(
+        [
+            (first_key, json!("first value")),
+            (second_key, json!("second value")),
+            ("ordinary".to_string(), json!("kept")),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let record = serde_json::to_vec(&payload).expect("serialize sensitive-key-name fixture");
+    let sanitizer = ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer");
+    let identity = identity_for(&record);
+
+    let first = sanitize_with_identity(&sanitizer, &record, identity.clone());
+    let second = sanitize_with_identity(&sanitizer, &record, identity);
+
+    assert_eq!(
+        first.receipt().disposition(),
+        SanitizerDispositionV1::Quarantined
+    );
+    assert!(first.durable_observation().is_none());
+    assert!(first.receipt().payload().is_none());
+    assert_eq!(first.findings().len(), 2);
+    assert!(first.findings().iter().all(|finding| {
+        finding.detector() == PrivacyDetectorV1::ExactCredential
+            && finding.action() == SanitizationActionV1::Quarantined
+            && !finding.location().contains(&prefix)
+    }));
+    assert_eq!(
+        first.receipt().receipt().receipt_id(),
+        second.receipt().receipt().receipt_id()
+    );
+    assert_eq!(first.findings(), second.findings());
+}
+
+#[test]
+fn wholesale_sensitive_value_redaction_skips_nested_object_keys() {
+    let prefix = ["s", "k", "-test-"].concat();
+    let nested_key = format!("{prefix}123456");
+    let nested = Value::Object([(nested_key, json!("nested value"))].into_iter().collect());
+    let payload = json!({"password": nested});
+    let record = serde_json::to_vec(&payload).expect("serialize wholesale-redaction fixture");
+
+    let outcome = sanitize(
+        &ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer"),
+        &record,
+    );
+
+    assert_eq!(
+        outcome.receipt().disposition(),
+        SanitizerDispositionV1::Redacted
+    );
+    assert!(outcome.durable_observation().is_some());
+    assert_eq!(outcome.findings().len(), 1);
+    assert_eq!(
+        outcome.findings()[0].detector(),
+        PrivacyDetectorV1::SensitiveField
+    );
 }
 
 #[test]
@@ -503,5 +670,60 @@ fn receipt_ids_are_deterministic_and_use_the_fixed_sanitizer_version() {
     assert_ne!(
         first.receipt().receipt().receipt_id(),
         changed_identity.receipt().receipt().receipt_id()
+    );
+}
+
+#[test]
+fn equal_length_distinct_secrets_produce_distinct_raw_bound_receipts() {
+    let first_record = serde_json::to_vec(&json!({"password": "alpha123!"})).unwrap();
+    let second_record = serde_json::to_vec(&json!({"password": "bravo456?"})).unwrap();
+    assert_eq!(first_record.len(), second_record.len());
+    let identity = identity_for(&first_record);
+    let sanitizer = ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer");
+
+    let first = sanitize_with_identity(&sanitizer, &first_record, identity.clone());
+    let second = sanitize_with_identity(&sanitizer, &second_record, identity);
+    let first_observation = first.durable_observation().expect("first redacted payload");
+    let second_observation = second
+        .durable_observation()
+        .expect("second redacted payload");
+
+    assert_eq!(
+        first_observation.observation_id(),
+        second_observation.observation_id()
+    );
+    assert_eq!(
+        first_observation.payload_reference(),
+        second_observation.payload_reference()
+    );
+    assert_ne!(
+        first.receipt().receipt().receipt_id(),
+        second.receipt().receipt().receipt_id()
+    );
+}
+
+#[test]
+fn custom_policy_behavior_has_a_deterministic_version_fingerprint() {
+    let default = ClaudeSanitizerPolicyV1::pr5().expect("valid default policy");
+    let first = ClaudeSanitizerPolicyV1::pr5()
+        .expect("valid default policy")
+        .with_sensitive_keys(["custom_one", "custom_two"]);
+    let reordered = ClaudeSanitizerPolicyV1::pr5()
+        .expect("valid default policy")
+        .with_sensitive_keys(["custom_two", "custom_one"]);
+    let limited = ClaudeSanitizerPolicyV1::pr5()
+        .expect("valid default policy")
+        .with_limits(1_024, 16, 100)
+        .expect("fingerprint custom limits");
+
+    assert_ne!(default.version(), first.version());
+    assert_eq!(first.version(), reordered.version());
+    assert_ne!(first.version(), limited.version());
+
+    let record = serde_json::to_vec(&json!({"custom_one": "secret-value"})).unwrap();
+    let outcome = sanitize(&ClaudeRecordSanitizerV1::new(first.clone()), &record);
+    assert_eq!(
+        outcome.receipt().receipt().sanitizer_version(),
+        first.version()
     );
 }

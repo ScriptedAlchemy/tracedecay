@@ -16,7 +16,7 @@ pr_labels = ["release"]
 publish = true
 publish_allow_dirty = true
 publish_timeout = "1h"
-semver_check = false
+semver_check = true
 
 # Publish workspace libraries before the root crate, but reserve the root
 # package's v{{ version }} tag and GitHub release for binary distribution.

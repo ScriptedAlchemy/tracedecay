@@ -13,23 +13,23 @@ use regex::Regex;
 
 use crate::privacy::detector_kernel::{
     CredentialPattern, CredentialPatternKind, CredentialPatternProfile,
-    compile_credential_patterns_lossy, looks_high_entropy_token,
+    compile_credential_patterns, looks_high_entropy_token,
 };
 
-fn compile_patterns(patterns: &[(&'static str, &'static str)]) -> Vec<(Regex, &'static str)> {
+fn compile_patterns(
+    patterns: &[(&'static str, &'static str)],
+) -> Result<Vec<(Regex, &'static str)>, regex::Error> {
     patterns
         .iter()
-        // Patterns are compile-time literals; a failed compile would only
-        // drop that rule (and is covered by the unit tests).
-        .filter_map(|(pattern, reason)| Regex::new(pattern).ok().map(|regex| (regex, *reason)))
+        .map(|(pattern, reason)| Regex::new(pattern).map(|regex| (regex, *reason)))
         .collect()
 }
 
-fn regex_set() -> &'static [CredentialPattern] {
-    static PATTERNS: OnceLock<Vec<CredentialPattern>> = OnceLock::new();
+fn regex_set() -> Result<&'static [CredentialPattern], &'static regex::Error> {
+    static PATTERNS: OnceLock<Result<Vec<CredentialPattern>, regex::Error>> = OnceLock::new();
     PATTERNS
-        .get_or_init(|| compile_credential_patterns_lossy(CredentialPatternProfile::Memory))
-        .as_slice()
+        .get_or_init(|| compile_credential_patterns(CredentialPatternProfile::Memory))
+        .as_deref()
 }
 
 fn credential_reason(kind: CredentialPatternKind) -> &'static str {
@@ -44,8 +44,11 @@ fn credential_reason(kind: CredentialPatternKind) -> &'static str {
 /// Conservative secret-likeness check. Returns a short reason when `content`
 /// matches a credential pattern, or `None` when it looks safe to store.
 pub fn detect_secret_like(content: &str) -> Option<String> {
-    for pattern in regex_set() {
-        if pattern.regex().is_match(content) {
+    let Ok(patterns) = regex_set() else {
+        return Some("credential detector unavailable".to_string());
+    };
+    for pattern in patterns {
+        if pattern.is_match(content) {
             return Some(credential_reason(pattern.kind()).to_string());
         }
     }
@@ -58,8 +61,8 @@ pub fn detect_secret_like(content: &str) -> Option<String> {
     None
 }
 
-fn transient_regexes() -> &'static Vec<(Regex, &'static str)> {
-    static PATTERNS: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
+fn transient_regexes() -> Result<&'static [(Regex, &'static str)], &'static regex::Error> {
+    static PATTERNS: OnceLock<Result<Vec<(Regex, &'static str)>, regex::Error>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
         compile_patterns(&[
             (
@@ -74,6 +77,7 @@ fn transient_regexes() -> &'static Vec<(Regex, &'static str)> {
             ),
         ])
     })
+    .as_deref()
 }
 
 /// Flags facts that look like ephemeral run output (ports, PIDs, one-off
@@ -81,8 +85,11 @@ fn transient_regexes() -> &'static Vec<(Regex, &'static str)> {
 /// curation planner to mark prune CANDIDATES — never to reject or delete
 /// anything on its own.
 pub fn detect_transient(content: &str) -> Option<String> {
+    let Ok(patterns) = transient_regexes() else {
+        return Some("transient detector unavailable".to_string());
+    };
     let mut reasons: Vec<&str> = Vec::new();
-    for (regex, reason) in transient_regexes() {
+    for (regex, reason) in patterns {
         if regex.is_match(content) && !reasons.contains(reason) {
             reasons.push(reason);
         }
@@ -145,6 +152,12 @@ mod tests {
         assert!(detect_secret_like("secret sauce of the planner is union-find").is_none());
         assert!(detect_secret_like("Use the sk-test fixture profile for dry runs").is_none());
         assert!(detect_secret_like("CamelCaseIdentifiersAreFineEvenWhenLong").is_none());
+    }
+
+    #[test]
+    fn pattern_compilation_errors_are_not_dropped() {
+        assert!(compile_patterns(&[("(", "invalid fixture")]).is_err());
+        assert!(compile_credential_patterns(CredentialPatternProfile::Memory).is_ok());
     }
 
     #[test]

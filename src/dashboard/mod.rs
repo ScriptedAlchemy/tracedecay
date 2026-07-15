@@ -404,27 +404,43 @@ fn spawn_session_catch_up_ingest(
     db: Arc<GlobalDb>,
     registry_db: Option<Arc<GlobalDb>>,
     project_root: PathBuf,
+    project_id: Option<String>,
 ) {
     tokio::spawn(async move {
-        let mut stats = crate::sessions::ingest_project_sources_for_provider(
+        let project_outcome = crate::sessions::ingest_project_sources_for_provider(
             db.as_ref(),
             &project_root,
+            project_id.as_deref(),
             None,
             true,
         )
         .await;
+        let mut stats = project_outcome.stats;
+        if !project_outcome.is_success() {
+            for failure in &project_outcome.failures {
+                eprintln!(
+                    "Session catch-up incomplete: provider={} source={} reason_code={} retryable={}",
+                    failure.provider, failure.source, failure.reason_code, failure.retryable
+                );
+            }
+        }
         if let Some(registry_db) = registry_db
             && let Ok(profile_root) = crate::storage::default_profile_root()
             && let Some(user_db) = crate::sessions::open_user_session_db(&profile_root).await
         {
-            stats = stats.merge(
-                crate::sessions::ingest_user_global_sources_for_startup_with_db(
-                    &user_db,
-                    registry_db.as_ref(),
-                    &profile_root,
-                )
-                .await,
-            );
+            let outcome = crate::sessions::ingest_user_global_sources_for_startup_with_db(
+                &user_db,
+                registry_db.as_ref(),
+                &profile_root,
+            )
+            .await;
+            for failure in &outcome.failures {
+                eprintln!(
+                    "Session catch-up incomplete: provider={} source={} reason_code={} retryable={}",
+                    failure.provider, failure.source, failure.reason_code, failure.retryable
+                );
+            }
+            stats = stats.merge(outcome.stats);
         }
         if stats.sessions_upserted > 0 || stats.messages_upserted > 0 {
             eprintln!(
@@ -540,6 +556,7 @@ where
                 Arc::clone(db),
                 state.savings_db.clone(),
                 state.project_root.clone(),
+                state.project_id.clone(),
             );
         } else {
             eprintln!(

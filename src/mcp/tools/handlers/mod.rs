@@ -44,7 +44,7 @@ pub async fn handle_user_lcm_tool(
     args: Value,
     profile_root: &Path,
 ) -> Result<crate::mcp::tools::ToolResult> {
-    handle_user_lcm_tool_with_db(tool_name, args, profile_root, None, true).await
+    handle_user_lcm_tool_with_db(tool_name, args, profile_root, None, None, true).await
 }
 
 async fn handle_user_lcm_tool_with_db(
@@ -52,6 +52,7 @@ async fn handle_user_lcm_tool_with_db(
     args: Value,
     profile_root: &Path,
     retained_session_db: Option<&Arc<GlobalDb>>,
+    registry_db: Option<&GlobalDb>,
     allow_owned_session_db: bool,
 ) -> Result<crate::mcp::tools::ToolResult> {
     if args.get("storage_scope").and_then(Value::as_str) != Some("user") {
@@ -80,6 +81,7 @@ async fn handle_user_lcm_tool_with_db(
             profile_root,
             args,
             retained_session_db,
+            registry_db,
             allow_owned_session_db,
         )
         .await;
@@ -401,6 +403,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
                     args,
                     &profile_root,
                     options.session_authorities.user,
+                    options.global_db,
                     options.allow_default_registry_fallback,
                 )
                 .await;
@@ -478,7 +481,10 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         }
         "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args).await,
         "tracedecay_admin_sync" => info::handle_admin_sync(cg, args).await,
-        "tracedecay_admin_cli" => admin_cli::handle_admin_cli(cg, args, options.global_db).await,
+        "tracedecay_admin_cli" => {
+            admin_cli::handle_admin_cli(cg, args, options.global_db, options.session_authorities)
+                .await
+        }
         "tracedecay_admin_project" => {
             admin_project::handle_admin_project(cg, args, options.global_db).await
         }
@@ -560,7 +566,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         }
         "tracedecay_health" => health::handle_health(cg, args, scope_prefix).await,
         "tracedecay_redundancy" => redundancy::handle_redundancy(cg, args, scope_prefix).await,
-        "tracedecay_runtime" => health::handle_runtime(cg, args).await,
+        "tracedecay_runtime" => health::handle_runtime(cg, args, options.global_db).await,
         "tracedecay_dsm" => health::handle_dsm(cg, args, scope_prefix).await,
         "tracedecay_test_risk" => health::handle_test_risk(cg, args, scope_prefix).await,
         "tracedecay_session_start" => health::handle_session_start(cg, args, scope_prefix).await,

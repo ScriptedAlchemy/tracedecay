@@ -31,11 +31,13 @@ use libsql::{Connection, params};
 use serde_json::Value;
 
 use crate::global_db::GlobalDb;
-use crate::sessions::SessionMessageRecord;
 use crate::sessions::codex::{CodexTurnUsage, merge_usage_counters};
 use crate::sessions::cursor::TimestampCarry;
 use crate::sessions::shared::usage_counters_from;
-use crate::sessions::source::{StoredCursor, TranscriptSource};
+use crate::sessions::source::{
+    MAX_JSONL_RECORD_BYTES, ParsedTranscript, StoredCursor, TranscriptIngestResult,
+    TranscriptSource,
+};
 
 const MARKER_NAME: &str = "transcript_facts_backfill";
 const MARKER_VERSION: i64 = 1;
@@ -402,8 +404,10 @@ fn derive_usage(provider: &str, record: &Value) -> Option<Value> {
     }
 }
 
-// Structured-row backfill replays stored Claude/Codex transcripts through the
-// current parser and inserts message ids missing from legacy stores.
+// Structured-row backfill replays stored Codex transcripts through the current
+// parser and inserts message ids missing from legacy stores. Claude is
+// intentionally excluded: its observation pipeline is the sole production
+// cursor authority and must not race an independent legacy replay.
 
 /// Base name of the per-provider structured-backfill marker rows in
 /// `session_schema_migrations`. Each provider gets its own row keyed
@@ -419,13 +423,10 @@ const STRUCTURED_MARKER_NAME: &str = "structured_rows_backfill";
 /// the one shared cursor and re-parsed every provider's history.
 ///
 /// Version history / in-flight-bump translation:
-/// * `claude = 3` — v3 emits a separate `kind="reasoning"` row for Claude
-///   assistant `thinking` blocks (previously nested in the assistant blob).
-///   This carries the merged global v3 bump from #372.
 /// * `codex = 4` — v4 joins the Codex CLI `custom_tool_call` exec harness into
 ///   searchable `kind="tool_call"` rows. The version intentionally advances
 ///   past the former global v3 Claude bump while re-sweeping only Codex.
-const STRUCTURED_BACKFILL_VERSIONS: &[(&str, i64)] = &[("claude", 3), ("codex", 4)];
+const STRUCTURED_BACKFILL_VERSIONS: &[(&str, i64)] = &[("codex", 4)];
 /// Base name of the sweep's path watermark. The live key is namespaced by both
 /// provider and target version (see [`structured_cursor_key`]) so bumping a
 /// provider's entry in [`STRUCTURED_BACKFILL_VERSIONS`] naturally starts that
@@ -433,11 +434,7 @@ const STRUCTURED_BACKFILL_VERSIONS: &[(&str, i64)] = &[("claude", 3), ("codex", 
 /// past the last file the prior version already covered.
 const STRUCTURED_CURSOR_KEY_PREFIX: &str = "structured_backfill_cursor";
 const STRUCTURED_BACKFILL_BATCH: usize = 32;
-/// Transcripts larger than this are skipped (with a logged warning and a cursor
-/// advance) rather than materialized whole. Threading a byte offset through the
-/// watermark would balloon the diff, so we cap file size instead — pathological
-/// multi-hundred-MB JSONL transcripts are the only ones affected.
-const STRUCTURED_BACKFILL_MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+const STRUCTURED_BACKFILL_PARSE_BYTES: u64 = MAX_JSONL_RECORD_BYTES as u64 + 1;
 
 /// Per-provider marker row name in `session_schema_migrations`.
 fn structured_marker_name(provider: &str) -> String {
@@ -640,71 +637,51 @@ async fn sweep_provider(
     }
 
     for candidate in &candidates {
-        // Bound memory cheaply: an oversized transcript would be materialized
-        // whole by the full-file parse below, so skip it (and advance past it)
-        // rather than risk pinning hundreds of MB per parse.
-        if let Ok(meta) = std::fs::metadata(&candidate.source_path)
-            && meta.len() > STRUCTURED_BACKFILL_MAX_FILE_BYTES
-        {
-            eprintln!(
-                "Structured backfill: skipping oversized transcript ({} bytes > {STRUCTURED_BACKFILL_MAX_FILE_BYTES} cap): {}",
-                meta.len(),
-                candidate.source_path
-            );
-            stats.files_scanned += 1;
-            write_backfill_cursor(conn, &cursor_key, &candidate.source_path).await?;
-            continue;
-        }
-
+        let target_size = std::fs::metadata(&candidate.source_path).ok()?.len();
         let project_paths =
             load_project_paths_for_source(conn, &candidate.provider, &candidate.source_path)
                 .await?;
         for project_path in project_paths {
             let project_root = PathBuf::from(&project_path);
-            let provider = candidate.provider.clone();
-            let source_path = candidate.source_path.clone();
-            let messages = match tokio::task::spawn_blocking(move || {
-                parse_structured_messages(&provider, &source_path, &project_path)
-            })
-            .await
-            {
-                // The parser ran to completion: rows to insert, or a clean
-                // decline (foreign/missing transcript) that yields nothing.
-                Ok(parsed) => parsed.unwrap_or_default(),
-                // The parser panicked on this file — a deterministic per-file
-                // failure. Holding the cursor here would re-poison every future
-                // open and starve all lexically-later files, so log it and fall
-                // through to advance past the file (it self-heals on a future
-                // marker-version bump). Environment errors take a different
-                // path: `insert_absent_session_messages` returns `None` below,
-                // which propagates and holds the cursor for a later retry.
-                Err(join_error) => {
-                    eprintln!(
-                        "Structured backfill: skipping transcript that failed to re-parse ({}): {join_error}",
-                        candidate.source_path
-                    );
-                    break;
-                }
-            };
-            if messages.is_empty() {
-                continue;
-            }
-            let commit_records =
-                crate::sessions::git_correlation::direct_commit_records(&messages, &project_root);
-            let span_observations =
-                crate::sessions::git_correlation::ingest_span_observations(&messages);
-            let inserted = db.insert_absent_session_messages(&messages).await?;
-            stats.inserted += inserted;
-            for record in &commit_records {
-                db.git_upsert_commit_session(record).await.ok()?;
-            }
-            for observation in &span_observations {
-                db.git_record_span_observation(
-                    observation,
-                    crate::sessions::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
-                )
+            let mut parse_cursor = StoredCursor::default();
+            while parse_cursor.position < target_size {
+                let provider = candidate.provider.clone();
+                let source_path = candidate.source_path.clone();
+                let project_path = project_path.clone();
+                let parsed = tokio::task::spawn_blocking(move || {
+                    parse_structured_messages(&provider, &source_path, &project_path, parse_cursor)
+                })
                 .await
+                .ok()?
                 .ok()?;
+                let parsed = parsed?;
+                if parsed.new_cursor.position <= parse_cursor.position {
+                    return None;
+                }
+                parse_cursor = parsed.new_cursor;
+                let messages = parsed.messages;
+                if messages.is_empty() {
+                    continue;
+                }
+                let commit_records = crate::sessions::git_correlation::direct_commit_records(
+                    &messages,
+                    &project_root,
+                );
+                let span_observations =
+                    crate::sessions::git_correlation::ingest_span_observations(&messages);
+                let inserted = db.insert_absent_session_messages(&messages).await?;
+                stats.inserted += inserted;
+                for record in &commit_records {
+                    db.git_upsert_commit_session(record).await.ok()?;
+                }
+                for observation in &span_observations {
+                    db.git_record_span_observation(
+                        observation,
+                        crate::sessions::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
+                    )
+                    .await
+                    .ok()?;
+                }
             }
         }
         stats.files_scanned += 1;
@@ -718,23 +695,22 @@ fn parse_structured_messages(
     provider: &str,
     source_path: &str,
     project_path: &str,
-) -> Option<Vec<SessionMessageRecord>> {
-    let source = provider_source(provider)?;
-    let parsed = source.parse_new(
+    previous: StoredCursor,
+) -> TranscriptIngestResult<Option<ParsedTranscript>> {
+    let Some(source) = provider_source(provider) else {
+        return Ok(None);
+    };
+    source.try_parse_new(
         Path::new(source_path),
-        StoredCursor::default(),
+        previous,
         Path::new(project_path),
-        None,
-    )?;
-    Some(parsed.messages)
+        Some(STRUCTURED_BACKFILL_PARSE_BYTES),
+    )
 }
 
 fn provider_source(provider: &str) -> Option<Box<dyn TranscriptSource>> {
     let home = crate::sessions::home_dir().unwrap_or_else(|| PathBuf::from("/"));
     match provider {
-        "claude" => Some(Box::new(crate::sessions::claude::ClaudeSource::with_home(
-            &home,
-        ))),
         "codex" => Some(Box::new(crate::sessions::codex::CodexSource::with_home(
             &home,
         ))),
@@ -913,4 +889,80 @@ async fn mark_structured_backfill_complete(
     .await
     .ok()?;
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_has_no_legacy_structured_backfill_path() {
+        assert_eq!(structured_backfill_target_version("claude"), 0);
+        assert!(provider_source("claude").is_none());
+    }
+
+    #[test]
+    fn codex_structured_backfill_drains_large_files_in_bounded_batches() {
+        const MESSAGE_COUNT: usize = 25;
+        const MESSAGE_BYTES: usize = 700 * 1024;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = dir.path().join("codex-large-backfill.jsonl");
+        let mut contents = format!(
+            "{}\n",
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "codex-large-backfill",
+                    "cwd": project,
+                    "model": "gpt-5.6"
+                }
+            })
+        );
+        let body = "x".repeat(MESSAGE_BYTES);
+        for index in 0..MESSAGE_COUNT {
+            contents.push_str(
+                &serde_json::json!({
+                    "timestamp": "2026-01-01T00:00:01.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": format!("{index}:{body}")
+                    }
+                })
+                .to_string(),
+            );
+            contents.push('\n');
+        }
+        assert!(contents.len() as u64 > STRUCTURED_BACKFILL_PARSE_BYTES);
+        std::fs::write(&transcript, &contents).unwrap();
+
+        let mut cursor = StoredCursor::default();
+        let mut batches = 0_usize;
+        let mut messages = 0_usize;
+        while cursor.position < contents.len() as u64 {
+            let parsed = parse_structured_messages(
+                "codex",
+                transcript.to_str().unwrap(),
+                project.to_str().unwrap(),
+                cursor,
+            )
+            .unwrap()
+            .expect("bounded Codex backfill batch");
+            assert!(parsed.new_cursor.position > cursor.position);
+            assert!(
+                parsed.new_cursor.position - cursor.position <= STRUCTURED_BACKFILL_PARSE_BYTES
+            );
+            cursor = parsed.new_cursor;
+            messages += parsed.messages.len();
+            batches += 1;
+        }
+
+        assert!(batches > 1);
+        assert_eq!(cursor.position, contents.len() as u64);
+        assert_eq!(messages, MESSAGE_COUNT);
+    }
 }

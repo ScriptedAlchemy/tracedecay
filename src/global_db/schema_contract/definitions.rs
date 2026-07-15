@@ -193,6 +193,50 @@ pub(super) const TABLES: &[Table] = &[
         []
     ),
     table!(
+        "source_cursor_advances",
+        [
+            column("source_json", "TEXT", true, None, 1),
+            column("scope_json", "TEXT", true, None, 2),
+            column("file_generation", "TEXT", true, None, 3),
+            column("start_offset", "TEXT", true, None, 4),
+            column("end_offset", "TEXT", true, None, 5),
+            column("reason", "TEXT", true, None, 0),
+            column("receipt_id", "TEXT", false, None, 0),
+        ],
+        [foreign_key(
+            "receipt_id",
+            "sanitization_receipts",
+            "receipt_id",
+            "NO ACTION"
+        )]
+    ),
+    table!(
+        "authority_audit_checkpoints",
+        [
+            column("audit_name", "TEXT", false, None, 1),
+            column("audit_version", "INTEGER", true, None, 0),
+            column("receipt_rowid", "INTEGER", true, None, 0),
+            column("observation_sequence", "INTEGER", true, None, 0),
+            column("provenance_rowid", "INTEGER", true, None, 0),
+            column("disposition_rowid", "INTEGER", true, None, 0),
+            column("alias_rowid", "INTEGER", true, None, 0),
+            column("projection_checkpoint", "INTEGER", true, None, 0),
+            column("last_receipts_audited", "INTEGER", true, None, 0),
+            column("last_observations_audited", "INTEGER", true, None, 0),
+            column("last_provenance_audited", "INTEGER", true, None, 0),
+            column("last_dispositions_audited", "INTEGER", true, None, 0),
+            column("last_aliases_audited", "INTEGER", true, None, 0),
+            column(
+                "bounded_passes_since_exhaustive",
+                "INTEGER",
+                true,
+                Some("0"),
+                0
+            ),
+        ],
+        []
+    ),
+    table!(
         "projection_queue",
         [
             column("observation_id", "TEXT", false, None, 1),
@@ -279,6 +323,17 @@ pub(super) const TABLES: &[Table] = &[
     ),
 ];
 
+pub(super) const REGISTRY_TABLE_NAMES: &[&str] = &[
+    "projects",
+    "code_projects",
+    "project_aliases",
+    "store_instances",
+    "graph_scopes",
+    "store_artifacts",
+];
+
+pub(super) const OBSERVATIONS_TABLE_NAME: &str = "observations";
+
 #[derive(Clone, Copy)]
 pub(super) struct Index {
     pub(super) table: &'static str,
@@ -323,5 +378,12 @@ pub(super) const INDEXES: &[Index] = &[
         unique: true,
         origin: "u",
         columns: &["observation_sequence"],
+    },
+    Index {
+        table: "observation_projection_provenance",
+        name: Some("idx_observation_projection_provenance_global_output"),
+        unique: false,
+        origin: "c",
+        columns: &["output_provider", "output_message_id", "projector_version"],
     },
 ];

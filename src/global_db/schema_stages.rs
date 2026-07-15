@@ -1,6 +1,9 @@
+use libsql::TransactionBehavior;
+
 use super::schema_contract::{
-    ensure_authority_invariants, validate_authority_schema_contract,
-    validate_registry_schema_contract,
+    ensure_authority_invariants, restore_immutability_after_canonical_repair,
+    suspend_immutability_for_canonical_repair, validate_authority_rows_exhaustive,
+    validate_authority_schema_contract, validate_registry_schema_contract,
 };
 use super::{
     GlobalDb, ensure_code_project_native_root_columns, ensure_parse_offset_columns,
@@ -230,15 +233,56 @@ pub(super) async fn ensure_transcript(db: &GlobalDb) -> crate::errors::Result<()
 }
 
 pub(super) async fn ensure_observation_authority(db: &GlobalDb) -> crate::errors::Result<()> {
-    observation::ensure_observation_schema(&db.conn).await?;
-    observation_projection::ensure_observation_projection_schema(&db.conn)
+    let transaction = db
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(|error| global_db_operation_error("begin observation authority schema", error))?;
+    observation::ensure_observation_schema(&transaction).await?;
+    observation_projection::ensure_observation_projection_schema(&transaction)
         .await
         .map_err(|error| {
             global_db_operation_error("initialize observation projection schema", error)
         })?;
-    ensure_authority_invariants(&db.conn).await?;
-    validate_authority_schema_contract(&db.conn).await?;
-    Ok(())
+    ensure_authority_invariants(&transaction).await?;
+    validate_authority_schema_contract(&transaction).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| global_db_operation_error("commit observation authority schema", error))
+}
+
+impl GlobalDb {
+    pub(crate) async fn audit_observation_authority(&self) -> crate::errors::Result<()> {
+        let _writer = self.transaction.lock().await;
+        let transaction = self.conn.transaction().await.map_err(|error| {
+            global_db_operation_error("begin observation authority audit", error)
+        })?;
+        validate_observation_authority_connection(&transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error("finish observation authority audit", error))
+    }
+}
+
+pub(crate) async fn validate_observation_authority_connection(
+    conn: &libsql::Connection,
+) -> crate::errors::Result<()> {
+    validate_authority_schema_contract(conn).await?;
+    validate_authority_rows_exhaustive(conn).await
+}
+
+pub(crate) async fn begin_observation_authority_canonical_repair(
+    conn: &libsql::Connection,
+) -> crate::errors::Result<()> {
+    suspend_immutability_for_canonical_repair(conn).await
+}
+
+pub(crate) async fn finish_observation_authority_canonical_repair(
+    conn: &libsql::Connection,
+) -> crate::errors::Result<()> {
+    restore_immutability_after_canonical_repair(conn).await
 }
 
 pub(super) async fn ensure_composed_context(db: &GlobalDb) -> crate::errors::Result<()> {

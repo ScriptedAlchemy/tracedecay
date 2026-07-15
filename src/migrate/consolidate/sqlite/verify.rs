@@ -1,12 +1,10 @@
-use std::cmp::Ordering;
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use libsql::Connection;
 
 use super::{
     SessionMergeOffsets, attach_as, build_consolidation_message_map, db_error, db_message,
-    mapped_parent_metadata, mapped_turn_message_id, projection, query_i64, read_source_cursor_rows,
+    mapped_parent_metadata, mapped_turn_message_id, observation, projection, query_i64,
 };
 use crate::errors::Result;
 
@@ -75,7 +73,7 @@ async fn verify_attached_tables(conn: &Connection, offsets: &SessionMergeOffsets
     for spec in verification_specs(offsets) {
         verify_table(conn, &spec).await?;
     }
-    verify_observation_cursors(conn).await?;
+    observation::verify_observation_union(conn, "target_input", "source_input").await?;
     projection::verify(conn).await?;
     if query_i64(
         conn,
@@ -118,44 +116,6 @@ async fn verify_attached_tables(conn: &Connection, offsets: &SessionMergeOffsets
                 format!("destination {label} differs from its durable backing table"),
             ));
         }
-    }
-    Ok(())
-}
-
-async fn verify_observation_cursors(conn: &Connection) -> Result<()> {
-    let mut expected = read_source_cursor_rows(conn, "target_input").await?;
-    for (key, source_value) in read_source_cursor_rows(conn, "source_input").await? {
-        match expected.get(&key) {
-            None => {
-                expected.insert(key, source_value);
-            }
-            Some((_, target_cursor)) => {
-                let ordering = source_value.1.checked_cmp(target_cursor).map_err(|_| {
-                    db_message(
-                        "verify_consolidation",
-                        "frozen source cursor generations are not comparable",
-                    )
-                })?;
-                if ordering == Ordering::Greater {
-                    expected.insert(key, source_value);
-                }
-            }
-        }
-    }
-    let actual = read_source_cursor_rows(conn, "main").await?;
-    let expected_typed = expected
-        .into_iter()
-        .map(|(key, (_, cursor))| (key, cursor))
-        .collect::<BTreeMap<_, _>>();
-    let actual_typed = actual
-        .into_iter()
-        .map(|(key, (_, cursor))| (key, cursor))
-        .collect::<BTreeMap<_, _>>();
-    if actual_typed != expected_typed {
-        return Err(db_message(
-            "verify_consolidation",
-            "destination source cursor union differs from frozen inputs",
-        ));
     }
     Ok(())
 }
@@ -308,32 +268,6 @@ fn verification_specs(offsets: &SessionMergeOffsets) -> Vec<TableVerification> {
                  SELECT name, version, applied_at FROM target_input.session_schema_migrations
                  UNION ALL SELECT name, version, applied_at FROM source_input.session_schema_migrations
              ) GROUP BY name",
-        ),
-        custom(
-            "sanitization receipt",
-            "sanitization_receipts",
-            "receipt_id, sanitizer_version, payload_digest, receipt_json",
-            "SELECT receipt_id, sanitizer_version, payload_digest, receipt_json
-             FROM target_input.sanitization_receipts
-             UNION
-             SELECT receipt_id, sanitizer_version, payload_digest, receipt_json
-             FROM source_input.sanitization_receipts",
-        ),
-        custom(
-            "observation",
-            "observations",
-            "observation_id, payload_digest, receipt_id, observation_json, committed_cursor_json",
-            "SELECT observation_id, payload_digest, receipt_id, observation_json,
-                    committed_cursor_json FROM target_input.observations
-             UNION
-             SELECT observation_id, payload_digest, receipt_id, observation_json,
-                    committed_cursor_json FROM source_input.observations",
-        ),
-        custom(
-            "observation projection queue",
-            "projection_queue",
-            "observation_id, observation_sequence",
-            "SELECT observation_id, sequence FROM main.observations",
         ),
         custom_owned(
             "LCM raw message",

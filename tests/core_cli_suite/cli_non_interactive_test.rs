@@ -1434,7 +1434,7 @@ async fn wipe_all_removes_profile_sharded_store_and_global_row() {
     assert!(!shard_root.join(STORE_MANIFEST_FILENAME).exists());
     let reopened = GlobalDb::open_at(&db_path).await.unwrap();
     assert!(
-        reopened.list_project_paths().await.is_empty(),
+        reopened.list_project_paths_compat().await.is_empty(),
         "global projects table should be empty after wipe --all"
     );
 }
@@ -1857,7 +1857,7 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
         GlobalDb::open_at(&global_db_path)
             .await
             .expect("reopen global db")
-            .list_project_paths()
+            .list_project_paths_compat()
             .await
     });
     assert!(

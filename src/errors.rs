@@ -1,6 +1,14 @@
 // Rust guideline compliant 2025-10-17
 use thiserror::Error;
 
+#[derive(Error, Debug)]
+#[error("{detail}")]
+struct HookRuntimeErrorContext {
+    reason_code: String,
+    retryable: bool,
+    detail: String,
+}
+
 /// Errors that can occur during code graph operations.
 #[derive(Error, Debug)]
 pub enum TraceDecayError {
@@ -17,6 +25,9 @@ pub enum TraceDecayError {
     #[error("database error: {message} (operation: {operation})")]
     Database { message: String, operation: String },
 
+    /// Retained for source compatibility. New database failures use
+    /// [`Self::Database`] so callers receive one stable public classification.
+    #[deprecated(note = "use TraceDecayError::Database")]
     #[error("database error: {source} (operation: {operation})")]
     DatabaseOperation {
         operation: String,
@@ -45,6 +56,43 @@ pub enum TraceDecayError {
 
 /// Convenience alias for results using `TraceDecayError`.
 pub type Result<T> = std::result::Result<T, TraceDecayError>;
+
+impl TraceDecayError {
+    pub(crate) fn database_operation(
+        operation: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Database {
+            operation: operation.into(),
+            message: source.to_string(),
+        }
+    }
+
+    #[allow(deprecated)]
+    pub(crate) fn is_database_error(&self) -> bool {
+        matches!(self, Self::Database { .. } | Self::DatabaseOperation { .. })
+    }
+
+    pub(crate) fn hook_runtime(
+        reason_code: impl Into<String>,
+        retryable: bool,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::Io(std::io::Error::other(HookRuntimeErrorContext {
+            reason_code: reason_code.into(),
+            retryable,
+            detail: detail.into(),
+        }))
+    }
+
+    pub(crate) fn hook_runtime_context(&self) -> Option<(&str, bool, &str)> {
+        let Self::Io(error) = self else {
+            return None;
+        };
+        let context = error.get_ref()?.downcast_ref::<HookRuntimeErrorContext>()?;
+        Some((&context.reason_code, context.retryable, &context.detail))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -94,6 +142,33 @@ mod tests {
         let s = err.to_string();
         assert!(s.contains("constraint violated"), "{s}");
         assert!(s.contains("INSERT"), "{s}");
+    }
+
+    #[test]
+    fn database_operation_preserves_public_database_classification() {
+        let err = TraceDecayError::database_operation(
+            "SELECT observations",
+            std::io::Error::other("database unavailable"),
+        );
+
+        let TraceDecayError::Database { operation, message } = &err else {
+            panic!("database operation must retain the public Database variant");
+        };
+        assert_eq!(operation, "SELECT observations");
+        assert_eq!(message, "database unavailable");
+        assert!(err.is_database_error());
+        assert!(err.to_string().contains("SELECT observations"));
+    }
+
+    #[test]
+    fn hook_runtime_error_preserves_typed_context() {
+        let err = TraceDecayError::hook_runtime("cursor_conflict", true, "cursor advanced");
+
+        assert_eq!(
+            err.hook_runtime_context(),
+            Some(("cursor_conflict", true, "cursor advanced"))
+        );
+        assert!(err.to_string().contains("cursor advanced"));
     }
 
     #[test]
