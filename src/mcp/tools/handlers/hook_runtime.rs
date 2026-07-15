@@ -1,11 +1,13 @@
 use serde_json::{Value, json};
 use std::path::Path;
 
+use crate::application::observation::ObservationApplicationError;
 use crate::automation::config_error;
 use crate::automation::run_ledger::AutomationRunStatus;
-use crate::errors::Result;
+use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::mcp::tools::ToolResult;
+use crate::sessions::claude_observation::ClaudeObservationIngestError;
 use crate::tracedecay::TraceDecay;
 
 use super::{SessionAuthorities, rendered_tool_json};
@@ -333,7 +335,7 @@ async fn ingest_transcript(
                 crate::application::observation::ObservationCancellation::default(),
             )
             .await
-            .map_err(|_| config_error("Claude observation ingest failed"))?;
+            .map_err(map_claude_observation_ingest_error)?;
             let messages_upserted = stats.transcript.messages_upserted;
             claude_observation_stats = Some(stats);
             messages_upserted
@@ -437,6 +439,25 @@ async fn ingest_transcript(
         output["deferred_sources"] = json!(stats.deferred_sources);
     }
     Ok(output)
+}
+
+fn map_claude_observation_ingest_error(error: ClaudeObservationIngestError) -> TraceDecayError {
+    match error {
+        error @ ClaudeObservationIngestError::Projection(_) => TraceDecayError::Database {
+            message: error.to_string(),
+            operation: "project Claude observations".to_string(),
+        },
+        error @ (ClaudeObservationIngestError::Store(_)
+        | ClaudeObservationIngestError::TranscriptCursorUnavailable
+        | ClaudeObservationIngestError::Application(
+            ObservationApplicationError::Store(_)
+            | ObservationApplicationError::PersistedObservationUnavailable,
+        )) => TraceDecayError::Database {
+            message: error.to_string(),
+            operation: "ingest Claude observations".to_string(),
+        },
+        error => config_error(error.to_string()),
+    }
 }
 
 async fn user_review(args: &Value, profile_root: &Path) -> Result<Value> {
@@ -604,7 +625,12 @@ async fn hermes_receipt(args: &Value, profile_root: &Path, session_db: &GlobalDb
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
+    use tracedecay_store::{ObservationStoreError, ProjectionStoreError};
+
     use super::*;
+    use crate::application::observation::CaptureClaudeObservationRequestError;
 
     #[test]
     fn required_str_rejects_missing_and_empty_values() {
@@ -651,5 +677,60 @@ mod tests {
         let event = json!({ "tokens": "42", "message_count": 7 });
         assert_eq!(event_i64(&event, &["tokens"]), Some(42));
         assert_eq!(event_usize(&event, &["message_count"]), Some(7));
+    }
+
+    #[test]
+    fn claude_observation_request_errors_are_bounded_config_errors() {
+        let error = ClaudeObservationIngestError::Request(
+            CaptureClaudeObservationRequestError::FrameTooLarge {
+                actual: 123_456,
+                max: 1_024,
+            },
+        );
+        let mapped = map_claude_observation_ingest_error(error);
+        let rendered = mapped.to_string();
+
+        assert!(matches!(mapped, TraceDecayError::Config { .. }));
+        assert!(rendered.contains("Claude observation request is invalid"));
+        assert!(!rendered.contains("123456"));
+        assert!(!rendered.contains("123_456"));
+    }
+
+    #[test]
+    fn claude_observation_store_errors_keep_database_category_without_source_detail() {
+        let error = ClaudeObservationIngestError::Store(ObservationStoreError::Storage {
+            operation: "private store operation",
+            source: Box::new(io::Error::other("private store source detail")),
+        });
+        let mapped = map_claude_observation_ingest_error(error);
+        let rendered = mapped.to_string();
+
+        assert!(matches!(
+            mapped,
+            TraceDecayError::Database { ref operation, .. }
+                if operation == "ingest Claude observations"
+        ));
+        assert!(rendered.contains("Claude observation store operation failed"));
+        assert!(!rendered.contains("private store operation"));
+        assert!(!rendered.contains("private store source detail"));
+    }
+
+    #[test]
+    fn claude_observation_projection_errors_keep_database_category_without_source_detail() {
+        let error = ClaudeObservationIngestError::Projection(ProjectionStoreError::Storage {
+            operation: "private projection operation",
+            source: Box::new(io::Error::other("private projection source detail")),
+        });
+        let mapped = map_claude_observation_ingest_error(error);
+        let rendered = mapped.to_string();
+
+        assert!(matches!(
+            mapped,
+            TraceDecayError::Database { ref operation, .. }
+                if operation == "project Claude observations"
+        ));
+        assert!(rendered.contains("Claude observation projection failed"));
+        assert!(!rendered.contains("private projection operation"));
+        assert!(!rendered.contains("private projection source detail"));
     }
 }

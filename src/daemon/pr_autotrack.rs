@@ -374,8 +374,8 @@ pub fn discover_open_prs(repo_root: &Path) -> Result<PrDiscovery, String> {
     {
         return Ok(discovery);
     }
-    // `gh` failed (rate limit, auth, transient). Fall through to ls-remote,
-    // which propagates its own failure as `Err` rather than empty.
+    // GitHub discovery was inapplicable, unavailable, or failed. `ls-remote`
+    // propagates its own failure as `Err` rather than empty.
     discover_via_ls_remote(repo_root)
 }
 
