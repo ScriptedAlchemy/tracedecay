@@ -17,8 +17,8 @@ use tracedecay::migrate::manifest::{
     ArtifactState, MIGRATION_MANIFEST_SCHEMA_VERSION, MigrationArtifact, MigrationManifest,
     MigrationPlanOptions, MigrationProtocol, MigrationRollbackState, apply_migration_manifest,
     assess_migration_rollback_state, build_plan_manifest, cleanup_migration_sources,
-    finalize_migration_apply, load_manifest, rollback_migration_manifest, save_manifest,
-    verify_migration_manifest,
+    export_profile_store, finalize_migration_apply, load_manifest, rollback_migration_manifest,
+    save_manifest, verify_migration_manifest,
 };
 use tracedecay::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
@@ -849,6 +849,68 @@ fn cleanup_migration_sources_rejects_source_parent_escape_without_deleting_outsi
         "unexpected error: {err}"
     );
     assert_eq!(fs::read(&outside_file).unwrap(), b"outside");
+}
+
+#[test]
+fn export_profile_store_requires_exclusive_profile_lifecycle_cutover() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = canonical_temp_path(&dir.path().join("profile"));
+    let project_id = "proj_123";
+    let data_root = profile_root.join("projects").join(project_id);
+    let project_root = dir.path().join("repo");
+    let target = dir.path().join("export");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    fs::write(data_root.join("tracedecay.db"), b"database").unwrap();
+    fs::write(
+        data_root.join(STORE_MANIFEST_FILENAME),
+        serde_json::to_vec_pretty(&StoreManifest {
+            schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+            project_id: Some(project_id.to_string()),
+            store_kind: StoreKind::CodeProject,
+            storage_mode: StorageMode::ProfileSharded,
+            project_root,
+            data_root: data_root.clone(),
+            graph_db_relpath: "tracedecay.db".into(),
+            sessions_db_relpath: "sessions.db".into(),
+            branch_meta_relpath: "branch-meta.json".into(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let _lease = acquire_exclusive_for_profile(&profile_root, "test export owner").unwrap();
+
+    let error = export_profile_store(&profile_root, project_id, &target).unwrap_err();
+
+    assert!(error.to_string().contains("test export owner"));
+    assert!(!target.exists());
+}
+
+#[test]
+fn cleanup_sources_requires_exclusive_profile_lifecycle_cutover() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = canonical_temp_path(&dir.path().join("profile"));
+    let source = dir.path().join("repo/.tracedecay/tracedecay.db");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::create_dir_all(&profile_root).unwrap();
+    fs::write(&source, b"database").unwrap();
+    let mut manifest = manifest_for(
+        MigrationProtocol::for_manifest(dir.path().join("manifest.json"), "mig_123"),
+        "mig_123",
+    );
+    manifest.destination.profile_root = Some(profile_root.clone());
+    manifest.artifacts.push(MigrationArtifact {
+        kind: "graph_db".to_string(),
+        source_path: source.clone(),
+        target_path: Some(profile_root.join("projects/proj_123/tracedecay.db")),
+        state: ArtifactState::Applied,
+    });
+    let _lease = acquire_exclusive_for_profile(&profile_root, "test cleanup owner").unwrap();
+
+    let error = cleanup_migration_sources(&manifest).unwrap_err();
+
+    assert!(error.to_string().contains("test cleanup owner"));
+    assert_eq!(fs::read(source).unwrap(), b"database");
 }
 
 #[test]

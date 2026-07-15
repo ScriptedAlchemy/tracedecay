@@ -628,6 +628,21 @@ pub fn export_profile_store(
     project_id: &str,
     target_dir: &Path,
 ) -> io::Result<MigrationExportReport> {
+    let lifecycle =
+        crate::lifecycle_lease::acquire_exclusive_for_profile(profile_root, "profile store export")
+            .map_err(|error| {
+                invalid_manifest(&format!("could not isolate profile store export: {error}"))
+            })?;
+    let _database_scope = crate::db::enter_maintenance_database_scope(
+        &lifecycle,
+        profile_root,
+        "profile store export",
+    )
+    .map_err(|error| {
+        invalid_manifest(&format!(
+            "could not authorize profile store export: {error}"
+        ))
+    })?;
     validate_project_id(project_id).map_err(|message| {
         invalid_manifest(&format!("invalid project_id '{project_id}': {message}"))
     })?;
@@ -675,6 +690,30 @@ pub fn export_profile_store(
 pub fn cleanup_migration_sources(
     manifest: &MigrationManifest,
 ) -> io::Result<MigrationCleanupSourcesReport> {
+    let profile_root = manifest
+        .destination
+        .profile_root
+        .as_deref()
+        .ok_or_else(|| invalid_manifest("migration manifest has no destination profile_root"))?;
+    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+        profile_root,
+        "migration source cleanup",
+    )
+    .map_err(|error| {
+        invalid_manifest(&format!(
+            "could not isolate migration source cleanup: {error}"
+        ))
+    })?;
+    let _database_scope = crate::db::enter_maintenance_database_scope(
+        &lifecycle,
+        profile_root,
+        "migration source cleanup",
+    )
+    .map_err(|error| {
+        invalid_manifest(&format!(
+            "could not authorize migration source cleanup: {error}"
+        ))
+    })?;
     if manifest.inventory.stores.len() > 1 {
         return Err(invalid_manifest(
             "cleanup-sources currently supports at most one manifest inventory store",
