@@ -38,6 +38,26 @@ struct HomeEnvGuard {
     previous_data_dir: Option<OsString>,
 }
 
+#[cfg(unix)]
+fn colliding_non_unicode_project_paths(root: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    (
+        root.join(OsString::from_vec(vec![b'p', 0x80])),
+        root.join(OsString::from_vec(vec![b'p', 0x81])),
+    )
+}
+
+#[cfg(windows)]
+fn colliding_non_unicode_project_paths(root: &Path) -> (PathBuf, PathBuf) {
+    use std::os::windows::ffi::OsStringExt as _;
+
+    (
+        root.join(OsString::from_wide(&[u16::from(b'p'), 0xd800])),
+        root.join(OsString::from_wide(&[u16::from(b'p'), 0xd801])),
+    )
+}
+
 #[tokio::test]
 async fn hermes_home_env_cannot_redirect_legacy_migration() {
     let _lock = HOME_ENV_LOCK.lock().await;
@@ -554,6 +574,66 @@ async fn applies_registry_reconstruction_records_from_manifest() {
             .map(portable_relpath),
         Some("projects/proj_123/store_manifest.json".to_string())
     );
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn registry_reconstruction_preserves_distinct_native_path_aliases() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    let first_manifest = write_profile_store_manifest_for_id(
+        &profile_root,
+        &dir.path().join("first-source"),
+        "proj_first_native",
+    );
+    let second_manifest = write_profile_store_manifest_for_id(
+        &profile_root,
+        &dir.path().join("second-source"),
+        "proj_second_native",
+    );
+    let mut first = reconstruct_registry_from_store_manifest(&first_manifest, &profile_root, 1);
+    let mut second = reconstruct_registry_from_store_manifest(&second_manifest, &profile_root, 1);
+    let (first_path, second_path) = colliding_non_unicode_project_paths(dir.path());
+    assert_eq!(first_path.to_string_lossy(), second_path.to_string_lossy());
+    first.plans[0].project.project_root = first_path.clone();
+    first.plans[0].project.aliases = vec![first_path.clone()];
+    second.plans[0].project.project_root = second_path.clone();
+    second.plans[0].project.aliases = vec![second_path.clone()];
+    let report = RegistryReconstructionReport {
+        plans: first.plans.into_iter().chain(second.plans).collect(),
+        issues: Vec::new(),
+    };
+    let db = GlobalDb::open_at(&profile_root.join("global.db"))
+        .await
+        .unwrap();
+
+    let applied = apply_registry_reconstruction_report(&db, &report)
+        .await
+        .unwrap();
+    assert_eq!(applied.projects, 2);
+    assert_eq!(applied.aliases, 2);
+    assert_eq!(
+        db.project_registry_context_by_alias(&first_path)
+            .await
+            .unwrap()
+            .project
+            .project_id,
+        "proj_first_native"
+    );
+    assert_eq!(
+        db.project_registry_context_by_alias(&second_path)
+            .await
+            .unwrap()
+            .project
+            .project_id,
+        "proj_second_native"
+    );
+
+    let resumed = apply_registry_reconstruction_report(&db, &report)
+        .await
+        .unwrap();
+    assert_eq!(resumed.projects, 0);
+    assert_eq!(resumed.aliases, 0);
 }
 
 #[tokio::test]

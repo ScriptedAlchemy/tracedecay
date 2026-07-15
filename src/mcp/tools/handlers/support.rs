@@ -375,6 +375,7 @@ mod tests {
         let now = crate::tracedecay::current_timestamp();
         for project in projects {
             let canonical_root = GlobalDb::canonical_project_key(&project.project_root);
+            let alias_key = GlobalDb::project_path_alias_key(&project.project_root);
             let display_root = project.project_root.to_string_lossy().to_string();
             conn.execute(
                 "INSERT INTO code_projects
@@ -403,7 +404,7 @@ mod tests {
                  ON CONFLICT(alias_path) DO UPDATE SET
                     project_id = excluded.project_id,
                     last_seen_at = excluded.last_seen_at",
-                params![canonical_root.as_str(), project.project_id.as_str(), now],
+                params![alias_key.as_str(), project.project_id.as_str(), now],
             )
             .await?;
         }

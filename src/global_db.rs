@@ -1657,6 +1657,11 @@ impl GlobalDb {
             .into_owned()
     }
 
+    /// Canonical lossless key for native project-path identity and authority.
+    pub(crate) fn project_path_alias_key(project_path: &Path) -> String {
+        project_path_alias_key(project_path)
+    }
+
     pub fn is_explicit_project_path_selector(selector: &str) -> bool {
         let selector = selector.trim();
         !selector.is_empty()

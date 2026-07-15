@@ -157,7 +157,7 @@ async fn registry_plan_has_missing_rows(
         if query_optional_text(
             conn,
             "SELECT project_id FROM project_aliases WHERE alias_path=?1",
-            params![GlobalDb::canonical_project_key(alias)],
+            params![GlobalDb::project_path_alias_key(alias)],
         )
         .await?
         .as_deref()
@@ -313,9 +313,10 @@ async fn preflight_registry_reconstruction(
         }
         let project = &plan.project;
         let root = GlobalDb::canonical_project_key(&project.project_root);
+        let root_alias = GlobalDb::project_path_alias_key(&project.project_root);
         record_batch_owner(
             &mut project_roots,
-            &root,
+            &root_alias,
             &project.project_id,
             "canonical project root",
             &mut issues,
@@ -336,8 +337,8 @@ async fn preflight_registry_reconstruction(
         }
         match query_all_text(
             conn,
-            "SELECT project_id FROM code_projects WHERE canonical_root=?1",
-            params![root.as_str()],
+            "SELECT project_id FROM project_aliases WHERE alias_path=?1",
+            params![root_alias.as_str()],
         )
         .await
         {
@@ -353,7 +354,7 @@ async fn preflight_registry_reconstruction(
             Err(error) => issues.push(error),
         }
         for alias in &project.aliases {
-            let alias = GlobalDb::canonical_project_key(alias);
+            let alias = GlobalDb::project_path_alias_key(alias);
             record_batch_owner(
                 &mut aliases,
                 &alias,
@@ -594,7 +595,7 @@ async fn insert_missing_registry_rows(
                     "INSERT OR IGNORE INTO project_aliases(alias_path, project_id, last_seen_at)
                      VALUES(?1, ?2, ?3)",
                     params![
-                        GlobalDb::canonical_project_key(alias),
+                        GlobalDb::project_path_alias_key(alias),
                         project.project_id.as_str(),
                         now,
                     ],

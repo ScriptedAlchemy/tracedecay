@@ -1274,6 +1274,7 @@ async fn retire_legacy_registry_owners(
 
     let result = async {
         let canonical_root = GlobalDb::canonical_project_key(&ledger.project_root);
+        let root_alias = GlobalDb::project_path_alias_key(&ledger.project_root);
         let mut rows = conn
             .query(
                 "SELECT canonical_root, COALESCE(git_common_dir, '')
@@ -1307,7 +1308,7 @@ async fn retire_legacy_registry_owners(
         let mut rows = conn
             .query(
                 "SELECT project_id FROM project_aliases WHERE alias_path=?1",
-                params![canonical_root.as_str()],
+                params![root_alias.as_str()],
             )
             .await
             .map_err(|error| {
