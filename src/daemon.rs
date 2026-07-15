@@ -855,6 +855,9 @@ where
     }
 }
 
+// Windows discovers the current daemon through a fallible endpoint lookup;
+// Unix keeps the same cross-platform contract even though its path is infallible.
+#[allow(clippy::unnecessary_wraps)]
 fn client_connection(socket_path: &Path) -> Result<DaemonConnection> {
     #[cfg(unix)]
     {

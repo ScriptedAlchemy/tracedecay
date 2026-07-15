@@ -760,7 +760,7 @@ fn render_files_md(value: &Value) -> String {
         &render::field_i64(value, "count").to_string(),
     );
     let layout = render::field_str(value, "layout");
-    md.field("layout", &layout);
+    md.field("layout", layout);
 
     let files = value
         .get("files")
@@ -1733,7 +1733,7 @@ fn render_type_hierarchy_md(value: &Value) -> String {
         "max_depth",
         &render::field_i64(value, "max_depth").to_string(),
     );
-    md.blank().code("text", &render::field_str(value, "tree"));
+    md.blank().code("text", render::field_str(value, "tree"));
     md.render()
 }
 

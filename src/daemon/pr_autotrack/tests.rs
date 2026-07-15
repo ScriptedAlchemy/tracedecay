@@ -162,6 +162,8 @@ fn state_round_trips_and_defaults_when_absent() {
 
 // ---- Reconcile: removal + idempotency (no index required) -------------------
 
+// `StoreAdministration` requires a fallible external-holder verifier callback.
+#[allow(clippy::unnecessary_wraps)]
 fn prove_no_open_store_holders(_database_paths: &[PathBuf]) -> crate::errors::Result<()> {
     Ok(())
 }

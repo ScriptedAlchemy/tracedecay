@@ -13,12 +13,12 @@ pub(crate) enum HookAdmission {
     Busy,
 }
 
-pub(crate) fn admit_hook_command(command: &Commands) -> tracedecay::errors::Result<HookAdmission> {
+pub(crate) fn admit_hook_command(command: &Commands) -> HookAdmission {
     if hook_input(command).is_none() {
-        return Ok(HookAdmission::NotHook);
+        return HookAdmission::NotHook;
     }
-    Ok(admission_from_attempt(
-        tracedecay::lifecycle_lease::try_acquire_shared("agent hook"),
+    admission_from_attempt(tracedecay::lifecycle_lease::try_acquire_shared(
+        "agent hook",
     ))
 }
 

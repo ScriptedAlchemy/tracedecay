@@ -642,11 +642,11 @@ fn dsm_matrix(adj: &HashMap<String, HashSet<String>>, max_files: usize) -> Value
 fn render_dsm_md(value: &Value) -> String {
     let mut md = Md::new();
     md.heading(2, "Design Structure Matrix");
-    md.field("shape", &render::field_str(value, "shape"));
+    md.field("shape", render::field_str(value, "shape"));
     if let Some(stats) = value.get("stats") {
         md.field("files", &render::field_i64(stats, "files").to_string());
         md.field("edges", &render::field_i64(stats, "edges").to_string());
-        md.field("density", &render::field_str(stats, "density"));
+        md.field("density", render::field_str(stats, "density"));
         md.field(
             "clusters",
             &render::field_i64(stats, "clusters").to_string(),

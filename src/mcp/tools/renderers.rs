@@ -202,7 +202,7 @@ fn append_fact_md(md: &mut Md, fact: &Value, envelope: &Value) {
         .and_then(Value::as_f64)
         .map(|score| format!("{score:.3}"))
         .unwrap_or_default();
-    let content = compact_text(&render::field_str(fact, "content"));
+    let content = compact_text(render::field_str(fact, "content"));
     let mut head = id;
     if !category.is_empty() {
         head.push(' ');
@@ -230,7 +230,7 @@ fn append_fact_md(md: &mut Md, fact: &Value, envelope: &Value) {
     if !detail.is_empty() {
         md.line(&format!("  {detail}"));
     }
-    let why = compact_text(&render::field_str(envelope, "why"));
+    let why = compact_text(render::field_str(envelope, "why"));
     if !why.is_empty() {
         md.line(&format!("  why: {why}"));
     }

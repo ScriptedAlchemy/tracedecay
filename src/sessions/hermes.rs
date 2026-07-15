@@ -818,13 +818,13 @@ async fn build_batches_with_locations(
             let Some(location) = turn_locations.get(&row.id) else {
                 return;
             };
-            let Some(message) = message_from_row(row, state_db_path, source, &location) else {
+            let Some(message) = message_from_row(row, state_db_path, source, location) else {
                 return;
             };
             let batch = by_session.entry(row.session_id.clone()).or_insert_with(|| {
                 order.push(row.session_id.clone());
                 TranscriptBatch {
-                    session: session_from_row(row, state_db_path, project_root, source, &location),
+                    session: session_from_row(row, state_db_path, project_root, source, location),
                     messages: Vec::new(),
                 }
             });

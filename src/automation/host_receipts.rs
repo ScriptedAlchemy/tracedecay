@@ -252,7 +252,7 @@ mod tests {
                 .unwrap()
         );
         assert!(!record(tmp.path(), route, receipt("call-1")).await.unwrap());
-        mark_turn_ingested(tmp.path(), pending_route("session-1"), "message-1")
+        mark_turn_ingested(tmp.path(), Some(pending_route("session-1")), "message-1")
             .await
             .unwrap();
         let pending = oldest_ready(tmp.path()).await.unwrap().unwrap().pending;
@@ -266,13 +266,13 @@ mod tests {
     async fn serves_parallel_sessions_oldest_first() {
         let tmp = tempfile::tempdir().unwrap();
         for session_id in ["session-1", "session-2"] {
-            let route = pending_route(session_id);
+            let route = Some(pending_route(session_id));
             assert!(
                 record(tmp.path(), route, receipt(session_id))
                     .await
                     .unwrap()
             );
-            mark_turn_ingested(tmp.path(), pending_route(session_id), session_id)
+            mark_turn_ingested(tmp.path(), Some(pending_route(session_id)), session_id)
                 .await
                 .unwrap();
         }
@@ -280,13 +280,13 @@ mod tests {
         assert_eq!(pending.pending.session_key, "session-1");
     }
 
-    fn pending_route(session_id: &str) -> Option<HookRouteMetadata> {
-        Some(HookRouteMetadata {
+    fn pending_route(session_id: &str) -> HookRouteMetadata {
+        HookRouteMetadata {
             session_id: Some(session_id.to_string()),
             thread_id: None,
             cwd: None,
             worktree: None,
             branch: None,
-        })
+        }
     }
 }

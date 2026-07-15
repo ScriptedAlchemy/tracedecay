@@ -210,7 +210,7 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
     };
 
     maybe_run_extract_worker(&command);
-    let _hook_lease = match hook_cmd::admit_hook_command(&command)? {
+    let _hook_lease = match hook_cmd::admit_hook_command(&command) {
         hook_cmd::HookAdmission::NotHook => None,
         hook_cmd::HookAdmission::Acquired(lease) => Some(lease),
         hook_cmd::HookAdmission::Busy => {

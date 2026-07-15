@@ -50,6 +50,8 @@ pub struct RetentionConfig {
     pub lcm_raw_messages_days: Option<u32>,
 }
 
+// Serde's field default callback must return the field's `Option<u32>` type.
+#[allow(clippy::unnecessary_wraps)]
 fn default_analytics_events_days() -> Option<u32> {
     Some(DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS)
 }

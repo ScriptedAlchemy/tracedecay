@@ -184,7 +184,7 @@ impl CodexStructuredState {
                 let payload = record.get("payload")?;
                 let row = match payload.get("type").and_then(Value::as_str)? {
                     "patch_apply_end" => {
-                        patch_apply_row(record, payload, meta, model, path, offset)
+                        Some(patch_apply_row(record, payload, meta, model, path, offset))
                     }
                     "task_started" | "task_complete" | "turn_aborted" => {
                         turn_boundary_row(record, payload, meta, model, path, offset)
@@ -193,9 +193,9 @@ impl CodexStructuredState {
                         mcp_tool_call_row(record, payload, meta, model, path, offset)
                     }
                     "web_search_end" => web_search_row(record, payload, meta, model, path, offset),
-                    "sub_agent_activity" => {
-                        sub_agent_activity_row(record, payload, meta, model, path, offset)
-                    }
+                    "sub_agent_activity" => Some(sub_agent_activity_row(
+                        record, payload, meta, model, path, offset,
+                    )),
                     _ => return None,
                 };
                 Some(row.into_iter().collect())
@@ -975,7 +975,7 @@ fn patch_apply_row(
     model: Option<&str>,
     path: &Path,
     offset: i64,
-) -> Option<SessionMessageRecord> {
+) -> SessionMessageRecord {
     let changes = payload.get("changes").and_then(Value::as_object);
     let mut files = Vec::new();
     if let Some(changes) = changes {
@@ -1026,7 +1026,7 @@ fn patch_apply_row(
     }
     metadata.insert("files".to_string(), Value::Array(files));
 
-    Some(build_row(
+    build_row(
         meta,
         model,
         path,
@@ -1037,7 +1037,7 @@ fn patch_apply_row(
         text,
         Some("apply_patch".to_string()),
         &Value::Object(metadata),
-    ))
+    )
 }
 
 /// Count unified-diff hunks (`@@ … @@` headers) without keeping the diff body.
@@ -1238,7 +1238,7 @@ fn sub_agent_activity_row(
     model: Option<&str>,
     path: &Path,
     offset: i64,
-) -> Option<SessionMessageRecord> {
+) -> SessionMessageRecord {
     let activity_kind = payload
         .get("kind")
         .and_then(Value::as_str)
@@ -1264,7 +1264,7 @@ fn sub_agent_activity_row(
         payload.get("occurred_at_ms"),
     );
 
-    Some(build_row(
+    build_row(
         meta,
         model,
         path,
@@ -1275,7 +1275,7 @@ fn sub_agent_activity_row(
         preview_truncated(&text, TEXT_PREVIEW_BYTES),
         None,
         &Value::Object(metadata),
-    ))
+    )
 }
 
 fn inter_agent_row(

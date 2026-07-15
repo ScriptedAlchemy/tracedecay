@@ -761,11 +761,8 @@ fn rust_module_path(rel: &str) -> Option<String> {
     };
     let mut segs: Vec<&str> = tail.to_vec();
     // Crate roots and module files contribute no path segment.
-    match segs.last().copied() {
-        Some("lib" | "main" | "mod") => {
-            segs.pop();
-        }
-        _ => {}
+    if let Some("lib" | "main" | "mod") = segs.last().copied() {
+        segs.pop();
     }
     let mut path = String::from("crate");
     for seg in segs {

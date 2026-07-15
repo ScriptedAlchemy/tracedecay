@@ -318,6 +318,9 @@ pub(crate) fn run_dogfood_command() -> tracedecay::errors::Result<()> {
     }
 }
 
+// Windows must drop the lease before replacing a running executable, while
+// other platforms retain it through the child handoff.
+#[allow(clippy::unnecessary_wraps)]
 fn prepare_post_update_lease(
     lease: tracedecay::lifecycle_lease::LifecycleLease,
 ) -> Option<tracedecay::lifecycle_lease::LifecycleLease> {
