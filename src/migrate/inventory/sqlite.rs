@@ -31,7 +31,7 @@ pub(super) async fn inspect_global_db(path: &Path, path_overridden: bool) -> Glo
             match db_result {
                 Ok(db) => match db.connect() {
                     Ok(conn) => {
-                        if !sqlite_quick_check(path).await {
+                        if !sqlite_quick_check_connection(&conn).await {
                             warnings
                                 .push(format!("global DB '{}' failed quick_check", path.display()));
                         }
@@ -85,6 +85,10 @@ pub(super) async fn sqlite_quick_check(path: &Path) -> bool {
     let Ok(conn) = db.connect() else {
         return false;
     };
+    sqlite_quick_check_connection(&conn).await
+}
+
+async fn sqlite_quick_check_connection(conn: &libsql::Connection) -> bool {
     let Ok(mut rows) = conn.query("PRAGMA quick_check", ()).await else {
         return false;
     };
