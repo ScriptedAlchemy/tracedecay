@@ -11,6 +11,8 @@ use crate::store::GlobalDbTranscriptStore;
 
 pub mod claude;
 pub(crate) mod claude_observation;
+#[cfg(all(test, target_os = "linux"))]
+mod claude_observation_benchmark;
 pub mod cline_like;
 pub mod codex;
 pub mod codex_app_server;

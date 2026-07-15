@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "workload_id": "pr5-observation-pipeline-v1",
+  "implementation": "src/sessions/claude_observation_benchmark.rs",
+  "platform": "Linux",
+  "profile": "release",
+  "warmup_repetitions": 3,
+  "measured_repetitions": 30,
+  "records_per_repetition": 64,
+  "concurrency": 1,
+  "input": {
+    "provider": "Claude",
+    "scope": "profile",
+    "format": "JSONL",
+    "record_type": "user",
+    "unique_ids": true,
+    "secret_shaped_field_per_record": true
+  },
+  "timed_pipeline": [
+    "scan and parse the complete provider transcript",
+    "sanitize every record",
+    "atomically commit observations, receipts, cursors, and projection work",
+    "drain the production projector and V1 fold",
+    "bounded replay of every committed observation"
+  ],
+  "setup_excluded_from_latency_cpu_and_io": [
+    "temporary directory creation",
+    "input generation",
+    "database open and schema initialization"
+  ],
+  "no_op_replay": "repeat the same production ingest and bounded replay against the durable end cursor; require zero observation-count change and zero coordinator work counters",
+  "metrics": {
+    "latency": "monotonic-clock batch nanoseconds; nearest-rank p50/p95/p99 plus min/max/mean/sample standard deviation",
+    "throughput": "committed and replayed input records divided by summed timed-pipeline duration",
+    "cpu": "Linux /proc/self/stat user plus system ticks for timed code only, converted with getconf CLK_TCK",
+    "peak_memory": "Linux /proc/self/status VmHWM after /proc/self/clear_refs reset immediately before each measured pipeline",
+    "bytes_written": "Linux /proc/self/io write_bytes delta while the production pipeline runs; the process performs no other file writes in the interval",
+    "database_storage_growth": "sum of SQLite database, WAL, and SHM file-length growth",
+    "no_op_work": "latency, CPU ticks, process write bytes, database storage growth, observation-count delta, and every coordinator work counter",
+    "raw_samples": "each measured repetition preserves latency, CPU ticks, process write bytes, database storage growth, peak RSS, and replayed observation count"
+  },
+  "command": "cargo test --quiet --release --lib sessions::claude_observation_benchmark::production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1"
+}
