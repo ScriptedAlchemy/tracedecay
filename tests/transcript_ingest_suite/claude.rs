@@ -919,13 +919,10 @@ async fn claude_system_hook_errors_become_searchable_hook_events() {
     assert_eq!(metadata["source"], "claude_system_record");
     assert!(metadata.get("hook_count").is_some());
 
-    // The capped hook preview stays reversible: the row points back at the exact
-    // transcript JSONL line so full fidelity is recoverable from the source.
-    assert!(
-        hit.message
-            .source_path
-            .as_deref()
-            .is_some_and(|path| path.ends_with("claude-hook-sess.jsonl"))
+    // Durable message identity does not leak an absolute checkout/cache path.
+    assert_eq!(
+        hit.message.source_path.as_deref(),
+        Some("claude:claude-hook-sess")
     );
     assert!(hit.message.source_offset.is_some());
 

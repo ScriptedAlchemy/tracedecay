@@ -36,17 +36,12 @@ mod frames;
 mod record_metadata;
 mod source_records;
 
-use cursor::claude_cursor_key;
-#[allow(
-    unused_imports,
-    reason = "the production coordinator consumes the shared frame API after integration"
-)]
+use cursor::{claude_cursor_key, claude_source_component};
 pub(crate) use frames::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSourceFrame,
-    ClaudeSourceFrameScan, ClaudeSourceScanIdentity, identify_claude_source,
-    scan_claude_source_frames,
+    ClaudeSourceFrameScan, identify_claude_source, scan_claude_source_frames,
 };
-use record_metadata::{SessionAccumulator, session_metadata};
+use record_metadata::{SessionAccumulator, accumulate_session_facts, session_metadata};
 pub(crate) use source_records::transcript_cwd;
 pub(crate) use source_records::{
     ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record,
@@ -58,7 +53,9 @@ use source_records::{
 #[cfg(test)]
 use cursor::{encode_claude_cursor_key, encode_claude_source_id};
 #[cfg(test)]
-use record_metadata::{append_git_operation_metadata, message_metadata};
+use record_metadata::append_git_operation_metadata;
+#[cfg(test)]
+use serde_json::Map;
 #[cfg(test)]
 use source_records::message_from_line;
 
@@ -173,12 +170,23 @@ impl ClaudeSource {
             return None;
         }
 
-        let session_cwd = scan
-            .frames
-            .iter()
-            .filter_map(ClaudeSourceFrame::scope_value)
-            .find_map(record_cwd)
-            .or_else(|| transcript_cwd(&scan.identity.source_path))
+        let scan_start = match scan.coverage {
+            ClaudeFrameCoverage::Complete { start_offset, .. }
+            | ClaudeFrameCoverage::Deferred { start_offset, .. } => start_offset,
+        };
+        let session_cwd = (scan_start > 0)
+            .then(|| transcript_cwd(&scan.identity.source_path))
+            .flatten()
+            .or_else(|| {
+                if scan_start == 0 {
+                    scan.frames
+                        .iter()
+                        .filter_map(ClaudeSourceFrame::scope_value)
+                        .find_map(record_cwd)
+                } else {
+                    None
+                }
+            })
             .or_else(|| {
                 subagent
                     .as_ref()
@@ -245,6 +253,7 @@ impl ClaudeSource {
 
         for frame in &scan.frames {
             let record = frame.sanitized_record()?;
+            accumulate_session_facts(record, &mut accumulator);
             let offset = i64::try_from(frame.offset).ok()?;
             let context = ClaudeRecordContext {
                 session_id: &session_id,
@@ -252,16 +261,23 @@ impl ClaudeSource {
                 project_path: &project,
                 file_generation: scan.file_generation,
                 offset: frame.offset,
+                session_cwd: scope.session_cwd.as_deref(),
             };
             let mut message = match map_sanitized_claude_record(record, &context) {
-                ClaudeRecordDisposition::Message { message, .. } => Some(message),
-                ClaudeRecordDisposition::NonConversational { .. } => system_hook_message_from_line(
-                    record,
-                    &session_id,
-                    source_path,
-                    offset,
-                    scope.session_cwd.as_deref(),
-                ),
+                ClaudeRecordDisposition::Message { draft, message } => {
+                    drop(draft);
+                    Some(*message)
+                }
+                ClaudeRecordDisposition::NonConversational { record_type } => {
+                    drop(record_type);
+                    system_hook_message_from_line(
+                        record,
+                        &session_id,
+                        source_path,
+                        offset,
+                        scope.session_cwd.as_deref(),
+                    )
+                }
             };
             if message.is_none() {
                 message = structured_marker_from_line(
@@ -347,6 +363,9 @@ impl TranscriptSource for ClaudeSource {
     ) -> Option<ParsedTranscript> {
         let identity = identify_claude_source(path)?;
         let mut scan = scan_claude_source_frames(identity, prev, max_new_bytes)?;
+        if scan.previous_cursor.state != prev || scan.previous_cursor.key != self.cursor_key(path) {
+            return None;
+        }
         if let ClaudeFrameCoverage::Deferred { reason, .. } = scan.coverage {
             tracing::debug!(
                 provider = PROVIDER,
@@ -411,7 +430,7 @@ struct ClaudeSubagentMeta {
 /// immediate parent. That immediate-parent assumption was a bug: workflow-nested
 /// subagents failed it and were ingested as orphan standalone sessions.
 fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
-    let session_id = path.file_stem()?.to_str()?.to_string();
+    let session_id = claude_source_component(path.file_stem()?);
 
     // Find the `subagents/` ancestor. `ancestors()` yields `path` first, so the
     // file itself can never match the directory name.
@@ -419,7 +438,7 @@ fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
         .ancestors()
         .find(|anc| anc.file_name().and_then(|name| name.to_str()) == Some("subagents"))?;
     let parent_session_dir = subagents_dir.parent()?;
-    let parent_session_id = parent_session_dir.file_name()?.to_str()?.to_string();
+    let parent_session_id = claude_source_component(parent_session_dir.file_name()?);
 
     // Capture the workflow run id (`wf_<run>`) when the subagent is nested under
     // `subagents/workflows/wf_<run>/`.
@@ -435,12 +454,11 @@ fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
         .to_string();
     // The parent transcript is the `<parent>.jsonl` sibling of the `<parent>`
     // directory that owns `subagents/`.
-    let parent_transcript_path = parent_session_dir.parent().map_or_else(
-        || PathBuf::from(format!("{parent_session_id}.jsonl")),
-        |grandparent| grandparent.join(format!("{parent_session_id}.jsonl")),
-    );
+    let mut parent_filename = parent_session_dir.file_name()?.to_os_string();
+    parent_filename.push(".jsonl");
+    let parent_transcript_path = parent_session_dir.parent()?.join(parent_filename);
 
-    let meta = read_subagent_meta(path, &session_id);
+    let meta = read_subagent_meta(path);
 
     Some(ClaudeSubagentInfo {
         parent_session_id,
@@ -456,8 +474,13 @@ fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
 
 /// Read the sibling `agent-<id>.meta.json` next to a subagent transcript. Fail
 /// open: a missing or malformed file yields empty facts rather than an error.
-fn read_subagent_meta(transcript_path: &Path, session_id: &str) -> ClaudeSubagentMeta {
-    let meta_path = transcript_path.with_file_name(format!("{session_id}.meta.json"));
+fn read_subagent_meta(transcript_path: &Path) -> ClaudeSubagentMeta {
+    let mut meta_filename = transcript_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_os_string();
+    meta_filename.push(".meta.json");
+    let meta_path = transcript_path.with_file_name(meta_filename);
     let Ok(text) = std::fs::read_to_string(&meta_path) else {
         return ClaudeSubagentMeta::default();
     };
@@ -503,7 +526,7 @@ mod tests {
         assert_eq!(scan.file_generation, scan.next_cursor.state.file_id);
         assert_eq!(scan.frames.len(), 1);
         assert_eq!(scan.frames[0].offset, 0);
-        assert_eq!(scan.frames[0].end_offset, complete.len() as i64);
+        assert_eq!(scan.frames[0].end_offset, complete.len() as u64);
         assert_eq!(
             scan.frames[0].parsed_record().unwrap().value()["type"],
             "summary"
@@ -548,6 +571,61 @@ mod tests {
     }
 
     #[test]
+    fn bounded_scan_blocks_oversized_frame_and_suffix_at_one_mib() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-42.jsonl");
+        let oversized = format!(
+            "{{\"payload\":\"{}\"}}\n",
+            "x".repeat(crate::privacy::PR5_MAX_CLAUDE_RECORD_BYTES)
+        );
+        std::fs::write(&path, format!("{oversized}{{\"type\":\"summary\"}}\n")).unwrap();
+
+        let identity = identify_claude_source(&path).unwrap();
+        let scan = scan_claude_source_frames(identity, StoredCursor::default(), None).unwrap();
+
+        assert!(scan.frames.is_empty());
+        assert_eq!(scan.next_cursor.state.position, 0);
+        assert!(matches!(
+            scan.coverage,
+            ClaudeFrameCoverage::Deferred {
+                covered_through: 0,
+                reason: JsonlFrameDeferral::Oversized { offset: 0 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bounded_scan_exposes_whitespace_ranges_without_parsing_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-42.jsonl");
+        let record = b"{\"type\":\"summary\"}\n";
+        std::fs::write(&path, [b"\n".as_slice(), record, b" \t\n"].concat()).unwrap();
+
+        let identity = identify_claude_source(&path).unwrap();
+        let scan = scan_claude_source_frames(identity, StoredCursor::default(), None).unwrap();
+
+        assert_eq!(scan.frames.len(), 1);
+        assert_eq!(scan.skipped_frames.len(), 2);
+        assert_eq!(
+            scan.skipped_frames[0],
+            ClaudeSkippedFrame {
+                offset: 0,
+                end_offset: 1,
+                reason: ClaudeSkippedFrameReason::Whitespace,
+            }
+        );
+        assert_eq!(
+            scan.skipped_frames[1],
+            ClaudeSkippedFrame {
+                offset: (1 + record.len()) as u64,
+                end_offset: (1 + record.len() + 3) as u64,
+                reason: ClaudeSkippedFrameReason::Whitespace,
+            }
+        );
+    }
+
+    #[test]
     fn canonical_mapper_emits_one_conversational_message() {
         let record = json!({
             "type": "user",
@@ -560,6 +638,7 @@ mod tests {
             project_path: "/project-1",
             file_generation: 42,
             offset: 9,
+            session_cwd: Some(Path::new("/project-1")),
         };
 
         let ClaudeRecordDisposition::Message { draft, message } =

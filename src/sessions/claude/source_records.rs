@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use crate::accounting::parser::parse_timestamp;
-use crate::privacy::PR5_MAX_CLAUDE_RECORD_BYTES;
+use crate::privacy::{PR5_MAX_CLAUDE_RECORD_BYTES, parse_claude_record_v1};
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{content_storage_text_and_tools, preview_truncated};
 use crate::sessions::source::{RawJsonlFrame, RawJsonlFrameReader, SessionDraft};
@@ -21,14 +21,15 @@ pub(crate) struct ClaudeRecordContext<'a> {
     pub project_path: &'a str,
     pub file_generation: u64,
     pub offset: u64,
+    pub session_cwd: Option<&'a Path>,
 }
 
 /// Minimal PR5 projection result. Rich reasoning/marker families remain V1
 /// enrichments until their explicit PR6 projection contract.
 pub(crate) enum ClaudeRecordDisposition {
     Message {
-        draft: SessionDraft,
-        message: SessionMessageRecord,
+        draft: Box<SessionDraft>,
+        message: Box<SessionMessageRecord>,
     },
     NonConversational {
         record_type: Option<String>,
@@ -56,7 +57,7 @@ pub(crate) fn map_sanitized_claude_record(
         context.session_id,
         Path::new(&source_id),
         offset,
-        None,
+        context.session_cwd,
         &mut accumulator,
     ) else {
         return ClaudeRecordDisposition::NonConversational {
@@ -87,31 +88,39 @@ pub(crate) fn map_sanitized_claude_record(
         agent_id: None,
         parent_tool_use_id: None,
     };
-    ClaudeRecordDisposition::Message { draft, message }
+    ClaudeRecordDisposition::Message {
+        draft: Box::new(draft),
+        message: Box::new(message),
+    }
 }
 
 pub(crate) fn transcript_cwd(path: &Path) -> Option<PathBuf> {
     let file = std::fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(file);
     let mut frames = RawJsonlFrameReader::new(reader, PR5_MAX_CLAUDE_RECORD_BYTES);
+    let mut offset = 0_u64;
     for _ in 0..CWD_PROBE_LINES {
-        match frames.next_frame().ok()? {
+        let byte_len = match frames.next_frame().ok()? {
             RawJsonlFrame::Eof
             | RawJsonlFrame::Partial { .. }
             | RawJsonlFrame::Oversized { .. } => return None,
-            RawJsonlFrame::Complete { .. } => {}
-        }
+            RawJsonlFrame::Complete { byte_len } => byte_len,
+        };
+        let end_offset = offset.checked_add(byte_len)?;
         let record = frames.record();
         if record.iter().all(u8::is_ascii_whitespace) {
+            offset = end_offset;
             continue;
         }
-        if let Ok(value) = serde_json::from_slice::<Value>(&record) {
-            if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
+        let range = tracedecay_domain::ClaudeByteRangeV1::new(offset, end_offset).ok()?;
+        if let Ok(parsed) = parse_claude_record_v1(record, range) {
+            if let Some(cwd) = parsed.value().get("cwd").and_then(Value::as_str) {
                 if !cwd.is_empty() {
                     return Some(PathBuf::from(cwd));
                 }
             }
         }
+        offset = end_offset;
     }
     None
 }

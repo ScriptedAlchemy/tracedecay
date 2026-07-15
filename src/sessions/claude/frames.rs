@@ -111,10 +111,6 @@ impl ClaudeSourceFrame {
 }
 
 /// Parsed Claude frames and the typed cursor transition they cover.
-#[allow(
-    dead_code,
-    reason = "the daemon observation consumer is layered on this shared scanner API"
-)]
 pub(crate) struct ClaudeSourceFrameScan {
     pub identity: ClaudeSourceScanIdentity,
     pub file_generation: u64,
@@ -163,20 +159,18 @@ pub(crate) fn scan_claude_source_frames(
             continue;
         }
         let range = ClaudeByteRangeV1::new(frame.offset, frame.end_offset).ok()?;
-        match parse_claude_record_v1(&frame.bytes, range) {
-            Ok(record) => frames.push(ClaudeSourceFrame {
+        let Ok(record) = parse_claude_record_v1(&frame.bytes, range) else {
+            raw.new_cursor.position = frame.offset;
+            raw.deferred = Some(JsonlFrameDeferral::Malformed {
                 offset: frame.offset,
-                end_offset: frame.end_offset,
-                payload: ClaudeFramePayload::Parsed(record),
-            }),
-            Err(_) => {
-                raw.new_cursor.position = frame.offset;
-                raw.deferred = Some(JsonlFrameDeferral::Malformed {
-                    offset: frame.offset,
-                });
-                break;
-            }
-        }
+            });
+            break;
+        };
+        frames.push(ClaudeSourceFrame {
+            offset: frame.offset,
+            end_offset: frame.end_offset,
+            payload: ClaudeFramePayload::Parsed(record),
+        });
     }
 
     let coverage = raw.deferred.map_or(

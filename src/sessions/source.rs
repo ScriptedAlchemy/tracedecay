@@ -321,7 +321,8 @@ pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     let cursor_path = cursor_key.store_path();
     let durable_offset = loaded.durable_offset;
     let legacy_offset = loaded.legacy_offset;
-    let next_offset = if loaded.checkpoint.state == expected_previous.state {
+    let is_backfill = loaded.checkpoint.state != expected_previous.state;
+    let next_offset = if !is_backfill {
         ParseOffset {
             byte_offset: parsed.new_cursor.position,
             mtime: parsed.new_cursor.mtime,
@@ -378,26 +379,49 @@ pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
         .as_ref()
         .and_then(|session| session.title.clone())
         .or(draft.title);
-    let ended_at = parsed
-        .messages
-        .last()
-        .and_then(|message| message.timestamp)
-        .or_else(|| existing.as_ref().and_then(|session| session.ended_at));
+    let parsed_ended_at = parsed.messages.last().and_then(|message| message.timestamp);
+    let ended_at = existing
+        .as_ref()
+        .and_then(|session| session.ended_at)
+        .into_iter()
+        .chain(parsed_ended_at)
+        .max();
+
+    let preserve = is_backfill.then_some(existing.as_ref()).flatten();
+    let project_key = preserve
+        .map(|session| session.project_key.clone())
+        .unwrap_or(draft.project_key);
+    let project_path = preserve
+        .map(|session| session.project_path.clone())
+        .unwrap_or(draft.project_path);
+    let metadata_json = preserve
+        .map(|session| session.metadata_json.clone())
+        .unwrap_or(draft.metadata_json);
+    let parent_session_id = preserve
+        .map(|session| session.parent_session_id.clone())
+        .unwrap_or(draft.parent_session_id);
+    let is_subagent = preserve.map_or(draft.is_subagent, |session| session.is_subagent);
+    let agent_id = preserve
+        .map(|session| session.agent_id.clone())
+        .unwrap_or(draft.agent_id);
+    let parent_tool_use_id = preserve
+        .map(|session| session.parent_tool_use_id.clone())
+        .unwrap_or(draft.parent_tool_use_id);
 
     let session = SessionRecord {
         provider: provider.to_string(),
         session_id: draft.session_id,
-        project_key: draft.project_key,
-        project_path: draft.project_path,
+        project_key,
+        project_path,
         title,
         started_at,
         ended_at,
         transcript_path: Some(cursor_key.durable_text()),
-        metadata_json: draft.metadata_json,
-        parent_session_id: draft.parent_session_id,
-        is_subagent: draft.is_subagent,
-        agent_id: draft.agent_id,
-        parent_tool_use_id: draft.parent_tool_use_id,
+        metadata_json,
+        parent_session_id,
+        is_subagent,
+        agent_id,
+        parent_tool_use_id,
     };
 
     let messages_upserted = parsed.messages.len() as u64;
@@ -606,6 +630,7 @@ impl<R: BufRead> RawJsonlFrameReader<R> {
 }
 
 /// Strict framing result used by providers that must retry invalid records.
+#[cfg(test)]
 pub(crate) enum StrictJsonlOutcome {
     Complete(NewJsonl),
     Deferred {
@@ -656,6 +681,7 @@ pub fn stream_new_jsonl(
 /// at that frame's start, so they may commit without skipping the blocked
 /// suffix. `max_record_bytes` includes the terminating newline. Other providers
 /// retain [`stream_new_jsonl`]'s skip-and-advance behavior.
+#[cfg(test)]
 pub(crate) fn stream_new_jsonl_strict(
     path: &Path,
     prev: StoredCursor,

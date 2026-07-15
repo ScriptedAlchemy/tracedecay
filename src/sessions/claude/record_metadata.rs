@@ -65,8 +65,11 @@ impl SessionAccumulator {
     }
 }
 
-/// Reads the session `cwd` from an early line of a Claude transcript.
+pub(super) fn accumulate_session_facts(record: &Value, accumulator: &mut SessionAccumulator) {
+    append_edited_file_metadata(&mut Map::new(), record, accumulator);
+}
 
+/// Read a record's optional wall-clock timestamp.
 pub(super) fn record_timestamp(record: &Value) -> Option<i64> {
     record
         .get("timestamp")

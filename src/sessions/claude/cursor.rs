@@ -7,10 +7,10 @@ const CLAUDE_CURSOR_KEY_PREFIX: &str = "tracedecay-claude-cursor-v1";
 const CLAUDE_SOURCE_ID_PREFIX: &str = "tracedecay-claude-source-v1";
 
 pub(super) fn claude_source_id(path: &Path) -> Option<String> {
-    path.file_stem().map(encode_claude_source_component)
+    path.file_stem().map(claude_source_component)
 }
 
-fn encode_claude_source_component(component: &OsStr) -> String {
+pub(super) fn claude_source_component(component: &OsStr) -> String {
     if let Some(component) = component.to_str() {
         return component.to_owned();
     }
