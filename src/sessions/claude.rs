@@ -712,7 +712,7 @@ mod tests {
         let second_identity = identify_claude_source(&second).unwrap();
         assert_ne!(first_identity.session_id, second_identity.session_id);
         assert_ne!(first_identity.source_id, second_identity.source_id);
-        assert!(!first_identity.source_id.contains("/"));
+        assert!(!first_identity.source_id.contains('/'));
     }
 
     #[test]

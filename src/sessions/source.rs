@@ -322,16 +322,16 @@ pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     let durable_offset = loaded.durable_offset;
     let legacy_offset = loaded.legacy_offset;
     let is_backfill = loaded.checkpoint.state != expected_previous.state;
-    let next_offset = if !is_backfill {
+    let next_offset = if is_backfill {
+        // Backfill/retry scans may start before V1. Upsert their deterministic
+        // rows idempotently while the V1 CAS remains pinned to its newer state.
+        durable_offset
+    } else {
         ParseOffset {
             byte_offset: parsed.new_cursor.position,
             mtime: parsed.new_cursor.mtime,
             file_id: parsed.new_cursor.file_id,
         }
-    } else {
-        // Backfill/retry scans may start before V1. Upsert their deterministic
-        // rows idempotently while the V1 CAS remains pinned to its newer state.
-        durable_offset
     };
     if parsed.messages.is_empty() {
         let batch =
