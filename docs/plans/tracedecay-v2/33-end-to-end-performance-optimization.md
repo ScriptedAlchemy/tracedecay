@@ -4,6 +4,8 @@
 
 **Depends on:** [02 store](02-store-crate.md), [04 projectors](04-projectors-crate.md),
 [05 query](05-query-crate.md), [25 code indexing](25-code-intelligence-indexing-crate.md),
+[12 migration/cutover](12-root-compatibility-migration.md),
+[19 convergence](19-system-defragmentation-convergence-and-extensibility.md),
 and [26 observability](26-observability-accounting-and-usage.md).
 
 ## Outcome
@@ -21,6 +23,11 @@ regression discovered by an earlier slice.
 
 ## Measurement contract
 
+- Before tuning or publishing results, review and freeze a versioned benchmark
+  workload manifest per path containing the baseline build and commit, corpus and generation inputs,
+  platform/hardware class, cold/warm preparation and warmup count, measured
+  repetitions, variance method, concurrency/load schedule, and per-path
+  regression thresholds. Changing it creates a new named baseline comparison.
 - Pin workload, corpus/generation, schema, configuration, platform, hardware
   class, cold/warm state, concurrency, and coverage for every comparison.
 - Report p50/p95/p99 latency and throughput for ingest, sync/catch-up,

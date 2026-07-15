@@ -48,8 +48,9 @@ provider record
   do not stop at schemas or unused scaffolding.
 - Record a bounded representative baseline for parse/sanitize/commit/replay
   latency, throughput, CPU, memory, bytes written, and no-op replay work using
-  the canonical observability contract. This is input to [PR20](33-end-to-end-performance-optimization.md),
-  not a reason to widen PR5 into a performance project.
+  only existing bounded local measurements available to PR5. PR5 neither adds
+  nor depends on Plan26/PR14 observability infrastructure. This is input to
+  [PR20](33-end-to-end-performance-optimization.md), not a reason to widen PR5.
 
 ## Direct tests
 
