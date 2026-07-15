@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
     CanonicalClaudeSanitizationReceiptMaterialV1, ClaudeObservationIdentityMaterialV1,
@@ -12,9 +11,7 @@ use super::detect::{
     DetectionConfidenceV1, DetectionError, PrivacyDetectorV1, SanitizationActionV1,
     SanitizationFindingV1, normalize_key, redact_sensitive_values,
 };
-use super::parse::{
-    ClaudeRecordParseErrorV1, ParseLimits, ParsedClaudeRecordV1, parse_claude_record,
-};
+use super::parse::{ClaudeRecordParseErrorV1, ParseLimits, ParsedClaudeRecordV1};
 
 pub const PR5_CLAUDE_SANITIZER_VERSION: &str = "privacy.claude-record.v1";
 
@@ -130,21 +127,6 @@ impl ClaudeRecordSanitizerV1 {
         &self.policy
     }
 
-    /// Mandatory parse-before-scan boundary for one complete Claude JSONL record.
-    pub fn sanitize(
-        &self,
-        record: &[u8],
-        identity: ClaudeObservationIdentityMaterialV1,
-        retention_class: RetentionClass,
-    ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
-        let parsed = match parse_claude_record(record, identity.position(), self.parse_limits()) {
-            Ok(parsed) => parsed,
-            Err(kind) => return self.non_durable_outcome(kind, record, &identity),
-        };
-
-        self.sanitize_parsed(parsed, identity, retention_class)
-    }
-
     /// Sanitizes a parser-issued token without decoding or parsing the record again.
     pub fn sanitize_parsed(
         &self,
@@ -190,16 +172,6 @@ impl ClaudeRecordSanitizerV1 {
             observation,
             findings: detected.findings,
         })
-    }
-
-    fn non_durable_outcome(
-        &self,
-        kind: ClaudeRecordParseErrorV1,
-        record: &[u8],
-        identity: &ClaudeObservationIdentityMaterialV1,
-    ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
-        let raw_digest: [u8; 32] = Sha256::digest(record).into();
-        self.non_durable_outcome_from_digest(kind, &raw_digest, identity)
     }
 
     fn non_durable_outcome_from_digest(

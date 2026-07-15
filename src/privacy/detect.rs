@@ -6,8 +6,8 @@ use thiserror::Error;
 
 use super::detector_kernel::{
     CredentialPattern, CredentialPatternKind, CredentialPatternProfile, JsonPathSegment,
-    NormalizedSensitiveKey, SensitiveKeyPolicy, compile_credential_patterns, high_entropy_ranges,
-    redact_sensitive_json_values, visit_json_strings_mut,
+    JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy, compile_credential_patterns,
+    high_entropy_ranges, visit_sensitive_json_mut,
 };
 
 const REDACTED_EXACT: &str = "[TraceDecay redacted: exact credential]";
@@ -113,21 +113,21 @@ pub(crate) fn redact_sensitive_values(
     let patterns = patterns()?;
     let mut findings = Vec::new();
     let policy = ConfiguredSensitiveKeyPolicy(sensitive_keys);
-    redact_sensitive_json_values(&mut payload, &policy, |child, (), path| {
-        if child.is_null() {
-            return false;
+    visit_sensitive_json_mut(&mut payload, &policy, |value, path| match value {
+        JsonVisitMut::SensitiveValue(child, ()) if !child.is_null() => {
+            *child = Value::String(REDACTED_SENSITIVE_FIELD.to_string());
+            findings.push(SanitizationFindingV1::new(
+                PrivacyDetectorV1::SensitiveField,
+                structural_location(path),
+                DetectionConfidenceV1::Contextual,
+                SanitizationActionV1::Redacted,
+            ));
+            true
         }
-        *child = Value::String(REDACTED_SENSITIVE_FIELD.to_string());
-        findings.push(SanitizationFindingV1::new(
-            PrivacyDetectorV1::SensitiveField,
-            structural_location(path),
-            DetectionConfidenceV1::Contextual,
-            SanitizationActionV1::Redacted,
-        ));
-        true
-    });
-    visit_json_strings_mut(&mut payload, |text, path| {
-        redact_text(text, &structural_location(path), patterns, &mut findings);
+        JsonVisitMut::SensitiveValue(_, ()) => false,
+        JsonVisitMut::String(text) => {
+            redact_text(text, &structural_location(path), patterns, &mut findings)
+        }
     });
     findings.sort();
     findings.dedup();
@@ -139,11 +139,13 @@ fn redact_text(
     path: &str,
     patterns: &[CredentialPattern],
     findings: &mut Vec<SanitizationFindingV1>,
-) {
+) -> bool {
+    let mut changed = false;
     for pattern in patterns {
         if pattern.regex().is_match(text) {
             let (detector, confidence, replacement) = pattern_metadata(pattern.kind());
             *text = pattern.regex().replace_all(text, replacement).into_owned();
+            changed = true;
             findings.push(SanitizationFindingV1::new(
                 detector,
                 path,
@@ -155,6 +157,7 @@ fn redact_text(
 
     let ranges = high_entropy_ranges(text);
     if !ranges.is_empty() {
+        changed = true;
         for range in ranges.into_iter().rev() {
             text.replace_range(range, REDACTED_ENTROPY);
         }
@@ -165,6 +168,7 @@ fn redact_text(
             SanitizationActionV1::Redacted,
         ));
     }
+    changed
 }
 
 fn patterns() -> Result<&'static [CredentialPattern], DetectionError> {

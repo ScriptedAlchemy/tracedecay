@@ -35,8 +35,18 @@ fn retention_class() -> RetentionClass {
 }
 
 fn sanitize(sanitizer: &ClaudeRecordSanitizerV1, record: &[u8]) -> ClaudeSanitizationOutcomeV1 {
+    sanitize_with_identity(sanitizer, record, identity_for(record))
+}
+
+fn sanitize_with_identity(
+    sanitizer: &ClaudeRecordSanitizerV1,
+    record: &[u8],
+    identity: ClaudeObservationIdentityMaterialV1,
+) -> ClaudeSanitizationOutcomeV1 {
+    let parsed = parse_claude_record_v1(record, identity.position())
+        .expect("parse bounded sanitizer fixture");
     sanitizer
-        .sanitize(record, identity_for(record), retention_class())
+        .sanitize_parsed(parsed, identity, retention_class())
         .expect("sanitizer should produce an outcome")
 }
 
@@ -207,18 +217,10 @@ fn json_is_parsed_before_unknown_fields_are_scanned() {
 
     let mut malformed_record = valid_record;
     assert_eq!(malformed_record.pop(), Some(b'}'));
-    let malformed_outcome = sanitize(&sanitizer, &malformed_record);
-    assert_non_durable(
-        &malformed_outcome,
-        SanitizerDispositionV1::Rejected,
-        PrivacyDetectorV1::MalformedRecord,
-        SanitizationActionV1::Rejected,
-    );
-    assert!(
-        !malformed_outcome
-            .findings()
-            .iter()
-            .any(|finding| finding.detector() == PrivacyDetectorV1::BearerToken)
+    let malformed_range = identity_for(&malformed_record).position();
+    assert_eq!(
+        parse_claude_record_v1(&malformed_record, malformed_range).err(),
+        Some(ClaudeRecordParseErrorV1::Malformed)
     );
 }
 
@@ -383,19 +385,18 @@ fn findings_never_contain_detected_secret_text() {
 }
 
 #[test]
-fn invalid_and_oversized_records_are_rejected_without_payloads() {
-    let sanitizer = ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer");
+fn invalid_records_stop_at_the_parser_and_policy_limited_records_have_no_payload() {
     let malformed = br#"{"message":"#.to_vec();
     let scalar = serde_json::to_vec(&json!("ordinary scalar")).expect("serialize scalar fixture");
 
-    for record in [Vec::new(), malformed, scalar] {
-        let outcome = sanitize(&sanitizer, &record);
-        assert_non_durable(
-            &outcome,
-            SanitizerDispositionV1::Rejected,
-            PrivacyDetectorV1::MalformedRecord,
-            SanitizationActionV1::Rejected,
-        );
+    for (record, expected) in [
+        (Vec::new(), ClaudeRecordParseErrorV1::Empty),
+        (malformed, ClaudeRecordParseErrorV1::Malformed),
+        (scalar, ClaudeRecordParseErrorV1::NonObject),
+    ] {
+        let end = u64::try_from(record.len().max(1)).expect("test record length fits");
+        let range = ClaudeByteRangeV1::new(0, end).expect("non-empty parser range");
+        assert_eq!(parse_claude_record_v1(&record, range).err(), Some(expected));
     }
 
     let limited_policy = ClaudeSanitizerPolicyV1::pr5()
@@ -405,7 +406,12 @@ fn invalid_and_oversized_records_are_rejected_without_payloads() {
     let limited_sanitizer = ClaudeRecordSanitizerV1::new(limited_policy);
     let oversized = serde_json::to_vec(&json!({ "message": "x".repeat(64) }))
         .expect("serialize oversized fixture");
-    let outcome = sanitize(&limited_sanitizer, &oversized);
+    let identity = identity_for(&oversized);
+    let parsed = parse_claude_record_v1(&oversized, identity.position())
+        .expect("canonical parser accepts policy-limited fixture");
+    let outcome = limited_sanitizer
+        .sanitize_parsed(parsed, identity, retention_class())
+        .expect("limited sanitizer returns a typed outcome");
     assert_non_durable(
         &outcome,
         SanitizerDispositionV1::Rejected,
@@ -422,7 +428,12 @@ fn structure_bound_failures_are_quarantined_without_payloads() {
         .expect("valid depth test limits");
     let depth_record = serde_json::to_vec(&json!({ "a": { "b": { "c": "value" } } }))
         .expect("serialize depth fixture");
-    let depth_outcome = sanitize(&ClaudeRecordSanitizerV1::new(depth_policy), &depth_record);
+    let depth_identity = identity_for(&depth_record);
+    let depth_parsed = parse_claude_record_v1(&depth_record, depth_identity.position())
+        .expect("canonical parser accepts policy-limited depth fixture");
+    let depth_outcome = ClaudeRecordSanitizerV1::new(depth_policy)
+        .sanitize_parsed(depth_parsed, depth_identity, retention_class())
+        .expect("limited sanitizer returns a typed outcome");
     assert_non_durable(
         &depth_outcome,
         SanitizerDispositionV1::Quarantined,
@@ -436,7 +447,12 @@ fn structure_bound_failures_are_quarantined_without_payloads() {
         .expect("valid value-count test limits");
     let value_record =
         serde_json::to_vec(&json!({ "values": [1, 2, 3] })).expect("serialize value-count fixture");
-    let value_outcome = sanitize(&ClaudeRecordSanitizerV1::new(value_policy), &value_record);
+    let value_identity = identity_for(&value_record);
+    let value_parsed = parse_claude_record_v1(&value_record, value_identity.position())
+        .expect("canonical parser accepts policy-limited value fixture");
+    let value_outcome = ClaudeRecordSanitizerV1::new(value_policy)
+        .sanitize_parsed(value_parsed, value_identity, retention_class())
+        .expect("limited sanitizer returns a typed outcome");
     assert_non_durable(
         &value_outcome,
         SanitizerDispositionV1::Quarantined,
@@ -458,12 +474,8 @@ fn receipt_ids_are_deterministic_and_use_the_fixed_sanitizer_version() {
     let record = serde_json::to_vec(&json!({ "message": "ordinary deterministic fixture" }))
         .expect("serialize deterministic fixture");
     let identity = identity_for(&record);
-    let first = sanitizer
-        .sanitize(&record, identity.clone(), retention_class())
-        .expect("first sanitization succeeds");
-    let second = sanitizer
-        .sanitize(&record, identity.clone(), retention_class())
-        .expect("second sanitization succeeds");
+    let first = sanitize_with_identity(&sanitizer, &record, identity.clone());
+    let second = sanitize_with_identity(&sanitizer, &record, identity.clone());
 
     assert_eq!(
         first.receipt().receipt().receipt_id(),
@@ -477,21 +489,17 @@ fn receipt_ids_are_deterministic_and_use_the_fixed_sanitizer_version() {
     let changed_record =
         serde_json::to_vec(&json!({ "message": "altered! deterministic fixture" }))
             .expect("serialize changed fixture");
-    let changed = sanitizer
-        .sanitize(&changed_record, identity, retention_class())
-        .expect("changed sanitization succeeds");
+    let changed = sanitize_with_identity(&sanitizer, &changed_record, identity);
     assert_ne!(
         first.receipt().receipt().receipt_id(),
         changed.receipt().receipt().receipt_id()
     );
 
-    let changed_identity = sanitizer
-        .sanitize(
-            &record,
-            identity_for_session(&record, "session.privacy-test.changed"),
-            retention_class(),
-        )
-        .expect("changed identity sanitization succeeds");
+    let changed_identity = sanitize_with_identity(
+        &sanitizer,
+        &record,
+        identity_for_session(&record, "session.privacy-test.changed"),
+    );
     assert_ne!(
         first.receipt().receipt().receipt_id(),
         changed_identity.receipt().receipt().receipt_id()

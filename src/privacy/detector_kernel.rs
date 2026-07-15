@@ -153,24 +153,25 @@ pub(crate) enum JsonPathSegment {
     Index(usize),
 }
 
-pub(crate) fn redact_sensitive_json_values<P, R>(
-    value: &mut Value,
-    policy: &P,
-    mut redact: R,
-) -> bool
+pub(crate) enum JsonVisitMut<'a, M> {
+    SensitiveValue(&'a mut Value, M),
+    String(&'a mut String),
+}
+
+pub(crate) fn visit_sensitive_json_mut<P, V>(value: &mut Value, policy: &P, mut visit: V) -> bool
 where
     P: SensitiveKeyPolicy,
-    R: FnMut(&mut Value, P::Match, &[JsonPathSegment]) -> bool,
+    V: FnMut(JsonVisitMut<'_, P::Match>, &[JsonPathSegment]) -> bool,
 {
-    fn walk<P, R>(
+    fn walk<P, V>(
         value: &mut Value,
         policy: &P,
         path: &mut Vec<JsonPathSegment>,
-        redact: &mut R,
+        visit: &mut V,
     ) -> bool
     where
         P: SensitiveKeyPolicy,
-        R: FnMut(&mut Value, P::Match, &[JsonPathSegment]) -> bool,
+        V: FnMut(JsonVisitMut<'_, P::Match>, &[JsonPathSegment]) -> bool,
     {
         match value {
             Value::Object(fields) => {
@@ -178,10 +179,11 @@ where
                 for (index, (key, child)) in fields.iter_mut().enumerate() {
                     path.push(JsonPathSegment::Field(index));
                     let normalized = NormalizedSensitiveKey::new(key);
-                    let redacted = policy
-                        .classify(&normalized)
-                        .is_some_and(|matched| redact(child, matched, path));
-                    changed |= redacted || walk(child, policy, path, redact);
+                    let redacted = policy.classify(&normalized).is_some_and(|matched| {
+                        visit(JsonVisitMut::SensitiveValue(child, matched), path)
+                    });
+                    changed |= redacted;
+                    changed |= walk(child, policy, path, visit);
                     path.pop();
                 }
                 changed
@@ -190,48 +192,17 @@ where
                 let mut changed = false;
                 for (index, child) in items.iter_mut().enumerate() {
                     path.push(JsonPathSegment::Index(index));
-                    changed |= walk(child, policy, path, redact);
+                    changed |= walk(child, policy, path, visit);
                     path.pop();
                 }
                 changed
             }
+            Value::String(text) => visit(JsonVisitMut::String(text), path),
             _ => false,
         }
     }
 
-    walk(value, policy, &mut Vec::new(), &mut redact)
-}
-
-pub(crate) fn visit_json_strings_mut(
-    value: &mut Value,
-    mut visit: impl FnMut(&mut String, &[JsonPathSegment]),
-) {
-    fn walk(
-        value: &mut Value,
-        path: &mut Vec<JsonPathSegment>,
-        visit: &mut impl FnMut(&mut String, &[JsonPathSegment]),
-    ) {
-        match value {
-            Value::Object(fields) => {
-                for (index, child) in fields.values_mut().enumerate() {
-                    path.push(JsonPathSegment::Field(index));
-                    walk(child, path, visit);
-                    path.pop();
-                }
-            }
-            Value::Array(items) => {
-                for (index, child) in items.iter_mut().enumerate() {
-                    path.push(JsonPathSegment::Index(index));
-                    walk(child, path, visit);
-                    path.pop();
-                }
-            }
-            Value::String(text) => visit(text, path),
-            _ => {}
-        }
-    }
-
-    walk(value, &mut Vec::new(), &mut visit);
+    walk(value, policy, &mut Vec::new(), &mut visit)
 }
 
 pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
@@ -318,22 +289,43 @@ mod tests {
     fn recursively_redacts_structured_sensitive_values() {
         let policy = KeySet(BTreeSet::from(["token".to_string()]));
         let mut value = json!({"outer": [{"token": "hidden"}], "safe": "kept"});
-        let changed = redact_sensitive_json_values(&mut value, &policy, |child, (), path| {
-            assert_eq!(
-                path,
-                &[
-                    JsonPathSegment::Field(0),
-                    JsonPathSegment::Index(0),
-                    JsonPathSegment::Field(0)
-                ]
-            );
-            *child = Value::String("redacted".to_string());
-            true
+        let mut visited = Vec::new();
+        let changed = visit_sensitive_json_mut(&mut value, &policy, |value, path| match value {
+            JsonVisitMut::SensitiveValue(child, ()) => {
+                assert_eq!(
+                    path,
+                    &[
+                        JsonPathSegment::Field(0),
+                        JsonPathSegment::Index(0),
+                        JsonPathSegment::Field(0)
+                    ]
+                );
+                *child = Value::String("redacted".to_string());
+                true
+            }
+            JsonVisitMut::String(text) => {
+                visited.push((text.clone(), path.to_vec()));
+                false
+            }
         });
 
         assert!(changed);
         assert_eq!(value["outer"][0]["token"], "redacted");
         assert_eq!(value["safe"], "kept");
+        assert_eq!(
+            visited,
+            vec![
+                (
+                    "redacted".to_string(),
+                    vec![
+                        JsonPathSegment::Field(0),
+                        JsonPathSegment::Index(0),
+                        JsonPathSegment::Field(0)
+                    ]
+                ),
+                ("kept".to_string(), vec![JsonPathSegment::Field(1)])
+            ]
+        );
     }
 
     #[test]
