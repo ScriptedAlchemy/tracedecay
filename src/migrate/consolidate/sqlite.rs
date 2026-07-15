@@ -360,8 +360,8 @@ pub(super) async fn merge_sessions(
 ) -> Result<()> {
     normalize_sessions(target_path).await?;
     normalize_sessions(source_path).await?;
-    let target = GlobalDb::open_at(target_path)
-        .await
+    let target = GlobalDb::try_open_at(target_path)
+        .await?
         .ok_or_else(|| db_message("merge_sessions", "could not open target sessions DB"))?;
     attach_as(target.conn(), source_path, "source").await?;
     attach_as(target.conn(), target_input_path, "target_input").await?;
@@ -422,7 +422,7 @@ pub(super) async fn merge_sessions(
 }
 
 async fn normalize_sessions(path: &Path) -> Result<()> {
-    let db = GlobalDb::open_at(path).await.ok_or_else(|| {
+    let db = GlobalDb::try_open_at(path).await?.ok_or_else(|| {
         db_message(
             "normalize_sessions",
             format!("could not open '{}'", path.display()),

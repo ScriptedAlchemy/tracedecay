@@ -90,6 +90,61 @@ async fn try_open_at_reports_observation_projection_schema_failure() {
     assert!(GlobalDb::open_at(&db_path).await.is_none());
 }
 
+#[tokio::test]
+async fn try_open_at_rejects_observation_table_without_authority_constraints() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let raw_db = Builder::new_local(&db_path).build().await.unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute_batch(
+            "CREATE TABLE observations (
+                sequence INTEGER,
+                observation_id TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                receipt_id TEXT NOT NULL,
+                observation_json TEXT NOT NULL,
+                committed_cursor_json TEXT NOT NULL
+            )",
+        )
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("constraintless observation table unexpectedly opened");
+    };
+    let TraceDecayError::Database { message, operation } = error else {
+        panic!("unexpected error: {error}");
+    };
+    assert_eq!(operation, "validate global database schema");
+    assert!(message.contains("observations"), "{message}");
+}
+
+#[tokio::test]
+async fn try_open_at_propagates_project_row_migration_failure() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let raw_db = Builder::new_local(&db_path).build().await.unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute("CREATE TABLE projects (path TEXT PRIMARY KEY)", ())
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("invalid projects table unexpectedly opened");
+    };
+    let TraceDecayError::Database { message, operation } = error else {
+        panic!("unexpected error: {error}");
+    };
+    assert_eq!(operation, "migrate global project rows");
+    assert!(message.contains("tokens_saved"), "{message}");
+}
+
 #[cfg(any(unix, windows))]
 #[tokio::test]
 async fn unique_legacy_non_unicode_alias_migrates_to_native_key() {
@@ -169,6 +224,20 @@ async fn bulk_project_deletion_preserves_native_non_unicode_aliases() {
     assert_eq!(db.delete_projects(std::slice::from_ref(&first)).await, 1);
     assert_eq!(db.get_project_tokens(&first).await, 0);
     assert_eq!(db.get_project_tokens(&second).await, 22);
+}
+
+#[tokio::test]
+async fn bulk_project_deletion_accepts_string_paths() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .expect("open global db");
+    let project = dir.path().join("project");
+    let project_text = project.to_string_lossy().into_owned();
+    db.upsert(&project, 11).await;
+
+    assert_eq!(db.delete_projects(&[project_text]).await, 1);
+    assert_eq!(db.get_project_tokens(&project).await, 0);
 }
 
 #[cfg(any(unix, windows))]
@@ -705,7 +774,11 @@ async fn session_column_migration_tolerates_duplicate_column_race() {
     .await
     .unwrap();
 
-    assert!(!session_column_exists(&conn, "parent_session_id").await);
+    assert!(
+        !session_column_exists(&conn, "parent_session_id")
+            .await
+            .unwrap()
+    );
 
     conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", ())
         .await
@@ -718,7 +791,7 @@ async fn session_column_migration_tolerates_duplicate_column_race() {
             "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
         )
         .await
-        .is_some()
+        .is_ok()
     );
 }
 

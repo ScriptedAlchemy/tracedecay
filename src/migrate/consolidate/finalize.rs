@@ -96,8 +96,8 @@ pub(super) async fn register_destination(resolved: &ResolvedPlan) -> Result<()> 
         .and_then(Path::parent)
         .ok_or_else(|| config_error("destination shard has no profile root"))?
         .join("global.db");
-    let db = GlobalDb::open_at(&global_path)
-        .await
+    let db = GlobalDb::try_open_at(&global_path)
+        .await?
         .ok_or_else(|| config_error("could not open global registry for consolidation"))?;
     let project = db
         .upsert_code_project(

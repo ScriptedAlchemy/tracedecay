@@ -8,27 +8,26 @@ use super::daemon::daemon_tool_json;
 async fn strict_registered_project_paths(
     gdb: &tracedecay::global_db::GlobalDb,
 ) -> tracedecay::errors::Result<Vec<PathBuf>> {
-    let projects = gdb.try_list_code_projects(usize::MAX).await?;
-    projects
-        .iter()
+    let paths = gdb.try_list_code_project_paths(usize::MAX).await?;
+    paths
+        .into_iter()
         .enumerate()
-        .map(|(index, project)| strict_registered_project_path(&project.display_root, index))
+        .map(|(index, path)| strict_registered_project_path(path, index))
         .collect()
 }
 
 fn strict_registered_project_path(
-    project_root: &str,
+    project_root: PathBuf,
     index: usize,
 ) -> tracedecay::errors::Result<PathBuf> {
-    let path = PathBuf::from(project_root);
-    if project_root.is_empty() || !path.is_absolute() {
+    if project_root.as_os_str().is_empty() || !project_root.is_absolute() {
         return Err(tracedecay::errors::TraceDecayError::Config {
             message: format!(
-                "global registry project at index {index} has an invalid display_root: {project_root:?}"
+                "global registry project at index {index} has an invalid root: {project_root:?}"
             ),
         });
     }
-    Ok(path)
+    Ok(project_root)
 }
 
 #[cfg(test)]
@@ -39,7 +38,7 @@ mod wipe_target_tests {
     #[test]
     fn registered_project_path_preserves_an_absolute_root() {
         let root = std::env::current_dir().expect("test process must have a working directory");
-        let path = strict_registered_project_path(&root.to_string_lossy(), 0)
+        let path = strict_registered_project_path(root.clone(), 0)
             .expect("absolute registry roots are valid");
         assert_eq!(path, root);
     }
@@ -47,7 +46,7 @@ mod wipe_target_tests {
     #[test]
     fn registered_project_path_rejects_malformed_roots() {
         for root in ["", "relative/project"] {
-            let error = strict_registered_project_path(root, 7)
+            let error = strict_registered_project_path(PathBuf::from(root), 7)
                 .expect_err("a malformed registry root must abort wipe discovery");
             assert!(
                 error
@@ -56,6 +55,50 @@ mod wipe_target_tests {
                 "unexpected error: {error}"
             );
         }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn registered_project_paths_preserve_non_unicode_roots() {
+        let dir = tempfile::TempDir::new().expect("create temporary profile");
+        #[cfg(unix)]
+        let (first, second) = {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt as _;
+
+            (
+                dir.path().join(OsString::from_vec(vec![b'p', 0x80])),
+                dir.path().join(OsString::from_vec(vec![b'p', 0x81])),
+            )
+        };
+        #[cfg(windows)]
+        let (first, second) = {
+            use std::ffi::OsString;
+            use std::os::windows::ffi::OsStringExt as _;
+
+            (
+                dir.path()
+                    .join(OsString::from_wide(&[u16::from(b'p'), 0xd800])),
+                dir.path()
+                    .join(OsString::from_wide(&[u16::from(b'p'), 0xd801])),
+            )
+        };
+
+        let db = tracedecay::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
+            .await
+            .expect("open global database");
+        db.upsert_code_project("proj_first", &first, None, None, None)
+            .await
+            .expect("register first project");
+        db.upsert_code_project("proj_second", &second, None, None, None)
+            .await
+            .expect("register second project");
+
+        let paths = strict_registered_project_paths(&db)
+            .await
+            .expect("list registered paths");
+        assert!(paths.contains(&first));
+        assert!(paths.contains(&second));
     }
 }
 
