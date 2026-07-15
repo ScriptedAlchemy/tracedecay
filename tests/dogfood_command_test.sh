@@ -16,6 +16,9 @@ printf '%s\n' "$*" >>"${TRACEDECAY_DOGFOOD_TEST_LOG:?}"
 if [[ "${1:-}" == "--version" ]]; then
   printf 'tracedecay 0.0.0-dogfood\n'
 fi
+if [[ "$*" == "daemon status" && "${TRACEDECAY_DOGFOOD_TEST_SOCKET_STATE:-}" == "connectable" ]]; then
+  printf 'socket: /tmp/tracedecay.sock (connectable)\n'
+fi
 EOF
 chmod +x "$fake_target/release/tracedecay"
 
@@ -42,9 +45,30 @@ cmp "$staged" "$installed"
 
 grep -Fxq 'cargo build --locked --release --bin tracedecay' "$log"
 grep -Fxq 'post-update' "$log"
+grep -Fxq 'daemon restart' "$log"
 grep -Fxq 'daemon status' "$log"
 grep -Fxq 'doctor' "$log"
 grep -Fxq -- '--version' "$log"
+test "$(grep -Fxc 'daemon status' "$log")" -eq 2
+
+restart_line=$(grep -nFx 'daemon restart' "$log" | cut -d: -f1)
+doctor_line=$(grep -nFx 'doctor' "$log" | cut -d: -f1)
+test "$restart_line" -lt "$doctor_line"
+
+: >"$log"
+PATH="$fake_bin:$PATH" \
+HOME="$fake_home" \
+CARGO_TARGET_DIR="$fake_target" \
+TRACEDECAY_DOGFOOD_TEST_LOG="$log" \
+TRACEDECAY_DOGFOOD_TEST_SOCKET_STATE=connectable \
+  "$repo_root/scripts/dogfood.sh"
+
+test "$(grep -Fxc 'daemon status' "$log")" -eq 1
+if grep -Fxq 'daemon restart' "$log"; then
+  echo 'dogfood restarted an already-connectable daemon' >&2
+  exit 1
+fi
+grep -Fxq 'doctor' "$log"
 
 grep -Fq 'dogfood = "run --quiet --release --bin tracedecay -- dogfood"' "$repo_root/.cargo/config.toml"
 

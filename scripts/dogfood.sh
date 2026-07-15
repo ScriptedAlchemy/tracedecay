@@ -40,7 +40,12 @@ install_atomically "$staged_binary" "$installed_binary"
 unset TRACEDECAY_DATA_DIR TRACEDECAY_DISABLE_GLOBAL_DB
 
 "$installed_binary" post-update
-"$installed_binary" daemon status
+daemon_status=$("$installed_binary" daemon status)
+printf '%s\n' "$daemon_status"
+if [[ "$daemon_status" != *"(connectable)"* ]]; then
+  "$installed_binary" daemon restart
+  "$installed_binary" daemon status
+fi
 "$installed_binary" doctor
 "$installed_binary" --version
 
