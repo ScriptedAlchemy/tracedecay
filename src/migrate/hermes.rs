@@ -19,7 +19,7 @@ use crate::memory::store::MemoryStore;
 
 mod session_merge;
 
-use session_merge::merge_snapshot;
+use session_merge::{MergeSnapshotRequest, merge_snapshot};
 
 const LEDGER_DIR: &str = "migration-ledger/hermes-legacy";
 const COPIED_TABLES: &[&str] = &[
@@ -637,18 +637,18 @@ async fn migrate_candidate_snapshot(
         None => 0,
     };
 
-    let result = merge_snapshot(
+    let result = merge_snapshot(MergeSnapshotRequest {
         source,
-        candidate.primary_path(),
-        target_db.conn(),
-        &target_layout.sessions_db_path,
-        &target_project.root,
-        &target_layout.project_id,
-        &fingerprint,
+        source_path: candidate.primary_path(),
+        target: target_db.conn(),
+        target_path: &target_layout.sessions_db_path,
+        target_project: &target_project.root,
+        target_project_id: &target_layout.project_id,
+        fingerprint: &fingerprint,
         source_schema_version,
-        memory_rows,
+        initial_rows_copied: memory_rows,
         fail_after_table,
-    )
+    })
     .await
     .map_err(CandidateError::Failed)?;
     if let Some(source_memory) = source_memory.as_ref() {

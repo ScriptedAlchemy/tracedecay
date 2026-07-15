@@ -148,19 +148,30 @@ pub async fn get(
 /// `(project_id, session_id, file_path, mode, args_hash)`; a re-`put` with
 /// matching keys replaces the prior row, which is how stale entries (mtime
 /// mismatch) get evicted.
-#[allow(clippy::too_many_arguments)]
-pub async fn put(
-    conn: &Connection,
-    project_id: &str,
-    session_id: &str,
-    file_path: &str,
-    mtime_ns: i64,
-    mode: &str,
-    args_hash: &str,
-    digest: &str,
-    body: &[u8],
-    token_count: u32,
-) -> Result<()> {
+pub struct ReadCacheWrite<'a> {
+    pub project_id: &'a str,
+    pub session_id: &'a str,
+    pub file_path: &'a str,
+    pub mtime_ns: i64,
+    pub mode: &'a str,
+    pub args_hash: &'a str,
+    pub digest: &'a str,
+    pub body: &'a [u8],
+    pub token_count: u32,
+}
+
+pub async fn put(conn: &Connection, write: ReadCacheWrite<'_>) -> Result<()> {
+    let ReadCacheWrite {
+        project_id,
+        session_id,
+        file_path,
+        mtime_ns,
+        mode,
+        args_hash,
+        digest,
+        body,
+        token_count,
+    } = write;
     let now = unix_seconds();
     conn.execute(
         "INSERT OR REPLACE INTO read_cache

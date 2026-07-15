@@ -2376,15 +2376,17 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
     if !cg.is_read_only() {
         read_cache::put(
             conn,
-            &project_id,
-            GLOBAL_SESSION,
-            &display_file,
-            mtime_ns,
-            mode.as_str(),
-            &args_hash,
-            &digest,
-            body_text.as_bytes(),
-            token_count,
+            read_cache::ReadCacheWrite {
+                project_id: &project_id,
+                session_id: GLOBAL_SESSION,
+                file_path: &display_file,
+                mtime_ns,
+                mode: mode.as_str(),
+                args_hash: &args_hash,
+                digest: &digest,
+                body: body_text.as_bytes(),
+                token_count,
+            },
         )
         .await?;
     }

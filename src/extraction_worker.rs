@@ -249,16 +249,18 @@ impl WorkerPool {
                 std::thread::spawn(move || {
                     worker_thread(
                         worker,
-                        queue,
-                        results,
-                        skipped,
-                        progress_count,
-                        on_progress,
-                        project_root,
-                        self_path,
-                        token,
-                        total,
-                        per_file_timeout,
+                        WorkerThreadContext {
+                            queue,
+                            results,
+                            skipped,
+                            progress_count,
+                            on_progress,
+                            project_root,
+                            self_path,
+                            token,
+                            total,
+                            per_file_timeout,
+                        },
                     );
                 })
             })
@@ -292,14 +294,7 @@ pub struct ExtractFilesOutcome {
     pub skipped: Vec<(String, String)>,
 }
 
-// `worker_thread` is the body of a `thread::spawn` closure that takes
-// owned Arc clones / PathBufs by value to keep the strong refcount /
-// path data alive for the lifetime of the thread. Clippy's
-// `needless_pass_by_value` doesn't model that — it only sees that
-// nothing is moved out inside the function — so we silence it here.
-#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
-fn worker_thread<F>(
-    mut worker: WorkerHandle,
+struct WorkerThreadContext<F> {
     queue: Arc<Mutex<VecDeque<String>>>,
     results: Arc<Mutex<Vec<ExtractTuple>>>,
     skipped: Arc<Mutex<Vec<(String, String)>>>,
@@ -310,9 +305,24 @@ fn worker_thread<F>(
     token: [u8; TOKEN_LEN],
     total: usize,
     per_file_timeout: Duration,
-) where
+}
+
+fn worker_thread<F>(mut worker: WorkerHandle, context: WorkerThreadContext<F>)
+where
     F: Fn(usize, usize, &str) + Send + Sync,
 {
+    let WorkerThreadContext {
+        queue,
+        results,
+        skipped,
+        progress_count,
+        on_progress,
+        project_root,
+        self_path,
+        token,
+        total,
+        per_file_timeout,
+    } = context;
     loop {
         let next = queue
             .lock()

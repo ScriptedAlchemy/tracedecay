@@ -21,36 +21,37 @@ struct MigrationMarker {
     rows_copied: u64,
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(super) struct MergeSnapshotRequest<'a> {
+    pub(super) source: Option<&'a Connection>,
+    pub(super) source_path: &'a Path,
+    pub(super) target: &'a Connection,
+    pub(super) target_path: &'a Path,
+    pub(super) target_project: &'a Path,
+    pub(super) target_project_id: &'a str,
+    pub(super) fingerprint: &'a str,
+    pub(super) source_schema_version: i64,
+    pub(super) initial_rows_copied: u64,
+    pub(super) fail_after_table: Option<&'a str>,
+}
+
 pub(super) async fn merge_snapshot(
-    source: Option<&Connection>,
-    source_path: &Path,
-    target: &Connection,
-    target_path: &Path,
-    target_project: &Path,
-    target_project_id: &str,
-    fingerprint: &str,
-    source_schema_version: i64,
-    initial_rows_copied: u64,
-    fail_after_table: Option<&str>,
+    request: MergeSnapshotRequest<'_>,
 ) -> Result<MergeOutcome, String> {
+    let source = request.source;
+    let source_path = request.source_path;
+    let target = request.target;
+    let target_path = request.target_path;
+    let target_project = request.target_project;
+    let target_project_id = request.target_project_id;
+    let fingerprint = request.fingerprint;
+    let source_schema_version = request.source_schema_version;
     let existing_marker = read_migration_marker(target_path, fingerprint, target_project_id)?;
     target
         .execute("BEGIN IMMEDIATE", ())
         .await
         .map_err(|error| format!("could not begin target migration: {error}"))?;
     let mut created_payloads = Vec::new();
-    let result = merge_snapshot_in_transaction(
-        source,
-        source_path,
-        target,
-        target_path,
-        target_project,
-        initial_rows_copied,
-        fail_after_table,
-        &mut created_payloads,
-    )
-    .await;
+    let result = merge_snapshot_in_transaction(&request, &mut created_payloads).await;
     match result {
         Ok(mut outcome) => {
             let repaired_payloads = !created_payloads.is_empty();
@@ -92,18 +93,17 @@ pub(super) async fn merge_snapshot(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn merge_snapshot_in_transaction(
-    source: Option<&Connection>,
-    source_path: &Path,
-    target: &Connection,
-    target_path: &Path,
-    target_project: &Path,
-    initial_rows_copied: u64,
-    fail_after_table: Option<&str>,
+    request: &MergeSnapshotRequest<'_>,
     created_payloads: &mut Vec<PathBuf>,
 ) -> Result<MergeOutcome, String> {
-    let mut rows_copied = initial_rows_copied;
+    let source_path = request.source_path;
+    let target = request.target;
+    let target_path = request.target_path;
+    let target_project = request.target_project;
+    let fail_after_table = request.fail_after_table;
+    let mut rows_copied = request.initial_rows_copied;
+    let source = request.source;
     let Some(source) = source else {
         return Ok(MergeOutcome {
             already_migrated: false,

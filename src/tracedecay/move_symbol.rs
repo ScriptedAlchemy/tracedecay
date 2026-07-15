@@ -161,15 +161,15 @@ impl TraceDecay {
         let dest_module = rust_module_path(&dest_rel);
         let src_module = rust_module_path(&source_rel);
         let analysis = self
-            .analyze_dependencies(
-                &target,
-                &source_rel,
-                &dest_rel,
-                &source,
-                &source_modified,
-                &moved_text,
-                src_module.as_deref(),
-            )
+            .analyze_dependencies(DependencyAnalysisInput {
+                target: &target,
+                source_rel: &source_rel,
+                dest_rel: &dest_rel,
+                source: &source,
+                source_modified: &source_modified,
+                moved_text: &moved_text,
+                src_module: src_module.as_deref(),
+            })
             .await?;
 
         // Assemble the destination content.
@@ -357,17 +357,19 @@ impl TraceDecay {
     /// Dependency analysis for the moved body: same-file symbols and source
     /// `use`-imports the body references that will no longer resolve at the
     /// destination. Produces auto-insertable imports plus hints for the rest.
-    #[allow(clippy::too_many_arguments)]
     async fn analyze_dependencies(
         &self,
-        target: &Node,
-        source_rel: &str,
-        dest_rel: &str,
-        source: &str,
-        source_modified: &str,
-        moved_text: &str,
-        src_module: Option<&str>,
+        input: DependencyAnalysisInput<'_>,
     ) -> Result<DependencyAnalysis> {
+        let DependencyAnalysisInput {
+            target,
+            source_rel,
+            dest_rel,
+            source,
+            source_modified,
+            moved_text,
+            src_module,
+        } = input;
         let mut out = DependencyAnalysis::default();
         // Scan only real code: a doc-comment mention (e.g. ``[`compute_total`]``)
         // and identifiers that appear only inside string literals are not
@@ -689,6 +691,16 @@ struct DependencyAnalysis {
     auto_imports: Vec<String>,
     /// Findings that need caller attention.
     hints: Vec<MoveHint>,
+}
+
+struct DependencyAnalysisInput<'a> {
+    target: &'a Node,
+    source_rel: &'a str,
+    dest_rel: &'a str,
+    source: &'a str,
+    source_modified: &'a str,
+    moved_text: &'a str,
+    src_module: Option<&'a str>,
 }
 
 /// A single binding brought into scope by a `use` statement.
