@@ -596,6 +596,14 @@ mod tests {
 
     use super::*;
 
+    const OBSERVATION_STATE_TABLES: &[&str] = &[
+        "sanitization_receipts",
+        "observations",
+        "source_cursors",
+        "projection_queue",
+        "observation_projection_checkpoints",
+    ];
+
     struct Fixture {
         temp: TempDir,
         home: PathBuf,
@@ -665,6 +673,71 @@ mod tests {
             )
             .await
         }
+    }
+
+    async fn observation_state_counts(fixture: &Fixture) -> Vec<i64> {
+        let database = libsql::Builder::new_local(fixture.profile.join("sessions.db"))
+            .build()
+            .await
+            .expect("open observation state database");
+        let connection = database
+            .connect()
+            .expect("connect observation state database");
+        let mut counts = Vec::with_capacity(OBSERVATION_STATE_TABLES.len());
+        for table in OBSERVATION_STATE_TABLES {
+            let mut rows = connection
+                .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+                .await
+                .expect("count observation state rows");
+            counts.push(
+                rows.next()
+                    .await
+                    .expect("read observation state count")
+                    .expect("observation state count row")
+                    .get(0)
+                    .expect("decode observation state count"),
+            );
+        }
+        counts
+    }
+
+    async fn assert_invalid_frame_preserves_observation_state(session_id: &str, frame: &[u8]) {
+        let fixture = Fixture::new(session_id).await;
+        fs::write(&fixture.transcript, frame).expect("write invalid Claude frame");
+        let source_adapter = fixture.source(session_id);
+        let source = ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap();
+        let store = GlobalDbObservationStore::new(&fixture.db);
+        let before = observation_state_counts(&fixture).await;
+
+        let stats = fixture
+            .ingest(&source_adapter, None, ObservationCancellation::default())
+            .await
+            .expect("invalid frame must defer without mutating observation state");
+
+        assert_eq!(stats.observations_committed, 0);
+        assert_eq!(stats.observation_duplicates, 0);
+        assert_eq!(stats.cursor_advances, 0);
+        assert_eq!(stats.projections_completed, 0);
+        assert_eq!(observation_state_counts(&fixture).await, before);
+        assert!(
+            store
+                .get_source_cursor(&source, &ObservationScopeV1::Profile)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(store.next_queued_observation().await.unwrap().is_none());
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -791,5 +864,25 @@ mod tests {
             .await
             .unwrap();
         assert!(observations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn malformed_partial_and_oversized_frames_preserve_all_observation_state() {
+        let oversized = format!(
+            "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
+            "x".repeat(crate::privacy::PR5_MAX_CLAUDE_RECORD_BYTES)
+        );
+        for (session_id, frame) in [
+            (
+                "invalid-malformed",
+                br#"{"type":"user",malformed}
+"#
+                .as_slice(),
+            ),
+            ("invalid-partial", br#"{"type":"user""#.as_slice()),
+            ("invalid-oversized", oversized.as_bytes()),
+        ] {
+            assert_invalid_frame_preserves_observation_state(session_id, frame).await;
+        }
     }
 }

@@ -503,73 +503,98 @@ async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
 
 #[tokio::test]
 async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queue() {
-    let tmp = TempDir::new().unwrap();
-    let db = open_lcm_db(&tmp).await;
-    let store = GlobalDbObservationStore::new(&db);
-    let candidate = observation(
-        "session-rollback",
-        0,
-        100,
-        "receipt.rollback-projection",
-        conversational_payload("message-rollback", "rollback searchable canary"),
-    );
-    persist(&store, candidate.clone(), None).await;
+    for (stage, trigger) in [
+        ("message", "BEFORE INSERT ON session_messages"),
+        (
+            "provenance",
+            "BEFORE INSERT ON observation_projection_provenance",
+        ),
+        ("dequeue", "BEFORE DELETE ON projection_queue"),
+        (
+            "checkpoint",
+            "BEFORE INSERT ON observation_projection_checkpoints",
+        ),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let db = open_lcm_db(&tmp).await;
+        let store = GlobalDbObservationStore::new(&db);
+        let message_id = format!("message-rollback-{stage}");
+        let searchable = format!("rollback searchable {stage}");
+        let candidate = observation(
+            &format!("session-rollback-{stage}"),
+            0,
+            100,
+            &format!("receipt.rollback-{stage}"),
+            conversational_payload(&message_id, &searchable),
+        );
+        persist(&store, candidate.clone(), None).await;
 
-    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
-        .build()
-        .await
-        .unwrap();
-    let raw_conn = raw_db.connect().unwrap();
-    raw_conn
-        .execute_batch(
-            "CREATE TRIGGER fail_projection_provenance
-             BEFORE INSERT ON observation_projection_provenance BEGIN
-                SELECT RAISE(ABORT, 'injected projection provenance failure');
-             END;",
-        )
-        .await
-        .unwrap();
-
-    let error = store
-        .project_observation(candidate.observation_id())
-        .await
-        .expect_err("injected projection failure must abort the transaction");
-    assert!(matches!(error, ProjectionStoreError::Storage { .. }));
-    assert_eq!(
-        store.projection_checkpoint().await.unwrap().last_sequence(),
-        0
-    );
-    assert_eq!(projection_counts(&tmp).await, (0, 0, 0, 0, 0, 1));
-    assert!(
-        db.search_session_messages("claude", Some("user"), "rollback searchable", 10)
+        let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+            .build()
             .await
-            .is_empty()
-    );
-    assert_eq!(
+            .unwrap();
+        let raw_conn = raw_db.connect().unwrap();
+        raw_conn
+            .execute_batch(&format!(
+                "CREATE TRIGGER fail_projection_{stage}
+                 {trigger} BEGIN
+                    SELECT RAISE(ABORT, 'injected projection {stage} failure');
+                 END;"
+            ))
+            .await
+            .unwrap();
+
+        let error = store
+            .project_observation(candidate.observation_id())
+            .await
+            .expect_err("injected projection failure must abort the transaction");
+        assert!(
+            matches!(error, ProjectionStoreError::Storage { .. }),
+            "{stage} failure surfaced as {error:?}"
+        );
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            0,
+            "{stage} failure advanced the checkpoint"
+        );
+        assert_eq!(
+            projection_counts(&tmp).await,
+            (0, 0, 0, 0, 0, 1),
+            "{stage} failure committed partial projection state"
+        );
+        assert!(
+            db.search_session_messages("claude", Some("user"), &searchable, 10)
+                .await
+                .is_empty(),
+            "{stage} failure leaked a searchable message"
+        );
+        assert_eq!(
+            store
+                .get_observation(candidate.observation_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .projection_status(),
+            ObservationProjectionStatus::Queued,
+            "{stage} failure consumed the queue item"
+        );
+
+        raw_conn
+            .execute_batch(&format!("DROP TRIGGER fail_projection_{stage};"))
+            .await
+            .unwrap();
         store
-            .get_observation(candidate.observation_id())
+            .project_observation(candidate.observation_id())
             .await
-            .unwrap()
-            .unwrap()
-            .projection_status(),
-        ObservationProjectionStatus::Queued
-    );
-
-    raw_conn
-        .execute_batch("DROP TRIGGER fail_projection_provenance;")
-        .await
-        .unwrap();
-    store
-        .project_observation(candidate.observation_id())
-        .await
-        .unwrap();
-    assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0, 0));
-    assert_eq!(
-        db.search_session_messages("claude", Some("user"), "rollback searchable", 10)
-            .await
-            .len(),
-        1
-    );
+            .unwrap();
+        assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0, 0));
+        assert_eq!(
+            db.search_session_messages("claude", Some("user"), &searchable, 10)
+                .await
+                .len(),
+            1
+        );
+    }
 }
 
 #[tokio::test]
