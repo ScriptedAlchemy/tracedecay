@@ -144,7 +144,7 @@ pub async fn get(
     }))
 }
 
-/// Parameters for [`put`].
+/// Parameters for the internal [`put_write`] entry point.
 pub(crate) struct ReadCacheWrite<'a> {
     pub project_id: &'a str,
     pub session_id: &'a str,

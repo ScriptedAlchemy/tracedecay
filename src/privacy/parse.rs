@@ -33,14 +33,14 @@ pub(super) enum ParsedPolicyLimitViolation {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ParseLimits {
-    pub record_bytes: usize,
-    pub depth: usize,
-    pub values: usize,
+pub(super) struct ParseLimits {
+    pub(super) record_bytes: usize,
+    pub(super) depth: usize,
+    pub(super) values: usize,
 }
 
 impl ParseLimits {
-    pub(crate) const fn pr5() -> Self {
+    pub(super) const fn pr5() -> Self {
         Self {
             record_bytes: PR5_MAX_CLAUDE_RECORD_BYTES,
             depth: PR5_MAX_DEPTH,
@@ -76,11 +76,11 @@ impl ParsedClaudeRecordV1 {
         self.encoded_len
     }
 
-    pub(crate) fn into_value(self) -> Value {
+    pub(super) fn into_value(self) -> Value {
         self.value
     }
 
-    pub(crate) fn raw_digest(&self) -> &[u8; 32] {
+    pub(super) fn raw_digest(&self) -> &[u8; 32] {
         &self.raw_digest
     }
 
@@ -108,7 +108,7 @@ pub fn parse_claude_record_v1(
     parse_claude_record(record, source_range, ParseLimits::pr5())
 }
 
-pub(crate) fn parse_claude_record(
+fn parse_claude_record(
     record: &[u8],
     source_range: ClaudeByteRangeV1,
     limits: ParseLimits,
