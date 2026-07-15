@@ -427,30 +427,30 @@ pub(crate) async fn run_payload_gc_in_transaction(
             &mut report,
         )?;
     }
-    reap_unreferenced_metadata(
+    reap_unreferenced_metadata(ReapUnreferencedMetadataRequest {
         conn,
         storage_root,
-        &scoped_metadata_refs,
-        &referenced,
-        &metadata_bytes,
+        metadata_refs: &scoped_metadata_refs,
+        referenced: &referenced,
+        metadata_bytes: &metadata_bytes,
         now,
-        &cfg,
+        cfg: &cfg,
         apply,
-        &mut remaining,
-        &mut report,
-    )
+        remaining: &mut remaining,
+        report: &mut report,
+    })
     .await?;
-    reap_missing_metadata(
+    reap_missing_metadata(ReapMissingMetadataRequest {
         conn,
         storage_root,
-        &all_metadata_refs,
-        &referenced,
+        metadata_refs: &all_metadata_refs,
+        referenced: &referenced,
         now,
-        &cfg,
+        cfg: &cfg,
         apply,
-        &mut remaining,
-        &mut report,
-    )
+        remaining: &mut remaining,
+        report: &mut report,
+    })
     .await?;
     rewrite_dangling_placeholders(
         conn,
@@ -545,19 +545,34 @@ pub fn reap_orphan_files(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn reap_unreferenced_metadata(
-    conn: &Connection,
-    storage_root: &Path,
-    metadata_refs: &BTreeSet<String>,
-    referenced: &BTreeSet<String>,
-    metadata_bytes: &BTreeMap<String, u64>,
+struct ReapUnreferencedMetadataRequest<'a> {
+    conn: &'a Connection,
+    storage_root: &'a Path,
+    metadata_refs: &'a BTreeSet<String>,
+    referenced: &'a BTreeSet<String>,
+    metadata_bytes: &'a BTreeMap<String, u64>,
     now: i64,
-    cfg: &LcmGcConfig,
+    cfg: &'a LcmGcConfig,
     apply: bool,
-    remaining: &mut usize,
-    report: &mut LcmGcReport,
+    remaining: &'a mut usize,
+    report: &'a mut LcmGcReport,
+}
+
+async fn reap_unreferenced_metadata(
+    request: ReapUnreferencedMetadataRequest<'_>,
 ) -> Result<(), LcmError> {
+    let ReapUnreferencedMetadataRequest {
+        conn,
+        storage_root,
+        metadata_refs,
+        referenced,
+        metadata_bytes,
+        now,
+        cfg,
+        apply,
+        remaining,
+        report,
+    } = request;
     for payload_ref in metadata_refs.intersection(referenced) {
         if apply {
             conn.execute(
@@ -648,18 +663,30 @@ async fn reap_unreferenced_metadata(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn reap_missing_metadata(
-    conn: &Connection,
-    storage_root: &Path,
-    metadata_refs: &BTreeSet<String>,
-    referenced: &BTreeSet<String>,
+struct ReapMissingMetadataRequest<'a> {
+    conn: &'a Connection,
+    storage_root: &'a Path,
+    metadata_refs: &'a BTreeSet<String>,
+    referenced: &'a BTreeSet<String>,
     now: i64,
-    cfg: &LcmGcConfig,
+    cfg: &'a LcmGcConfig,
     apply: bool,
-    remaining: &mut usize,
-    report: &mut LcmGcReport,
-) -> Result<(), LcmError> {
+    remaining: &'a mut usize,
+    report: &'a mut LcmGcReport,
+}
+
+async fn reap_missing_metadata(request: ReapMissingMetadataRequest<'_>) -> Result<(), LcmError> {
+    let ReapMissingMetadataRequest {
+        conn,
+        storage_root,
+        metadata_refs,
+        referenced,
+        now,
+        cfg,
+        apply,
+        remaining,
+        report,
+    } = request;
     let dir = payload::existing_payload_dir_opt(storage_root)?;
     for payload_ref in metadata_refs.intersection(referenced) {
         if payload_file_present(dir.as_deref(), payload_ref)? {
@@ -1048,18 +1075,18 @@ mod tests {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn insert_raw_message(
-        conn: &Connection,
-        session_id: &str,
-        message_id: &str,
-        storage_kind: &str,
-        payload_ref: Option<&str>,
-        content: Option<&str>,
-        snippet_text: &str,
-        index_text: &str,
-        metadata_json: Option<&str>,
-    ) -> Result<(), String> {
+    struct RawMessage<'a> {
+        session_id: &'a str,
+        message_id: &'a str,
+        storage_kind: &'a str,
+        payload_ref: Option<&'a str>,
+        content: Option<&'a str>,
+        snippet_text: &'a str,
+        index_text: &'a str,
+        metadata_json: Option<&'a str>,
+    }
+
+    async fn insert_raw_message(conn: &Connection, message: RawMessage<'_>) -> Result<(), String> {
         conn.execute(
             "INSERT INTO lcm_raw_messages (
                 provider, message_id, session_id, role, ordinal, timestamp,
@@ -1068,19 +1095,19 @@ mod tests {
              ) VALUES (?1, ?2, ?3, 'assistant', 1, 2, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, ?10)",
             params![
                 PROVIDER,
-                message_id,
-                session_id,
-                util::opt_text(content),
-                format!("{message_id}-hash"),
-                storage_kind,
-                payload_ref,
-                snippet_text,
-                index_text,
-                metadata_json
+                message.message_id,
+                message.session_id,
+                util::opt_text(message.content),
+                format!("{}-hash", message.message_id),
+                message.storage_kind,
+                message.payload_ref,
+                message.snippet_text,
+                message.index_text,
+                message.metadata_json
             ],
         )
         .await
-        .map_err(|err| format!("insert raw message {message_id}: {err}"))?;
+        .map_err(|err| format!("insert raw message {}: {err}", message.message_id))?;
         Ok(())
     }
 
@@ -1110,14 +1137,16 @@ mod tests {
         );
         insert_raw_message(
             &store.conn,
-            "session-a",
-            message_id,
-            "external",
-            Some(&payload_ref.payload_ref),
-            None,
-            &placeholder,
-            &placeholder,
-            Some(&placeholder),
+            RawMessage {
+                session_id: "session-a",
+                message_id,
+                storage_kind: "external",
+                payload_ref: Some(&payload_ref.payload_ref),
+                content: None,
+                snippet_text: &placeholder,
+                index_text: &placeholder,
+                metadata_json: Some(&placeholder),
+            },
         )
         .await?;
         Ok(payload_ref.payload_ref)
@@ -1204,26 +1233,30 @@ mod tests {
         );
         insert_raw_message(
             &store.conn,
-            "session-a",
-            "message-1",
-            "inline",
-            None,
-            Some(&live),
-            &live,
-            &live,
-            None,
+            RawMessage {
+                session_id: "session-a",
+                message_id: "message-1",
+                storage_kind: "inline",
+                payload_ref: None,
+                content: Some(&live),
+                snippet_text: &live,
+                index_text: &live,
+                metadata_json: None,
+            },
         )
         .await?;
         insert_raw_message(
             &store.conn,
-            "session-a",
-            "message-2",
-            "inline",
-            None,
-            Some(&tombstoned),
-            &tombstoned,
-            &tombstoned,
-            None,
+            RawMessage {
+                session_id: "session-a",
+                message_id: "message-2",
+                storage_kind: "inline",
+                payload_ref: None,
+                content: Some(&tombstoned),
+                snippet_text: &tombstoned,
+                index_text: &tombstoned,
+                metadata_json: None,
+            },
         )
         .await?;
 

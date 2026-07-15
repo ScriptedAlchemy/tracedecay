@@ -572,15 +572,17 @@ fn append_bubble_rows(
         push_row(
             messages,
             ordinal,
-            format!("{composer_id}:{bubble_id}:tool"),
             composer_id,
-            &role,
-            timestamp,
-            format!("{name} ({status})").trim().to_string(),
-            kind,
-            model,
-            Some(name.to_string()),
-            &metadata,
+            ComposerRow {
+                message_id: format!("{composer_id}:{bubble_id}:tool"),
+                role: &role,
+                timestamp,
+                text: format!("{name} ({status})").trim().to_string(),
+                kind,
+                model,
+                tool_names: Some(name.to_string()),
+                metadata: &metadata,
+            },
         );
     }
 
@@ -594,15 +596,17 @@ fn append_bubble_rows(
         push_row(
             messages,
             ordinal,
-            format!("{composer_id}:{bubble_id}:thinking"),
             composer_id,
-            &role,
-            timestamp,
-            thinking.to_string(),
-            "reasoning",
-            model,
-            None,
-            &json!({ "source": "cursor_composer" }),
+            ComposerRow {
+                message_id: format!("{composer_id}:{bubble_id}:thinking"),
+                role: &role,
+                timestamp,
+                text: thinking.to_string(),
+                kind: "reasoning",
+                model,
+                tool_names: None,
+                metadata: &json!({ "source": "cursor_composer" }),
+            },
         );
     }
 
@@ -623,15 +627,17 @@ fn append_bubble_rows(
         push_row(
             messages,
             ordinal,
-            format!("{composer_id}:{bubble_id}"),
             composer_id,
-            &role,
-            timestamp,
-            text.to_string(),
-            "message",
-            model,
-            None,
-            &metadata,
+            ComposerRow {
+                message_id: format!("{composer_id}:{bubble_id}"),
+                role: &role,
+                timestamp,
+                text: text.to_string(),
+                kind: "message",
+                model,
+                tool_names: None,
+                metadata: &metadata,
+            },
         );
     }
 
@@ -641,15 +647,17 @@ fn append_bubble_rows(
             push_row(
                 messages,
                 ordinal,
-                format!("{composer_id}:{bubble_id}:pr:{index}"),
                 composer_id,
-                &role,
-                timestamp,
-                pr_link_text(pr),
-                "pr_link",
-                model,
-                None,
-                &json!({ "source": "cursor_composer", "pull_request": pr.clone() }),
+                ComposerRow {
+                    message_id: format!("{composer_id}:{bubble_id}:pr:{index}"),
+                    role: &role,
+                    timestamp,
+                    text: pr_link_text(pr),
+                    kind: "pr_link",
+                    model,
+                    tool_names: None,
+                    metadata: &json!({ "source": "cursor_composer", "pull_request": pr.clone() }),
+                },
             );
         }
     }
@@ -689,48 +697,53 @@ fn append_plan_row(
     push_row(
         messages,
         ordinal,
-        format!("{composer_id}:plan"),
         composer_id,
-        "assistant",
-        None,
-        text,
-        "plan",
-        None,
-        None,
-        &json!({ "source": "cursor_composer", "todos": items }),
+        ComposerRow {
+            message_id: format!("{composer_id}:plan"),
+            role: "assistant",
+            timestamp: None,
+            text,
+            kind: "plan",
+            model: None,
+            tool_names: None,
+            metadata: &json!({ "source": "cursor_composer", "todos": items }),
+        },
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+struct ComposerRow<'a> {
+    message_id: String,
+    role: &'a str,
+    timestamp: Option<i64>,
+    text: String,
+    kind: &'a str,
+    model: Option<&'a str>,
+    tool_names: Option<String>,
+    metadata: &'a Value,
+}
+
 fn push_row(
     messages: &mut Vec<SessionMessageRecord>,
     ordinal: &mut i64,
-    message_id: String,
     composer_id: &str,
-    role: &str,
-    timestamp: Option<i64>,
-    text: String,
-    kind: &str,
-    model: Option<&str>,
-    tool_names: Option<String>,
-    metadata: &Value,
+    row: ComposerRow<'_>,
 ) {
     let current = *ordinal;
     *ordinal += 1;
     messages.push(SessionMessageRecord {
         provider: PROVIDER.to_string(),
-        message_id,
+        message_id: row.message_id,
         session_id: composer_id.to_string(),
-        role: role.to_string(),
-        timestamp,
+        role: row.role.to_string(),
+        timestamp: row.timestamp,
         ordinal: current,
-        text,
-        kind: Some(kind.to_string()),
-        model: model.map(str::to_string),
-        tool_names,
+        text: row.text,
+        kind: Some(row.kind.to_string()),
+        model: row.model.map(str::to_string),
+        tool_names: row.tool_names,
         source_path: None,
         source_offset: Some(current),
-        metadata_json: serde_json::to_string(metadata).ok(),
+        metadata_json: serde_json::to_string(row.metadata).ok(),
     });
 }
 

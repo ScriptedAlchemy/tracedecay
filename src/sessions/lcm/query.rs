@@ -2606,16 +2606,16 @@ pub(crate) async fn payload_health_detail(
     } else {
         0
     };
-    let unreferenced_refs = payload_unreferenced_samples(
+    let unreferenced_refs = payload_unreferenced_samples(PayloadUnreferencedSamplesRequest {
         conn,
-        &metadata_refs,
-        &referenced_refs,
-        &metadata_bytes,
+        metadata_refs: &metadata_refs,
+        referenced_refs: &referenced_refs,
+        metadata_bytes: &metadata_bytes,
         last_gc_at,
-        grace_seconds_i64,
+        grace_seconds: grace_seconds_i64,
         now,
         sample_limit,
-    )
+    })
     .await?;
 
     Ok(PayloadHealthDetail {
@@ -2775,17 +2775,30 @@ fn payload_ref_location(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn payload_unreferenced_samples(
-    conn: &Connection,
-    metadata_refs: &BTreeSet<String>,
-    referenced_refs: &BTreeSet<String>,
-    metadata_bytes: &BTreeMap<String, u64>,
+struct PayloadUnreferencedSamplesRequest<'a> {
+    conn: &'a Connection,
+    metadata_refs: &'a BTreeSet<String>,
+    referenced_refs: &'a BTreeSet<String>,
+    metadata_bytes: &'a BTreeMap<String, u64>,
     last_gc_at: Option<i64>,
     grace_seconds: i64,
     now: i64,
     sample_limit: usize,
+}
+
+async fn payload_unreferenced_samples(
+    request: PayloadUnreferencedSamplesRequest<'_>,
 ) -> Result<Vec<PayloadRefStatusSample>, LcmError> {
+    let PayloadUnreferencedSamplesRequest {
+        conn,
+        metadata_refs,
+        referenced_refs,
+        metadata_bytes,
+        last_gc_at,
+        grace_seconds,
+        now,
+        sample_limit,
+    } = request;
     let mut samples = Vec::new();
     for payload_ref in metadata_refs.difference(referenced_refs) {
         if samples.len() >= sample_limit {

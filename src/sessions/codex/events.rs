@@ -769,33 +769,34 @@ fn parse_leading_float(text: &str) -> Option<f64> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_row(
-    meta: &CodexMeta,
-    model: Option<&str>,
-    path: &Path,
+struct BuildRowRequest<'a> {
+    meta: &'a CodexMeta,
+    model: Option<&'a str>,
+    path: &'a Path,
     offset: i64,
     timestamp: Option<i64>,
-    role: &str,
-    kind: &str,
+    role: &'a str,
+    kind: &'a str,
     text: String,
     tool_names: Option<String>,
-    metadata: &Value,
-) -> SessionMessageRecord {
+    metadata: &'a Value,
+}
+
+fn build_row(request: BuildRowRequest<'_>) -> SessionMessageRecord {
     SessionMessageRecord {
         provider: PROVIDER.to_string(),
-        message_id: format!("{}:{offset}", meta.session_id),
-        session_id: meta.session_id.clone(),
-        role: role.to_string(),
-        timestamp,
-        ordinal: offset,
-        text,
-        kind: Some(kind.to_string()),
-        model: model.map(str::to_string),
-        tool_names,
-        source_path: Some(path.to_string_lossy().to_string()),
-        source_offset: Some(offset),
-        metadata_json: serde_json::to_string(metadata).ok(),
+        message_id: format!("{}:{}", request.meta.session_id, request.offset),
+        session_id: request.meta.session_id.clone(),
+        role: request.role.to_string(),
+        timestamp: request.timestamp,
+        ordinal: request.offset,
+        text: request.text,
+        kind: Some(request.kind.to_string()),
+        model: request.model.map(str::to_string),
+        tool_names: request.tool_names,
+        source_path: Some(request.path.to_string_lossy().to_string()),
+        source_offset: Some(request.offset),
+        metadata_json: serde_json::to_string(request.metadata).ok(),
     }
 }
 
@@ -864,18 +865,18 @@ fn exec_command_row(
         }
     }
 
-    build_row(
+    build_row(BuildRowRequest {
         meta,
-        exec.model.as_deref(),
+        model: exec.model.as_deref(),
         path,
-        exec.offset,
-        exec.timestamp,
-        "tool",
-        "tool_call",
-        preview_truncated(&exec.cmd, TEXT_PREVIEW_BYTES),
-        Some("exec_command".to_string()),
-        &Value::Object(metadata),
-    )
+        offset: exec.offset,
+        timestamp: exec.timestamp,
+        role: "tool",
+        kind: "tool_call",
+        text: preview_truncated(&exec.cmd, TEXT_PREVIEW_BYTES),
+        tool_names: Some("exec_command".to_string()),
+        metadata: &Value::Object(metadata),
+    })
 }
 
 /// Commit refs mined from one exec result, split by evidence strength.
@@ -1026,18 +1027,18 @@ fn patch_apply_row(
     }
     metadata.insert("files".to_string(), Value::Array(files));
 
-    build_row(
+    build_row(BuildRowRequest {
         meta,
         model,
         path,
         offset,
-        timestamp_of(record),
-        "tool",
-        "file_edit",
+        timestamp: timestamp_of(record),
+        role: "tool",
+        kind: "file_edit",
         text,
-        Some("apply_patch".to_string()),
-        &Value::Object(metadata),
-    )
+        tool_names: Some("apply_patch".to_string()),
+        metadata: &Value::Object(metadata),
+    })
 }
 
 /// Count unified-diff hunks (`@@ … @@` headers) without keeping the diff body.
@@ -1092,18 +1093,18 @@ fn turn_boundary_row(
     insert_i64(&mut metadata, "completed_at", payload.get("completed_at"));
     insert_str(&mut metadata, "reason", payload.get("reason"));
 
-    Some(build_row(
+    Some(build_row(BuildRowRequest {
         meta,
         model,
         path,
         offset,
-        timestamp_of(record),
-        "system",
-        "turn_boundary",
+        timestamp: timestamp_of(record),
+        role: "system",
+        kind: "turn_boundary",
         text,
-        None,
-        &Value::Object(metadata),
-    ))
+        tool_names: None,
+        metadata: &Value::Object(metadata),
+    }))
 }
 
 fn mcp_tool_call_row(
@@ -1161,18 +1162,18 @@ fn mcp_tool_call_row(
         metadata.insert("error".to_string(), Value::String(error));
     }
 
-    Some(build_row(
+    Some(build_row(BuildRowRequest {
         meta,
         model,
         path,
         offset,
-        timestamp_of(record),
-        "tool",
-        "tool_call",
-        tool_names.clone(),
-        Some(tool_names),
-        &Value::Object(metadata),
-    ))
+        timestamp: timestamp_of(record),
+        role: "tool",
+        kind: "tool_call",
+        text: tool_names.clone(),
+        tool_names: Some(tool_names),
+        metadata: &Value::Object(metadata),
+    }))
 }
 
 /// Codex encodes MCP call durations as `{ "secs": s, "nanos": n }`.
@@ -1217,18 +1218,18 @@ fn web_search_row(
     insert_str(&mut metadata, "call_id", payload.get("call_id"));
     metadata.insert("queries".to_string(), Value::Array(queries));
 
-    Some(build_row(
+    Some(build_row(BuildRowRequest {
         meta,
         model,
         path,
         offset,
-        timestamp_of(record),
-        "tool",
-        "web_search",
-        preview_truncated(query, TEXT_PREVIEW_BYTES),
-        Some("web_search".to_string()),
-        &Value::Object(metadata),
-    ))
+        timestamp: timestamp_of(record),
+        role: "tool",
+        kind: "web_search",
+        text: preview_truncated(query, TEXT_PREVIEW_BYTES),
+        tool_names: Some("web_search".to_string()),
+        metadata: &Value::Object(metadata),
+    }))
 }
 
 fn sub_agent_activity_row(
@@ -1264,18 +1265,18 @@ fn sub_agent_activity_row(
         payload.get("occurred_at_ms"),
     );
 
-    build_row(
+    build_row(BuildRowRequest {
         meta,
         model,
         path,
         offset,
-        timestamp_of(record),
-        "system",
-        "subagent_activity",
-        preview_truncated(&text, TEXT_PREVIEW_BYTES),
-        None,
-        &Value::Object(metadata),
-    )
+        timestamp: timestamp_of(record),
+        role: "system",
+        kind: "subagent_activity",
+        text: preview_truncated(&text, TEXT_PREVIEW_BYTES),
+        tool_names: None,
+        metadata: &Value::Object(metadata),
+    })
 }
 
 fn inter_agent_row(
@@ -1314,18 +1315,18 @@ fn inter_agent_row(
         metadata.insert("trigger_turn".to_string(), Value::Bool(trigger));
     }
 
-    Some(build_row(
+    Some(build_row(BuildRowRequest {
         meta,
         model,
         path,
         offset,
-        timestamp_of(record),
-        "system",
-        "subagent_activity",
-        format!("Codex agent message: {author} -> {recipient} (encrypted)"),
-        None,
-        &Value::Object(metadata),
-    ))
+        timestamp: timestamp_of(record),
+        role: "system",
+        kind: "subagent_activity",
+        text: format!("Codex agent message: {author} -> {recipient} (encrypted)"),
+        tool_names: None,
+        metadata: &Value::Object(metadata),
+    }))
 }
 
 fn update_plan_row(
@@ -1364,18 +1365,18 @@ fn update_plan_row(
     insert_str(&mut metadata, "explanation", args.get("explanation"));
     metadata.insert("steps".to_string(), Value::Array(steps));
 
-    Some(build_row(
+    Some(build_row(BuildRowRequest {
         meta,
         model,
         path,
         offset,
         timestamp,
-        "assistant",
-        "plan",
-        preview_truncated(&lines.join("\n"), TEXT_PREVIEW_BYTES),
-        Some("update_plan".to_string()),
-        &Value::Object(metadata),
-    ))
+        role: "assistant",
+        kind: "plan",
+        text: preview_truncated(&lines.join("\n"), TEXT_PREVIEW_BYTES),
+        tool_names: Some("update_plan".to_string()),
+        metadata: &Value::Object(metadata),
+    }))
 }
 
 fn insert_str(metadata: &mut Map<String, Value>, key: &str, value: Option<&Value>) {
