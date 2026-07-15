@@ -27,9 +27,9 @@ pub enum ClaudeRecordParseErrorV1 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ParsedPolicyLimitViolation {
-    TooLarge,
-    TooDeep,
-    TooManyValues,
+    RecordSize,
+    NestingDepth,
+    ValueCount,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -89,13 +89,13 @@ impl ParsedClaudeRecordV1 {
         limits: ParseLimits,
     ) -> Result<(), ParsedPolicyLimitViolation> {
         if self.encoded_len > limits.record_bytes {
-            return Err(ParsedPolicyLimitViolation::TooLarge);
+            return Err(ParsedPolicyLimitViolation::RecordSize);
         }
         if self.observed_depth > limits.depth {
-            return Err(ParsedPolicyLimitViolation::TooDeep);
+            return Err(ParsedPolicyLimitViolation::NestingDepth);
         }
         if self.observed_values > limits.values {
-            return Err(ParsedPolicyLimitViolation::TooManyValues);
+            return Err(ParsedPolicyLimitViolation::ValueCount);
         }
         Ok(())
     }

@@ -181,12 +181,12 @@ impl ClaudeRecordSanitizerV1 {
         identity: &ClaudeObservationIdentityMaterialV1,
     ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
         let (disposition, detector, action) = match kind {
-            ParsedPolicyLimitViolation::TooDeep | ParsedPolicyLimitViolation::TooManyValues => (
+            ParsedPolicyLimitViolation::NestingDepth | ParsedPolicyLimitViolation::ValueCount => (
                 SanitizerDispositionV1::Quarantined,
                 PrivacyDetectorV1::StructureLimit,
                 SanitizationActionV1::Quarantined,
             ),
-            ParsedPolicyLimitViolation::TooLarge => (
+            ParsedPolicyLimitViolation::RecordSize => (
                 SanitizerDispositionV1::Rejected,
                 PrivacyDetectorV1::RecordSizeLimit,
                 SanitizationActionV1::Rejected,
