@@ -65,6 +65,7 @@ pub(super) async fn handle_status(
     args: Value,
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
+    project_session_db: Option<&GlobalDb>,
 ) -> Result<ToolResult> {
     let stats = cg.get_stats().await?;
     let mut output: Value = serde_json::to_value(&stats).unwrap_or(json!({}));
@@ -130,13 +131,13 @@ pub(super) async fn handle_status(
     // any un-ingested transcript backlog from the project sessions.db.
     let session_db_path = cg.store_layout().sessions_db_path.clone();
     if session_db_path.exists() {
-        match GlobalDb::open_at(&session_db_path).await {
+        match project_session_db {
             None => {
-                // The store exists but won't open — say so instead of
-                // silently dropping the section (which reads as "healthy").
+                // The store exists but the daemon did not retain its authority;
+                // fail closed instead of opening a second connection here.
                 output["session_ingest"] = json!({
                     "status": "unavailable",
-                    "message": "session store exists but could not be opened",
+                    "message": "daemon project session authority is unavailable",
                 });
             }
             Some(db) => {

@@ -12,7 +12,6 @@ use tracedecay::automation::managed_skills::{
 };
 use tracedecay::branch_meta;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::sessions::SessionRecord;
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 
@@ -5092,58 +5091,33 @@ fn test_healthcheck_cursor_local_install_checks_project_config() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_cursor_healthcheck_warns_on_literal_workspace_folder_transcript_path() {
-    // TraceDecay::init and healthcheck read the user data dir from the
-    // process env, which other tests pin via EnvVarGuard — serialize and pin
-    // like every other TraceDecay::init test in this suite.
-    let _env_lock = AGENT_ENV_LOCK.lock().await;
+#[test]
+fn test_cursor_healthcheck_warns_on_literal_workspace_folder_transcript_path() {
     let home = TempDir::new().unwrap();
-    let data_dir = home.path().join(".tracedecay");
-    std::fs::create_dir_all(&data_dir).unwrap();
-    let data_dir = data_dir.canonicalize().unwrap();
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, data_dir);
     let project = TempDir::new().unwrap();
     CursorIntegration
         .install(&make_install_ctx(home.path()))
         .unwrap();
-    let cg = TraceDecay::init(project.path()).await.unwrap();
-    let db = tracedecay::sessions::cursor::open_project_session_db(project.path())
-        .await
-        .expect("session db should open for initialized project");
-    assert!(
-        db.upsert_session(&SessionRecord {
-            provider: "cursor".to_string(),
-            session_id: "cursor-placeholder-session".to_string(),
-            project_key: project.path().to_string_lossy().to_string(),
-            project_path: project.path().to_string_lossy().to_string(),
-            title: Some("placeholder path".to_string()),
-            started_at: Some(1_715_000_000),
-            ended_at: None,
-            transcript_path: Some(
-                "${workspaceFolder}/.cursor/sessions/cursor-placeholder-session.jsonl".to_string(),
-            ),
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await,
-        "session row should insert"
-    );
-    cg.close();
+    let daemon_status = serde_json::json!({
+        "cursor_session_ingest": {
+            "tracked_transcripts": 1,
+            "pending_transcripts": 0,
+            "pending_bytes": 0,
+            "max_transcript_pending_bytes": 0,
+        },
+        "cursor_session_placeholder_paths": [
+            "${workspaceFolder}/.cursor/sessions/cursor-placeholder-session.jsonl"
+        ],
+    });
 
     let mut dc = DoctorCounters::new();
     let hctx = HealthcheckContext {
         home: home.path().to_path_buf(),
         project_path: project.path().to_path_buf(),
     };
-    CursorIntegration.healthcheck(&mut dc, &hctx);
-    assert!(
-        dc.warnings > 0,
-        "literal workspaceFolder transcript paths should be reported"
-    );
+    CursorIntegration.healthcheck_with_daemon_status(&mut dc, &hctx, Some(&daemon_status));
+    assert_eq!(dc.issues, 0);
+    assert_eq!(dc.warnings, 1);
 }
 
 #[test]

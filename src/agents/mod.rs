@@ -265,6 +265,18 @@ pub trait AgentIntegration {
     /// Verify installation health (replaces agent-specific doctor checks).
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext);
 
+    /// Verify installation health using the daemon-owned snapshot already
+    /// collected by Doctor. Integrations with daemon-backed diagnostics can
+    /// override this without issuing another daemon call.
+    fn healthcheck_with_daemon_status(
+        &self,
+        dc: &mut DoctorCounters,
+        ctx: &HealthcheckContext,
+        _daemon_status: Option<&serde_json::Value>,
+    ) {
+        self.healthcheck(dc, ctx);
+    }
+
     /// Returns true if this agent appears to be installed on the system
     /// (its config directory exists).
     fn is_detected(&self, _home: &Path) -> bool {

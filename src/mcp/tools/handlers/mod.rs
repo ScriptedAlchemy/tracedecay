@@ -317,8 +317,15 @@ pub async fn handle_tool_call(
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    handle_tool_call_with_registry(cg, tool_name, args, server_stats, scope_prefix, None, true)
-        .await
+    handle_tool_call_with_registry_and_implicit_project(
+        cg,
+        tool_name,
+        args,
+        server_stats,
+        scope_prefix,
+        ToolCallRegistryOptions::default(),
+    )
+    .await
 }
 
 pub async fn handle_tool_call_with_registry(
@@ -339,12 +346,7 @@ pub async fn handle_tool_call_with_registry(
         ToolCallRegistryOptions {
             global_db,
             allow_default_registry_fallback,
-            implicit_project_path: None,
-            automation_scheduler_reconciler: None,
-            automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
-            diagnostics_cache: None,
-            diagnostics_lsp: None,
-            session_authorities: SessionAuthorities::default(),
+            ..Default::default()
         },
     )
     .await
@@ -361,6 +363,21 @@ pub struct ToolCallRegistryOptions<'a> {
     pub diagnostics_lsp:
         Option<&'a tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
     pub session_authorities: SessionAuthorities<'a>,
+}
+
+impl Default for ToolCallRegistryOptions<'_> {
+    fn default() -> Self {
+        Self {
+            global_db: None,
+            allow_default_registry_fallback: true,
+            implicit_project_path: None,
+            automation_scheduler_reconciler: None,
+            automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
+            diagnostics_cache: None,
+            diagnostics_lsp: None,
+            session_authorities: SessionAuthorities::default(),
+        }
+    }
 }
 
 pub async fn handle_tool_call_with_registry_and_implicit_project(
@@ -469,7 +486,16 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_callees" => graph::handle_callees(cg, args).await,
         "tracedecay_impact" => graph::handle_impact(cg, args).await,
         "tracedecay_node" => graph::handle_node(cg, args).await,
-        "tracedecay_status" => info::handle_status(cg, args, server_stats, scope_prefix).await,
+        "tracedecay_status" => {
+            info::handle_status(
+                cg,
+                args,
+                server_stats,
+                scope_prefix,
+                active_project_session_db.map(Arc::as_ref),
+            )
+            .await
+        }
         "tracedecay_hook_runtime" => {
             hook_runtime::handle_hook_runtime(
                 cg,
@@ -566,7 +592,15 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         }
         "tracedecay_health" => health::handle_health(cg, args, scope_prefix).await,
         "tracedecay_redundancy" => redundancy::handle_redundancy(cg, args, scope_prefix).await,
-        "tracedecay_runtime" => health::handle_runtime(cg, args, options.global_db).await,
+        "tracedecay_runtime" => {
+            health::handle_runtime(
+                cg,
+                args,
+                options.global_db,
+                active_project_session_db.map(Arc::as_ref),
+            )
+            .await
+        }
         "tracedecay_dsm" => health::handle_dsm(cg, args, scope_prefix).await,
         "tracedecay_test_risk" => health::handle_test_risk(cg, args, scope_prefix).await,
         "tracedecay_session_start" => health::handle_session_start(cg, args, scope_prefix).await,

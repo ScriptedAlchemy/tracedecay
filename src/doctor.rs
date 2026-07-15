@@ -75,7 +75,7 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
             None => agents::all_integrations(),
         };
         for ag in &agents_to_check {
-            ag.healthcheck(&mut dc, &hctx);
+            ag.healthcheck_with_daemon_status(&mut dc, &hctx, daemon_status.as_ref().ok());
         }
         let materialization_root =
             crate::automation::skill_materialization::resolve_project_root(&project_path);
@@ -259,6 +259,7 @@ fn daemon_runtime_args() -> serde_json::Value {
     serde_json::json!({
         "format": "json",
         "authority_audit": true,
+        "session_ingest_health": true,
     })
 }
 
@@ -283,7 +284,13 @@ fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<se
     if let Some(version) = runtime.get("tracedecay_version").cloned() {
         storage.insert("daemon_version".to_string(), version);
     }
-    Ok(serde_json::json!({ "storage_health": storage }))
+    let mut status = serde_json::json!({ "storage_health": storage });
+    for key in ["cursor_session_ingest", "cursor_session_placeholder_paths"] {
+        if let Some(value) = runtime.get(key).cloned() {
+            status[key] = value;
+        }
+    }
+    Ok(status)
 }
 
 fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {

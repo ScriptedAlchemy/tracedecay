@@ -14,6 +14,7 @@ use std::ops::{Deref, DerefMut};
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
@@ -3528,7 +3529,7 @@ async fn test_status() {
 #[tokio::test]
 async fn status_stalled_session_ingest_warning_points_to_manual_ingest() {
     let (cg, _env, dir) = setup_empty_project().await;
-    let db = open_active_project_session_db(&cg).await;
+    let db = Arc::new(open_active_project_session_db(&cg).await);
     let transcript = dir.path().join("claude-backlog.jsonl");
     let file = fs::File::create(&transcript).unwrap();
     file.set_len(tracedecay::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES + 1)
@@ -3552,15 +3553,105 @@ async fn status_stalled_session_ingest_warning_points_to_manual_ingest() {
         .await
     );
 
-    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, None)
-        .await
-        .unwrap();
+    let result = tracedecay::mcp::tools::handle_tool_call_with_registry_and_implicit_project(
+        &cg,
+        "tracedecay_status",
+        json!({}),
+        None,
+        None,
+        tracedecay::mcp::tools::ToolCallRegistryOptions {
+            session_authorities: tracedecay::mcp::tools::SessionAuthorities::new(Some(&db), None),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     let text = extract_text(&result.value);
     assert!(text.contains("session transcript ingest looks stalled"));
     assert!(text.contains("automatic catch-up warning threshold"));
     assert!(text.contains("tracedecay sessions ingest --project-path"));
     assert!(!text.contains("hook catch-up cap"));
     assert!(!text.contains("tracedecay doctor --agent cursor"));
+}
+
+#[tokio::test]
+async fn runtime_exposes_cursor_ingest_health_for_daemon_owned_doctor_checks() {
+    let (cg, _env, dir) = setup_empty_project().await;
+    let db = Arc::new(open_active_project_session_db(&cg).await);
+    let transcript = dir.path().join("cursor-backlog.jsonl");
+    fs::write(&transcript, b"pending cursor transcript").unwrap();
+    for (session_id, transcript_path) in [
+        ("cursor-backlog", transcript.to_string_lossy().into_owned()),
+        (
+            "cursor-placeholder",
+            "${workspaceFolder}/.cursor/sessions/cursor-placeholder.jsonl".to_string(),
+        ),
+    ] {
+        assert!(
+            db.upsert_session(&SessionRecord {
+                provider: "cursor".to_string(),
+                session_id: session_id.to_string(),
+                project_key: cg.project_root().to_string_lossy().to_string(),
+                project_path: cg.project_root().to_string_lossy().to_string(),
+                title: None,
+                started_at: Some(1),
+                ended_at: None,
+                transcript_path: Some(transcript_path),
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await
+        );
+    }
+
+    let result = tracedecay::mcp::tools::handle_tool_call_with_registry_and_implicit_project(
+        &cg,
+        "tracedecay_runtime",
+        json!({ "format": "json", "session_ingest_health": true }),
+        None,
+        None,
+        tracedecay::mcp::tools::ToolCallRegistryOptions {
+            session_authorities: tracedecay::mcp::tools::SessionAuthorities::new(Some(&db), None),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["cursor_session_ingest"]["tracked_transcripts"], 1);
+    assert_eq!(payload["cursor_session_ingest"]["pending_transcripts"], 1);
+    assert_eq!(
+        payload["cursor_session_placeholder_paths"],
+        json!(["${workspaceFolder}/.cursor/sessions/cursor-placeholder.jsonl"])
+    );
+}
+
+#[tokio::test]
+async fn status_without_retained_session_authority_fails_closed() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    drop(open_active_project_session_db(&cg).await);
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_status",
+        json!({ "format": "json" }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(payload["session_ingest"]["status"], "unavailable");
+    assert_eq!(
+        payload["session_ingest"]["message"],
+        "daemon project session authority is unavailable"
+    );
+    assert!(payload.get("cursor_session_ingest").is_none());
 }
 
 #[tokio::test]

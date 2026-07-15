@@ -460,6 +460,7 @@ pub(super) async fn handle_runtime(
     cg: &TraceDecay,
     args: Value,
     registry: Option<&crate::global_db::GlobalDb>,
+    project_session_db: Option<&crate::global_db::GlobalDb>,
 ) -> Result<ToolResult> {
     let snap = crate::runtime_telemetry::collect(cg).await?;
     let mut value = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
@@ -484,6 +485,28 @@ pub(super) async fn handle_runtime(
                 "authority_audit_error".to_string(),
                 json!(authority_audit_error),
             );
+        }
+    }
+    if args
+        .get("session_ingest_health")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        match project_session_db {
+            Some(db) => {
+                value["cursor_session_ingest"] = serde_json::to_value(
+                    db.session_ingest_health_for_provider(Some("cursor")).await,
+                )
+                .unwrap_or_else(|_| json!({}));
+                value["cursor_session_placeholder_paths"] =
+                    json!(db.literal_workspace_placeholder_transcript_paths(10).await);
+            }
+            None => {
+                value["cursor_session_ingest"] = json!({
+                    "status": "unavailable",
+                    "message": "daemon project session authority is unavailable",
+                });
+            }
         }
     }
     let text = render::finalize(Some(cg.project_root()), &args, &value, || {

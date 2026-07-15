@@ -1938,6 +1938,10 @@ fn def_runtime() -> ToolDefinition {
                 "authority_audit": {
                     "type": "boolean",
                     "description": "Run the exhaustive observation-authority audit and include authority_audit_ok/error in database telemetry (default: false)"
+                },
+                "session_ingest_health": {
+                    "type": "boolean",
+                    "description": "Include Cursor transcript-ingest health from the daemon-retained project session authority (default: false)"
                 }
             }
         }),

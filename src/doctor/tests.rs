@@ -884,7 +884,7 @@ fn daemon_runtime_parser_extracts_storage_health_and_owner() {
             {"type": "text", "text": "daemon notice"},
             {
                 "type": "text",
-                "text": r#"{"tracedecay_version":"0.0.66","process":{"pid":1234},"database":{"canonical_db_path":"/tmp/project.db","quick_check_ok":true,"authority_audit_ok":true,"authority_audit_error":null,"dirty_marker":{"exists":false}}}"#
+                "text": r#"{"tracedecay_version":"0.0.66","process":{"pid":1234},"database":{"canonical_db_path":"/tmp/project.db","quick_check_ok":true,"authority_audit_ok":true,"authority_audit_error":null,"dirty_marker":{"exists":false}},"cursor_session_ingest":{"tracked_transcripts":1,"pending_transcripts":0,"pending_bytes":0,"max_transcript_pending_bytes":0},"cursor_session_placeholder_paths":["${workspaceFolder}/cursor.jsonl"]}"#
             }
         ]
     }))
@@ -910,6 +910,14 @@ fn daemon_runtime_parser_extracts_storage_health_and_owner() {
         parsed.pointer("/storage_health/authority_audit_error"),
         Some(&serde_json::Value::Null)
     );
+    assert_eq!(
+        parsed.pointer("/cursor_session_ingest/tracked_transcripts"),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(
+        parsed.pointer("/cursor_session_placeholder_paths/0"),
+        Some(&serde_json::json!("${workspaceFolder}/cursor.jsonl"))
+    );
 }
 
 #[test]
@@ -919,6 +927,7 @@ fn daemon_runtime_request_enables_authority_audit() {
         serde_json::json!({
             "format": "json",
             "authority_audit": true,
+            "session_ingest_health": true,
         })
     );
 }

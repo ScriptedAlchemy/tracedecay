@@ -7,7 +7,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -132,8 +132,17 @@ impl AgentIntegration for CursorIntegration {
                  tracedecay-owned entries",
             );
         }
-        doctor_check_session_ingest(dc, &ctx.project_path);
         super::cursor_diagnostics::report_cursor_mcp_log_findings(dc, &ctx.home);
+    }
+
+    fn healthcheck_with_daemon_status(
+        &self,
+        dc: &mut DoctorCounters,
+        ctx: &HealthcheckContext,
+        daemon_status: Option<&Value>,
+    ) {
+        self.healthcheck(dc, ctx);
+        doctor_check_session_ingest(dc, &ctx.project_path, daemon_status);
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -154,6 +163,49 @@ impl AgentIntegration for CursorIntegration {
 // Post-install hook
 // ---------------------------------------------------------------------------
 
+const CURSOR_BRANCH_ADD_TOOL: &str = "tracedecay_admin_branch_add";
+
+fn cursor_branch_add_arguments(branch_name: &str) -> Value {
+    json!({ "branch": branch_name })
+}
+
+fn parse_cursor_branch_add_outcome(response: &Value) -> Result<crate::branch::BranchAddOutcome> {
+    match response.get("outcome").and_then(Value::as_str) {
+        Some("not_indexed") => Ok(crate::branch::BranchAddOutcome::NotIndexed),
+        Some("already_tracked") => Ok(crate::branch::BranchAddOutcome::AlreadyTracked),
+        Some("added") => Ok(crate::branch::BranchAddOutcome::Added),
+        Some("deferred") => Ok(crate::branch::BranchAddOutcome::Deferred),
+        Some(outcome) => Err(TraceDecayError::Config {
+            message: format!("daemon Cursor branch add returned unknown outcome: {outcome}"),
+        }),
+        None => Err(TraceDecayError::Config {
+            message: "daemon Cursor branch add response omitted outcome".to_string(),
+        }),
+    }
+}
+
+async fn add_cursor_branch_via_daemon(
+    project_path: &Path,
+    branch_name: &str,
+) -> Result<crate::branch::BranchAddOutcome> {
+    let response = match crate::hooks::daemon_tool_json(
+        Some(project_path),
+        CURSOR_BRANCH_ADD_TOOL,
+        cursor_branch_add_arguments(branch_name),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            eprintln!(
+                "\x1b[33mwarning:\x1b[0m deferred Cursor branch tracking for '{branch_name}' because the TraceDecay daemon request was unavailable: {err}"
+            );
+            return Ok(crate::branch::BranchAddOutcome::Deferred);
+        }
+    };
+    parse_cursor_branch_add_outcome(&response)
+}
+
 /// Registers the project's current git branch for tracedecay indexing after a
 /// Cursor plugin install, so per-branch graphs stay in sync from the moment
 /// the integration is set up.
@@ -173,7 +225,7 @@ async fn track_branch_after_install(project_path: Option<&Path>) {
     let Some(branch_name) = crate::branch::current_branch(project_path) else {
         return;
     };
-    match crate::tracedecay::TraceDecay::add_branch_tracking(project_path, &branch_name).await {
+    match add_cursor_branch_via_daemon(project_path, &branch_name).await {
         Ok(crate::branch::BranchAddOutcome::Added) => {
             eprintln!(
                 "\x1b[32m✔\x1b[0m Tracked Cursor branch '{branch_name}' for tracedecay indexing"
@@ -793,44 +845,64 @@ fn doctor_check_plugin_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
     }
 }
 
-/// Flags a stalled Cursor transcript ingest. The per-turn hooks cap how much
-/// transcript tail they read ([`crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES`]),
-/// so a backlog above that cap will never drain on its own — exactly the
-/// "session recall is silently missing recent turns" failure users hit.
-fn doctor_check_session_ingest(dc: &mut DoctorCounters, project_path: &Path) {
-    let db_path = crate::sessions::cursor::project_session_db_path(project_path);
-    if !db_path.exists() {
+#[derive(serde::Deserialize)]
+struct CursorSessionIngestHealth {
+    tracked_transcripts: u64,
+    pending_transcripts: u64,
+    pending_bytes: u64,
+    max_transcript_pending_bytes: u64,
+}
+
+/// Flags a stalled Cursor transcript ingest using Doctor's daemon snapshot.
+fn doctor_check_session_ingest(
+    dc: &mut DoctorCounters,
+    project_path: &Path,
+    daemon_status: Option<&Value>,
+) {
+    let Some(status) = daemon_status else {
+        return;
+    };
+    if status
+        .pointer("/cursor_session_ingest/status")
+        .and_then(Value::as_str)
+        == Some("unavailable")
+    {
+        dc.warn("Cursor transcript ingest health unavailable from daemon session authority");
         return;
     }
-    // `healthcheck` is a sync trait method but runs inside the multi-thread
-    // tokio runtime, so the bounded DB read runs via block_in_place.
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+    let Some(health) = status
+        .get("cursor_session_ingest")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+    else {
         return;
     };
-    let health = tokio::task::block_in_place(|| {
-        handle.block_on(async {
-            let db = crate::sessions::cursor::open_project_session_db(project_path).await?;
-            let placeholder_paths = db.literal_workspace_placeholder_transcript_paths(10).await;
-            if !placeholder_paths.is_empty() {
-                dc.warn(&format!(
-                    "Cursor transcript ingest has {} path(s) with a literal workspace placeholder; \
-                     Cursor did not expand `${{workspaceFolder}}`, so session recall will miss those transcripts",
-                    placeholder_paths.len(),
-                ));
-                for path in &placeholder_paths {
-                    dc.info(&format!("  - {path}"));
-                }
-            }
-            Some(db.session_ingest_health_for_provider(Some("cursor")).await)
-        })
-    });
-    let Some(health) = health else {
+    let placeholder_paths = status
+        .get("cursor_session_placeholder_paths")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str);
+    report_cursor_session_ingest(dc, project_path, &health, placeholder_paths);
+}
+
+fn report_cursor_session_ingest<'a>(
+    dc: &mut DoctorCounters,
+    project_path: &Path,
+    health: &CursorSessionIngestHealth,
+    placeholder_paths: impl Iterator<Item = &'a str>,
+) {
+    let placeholder_paths = placeholder_paths.collect::<Vec<_>>();
+    if !placeholder_paths.is_empty() {
         dc.warn(&format!(
-            "could not open session store {} to check transcript ingest",
-            db_path.display()
+            "Cursor transcript ingest has {} path(s) with a literal workspace placeholder; \
+             Cursor did not expand `${{workspaceFolder}}`, so session recall will miss those transcripts",
+            placeholder_paths.len(),
         ));
-        return;
-    };
+        for path in placeholder_paths {
+            dc.info(&format!("  - {path}"));
+        }
+    }
     if health.max_transcript_pending_bytes > crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES {
         dc.warn(&format!(
             "Cursor transcript ingest looks stalled: a transcript has {} un-ingested \
@@ -1519,6 +1591,79 @@ mod tests {
             cwd_sweep_target(project.path().to_path_buf(), home.path()),
             Some(project.path().to_path_buf())
         );
+    }
+
+    #[test]
+    fn session_ingest_healthcheck_reports_daemon_snapshot() {
+        let mut counters = DoctorCounters::new();
+        let health = CursorSessionIngestHealth {
+            tracked_transcripts: 2,
+            pending_transcripts: 1,
+            pending_bytes: crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES + 1,
+            max_transcript_pending_bytes: crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES + 1,
+        };
+
+        report_cursor_session_ingest(
+            &mut counters,
+            Path::new("/project"),
+            &health,
+            ["${workspaceFolder}/cursor.jsonl"].into_iter(),
+        );
+
+        assert_eq!(counters.issues, 0);
+        assert_eq!(counters.warnings, 2);
+    }
+
+    #[test]
+    fn session_ingest_healthcheck_warns_when_daemon_authority_is_unavailable() {
+        let mut counters = DoctorCounters::new();
+        doctor_check_session_ingest(
+            &mut counters,
+            Path::new("/project"),
+            Some(&serde_json::json!({
+                "cursor_session_ingest": {
+                    "status": "unavailable",
+                    "message": "daemon project session authority is unavailable",
+                }
+            })),
+        );
+
+        assert_eq!(counters.issues, 0);
+        assert_eq!(counters.warnings, 1);
+    }
+
+    #[test]
+    fn cursor_branch_add_request_uses_daemon_admin_contract() {
+        assert_eq!(
+            cursor_branch_add_arguments("feature/cursor"),
+            serde_json::json!({ "branch": "feature/cursor" })
+        );
+    }
+
+    #[test]
+    fn cursor_branch_add_outcomes_are_strictly_decoded() {
+        for (name, expected) in [
+            ("not_indexed", crate::branch::BranchAddOutcome::NotIndexed),
+            (
+                "already_tracked",
+                crate::branch::BranchAddOutcome::AlreadyTracked,
+            ),
+            ("added", crate::branch::BranchAddOutcome::Added),
+            ("deferred", crate::branch::BranchAddOutcome::Deferred),
+        ] {
+            assert_eq!(
+                parse_cursor_branch_add_outcome(&serde_json::json!({ "outcome": name }))
+                    .expect("known daemon outcome"),
+                expected
+            );
+        }
+
+        for response in [
+            serde_json::json!({}),
+            serde_json::json!({ "outcome": "other" }),
+        ] {
+            assert!(parse_cursor_branch_add_outcome(&response).is_err());
+        }
     }
 
     /// The Cursor `post_install` hook (the branch-tracking logic that moved
