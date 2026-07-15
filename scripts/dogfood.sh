@@ -11,7 +11,7 @@ installed_binary="$install_dir/tracedecay"
 
 cd "$repo_root"
 if [[ -z "${TRACEDECAY_DOGFOOD_SOURCE_BINARY:-}" ]]; then
-  cargo build --locked --release --bin tracedecay
+  cargo build --locked --release --all-features --bin tracedecay
 fi
 
 if [[ ! -x "$source_binary" ]]; then

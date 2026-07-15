@@ -19,7 +19,7 @@
 - Cargo-launched TraceDecay test data follows the active target dir:
   repo-local default → `TRACEDECAY_DATA_DIR=target/test-profile/.tracedecay`; fast-cache
   fallback → `TRACEDECAY_DATA_DIR=<CARGO_TARGET_DIR>/test-profile/.tracedecay`.
-- Run normal repo commands from the repo root: `cargo check`, `cargo test`, `cargo test-all`, `cargo nextest run --workspace --no-fail-fast`.
+- Run normal repo commands from the repo root with all features: `cargo check --all-features`, `cargo test --all-features`, `cargo test-all`, `cargo nextest run --workspace --all-features --no-fail-fast`.
 - Toolchain caches (`sccache`, cargo registry) live under `/fast/cache/` and need no
   per-agent changes.
 - Hosted CI and other developers follow their own environment/repository defaults; never

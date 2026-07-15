@@ -43,7 +43,7 @@ test -x "$installed"
 cmp "$fake_target/release/tracedecay" "$staged"
 cmp "$staged" "$installed"
 
-grep -Fxq 'cargo build --locked --release --bin tracedecay' "$log"
+grep -Fxq 'cargo build --locked --release --all-features --bin tracedecay' "$log"
 grep -Fxq 'post-update' "$log"
 grep -Fxq 'daemon restart' "$log"
 grep -Fxq 'daemon status' "$log"
@@ -70,6 +70,6 @@ if grep -Fxq 'daemon restart' "$log"; then
 fi
 grep -Fxq 'doctor' "$log"
 
-grep -Fq 'dogfood = "run --quiet --release --bin tracedecay -- dogfood"' "$repo_root/.cargo/config.toml"
+grep -Fq 'dogfood = "run --quiet --release --all-features --bin tracedecay -- dogfood"' "$repo_root/.cargo/config.toml"
 
 echo "dogfood command contract passed"

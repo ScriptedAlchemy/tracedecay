@@ -180,7 +180,7 @@ cargo build --release
 cargo build --release --features medium
 cargo build --release --no-default-features
 
-cargo nextest run --workspace --no-fail-fast
+cargo nextest run --workspace --all-features --no-fail-fast
 cargo check --no-default-features
 cargo clippy --workspace --all-targets
 ```

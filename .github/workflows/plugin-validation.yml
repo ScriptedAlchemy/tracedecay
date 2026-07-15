@@ -100,7 +100,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build tracedecay
-        run: cargo build --bin tracedecay --locked
+        run: cargo build --all-features --bin tracedecay --locked
 
       - name: Run MCP conformance smoke
         run: scripts/mcp-conformance-smoke.sh

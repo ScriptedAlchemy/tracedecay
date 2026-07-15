@@ -36,7 +36,7 @@ drift apart.
 
 `tests/memory_eval_test.rs` replays scripted tool-call sequences through the
 real `tracedecay` binary — the same code path MCP tool calls hit — and runs in
-the normal `cargo nextest run --workspace --no-fail-fast` suite (so it is part
+the normal `cargo nextest run --workspace --all-features --no-fail-fast` suite (so it is part
 of the existing CI test job on Linux/macOS/Windows; CI never calls a model).
 
 Each scenario runs up to two phases:

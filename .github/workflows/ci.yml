@@ -125,12 +125,12 @@ jobs:
           cache-on-failure: true
 
       - name: Run tests
-        run: cargo nextest run --workspace --profile ci --locked
+        run: cargo nextest run --workspace --all-features --profile ci --locked
 
       - name: Run in-flight observation crash harness
         if: matrix.name == 'Linux'
         run: >-
-          cargo test --locked --features test-transport
+          cargo test --locked --all-features --features test-transport
           --test daemon_fault_harness_test
           killed_daemon_retries_in_flight_claude_observation_once_via_public_apis
           -- --exact
@@ -191,7 +191,7 @@ jobs:
 
       - name: Build nextest archive
         shell: pwsh
-        run: cargo nextest archive --workspace --locked --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+        run: cargo nextest archive --workspace --all-features --locked --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
 
       - name: Upload nextest archive
         uses: actions/upload-artifact@v4
@@ -480,7 +480,7 @@ jobs:
           cache-on-failure: true
 
       - name: Run dashboard integration tests
-        run: cargo nextest run --test dashboard_api_test --no-fail-fast --locked
+        run: cargo nextest run --all-features --test dashboard_api_test --no-fail-fast --locked
 
       - name: Cache Playwright browsers
         uses: actions/cache@v6
@@ -495,7 +495,7 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Prebuild dashboard binary for smoke
-        run: cargo build --bin tracedecay --locked
+        run: cargo build --all-features --bin tracedecay --locked
 
       - name: Run dashboard smoke (empty LCM)
         working-directory: dashboard
@@ -558,7 +558,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build tracedecay binary
-        run: cargo build --bin tracedecay --locked
+        run: cargo build --all-features --bin tracedecay --locked
 
       - name: Run generated-plugin unit checks (no Hermes required)
         run: python3 scripts/hermes_plugin_unit_check.py

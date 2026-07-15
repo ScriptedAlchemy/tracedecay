@@ -8,7 +8,7 @@ Thanks for your interest in contributing! This guide covers everything you need 
 git clone https://github.com/ScriptedAlchemy/tracedecay.git
 cd tracedecay
 cargo build
-cargo nextest run --workspace --no-fail-fast
+cargo nextest run --workspace --all-features --no-fail-fast
 ```
 
 Requires **Rust 1.70+** (edition 2021).
@@ -54,7 +54,7 @@ cargo nextest run --no-default-features --features lite
 2. **Write tests.** Every extraction change should have a corresponding test in `tests/`. Follow the existing pattern: create a fixture in `tests/fixtures/` and assert on extracted nodes/edges.
 3. **Run the full test suite** before submitting:
    ```bash
-   cargo nextest run --workspace --no-fail-fast
+   cargo nextest run --workspace --all-features --no-fail-fast
    ```
    Cargo-launched test processes are isolated from your real `~/.tracedecay`
    profile: `.cargo/config.toml` pins `TRACEDECAY_DATA_DIR` to
