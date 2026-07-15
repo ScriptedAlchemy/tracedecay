@@ -454,6 +454,7 @@ mod tests {
             &self,
             advance: ObservationCursorAdvance,
         ) -> ObservationStoreResult<CursorAdvanceOutcome> {
+            self.cursor_advances.lock().unwrap().push(advance.clone());
             let mut cursors = self.source_cursors.lock().unwrap();
             let position = cursors.iter().position(|cursor| {
                 cursor.source() == advance.next_cursor().source()
@@ -474,14 +475,6 @@ mod tests {
             } else {
                 cursors.push(advance.next_cursor().clone());
             }
-            Ok(CursorAdvanceOutcome::Committed)
-        }
-
-        async fn advance_source_cursor(
-            &self,
-            advance: ObservationCursorAdvance,
-        ) -> ObservationStoreResult<CursorAdvanceOutcome> {
-            self.cursor_advances.lock().unwrap().push(advance);
             Ok(CursorAdvanceOutcome::Committed)
         }
 

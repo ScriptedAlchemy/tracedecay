@@ -5,8 +5,7 @@ use serde_json::{Map, Value as JsonValue, json};
 
 use crate::{
     privacy::detector_kernel::{
-        NormalizedSensitiveKey, SensitiveKeyPolicy,
-        redact_sensitive_json_values as redact_json_values,
+        JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy, visit_sensitive_json_mut,
     },
     sessions::SessionMessageRecord,
 };
@@ -744,19 +743,18 @@ fn redact_sensitive_json_values(
     config: &IngestConfig,
     patterns: &mut Vec<String>,
 ) -> bool {
-    redact_json_values(
+    visit_sensitive_json_mut(
         value,
         &LcmSensitiveKeyPolicy(config),
-        |child, pattern, _path| {
-            let JsonValue::String(text) = child else {
-                return false;
-            };
-            if text.is_empty() || text.contains(SENSITIVE_REDACTION_PREFIX) {
-                return false;
+        |visit, _path| match visit {
+            JsonVisitMut::SensitiveValue(JsonValue::String(text), pattern)
+                if !text.is_empty() && !text.contains(SENSITIVE_REDACTION_PREFIX) =>
+            {
+                *text = sensitive_placeholder(pattern, text.as_str());
+                patterns.push(pattern.to_string());
+                true
             }
-            *text = sensitive_placeholder(pattern, text);
-            patterns.push(pattern.to_string());
-            true
+            JsonVisitMut::SensitiveValue(_, _) | JsonVisitMut::String(_) => false,
         },
     )
 }

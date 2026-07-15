@@ -23,7 +23,7 @@ use tracedecay_store::{
 use crate::application::observation::{
     CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest,
     CaptureClaudeObservationRequestError, ObservationApplication, ObservationApplicationError,
-    ObservationCancellation, ReplayObservationsRequest,
+    ObservationCancellation,
 };
 use crate::privacy::{ClaudeRecordSanitizerV1, PrivacySanitizerError};
 use crate::sessions::claude::{
@@ -595,6 +595,7 @@ mod tests {
     use tracedecay_store::{ObservationReplayRequest, ObservationStore};
 
     use super::*;
+    use crate::application::observation::ReplayObservationsRequest;
 
     const OBSERVATION_STATE_TABLES: &[&str] = &[
         "sanitization_receipts",

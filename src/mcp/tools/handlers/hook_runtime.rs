@@ -682,18 +682,14 @@ mod tests {
     #[test]
     fn claude_observation_request_errors_are_bounded_config_errors() {
         let error = ClaudeObservationIngestError::Request(
-            CaptureClaudeObservationRequestError::FrameTooLarge {
-                actual: 123_456,
-                max: 1_024,
-            },
+            CaptureClaudeObservationRequestError::SourceRangeMismatch,
         );
         let mapped = map_claude_observation_ingest_error(error);
         let rendered = mapped.to_string();
 
         assert!(matches!(mapped, TraceDecayError::Config { .. }));
         assert!(rendered.contains("Claude observation request is invalid"));
-        assert!(!rendered.contains("123456"));
-        assert!(!rendered.contains("123_456"));
+        assert!(!rendered.contains("source range"));
     }
 
     #[test]
