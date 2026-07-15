@@ -32,14 +32,12 @@ use crate::sessions::shared::{
     title_from_messages,
 };
 use crate::sessions::source::{
-    BoundedJsonlRecord, ParsedTranscript, SessionDraft, StrictJsonlOutcome, TranscriptSource,
-    collect_files_with_ext, read_bounded_jsonl_record, stream_new_jsonl_strict,
+    JsonlFrameDeferral, JsonlLine, MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlFrame,
+    RawJsonlFrameReader, SessionDraft, StrictJsonlOutcome, TranscriptCursorCheckpoint,
+    TranscriptCursorKey, TranscriptSource, collect_files_with_ext, stream_new_jsonl_strict,
 };
 
 const PROVIDER: &str = "claude";
-// Includes the terminating newline. Records above this bound stay retryable
-// at their starting cursor instead of allocating or logging their contents.
-const MAX_JSONL_RECORD_BYTES: usize = 16 * 1024 * 1024;
 
 /// Shared cross-source telemetry-row `kind` vocabulary. Cursor/Codex adapters
 /// tag their structured marker rows with the same strings so `message_search`
@@ -85,6 +83,47 @@ pub struct ClaudeSource {
 struct UserClaudeScope {
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,
+}
+
+/// Stable identity attached to every bounded Claude frame scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClaudeSourceIdentity {
+    pub provider: &'static str,
+    pub session_id: String,
+    pub source_path: PathBuf,
+}
+
+/// Exact byte coverage achieved by one bounded scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaudeFrameCoverage {
+    Complete {
+        start_offset: u64,
+        end_offset: u64,
+    },
+    Deferred {
+        start_offset: u64,
+        covered_through: u64,
+        reason: JsonlFrameDeferral,
+    },
+}
+
+/// Parsed Claude frames and the typed cursor transition they cover.
+///
+/// Raw frame bytes are intentionally transient. Consumers receive each parsed
+/// value with its exact byte range, stable source/session identity, file
+/// generation, and an explicit coverage outcome before deciding whether to
+/// persist the next cursor.
+#[allow(
+    dead_code,
+    reason = "the daemon observation consumer is layered on this shared scanner API"
+)]
+pub(crate) struct ClaudeSourceFrameScan {
+    pub identity: ClaudeSourceIdentity,
+    pub file_generation: u64,
+    pub previous_cursor: TranscriptCursorCheckpoint,
+    pub next_cursor: TranscriptCursorCheckpoint,
+    pub frames: Vec<JsonlLine>,
+    pub coverage: ClaudeFrameCoverage,
 }
 
 impl ClaudeSource {
@@ -136,6 +175,63 @@ pub async fn ingest_user_sessions(
     crate::sessions::source::ingest_source(db, &source, profile_root, None).await
 }
 
+/// Scan newly appended Claude frames once with strict, bounded framing.
+///
+/// This is the shared production boundary for transcript ingestion and live
+/// observation. It performs no persistence.
+pub(crate) fn scan_claude_source_frames(
+    path: &Path,
+    previous: StoredCursor,
+    max_new_bytes: Option<u64>,
+) -> Option<ClaudeSourceFrameScan> {
+    let identity = claude_source_identity(path);
+    scan_identified_claude_source_frames(identity, previous, max_new_bytes)
+}
+
+fn scan_identified_claude_source_frames(
+    identity: ClaudeSourceIdentity,
+    previous: StoredCursor,
+    max_new_bytes: Option<u64>,
+) -> Option<ClaudeSourceFrameScan> {
+    let cursor_key = claude_cursor_key(&identity.source_path);
+    let outcome = stream_new_jsonl_strict(
+        &identity.source_path,
+        previous,
+        max_new_bytes,
+        MAX_JSONL_RECORD_BYTES,
+    )?;
+    let (parsed, deferred) = match outcome {
+        StrictJsonlOutcome::Complete(parsed) => (parsed, None),
+        StrictJsonlOutcome::Deferred { parsed, reason } => (parsed, Some(reason)),
+    };
+    let coverage = deferred.map_or(
+        ClaudeFrameCoverage::Complete {
+            start_offset: parsed.start_offset,
+            end_offset: parsed.new_cursor.position,
+        },
+        |reason| ClaudeFrameCoverage::Deferred {
+            start_offset: parsed.start_offset,
+            covered_through: parsed.new_cursor.position,
+            reason,
+        },
+    );
+
+    Some(ClaudeSourceFrameScan {
+        identity,
+        file_generation: parsed.new_cursor.file_id,
+        previous_cursor: TranscriptCursorCheckpoint {
+            key: cursor_key.clone(),
+            state: previous,
+        },
+        next_cursor: TranscriptCursorCheckpoint {
+            key: cursor_key,
+            state: parsed.new_cursor,
+        },
+        frames: parsed.lines,
+        coverage,
+    })
+}
+
 impl TranscriptSource for ClaudeSource {
     fn provider(&self) -> &'static str {
         PROVIDER
@@ -148,8 +244,8 @@ impl TranscriptSource for ClaudeSource {
         collect_files_with_ext(&self.projects_dir, "jsonl", MAX_SCAN_DEPTH)
     }
 
-    fn cursor_path(&self, transcript_path: &Path) -> PathBuf {
-        claude_cursor_path(transcript_path)
+    fn cursor_key(&self, transcript_path: &Path) -> TranscriptCursorKey {
+        claude_cursor_key(transcript_path)
     }
 
     fn parse_new(
@@ -170,28 +266,19 @@ impl TranscriptSource for ClaudeSource {
                 .and_then(|info| transcript_cwd(&info.parent_transcript_path))
         });
 
-        let new = match stream_new_jsonl_strict(path, prev, max_new_bytes, MAX_JSONL_RECORD_BYTES)?
-        {
-            StrictJsonlOutcome::Complete(parsed) => parsed,
-            StrictJsonlOutcome::Deferred { parsed, reason } => {
-                tracing::debug!(
-                    provider = PROVIDER,
-                    line_offset = reason.offset(),
-                    reason = reason.reason_code(),
-                    "deferring transcript input at strict JSONL frame"
-                );
-                parsed
+        let scan = scan_claude_source_frames(path, prev, max_new_bytes)?;
+        if let ClaudeFrameCoverage::Deferred { reason, .. } = scan.coverage {
+            tracing::debug!(
+                provider = PROVIDER,
+                line_offset = reason.offset(),
+                reason = reason.reason_code(),
+                "deferring transcript input at strict JSONL frame"
+            );
+            if matches!(reason, JsonlFrameDeferral::Backlog { .. }) {
+                return None;
             }
-        };
-        let session_id = subagent.as_ref().map_or_else(
-            || {
-                path.file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .unwrap_or("unknown")
-                    .to_string()
-            },
-            |info| info.session_id.clone(),
-        );
+        }
+        let session_id = scan.identity.session_id.clone();
         if self
             .user_scope
             .as_ref()
@@ -211,7 +298,7 @@ impl TranscriptSource for ClaudeSource {
         // summary alongside the per-row marker rows / metadata.
         let mut accumulator = SessionAccumulator::default();
         let mut messages = Vec::new();
-        for line in &new.lines {
+        for line in &scan.frames {
             let record = &line.value;
             let line_cwd = record_cwd(record).or_else(|| session_cwd.clone());
             let include = self.user_scope.as_ref().map_or_else(
@@ -308,33 +395,44 @@ impl TranscriptSource for ClaudeSource {
         Some(ParsedTranscript {
             draft,
             messages,
-            new_cursor: new.new_cursor,
+            new_cursor: scan.next_cursor.state,
         })
+    }
+}
+
+fn claude_source_identity(path: &Path) -> ClaudeSourceIdentity {
+    let cursor_key = claude_cursor_key(path);
+    let session_id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("source:{}", cursor_key.durable_text()));
+    ClaudeSourceIdentity {
+        provider: PROVIDER,
+        session_id,
+        source_path: path.to_path_buf(),
     }
 }
 
 const CLAUDE_CURSOR_KEY_PREFIX: &str = "tracedecay-claude-cursor-v1";
 
-fn claude_cursor_path(path: &Path) -> PathBuf {
+fn claude_cursor_key(path: &Path) -> TranscriptCursorKey {
     if path.to_str().is_some() {
-        return path.to_path_buf();
+        return TranscriptCursorKey::for_path(path);
     }
 
-    claude_non_unicode_cursor_path(path)
+    TranscriptCursorKey::opaque(claude_non_unicode_cursor_key(path), path)
 }
 
 #[cfg(unix)]
-fn claude_non_unicode_cursor_path(path: &Path) -> PathBuf {
+fn claude_non_unicode_cursor_key(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
 
-    PathBuf::from(encode_claude_cursor_key(
-        "unix-bytes",
-        path.as_os_str().as_bytes(),
-    ))
+    encode_claude_cursor_key("unix-bytes", path.as_os_str().as_bytes())
 }
 
 #[cfg(windows)]
-fn claude_non_unicode_cursor_path(path: &Path) -> PathBuf {
+fn claude_non_unicode_cursor_key(path: &Path) -> String {
     use std::os::windows::ffi::OsStrExt;
 
     let bytes: Vec<u8> = path
@@ -342,15 +440,12 @@ fn claude_non_unicode_cursor_path(path: &Path) -> PathBuf {
         .encode_wide()
         .flat_map(u16::to_le_bytes)
         .collect();
-    PathBuf::from(encode_claude_cursor_key("windows-utf16le", &bytes))
+    encode_claude_cursor_key("windows-utf16le", &bytes)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn claude_non_unicode_cursor_path(path: &Path) -> PathBuf {
-    PathBuf::from(encode_claude_cursor_key(
-        "rust-os-str",
-        path.as_os_str().as_encoded_bytes(),
-    ))
+fn claude_non_unicode_cursor_key(path: &Path) -> String {
+    encode_claude_cursor_key("rust-os-str", path.as_os_str().as_encoded_bytes())
 }
 
 fn encode_claude_cursor_key(platform: &str, native_path: &[u8]) -> String {
@@ -363,7 +458,6 @@ fn encode_claude_cursor_key(platform: &str, native_path: &[u8]) -> String {
 /// Identity + spawn provenance for a subagent transcript, assembled from the
 /// on-disk layout and the sibling `agent-<id>.meta.json`.
 struct ClaudeSubagentInfo {
-    session_id: String,
     parent_session_id: String,
     agent_id: String,
     parent_transcript_path: PathBuf,
@@ -436,7 +530,6 @@ fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
     let meta = read_subagent_meta(path, &session_id);
 
     Some(ClaudeSubagentInfo {
-        session_id,
         parent_session_id,
         agent_id,
         parent_transcript_path,
@@ -527,15 +620,16 @@ impl SessionAccumulator {
 /// Reads the session `cwd` from an early line of a Claude transcript.
 pub(crate) fn transcript_cwd(path: &Path) -> Option<PathBuf> {
     let file = std::fs::File::open(path).ok()?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut record = Vec::new();
+    let reader = std::io::BufReader::new(file);
+    let mut frames = RawJsonlFrameReader::new(reader, MAX_JSONL_RECORD_BYTES);
     for _ in 0..CWD_PROBE_LINES {
-        match read_bounded_jsonl_record(&mut reader, &mut record, MAX_JSONL_RECORD_BYTES).ok()? {
-            BoundedJsonlRecord::Eof
-            | BoundedJsonlRecord::Partial
-            | BoundedJsonlRecord::Oversized => return None,
-            BoundedJsonlRecord::Complete => {}
+        match frames.next_frame().ok()? {
+            RawJsonlFrame::Eof
+            | RawJsonlFrame::Partial { .. }
+            | RawJsonlFrame::Oversized { .. } => return None,
+            RawJsonlFrame::Complete { .. } => {}
         }
+        let record = frames.record();
         if record.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
@@ -1413,6 +1507,63 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn bounded_scan_carries_identity_cursor_generation_and_coverage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-42.jsonl");
+        let complete = b"{\"type\":\"summary\"}\n";
+        std::fs::write(&path, [complete.as_slice(), b"{\"partial\":"].concat()).unwrap();
+
+        let scan = scan_claude_source_frames(&path, StoredCursor::default(), None).unwrap();
+
+        assert_eq!(scan.identity.provider, "claude");
+        assert_eq!(scan.identity.session_id, "session-42");
+        assert_eq!(scan.identity.source_path, path);
+        assert_eq!(scan.previous_cursor.state, StoredCursor::default());
+        assert_eq!(scan.previous_cursor.key, scan.next_cursor.key);
+        assert_eq!(scan.file_generation, scan.next_cursor.state.file_id);
+        assert_eq!(scan.frames.len(), 1);
+        assert_eq!(scan.frames[0].offset, 0);
+        assert_eq!(scan.frames[0].end_offset, complete.len() as i64);
+        assert_eq!(scan.frames[0].value["type"], "summary");
+        assert_eq!(
+            scan.coverage,
+            ClaudeFrameCoverage::Deferred {
+                start_offset: 0,
+                covered_through: complete.len() as u64,
+                reason: JsonlFrameDeferral::Partial {
+                    offset: complete.len() as u64,
+                },
+            }
+        );
+        assert_eq!(scan.next_cursor.state.position, complete.len() as u64);
+    }
+
+    #[test]
+    fn bounded_scan_reports_backlog_without_advancing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-42.jsonl");
+        let contents = b"{\"type\":\"summary\"}\n";
+        std::fs::write(&path, contents).unwrap();
+
+        let scan = scan_claude_source_frames(&path, StoredCursor::default(), Some(1)).unwrap();
+
+        assert!(scan.frames.is_empty());
+        assert_eq!(scan.next_cursor.state.position, 0);
+        assert_eq!(
+            scan.coverage,
+            ClaudeFrameCoverage::Deferred {
+                start_offset: 0,
+                covered_through: 0,
+                reason: JsonlFrameDeferral::Backlog {
+                    offset: 0,
+                    unread_bytes: contents.len() as u64,
+                    max_new_bytes: 1,
+                },
+            }
+        );
+    }
+
+    #[test]
     fn cursor_key_round_trips_native_bytes_without_collisions() {
         let native_path: Vec<u8> = r"C:\Users\zack\.claude\projects\session.jsonl"
             .encode_utf16()
@@ -1450,7 +1601,10 @@ mod tests {
         assert_eq!(first.to_string_lossy(), second.to_string_lossy());
 
         let source = ClaudeSource::with_home(Path::new("/unused"));
-        assert_ne!(source.cursor_path(&first), source.cursor_path(&second));
+        assert_ne!(
+            source.cursor_key(&first).durable_text(),
+            source.cursor_key(&second).durable_text()
+        );
     }
 
     #[test]
@@ -1458,7 +1612,10 @@ mod tests {
         let path = Path::new("/tmp/claude-session.jsonl");
         let source = ClaudeSource::with_home(Path::new("/unused"));
 
-        assert_eq!(source.cursor_path(path), path);
+        assert_eq!(
+            source.cursor_key(path).durable_text(),
+            path.to_string_lossy()
+        );
     }
 
     #[test]

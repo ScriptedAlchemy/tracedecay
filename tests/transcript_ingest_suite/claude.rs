@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::global_db::{GlobalDb, ParseOffset};
 use tracedecay::sessions::claude::ClaudeSource;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::git_correlation::{
@@ -101,13 +101,80 @@ async fn claude_non_utf8_cursor_key_survives_atomic_persistence() {
     let stats = ingest_source(&db, &source, &project, None).await;
     assert_eq!(stats.messages_upserted, 1);
 
-    let cursor_key = source.cursor_path(&path).to_string_lossy().into_owned();
+    let cursor_key = source.cursor_key(&path).durable_text();
     let offset = db
         .get_parse_offset(&cursor_key)
         .await
         .expect("lossless cursor key persisted");
     assert_eq!(offset.byte_offset, std::fs::metadata(&path).unwrap().len());
-    assert_eq!(db.get_parse_offset(&path.to_string_lossy()).await, None);
+    assert_eq!(
+        db.get_parse_offset(&path.to_string_lossy())
+            .await
+            .unwrap()
+            .byte_offset,
+        offset.byte_offset,
+        "legacy health cursor stays synchronized"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_non_utf8_cursor_key_migrates_legacy_offset_without_replay() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let dir = home.join(".claude/projects/-non-utf8-migration");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(OsString::from_vec(b"session-\xfe.jsonl".to_vec()));
+    let row = |uuid: &str, content: &str| {
+        serde_json::json!({
+            "type": "user",
+            "cwd": project,
+            "sessionId": "native-migration-session",
+            "uuid": uuid,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": content}
+        })
+    };
+    let prefix = format!("{}\n", row("legacy-row", "Already ingested legacy row"));
+    let suffix = format!("{}\n", row("new-row", "New native path evidence"));
+    std::fs::write(&path, format!("{prefix}{suffix}")).unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let legacy_key = path.to_string_lossy().into_owned();
+    db.set_parse_offset(
+        &legacy_key,
+        ParseOffset {
+            byte_offset: prefix.len() as u64,
+            mtime: 0,
+            file_id: 0,
+        },
+    )
+    .await;
+
+    let source = ClaudeSource::with_home(&home);
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 1);
+    assert!(
+        db.get_session_message("claude", "legacy-row")
+            .await
+            .is_none()
+    );
+    assert!(db.get_session_message("claude", "new-row").await.is_some());
+
+    let final_offset = std::fs::metadata(&path).unwrap().len();
+    let durable_key = source.cursor_key(&path).durable_text();
+    assert_eq!(
+        db.get_parse_offset(&durable_key).await.unwrap().byte_offset,
+        final_offset
+    );
+    assert_eq!(
+        db.get_parse_offset(&legacy_key).await.unwrap().byte_offset,
+        final_offset,
+        "health alias advances with the migrated durable cursor"
+    );
 }
 
 #[tokio::test]
