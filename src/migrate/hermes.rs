@@ -2434,8 +2434,7 @@ mod tests {
         target_db_path
             .parent()
             .and_then(|root| fs::read_dir(root.join(LEDGER_DIR)).ok())
-            .map(|entries| entries.flatten().count())
-            .unwrap_or(0)
+            .map_or(0, |entries| entries.flatten().count())
     }
 
     #[tokio::test]

@@ -1151,7 +1151,7 @@ fn structured_tool_project_paths(row: &HermesRow) -> Vec<PathBuf> {
         return Vec::new();
     };
     let mut paths = Vec::new();
-    let calls = calls.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let calls = calls.as_array().map_or(&[] as &[Value], Vec::as_slice);
     for call in calls {
         let arguments = call
             .pointer("/function/arguments")

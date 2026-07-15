@@ -316,8 +316,10 @@ mod tests {
         GENERATED_SKILL_FILES
             .iter()
             .find(|file| file.relative == relative)
-            .map(|file| file.contents)
-            .unwrap_or_else(|| panic!("shared skill should be embedded: {relative}"))
+            .map_or_else(
+                || panic!("shared skill should be embedded: {relative}"),
+                |file| file.contents,
+            )
     }
 
     #[test]
@@ -438,8 +440,10 @@ mod tests {
             let deployed = files
                 .iter()
                 .find(|(path, _)| *path == relative)
-                .map(|(_, contents)| *contents)
-                .unwrap_or_else(|| panic!("{host} is missing {relative}"));
+                .map_or_else(
+                    || panic!("{host} is missing {relative}"),
+                    |(_, contents)| *contents,
+                );
             assert_eq!(
                 deployed, source,
                 "{host} must ship the shared source verbatim"
