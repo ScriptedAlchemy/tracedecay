@@ -944,7 +944,7 @@ fn test_local_install_cursor_installs_plugin_without_project_config() {
 }
 
 #[tokio::test]
-async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
+async fn test_local_install_cursor_defers_branch_tracking_without_daemon() {
     let _env_lock = AGENT_ENV_LOCK.lock().await;
     let home = TempDir::new().unwrap();
     let home_root = home
@@ -1016,15 +1016,25 @@ async fn test_local_install_cursor_tracks_current_branch_when_initialized() {
         String::from_utf8_lossy(&checkout.stderr)
     );
 
-    assert_local_install_success("cursor", &project_root, &home_root);
+    let output = assert_local_install_success("cursor", &project_root, &home_root);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "deferred Cursor branch tracking for 'feature/install' because the TraceDecay daemon request was unavailable"
+        ),
+        "Cursor install should report deferred daemon-owned branch tracking\nstderr:\n{stderr}"
+    );
 
     let data_dir = resolve_layout_for_current_profile(&project_root)
         .unwrap_or_else(|err| panic!("failed to resolve project store layout: {err}"))
         .data_root;
     let meta = branch_meta::load_branch_meta(&data_dir)
-        .expect("Cursor install should bootstrap branch tracking metadata");
+        .expect("TraceDecay init should bootstrap branch tracking metadata");
     assert!(meta.is_tracked("main"));
-    assert!(meta.is_tracked("feature/install"));
+    assert!(
+        !meta.is_tracked("feature/install"),
+        "Cursor install must not bypass the daemon to write branch metadata"
+    );
 }
 
 #[test]
