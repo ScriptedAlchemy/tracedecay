@@ -23,7 +23,7 @@ use tracedecay_store::{
 use crate::application::observation::{
     CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest,
     CaptureClaudeObservationRequestError, ObservationApplication, ObservationApplicationError,
-    ObservationCancellation,
+    ObservationCancellation, ReplayObservationsRequest,
 };
 use crate::privacy::{ClaudeRecordSanitizerV1, PrivacySanitizerError};
 use crate::sessions::claude::{
@@ -271,15 +271,18 @@ where
     }
 }
 
-async fn advance_non_durable(
-    store: &GlobalDbObservationStore<'_>,
+async fn advance_non_durable<S>(
+    application: &ObservationApplication<S>,
     source: &ClaudeSourceIdentityV1,
     scope: &ObservationScopeV1,
     generation: ClaudeFileGenerationV1,
     expected_cursor: Option<ClaudeSourceCursorV1>,
     covered: ClaudeByteRangeV1,
     reason: NonDurableFrameReason,
-) -> Result<CursorAdvanceOutcome, ClaudeObservationIngestError> {
+) -> Result<CursorAdvanceOutcome, ClaudeObservationIngestError>
+where
+    S: ObservationStore,
+{
     let advance = ObservationCursorAdvance::new(
         source.clone(),
         scope.clone(),
@@ -288,7 +291,9 @@ async fn advance_non_durable(
         covered,
         reason,
     )?;
-    Ok(store.advance_source_cursor(advance).await?)
+    Ok(application
+        .advance_non_durable_source_cursor(advance)
+        .await?)
 }
 
 async fn process_source(
@@ -378,7 +383,7 @@ async fn process_source(
                     ClaudeSkippedFrameReason::OutOfScope => NonDurableFrameReason::OutOfScope,
                 };
                 let outcome = advance_non_durable(
-                    application.store(),
+                    &application,
                     &source,
                     scope,
                     generation,
@@ -431,7 +436,7 @@ async fn process_source(
                             continue;
                         }
                         let outcome = advance_non_durable(
-                            application.store(),
+                            &application,
                             &source,
                             scope,
                             generation,
@@ -460,7 +465,7 @@ async fn process_source(
                             continue;
                         }
                         let outcome = advance_non_durable(
-                            application.store(),
+                            &application,
                             &source,
                             scope,
                             generation,
@@ -747,11 +752,13 @@ mod tests {
         assert_eq!(stats.transcript.messages_upserted, 1);
         assert_eq!(stats.projections_completed, 1);
         let observations = application
-            .store()
-            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .replay_observations(ReplayObservationsRequest::new(
+                ObservationReplayRequest::new(0, 10).unwrap(),
+                ObservationCancellation::default(),
+            ))
             .await
             .unwrap();
-        assert_eq!(observations.len(), 1);
+        assert_eq!(observations.observations().len(), 1);
     }
 
     #[tokio::test]

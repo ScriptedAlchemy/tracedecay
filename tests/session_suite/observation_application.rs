@@ -185,8 +185,7 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
     assert_eq!(table_counts(&tmp).await, counts_after_commit);
     assert!(!format!("{retry:?}").contains(secret));
 
-    let projected = application
-        .store()
+    let projected = GlobalDbObservationStore::new(&db)
         .project_observation(&observation_id)
         .await
         .unwrap();
@@ -310,16 +309,14 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
 
     assert_eq!(table_counts(&tmp).await, before);
     assert!(
-        application
-            .store()
+        GlobalDbObservationStore::new(&db)
             .get_source_cursor(&source(session_id), &ObservationScopeV1::Profile)
             .await
             .unwrap()
             .is_none()
     );
     assert_eq!(
-        application
-            .store()
+        GlobalDbObservationStore::new(&db)
             .projection_checkpoint()
             .await
             .unwrap()
@@ -372,16 +369,14 @@ async fn malformed_partial_and_oversized_frames_leave_authoritative_state_unchan
 
     assert_eq!(table_counts(&tmp).await, before);
     assert!(
-        application
-            .store()
+        GlobalDbObservationStore::new(&db)
             .get_source_cursor(&source(session_id), &ObservationScopeV1::Profile)
             .await
             .unwrap()
             .is_none()
     );
     assert_eq!(
-        application
-            .store()
+        GlobalDbObservationStore::new(&db)
             .projection_checkpoint()
             .await
             .unwrap()

@@ -7,6 +7,7 @@ use tracedecay_domain::{
     CanonicalObservationIdV1, ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1,
     ObservationContractError, RetentionClass, SanitizationReceiptV1,
 };
+use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStatus, ObservationReplayRequest,
     ObservationStore, ObservationStoreError, ObservationWrite, StoredObservation,
@@ -239,8 +240,15 @@ impl<S: ObservationStore> ObservationApplication<S> {
         Self { store, sanitizer }
     }
 
-    pub fn store(&self) -> &S {
-        &self.store
+    /// Advances a validated non-durable frame cursor without exposing the store.
+    pub async fn advance_non_durable_source_cursor(
+        &self,
+        advance: ObservationCursorAdvance,
+    ) -> Result<CursorAdvanceOutcome, ObservationApplicationError> {
+        self.store
+            .advance_source_cursor(advance)
+            .await
+            .map_err(ObservationApplicationError::from)
     }
 
     pub async fn capture_claude_observation(
@@ -398,6 +406,7 @@ mod tests {
         ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeSourceIdentityV1, ObservationScopeV1,
         ProjectId, SessionId,
     };
+    use tracedecay_store::observation::NonDurableFrameReason;
     use tracedecay_store::{ObservationCommitReceipt, ObservationStoreResult};
 
     use crate::privacy::parse_claude_record_v1;
@@ -410,6 +419,7 @@ mod tests {
         cancel_on_persist: Mutex<Option<ObservationCancellation>>,
         cancel_on_get: Mutex<Option<ObservationCancellation>>,
         cancel_on_replay: Mutex<Option<ObservationCancellation>>,
+        cursor_advances: Mutex<Vec<ObservationCursorAdvance>>,
     }
 
     impl ObservationStore for FakeStore {
@@ -452,6 +462,14 @@ mod tests {
             _scope: &ObservationScopeV1,
         ) -> ObservationStoreResult<Option<ClaudeSourceCursorV1>> {
             Ok(None)
+        }
+
+        async fn advance_source_cursor(
+            &self,
+            advance: ObservationCursorAdvance,
+        ) -> ObservationStoreResult<CursorAdvanceOutcome> {
+            self.cursor_advances.lock().unwrap().push(advance);
+            Ok(CursorAdvanceOutcome::Committed)
         }
 
         async fn get_observation(
@@ -540,6 +558,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_durable_cursor_advance_stays_inside_application_boundary() {
+        let application = application();
+        let source =
+            ClaudeSourceIdentityV1::new(SessionId::new("session.cursor-advance").unwrap()).unwrap();
+        let advance = ObservationCursorAdvance::new(
+            source,
+            ObservationScopeV1::Profile,
+            ClaudeFileGenerationV1::new(1).unwrap(),
+            None,
+            ClaudeByteRangeV1::new(0, 4).unwrap(),
+            NonDurableFrameReason::BlankFrame,
+        )
+        .unwrap();
+
+        let outcome = application
+            .advance_non_durable_source_cursor(advance)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, CursorAdvanceOutcome::Committed);
+        let advances = application.store.cursor_advances.lock().unwrap();
+        assert_eq!(advances.len(), 1);
+        assert_eq!(advances[0].covered(), ClaudeByteRangeV1::new(0, 4).unwrap());
+        assert_eq!(advances[0].reason(), NonDurableFrameReason::BlankFrame);
+    }
+
+    #[tokio::test]
     async fn capture_redacts_before_the_store_and_replays_the_receipt_bound_row() {
         let application = application();
         let secret = "sk-proj-application-secret-1234567890";
@@ -584,7 +629,7 @@ mod tests {
         let raw = serde_json::to_vec(&json!("not an object")).unwrap();
         let range = ClaudeByteRangeV1::new(0, u64::try_from(raw.len()).unwrap()).unwrap();
         assert!(parse_claude_record_v1(&raw, range).is_err());
-        assert!(application.store().observations.lock().unwrap().is_empty());
+        assert!(application.store.observations.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -647,7 +692,7 @@ mod tests {
             other => panic!("first capture must persist, got {other:?}"),
         };
         {
-            let mut observations = application.store().observations.lock().unwrap();
+            let mut observations = application.store.observations.lock().unwrap();
             let stored = observations[0].clone();
             observations[0] = StoredObservation::new(
                 stored.sequence(),
@@ -677,7 +722,7 @@ mod tests {
             }
             other => panic!("duplicate must persist, got {other:?}"),
         }
-        assert_eq!(application.store().observations.lock().unwrap().len(), 1);
+        assert_eq!(application.store.observations.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -735,7 +780,7 @@ mod tests {
             .await
             .unwrap();
         {
-            let mut observations = application.store().observations.lock().unwrap();
+            let mut observations = application.store.observations.lock().unwrap();
             let seed = observations[0].clone();
             *observations = (1..=1_001)
                 .map(|sequence| {
@@ -782,14 +827,14 @@ mod tests {
             result,
             Err(ObservationApplicationError::Cancelled)
         ));
-        assert!(application.store().observations.lock().unwrap().is_empty());
+        assert!(application.store.observations.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn cancellation_during_atomic_commit_is_reported_after_commit_and_retry_is_exact() {
         let application = application();
         let cancellation = ObservationCancellation::default();
-        *application.store().cancel_on_persist.lock().unwrap() = Some(cancellation.clone());
+        *application.store.cancel_on_persist.lock().unwrap() = Some(cancellation.clone());
         let record = json!({
             "type": "user",
             "message": { "role": "user", "content": "commit before acknowledgement" }
@@ -799,7 +844,7 @@ mod tests {
             .capture_claude_observation(request_at_with_cancellation(&record, 0, cancellation))
             .await;
         assert!(matches!(first, Err(ObservationApplicationError::Cancelled)));
-        assert_eq!(application.store().observations.lock().unwrap().len(), 1);
+        assert_eq!(application.store.observations.lock().unwrap().len(), 1);
 
         let retry = application
             .capture_claude_observation(request(&record))
@@ -812,7 +857,7 @@ mod tests {
             outcome,
             ObservationPersistOutcome::ExactDuplicate(_)
         ));
-        assert_eq!(application.store().observations.lock().unwrap().len(), 1);
+        assert_eq!(application.store.observations.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -833,7 +878,7 @@ mod tests {
         };
 
         let read_cancellation = ObservationCancellation::default();
-        *application.store().cancel_on_get.lock().unwrap() = Some(read_cancellation.clone());
+        *application.store.cancel_on_get.lock().unwrap() = Some(read_cancellation.clone());
         let read = application
             .get_observation(GetObservationRequest::new(
                 observation_id,
@@ -843,7 +888,7 @@ mod tests {
         assert!(matches!(read, Err(ObservationApplicationError::Cancelled)));
 
         let replay_cancellation = ObservationCancellation::default();
-        *application.store().cancel_on_replay.lock().unwrap() = Some(replay_cancellation.clone());
+        *application.store.cancel_on_replay.lock().unwrap() = Some(replay_cancellation.clone());
         let replay = application
             .replay_observations(ReplayObservationsRequest::new(
                 ObservationReplayRequest::new(0, 10).unwrap(),
