@@ -32,7 +32,8 @@ use crate::sessions::shared::{
     title_from_messages,
 };
 use crate::sessions::source::{
-    ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, stream_new_jsonl,
+    ParsedTranscript, SessionDraft, StrictJsonlOutcome, TranscriptSource, collect_files_with_ext,
+    stream_new_jsonl_strict,
 };
 
 const PROVIDER: &str = "claude";
@@ -162,7 +163,18 @@ impl TranscriptSource for ClaudeSource {
                 .and_then(|info| transcript_cwd(&info.parent_transcript_path))
         });
 
-        let new = stream_new_jsonl(path, prev, max_new_bytes)?;
+        let new = match stream_new_jsonl_strict(path, prev, max_new_bytes)? {
+            StrictJsonlOutcome::Complete(parsed) => parsed,
+            StrictJsonlOutcome::Deferred { parsed, reason } => {
+                tracing::debug!(
+                    provider = PROVIDER,
+                    line_offset = reason.offset(),
+                    reason = reason.reason_code(),
+                    "deferring transcript input at strict JSONL frame"
+                );
+                parsed
+            }
+        };
         let session_id = subagent.as_ref().map_or_else(
             || {
                 path.file_stem()

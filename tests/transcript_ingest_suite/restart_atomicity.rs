@@ -108,6 +108,82 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
 }
 
 #[tokio::test]
+async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let path = write_claude_transcript(&home, &project, "claude-malformed-frame");
+    let path_key = path.to_string_lossy().to_string();
+    let valid_prefix = std::fs::read_to_string(&path).unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let initial = ingest_source(&db, &ClaudeSource::with_home(&home), &project, None).await;
+    assert_eq!(initial.messages_upserted, 2);
+    let prefix_offset = db.get_parse_offset(&path_key).await.unwrap();
+    assert_eq!(prefix_offset.byte_offset, valid_prefix.len() as u64);
+    drop(db);
+
+    let suffix = serde_json::json!({
+        "type": "user",
+        "cwd": project,
+        "sessionId": "claude-malformed-frame",
+        "uuid": "u4",
+        "timestamp": "2026-01-01T00:00:15.000Z",
+        "message": {"role": "user", "content": "Valid suffix after malformed frame."}
+    });
+    std::fs::write(
+        &path,
+        format!("{valid_prefix}{{\"type\":\"user\",\"cwd\":}}\n{suffix}\n"),
+    )
+    .unwrap();
+
+    let rejected = open_project_session_db(&project).await.unwrap();
+    let malformed = ingest_source(&rejected, &ClaudeSource::with_home(&home), &project, None).await;
+    assert_eq!(malformed.messages_upserted, 0);
+    assert_eq!(
+        rejected
+            .get_parse_offset(&path_key)
+            .await
+            .unwrap()
+            .byte_offset,
+        prefix_offset.byte_offset
+    );
+    assert_eq!(rejected.session_message_count().await.unwrap(), 2);
+    assert!(rejected.get_session_message("claude", "u4").await.is_none());
+    drop(rejected);
+
+    let repaired = serde_json::json!({
+        "type": "user",
+        "cwd": project,
+        "sessionId": "claude-malformed-frame",
+        "uuid": "u3",
+        "timestamp": "2026-01-01T00:00:10.000Z",
+        "message": {"role": "user", "content": "Recovered malformed frame."}
+    });
+    std::fs::write(&path, format!("{valid_prefix}{repaired}\n{suffix}\n")).unwrap();
+
+    let retry = open_project_session_db(&project).await.unwrap();
+    let recovered = ingest_source(&retry, &ClaudeSource::with_home(&home), &project, None).await;
+    assert!(recovered.messages_upserted >= 2);
+    assert_eq!(retry.session_message_count().await.unwrap(), 4);
+    assert!(retry.get_session_message("claude", "u3").await.is_some());
+    assert!(retry.get_session_message("claude", "u4").await.is_some());
+    let final_offset = retry.get_parse_offset(&path_key).await.unwrap();
+    assert_eq!(
+        final_offset.byte_offset,
+        std::fs::metadata(&path).unwrap().len()
+    );
+    drop(retry);
+
+    let replay = open_project_session_db(&project).await.unwrap();
+    let unchanged = ingest_source(&replay, &ClaudeSource::with_home(&home), &project, None).await;
+    assert_eq!(unchanged.sessions_upserted, 0);
+    assert_eq!(unchanged.messages_upserted, 0);
+    assert_eq!(replay.get_parse_offset(&path_key).await, Some(final_offset));
+    assert_eq!(replay.session_message_count().await.unwrap(), 4);
+    assert!(replay.get_session_message("claude", "u4").await.is_some());
+}
+
+#[tokio::test]
 async fn claude_restart_defers_a_partial_final_line() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
@@ -155,14 +231,20 @@ async fn claude_restart_defers_a_partial_final_line() {
     let completed = ingest_source(&reopened, &ClaudeSource::with_home(&home), &project, None).await;
     assert_eq!(completed.messages_upserted, 1);
     assert_eq!(reopened.session_message_count().await.unwrap(), 3);
+    let final_offset = reopened.get_parse_offset(&path_key).await.unwrap();
     assert_eq!(
-        reopened
-            .get_parse_offset(&path_key)
-            .await
-            .unwrap()
-            .byte_offset,
-        std::fs::metadata(path).unwrap().len()
+        final_offset.byte_offset,
+        std::fs::metadata(&path).unwrap().len()
     );
+    drop(reopened);
+
+    let replay = open_project_session_db(&project).await.unwrap();
+    let unchanged = ingest_source(&replay, &ClaudeSource::with_home(&home), &project, None).await;
+    assert_eq!(unchanged.sessions_upserted, 0);
+    assert_eq!(unchanged.messages_upserted, 0);
+    assert_eq!(replay.get_parse_offset(&path_key).await, Some(final_offset));
+    assert_eq!(replay.session_message_count().await.unwrap(), 3);
+    assert!(replay.get_session_message("claude", "u3").await.is_some());
 }
 
 #[tokio::test]

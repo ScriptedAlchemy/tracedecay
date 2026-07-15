@@ -296,6 +296,43 @@ pub struct NewJsonl {
     pub new_cursor: StoredCursor,
 }
 
+/// Why strict JSONL framing stopped before consuming the next record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JsonlFrameDeferral {
+    Partial { offset: u64 },
+    Malformed { offset: u64 },
+}
+
+impl JsonlFrameDeferral {
+    pub(crate) fn offset(self) -> u64 {
+        match self {
+            Self::Partial { offset } | Self::Malformed { offset } => offset,
+        }
+    }
+
+    pub(crate) fn reason_code(self) -> &'static str {
+        match self {
+            Self::Partial { .. } => "partial_jsonl_frame",
+            Self::Malformed { .. } => "malformed_jsonl_frame",
+        }
+    }
+}
+
+/// Strict framing result used by providers that must retry invalid records.
+pub(crate) enum StrictJsonlOutcome {
+    Complete(NewJsonl),
+    Deferred {
+        parsed: NewJsonl,
+        reason: JsonlFrameDeferral,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum MalformedJsonlPolicy {
+    Skip,
+    Defer,
+}
+
 /// **`ByteOffset`** reader for append-only JSONL.
 ///
 /// Seeks to `prev.position` (when the file has only grown and its mtime has not
@@ -312,6 +349,35 @@ pub fn stream_new_jsonl(
     prev: StoredCursor,
     max_new_bytes: Option<u64>,
 ) -> Option<NewJsonl> {
+    stream_new_jsonl_with_policy(path, prev, max_new_bytes, MalformedJsonlPolicy::Skip)
+        .map(|(parsed, _)| parsed)
+}
+
+/// Reads complete Claude-style JSONL frames without consuming an invalid one.
+///
+/// Valid records before the deferred frame are returned with a cursor ending
+/// at that frame's start, so they may commit without skipping the blocked
+/// suffix. Other providers retain [`stream_new_jsonl`]'s skip-and-advance
+/// behavior.
+pub(crate) fn stream_new_jsonl_strict(
+    path: &Path,
+    prev: StoredCursor,
+    max_new_bytes: Option<u64>,
+) -> Option<StrictJsonlOutcome> {
+    let (parsed, reason) =
+        stream_new_jsonl_with_policy(path, prev, max_new_bytes, MalformedJsonlPolicy::Defer)?;
+    Some(match reason {
+        Some(reason) => StrictJsonlOutcome::Deferred { parsed, reason },
+        None => StrictJsonlOutcome::Complete(parsed),
+    })
+}
+
+fn stream_new_jsonl_with_policy(
+    path: &Path,
+    prev: StoredCursor,
+    max_new_bytes: Option<u64>,
+    malformed_policy: MalformedJsonlPolicy,
+) -> Option<(NewJsonl, Option<JsonlFrameDeferral>)> {
     let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,
         Err(error) => {
@@ -331,14 +397,17 @@ pub fn stream_new_jsonl(
 
     if seek_to >= file_size {
         // Nothing new; refresh mtime so we stop re-stat-ing an idle file.
-        return Some(NewJsonl {
-            lines: Vec::new(),
-            new_cursor: StoredCursor {
-                position: seek_to,
-                mtime,
-                file_id,
+        return Some((
+            NewJsonl {
+                lines: Vec::new(),
+                new_cursor: StoredCursor {
+                    position: seek_to,
+                    mtime,
+                    file_id,
+                },
             },
-        });
+            None,
+        ));
     }
 
     if let Some(cap) = max_new_bytes {
@@ -371,45 +440,62 @@ pub fn stream_new_jsonl(
     let mut lines = Vec::new();
     let mut offset = seek_to;
     let mut line = String::new();
-    loop {
+    let deferred = loop {
         line.clear();
         match reader.read_line(&mut line) {
-            Ok(0) => break,
+            Ok(0) => break None,
             Err(error) => {
                 log_source_skip(path, "read jsonl transcript line", &error);
-                break;
+                break None;
             }
             Ok(n) => {
                 // A line without a trailing newline is a partial write at EOF:
                 // stop without consuming it so the next call re-reads it whole.
                 if !line.ends_with('\n') {
-                    break;
+                    break Some(JsonlFrameDeferral::Partial { offset });
                 }
                 let line_offset = offset;
-                offset = offset.saturating_add(n as u64);
+                let next_offset = offset.saturating_add(n as u64);
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
+                    offset = next_offset;
                     continue;
                 }
                 match serde_json::from_str::<Value>(trimmed) {
-                    Ok(value) => lines.push(JsonlLine {
-                        offset: line_offset as i64,
-                        value,
-                    }),
-                    Err(error) => log_jsonl_decode_skip(path, line_offset, &error),
+                    Ok(value) => {
+                        lines.push(JsonlLine {
+                            offset: line_offset as i64,
+                            value,
+                        });
+                        offset = next_offset;
+                    }
+                    Err(error) => match malformed_policy {
+                        MalformedJsonlPolicy::Skip => {
+                            log_jsonl_decode_skip(path, line_offset, &error);
+                            offset = next_offset;
+                        }
+                        MalformedJsonlPolicy::Defer => {
+                            break Some(JsonlFrameDeferral::Malformed {
+                                offset: line_offset,
+                            });
+                        }
+                    },
                 }
             }
         }
-    }
+    };
 
-    Some(NewJsonl {
-        lines,
-        new_cursor: StoredCursor {
-            position: offset,
-            mtime,
-            file_id,
+    Some((
+        NewJsonl {
+            lines,
+            new_cursor: StoredCursor {
+                position: offset,
+                mtime,
+                file_id,
+            },
         },
-    })
+        deferred,
+    ))
 }
 
 /// Full contents of a changed file plus the advanced cursor.
