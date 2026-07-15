@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 //! Consolidated test suite for hook evaluation, hook branch routing, LSP
 //! diagnostics, and extract-worker hardening tests.
 //!

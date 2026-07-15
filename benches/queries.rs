@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 //! Static (per-repo) query catalog used by the criterion bench.
 //!
 //! Queries are constructed once after the repo is indexed: the `QueryContext`

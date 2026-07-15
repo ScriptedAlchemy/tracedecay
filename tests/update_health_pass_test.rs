@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 //! Integration tests for the post-update health pass that runs at the end of
 //! `tracedecay update` / `tracedecay post-update` (skippable via `--no-heal`).
 //!

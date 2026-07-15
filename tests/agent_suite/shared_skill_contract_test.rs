@@ -65,10 +65,10 @@ fn unfenced_headings(body: &str) -> Vec<(usize, String)> {
             continue;
         }
         let level = line.bytes().take_while(|byte| *byte == b'#').count();
-        if level <= 6 {
-            if let Some(text) = line[level..].strip_prefix(' ') {
-                headings.push((level, text.trim().to_string()));
-            }
+        if level <= 6
+            && let Some(text) = line[level..].strip_prefix(' ')
+        {
+            headings.push((level, text.trim().to_string()));
         }
     }
     headings
@@ -190,12 +190,12 @@ fn shared_skill_bodies_follow_the_intersection_body_rules() {
                 h1s.len()
             ));
         }
-        if let Some(title) = h1s.first() {
-            if title.starts_with('/') {
-                violations.push(format!(
-                    "{at}: model-invocable skill must use a plain-title H1, not {title:?}"
-                ));
-            }
+        if let Some(title) = h1s.first()
+            && title.starts_with('/')
+        {
+            violations.push(format!(
+                "{at}: model-invocable skill must use a plain-title H1, not {title:?}"
+            ));
         }
 
         match skill.body.lines().find(|line| !line.trim().is_empty()) {

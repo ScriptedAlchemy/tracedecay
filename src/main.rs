@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 // Rust guideline compliant 2025-10-17
 // Updated 2026-03-23: compact bordered table for status output
 use clap::{CommandFactory, Parser};
@@ -252,10 +251,10 @@ async fn run_startup_preamble(command: &Commands) {
     if startup_policy.runs_startup_maintenance() {
         global::try_flush(&mut user_config, is_force_flush);
     }
-    if !is_local_install_command(command) {
-        if let Err(err) = user_config.save_if_exists() {
-            eprintln!("warning: could not save tracedecay config: {err}");
-        }
+    if !is_local_install_command(command)
+        && let Err(err) = user_config.save_if_exists()
+    {
+        eprintln!("warning: could not save tracedecay config: {err}");
     }
 
     if is_first_run && startup_policy.runs_startup_maintenance() {

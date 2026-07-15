@@ -95,11 +95,9 @@ pub(crate) async fn handle_tool_call(
     scope_prefix: Option<&str>,
 ) -> tracedecay::errors::Result<ToolResult> {
     let owns_format = tracedecay::mcp::tools::tool_defaults_to_markdown(tool_name);
-    if !owns_format {
-        if let Some(obj) = args.as_object_mut() {
-            obj.entry("format".to_string())
-                .or_insert_with(|| serde_json::json!("json"));
-        }
+    if !owns_format && let Some(obj) = args.as_object_mut() {
+        obj.entry("format".to_string())
+            .or_insert_with(|| serde_json::json!("json"));
     }
     tracedecay::mcp::handle_tool_call(cg, tool_name, args, server_stats, scope_prefix).await
 }
@@ -4935,29 +4933,29 @@ async fn test_complexity_response_fields() {
     assert!(parsed.get("ranking").is_some(), "should have ranking key");
     assert!(parsed.get("formula").is_some(), "should have formula key");
     // Check ranking items have expected fields
-    if let Some(items) = parsed["ranking"].as_array() {
-        if let Some(first) = items.first() {
-            assert!(
-                first.get("cyclomatic_complexity").is_some(),
-                "ranking item should have cyclomatic_complexity"
-            );
-            assert!(
-                first.get("branches").is_some(),
-                "ranking item should have branches"
-            );
-            assert!(
-                first.get("max_nesting").is_some(),
-                "ranking item should have max_nesting"
-            );
-            assert!(
-                first.get("fan_out").is_some(),
-                "ranking item should have fan_out"
-            );
-            assert!(
-                first.get("score").is_some(),
-                "ranking item should have score"
-            );
-        }
+    if let Some(items) = parsed["ranking"].as_array()
+        && let Some(first) = items.first()
+    {
+        assert!(
+            first.get("cyclomatic_complexity").is_some(),
+            "ranking item should have cyclomatic_complexity"
+        );
+        assert!(
+            first.get("branches").is_some(),
+            "ranking item should have branches"
+        );
+        assert!(
+            first.get("max_nesting").is_some(),
+            "ranking item should have max_nesting"
+        );
+        assert!(
+            first.get("fan_out").is_some(),
+            "ranking item should have fan_out"
+        );
+        assert!(
+            first.get("score").is_some(),
+            "ranking item should have score"
+        );
     }
 }
 
@@ -4980,18 +4978,18 @@ async fn test_doc_coverage_response_structure() {
     assert!(parsed.get("file_count").is_some(), "should have file_count");
     assert!(parsed.get("files").is_some(), "should have files array");
     // If there are files, check their structure
-    if let Some(files) = parsed["files"].as_array() {
-        if let Some(first) = files.first() {
-            assert!(first.get("file").is_some(), "file entry should have 'file'");
-            assert!(
-                first.get("count").is_some(),
-                "file entry should have 'count'"
-            );
-            assert!(
-                first.get("symbols").is_some(),
-                "file entry should have 'symbols'"
-            );
-        }
+    if let Some(files) = parsed["files"].as_array()
+        && let Some(first) = files.first()
+    {
+        assert!(first.get("file").is_some(), "file entry should have 'file'");
+        assert!(
+            first.get("count").is_some(),
+            "file entry should have 'count'"
+        );
+        assert!(
+            first.get("symbols").is_some(),
+            "file entry should have 'symbols'"
+        );
     }
 }
 

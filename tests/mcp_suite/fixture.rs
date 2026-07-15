@@ -92,14 +92,12 @@ fn test_helper() { assert!(!helper().is_empty()); }
 /// initialized (schema-complete, empty) store from the on-disk template and
 /// opens it. Falls back to the real init when seeding is not possible.
 pub async fn init_project_from_template(project_root: &Path) -> TdResult<TraceDecay> {
-    if let Some(template) = template_root().await {
-        if let Some(targets) = SeedTargets::from_env() {
-            if seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets).is_ok() {
-                if let Ok(cg) = TraceDecay::open(project_root).await {
-                    return Ok(cg);
-                }
-            }
-        }
+    if let Some(template) = template_root().await
+        && let Some(targets) = SeedTargets::from_env()
+        && seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets).is_ok()
+        && let Ok(cg) = TraceDecay::open(project_root).await
+    {
+        return Ok(cg);
     }
     TraceDecay::init(project_root).await
 }
@@ -112,12 +110,10 @@ pub async fn init_project_from_template_with_options(
 ) -> TdResult<TraceDecay> {
     if let (Some(template), Some(targets)) =
         (template_root().await, SeedTargets::from_options(&options))
+        && seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets).is_ok()
+        && let Ok(cg) = TraceDecay::open_with_options(project_root, options.clone()).await
     {
-        if seed_store(&template.join(EMPTY_FLAVOR), project_root, &targets).is_ok() {
-            if let Ok(cg) = TraceDecay::open_with_options(project_root, options.clone()).await {
-                return Ok(cg);
-            }
-        }
+        return Ok(cg);
     }
     TraceDecay::init_with_options(project_root, options).await
 }

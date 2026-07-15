@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 //! Consolidated extractor test suite.
 //!
 //! Each module was previously a standalone integration-test binary

@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 //! Hermes agent integration suite.
 //!
 //! One test binary for the generated Hermes plugin (LCM bridge) and the

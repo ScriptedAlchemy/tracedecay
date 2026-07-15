@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 //! Definition + on-demand shallow clone of the large repositories used by the
 //! bench. Each repo is pinned to a constant ref so successive bench runs hit
 //! identical source, and cloned with `--depth 1` (via init + fetch) to avoid
@@ -91,12 +90,11 @@ fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<(), String> {
 pub fn ensure_cloned(root: &Path, repo: Repo) -> Result<PathBuf, String> {
     let dir = root.join(repo.name);
     let marker = dir.join(".bench-ref");
-    if marker.exists() {
-        if let Ok(existing) = std::fs::read_to_string(&marker) {
-            if existing.trim() == repo.git_ref {
-                return Ok(dir);
-            }
-        }
+    if marker.exists()
+        && let Ok(existing) = std::fs::read_to_string(&marker)
+        && existing.trim() == repo.git_ref
+    {
+        return Ok(dir);
     }
 
     if !dir.exists() {

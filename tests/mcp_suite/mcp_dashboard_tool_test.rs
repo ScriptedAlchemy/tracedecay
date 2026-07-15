@@ -123,23 +123,23 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
     let cap_url = format!("{}api/capabilities", url);
     // Give the background server a moment to accept (rarely needed but robust)
     for _ in 0..40 {
-        if let Ok(mut resp) = agent.get(&cap_url).call() {
-            if resp.status().as_u16() == 200 {
-                let raw = resp.body_mut().read_to_string().unwrap_or_default();
-                let body: Value = serde_json::from_str(&raw).unwrap_or(json!({}));
-                assert_eq!(body.get("name"), Some(&json!("tracedecay-dashboard")));
-                assert!(body.get("features").is_some());
-                // success — now stop it via tool for cleanup
-                let _stop = handle_tool_call(
-                    &cg,
-                    "tracedecay_dashboard",
-                    json!({ "action": "stop" }),
-                    None,
-                    None,
-                )
-                .await;
-                return;
-            }
+        if let Ok(mut resp) = agent.get(&cap_url).call()
+            && resp.status().as_u16() == 200
+        {
+            let raw = resp.body_mut().read_to_string().unwrap_or_default();
+            let body: Value = serde_json::from_str(&raw).unwrap_or(json!({}));
+            assert_eq!(body.get("name"), Some(&json!("tracedecay-dashboard")));
+            assert!(body.get("features").is_some());
+            // success — now stop it via tool for cleanup
+            let _stop = handle_tool_call(
+                &cg,
+                "tracedecay_dashboard",
+                json!({ "action": "stop" }),
+                None,
+                None,
+            )
+            .await;
+            return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

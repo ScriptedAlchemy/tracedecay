@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 //! Consolidated agent-integration and skill test binary.
 //!
 //! Windows CI links every integration-test binary separately, and link time

@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 //! Criterion benchmark: tracedecay MCP tools against large, real-world repos.
 //!
 //! What it does:

@@ -110,10 +110,10 @@ fn spawn_dashboard_server_with_runner(
 }
 
 pub(crate) fn write_file(path: &Path, content: &str) {
-    if let Some(parent) = path.parent() {
-        if let Err(err) = fs::create_dir_all(parent) {
-            panic!("failed to create {}: {err}", parent.display());
-        }
+    if let Some(parent) = path.parent()
+        && let Err(err) = fs::create_dir_all(parent)
+    {
+        panic!("failed to create {}: {err}", parent.display());
     }
     if let Err(err) = fs::write(path, content) {
         panic!("failed to write {}: {err}", path.display());

@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 //! Consolidated automation test suite.
 //!
 //! Merges the former automation_backend_test, automation_config_test,
