@@ -41,9 +41,9 @@ must cover prevention, visible state, retry or recovery, and restart behavior.
 | PR9 | Code generations are deterministic; exact identifiers and phrases are not displaced by parse errors, echoes, wrong snapshots, or uncalibrated shard scores; stale, cross-generation, and dirty-overlay diagnostics never publish as current or enter clean generations. |
 | PR10 | Semantic search never substitutes models, crosses privacy domains, recomputes unchanged documents, or shortens lexical results after model failure. |
 | PR11 | Policy, application, settings, catalog, analyzer execution, and analyzer configuration remain authorized, deterministic, idempotent, privacy-safe, and free of alias-local business logic. |
-| PR12 | CLI, MCP, HTTP, output, and the [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) LSP gateway agree on lifecycle, framing, capabilities, protocol/catalog versions, cancellation, schemas, defaults, errors, pagination, formats, and nonzero failure status; notifications cannot satisfy pending responses. |
-| PR13 | Hooks stay fast and thin; Scout and host bundles preserve address, privacy, lifecycle ownership, and effects without local query/model/storage work; conflicting extension claims require safe discovery, explicit replacement confirmation, configuration preservation, and rollback. |
-| PR14 | Dashboard, Doctor, observability, and configuration views use canonical daemon operations, distinguish empty/stale/error/locked/partial, and offer executable recovery. |
+| PR12 | CLI, MCP, HTTP, output, and the [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) LSP gateway agree on lifecycle, framing, capabilities, protocol/catalog versions, cancellation, schemas, defaults, errors, pagination, formats, and nonzero failure status; notifications cannot satisfy pending responses; a method outside the supported capability set, or one the active analyzer declares unsupported, returns an explicit unavailable outcome rather than a guessed result; `prepareRename`/`rename` candidates never apply through `workspace/applyEdit` or an opaque server command. |
+| PR13 | Hooks stay fast and thin; Scout and host bundles preserve address, privacy, lifecycle ownership, and effects without local query/model/storage work; only clean-generation or saved-content semantic evidence may commit to Scout envelopes, checkpoints, delivery/feedback records, observations, facts, memory, telemetry payloads, spools, caches, replicas, or exports — dirty-overlay or unsaved-secret semantic evidence must return typed suppressed or unavailable state and never durably persist hover, signature, diagnostic, or reference content; conflicting extension claims require safe discovery, explicit replacement confirmation, configuration preservation, and rollback; Claude Code, Cursor desktop, Cursor cloud, and Codex each receive their capability-specific LSP/native-diagnostics/hook delivery path without being forced to a lowest-common-denominator behavior; Hermes and Kiro report hook/MCP/CLI or unavailable paths explicitly and are not assumed to receive full LSP. |
+| PR14 | Dashboard, Doctor, observability, and configuration views use canonical daemon operations, distinguish empty/stale/error/locked/partial, and offer executable recovery; the unqualified Doctor kernel, UI, and remediation consume typed Scout and host finding state emitted by PR13; table-driven direct tests cover the complete canonical semantic-evidence provider state set — unsupported, absent, indexing, stale, cancelled, timed-out, failed, and partial — and none of those states may render as a clean empty result; only supported plus completed plus complete-coverage zero-match may present as clean empty. |
 | PR15 | Explicit repository/worktree/ref and LSP workspace-folder targets never fall back to CWD, first workspace, or active checkout; cross-project results exact-load globally; dirty/stale graph and multi-root diagnostic coverage is explicit. |
 | PR16 | Remote authority, offline replay, cache verification, backup, restore, and failover never admit two writers or hide incomplete coverage; unsaved LSP content, overlays, and analyzer state remain node-local and never enter spools or replicas. |
 | PR17 | Workflow scheduling, history, leases, effects, artifacts, retries, and cancellation share daemon authority and never duplicate observable effects. |
@@ -66,7 +66,29 @@ failure class.
   end-to-end coverage in their owning slices.
 - LSP suites include stale generations, conflicting dirty overlays, malformed or
   interleaved frames, notification/response confusion, cancellation races,
-  analyzer restart exhaustion, and competing extension claims.
+  analyzer restart exhaustion, competing extension claims, graph-only versus
+  analyzer-only coverage, analyzer disagreement, stale versus current
+  generation, overlay versus clean-generation semantic evidence, provenance
+  dedupe, cross-project merge boundaries, and `prepareRename`/`rename`
+  candidates that never self-apply.
+- PR14 and LSP/gateway suites include table-driven direct tests for the
+  complete canonical semantic-evidence provider state set: unsupported, absent,
+  indexing, stale, cancelled, timed-out, failed, and partial. Each state must
+  render its typed outcome explicitly; none may collapse to a clean empty
+  result. Only supported plus completed plus complete-coverage zero-match may
+  present as clean empty.
+- Scout suites must include a **positive** saved-content/clean-generation
+  fixture proving committed semantic evidence remains bound to exact
+  saved-content/clean-generation identity through envelope, checkpoint, delivery
+  receipt, feedback state, telemetry metadata, and every durable spool, cache,
+  replica, and export representation; no sink may drop, substitute, or relabel
+  that identity.
+- Scout suites must include a **negative** unsaved-secret dirty-overlay fixture
+  proving no durable envelope, checkpoint, receipt, feedback record,
+  observation, fact, memory entry, telemetry payload, spool, cache, replica, or
+  export contains overlay-derived hover, signature, diagnostic, reference, or
+  implementation source/evidence; durable delivery requests for such evidence
+  return typed suppressed or unavailable state.
 - Aggregate verification reports failures by product test, without parsing this file or
   generating a second inventory.
 - Removing V1 code cannot remove the last direct test for one of these classes.

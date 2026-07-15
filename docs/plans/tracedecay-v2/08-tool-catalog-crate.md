@@ -4,8 +4,10 @@
 
 - Status: pending for PR11.
 - PR11 implements the minimal runtime catalog with application and policy consumers.
-- PR12 binds the catalog to CLI, MCP, HTTP, LSP, dashboard, and discovery
-  surfaces. PR18 adds SDK bindings only when the official SDK methods ship.
+- PR12 binds the catalog to CLI, MCP, HTTP, LSP, and discovery surfaces.
+  PR14 first ships dashboard binding, dashboard actions, and dashboard parity
+  over the same CapabilityIds and application handlers. PR18 adds SDK bindings
+  only when the official SDK methods ship.
 - tracedecay-tool-catalog describes callable product capabilities. It does not discover them by parsing source code.
 
 ## Outcome
@@ -51,13 +53,28 @@ Every public surface resolves stable capability IDs to the same application use 
 - **PR11 — daemon:** bind each executable capability to the single tracedecayd/application authority. Catalog consumers never open a database or bypass application authorization.
 - **PR11 — profiles:** define explicit capability sets and hard ceilings for default, compact, administrative, and host-limited surfaces. Absence is explicit, not a hidden fallback.
 - **PR11 — compatibility:** retain a current public name only when a direct compatibility test requires it. Retired names are absent and return typed discovery guidance.
-- **PR12 — bindings:** map CLI commands, MCP tools, HTTP operations, LSP
-  methods, and dashboard actions to the same CapabilityId and typed application
-  handler where the protocol exposes a callable product operation.
+- **PR12 — bindings:** map CLI commands, MCP tools, HTTP operations, and LSP
+  methods to the same CapabilityId and typed application handler where the
+  protocol exposes a callable product operation. Dashboard binding, dashboard
+  actions, and dashboard parity remain owned by PR14; PR12 does not ship
+  dashboard adapters.
+- **PR14 — dashboard binding:** map dashboard actions to the same CapabilityId
+  and typed application handler as CLI, MCP, HTTP, and LSP. Dashboard parity
+  tests submit equivalent typed requests through dashboard and non-dashboard
+  adapters and compare semantic results before rendering.
 - **PR12 — LSP bindings:** map each supported standard navigation or diagnostic
   method to an existing typed code or diagnostic capability and handler.
   Lifecycle, framing, and document notifications remain protocol mechanics,
-  not callable catalog capabilities.
+  not callable catalog capabilities. `prepareRename` and `rename` bind only to
+  read-only candidate/preview UseCaseIds owned by
+  [34](34-workspace-refactoring-and-api-migration.md); they never bind directly
+  to `tracedecay_rename_symbol`, API-migration apply, another write-effect
+  entry, `workspace/applyEdit`, or opaque server commands. No separate
+  `lsp_*` capability is cataloged for them, and no binding may apply an edit
+  on their behalf. General LSP `textDocument/codeAction` is deferred: it does
+  not ship in PR12 and cannot be cataloged until a separate owner defines a
+  typed candidate-consumption operation, policy classification, canonical
+  preview/`EditTransaction` route, and acceptance fixtures.
 - **PR12 — LSP extensions:** require every vendor extension to have an explicit
   typed catalog entry, bounded schema, policy classification, and tested
   handler. Never expose arbitrary method or payload forwarding.
@@ -76,7 +93,8 @@ Every public surface resolves stable capability IDs to the same application use 
 - PR11 unit tests cover stable ID serialization, immutable snapshots, duplicate/conflict rejection, profile ceilings, explicit absence, deprecation, availability, and deterministic lookup.
 - PR11 integration tests prove every catalog entry resolves to one real application handler with matching scope, effect, privacy, and schema contracts.
 - Policy tests cover routing among available entries, missing capability, denied scope, stale availability, and no silent substitution.
-- PR12 parity tests invoke representative read, write, administrative, streaming, and long-running use cases through each supported surface and compare typed results before rendering.
+- PR12 parity tests invoke representative read, write, administrative, streaming, and long-running use cases through CLI, MCP, HTTP, and LSP adapters and compare typed results before rendering.
+- PR14 contract tests add dashboard binding, dashboard actions, and dashboard parity on the same typed requests and CapabilityIds.
 - PR18 SDK parity tests require every advertised SDK binding to resolve to the
   shipped typed method and canonical application handler.
 - Discovery tests prove compact profiles stay bounded and administrative/private capabilities are filtered correctly.

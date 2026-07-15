@@ -85,17 +85,17 @@ not be rebuilt.
 | PR | Product delivery |
 |---|---|
 | PR5 (complete) | Sanitized observation vertical: one real provider from parse through sanitizer, daemon-owned persistence, replay, and restart. |
-| PR6 | Provider coverage and event normalization: remaining hosts/sources, durable spools, identities, dedupe, partial input, backpressure, and canonical event relations. |
+| PR6 | Provider coverage and event normalization: remaining hosts/sources, daemon host-admission spool for non-replayable events, identities, dedupe, partial input, backpressure, and canonical event relations. |
 | PR7 | Memory, facts, and provenance: project/profile ownership, evidence, corrections, trust, curation, migration, and deletion lineage. |
 | PR8 | Session/LCM temporal retrieval: occurrences, copies, summaries, supersession, current/as-of/evolution retrieval, and stable context assembly. |
 | PR9 | Code intelligence and lexical retrieval: deterministic extraction, generations, lineage, generation-bound managed diagnostics/tests, exact/phrase/BM25 search, and V1 parity. |
 | PR10 | Native semantic retrieval and ranking: gated FastEmbed artifacts, immutable vector generations, hybrid ranking, redundancy augmentation, evaluation, and lexical fallback. |
 | PR11 | Policy, application, catalog, and configuration core: typed use cases, grants, routing, replay, operations, capabilities, analyzer policy/settings, and one runtime configuration authority. |
 | PR12 | CLI, MCP, HTTP API, LSP gateway, and output convergence: one schema registry, dispatcher, and binding taxonomy; stable errors/cursors, compact Markdown, canonical JSON, SSE, cancellation, managed diagnostics, and surface parity. |
-| PR13 | Hooks, Context Scout, and host bundles: bounded hook ingestion, asynchronous suggestions, Codex/Claude/Cursor/Hermes/Kiro projections, universal TraceDecay LSP registration, install/repair, and stock-host conformance. |
+| PR13 | Hooks, Context Scout, and host bundles: bounded hook ingestion, asynchronous suggestions, Codex/Claude/Cursor/Hermes/Kiro projections, one TraceDecay semantic/diagnostic contract delivered per host (Claude Code LSP plugin; Cursor desktop native-diagnostics adapter with duplicate-analyzer avoidance; hook/MCP/CLI capability paths for Cursor cloud, Codex, and other supported hosts as applicable), install/repair, and stock-host conformance. |
 | PR14 | Dashboard, Doctor, observability, and configuration operations: Brain/Explorer/Loom foundations, one truthful health/recovery kernel, metrics/SLOs, Settings, and direct remediation. |
 | PR15 | Cross-project, repository, and worktree behavior: canonical scope resolution, federation, globally routable evidence, graph/query/LSP workspace coverage, and multi-repository workflows. |
-| PR16 | Remote shared Brain: enrolled nodes, one fenced authority per shard, offline sanitized capture, verified caches/replicas, node-local LSP overlays/analyzers, Git correlation, backup, restore, and failover. |
+| PR16 | Remote shared Brain: enrolled nodes, one fenced authority per shard, remote offline-capture spool, verified caches/replicas, node-local LSP overlays/analyzers, Git correlation, backup, restore, and failover. |
 | PR17 | Real typed dynamic workflows and automations: daemon-owned definitions, deterministic replay, and one shared scheduler/history/lease/effect/artifact kernel. |
 | PR18 | Official API stabilization and SDKs: frozen public contract, OpenAPI/schema publication, first-party Rust/TypeScript/Python SDKs, docs, and conformance. |
 | PR19 | Compatibility migration, defragmentation, cutover, and deletion: resumable backfill, shadow parity, bounded cutovers, rollback window, V2 default, and removal of every superseded V1 path. |
@@ -119,9 +119,9 @@ are stable.
   PR13 daemon cutover, host bundles, lifecycle, and conformance. Plan 22 owns
   PR13 Context Scout behavior.
 - Plan [35](35-daemon-lsp-gateway-and-universal-diagnostics.md): PR9,
-  PR11–PR13, PR15, and PR16 generation-bound diagnostics, analyzer policy,
-  daemon LSP gateway, universal host plugin, multi-root scope, and remote-node
-  behavior.
+  PR11–PR13, PR14, PR15, and PR16 generation-bound diagnostics, analyzer
+  policy, daemon LSP gateway, gateway-specific finding/state schema consumed by
+  dashboard/Doctor, multi-root scope, and remote-node behavior.
 - Plans 11, 14, and 26: PR14 product UI, Doctor, observability, regression, and
   operational quality.
 - Plan 16: PR15 canonical scope. Plan 24 is a permanent tombstone for the

@@ -3,7 +3,7 @@
 **Delivery:** PR 8
 
 **Status:** planned product work
-**Depends on:** [01 domain](01-domain-crate.md), [02 store](02-store-crate.md), [03 capture](03-capture-crate.md), [04 projectors](04-projectors-crate.md), [05 query](05-query-crate.md), [09 application](09-application-crate.md), [13 anchors](13-research-provenance-and-context-anchors.md), [16 scope](16-cross-project-repository-worktree-scope.md), and [18 privacy](18-secret-detection-redaction-and-private-data-safety.md).
+**Depends on:** [01 domain](01-domain-crate.md), [02 store](02-store-crate.md), [03 capture](03-capture-crate.md), [04 projectors](04-projectors-crate.md), [05 query](05-query-crate.md), [09 application](09-application-crate.md), [13 anchors](13-research-provenance-and-context-anchors.md), and [18 privacy](18-secret-detection-redaction-and-private-data-safety.md). PR8 ships against explicitly resolved current-project/single-root scope and address contracts available by then; [16 scope](16-cross-project-repository-worktree-scope.md) later composes this retrieval with canonical cross-project/repository/worktree resolution in PR15 and is not a PR8 implementation prerequisite.
 
 ## Outcome
 
@@ -77,7 +77,7 @@ Compact context contains only the selected Turns, exact supporting evidence, sum
 - current, as-of, evolution, and forensic fixtures handle correction and conflict correctly;
 - summary lineage survives restart and exposes exact sources;
 - exact technical queries are not displaced by generic semantic neighbors;
-- cross-project results hydrate without CWD or store switching;
+- within the PR8 single-root scope, results hydrate without CWD or store switching; PR15 extends this to canonical cross-project targets;
 - partial/conflicted shards remain visible and never fabricate an empty-complete answer;
 - reads create no files, rows, cursors, repairs, or writable connections;
 - concurrent refresh callers share one operation and one terminal receipt;

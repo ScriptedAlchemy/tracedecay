@@ -35,8 +35,9 @@ Every operational and product metric states what was measured, over which popula
 - Emit versioned events through the same authoritative event/store path as other V2 observations.
 - Emit privacy-safe [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)
   events for sessions; methods, outcomes, and latency; queueing and
-  cancellation; analyzer startup and restart; cache reuse; diagnostic add and
-  clear; partial coverage and drops; and bridge reconnect.
+  cancellation; analyzer startup, restart, and indexing/degraded state; cache
+  reuse and overlay freshness; diagnostic add and clear; provider conflicts;
+  host delivery path; partial coverage and drops; and bridge reconnect.
 - LSP telemetry contains no paths, source, symbols, or diagnostic messages.
 - Identify scope, capability, operation, result, event and observation time, duration or quantity, unit, producer revision, trace, and privacy classification.
 - Use stable idempotency keys so retries and replay cannot double count.
@@ -60,8 +61,13 @@ Every operational and product metric states what was measured, over which popula
 - Automation admission, execution, useful work, effect, recovery, and terminal outcome funnels.
 - Usage, cost, and measured savings with declared pricing inputs, exclusions, and confidence.
 - Store, index, daemon, hook, and remote-coverage health derived from canonical facts rather than incidental row presence.
-- Diagnostic coverage distinguishes missing analyzers, unsupported languages,
-  and daemon unavailability from a successful zero-diagnostic result.
+- Diagnostic and analyzer/provider coverage carry the complete canonical state
+  set: `unsupported`, `absent`, `indexing`, `stale`, `cancelled`, `timed-out`,
+  `failed`, and `partial`. These remain distinct from
+  `supported`+`completed`+`complete` zero-findings. Metrics and views never
+  collapse any state into a clean empty result, and surface overlay freshness,
+  cache reuse, provider conflicts, and host delivery path without leaking
+  source, path, or message content.
 
 ### Rejected-argument analytics
 
@@ -93,8 +99,10 @@ decision with collision, ambiguity, maintenance, and privacy review.
 ### Doctor and health
 
 - Doctor, Observatory, CLI, MCP, API, and dashboard consume one typed health and
-  remediation kernel. An alias reports kernel availability; it cannot substitute
-  a private probe or claim health from binding presence.
+  remediation kernel owned by PR14. Doctor uses the kernel read-only for
+  detection and explanation; remediation remains explicit confirmed operations.
+  An alias reports kernel availability; it cannot substitute a private probe or
+  claim health from binding presence.
 - Replace separate `session_start`/`session_end` baseline tools with one
   health-delta operation over pinned before/after watermarks and coverage.
 - Analytics consume canonical versioned events only. Session or surface
@@ -122,6 +130,12 @@ decision with collision, ambiguity, maintenance, and privacy review.
 - LSP fixtures reconcile session, request, analyzer, cache, diagnostic,
   coverage, drop, and reconnect events while proving paths, source, symbols,
   and messages never enter telemetry.
+- Analyzer/provider coverage fixtures exercise every canonical state
+  (`unsupported`, `absent`, `indexing`, `stale`, `cancelled`, `timed-out`,
+  `failed`, `partial`, and `supported`+`completed`+`complete` zero-findings)
+  in required product views and prove none collapse to clean empty. Table-driven
+  parity/coverage tests verify Observatory, CLI, MCP, HTTP, and exports render
+  the same state labels, denominators, and non-zero coverage semantics.
 - Rejected-argument fixtures reconcile exact frequencies and eligible-attempt
   rates by tool/command, safe rejected name, error class, schema/version,
   transport, provider, model family, and agent-host kind for pinned watermarks.

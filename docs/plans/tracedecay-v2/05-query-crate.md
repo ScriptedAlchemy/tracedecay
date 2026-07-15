@@ -5,15 +5,22 @@
 - Status: modules first after the completed PR4 authoritative store boundary.
 - PR5 added only the observation read/replay needed by its capture vertical in
   existing store and application modules. Extract `tracedecay-query` only when
-  PR8+ reuse, dependency isolation, or compile-time savings justify the boundary.
+  PR8-or-later reuse, dependency isolation, or compile-time savings justify the
+  boundary.
 - PR7 adds facts and provenance, PR8 adds LCM/session retrieval, PR9 adds
   lexical code search, code navigation, and current diagnostics, and PR10 adds
   semantic search.
-- PR11 composes query use cases in application and policy. PR12 exposes them through CLI, MCP, HTTP, and dashboard surfaces.
+- PR11 composes query use cases in application and policy. PR12 exposes them
+  through CLI, MCP, HTTP, LSP, export, and live non-dashboard adapters.
+  PR14 first ships dashboard binding and dashboard parity.
 - Each retrieval slice records representative latency, throughput, resource,
   and no-op baselines for [PR20](33-end-to-end-performance-optimization.md).
 - If extracted, `tracedecay-query` is a transport-neutral execution library. It
   does not replace domain-specific query contracts with one universal language.
+- Staged execution: PR8 operates on current-project/single-root scope with
+  available watermark/cursor semantics; frozen multi-root watermarks, shard
+  selection/merge, canonical multi-root composition, and federation activate in
+  PR15 with [Plan 16](16-cross-project-repository-worktree-scope.md).
 
 ## Outcome
 
@@ -23,10 +30,12 @@ Every product surface can run the same bounded query use case and receive determ
 
 - Shared query primitives: explicit scope, page request, opaque cursor, cost budget, cancellation, frozen watermark, coverage, timing, and safe explanation metadata.
 - Planning against application-resolved scope and store-advertised read capabilities.
-- Bounded shard selection, execution coordination, deterministic merge, and stable tie-breaking.
+- Execution coordination, deterministic merge, and stable tie-breaking; bounded
+  shard selection activates with PR15 multi-root execution (Plan 16).
 - Cursor authentication and validation against scope, access, schema, ranking version, index generation, and captured watermarks.
 - Query-side ranking mechanics shared by compatible channels, including finite scores, declared normalization, stable fallback, and component explanations.
-- Typed current-diagnostic and code-navigation reads bound to exact generation,
+- Immutable query-evidence input types for current diagnostics, code
+  navigation, and impact/affected-test hybrid reads bound to exact generation,
   file, symbol, span, producer, and freshness evidence.
 - Read-only ports implemented by root store/projector adapters.
 
@@ -40,6 +49,10 @@ Every product surface can run the same bounded query use case and receive determ
 - An LSP-specific graph or query engine, ranking, hydration, scope, or fallback
   path; LSP remains a transport adapter under
   [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
+- Live analyzer sessions, provider lifecycle, provider traits, or implicit
+  fetches from admitted analyzers. Plan 09 invokes providers and translates
+  provider results into Plan-05-owned explicit evidence inputs; this crate
+  never imports Plan 09 or provider traits and never opens analyzer sessions.
 - Hidden network inference or silent fallback between incompatible indexes or models.
 
 ## Required behavior
@@ -60,24 +73,44 @@ Every product surface can run the same bounded query use case and receive determ
 - **PR5 — boundary:** use the existing store/application path with bounded
   reads and cancellation. Do not add activity/session search, multi-root query,
   ranking, shard merge, authenticated distributed cursors, or a query framework.
-- **PR8+ — shared execution:** introduce frozen multi-root watermarks,
-  authenticated cursors, budgets, shard selection/merge, and reusable query
-  execution only with the temporal and later retrieval product slices.
+- **PR8 — shared execution (single-root):** introduce current-project scope,
+  single-root frozen watermarks and authenticated cursors, cost budgets, and
+  reusable query execution for the temporal kernel and its compatibility
+  bindings.
+- **PR15 — multi-root execution (Plan 16):** introduce frozen multi-root
+  watermarks, authenticated distributed cursors, shard selection/merge,
+  canonical multi-root composition, and federation for retrieval slices that
+  require cross-root scope.
 - **PR7 — facts/provenance:** add typed fact, assertion, evidence, contradiction, supersession, trust, and as-of requests. Preserve source and privacy-domain identity through merge and hydration.
-- **PR8 — LCM/session:** add typed recent-session, message, occurrence, logical-copy, summary-DAG, current, as-of, evolution, and forensic requests. Native rows remain addressable; representative views report hidden and unknown counts.
-- **PR9 — lexical code:** add exact identifier, phrase, token, field, bounded fuzzy, relation, path, impact, affected-test, facet, and timeline requests. Exact identifiers precede approximate candidates.
+- **PR8 — LCM/session:** add typed recent-session, message, occurrence,
+  logical-copy, summary-DAG, current, as-of, evolution, and forensic requests
+  over current-project/single-root scope. Native rows remain addressable;
+  representative views report hidden and unknown counts.
+- **PR9 — lexical code:** add exact identifier, phrase, token, field, bounded fuzzy, relation, path, impact, affected-test, facet, and timeline requests. Exact identifiers precede approximate candidates. Impact and affected-test requests may merge only explicit typed reference/dispatch evidence inputs alongside graph, Git, and test inputs; that evidence never proves a test executed or a change was delivered.
 - **PR9 — diagnostics/navigation:** add typed current-diagnostic and
-  code-navigation reads over exact clean-generation evidence. Current results
-  require matching scope, generation, content, producer provenance, freshness,
-  and clearing/supersession state.
+  code-navigation reads over exact clean-generation and graph-backed evidence,
+  covering declaration, definition, type-definition, implementation,
+  references, symbols, and call hierarchy. Current results require matching
+  scope, generation, content, producer provenance, freshness, and
+  clearing/supersession state. PR9 query work does not import Plan 09, depend
+  on live providers, or open analyzer sessions. The graph remains authoritative
+  for stable identity, generations, bounded traversal, history, cross-project
+  evidence, and test attribution.
+- **PR12 — analyzer-derived navigation:** activate hover, signature help, type
+  hierarchy, and rename-candidate merging in the same slice as Plan 35
+  analyzer producers. Plan 09 translates provider results into Plan-05-owned
+  explicit evidence inputs; the query crate validates and merges only those
+  typed inputs and never opens analyzer sessions or depends on live provider
+  availability. Rename candidates are not durable clean-generation evidence.
 - **PR9 — lexical ranking:** centralize tokenizer/profile versions, lexical normalization, deterministic fusion, diversity, and explanations. Preserve a named V1 compatibility profile only where direct fixtures require it.
 - **PR10 — semantic:** add local semantic candidate and bounded rerank channels only with exact model, tokenizer, dimension, metric, normalization, runtime, index-generation, privacy, and watermark compatibility.
 - **PR10 — fallback:** when semantic or rerank execution is unavailable, preserve the pre-stage lexical result bytes and order when the selected profile permits fallback; otherwise fail explicitly.
 - **PR11 — composition:** expose typed query services to application and pure policy evaluators without importing application or policy into this crate.
-- **PR12 — surfaces:** CLI, MCP, HTTP, LSP, dashboard, exports, and live views
-  map typed requests and responses without implementing their own scope,
-  ranking, cursor, hydration, coverage, or fallback rules. LSP uses the same
-  query kernels as every other adapter.
+- **PR12 — surfaces:** CLI, MCP, HTTP, LSP, exports, and live views map typed
+  requests and responses without implementing their own scope, ranking, cursor,
+  hydration, coverage, or fallback rules. LSP uses the same query kernels as
+  every other adapter. Dashboard binding and dashboard parity remain owned by
+  PR14; PR12 does not ship dashboard adapters.
 - **PR12 — export/live:** stream bounded frozen exports with manifests and ordered snapshot/delta/gap contracts. Filesystem publication and SSE framing remain adapter responsibilities.
 
 ## Acceptance
@@ -87,10 +120,12 @@ Every product surface can run the same bounded query use case and receive determ
   retry, and canonical profile/project ownership without ambient fallback.
 - PR7 direct tests cover provenance preservation, contradiction/supersession, as-of knowledge, denied payloads, redacted frontiers, and unknown denominators.
 - PR8 direct tests cover native versus representative views, copied prompts, punctuation/CJK/emoji, provider filters, summary freshness, temporal resolution, and restart-stable pagination.
-- PR9 direct tests compare lexical inclusion and declared ordering with redacted V1 fixtures and cover exact identifiers, fuzzy bounds, graph limits, impact roles, facets, deterministic diversity, and generation-exact current diagnostic/navigation reads.
+- PR9 direct tests compare lexical inclusion and declared ordering with redacted V1 fixtures and cover exact identifiers, fuzzy bounds, graph limits, impact roles, facets, deterministic diversity, and generation-exact clean-generation/graph-backed diagnostic and navigation reads.
+- PR12 direct tests cover analyzer-derived hover, signature help, type hierarchy, and rename-candidate merging from explicit typed evidence inputs only.
 - PR10 direct tests cover incompatible representations, privacy isolation, missing artifacts, exact fallback, semantic failure, rerank caps, and byte-stable lexical fallback.
 - PR11/PR12 contract tests submit equivalent typed requests through application,
-  CLI JSON, MCP JSON, HTTP JSON, LSP, dashboard, export, and live adapters and
-  compare semantic results before rendering.
+  CLI JSON, MCP JSON, HTTP JSON, LSP, export, and live adapters and compare
+  semantic results before rendering. PR14 contract tests add dashboard binding
+  and dashboard parity on the same typed requests.
 - Benchmarks record corpus and watermark with p50/p95, candidate counts, allocations, peak RSS, shard opens, and quality deltas. No ranking change ships without direct held-out evidence and worst-stratum checks.
 - Architecture tests reject storage, transport, UI, policy, task-executor, and model-runtime dependencies from tracedecay-query, plus any LSP-private query engine or fallback.

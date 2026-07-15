@@ -47,12 +47,44 @@ It does not expose one symbol-aware apply operation that carries a preview acros
 
 ## Ownership
 
-- The code graph remains the authority for symbol identity, definitions, references, callers, public re-exports, affected files, tests, and graph freshness.
-- Language extractors and resolvers remain the authority for binding a source occurrence to a symbol and for reporting unsupported syntax or ambiguous identity.
-- The existing edit kernel remains the sole owner of preconditioned text edits, file preimages, transactional writes, rollback, and edit receipts. Symbol replacement and string replacement are reused rather than copied.
-- Existing diagnostics and formatter integrations remain the owners of post-edit analysis and repository formatting.
-- The tool catalog owns schemas, discoverability, capability metadata, and host rendering. It lists apply tools only after their implementation and acceptance gates ship. See [V2 tool catalog crate](08-tool-catalog-crate.md).
-- This plan owns rename and API-migration semantics, preview/apply contracts, compatibility-preservation rules, stale-preview behavior, and the end-to-end acceptance matrix.
+- The code graph remains the authority for stable symbol identity, clean
+  generations, canonical historical and cross-project relations, bounded
+  traversal, test attribution, definitions, references, callers, public
+  re-exports, affected files, and graph freshness.
+- Analyzer evidence may add active-document, version-reference, and dispatch
+  candidates with independent provenance. Analyzer disagreement with graph
+  truth stays explicit and never rewrites graph identity, clean generations,
+  canonical relations, bounded traversal, or test attribution.
+- Language extractors and resolvers remain the authority for binding a source
+  occurrence to a symbol and for reporting unsupported syntax or ambiguous
+  identity.
+- The existing edit kernel remains the sole owner of preconditioned text edits,
+  file preimages, transactional writes, rollback, and edit receipts. Symbol
+  replacement and string replacement are reused rather than copied.
+- Existing diagnostics and formatter integrations remain the owners of post-edit
+  analysis and repository formatting.
+- The tool catalog owns schemas, discoverability, capability metadata, and host
+  rendering. It lists apply tools only after their implementation and acceptance
+  gates ship. See [V2 tool catalog crate](08-tool-catalog-crate.md).
+- This plan owns rename and API-migration semantics, preview/apply contracts,
+  compatibility-preservation rules, stale-preview behavior, and the end-to-end
+  acceptance matrix.
+- [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)'s
+  `prepareRename` and `rename` bind only to read-only candidate/preview
+  UseCaseIds. They never bind directly to `tracedecay_rename_symbol`,
+  API-migration apply, another write-effect entry, `workspace/applyEdit`, or
+  opaque server commands. This plan is the sole path that can turn accepted
+  candidate evidence into a canonical immutable preview/manifest and
+  `EditTransaction` with graph identity, CAS/preconditions, protected-value
+  policy, formatting, diagnostics, affected-test selection, verification,
+  rollback, and receipt. General LSP `textDocument/codeAction` is deferred and
+  is not current ownership here; it cannot ship until a separate owner defines a
+  typed candidate-consumption operation, policy classification, canonical
+  preview/`EditTransaction` route, and acceptance fixtures. Move-symbol and
+  semantic API migration remain TraceDecay workflows owned here because LSP has
+  no portable, complete contract for either; an LSP provider may assist
+  candidate resolution and post-edit verification but never supplies apply
+  authority.
 
 ## Product surface
 
@@ -299,6 +331,30 @@ The Rust fixture corpus must cover:
 - formatter, diagnostics, and verification failure rollback; and
 - changed/unchanged/skipped/blocked manifest and rendering parity.
 
+### Analyzer-candidate merge fixtures
+
+Where rename preview consumes analyzer candidates from Plan 35's
+`prepareRename` or `rename`, the fixture corpus must additionally cover:
+
+- graph-only planning: graph evidence alone produces the canonical preview
+  manifest and site dispositions;
+- analyzer-only candidates: analyzer evidence alone is reported with
+  independent provenance and cannot become durable preview truth without graph
+  confirmation or an explicit replan against clean content;
+- disagreement: graph and analyzer candidates conflict and the manifest keeps
+  both provenances explicit without rewriting graph identity, clean generations,
+  canonical relations, bounded traversal, or test attribution;
+- stale-analyzer: superseded document versions or cancelled analyzer work are
+  rejected before preview truth is minted;
+- overlay-vs-clean: dirty overlay candidates cannot become durable preview
+  truth unless saved or replanned against clean content;
+- provenance-preserving dedupe: equivalent sites from graph and analyzer
+  sources collapse only when provenance and disposition remain inspectable; and
+- cross-project merge: canonical historical and cross-project relations from
+  graph evidence remain authoritative while analyzer candidates add only
+  active-document, version-reference, or dispatch evidence with independent
+  provenance.
+
 End-to-end gates:
 
 1. Preview and `dry_run` make zero file changes.
@@ -311,3 +367,4 @@ End-to-end gates:
 8. MCP and CLI return the same typed manifest and semantic success/failure status.
 9. Natural-language evals select pure rename for identity-preserving changes and API migration for provider-neutral promotion or compatibility work.
 10. The implementation reuses canonical graph, edit, diagnostics, formatting, and catalog owners; acceptance rejects a copied resolver, replacement engine, transaction path, or duplicate tool definition.
+11. Analyzer-candidate merge fixtures prove graph-only, analyzer-only, disagreement, stale-analyzer, overlay-vs-clean, provenance-preserving dedupe, and cross-project merge behavior; dirty overlay candidates never become durable preview truth without save or replan against clean content.

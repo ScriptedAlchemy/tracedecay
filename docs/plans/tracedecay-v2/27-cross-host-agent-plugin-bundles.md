@@ -2,9 +2,16 @@
 
 ## Status / role
 
-PR6 establishes the canonical host-integration model and working Claude Code,
-Codex, Cursor, Hermes, and Kiro adapters. PR13 completes lifecycle management,
-Doctor, conformance, packaging, and cutover for every supported host.
+PR6 establishes the host-neutral integration catalog model, working Claude
+Code, Codex, Cursor, Hermes, and Kiro observation adapters, canonical event
+semantics, and conformance fixtures. PR13 completes packaging, registration,
+conflict handling, install/repair/uninstall, one configured-language TraceDecay
+LSP plugin for Claude Code, the Cursor desktop native-diagnostics adapter,
+Cursor cloud/Codex/Hermes/Kiro hook/MCP/CLI or typed unavailable paths, host
+install/registration/protocol conformance findings and fixtures, and cutover for
+every supported host. PR14 owns canonical Doctor presentation, diagnosis, and
+remediation orchestration that invokes PR13 lifecycle operations without
+redefining repair mechanics.
 
 ## Outcome
 
@@ -12,12 +19,25 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
 
 ## Owns
 
-- The canonical host-integration manifest and deterministic per-host projections.
+- The canonical host-integration manifest, capability catalog, and deterministic
+  per-host projections. PR6 delivers the model, observation adapters, event
+  semantics, and fixtures; PR13 delivers packaging, registration, conflict
+  handling, install/repair/uninstall, one configured-language TraceDecay LSP
+  plugin for Claude Code, the Cursor desktop native-diagnostics adapter, and
+  Cursor cloud/Codex/Hermes/Kiro hook/MCP/CLI or typed unavailable path
+  projections.
 - Claude Code, Codex, Cursor, Hermes, and Kiro hook, tool-discovery, command,
   skill, and agent adapters where each host supports those capabilities.
 - Capability negotiation and explicit host-difference reporting.
-- Safe install, update, repair, uninstall, backup, and restore of TraceDecay-owned host configuration.
-- Host Doctor checks and cross-host conformance fixtures.
+- Host lifecycle operation mechanics: install, update, repair, uninstall,
+  backup/restore, explicit confirmation, receipts, and rollback/recovery for
+  TraceDecay-owned host configuration (PR13). PR13 owns the operations; it does
+  not own canonical Doctor presentation.
+- Host install, registration, and protocol-conformance findings/state and
+  cross-host conformance fixtures (PR13). PR14 in
+  [Plan 11](11-dashboard-frontend.md) owns the canonical Doctor kernel/UI,
+  dashboard views, diagnosis, and remediation orchestration that invokes these
+  PR13 lifecycle operations without redefining repair mechanics.
 
 ## Does not own
 
@@ -32,26 +52,37 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
 ### Canonical integration catalog
 
 - Define each integration capability once with stable identity, privacy/effect class, required daemon/API support, and host availability.
-- Project one `tracedecay-lsp` plugin from
-  [Plan 25](25-code-intelligence-indexing-crate.md) language descriptors and
-  [Plan 20](20-configuration-control-plane.md) bounded, non-sensitive
+- PR13 projects one configured-language TraceDecay LSP plugin for Claude Code
+  from [Plan 25](25-code-intelligence-indexing-crate.md) language descriptors
+  and [Plan 20](20-configuration-control-plane.md) bounded, non-sensitive
   per-language registration selection, following
-  [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md). Host artifacts
-  define no independent language, extension, or analyzer authority and never
-  copy analyzer commands, arguments, initialization options, settings, or
-  environment.
-- Generate or render only thin host-native registration artifacts from that catalog.
-- Pin installed artifacts to a compatible TraceDecay protocol and catalog revision and report skew clearly.
+  [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) for gateway,
+  provider, and duplicate-analyzer policy. One plugin covers the configured
+  language subset; PR13 does not ship one plugin per language or project the
+  LSP plugin to every host. PR6 defines the host-neutral catalog model and
+  observation-adapter contracts only; it does not ship, package, register, or
+  install the LSP plugin. Host artifacts define no independent language,
+  extension, or analyzer authority and never copy analyzer commands,
+  arguments, initialization options, settings, or environment.
+- PR13 generates or renders thin host-native registration artifacts from that
+  catalog and pins installed artifacts to a compatible TraceDecay protocol and
+  catalog revision, reporting skew clearly.
 - Keep host-local files free of copied product logic and durable project/session/fact state.
 
 ### Host adapters
 
 - Decode native lifecycle and tool events into bounded canonical `HookEvent`
   envelopes with provider-native identity and ordering evidence. The daemon
-  owns sanitization and creation of durable observations.
+  owns sanitization and creation of durable observations. PR6 owns Claude Code,
+  Codex, Cursor, Hermes, and Kiro observation adapters; PR13 owns one
+  configured-language TraceDecay LSP plugin for Claude Code, the Cursor desktop
+  native-diagnostics adapter, and other host-native registration/packaging only.
 - Invoke only public CLI or daemon APIs; hooks and host processes never open TraceDecay databases.
-- The LSP plugin launches only the thin bridge; it never starts analyzers,
-  opens LSP connections itself, or owns diagnostic routing or state.
+- PR13's one configured-language TraceDecay LSP plugin for Claude Code launches
+  only the thin bridge; it never starts analyzers, opens LSP connections
+  itself, or owns diagnostic routing, gateway lifecycle, or duplicate-analyzer
+  policy — those remain in
+  [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 - Preserve parent/subagent lineage, working directory, repository/worktree identity, tool outcomes, cancellation, and compaction boundaries when the host exposes them.
 - Bound hook latency and payload size; enqueue or signal durable daemon work rather than performing it in the hook.
 - Remain useful without MCP and expose compact fallback commands and help.
@@ -59,13 +90,20 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
 ### Capability differences
 
 - Publish a tested capability view for each host using `supported`, `degraded`, or `unavailable` with a reason.
-- Report host-specific LSP capability differences explicitly. Hosts without
-  native LSP registration retain other integrations and mark automatic editor
-  diagnostics unavailable.
+- Report host-specific LSP capability differences explicitly, following
+  [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)'s
+  capability-specific host model: Claude Code gets one configured-language
+  TraceDecay LSP plugin and the full gateway; the Cursor desktop
+  native-diagnostics adapter reuses/ingests native diagnostics and publishes
+  TraceDecay-only findings; Cursor cloud and Codex use hooks/MCP/CLI instead of
+  a degraded LSP session; Hermes and Kiro report hook/MCP/CLI or typed
+  unavailable paths with tested typed outcomes rather than implying full LSP.
+  All other supported hosts receive the same explicit capability reporting or a
+  tested unavailable path.
 - Never infer unsupported events, lifecycle controls, permissions, or task semantics.
 - Preserve provider-native workflows as observations unless the user explicitly imports them into a TraceDecay product workflow.
 
-### Lifecycle safety
+### Lifecycle safety (PR13)
 
 - Discover existing user configuration and ownership before mutation.
 - Discover existing extension claims before registration. Replacing a
@@ -76,23 +114,38 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
 - Make install and update idempotent; make repair explicit and receipt-backed; remove only TraceDecay-owned state during uninstall.
 - Keep service-manager ownership and daemon lifecycle separate from host registration files.
 
-### Doctor and conformance
+### Host conformance findings (PR13) and Doctor remediation (PR14)
 
-- Doctor is read-only: it reports installation ownership, version skew, endpoint reachability, hook delivery, capability availability, and actionable causes.
-- Repair is a separate confirmed operation using the same preflight evidence.
-- Human and structured output share stable finding identities and remediation references.
-- Conformance uses native host fixtures and processes rather than source-text inspection of host applications.
-- LSP conformance runs against real supported host processes, including
-  initialization, document lifecycle, cancellation, shutdown, and reconnect.
+- PR13 emits read-only host install, registration, version skew, endpoint
+  reachability, hook delivery, capability availability, and protocol-conformance
+  findings with stable identities and remediation references consumable by PR14
+  Doctor.
+- PR13 owns confirmed repair/install/update/uninstall operation mechanics—preflight
+  evidence, explicit confirmation, receipts, backup/restore, and
+  rollback/recovery. PR14 owns canonical Doctor presentation, diagnosis, and
+  remediation orchestration that invokes those PR13 operations; PR14 does not
+  redefine repair mechanics.
+- Conformance uses native host fixtures and processes rather than source-text
+  inspection of host applications.
+- PR13 LSP conformance, limited to LSP-capable hosts (Claude Code), runs against
+  real supported host processes, including initialization, document lifecycle,
+  cancellation, shutdown, and reconnect. The Cursor desktop native-diagnostics
+  adapter has separate conformance coverage. Cursor cloud, Codex, Hermes, and
+  Kiro prove hook/MCP/CLI or typed unavailable paths instead of LSP session
+  conformance.
 
 ## Acceptance
 
-- Claude Code, Codex, Cursor, Hermes, and Kiro install, update, repair,
-  backup/restore, and uninstall fixtures preserve unrelated configuration and
-  recover from interruption.
+- PR13 install, update, repair, backup/restore, and uninstall fixtures for
+  Claude Code, Codex, Cursor, Hermes, and Kiro preserve unrelated configuration
+  and recover from interruption. Claude Code fixtures include the
+  configured-language TraceDecay LSP plugin; Cursor desktop fixtures include
+  the native-diagnostics adapter; Cursor cloud, Codex, Hermes, and Kiro fixtures
+  prove hook/MCP/CLI or typed unavailable paths without assuming full LSP
+  registration.
 - Every supported native event reaches one canonical observation exactly once; unavailable events remain explicit.
 - Host processes and hooks pass negative tests proving they cannot open stores or become daemon writers.
 - MCP-present and CLI-only paths produce equivalent authorized product behavior.
-- Version-skew, missing binary, dead daemon, stale registration, ownership conflict, and partial-install Doctor fixtures return stable causes without mutation.
+- Version-skew, missing binary, dead daemon, stale registration, ownership conflict, and partial-install host-conformance fixtures return stable causes without mutation; PR14 Doctor consumes the same finding identities for kernel/UI presentation and remediation orchestration that invokes PR13 lifecycle operations.
 - Cross-host handoff preserves repository/worktree, session, parent/subagent, privacy, and provenance identity.
 - Repository checks reject workflow JS, Markdown plan parsers, rewrite executors, copied product catalogs, and host-local durable-state mirrors.

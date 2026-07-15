@@ -36,9 +36,11 @@ regression discovered by an earlier slice.
   projection, index build/update, exact/temporal/graph/semantic query, and the
   representative end-to-end journeys.
 - Measure LSP cold and warm gateway/analyzer startup, workspace indexing,
-  hover and navigation, edit-to-diagnostic latency, clean cache reuse and
-  no-op work, concurrent isolated overlays, bridge reconnect, and analyzer
-  crash/recovery.
+  hover and navigation, edit-to-diagnostic and edit-to-context latency,
+  request coalescing and cancellation propagation, cache-key hit/miss
+  behavior, clean cache reuse and no-op work, concurrent isolated overlays,
+  provider conflicts, analyzer duplication avoidance across hosts, bridge
+  reconnect, and analyzer crash/recovery.
 - Report peak and steady memory, CPU time/utilization, database and generation
   bytes, temporary space, bytes read/written, and write amplification.
 - Separate queue, lock, I/O, parse, projection, model, merge, hydration, and
@@ -99,8 +101,14 @@ regression discovered by an earlier slice.
   publication latency and resource use without exposing private content.
 - Share analyzers, clean generations, and caches only when complete identity
   matches and client overlay isolation remains exact.
-- Process reduction never justifies stale or cross-session results, weakened
-  cancellation, incomplete provenance, or disclosure of unsaved content.
+- Coalesce equivalent in-flight requests and propagate cancellation to
+  superseded work without dropping a response still needed elsewhere; cache
+  keys cover the complete provider identity tuple so no distinct input aliases
+  onto another's cached result.
+- Process reduction, including avoiding duplicate per-host analyzer processes,
+  is a resource optimization; it never justifies stale or cross-session
+  results, weakened cancellation, incomplete provenance, or disclosure of
+  unsaved content.
 
 ### Developer build and verification
 

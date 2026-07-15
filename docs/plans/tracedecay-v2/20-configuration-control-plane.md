@@ -24,8 +24,12 @@ opaque and operators can see which revision the running system actually uses.
   arguments, initialization options, settings, environment allowlist, privacy
   class, resource limits, restart policy, and per-language selection for
   [35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
+- Canonical analyzer configuration source and revision/digest consumed by
+  [09](09-application-crate.md) provider-result identity and
+  [35](35-daemon-lsp-gateway-and-universal-diagnostics.md) runtime snapshot
+  composition.
 - CLI, API, MCP, and UI configuration surfaces.
-- Doctor diagnostics and safe repairs for configuration state.
+- Doctor read-only detection and explanation for configuration state.
 
 ## Does not own
 
@@ -37,6 +41,14 @@ opaque and operators can see which revision the running system actually uses.
 - Generated inventories, Markdown parsers, trackers, executors, or workflow JavaScript.
 - Static extension, language-ID, root-marker, and parser facts owned by
   [25](25-code-intelligence-indexing-crate.md).
+- Semantic-provider cache storage, eviction, reuse, invalidation execution, and
+  lifecycle; those remain owned solely by
+  [35](35-daemon-lsp-gateway-and-universal-diagnostics.md), which consumes only
+  the canonical configuration source and digest this plan publishes.
+- Doctor repair, remediation, or implicit mutation of configuration state; PR14
+  owns explicit confirmed remediation operations with authorization,
+  dry-run/preview where applicable, idempotency/CAS, receipts,
+  rollback/recovery, and audit.
 
 ## Required behavior
 
@@ -47,6 +59,14 @@ opaque and operators can see which revision the running system actually uses.
      initialization options, settings, environment allowlist, privacy class,
      limits, restart policy, and per-language selection without duplicating
      Plan 25's static language facts.
+   - Each analyzer-configuration mutation publishes a new canonical revision and
+     digest. That digest participates in Plan 09 provider-result identity and
+     Plan 35 cache keys. Any change to executable reference, arguments,
+     initialization options, settings, environment allowlist, privacy policy,
+     limits, restart policy, or per-language selection invalidates exactly the
+     affected provider cache entries; this plan owns the configuration source
+     and digest only, not cache storage, reuse policy, or invalidation
+     execution.
    - Host plugin projection may consume only the non-sensitive enabled-language
      registration selection. Executable references, arguments, initialization
      options, settings, environment, and credentials never enter host
@@ -86,7 +106,9 @@ opaque and operators can see which revision the running system actually uses.
 7. Doctor integration
    - Doctor detects invalid persisted values, unknown keys, deprecated keys, unresolved credential
      references, precedence mistakes, and desired/observed revision drift.
-   - Doctor performs only deterministic safe repairs automatically and reports all changes.
+   - Doctor detection and explanation is read-only. Automatic or implicit repair is forbidden.
+   - PR14 remediation uses separate explicit confirmed operations with authorization,
+     dry-run/preview where applicable, idempotency/CAS, receipts, rollback/recovery, and audit.
 
 ## Acceptance
 
@@ -95,6 +117,7 @@ opaque and operators can see which revision the running system actually uses.
 - Cross-surface tests prove CLI, API, MCP, and UI observe identical values and errors.
 - Concurrent writers cannot lose updates or partially commit a batch.
 - Credential values never appear in reads, history, audit data, logs, diagnostics, or UI payloads.
-- PR14 ships complete configuration UI, Doctor checks/repairs, and desired-versus-observed state.
+- PR14 ships complete configuration UI, Doctor read-only checks, explicit configuration
+  remediation operations, and desired-versus-observed state.
 - Restart-required and failed-activation scenarios preserve the last working runtime configuration.
 - No task steering, preview/apply pipeline, plan machinery, or workflow JavaScript is present.

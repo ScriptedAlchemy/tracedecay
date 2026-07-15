@@ -109,6 +109,14 @@ storage, availability, or fallback logic.
 - `test_map` and `affected` share one test-attribution kernel.
 - Exact, symbol, insert, move, and structural rewrites use the one journaled
   application `EditTransaction`; preview/dry-run never means a second edit path.
+  Plan 35's `prepareRename` and `rename` bind only to read-only
+  candidate/preview UseCaseIds; they never bind directly to
+  `tracedecay_rename_symbol`, API-migration apply, another write-effect entry,
+  `workspace/applyEdit`, or opaque server commands. Plan 34's immutable
+  preview/manifest and `EditTransaction` remain the only apply path. General
+  LSP `textDocument/codeAction` is deferred from PR12 and cannot ship until a
+  separate owner defines typed candidate consumption, policy classification, a
+  canonical preview/`EditTransaction` route, and acceptance fixtures.
 
 Literal grep, AST structural match, body source, graph node records, and context
 composition remain distinct because their evidence and semantics differ.

@@ -20,6 +20,23 @@ Every user-visible operation has one direct typed application entry point. CLI, 
   admission, current diagnostics, analyzer engine and coverage state, and code
   navigation as required by
   [35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
+- The one typed, transport-neutral semantic-evidence/provider contract that
+  ships in PR11 with the application core. Every analyzer-backed capability
+  implements this contract. Plan 35 implements analyzer-backed providers behind
+  it; this crate owns the contract's type, evolution, and canonical
+  provider-result identity/compatibility semantics—not a copy scoped to LSP.
+  Every provider result identity tuple is complete from PR11 onward: PR11 ships
+  explicit current-project/single-root scope/project/worktree identity available
+  then; PR15 upgrades and composes that scope identity with Plan 16 canonical
+  multi-root/cross-project scope identity. Plan 16 is not a PR11 prerequisite.
+  The tuple also includes clean-generation or node/client/session overlay
+  identity; file/content digest; document version where applicable;
+  producer/analyzer identity and revision; requested capability; freshness;
+  coverage/completeness; provenance; Plan 25 language-descriptor
+  identity/revision; Plan 20 configuration revision/digest; and Plan 06 policy
+  decision/revision/digest.
+- Translation from provider results into Plan-05-owned explicit query-evidence
+  inputs for diagnostics, navigation, impact, and affected-test reads.
 - Direct product operations for capture, search, context, sessions, memory, code, delivery, automation, Doctor, configuration, and workflows.
 - Canonical structural-search, source-outline, and source-rewrite operations
   backed by the PR9 in-process code-intelligence kernel.
@@ -35,6 +52,9 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - Domain entity definitions or domain invariants.
 - A generic command bus, query bus, plugin framework, service locator, or runtime registry.
 - A generic LSP or JSON-RPC pass-through operation.
+- Analyzer-provider cache storage, admission, reuse, eviction, invalidation
+  execution, or lifecycle; those remain owned by
+  [35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 - Developer plan parsing, Markdown execution, task scheduling, agent orchestration, edit bundles, generated inventories, or compatibility ledgers.
 - JavaScript workflow execution. PR17 workflows are real typed product operations, not developer-plan machinery.
 
@@ -47,6 +67,23 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - LSP-facing operations preserve authorized workspace scope, deadline,
   cancellation, document version, source generation, freshness, and coverage
   without accepting transport-native arbitrary payloads.
+- Navigation, type-hierarchy, context, impact, affected-test, diagnostics, and
+  refactoring-preview operations are enriched internally with the
+  semantic-evidence provider's source/producer identity, provenance,
+  coverage, freshness, and conflicts rather than exposed through a duplicate
+  public `lsp_*` tool family. Active-document type semantics may come from an
+  admitted analyzer provider; the code graph remains authoritative for stable
+  symbol identity, generations, bounded traversal, history, cross-project
+  evidence, and test attribution. Unsupported, absent, indexing, stale,
+  cancelled, timed-out, failed, and partial provider states are reported
+  explicitly; none may collapse to a clean empty result. Empty output is valid
+  only for a supported, successfully completed request with complete coverage
+  and zero matches. Impact and affected-test operations may incorporate provider
+  reference/dispatch evidence translated into Plan-05-owned explicit typed
+  inputs alongside graph, Git, and test evidence; a provider never proves that
+  a test executed or that a change was delivered.
+- Catalog, dashboard, and observability surfaces consume typed application
+  results and state, never the provider port directly.
 - Return structured freshness, coverage, provenance, warnings, and continuation data where relevant.
 - Make mutation retries safe through operation-specific idempotency keys and daemon-owned transactions.
 - Source edits use one journaled all-or-recoverable `EditTransaction`. Preview
@@ -65,7 +102,15 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - Keep streaming events bounded, ordered, resumable where the product contract requires it, and independent of SSE framing.
 - Expose workflow create, validate, run, inspect, cancel, and history operations in PR17 as typed domain/application contracts only.
 - Add each use case in the same product PR as its domain/store/query behavior; do not create speculative APIs ahead of executable behavior.
-- PR11 removes remaining root-level business orchestration by routing adapters through the completed application core.
+- PR11 ships the transport-neutral semantic-evidence/provider contract with
+  the completed application core and explicit current-project/single-root
+  scope/project/worktree identity in every provider result. PR9 query work does
+  not import this crate or depend on live providers.
+- PR15 upgrades provider-result scope identity by composing PR11's
+  single-root identity with Plan 16 canonical multi-root/cross-project scope
+  identity. Plan 16 is not a PR11 prerequisite.
+- PR11 removes remaining root-level business orchestration by routing adapters
+  through the completed application core.
 - Keep the application's direct dependency graph narrow and feature-minimal.
   Concrete stores, transports, providers, model runtimes, dashboard assets, and
   their build scripts must not enter its normal check or test graph.
@@ -80,6 +125,10 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - CLI, MCP, HTTP, hooks, automations, and dashboard paths share those contracts rather than reimplementing behavior.
 - Dependency checks prove the crate is transport- and storage-neutral.
 - Authorization, scope, cancellation, idempotency, freshness, coverage, and error semantics have direct tests.
+- Unsupported, absent, indexing, stale, cancelled, timed-out, failed, and partial
+  provider states have direct tests; none collapse to a clean empty result.
+  Empty output is valid only for supported, successfully completed requests with
+  complete coverage and zero matches.
 - No generic bus/framework, plan parser/executor, generated inventory, or JavaScript workflow runtime exists in this layer.
 - PR11 leaves no product orchestration in transport handlers or the legacy root crate.
 - A focused application check or test does not compile transport, dashboard,

@@ -6,7 +6,7 @@ PR16 fully delivers the remote shared-Brain product. It builds on the PR4 author
 
 ## Outcome
 
-Enrolled machines share one logical Brain through authenticated TraceDecay APIs while each mutable shard has exactly one fenced daemon writer. Clients remain useful offline through a sanitized event spool and verified read cache, without opening or copying authority databases.
+Enrolled machines share one logical Brain through authenticated TraceDecay APIs while each mutable shard has exactly one fenced daemon writer. Clients remain useful offline through a remote offline-capture spool and verified read cache, without opening or copying authority databases.
 
 ## Owns
 
@@ -14,7 +14,7 @@ Enrolled machines share one logical Brain through authenticated TraceDecay APIs 
 - Authenticated remote routing and API-only client behavior.
 - Fenced authority transfer, standby promotion, reconnect, and split-brain prevention.
 - Verified read replicas and caches with provenance, watermark, and lag.
-- Durable offline event spooling and idempotent replay.
+- Remote offline-capture spool and idempotent replay.
 - Cross-machine repository identity, coverage reporting, backup, restore, and failover.
 
 ## Does not own
@@ -46,17 +46,26 @@ Enrolled machines share one logical Brain through authenticated TraceDecay APIs 
 - Responses declare remote coverage, cache age, lag, unavailable shards, and pending local observations.
 - Stale or unverifiable caches may support explicitly stale reads but never writes, promotion, or healthy coverage claims.
 
-### Offline event spool
+### Remote offline-capture spool
+
+This PR16 product is distinct from the PR6 daemon host-admission spool, which
+bounds local non-replayable provider/host events before canonical capture on
+the authority daemon. The remote offline-capture spool holds sanitized canonical
+offline events for enrolled remote nodes and later fenced replay; it never
+contains unsaved LSP documents, overlays, analyzer state, or dirty-overlay
+diagnostics.
 
 - Local hooks send bounded `HookEvent`s to the enrolled node-local daemon. That
-  daemon applies the canonical sanitizer and owns the durable bounded spool
-  when shard authority is unreachable; hooks never sanitize durable payloads
-  or append spool records.
+  daemon applies the canonical sanitizer and owns the remote offline-capture
+  spool when shard authority is unreachable; hooks never sanitize durable
+  payloads or append remote offline-capture spool records.
 - Unsaved LSP documents, dirty-overlay diagnostics, document versions, analyzer
-  process state, and raw JSON-RPC frames are never spool records. Authority loss
-  makes their remote durable coverage partial or unavailable; it does not
-  create a database or analyzer fallback.
-- Spool frames carry deterministic observation identity, node identity, repository/worktree identity, privacy policy, ordering evidence, and integrity checks.
+  process state, and raw JSON-RPC frames are never remote offline-capture spool
+  records. Authority loss makes their remote durable coverage partial or
+  unavailable; it does not create a database or analyzer fallback.
+- Remote offline-capture spool frames carry deterministic observation identity,
+  node identity, repository/worktree identity, privacy policy, ordering evidence,
+  and integrity checks.
 - Reconnect replays idempotently through the current authority and deletes frames only after durable acknowledgement.
 - Overflow, corruption, policy change, revocation, and rejected replay remain visible and recoverable; no empty local database is created as fallback.
 
@@ -81,8 +90,9 @@ Enrolled machines share one logical Brain through authenticated TraceDecay APIs 
 ### Operations
 
 - PR16 application/API contracts and the then-shipped Settings, CLI, API, and
-  Doctor surfaces expose topology, authority, placement, lag, spool, replica,
-  backup, and failover state from one application model. PR18 adds equivalent
+  Doctor surfaces expose topology, authority, placement, lag, remote
+  offline-capture spool, replica, backup, and failover state from one
+  application model. PR18 adds equivalent
   SDK bindings and parity when the SDKs ship.
 - Human and structured health output use the same findings, coverage, and remediation identities.
 - Connectivity profiles are replaceable transports beneath the authenticated TraceDecay protocol.
@@ -94,8 +104,8 @@ Enrolled machines share one logical Brain through authenticated TraceDecay APIs 
 - Offline events replay exactly once in order; crash, duplicate, corruption, overflow, revocation, and privacy-change cases preserve evidence.
 - Remote LSP fixtures prove overlays and analyzers stay on the workspace node,
   clean diagnostic publication is fenced through the owning shard authority,
-  and authority loss never spools unsaved content or republishes stale cached
-  diagnostics as current.
+  and authority loss never places unsaved content in the remote offline-capture
+  spool or republishes stale cached diagnostics as current.
 - Cache and replica fixtures reject wrong Brain, shard, generation, epoch, schema, policy, digest, and watermark claims.
 - Repository fixtures correlate verified clones while separating unrelated repositories, worktrees, refs, and local-only scopes.
 - Backup, staged restore, promotion, rollback, and old-authority rejoin tests never expose a partial generation or two writers.

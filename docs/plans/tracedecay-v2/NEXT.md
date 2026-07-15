@@ -46,9 +46,12 @@ provider source or daemon-admitted host event
   any provider coverage state atomically through the already-open daemon
   authority. No adapter, hook, client, or recovery path opens another writer.
 - Use authoritative provider transcripts for catch-up when they are replayable.
-  A source that is not replayable may use a bounded daemon-owned admission spool
-  with checksummed frames, explicit overflow/corruption state, and delete-after-
-  commit semantics. Hooks never own a spool database or storage authority.
+  A source that is not replayable may use a bounded daemon host-admission spool
+  on the local daemon authority with checksummed frames, explicit overflow/
+  corruption state, and delete-after-commit semantics. The host-admission spool
+  admits non-replayable provider/host events before canonical capture; it is
+  not an LSP overlay mechanism and does not provide PR16 remote offline
+  behavior. Hooks never own a spool database or storage authority.
 - Make exact duplicate input a durable no-op: no observation, cursor, frontier,
   projection, or compatibility-view write. A conflicting identity fails without
   overwriting evidence or advancing progress.
@@ -88,8 +91,8 @@ provider source or daemon-admitted host event
 - sanitizer redaction/rejection/quarantine before every durable or visible sink;
 - crash before commit and after commit-before-acknowledgement, followed by exact
   retry and restart catch-up;
-- bounded backlog, fair multi-source progress, spool overflow/corruption where
-  applicable, cancellation, and daemon backpressure;
+- bounded backlog, fair multi-source progress, daemon host-admission spool
+  overflow/corruption where applicable, cancellation, and daemon backpressure;
 - deterministic incremental/rebuild projection and atomic effect/checkpoint
   rollback;
 - provider-specific tool, usage, agent lineage, compaction, reasoning
@@ -109,7 +112,8 @@ provider source or daemon-admitted host event
 - no plan parser, tracker, PR executor, generated provider inventory, workflow
   JavaScript, source-derived architecture model, or planning CI;
 - no PR7 memory/fact model, PR8 temporal retrieval, PR9 code indexing, PR10
-  semantics, PR11 policy/catalog, PR12 surface rewrite, or PR13 hook cutover.
+  semantics, PR11 policy/catalog, PR12 surface rewrite, PR13 hook cutover, or
+  PR16 remote offline-capture spool, remote enrollment, or cross-node replay.
 
 ## Done
 

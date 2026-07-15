@@ -2,11 +2,13 @@
 
 ## Status / role
 
-Planned across PR9, PR11–PR13, PR15, and PR16. PR9 establishes
+Planned across PR9, PR11–PR13, PR14, PR15, and PR16. PR9 establishes
 generation-bound diagnostic records, PR11 owns analyzer policy and
 configuration, PR12 ships the single-project daemon LSP gateway and typed
-routing operations, and PR13 ships Claude Code and other host-native
-registration, lifecycle, Doctor, and conformance behavior. PR15 replaces the
+routing operations, PR13 supplies gateway/provider conformance evidence,
+duplicate-analyzer rules, and Cursor desktop native-diagnostics adapter
+behavior consumed by Plan 27 packaging, and PR14 owns dashboard consumption and the
+canonical Doctor kernel/UI. PR15 replaces the
 bounded single-project admission with canonical multi-root project/worktree
 scope, and PR16 defines remote-node placement without exporting unsaved
 workspace authority accidentally.
@@ -18,28 +20,52 @@ rules in [27](27-cross-host-agent-plugin-bundles.md).
 
 ## Outcome
 
-TraceDecay is the one Language Server Protocol endpoint registered with an
-agent host for a workspace. The daemon serves an LSP 3.17 gateway that combines
-TraceDecay's generation-bound code intelligence and managed diagnostics with
-language-specific semantic results delegated to explicitly configured upstream
-language servers.
+LSP-capable agent hosts—initially Claude Code, and additional hosts only after
+they pass the same gateway conformance contract—connect to TraceDecay through
+one daemon LSP gateway per workspace. That gateway is an LSP 3.17 endpoint
+that combines TraceDecay's generation-bound code intelligence and managed
+diagnostics with language-specific semantic results delegated to explicitly
+configured upstream language servers.
 
-Hosts no longer need competing per-language TraceDecay and analyzer plugins.
-They connect to TraceDecay, while TraceDecay starts, supervises, and routes to
-the appropriate analyzer behind one truthful, local-first protocol boundary.
+Hosts that do not expose a reliable full LSP surface consume the same semantic
+and diagnostic application contracts through capability-specific
+native-diagnostics adapters or hook/MCP/CLI paths defined by
+[Plan 27](27-cross-host-agent-plugin-bundles.md), rather than degraded or
+universal LSP registration. Universal here means one typed product contract
+across paths, not that every host registers the same protocol.
+
+For LSP-capable hosts, competing per-language TraceDecay and analyzer plugins
+are unnecessary. TraceDecay starts, supervises, and routes to the appropriate
+analyzer behind one truthful, local-first protocol boundary for those sessions.
+
+LSP is a daemon-internal semantic-evidence provider and host protocol adapter.
+It is not a second graph, query engine, durable index, edit path, policy
+authority, or universal product API.
+[Plan 09](09-application-crate.md) owns the one typed, transport-neutral
+semantic-evidence/provider contract and canonical provider-result
+identity/compatibility semantics; this plan implements analyzer-backed
+providers behind that contract, owns analyzer-provider cache storage,
+admission, reuse, eviction, invalidation execution, and lifecycle, and is
+the architectural center for every LSP-shaped gateway decision in the V2
+plan set, so other plans link back to it instead of restating this
+architecture.
 
 ## Owns
 
 - A daemon-hosted, stateful LSP 3.17 gateway and its client-session lifecycle.
 - A thin stdio bridge for hosts that launch an LSP command instead of connecting
   directly to a daemon socket.
+- Analyzer-provider cache storage, admission, reuse, eviction, invalidation
+  execution, and lifecycle keyed by the canonical Plan 09 provider-result
+  identity tuple.
 - Capability negotiation, document synchronization, request routing,
   cancellation, deadlines, response ordering, and upstream analyzer lifecycle.
 - Merging current upstream diagnostics with current TraceDecay-managed
   diagnostics without losing source, provenance, freshness, or severity.
 - Exact clean-snapshot diagnostic reuse and isolated unsaved-document overlays.
-- Typed gateway requirements and status consumed by Plan 27's universal host
-  plugin projection, conflict checks, and Doctor findings.
+- Typed gateway requirements, finding, and engine-state schema consumed by
+  [27](27-cross-host-agent-plugin-bundles.md) host plugin projection, PR13
+  conformance checks, and PR14 Doctor/dashboard surfaces.
 - Telemetry and direct protocol conformance for the daemon gateway and bridge.
 
 ## Does not own
@@ -52,17 +78,52 @@ the appropriate analyzer behind one truthful, local-first protocol boundary.
 - Database connections or writable fallback behavior in the stdio bridge,
   host plugin, hook, MCP server, dashboard, or other client.
 - A second language registry, extension table, analyzer configuration store,
-  diagnostic persistence model, or host plugin manifest.
+  or diagnostic persistence model.
+- Host plugin packaging, install/update/repair/uninstall mechanics, and
+  host-adapter projection; [Plan 27](27-cross-host-agent-plugin-bundles.md)
+  owns those surfaces.
+- Provider-result identity/compatibility semantics; Plan 09 owns the canonical
+  identity tuple.
+- Configuration source/digest semantics; Plan 20 owns those fields.
+- Policy decision/revision/digest semantics; Plan 06 owns those fields.
 - A private project/worktree resolver or remote-authority topology; Plans
   [16](16-cross-project-repository-worktree-scope.md) and
   [28](28-remote-multi-machine-shared-brain.md) own those contracts.
-- Completion, formatting, rename, code actions, or arbitrary vendor-specific
-  LSP methods until a separate product requirement and conformance gate justify
-  them.
+- Completion, formatting, or arbitrary vendor-specific LSP methods until a
+  separate product requirement and conformance gate justify them.
+- Applying `rename` or any other edit-shaped LSP result. This plan surfaces
+  `prepareRename`/`rename` results as read-only candidate evidence routed to
+  [Plan 34](34-workspace-refactoring-and-api-migration.md); Plan 34 owns
+  preview, precondition, formatting, verification, and apply authority for
+  every edit that originates from LSP candidate evidence. General
+  `textDocument/codeAction` remains deferred until a separate typed
+  candidate-consumption operation, policy, transactional apply owner, and
+  acceptance fixtures are planned.
 - Publishing historical, stale, inferred, or cross-snapshot findings as if they
   were current editor diagnostics.
+- Facts, memory, Git history, proof that a test executed or a change was
+  delivered, authorization or privacy policy authority, workflow scheduling, or
+  durable temporal truth. Those remain owned by their existing product plans
+  regardless of which transport surfaced the originating request.
 
 ## Required architecture
+
+### Semantic-evidence provider boundary
+
+- [Plan 09](09-application-crate.md) owns one typed, transport-neutral
+  semantic-evidence/provider contract and canonical provider-result
+  identity/compatibility semantics. This plan implements analyzer-backed
+  providers behind that contract; it does not define a second,
+  gateway-private evidence shape or duplicate the identity field list.
+- Every provider result conforms to the canonical Plan 09 identity tuple.
+  This plan solely owns cache storage, admission, reuse, eviction,
+  invalidation execution, and lifecycle keyed by that tuple so that no two
+  distinct inputs can alias onto one cached result.
+- Catalog, dashboard, and observability consumers depend on typed application
+  results and state, never the provider port directly. This plan is the only
+  component that constructs analyzer-backed provider results, but Plan 09 is
+  the only component that owns the contract's type, evolution, and identity
+  semantics.
 
 ### Daemon authority and transport
 
@@ -123,8 +184,10 @@ the appropriate analyzer behind one truthful, local-first protocol boundary.
 - Dynamic execution configuration comes only from Plan 20: executable
   reference, arguments, initialization options, settings, environment
   allowlist, privacy class, limits, restart policy, and per-language
-  enablement. The broker composes typed snapshots from those two owners at
-  runtime; it does not persist a third combined registry.
+  enablement. Eligibility and routing decisions come only from Plan 06. The
+  broker composes typed runtime snapshots from those owners at admission time;
+  it does not persist a third combined registry or duplicate config fields,
+  grants, or policy digests.
 - Analyzer commands cannot be supplied by an untrusted LSP request. They must
   resolve through authorized configuration, executable-path validation, and
   policy before process creation.
@@ -147,11 +210,26 @@ the appropriate analyzer behind one truthful, local-first protocol boundary.
 
 - The gateway implements the standard LSP lifecycle and document synchronization
   methods required by Claude Code and other supported hosts.
-- The first shipped semantic request set is:
-  `textDocument/definition`, `textDocument/references`,
-  `textDocument/hover`, `textDocument/documentSymbol`,
-  `workspace/symbol`, `textDocument/implementation`, and the standard prepare,
-  incoming, and outgoing call-hierarchy methods.
+- The supported semantic capability set is: `textDocument/declaration`,
+  `textDocument/definition`, `textDocument/typeDefinition`,
+  `textDocument/implementation`, `textDocument/references`,
+  `textDocument/hover`, `textDocument/signatureHelp`,
+  `textDocument/documentSymbol`, `workspace/symbol`, the standard prepare,
+  incoming, and outgoing call-hierarchy methods, the standard prepare,
+  supertypes, and subtypes type-hierarchy methods, `textDocument/diagnostic`
+  alongside `publishDiagnostics`, and `textDocument/prepareRename` and
+  `textDocument/rename`. General `textDocument/codeAction` remains deferred
+  until a separate typed candidate-consumption operation, policy,
+  transactional apply owner, and acceptance fixtures are planned.
+- `prepareRename` and `rename` results are read-only candidate evidence routed
+  to [Plan 34](34-workspace-refactoring-and-api-migration.md). The gateway
+  never calls `workspace/applyEdit`, executes an opaque server command, or
+  writes a file from these results; Plan 34 is the sole path that can convert
+  a candidate into a canonical preview/manifest and `EditTransaction`.
+- A method outside this set, or a request the active analyzer declares
+  unsupported, returns an explicit typed capability-unavailable outcome. The
+  gateway never guesses a fallback result or synthesizes a plausible-looking
+  answer for a method it cannot truthfully answer.
 - Upstream analyzer results are authoritative for language-specific type
   semantics. TraceDecay may add graph results only when they carry exact
   generation, file, symbol, and span evidence. It never upgrades a heuristic
@@ -160,9 +238,10 @@ the appropriate analyzer behind one truthful, local-first protocol boundary.
   without erasing distinct provenance, deterministically ordered, bounded, and
   returned only for the requesting session's workspace and document version.
 - If an upstream engine is unavailable, the gateway uses only operations that
-  the active TraceDecay generation can answer truthfully. Unsupported or
-  unknown results remain empty or unavailable according to the LSP method
-  contract; the gateway never fabricates type information.
+  the active TraceDecay generation can answer truthfully. Unsupported,
+  absent, indexing, stale, cancelled, timed-out, failed, or partial providers
+  return typed unavailable or partial outcomes and never collapse to a clean
+  empty result; the gateway never fabricates type information.
 - Capability advertisement is derived from guaranteed gateway behavior plus
   negotiated upstream capabilities. Dynamic registration is used where the
   host supports it. Static capabilities are advertised only when every routed
@@ -170,6 +249,25 @@ the appropriate analyzer behind one truthful, local-first protocol boundary.
 - Vendor-specific methods are not blindly proxied. Adding one requires a typed
   catalog entry, policy classification, bounded schema, direct tests, and
   explicit host capability projection.
+
+### Merge authority
+
+- Active-document type semantics may come from the admitted analyzer for that
+  document version. The TraceDecay graph remains authoritative for stable
+  symbol identity, generations, bounded traversal, history, cross-project
+  evidence, and test attribution; an analyzer result never overrides those
+  facts.
+- Empty analyzer output is valid only for a supported, successfully completed
+  request with complete coverage and no matches. When an analyzer is absent,
+  still indexing, stale, cancelled, timed out, failed, or partial, the gateway
+  reports that state explicitly instead of returning a clean empty result, and
+  graph-backed operations keep answering from
+  [Plan 25](25-code-intelligence-indexing-crate.md) evidence with their own
+  freshness and coverage.
+- Impact and affected-test results combine LSP-resolved references and call
+  dispatch with graph, Git, and test-execution evidence. LSP evidence may
+  contribute candidate sites; it never proves that a test executed or that a
+  change was delivered.
 
 ## Universal managed diagnostics
 
@@ -230,10 +328,16 @@ not forced into fake editor positions.
 
 ## Host plugin projection and coexistence
 
+- [Plan 27](27-cross-host-agent-plugin-bundles.md) owns host plugin packaging,
+  install/update/repair/uninstall mechanics, and host-adapter projection from
+  the canonical host-integration catalog. This plan owns gateway/provider
+  behavior, normalization, and duplicate-analyzer policy.
 - Plan 27's canonical host-integration catalog declares one
-  `tracedecay-lsp` capability and projects the Claude Code plugin configuration,
-  install metadata, compatibility range, and equivalent supported-host
-  registration.
+  `tracedecay-lsp` capability and, for LSP-capable hosts that pass gateway
+  conformance (Claude Code first; additional hosts only after the same gate),
+  projects plugin configuration, install metadata, compatibility range, and
+  conformant LSP registration. Non-LSP hosts use Plan 27 capability-specific
+  paths instead of equivalent LSP registration.
 - Claude Code's `extensionToLanguage` map is projected from Plan 25's canonical
   language descriptors and Plan 20's bounded, non-sensitive per-language
   registration selection. Generated host artifacts contain no independent
@@ -242,20 +346,35 @@ not forced into fake editor positions.
 - The plugin launches only the stdio bridge and points it at the selected
   daemon/project. It does not package upstream analyzers or copied TraceDecay
   product logic.
-- Installation discovers enabled host LSP plugins that claim any projected
-  extension. Because Claude Code selects the first registered server for an
-  extension, TraceDecay reports the exact conflict and requires explicit user
-  confirmation before disabling or replacing a conflicting third-party
-  registration.
-- Install, update, repair, and uninstall preserve unrelated host configuration,
-  back up affected TraceDecay-owned registration, and never remove a
-  third-party analyzer or plugin without a separately confirmed operation.
+- Duplicate-analyzer detection records enabled host LSP plugins that claim any
+  projected extension. Because Claude Code selects the first registered server
+  for an extension, TraceDecay emits typed finding/conformance state for the
+  exact conflict and requires explicit user confirmation before disabling or
+  replacing a conflicting third-party registration. [Plan 27](27-cross-host-agent-plugin-bundles.md)
+  owns install/update/repair/uninstall mechanics that consume that state.
 - Users may select a bounded language subset. Universal means one gateway and
   contract across configured languages, not silently claiming every possible
   file extension.
-- Hosts that cannot consume LSP retain CLI, MCP, hook, and daemon API access;
-  capability reporting marks automatic editor diagnostics unavailable rather
-  than emulating them.
+- Automatic editor diagnostics are unavailable only when a host supports
+  neither conformant LSP registration nor a native-diagnostics adapter; such
+  hosts retain CLI, MCP, hook, and daemon API access rather than emulating
+  editor diagnostics. Cursor desktop's native-diagnostics adapter is an
+  available automatic diagnostics path, not unavailable.
+- Host behavior is capability-specific rather than lowest-common-denominator.
+  Claude Code registers the full TraceDecay LSP gateway through the stdio
+  bridge where the host supports LSP registration. Cursor desktop reuses or
+  ingests the native editor's own analyzer/diagnostic output where the host
+  exposes it, avoids running a duplicate TraceDecay-managed analyzer for the
+  same language, and submits provenance-bearing native evidence through
+  application/provider admission instead of constructing a second provider
+  result contract; it publishes only TraceDecay-only findings through a native
+  diagnostics adapter rather than a competing LSP registration. Cursor cloud
+  and Codex do not expose a reliable full LSP host surface, so they receive
+  equivalent diagnostics and context through hooks, MCP, and CLI operations
+  over the same application contracts rather than a degraded LSP session.
+  Every difference is a typed, tested capability outcome reported through
+  [Plan 27](27-cross-host-agent-plugin-bundles.md), not an assumption baked
+  into client code.
 
 ## Policy, privacy, and resource safety
 
@@ -282,17 +401,31 @@ not forced into fake editor positions.
 
 - Stable metrics cover session count, active languages, request method and
   outcome, latency, cancellation, queueing, analyzer startup, restarts, cache
-  reuse, diagnostic additions/clears, partial coverage, dropped updates, and
-  bridge reconnects without recording source text, symbols, paths, or messages.
+  reuse, diagnostic additions/clears, partial coverage, dropped updates,
+  provider conflicts, host delivery path, and bridge reconnects without
+  recording source text, symbols, paths, or messages.
 - Trace identifiers connect bridge, gateway, upstream analyzer, diagnostic
   projection, and host publication events while preserving client isolation.
-- Doctor reports daemon reachability, protocol/catalog skew, host registration,
-  extension conflicts, analyzer availability, executable safety, workspace-root
-  resolution, capability negotiation, engine crashes, cache freshness, and
-  privacy-policy blockers.
-- Doctor is read-only. Repair, analyzer configuration, plugin replacement, and
-  registration mutation are separate confirmed operations with receipts and
-  rollback.
+- Plan 35 defines the gateway-specific finding and engine-state schema for
+  daemon reachability, protocol/catalog skew, host registration, extension
+  conflicts, analyzer capabilities and availability, coverage versus a genuine
+  zero-finding result, indexing/degraded analyzer state, executable safety,
+  workspace-root resolution, capability negotiation, overlay freshness, engine
+  crashes, cache reuse and freshness, provider conflicts, host delivery path,
+  and privacy-policy blockers, all without source, path, or message leakage.
+- PR13 conformance checks and Plan 27 lifecycle mechanics consume that schema
+  for host registration/protocol conformance only. PR14 owns the canonical Doctor kernel/UI, dashboard
+  consumption/migration, and remediation orchestration surfaces built on the
+  same schema; PR14 does not redefine Plan 27 repair/install/update/uninstall
+  mechanics.
+- Doctor remains read-only. Canonical analyzer-configuration mutation
+  operations are owned exclusively by
+  [Plan 20](20-configuration-control-plane.md). Host lifecycle
+  mechanics—install/update/repair/uninstall, backup/restore, receipts, and
+  rollback—are owned exclusively by Plan 27. PR14 Doctor remediation surfaces
+  orchestrate confirmed operations without redefining either owner's mutations;
+  plugin replacement and registration changes remain Plan 27 lifecycle
+  operations.
 
 ## Delivery slices
 
@@ -307,32 +440,59 @@ not forced into fake editor positions.
 
 ### PR11: configuration and policy
 
-- Move analyzer definitions and language routing inputs under the canonical
-  language registry and configuration control plane.
-- Define analyzer execution grants, environment policy, limits, privacy class,
-  remote-analyzer prohibition by default, and per-language enablement.
-- Expose typed engine and coverage state to application, Doctor, and
-  observability consumers.
+- Consume and enforce [Plan 20](20-configuration-control-plane.md) canonical
+  configuration fields/digest and [Plan 06](06-policy-crate.md)
+  decision/revision/digest at analyzer admission. Bind execution grants to
+  [Plan 25](25-code-intelligence-indexing-crate.md) static language descriptors
+  (extension mapping, language ID, root markers, diagnostic mode, capability
+  expectations). Plan 35 composes typed runtime snapshots from those owners at
+  admission time; it does not persist a third combined registry or define
+  duplicate configuration or policy fields.
+- Expose typed engine and coverage state to application, PR13 conformance
+  consumers and PR14 Doctor/dashboard consumers, and observability surfaces.
 
 ### PR12: daemon gateway
 
 - Ship the daemon LSP session API, stdio bridge, upstream router, capability
-  negotiation, supported semantic methods, managed diagnostic merge, and
-  cancellation/backpressure behavior.
-- Route new production host and dashboard behavior through the daemon gateway
-  and disable bypass paths by default after parity. Any bounded compatibility
-  path names its PR19 deletion condition and cannot remain a second authority.
+  negotiation, managed diagnostic merge, and cancellation/backpressure behavior.
+- Core PR12 gate: `textDocument/diagnostic` and `publishDiagnostics`,
+  `textDocument/declaration`, `textDocument/definition`,
+  `textDocument/typeDefinition`, `textDocument/implementation`,
+  `textDocument/references`, `textDocument/hover`,
+  `textDocument/documentSymbol`, `workspace/symbol`, and the standard prepare,
+  incoming, and outgoing call-hierarchy methods.
+- Later PR12 sub-slice gate: `textDocument/signatureHelp`, the standard prepare,
+  supertypes, and subtypes type-hierarchy methods, and
+  `textDocument/prepareRename` and `textDocument/rename` as read-only candidate
+  evidence routed to [Plan 34](34-workspace-refactoring-and-api-migration.md).
+  General `textDocument/codeAction` remains deferred.
+- Install the canonical daemon gateway and disable or mark bypass paths by
+  default after parity. Dashboard consumption and migration remain owned by
+  PR14; any bounded compatibility path names its PR19 deletion condition and
+  cannot remain a second authority.
 - Prove that the bridge and every other LSP client process cannot open a
   writable TraceDecay store.
 
 ### PR13: host integration
 
-- Project and package the universal Claude Code plugin from the canonical
-  language and host-integration catalogs.
-- Add conflict-aware install/update/repair/uninstall, compatibility pinning,
-  Doctor checks, and real Claude Code protocol fixtures.
-- Add equivalent capability projections for other hosts only where their native
-  LSP extension mechanism passes the same conformance contract.
+- Supply gateway/provider behavior, duplicate-analyzer rules, and typed
+  finding/conformance state consumed by [Plan 27](27-cross-host-agent-plugin-bundles.md).
+  Plan 27 exclusively owns host plugin packaging,
+  install/update/repair/uninstall mechanics, and host-adapter projection from
+  the canonical host-integration catalog.
+- Implement Cursor desktop native-diagnostics adapter behavior and
+  duplicate-analyzer policy: reuse or ingest the editor's analyzer/diagnostic
+  output, avoid a duplicate TraceDecay-managed analyzer for the same language,
+  submit provenance-bearing native evidence through application/provider
+  admission, and publish only TraceDecay-only findings through the native
+  adapter rather than competing LSP registration. Cursor cloud and Codex remain
+  hook/MCP/CLI capability paths.
+- Expose compatibility pinning and host install/registration/protocol conformance
+  evidence through Plan 35's gateway finding/state schema for Plan 27 and PR13
+  conformance checks. Add real Claude Code protocol fixtures.
+- Add conformant LSP capability projections for additional LSP-capable hosts
+  only where their native LSP extension mechanism passes the same conformance
+  contract.
 
 ### PR15: multi-root canonical scope
 
@@ -363,9 +523,13 @@ not forced into fake editor positions.
 - A real Claude Code session registers only the TraceDecay LSP plugin for the
   configured languages and receives Rust, Python, and TypeScript diagnostics
   through one daemon gateway.
-- Definition, references, hover, document/workspace symbols, implementation,
-  and call hierarchy match direct upstream results on representative projects,
-  with deterministic exact TraceDecay graph augmentation where available.
+- Declaration, definition, type definition, implementation, references,
+  hover, signature help, document/workspace symbols, call hierarchy, and type
+  hierarchy match direct upstream results on representative projects, with
+  deterministic exact TraceDecay graph augmentation where available.
+- `prepareRename` and `rename` return read-only candidate evidence routed to
+  Plan 34 that matches direct upstream results; no gateway path applies a
+  workspace edit or server command from that evidence.
 - Analyzer notifications cannot be mistaken for request responses; startup
   waits for readiness, and cross-file operations pass after workspace indexing.
 - Identical clean generations reuse diagnostics without analyzer work.
@@ -383,9 +547,9 @@ not forced into fake editor positions.
 - Unsupported files, stale generations, partial indexing, redacted content,
   denied scope, symlink escape, oversized payload, malformed JSON-RPC, and
   protocol skew return bounded stable failures without leaking content.
-- Installation detects competing extension claims, requires confirmation for
-  replacement, preserves unrelated configuration, and rolls back interrupted
-  mutations.
+- Duplicate-analyzer and extension-conflict fixtures emit typed
+  finding/conformance state; Plan 27 lifecycle mechanics consume that state for
+  confirmation, preservation, and rollback.
 - PR15 multi-root fixtures preserve exact per-folder project/worktree/generation
   scope and reject CWD, first-folder, active-checkout, symlink, or ambiguous
   fallback.

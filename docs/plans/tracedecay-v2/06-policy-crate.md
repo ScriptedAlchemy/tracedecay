@@ -13,7 +13,7 @@ Hints, retrieval choices, routing, correlation, diagnostics, curation, schedulin
 
 ## Owns
 
-- Versioned evaluator IDs, typed input snapshots, typed decisions, reason codes, score components, and configuration digests.
+- Versioned evaluator IDs, typed input snapshots, typed decisions, reason codes, score components, and canonical policy decision/revision/digest semantics consumed by [09](09-application-crate.md) provider-result identity.
 - Ordinary pure Rust evaluators for hint eligibility and delivery, retrieval selection, tool/Git routing, correlation, diagnostics/curation, scheduler decisions, and memory proposals.
 - Pure analyzer eligibility and routing decisions for the daemon-hosted LSP
   gateway in [35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
@@ -43,8 +43,12 @@ Hints, retrieval choices, routing, correlation, diagnostics, curation, schedulin
 - **PR11 — routing:** choose among cataloged capabilities using explicit availability, freshness, scope, effect, and truth-source metadata. Never invent a fallback capability.
 - **PR11 — analyzer routing:** decide only among cataloged analyzers and typed
   code/diagnostic capabilities from explicit availability, privacy, scope,
-  configuration, and resource evidence. Application revalidates authorization,
+  configuration, and resource evidence. Publish canonical policy
+  decision/revision/digest tuples for Plan 09 provider-result identity and
+  Plan 35 runtime snapshot composition. Application revalidates authorization,
   freshness, limits, and effect preconditions before admission or execution.
+  Plan 35 consumes these decisions while composing runtime snapshots; it does
+  not duplicate policy fields or digest semantics.
 - **PR11 — correlation:** reconcile local code/session evidence with live Git delivery evidence while preserving separate watermarks and disagreements.
 - **PR11 — diagnostics/curation:** propose bounded remediation or fact changes with evidence and confidence; application revalidates authority and preconditions before applying.
 - **PR11 — scheduler:** decide eligibility from explicit config, activity, lock, retry, budget, and prior-run state; application owns clocks, leases, and execution.
