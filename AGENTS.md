@@ -40,6 +40,7 @@
 - Delegate code edits to execution-focused subagents; use planning/review-focused agents for planning, review, and thinking.
 - When orchestrating parallel agents, the lead dictates exact scoped edits, subagents execute, and the lead reviews diffs before any push.
 - Subagents should not invent scope beyond what the lead dictated.
+- For Cursor plugin fixes, dogfood the official TraceDecay install or upgrade flow instead of hand-editing installed plugin files.
 
 ## Git
 
@@ -52,6 +53,7 @@
 
 - Parallel branch work uses git worktrees under `.worktrees/` in the repo root (for example `.worktrees/codex-cli-args-stdin`).
 - Integration/default branch is `master` (GitHub: ScriptedAlchemy/tracedecay).
+- Cursor's TraceDecay plugin uses the MCP key `tracedecay`; Claude and Codex retain the `graph` key.
 - Multi-PR merge verification: build a detached temporary worktree on
   `origin/master`, merge all target branches, then run ordinary Cargo tests and
   let the local shim allocate the isolated build and test-data lane.
