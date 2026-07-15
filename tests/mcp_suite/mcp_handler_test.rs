@@ -15892,12 +15892,13 @@ async fn message_search_selects_registered_project_session_db_by_project_id() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let profile_root = cg.project_root().join("home/.tracedecay");
     let target_project = cg.project_root().join("registered-target");
-    let target_project_path = target_project.to_string_lossy().to_string();
     let target_store_relpath = "projects/proj_cross_messages";
     let target_store_root = profile_root.join(target_store_relpath);
     let target_session_db = target_store_root.join("sessions.db");
     fs::create_dir_all(&target_project).unwrap();
     fs::create_dir_all(&target_store_root).unwrap();
+    let target_project = target_project.canonicalize().unwrap();
+    let target_project_path = target_project.to_string_lossy().to_string();
 
     let active_db = open_project_session_db(cg.project_root())
         .await

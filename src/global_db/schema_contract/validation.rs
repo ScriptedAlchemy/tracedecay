@@ -4,6 +4,7 @@ use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
     Column, INDEXES, Index, OBSERVATIONS_TABLE_NAME, REGISTRY_TABLE_NAMES, TABLES, Table,
 };
+use super::normalize_trigger_sql;
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, read_columns, read_foreign_keys, read_indexes,
 };
@@ -287,14 +288,6 @@ async fn validate_indexes_for_table(conn: &Connection, table: &str) -> crate::er
         ));
     }
     Ok(())
-}
-
-fn normalize_trigger_sql(sql: &str) -> String {
-    sql.trim_end_matches(';')
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
 }
 
 async fn validate_trigger(

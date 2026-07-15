@@ -36,7 +36,8 @@ async fn registered_project_roots_include_modern_registry_aliases() {
     assert!(roots.contains(&worktree));
 }
 
-#[cfg(unix)]
+// macOS filesystems reject invalid UTF-8 path components with EILSEQ.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test]
 async fn registered_project_roots_preserve_non_unicode_current_root() {
     use std::os::unix::ffi::OsStringExt;

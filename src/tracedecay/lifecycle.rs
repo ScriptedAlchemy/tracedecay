@@ -1217,7 +1217,7 @@ fn shell_quote(value: &str) -> String {
 fn profile_relative(profile_root: &Path, path: &Path) -> Option<String> {
     path.strip_prefix(profile_root)
         .ok()
-        .map(|rel| rel.to_string_lossy().to_string())
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
 }
 
 fn profile_root_for_layout(layout: &StoreLayout) -> Option<PathBuf> {

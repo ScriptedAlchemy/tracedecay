@@ -1689,6 +1689,7 @@ async fn authority_reensure_audits_only_new_append_suffixes() {
     assert_eq!(row.get::<i64>(0).unwrap(), 64);
     assert_eq!(row.get::<i64>(1).unwrap(), 64);
     assert_eq!(row.get::<i64>(2).unwrap(), 64);
+    drop(row);
     drop(rows);
     require_schema_reensure(&db).await;
     drop(db);

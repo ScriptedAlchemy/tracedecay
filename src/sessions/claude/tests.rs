@@ -185,7 +185,7 @@ fn canonical_mapper_emits_one_conversational_message() {
 #[test]
 fn legacy_trait_parse_only_folds_sanitizer_issued_values() {
     let dir = tempfile::tempdir().unwrap();
-    let secret = r#"password = "p@ssw0rd!""#;
+    let secret = "password = p@ssw0rd!";
     let project_root = dir.path().join(secret);
     std::fs::create_dir_all(&project_root).unwrap();
     let transcript = dir.path().join("session-sanitized.jsonl");

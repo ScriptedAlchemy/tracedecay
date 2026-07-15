@@ -2,6 +2,7 @@ use libsql::{Connection, params};
 use tracedecay_store::CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION;
 
 use super::super::{global_db_operation_error, global_db_operation_message};
+use super::normalize_trigger_sql;
 
 mod audit;
 mod repair;
@@ -46,14 +47,6 @@ async fn projection_checkpoint(conn: &Connection) -> crate::errors::Result<i64> 
         .ok_or_else(|| authority_violation("projection checkpoint query returned no row"))?
         .get(0)
         .map_err(|error| global_db_operation_error(OPERATION, error))
-}
-
-fn normalize_trigger_sql(sql: &str) -> String {
-    sql.trim_end_matches(';')
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
 }
 
 pub(in crate::global_db) async fn ensure_authority_invariants(

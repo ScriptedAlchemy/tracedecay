@@ -9,7 +9,9 @@ use tracedecay::sessions::lcm::{
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 
-use crate::common::{self, isolated_lcm_db_path as isolated_db_path, open_lcm_db};
+use crate::common::{
+    self, isolated_lcm_db_path as isolated_db_path, lcm_dag_message as raw_message, open_lcm_db,
+};
 
 fn sample_session(provider: &str, session_id: &str) -> SessionRecord {
     common::session_record(
@@ -20,26 +22,6 @@ fn sample_session(provider: &str, session_id: &str) -> SessionRecord {
         None,
         None,
     )
-}
-
-fn raw_message(
-    provider: &str,
-    message_id: &str,
-    session_id: &str,
-    ordinal: i64,
-    text: &str,
-) -> SessionMessageRecord {
-    common::MessageRecordBuilder::new(
-        provider,
-        message_id,
-        session_id,
-        "assistant",
-        ordinal,
-        text,
-        "message",
-    )
-    .with_timestamp(Some(1_715_000_000 + ordinal))
-    .build()
 }
 
 struct RawMessageContext<'a> {

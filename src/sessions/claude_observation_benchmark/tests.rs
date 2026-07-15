@@ -5,9 +5,9 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::artifact::{
-    EvidenceIndex, git_snapshot, is_lower_hex, sha256_file, status_output_is_dirty,
-    validate_evidence_directory, validate_git_snapshots, validate_release_profile,
-    verify_git_toplevel, workload_identity,
+    EvidenceIndex, git_snapshot, is_lower_hex, portable_text_sha256, sha256_file,
+    status_output_is_dirty, validate_evidence_directory, validate_git_snapshots,
+    validate_release_profile, verify_git_toplevel, workload_identity,
 };
 use super::manifest;
 use super::metrics::{
@@ -33,6 +33,14 @@ fn workload_manifest_matches_executable_contract() {
     assert_eq!(identity.manifest_sha256.len(), 64);
     assert_eq!(identity.harness_sha256.len(), 64);
     assert_eq!(identity.harness_paths.len(), HARNESS_SOURCES.len());
+}
+
+#[test]
+fn workload_identity_hashes_are_line_ending_independent() {
+    assert_eq!(
+        portable_text_sha256(b"first\nsecond\n"),
+        portable_text_sha256(b"first\r\nsecond\r\n")
+    );
 }
 
 #[test]

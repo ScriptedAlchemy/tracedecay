@@ -931,6 +931,17 @@ fn read_changed_file_detects_change_and_noops_when_unchanged() {
 }
 
 #[test]
+fn collect_files_preserves_the_callers_root_spelling() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("nested");
+    let transcript = nested.join("session.jsonl");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(&transcript, "{}\n").unwrap();
+
+    assert_eq!(collect_files_with_ext(dir.path(), "jsonl", 1), [transcript]);
+}
+
+#[test]
 fn stream_new_jsonl_returns_none_for_missing_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("missing.jsonl");

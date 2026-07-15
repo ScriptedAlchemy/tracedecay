@@ -361,6 +361,10 @@ jobs:
 
       - name: Check root crate API compatibility
         uses: obi1kenobi/cargo-semver-checks-action@v2
+        env:
+          # semver-checks builds the crate from a synthetic resolver-v1
+          # workspace, so make dependency selection honor this job's toolchain.
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
         with:
           package: tracedecay
           rust-toolchain: manual

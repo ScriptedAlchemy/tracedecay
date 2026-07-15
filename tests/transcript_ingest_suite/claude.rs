@@ -2,14 +2,14 @@ use std::io::Write;
 
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use tracedecay::global_db::ParseOffset;
 use tracedecay::sessions::claude::ClaudeSource;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::git_correlation::{
     CommitEvidence, CommitRelation, GitRefFilter, SessionsForQuery, SpanOverlapKind,
 };
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use tracedecay::sessions::source::TranscriptSource;
 use tracedecay::sessions::source::ingest_source;
 
@@ -79,7 +79,8 @@ fn write_claude_rows(home: &std::path::Path, session: &str, rows: &[serde_json::
     .unwrap();
 }
 
-#[cfg(unix)]
+// macOS filesystems reject invalid UTF-8 path components with EILSEQ.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test]
 async fn claude_non_utf8_cursor_key_survives_atomic_persistence() {
     use std::ffi::OsString;
@@ -121,7 +122,8 @@ async fn claude_non_utf8_cursor_key_survives_atomic_persistence() {
     );
 }
 
-#[cfg(unix)]
+// macOS filesystems reject invalid UTF-8 path components with EILSEQ.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test]
 async fn claude_non_utf8_cursor_key_replays_unbound_legacy_offset() {
     use std::ffi::OsString;

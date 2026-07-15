@@ -349,7 +349,17 @@ pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
         while end < bytes.len() && token_byte(bytes[end]) {
             end += 1;
         }
-        if looks_high_entropy_token(&text[start..end]) {
+        let candidate = &text[start..end];
+        if candidate.starts_with('/') && candidate[1..].contains('/') {
+            let mut component_start = 0usize;
+            for component in candidate.split('/') {
+                let component_end = component_start + component.len();
+                if looks_high_entropy_token(component) {
+                    ranges.push(start + component_start..start + component_end);
+                }
+                component_start = component_end + 1;
+            }
+        } else if looks_high_entropy_token(candidate) {
             ranges.push(start..end);
         }
         start = end;
@@ -536,5 +546,18 @@ mod tests {
         let above_threshold = "abcdefghij123456789".repeat(2);
         assert!(!looks_high_entropy_token(&below_threshold));
         assert!(looks_high_entropy_token(&above_threshold));
+
+        let ordinary_temp_path =
+            "/private/var/folders/ab/cd0123456789abcdefghijklmnopqrst/T/";
+        assert!(high_entropy_ranges(ordinary_temp_path).is_empty());
+
+        let secret_component =
+            "Qm9vZ2llV29vZ2llMTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A4OTc2NTQzMjE";
+        let path = format!("/private/var/{secret_component}/project");
+        let component_start = "/private/var/".len();
+        assert_eq!(
+            high_entropy_ranges(&path),
+            vec![component_start..component_start + secret_component.len()]
+        );
     }
 }

@@ -7,7 +7,6 @@
 //! tolerance. No real Cursor data is touched.
 
 use std::collections::HashSet;
-use std::fmt::Write as _;
 use std::path::Path;
 
 use tempfile::TempDir;
@@ -387,7 +386,7 @@ async fn write_store_db(path: &Path) {
     for id in [&sys_id, &user_id, &asst_id] {
         root.push(0x0a);
         root.push(0x20);
-        root.extend_from_slice(&hex_decode(id));
+        root.extend_from_slice(&hex::decode(id).unwrap());
     }
 
     let meta = serde_json::json!({
@@ -397,7 +396,7 @@ async fn write_store_db(path: &Path) {
         "mode": "agent",
         "createdAt": 1_700_000_100_000i64,
     });
-    let meta_hex = hex_encode(meta.to_string().as_bytes());
+    let meta_hex = hex::encode(meta.to_string().as_bytes());
 
     let db = libsql::Builder::new_local(path).build().await.unwrap();
     let conn = db.connect().unwrap();
@@ -431,21 +430,6 @@ async fn write_store_db(path: &Path) {
     }
     drop(conn);
     drop(db);
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
-}
-
-fn hex_decode(hex: &str) -> Vec<u8> {
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
-        .collect()
 }
 
 /// Manual live smoke check against the real ~21 GB `state.vscdb`. Ignored by

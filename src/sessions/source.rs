@@ -762,7 +762,10 @@ fn collect_files_inner(dir: &Path, ext: &str, max_depth: u8, depth: u8, out: &mu
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
+        // Rebuild from the caller's root spelling. On Windows, DirEntry::path
+        // may add an extended-length prefix, which would create a second
+        // durable cursor key for the same transcript.
+        let path = dir.join(entry.file_name());
         if path.is_dir() {
             collect_files_inner(&path, ext, max_depth, depth + 1, out);
         } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
@@ -805,10 +808,16 @@ fn stable_jsonl_file_id(
     }
     #[cfg(windows)]
     {
+        use std::hash::{Hash, Hasher};
         use std::os::windows::fs::MetadataExt;
 
-        // Creation time is read from the same open handle as framing, so an
-        // atomic path replacement cannot splice identity from another file.
+        // `same_file::Handle` hashes the volume and native file index from the
+        // same open file used for framing. Creation time remains an additional
+        // discriminator on file systems with weak native identities.
+        let native_handle = same_file::Handle::from_file(file.try_clone()?)?;
+        let mut native_identity = std::collections::hash_map::DefaultHasher::new();
+        native_handle.hash(&mut native_identity);
+        hasher.update(native_identity.finish().to_le_bytes());
         hasher.update(meta.creation_time().to_le_bytes());
     }
     #[cfg(not(any(unix, windows)))]

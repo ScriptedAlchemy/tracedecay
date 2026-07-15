@@ -698,6 +698,7 @@ async fn observation_store_resolver_requires_existing_artifacts_and_creates_noth
     let db = GlobalDb::open_at(&profile_root.join("global.db"))
         .await
         .unwrap();
+    let profile_root = profile_root.canonicalize().unwrap();
     let project_id = "proj_missing_artifacts";
     let store_id = "store_missing_artifacts";
     db.upsert_code_project(project_id, &project_root, None, None, None)

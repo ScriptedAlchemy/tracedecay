@@ -1,10 +1,10 @@
-use std::fs;
 use std::path::Path;
 
 use crate::common::{
     EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK, create_runtime, get_json, http_agent,
     pick_free_port, tempdir_or_panic, wait_for_dashboard, write_empty_global_db_schema,
 };
+use crate::dashboard_api_support::write_file;
 use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay::dashboard;
@@ -21,17 +21,6 @@ struct DashboardFixture {
 impl Drop for DashboardFixture {
     fn drop(&mut self) {
         self.server.abort();
-    }
-}
-
-fn write_file(path: &Path, content: &str) {
-    if let Some(parent) = path.parent()
-        && let Err(err) = fs::create_dir_all(parent)
-    {
-        panic!("failed to create {}: {err}", parent.display());
-    }
-    if let Err(err) = fs::write(path, content) {
-        panic!("failed to write {}: {err}", path.display());
     }
 }
 
