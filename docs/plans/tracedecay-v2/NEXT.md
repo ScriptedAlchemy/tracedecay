@@ -1,23 +1,33 @@
-# Next delivery: production store boundary
+# Next delivery: sanitized observation capture
 
-The next change starts real product implementation.
-
-## Outcome
-
-Create the first production `tracedecay-store` boundary and route one end-to-end runtime slice through it.
+PR4's production transcript-store boundary is implemented. The next slice moves
+one provider's parsed transcript records into an immutable, sanitized
+observation path behind the same daemon-owned database authority.
 
 ## Scope
 
-- Define the store API around the existing V2 domain contracts.
-- Integrate sole-daemon database ownership after PR #473 lands.
-- Move one real session/event persistence and recovery path behind the store API.
-- Keep the root binary operational throughout the migration; no parallel local-write fallback.
-- Add direct concurrency, restart, and recovery tests for the migrated path.
-- Do not block this slice on the closed-wire spike or introduce store, event, transaction, or recovery macros before repeated production patterns exist.
+- Define ordinary typed capture inputs, sanitizer receipts, source identity, and
+  idempotency keys; do not add a macro DSL or parallel metadata model.
+- Route one existing provider path end to end through capture, persistence, and
+  replay while preserving the root binary and V1 behavior.
+- Reuse the open `GlobalDb` authority and `tracedecay-store` boundary. Do not
+  open a second database or add local, in-memory, source-adjacent, or recovery
+  fallback writers.
+- Persist project observations in the canonical project-wide store shared by
+  all branches and worktrees; keep account-wide user sessions in the
+  user/profile store. Branch/worktree scope applies only to code-graph indexes.
+- Resolve worktrees through the project registry and Git common directory, and
+  fail closed when the required project or user-store authority is unavailable.
+- Persist only sanitized observations; malformed, partial, duplicate, and
+  restart behavior must remain explicit and retry-safe.
+- Add direct behavior tests for secret rejection/redaction, idempotent replay,
+  crash-before-commit, suffix resume, stale-owner rejection, and restart.
 
 ## Done when
 
-- Production TraceDecay calls the new store boundary.
-- The migrated path has one database authority and no duplicate implementation.
-- Direct behavior tests pass on Linux and Windows.
-- No inventory generator, generated architecture view, plan parser, or workflow executor is introduced.
+- One real provider path produces replayable sanitized observations through the
+  production daemon/store authority.
+- Crash and retry tests prove no duplicate observation, skipped suffix, advanced
+  offset without data, or unsanitized durable payload.
+- Linux and Windows checks pass without inventory generators, plan parsers,
+  workflow executors, or generated architecture views.

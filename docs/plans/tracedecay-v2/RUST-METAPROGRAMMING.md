@@ -57,7 +57,7 @@ Before adding a procedural macro:
 8. Measure deleted and added production lines plus clean and incremental build cost.
 9. Stop if the approach requires another private copy of the complete wire model.
 
-This spike must not block the first production store boundary.
+This spike must not block the next production slice.
 
 ## Procedural-macro admission gates
 
@@ -87,7 +87,7 @@ Do not add custom macros for:
 - General domain-validation rules, which have distinct semantics and should remain typed functions and methods.
 - Error taxonomies already served by maintained derives such as `thiserror`.
 - Markdown rendering, which requires deliberate human-facing presentation over typed view models.
-- Store rows, events, transactions, or recovery before repeated V2 production patterns exist.
+- Store rows, events, transactions, or recovery without repeated V2 production patterns and measured net deletion.
 - Untyped automation artifact payloads; surviving artifacts should become versioned structs or enums.
 - Small enum string conversions, early-return control flow, or test DSLs.
 - Architecture snapshots, source inventories, plan receipts, rewrite workflows, or other systems that model the rewrite instead of delivering product behavior.
