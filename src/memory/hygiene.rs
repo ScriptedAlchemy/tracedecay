@@ -11,6 +11,11 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use crate::privacy::detector_kernel::{
+    CredentialPattern, CredentialPatternKind, CredentialPatternProfile,
+    compile_credential_patterns_lossy, looks_high_entropy_token,
+};
+
 fn compile_patterns(patterns: &[(&'static str, &'static str)]) -> Vec<(Regex, &'static str)> {
     patterns
         .iter()
@@ -20,96 +25,33 @@ fn compile_patterns(patterns: &[(&'static str, &'static str)]) -> Vec<(Regex, &'
         .collect()
 }
 
-fn regex_set() -> &'static Vec<(Regex, &'static str)> {
-    static PATTERNS: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
-    PATTERNS.get_or_init(|| {
-        compile_patterns(&[
-            (
-                // PEM-encoded private key blocks.
-                r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----",
-                "PEM private-key block",
-            ),
-            (
-                // Bearer tokens with a long opaque value.
-                r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}",
-                "bearer token",
-            ),
-            (
-                // Well-known credential prefixes (OpenAI, GitHub, Slack, AWS,
-                // GitLab). The broad OpenAI form requires a long opaque tail;
-                // the shorter test-key form requires a numeric suffix so prose
-                // like "sk-test fixture profile" cannot match.
-                r"\b(sk-[A-Za-z0-9_-]{20,}|sk-test-[0-9]{6,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9_-]{20,})\b",
-                "known credential prefix",
-            ),
-            (
-                // key=value / key: value where the key is credential-ish and
-                // the value is a long unbroken token.
-                r#"(?i)\b(api[_-]?key|secret|token|passwd|password|credential|private[_-]?key|access[_-]?key)\b\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{16,}"#,
-                "credential-like key=value assignment",
-            ),
-        ])
-    })
+fn regex_set() -> &'static [CredentialPattern] {
+    static PATTERNS: OnceLock<Vec<CredentialPattern>> = OnceLock::new();
+    PATTERNS
+        .get_or_init(|| compile_credential_patterns_lossy(CredentialPatternProfile::Memory))
+        .as_slice()
 }
 
-/// Shannon entropy of a token in bits per character.
-fn shannon_entropy(token: &str) -> f64 {
-    let len = token.chars().count();
-    if len == 0 {
-        return 0.0;
+fn credential_reason(kind: CredentialPatternKind) -> &'static str {
+    match kind {
+        CredentialPatternKind::PrivateKey => "PEM private-key block",
+        CredentialPatternKind::BearerToken => "bearer token",
+        CredentialPatternKind::KnownCredential => "known credential prefix",
+        CredentialPatternKind::CredentialAssignment => "credential-like key=value assignment",
     }
-    let mut counts: std::collections::HashMap<char, usize> = std::collections::HashMap::new();
-    for ch in token.chars() {
-        *counts.entry(ch).or_insert(0) += 1;
-    }
-    counts
-        .values()
-        .map(|&count| {
-            let p = count as f64 / len as f64;
-            -p * p.log2()
-        })
-        .sum()
-}
-
-fn is_hex_only(token: &str) -> bool {
-    token.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-/// True for a single long, high-entropy, base64-ish token. Tuned to stay
-/// quiet on legitimate fact content: git SHAs and other hex digests are
-/// explicitly excluded (hex tops out at 4 bits/char), and the length floor
-/// keeps ordinary identifiers and URLs from qualifying.
-fn looks_high_entropy_token(token: &str) -> bool {
-    let trimmed = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-    if trimmed.chars().count() < 36 || is_hex_only(trimmed) {
-        return false;
-    }
-    let has_alpha = trimmed.chars().any(|c| c.is_ascii_alphabetic());
-    let has_digit = trimmed.chars().any(|c| c.is_ascii_digit());
-    if !has_alpha || !has_digit {
-        return false;
-    }
-    // Only token-charset candidates (base64/url-safe); anything with other
-    // punctuation is treated as prose or a path, not a secret blob.
-    if !trimmed
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-'))
-    {
-        return false;
-    }
-    shannon_entropy(trimmed) >= 4.2
 }
 
 /// Conservative secret-likeness check. Returns a short reason when `content`
 /// matches a credential pattern, or `None` when it looks safe to store.
 pub fn detect_secret_like(content: &str) -> Option<String> {
-    for (regex, reason) in regex_set() {
-        if regex.is_match(content) {
-            return Some((*reason).to_string());
+    for pattern in regex_set() {
+        if pattern.regex().is_match(content) {
+            return Some(credential_reason(pattern.kind()).to_string());
         }
     }
     for token in content.split_whitespace() {
-        if looks_high_entropy_token(token) {
+        let trimmed = token.trim_matches(|character: char| !character.is_ascii_alphanumeric());
+        if looks_high_entropy_token(trimmed) {
             return Some("high-entropy token".to_string());
         }
     }

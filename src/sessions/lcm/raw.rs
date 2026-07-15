@@ -3,7 +3,13 @@ use std::path::Path;
 use libsql::{Connection, params};
 use serde_json::{Map, Value as JsonValue, json};
 
-use crate::sessions::SessionMessageRecord;
+use crate::{
+    privacy::detector_kernel::{
+        NormalizedSensitiveKey, SensitiveKeyPolicy,
+        redact_sensitive_json_values as redact_json_values,
+    },
+    sessions::SessionMessageRecord,
+};
 
 use super::{
     DERIVED_TRUNCATION_MARKER, LcmError, LcmPayloadRef, LcmRawMessage, LcmStorageKind,
@@ -691,47 +697,42 @@ fn sensitive_pattern_active(config: &IngestConfig, name: &str) -> bool {
         .any(|pattern| pattern == name || pattern == "all" || pattern == "default")
 }
 
-// Port of hermes-lcm `_sensitive_pattern_for_key`
-// (ingest_protection.py:252-268): match keys by their compact normalized
-// form so aliases like `apiToken` or `client-secret` are covered.
-fn sensitive_pattern_for_key(key: &str, config: &IngestConfig) -> Option<&'static str> {
-    let mut normalized = String::with_capacity(key.len());
-    for ch in key.to_lowercase().chars() {
-        if ch.is_ascii_alphanumeric() {
-            normalized.push(ch);
-        } else if !normalized.ends_with('_') {
-            normalized.push('_');
+// Policy adapter for hermes-lcm `_sensitive_pattern_for_key`
+// (ingest_protection.py:252-268). The shared kernel normalizes each key once.
+struct LcmSensitiveKeyPolicy<'a>(&'a IngestConfig);
+
+impl SensitiveKeyPolicy for LcmSensitiveKeyPolicy<'_> {
+    type Match = &'static str;
+
+    fn classify(&self, key: &NormalizedSensitiveKey) -> Option<Self::Match> {
+        let normalized = key.separated();
+        let compact = key.compact();
+        let config = self.0;
+        if sensitive_pattern_active(config, "api_key")
+            && (matches!(
+                compact,
+                "apikey" | "apitoken" | "accesstoken" | "secretkey" | "clientsecret"
+            ) || (normalized.contains("api") && normalized.contains("key"))
+                || (normalized.contains("access") && normalized.contains("token"))
+                || (normalized.contains("secret") && normalized.contains("key")))
+        {
+            return Some("api_key");
         }
+        if sensitive_pattern_active(config, "bearer_token")
+            && matches!(
+                compact,
+                "authorization" | "authtoken" | "bearertoken" | "token"
+            )
+        {
+            return Some("bearer_token");
+        }
+        if sensitive_pattern_active(config, "password_assignment")
+            && matches!(compact, "password" | "passwd" | "pwd" | "passphrase")
+        {
+            return Some("password_assignment");
+        }
+        None
     }
-    let normalized = normalized.trim_matches('_');
-    let compact = normalized.replace('_', "");
-    if sensitive_pattern_active(config, "api_key")
-        && (matches!(
-            compact.as_str(),
-            "apikey" | "apitoken" | "accesstoken" | "secretkey" | "clientsecret"
-        ) || (normalized.contains("api") && normalized.contains("key"))
-            || (normalized.contains("access") && normalized.contains("token"))
-            || (normalized.contains("secret") && normalized.contains("key")))
-    {
-        return Some("api_key");
-    }
-    if sensitive_pattern_active(config, "bearer_token")
-        && matches!(
-            compact.as_str(),
-            "authorization" | "authtoken" | "bearertoken" | "token"
-        )
-    {
-        return Some("bearer_token");
-    }
-    if sensitive_pattern_active(config, "password_assignment")
-        && matches!(
-            compact.as_str(),
-            "password" | "passwd" | "pwd" | "passphrase"
-        )
-    {
-        return Some("password_assignment");
-    }
-    None
 }
 
 // Port of hermes-lcm `redact_sensitive_value` (ingest_protection.py:291-323):
@@ -743,33 +744,21 @@ fn redact_sensitive_json_values(
     config: &IngestConfig,
     patterns: &mut Vec<String>,
 ) -> bool {
-    match value {
-        JsonValue::Object(map) => {
-            let mut changed = false;
-            for (key, child) in map.iter_mut() {
-                if let Some(pattern) = sensitive_pattern_for_key(key, config) {
-                    if let JsonValue::String(text) = child {
-                        if !text.is_empty() && !text.contains(SENSITIVE_REDACTION_PREFIX) {
-                            *text = sensitive_placeholder(pattern, text.as_str());
-                            patterns.push(pattern.to_string());
-                            changed = true;
-                            continue;
-                        }
-                    }
-                }
-                changed |= redact_sensitive_json_values(child, config, patterns);
+    redact_json_values(
+        value,
+        &LcmSensitiveKeyPolicy(config),
+        |child, pattern, _path| {
+            let JsonValue::String(text) = child else {
+                return false;
+            };
+            if text.is_empty() || text.contains(SENSITIVE_REDACTION_PREFIX) {
+                return false;
             }
-            changed
-        }
-        JsonValue::Array(items) => {
-            let mut changed = false;
-            for item in items.iter_mut() {
-                changed |= redact_sensitive_json_values(item, config, patterns);
-            }
-            changed
-        }
-        _ => false,
-    }
+            *text = sensitive_placeholder(pattern, text);
+            patterns.push(pattern.to_string());
+            true
+        },
+    )
 }
 
 fn ingest_config(metadata_json: Option<&str>) -> IngestConfig {

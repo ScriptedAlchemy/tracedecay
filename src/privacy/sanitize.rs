@@ -15,7 +15,7 @@ use super::detect::{
 use super::parse::{ParseFailureKind, ParseLimits, parse_claude_record};
 
 pub const PR5_CLAUDE_SANITIZER_VERSION: &str = "privacy.claude-record.v1";
-const DEFAULT_MAX_RECORD_BYTES: usize = 1024 * 1024;
+pub const PR5_MAX_CLAUDE_RECORD_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_DEPTH: usize = 96;
 const DEFAULT_MAX_VALUES: usize = 50_000;
 
@@ -76,7 +76,7 @@ impl ClaudeSanitizerPolicyV1 {
         .collect();
         Ok(Self {
             version,
-            max_record_bytes: DEFAULT_MAX_RECORD_BYTES,
+            max_record_bytes: PR5_MAX_CLAUDE_RECORD_BYTES,
             max_depth: DEFAULT_MAX_DEPTH,
             max_values: DEFAULT_MAX_VALUES,
             sensitive_keys,

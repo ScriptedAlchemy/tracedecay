@@ -5,6 +5,7 @@
 //! carries payload bytes.
 
 mod detect;
+pub(crate) mod detector_kernel;
 mod parse;
 mod sanitize;
 
@@ -13,7 +14,7 @@ pub use detect::{
 };
 pub use sanitize::{
     ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1,
-    PR5_CLAUDE_SANITIZER_VERSION, PrivacySanitizerError,
+    PR5_CLAUDE_SANITIZER_VERSION, PR5_MAX_CLAUDE_RECORD_BYTES, PrivacySanitizerError,
 };
 
 #[cfg(test)]

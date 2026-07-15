@@ -7,7 +7,8 @@ use tracedecay_domain::{
 
 use super::{
     ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1,
-    DetectionConfidenceV1, PR5_CLAUDE_SANITIZER_VERSION, PrivacyDetectorV1, SanitizationActionV1,
+    DetectionConfidenceV1, PR5_CLAUDE_SANITIZER_VERSION, PR5_MAX_CLAUDE_RECORD_BYTES,
+    PrivacyDetectorV1, SanitizationActionV1,
 };
 
 fn identity_for(record: &[u8]) -> ClaudeObservationIdentityMaterialV1 {
@@ -370,6 +371,7 @@ fn structure_bound_failures_are_quarantined_without_payloads() {
 #[test]
 fn receipt_ids_are_deterministic_and_use_the_fixed_sanitizer_version() {
     assert_eq!(PR5_CLAUDE_SANITIZER_VERSION, "privacy.claude-record.v1");
+    assert_eq!(PR5_MAX_CLAUDE_RECORD_BYTES, 1_048_576);
     let sanitizer = ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer");
     assert_eq!(
         sanitizer.policy().version().as_str(),
