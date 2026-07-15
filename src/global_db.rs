@@ -392,14 +392,6 @@ impl GlobalDbWriterConnection<'_> {
         self.conn.execute(sql, params).await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn execute_batch(
-        &self,
-        sql: &str,
-    ) -> Result<libsql::BatchRows, libsql::Error> {
-        self.conn.execute_batch(sql).await
-    }
-
     async fn drain_pending_payload_deletes(
         &self,
         storage_root: &Path,

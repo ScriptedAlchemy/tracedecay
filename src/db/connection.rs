@@ -71,11 +71,6 @@ impl DatabaseWriterConnection<'_> {
         self.conn.execute(sql, params).await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn execute_batch(&self, sql: &str) -> libsql::Result<libsql::BatchRows> {
-        self.conn.execute_batch(sql).await
-    }
-
     pub(crate) async fn query(
         &self,
         sql: &str,

@@ -4322,7 +4322,6 @@ async fn create_shard(
                 .unwrap();
         }
     }
-    drop(writer);
     graph.checkpoint().await.unwrap();
     graph.close();
 
@@ -4421,7 +4420,6 @@ async fn add_fact_to_shard(
                 .unwrap();
         }
     }
-    drop(writer);
     graph.checkpoint().await.unwrap();
     graph.close();
 }
