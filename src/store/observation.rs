@@ -2,8 +2,9 @@ use tracedecay_domain::{
     CanonicalObservationIdV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ObservationScopeV1,
 };
 use tracedecay_store::{
-    ObservationPersistOutcome, ObservationReplayRequest, ObservationStore, ObservationStoreResult,
-    ObservationWrite, StoredObservation,
+    ObservationPersistOutcome, ObservationProjectionStore, ObservationReplayRequest,
+    ObservationStore, ObservationStoreResult, ObservationWrite, ProjectionCheckpoint,
+    ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionStoreResult, StoredObservation,
 };
 
 use crate::global_db::GlobalDb;
@@ -49,6 +50,26 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
         request: ObservationReplayRequest,
     ) -> ObservationStoreResult<Vec<StoredObservation>> {
         self.db.replay_observations_result(request).await
+    }
+}
+
+impl ObservationProjectionStore for GlobalDbObservationStore<'_> {
+    async fn project_observation(
+        &self,
+        observation_id: &CanonicalObservationIdV1,
+    ) -> ProjectionStoreResult<ProjectionPersistOutcome> {
+        self.db.project_observation_result(observation_id).await
+    }
+
+    async fn projection_checkpoint(&self) -> ProjectionStoreResult<ProjectionCheckpoint> {
+        self.db.projection_checkpoint_result().await
+    }
+
+    async fn rebuild_projection(
+        &self,
+        frontier_sequence: u64,
+    ) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
+        self.db.rebuild_projection_result(frontier_sequence).await
     }
 }
 

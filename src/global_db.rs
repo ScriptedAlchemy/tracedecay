@@ -30,6 +30,7 @@ use crate::sessions::{
 
 mod observation_store;
 mod observation;
+mod observation_projection;
 mod transcript;
 
 pub use observation_store::{ProjectObservationStoreError, ProjectObservationStoreResolution};
@@ -1321,6 +1322,9 @@ impl GlobalDb {
         ensure_session_parent_columns(&db.conn).await?;
         ensure_parse_offset_columns(&db.conn).await?;
         observation::ensure_observation_schema(&db.conn)
+            .await
+            .ok()?;
+        observation_projection::ensure_observation_projection_schema(&db.conn)
             .await
             .ok()?;
         crate::sessions::lcm::schema::ensure_lcm_schema(&db.conn)
