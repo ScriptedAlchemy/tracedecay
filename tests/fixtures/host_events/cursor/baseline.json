@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "provider": "cursor",
+  "cases": [
+    {
+      "state": "supported", "admission_provider": "cursor",
+      "request": {"hook_event_name": "sessionStart", "conversation_id": "<SESSION_ID>", "workspace_roots": ["<PROJECT_ROOT>"]},
+      "admission": {"status": "supported", "retryable": false},
+      "response": {"exit_code": 0, "stdout": "{\"additional_context\":\"<REDACTED_CONTEXT>\",\"env\":{}}", "stderr": ""}
+    },
+    {
+      "state": "degraded", "admission_provider": "cursor",
+      "request": {"hook_event_name": "sessionStart", "conversation_id": "<SESSION_ID>", "workspace_roots": ["<PROJECT_ROOT>"], "payload": {"malformed": true}},
+      "admission": {"status": "degraded", "retryable": false, "reason_code": "malformed_event"},
+      "response": {"exit_code": 0, "stdout": "{\"additional_context\":\"<REDACTED_CONTEXT>\",\"env\":{}}", "stderr": ""}
+    },
+    {
+      "state": "unavailable", "admission_provider": "cursor",
+      "request": {"hook_event_name": "sessionStart", "conversation_id": "<SESSION_ID>", "workspace_roots": ["<PROJECT_ROOT>"]},
+      "admission": {"status": "unavailable", "retryable": true, "reason_code": "authority_unavailable"},
+      "response": {"exit_code": 0, "stdout": "{\"additional_context\":\"<REDACTED_CONTEXT>\",\"env\":{}}", "stderr": ""}
+    },
+    {
+      "state": "unknown", "admission_provider": "cursor-future",
+      "request": {"hook_event_name": "futureEvent", "conversation_id": "<SESSION_ID>", "workspace_roots": ["<PROJECT_ROOT>"]},
+      "admission": {"status": "unknown", "retryable": false, "reason_code": "unknown_provider"},
+      "response": {"exit_code": 0, "stdout": "{\"additional_context\":\"<REDACTED_CONTEXT>\",\"env\":{}}", "stderr": ""}
+    }
+  ]
+}

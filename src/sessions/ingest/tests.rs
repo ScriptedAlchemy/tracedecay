@@ -83,10 +83,25 @@ fn provider_scoped_user_catch_up_excludes_unrelated_providers() {
 }
 
 #[test]
-fn project_claude_ingest_never_uses_legacy_transcript_source() {
-    let mut sources = Vec::new();
-    push_file_source(&mut sources, SessionProvider::Claude);
-    assert!(sources.is_empty());
+fn migrated_providers_never_use_legacy_transcript_sources() {
+    for provider in [
+        SessionProvider::Claude,
+        SessionProvider::Codex,
+        SessionProvider::Cursor,
+        SessionProvider::Hermes,
+        SessionProvider::Kiro,
+        SessionProvider::Cline,
+        SessionProvider::RooCode,
+        SessionProvider::Kilo,
+    ] {
+        let mut sources = Vec::new();
+        push_file_source(&mut sources, provider);
+        assert!(
+            sources.is_empty(),
+            "{} used the legacy source",
+            provider.id()
+        );
+    }
 }
 
 #[test]

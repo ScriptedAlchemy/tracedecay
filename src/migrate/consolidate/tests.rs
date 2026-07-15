@@ -17,6 +17,7 @@ use tracedecay_domain::{
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionId,
 };
+use tracedecay_store::observation::ObservationCoverageV1;
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationWrite,
 };
@@ -3165,10 +3166,13 @@ async fn source_cursor_advance_receipts_merge_losslessly_and_idempotently() {
         .unwrap()
         .execute(
             "INSERT INTO source_cursor_advances(
-                 source_json, scope_json, file_generation,
-                 start_offset, end_offset, reason
-             ) VALUES (?1, ?2, '17', '0', '5', 'blank_frame')",
-            libsql::params![source_json.as_str(), scope_json.as_str()],
+                 source_json, scope_json, coverage_json, reason
+             ) VALUES (?1, ?2, ?3, 'blank_frame')",
+            libsql::params![
+                source_json.as_str(),
+                scope_json.as_str(),
+                migration_coverage_json(0, 5)
+            ],
         )
         .await
         .unwrap();
@@ -3203,14 +3207,19 @@ async fn source_cursor_advance_receipts_merge_losslessly_and_idempotently() {
         .await
         .unwrap();
     source
-        .conn()
+        .writer_connection()
+        .await
+        .unwrap()
         .execute(
             "INSERT INTO source_cursor_advances(
-                 source_json, scope_json, file_generation,
-                 start_offset, end_offset, reason, receipt_id
-             ) VALUES (?1, ?2, '17', '5', '10', 'sanitizer_rejected',
+                 source_json, scope_json, coverage_json, reason, receipt_id
+             ) VALUES (?1, ?2, ?3, 'sanitizer_rejected',
                        'receipt.cursor.consolidation')",
-            libsql::params![source_json.as_str(), scope_json.as_str()],
+            libsql::params![
+                source_json.as_str(),
+                scope_json.as_str(),
+                migration_coverage_json(5, 10)
+            ],
         )
         .await
         .unwrap();
@@ -3278,13 +3287,19 @@ async fn source_cursor_advance_identity_collision_rolls_back_merge() {
         let db = GlobalDb::open_at_without_structured_backfill(path)
             .await
             .unwrap();
-        db.conn()
+        db.writer_connection()
+            .await
+            .unwrap()
             .execute(
                 "INSERT INTO source_cursor_advances(
-                     source_json, scope_json, file_generation,
-                     start_offset, end_offset, reason
-                 ) VALUES (?1, ?2, '17', '0', '5', ?3)",
-                libsql::params![source_json.as_str(), scope_json.as_str(), reason],
+                     source_json, scope_json, coverage_json, reason
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                libsql::params![
+                    source_json.as_str(),
+                    scope_json.as_str(),
+                    migration_coverage_json(0, 5),
+                    reason
+                ],
             )
             .await
             .unwrap();
@@ -3664,6 +3679,15 @@ async fn inconsistent_projection_alias_fails_authority_preflight_without_target_
 
 fn migration_source() -> ClaudeSourceIdentityV1 {
     ClaudeSourceIdentityV1::new(SessionId::new("session.migration").unwrap()).unwrap()
+}
+
+fn migration_coverage_json(start: u64, end: u64) -> String {
+    serde_json::to_string(&ObservationCoverageV1::new(
+        ClaudeFileGenerationV1::new(17).unwrap(),
+        tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
+        ClaudeByteRangeV1::new(start, end).unwrap(),
+    ))
+    .unwrap()
 }
 
 fn migration_cursor(byte_offset: u64) -> ClaudeSourceCursorV1 {
@@ -4268,12 +4292,9 @@ async fn create_shard(
     let layout = layout_for_id(project, profile, project_id).unwrap();
     fs::create_dir_all(&layout.data_root).unwrap();
     let (graph, _) = test_initialize(&layout.graph_db_path).await;
-    let writer = graph
-        .writer_connection("seed consolidation shard fixture")
-        .await
-        .unwrap();
     {
-        let memory = writer.memory_store();
+        let writer = graph.memory_writer().await.unwrap();
+        let memory = writer.store();
         let outcome = memory
             .add_fact(
                 AddFactRequest {
@@ -4370,12 +4391,9 @@ async fn add_fact_to_shard(
 ) {
     let layout = layout_for_id(&fixture.project, &fixture.profile, project_id).unwrap();
     let (graph, _) = test_open(&layout.graph_db_path).await;
-    let writer = graph
-        .writer_connection("seed consolidation memory fixture")
-        .await
-        .unwrap();
     {
-        let memory = writer.memory_store();
+        let writer = graph.memory_writer().await.unwrap();
+        let memory = writer.store();
         let outcome = memory
             .add_fact(
                 AddFactRequest {
@@ -4411,12 +4429,9 @@ async fn add_fact_to_shard(
 async fn add_fact_relation_to_shard(fixture: &Fixture, project_id: &str) {
     let layout = layout_for_id(&fixture.project, &fixture.profile, project_id).unwrap();
     let (graph, _) = test_open(&layout.graph_db_path).await;
-    let writer = graph
-        .writer_connection("seed consolidation relation fixture")
-        .await
-        .unwrap();
     {
-        let memory = writer.memory_store();
+        let writer = graph.memory_writer().await.unwrap();
+        let memory = writer.store();
         let source_fact_id = memory
             .list_facts(None, Some(0.0), 10)
             .await
@@ -4455,7 +4470,6 @@ async fn add_fact_relation_to_shard(fixture: &Fixture, project_id: &str) {
             .await
             .unwrap();
     }
-    drop(writer);
     graph.checkpoint().await.unwrap();
     graph.close();
 }
@@ -4480,27 +4494,25 @@ async fn add_untracked_branch(layout: &StoreLayout, name: &str, fact_content: &s
     let path = branches.join(format!("{name}.db"));
     fs::copy(&layout.graph_db_path, &path).unwrap();
     let (db, _) = test_open(&path).await;
-    let writer = db
-        .writer_connection("seed untracked branch fixture")
-        .await
-        .unwrap();
-    writer
-        .memory_store()
-        .add_fact(
-            AddFactRequest {
-                content: fact_content.to_string(),
-                category: MemoryCategory::Project,
-                source: Some("untracked-branch-test".to_string()),
-                tags: vec![name.to_string()],
-                entities: vec!["TraceDecay".to_string()],
-                trust: Some(0.8),
-                metadata: json!({"branch": name}),
-            },
-            0.5,
-        )
-        .await
-        .unwrap();
-    drop(writer);
+    {
+        let writer = db.memory_writer().await.unwrap();
+        writer
+            .store()
+            .add_fact(
+                AddFactRequest {
+                    content: fact_content.to_string(),
+                    category: MemoryCategory::Project,
+                    source: Some("untracked-branch-test".to_string()),
+                    tags: vec![name.to_string()],
+                    entities: vec!["TraceDecay".to_string()],
+                    trust: Some(0.8),
+                    metadata: json!({"branch": name}),
+                },
+                0.5,
+            )
+            .await
+            .unwrap();
+    }
     db.checkpoint().await.unwrap();
     db.close();
 }
@@ -4527,16 +4539,13 @@ async fn execute_sql(path: &Path, sql: &str) {
 }
 
 async fn rewrite_page_size(path: &Path, page_size: i64) {
-    // Page-size fixture generation must use one exclusive connection: the
-    // normal Database wrapper intentionally retains a separate read handle.
     let db = libsql::Builder::new_local(path).build().await.unwrap();
-    let connection = db.connect().unwrap();
-    connection
-        .execute_batch(&format!(
-            "PRAGMA journal_mode = DELETE; PRAGMA page_size = {page_size}; VACUUM;"
-        ))
-        .await
-        .unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute_batch(&format!(
+        "PRAGMA journal_mode = DELETE; PRAGMA page_size = {page_size}; VACUUM;"
+    ))
+    .await
+    .unwrap();
 }
 
 async fn database_page_size(path: &Path) -> i64 {

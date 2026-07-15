@@ -1,15 +1,19 @@
 use libsql::{Connection, params};
-use tracedecay_domain::{CanonicalObservationIdV1, DurableClaudeObservationV1, ObservationScopeV1};
+use tracedecay_domain::{
+    CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
+    CanonicalObservationFactV1, CanonicalObservationIdV1, CanonicalReasoningVisibilityV1,
+    CanonicalWorkflowEvidenceKindV1, DurableObservationV1, ObservationContractError,
+    ObservationScopeV1,
+};
 use tracedecay_store::{
-    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ClaudeObservationProjection,
-    ClaudeSessionMessageProjection, ProjectionSkipReason, ProjectionStoreError,
-    ProjectionStoreResult,
+    ObservationProjection, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V1, SessionMessageProjection,
 };
 
-use crate::sessions::SessionRecord;
 use crate::sessions::claude::{
     ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record,
 };
+use crate::sessions::{SessionMessageRecord, SessionRecord};
 
 use super::state::{
     has_other_projector_output_owner, message_rows_compatible, read_message, read_output_state,
@@ -17,8 +21,303 @@ use super::state::{
 };
 
 pub(in super::super) fn derive_projection(
-    observation: &DurableClaudeObservationV1,
-) -> ProjectionStoreResult<ClaudeObservationProjection> {
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<ObservationProjection> {
+    match observation.source().provider().as_str() {
+        "claude" => derive_claude_projection(observation),
+        "codex" | "cursor" | "hermes" | "kiro" | "cline" | "roo-code" | "kilo" => {
+            derive_canonical_projection(observation)
+        }
+        provider => Err(ProjectionStoreError::UnsupportedProvider(
+            provider.to_string(),
+        )),
+    }
+}
+
+fn derive_canonical_projection(
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<ObservationProjection> {
+    let envelope: CanonicalObservationEnvelopeV1 =
+        serde_json::from_value(observation.payload().clone()).map_err(|_| {
+            ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+        })?;
+    envelope
+        .validate()
+        .map_err(ProjectionStoreError::Contract)?;
+    if envelope.provider() != observation.source().provider()
+        || envelope.stable_record_id()
+            != observation.identity().native_record_id().ok_or_else(|| {
+                ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+            })?
+        || envelope.evidence().ordering_domain() != observation.identity().ordering_domain()
+        || envelope.evidence().range() != observation.identity().position()
+    {
+        return Err(ProjectionStoreError::Contract(
+            ObservationContractError::InvalidCanonicalPayload,
+        ));
+    }
+
+    let Some(projected) = canonical_message_fields(&envelope)? else {
+        return ObservationProjection::for_skip(
+            observation,
+            ProjectionSkipReason::NonConversationalRecord,
+        );
+    };
+    let provider = envelope.provider().as_str().to_owned();
+    let session_id = envelope.relations().session_id().as_str().to_owned();
+    let (project_key, project_path) = match observation.scope() {
+        ObservationScopeV1::Profile => ("user".to_owned(), "user".to_owned()),
+        ObservationScopeV1::Project { project_id } => (
+            project_id.as_str().to_owned(),
+            project_id.as_str().to_owned(),
+        ),
+    };
+    let timestamp = projected
+        .timestamp
+        .or_else(|| envelope.evidence().native_timestamp());
+    let is_subagent = envelope.relations().parent_agent_id().is_some();
+    let session = SessionRecord {
+        provider: provider.clone(),
+        session_id: session_id.clone(),
+        project_key,
+        project_path,
+        title: None,
+        started_at: timestamp,
+        ended_at: timestamp,
+        transcript_path: None,
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent,
+        agent_id: envelope
+            .relations()
+            .agent_id()
+            .map(|id| id.as_str().to_owned()),
+        parent_tool_use_id: None,
+    };
+    let ordinal = envelope
+        .evidence()
+        .native_sequence()
+        .unwrap_or_else(|| envelope.evidence().range().start());
+    let ordinal = i64::try_from(ordinal).map_err(|_| {
+        ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+    })?;
+    let metadata_json = serde_json::to_string(&envelope)
+        .map_err(|_| ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding))?;
+    let message = SessionMessageRecord {
+        provider,
+        message_id: envelope
+            .relations()
+            .message_id()
+            .unwrap_or_else(|| envelope.stable_record_id())
+            .as_str()
+            .to_owned(),
+        session_id,
+        role: projected.role,
+        timestamp,
+        ordinal,
+        text: projected.text,
+        kind: Some(projected.kind),
+        model: projected.model,
+        tool_names: projected.tool_names,
+        source_path: None,
+        source_offset: i64::try_from(envelope.evidence().range().start()).ok(),
+        metadata_json: Some(metadata_json),
+    };
+    ObservationProjection::for_message(observation, session, message)
+}
+
+struct CanonicalMessageFields {
+    role: String,
+    text: String,
+    kind: String,
+    model: Option<String>,
+    timestamp: Option<i64>,
+    tool_names: Option<String>,
+}
+
+fn canonical_message_fields(
+    envelope: &CanonicalObservationEnvelopeV1,
+) -> ProjectionStoreResult<Option<CanonicalMessageFields>> {
+    let facts = envelope.facts();
+    let tool_names = facts
+        .iter()
+        .filter_map(|fact| match fact {
+            CanonicalObservationFactV1::ToolInvocation { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let tool_names = (!tool_names.is_empty()).then(|| tool_names.join(","));
+
+    if let Some(CanonicalObservationFactV1::Message {
+        role,
+        content,
+        model,
+        timestamp,
+    }) = facts
+        .iter()
+        .find(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
+    {
+        return Ok(Some(CanonicalMessageFields {
+            role: canonical_role(*role).to_owned(),
+            text: canonical_fact_text(content)?,
+            kind: "message".to_owned(),
+            model: model.clone(),
+            timestamp: *timestamp,
+            tool_names,
+        }));
+    }
+
+    for fact in facts {
+        let fields = match fact {
+            CanonicalObservationFactV1::ToolInvocation {
+                name, arguments, ..
+            } => CanonicalMessageFields {
+                role: "assistant".to_owned(),
+                text: canonical_fact_text(arguments)?,
+                kind: "tool_invocation".to_owned(),
+                model: None,
+                timestamp: None,
+                tool_names: Some(name.clone()),
+            },
+            CanonicalObservationFactV1::ToolResult { content, .. } => CanonicalMessageFields {
+                role: "tool".to_owned(),
+                text: canonical_fact_text(content)?,
+                kind: "tool_result".to_owned(),
+                model: None,
+                timestamp: None,
+                tool_names: None,
+            },
+            CanonicalObservationFactV1::Compaction { summary, .. } => CanonicalMessageFields {
+                role: "system".to_owned(),
+                text: summary
+                    .as_ref()
+                    .map(canonical_fact_text)
+                    .transpose()?
+                    .unwrap_or_default(),
+                kind: "compaction".to_owned(),
+                model: None,
+                timestamp: None,
+                tool_names: None,
+            },
+            CanonicalObservationFactV1::Reasoning {
+                visibility,
+                content: Some(content),
+            } => CanonicalMessageFields {
+                role: "assistant".to_owned(),
+                text: canonical_fact_text(content)?,
+                kind: reasoning_kind(*visibility).to_owned(),
+                model: None,
+                timestamp: None,
+                tool_names: None,
+            },
+            CanonicalObservationFactV1::Git {
+                evidence_kind,
+                content,
+                ..
+            } => CanonicalMessageFields {
+                role: "system".to_owned(),
+                text: content
+                    .as_ref()
+                    .map(canonical_fact_text)
+                    .transpose()?
+                    .unwrap_or_default(),
+                kind: git_kind(*evidence_kind).to_owned(),
+                model: None,
+                timestamp: None,
+                tool_names: None,
+            },
+            CanonicalObservationFactV1::Workflow {
+                evidence_kind,
+                content,
+                ..
+            } => CanonicalMessageFields {
+                role: "system".to_owned(),
+                text: content
+                    .as_ref()
+                    .map(canonical_fact_text)
+                    .transpose()?
+                    .unwrap_or_default(),
+                kind: workflow_kind(*evidence_kind).to_owned(),
+                model: None,
+                timestamp: None,
+                tool_names: None,
+            },
+            CanonicalObservationFactV1::Usage { .. } => CanonicalMessageFields {
+                role: "system".to_owned(),
+                text: String::new(),
+                kind: "usage".to_owned(),
+                model: None,
+                timestamp: None,
+                tool_names: None,
+            },
+            CanonicalObservationFactV1::Message { .. }
+            | CanonicalObservationFactV1::Reasoning { content: None, .. }
+            | CanonicalObservationFactV1::Boundary { .. }
+            | CanonicalObservationFactV1::Unknown { .. } => continue,
+        };
+        return Ok(Some(fields));
+    }
+    Ok(None)
+}
+
+fn canonical_fact_text(value: &serde_json::Value) -> ProjectionStoreResult<String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_owned());
+    }
+    for pointer in ["/text", "/content", "/message"] {
+        if let Some(text) = value.pointer(pointer).and_then(serde_json::Value::as_str) {
+            return Ok(text.to_owned());
+        }
+    }
+    serde_json::to_string(value)
+        .map_err(|_| ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding))
+}
+
+fn canonical_role(role: CanonicalMessageRoleV1) -> &'static str {
+    match role {
+        CanonicalMessageRoleV1::User => "user",
+        CanonicalMessageRoleV1::Assistant => "assistant",
+        CanonicalMessageRoleV1::System => "system",
+        CanonicalMessageRoleV1::Tool => "tool",
+        CanonicalMessageRoleV1::Unknown => "unknown",
+    }
+}
+
+fn reasoning_kind(visibility: CanonicalReasoningVisibilityV1) -> &'static str {
+    match visibility {
+        CanonicalReasoningVisibilityV1::Visible => "reasoning_visible",
+        CanonicalReasoningVisibilityV1::Redacted => "reasoning_redacted",
+        CanonicalReasoningVisibilityV1::Unavailable => "reasoning_unavailable",
+        CanonicalReasoningVisibilityV1::NotApplicable => "reasoning_not_applicable",
+    }
+}
+
+fn git_kind(kind: CanonicalGitEvidenceKindV1) -> &'static str {
+    match kind {
+        CanonicalGitEvidenceKindV1::Diff => "git_diff",
+        CanonicalGitEvidenceKindV1::FileEdit => "git_file_edit",
+        CanonicalGitEvidenceKindV1::Commit => "git_commit",
+        CanonicalGitEvidenceKindV1::Branch => "git_branch",
+        CanonicalGitEvidenceKindV1::PullRequest => "git_pull_request",
+        CanonicalGitEvidenceKindV1::Unknown => "git_unknown",
+    }
+}
+
+fn workflow_kind(kind: CanonicalWorkflowEvidenceKindV1) -> &'static str {
+    match kind {
+        CanonicalWorkflowEvidenceKindV1::Plan => "workflow_plan",
+        CanonicalWorkflowEvidenceKindV1::Task => "workflow_task",
+        CanonicalWorkflowEvidenceKindV1::Subagent => "workflow_subagent",
+        CanonicalWorkflowEvidenceKindV1::ModelFallback => "workflow_model_fallback",
+        CanonicalWorkflowEvidenceKindV1::Attribution => "workflow_attribution",
+        CanonicalWorkflowEvidenceKindV1::PullRequest => "workflow_pull_request",
+        CanonicalWorkflowEvidenceKindV1::Unknown => "workflow_unknown",
+    }
+}
+
+fn derive_claude_projection(
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<ObservationProjection> {
     let session_id = observation.source().session_id().as_str();
     let payload = observation.payload();
     let durable_message_id = payload
@@ -74,9 +373,9 @@ pub(in super::super) fn derive_projection(
                 agent_id: draft.agent_id,
                 parent_tool_use_id: draft.parent_tool_use_id,
             };
-            ClaudeObservationProjection::for_message(observation, session, message)
+            ObservationProjection::for_message(observation, session, message)
         }
-        ClaudeRecordDisposition::NonConversational => ClaudeObservationProjection::for_skip(
+        ClaudeRecordDisposition::NonConversational => ObservationProjection::for_skip(
             observation,
             ProjectionSkipReason::NonConversationalRecord,
         ),
@@ -99,7 +398,7 @@ async fn read_projection_alias(
              FROM observation_projection_aliases
              WHERE projector_version = ?1 AND observation_id = ?2",
             params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
                 observation_id.as_str()
             ],
         )
@@ -124,13 +423,13 @@ async fn read_projection_alias(
 
 pub(in super::super) async fn derive_projection_with_alias(
     conn: &Connection,
-    observation: &DurableClaudeObservationV1,
-) -> ProjectionStoreResult<ClaudeObservationProjection> {
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<ObservationProjection> {
     let projection = derive_projection(observation)?;
     let Some(alias) = read_projection_alias(conn, observation.observation_id()).await? else {
         return Ok(projection);
     };
-    let ClaudeObservationProjection::Message(projection) = projection else {
+    let ObservationProjection::Message(projection) = projection else {
         return Err(ProjectionStoreError::ProvenanceCollision);
     };
     let mut session = projection.session().clone();
@@ -138,14 +437,14 @@ pub(in super::super) async fn derive_projection_with_alias(
     session.provider.clone_from(&alias.provider);
     message.provider = alias.provider;
     message.message_id = alias.message_id;
-    ClaudeObservationProjection::for_message(observation, session, message)
+    ObservationProjection::for_message(observation, session, message)
 }
 
 async fn apply_rows(
     conn: &Connection,
     sequence: u64,
-    observation: &DurableClaudeObservationV1,
-    projection: &ClaudeSessionMessageProjection,
+    observation: &DurableObservationV1,
+    projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<bool> {
     let session = projection.session();
     match read_session(conn, &session.provider, &session.session_id).await? {
@@ -284,7 +583,7 @@ async fn apply_rows(
 
 pub(super) async fn verify_provenance(
     conn: &Connection,
-    projection: &ClaudeSessionMessageProjection,
+    projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
     let provenance = projection.provenance();
     let message = projection.message();
@@ -333,7 +632,7 @@ pub(super) async fn verify_provenance(
 async fn apply_provenance(
     conn: &Connection,
     sequence: u64,
-    projection: &ClaudeSessionMessageProjection,
+    projection: &SessionMessageProjection,
     message_created: bool,
 ) -> ProjectionStoreResult<()> {
     let provenance = projection.provenance();
@@ -407,7 +706,7 @@ async fn apply_provenance(
 
 async fn verify_skip_disposition(
     conn: &Connection,
-    observation: &DurableClaudeObservationV1,
+    observation: &DurableObservationV1,
     reason: ProjectionSkipReason,
 ) -> ProjectionStoreResult<()> {
     let mut rows = conn
@@ -415,7 +714,7 @@ async fn verify_skip_disposition(
             "SELECT receipt_id, reason FROM observation_projection_dispositions
              WHERE projector_version = ?1 AND observation_id = ?2",
             params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
                 observation.observation_id().as_str()
             ],
         )
@@ -444,7 +743,7 @@ async fn verify_skip_disposition(
 
 async fn apply_skip_disposition(
     conn: &Connection,
-    observation: &DurableClaudeObservationV1,
+    observation: &DurableObservationV1,
     reason: ProjectionSkipReason,
 ) -> ProjectionStoreResult<()> {
     conn.execute(
@@ -453,7 +752,7 @@ async fn apply_skip_disposition(
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT DO NOTHING",
         params![
-            CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+            SESSION_MESSAGE_PROJECTOR_VERSION_V1,
             observation.observation_id().as_str(),
             observation.receipt().receipt().receipt_id().as_str(),
             reason.as_str(),
@@ -466,18 +765,18 @@ async fn apply_skip_disposition(
 
 pub(super) async fn verify_effect(
     conn: &Connection,
-    observation: &DurableClaudeObservationV1,
-    effect: &ClaudeObservationProjection,
+    observation: &DurableObservationV1,
+    effect: &ObservationProjection,
 ) -> ProjectionStoreResult<()> {
     match effect {
-        ClaudeObservationProjection::Message(projection) => {
+        ObservationProjection::Message(projection) => {
             verify_provenance(conn, projection).await?;
             let state = read_output_state(conn, projection)
                 .await?
                 .ok_or(ProjectionStoreError::ProvenanceCollision)?;
             verify_output_state(conn, &state).await
         }
-        ClaudeObservationProjection::Skipped(reason) => {
+        ObservationProjection::Skipped(reason) => {
             verify_skip_disposition(conn, observation, *reason).await
         }
     }
@@ -486,16 +785,100 @@ pub(super) async fn verify_effect(
 pub(super) async fn apply_effect(
     conn: &Connection,
     sequence: u64,
-    observation: &DurableClaudeObservationV1,
-    effect: &ClaudeObservationProjection,
+    observation: &DurableObservationV1,
+    effect: &ObservationProjection,
 ) -> ProjectionStoreResult<()> {
     match effect {
-        ClaudeObservationProjection::Message(projection) => {
+        ObservationProjection::Message(projection) => {
             let message_created = apply_rows(conn, sequence, observation, projection).await?;
             apply_provenance(conn, sequence, projection, message_created).await
         }
-        ClaudeObservationProjection::Skipped(reason) => {
+        ObservationProjection::Skipped(reason) => {
             apply_skip_disposition(conn, observation, *reason).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tracedecay_domain::{
+        CanonicalBoundaryKindV1, CanonicalObservationEvidenceV1, CanonicalObservationRelationsV1,
+        ObservationId, ObservationOrderingDomainV1, ObservationSourceRangeV1, ProviderId,
+        SessionId,
+    };
+
+    use super::*;
+
+    fn envelope(facts: Vec<CanonicalObservationFactV1>) -> CanonicalObservationEnvelopeV1 {
+        CanonicalObservationEnvelopeV1::new(
+            ProviderId::new("codex").unwrap(),
+            "fixture",
+            ObservationId::new("record.fixture").unwrap(),
+            CanonicalObservationRelationsV1::new(SessionId::new("session.fixture").unwrap()),
+            facts,
+            CanonicalObservationEvidenceV1::new(
+                ObservationOrderingDomainV1::SnapshotOrder,
+                ObservationSourceRangeV1::new(1, 2).unwrap(),
+            ),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn canonical_projection_prefers_authored_message_over_supporting_facts() {
+        let envelope = envelope(vec![
+            CanonicalObservationFactV1::Usage {
+                input_tokens: Some(10),
+                output_tokens: Some(4),
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                reasoning_tokens: None,
+            },
+            CanonicalObservationFactV1::ToolInvocation {
+                invocation_id: ObservationId::new("tool.fixture").unwrap(),
+                name: "Read".to_owned(),
+                arguments: json!({"path": "redacted"}),
+            },
+            CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!({"text": "safe"}),
+                model: Some("model.fixture".to_owned()),
+                timestamp: Some(42),
+            },
+        ]);
+
+        let fields = canonical_message_fields(&envelope).unwrap().unwrap();
+        assert_eq!(fields.role, "assistant");
+        assert_eq!(fields.text, "safe");
+        assert_eq!(fields.kind, "message");
+        assert_eq!(fields.model.as_deref(), Some("model.fixture"));
+        assert_eq!(fields.timestamp, Some(42));
+        assert_eq!(fields.tool_names.as_deref(), Some("Read"));
+    }
+
+    #[test]
+    fn canonical_projection_skips_boundary_only_records() {
+        let envelope = envelope(vec![CanonicalObservationFactV1::Boundary {
+            boundary_kind: CanonicalBoundaryKindV1::TurnEnd,
+        }]);
+
+        assert!(canonical_message_fields(&envelope).unwrap().is_none());
+    }
+
+    #[test]
+    fn canonical_projection_kind_names_are_stable() {
+        assert_eq!(
+            reasoning_kind(CanonicalReasoningVisibilityV1::Visible),
+            "reasoning_visible"
+        );
+        assert_eq!(
+            git_kind(CanonicalGitEvidenceKindV1::PullRequest),
+            "git_pull_request"
+        );
+        assert_eq!(
+            workflow_kind(CanonicalWorkflowEvidenceKindV1::ModelFallback),
+            "workflow_model_fallback"
+        );
     }
 }

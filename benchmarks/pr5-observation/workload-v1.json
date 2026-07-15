@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "workload_id": "pr5-observation-pipeline-v1",
   "implementation": "src/sessions/claude_observation_benchmark.rs",
   "platform": {
@@ -30,6 +30,56 @@
     "unique_ids": true,
     "secret_shaped_field_per_record": true
   },
+  "provider_baselines": [
+    {
+      "provider": "claude",
+      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-claude-session", "message_id": "benchmark-claude-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
+      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
+      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+    },
+    {
+      "provider": "codex",
+      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-codex-session", "message_id": "benchmark-codex-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
+      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
+      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+    },
+    {
+      "provider": "cursor",
+      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-cursor-session", "message_id": "benchmark-cursor-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
+      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
+      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+    },
+    {
+      "provider": "hermes",
+      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-hermes-session", "message_id": "benchmark-hermes-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
+      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
+      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+    },
+    {
+      "provider": "kiro",
+      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-kiro-session", "message_id": "benchmark-kiro-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
+      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
+      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+    },
+    {
+      "provider": "cline",
+      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-cline-session", "message_id": "benchmark-cline-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
+      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
+      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+    },
+    {
+      "provider": "roo-code",
+      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-roo-code-session", "message_id": "benchmark-roo-code-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
+      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
+      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+    },
+    {
+      "provider": "kilo",
+      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-kilo-session", "message_id": "benchmark-kilo-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
+      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
+      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+    }
+  ],
   "phases": [
     "scan_complete_transcript",
     "parse_records",

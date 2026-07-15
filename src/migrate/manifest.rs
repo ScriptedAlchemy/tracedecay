@@ -558,10 +558,11 @@ async fn apply_migration_manifest_with_lease(
     }
     let mut database_scopes = Vec::with_capacity(lifecycle_leases.len());
     for lease in &lifecycle_leases {
-        let root = profile_roots
-            .iter()
-            .find(|root| lease.guards_profile(root))
-            .expect("migration lease must guard one requested profile root");
+        let Some(root) = profile_roots.iter().find(|root| lease.guards_profile(root)) else {
+            return Err(invalid_manifest(
+                "migration lease does not guard a requested profile root",
+            ));
+        };
         database_scopes.push(
             crate::db::enter_maintenance_database_scope(lease, root, &operation)
                 .map_err(|error| invalid_manifest(&error.to_string()))?,
@@ -1087,7 +1088,11 @@ fn set_snapshot_permissions(_path: &Path) -> io::Result<()> {
 }
 
 fn sync_file(path: &Path) -> io::Result<()> {
-    fs::File::open(path)?.sync_all()
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?
+        .sync_all()
 }
 
 #[cfg(unix)]

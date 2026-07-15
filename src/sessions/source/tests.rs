@@ -942,6 +942,26 @@ fn collect_files_preserves_the_callers_root_spelling() {
 }
 
 #[test]
+fn collect_files_bounds_recursive_discovery_by_depth() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_transcript = dir.path().join("root.jsonl");
+    let nested = dir.path().join("nested");
+    let nested_transcript = nested.join("nested.jsonl");
+    let too_deep = nested.join("deeper").join("ignored.jsonl");
+    std::fs::create_dir_all(too_deep.parent().unwrap()).unwrap();
+    std::fs::write(&root_transcript, "{}\n").unwrap();
+    std::fs::write(&nested_transcript, "{}\n").unwrap();
+    std::fs::write(&too_deep, "{}\n").unwrap();
+
+    let mut discovered = collect_files_with_ext(dir.path(), "jsonl", 1);
+    discovered.sort();
+    let mut expected = vec![root_transcript, nested_transcript];
+    expected.sort();
+
+    assert_eq!(discovered, expected);
+}
+
+#[test]
 fn stream_new_jsonl_returns_none_for_missing_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("missing.jsonl");

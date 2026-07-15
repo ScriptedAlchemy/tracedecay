@@ -8,54 +8,50 @@
 //! legacy `plugins.tracedecay.project_root` pin or the session row's `cwd`.
 //! For projectless/gateway sessions, one completed turn may instead prove its
 //! project through structured tool-call routing (`project_path`,
-//! `project_root`, or a nested project selector). Only that turn is projected;
-//! an entire long-running multi-project chat is never assigned by inference.
+//! `project_root`, or a nested project selector). Only that turn is admitted to
+//! the project scope; an entire long-running multi-project chat is never assigned
+//! by inference.
 //! Profile directories are never `TraceDecay` project identities.
 //!
-//! Unlike the file-based adapters this source holds *many* sessions in one
-//! store, so it does not implement [`TranscriptSource`]; it drives the shared
-//! `parse_offsets` cursor directly (`position` = last-seen `messages.id`, the
-//! `RowCursor` kind) and upserts multi-session [`TranscriptBatch`]es in
-//! bounded chunks.
-//!
-//! Hermes transcripts fill only the searchable `session_messages` projection
-//! ([`GlobalDb::upsert_transcript_projection_batches`]): the raw LCM store is
-//! already fed losslessly at runtime by the generated plugin's
-//! `lcm_preflight` active-message ingest (and by the one-time legacy-store
-//! migration) under its own message ids, so writing raw rows from this sweep
-//! too would duplicate the LCM store.
-//!
-//! [`TranscriptSource`]: crate::sessions::source::TranscriptSource
-//! [`TranscriptBatch`]: crate::global_db::TranscriptBatch
+//! Each bounded `SQLite` row is admitted through the shared observation privacy,
+//! cursor, persistence, duplicate, collision, and projection-queue authority.
+//! `SQLite` row ids are generation-local ordering evidence only; native identity
+//! is derived from immutable Hermes session and message evidence.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
-use serde_json::{Map, Value};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use tracedecay_domain::{
+    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1,
+    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, PayloadReferenceV1, ProjectId, ProviderId, RetentionClass, SessionId,
+};
+use tracedecay_store::ObservationPersistOutcome;
+use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
 use crate::agents::hermes::read_config_pinned_project_root;
-use crate::global_db::{GlobalDb, ParseOffset, TranscriptBatch};
-use crate::sessions::shared::{
-    NewRows, ProjectRootMatcher, StoredCursor, TranscriptIngestStats, TranscriptLocation,
-    TranscriptLocationMetadataKeys, append_location_metadata, content_storage_text_and_tools,
-    path_belongs_to_project, preview_title, title_from_messages,
+use crate::application::host_admission::{
+    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionStatus,
 };
-use crate::sessions::{SessionMessageRecord, SessionRecord};
-
+use crate::application::observation::{
+    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
+};
+use crate::global_db::GlobalDb;
+use crate::privacy::{
+    MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1,
+    parse_normalized_observation_record_v1,
+};
+use crate::sessions::shared::{
+    NewRows, ProjectRootMatcher, StoredCursor, TranscriptIngestStats, path_belongs_to_project,
+};
 const PROVIDER: &str = "hermes";
-const HERMES_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMetadataKeys::new(
-    "hermes_session_cwd",
-    "hermes_session_worktree",
-    "hermes_session_location_provenance",
-);
-/// Rows ingested per transaction. Keeps the first catch-up over a large
-/// profile history (tens of thousands of rows) memory-bounded while letting
-/// the cursor advance after every committed chunk, so an interrupted sweep
-/// resumes where it stopped.
+const OBSERVATION_RETENTION: &str = "transcript.hermes.v1";
 const CHUNK_ROWS: usize = 2000;
-const CORRELATION_CURSOR_VERSION: &str = "turn-project-v2";
-const USER_CURSOR_VERSION: &str = "user-turn-v2";
 
 /// Ingests Hermes sessions proven to belong to `project_root` into `db`.
 ///
@@ -77,8 +73,8 @@ pub struct ProjectIngestDestination<'a> {
 
 /// Ingests Hermes history for several registered projects while opening and
 /// scanning each profile `state.db` only once. Every destination retains its
-/// own durable row cursor and advances it in the same transaction as its
-/// projection writes.
+/// own authoritative source cursor, advanced atomically with canonical
+/// observation persistence or typed complete-record coverage.
 pub async fn ingest_for_projects(
     destinations: &[ProjectIngestDestination<'_>],
 ) -> TranscriptIngestStats {
@@ -139,9 +135,9 @@ pub async fn ingest_homes(
     stats
 }
 
-/// Ingests the canonical historical Hermes conversation into the profile-level
-/// user session store. Project ingestion separately projects each turn into
-/// every registered project it touched using the same stable message IDs.
+/// Ingests canonical historical Hermes observations into the profile scope.
+/// Project ingestion separately admits each turn to every registered project it
+/// touched using the same stable message IDs.
 pub async fn ingest_user_sessions(
     db: &GlobalDb,
     registered_roots: &[PathBuf],
@@ -191,15 +187,8 @@ pub(crate) async fn ingest_legacy_pinned_profile(
                 state_db.display()
             )
         })?;
-    let profile = profile_dir
-        .parent()
-        .filter(|parent| parent.file_name().is_some_and(|name| name == "profiles"))
-        .and_then(|_| profile_dir.file_name())
-        .and_then(|name| name.to_str())
-        .map(str::to_string);
     let source = HermesProfileSource {
         state_db,
-        profile,
         legacy_project_pin: Some(legacy_project_pin),
     };
     try_ingest_state_db(db, &source, project_root).await
@@ -211,11 +200,8 @@ pub(crate) async fn ingest_legacy_pinned_profile(
 /// profile is only a bounded candidate source and each session must carry a
 /// matching code-project cwd.
 ///
-/// Returns `(state_db_path, profile_name)`; the default profile (the home
-/// directory itself) has no profile name.
 struct HermesProfileSource {
     state_db: PathBuf,
-    profile: Option<String>,
     legacy_project_pin: Option<PathBuf>,
 }
 
@@ -233,12 +219,11 @@ fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
                 })?
             }));
         }
-        for (profile_dir, profile) in profiles {
+        for (profile_dir, _) in profiles {
             let state_db = profile_dir.join("state.db");
             if state_db.is_file() && seen.insert(state_db.clone()) {
                 out.push(HermesProfileSource {
                     state_db,
-                    profile,
                     legacy_project_pin: read_config_pinned_project_root(
                         &profile_dir.join("config.yaml"),
                     )
@@ -273,7 +258,7 @@ fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<Her
                 candidates.push((profile_dir, name));
             }
         }
-        for (profile_dir, profile_name) in candidates {
+        for (profile_dir, _) in candidates {
             let legacy_project_pin =
                 read_config_pinned_project_root(&profile_dir.join("config.yaml"))
                     .map(PathBuf::from);
@@ -288,7 +273,6 @@ fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<Her
             if state_db.is_file() && seen.insert(state_db.clone()) {
                 out.push(HermesProfileSource {
                     state_db,
-                    profile: profile_name,
                     legacy_project_pin,
                 });
             }
@@ -316,15 +300,12 @@ struct HermesRow {
     session_id: String,
     role: String,
     content: Option<String>,
+    reasoning: Option<String>,
     tool_name: Option<String>,
     tool_calls: Option<String>,
     timestamp: Option<f64>,
-    session_title: Option<String>,
     session_model: Option<String>,
     parent_session_id: Option<String>,
-    session_started_at: Option<f64>,
-    session_ended_at: Option<f64>,
-    session_source: Option<String>,
     session_cwd: Option<String>,
     session_input_tokens: Option<i64>,
     session_output_tokens: Option<i64>,
@@ -336,40 +317,668 @@ struct HermesRow {
     active: i64,
 }
 
+struct HermesObservationRecord {
+    native: Value,
+    native_record_id: ObservationId,
+    source: ObservationSourceIdentityV1,
+    range: ObservationSourceRangeV1,
+}
+
+enum HermesAdmissionAction {
+    Capture(Box<CaptureObservationRequest>),
+    Cover(ObservationCoverageReason),
+}
+
+struct HermesAdmission {
+    source: ObservationSourceIdentityV1,
+    range: ObservationSourceRangeV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    action: HermesAdmissionAction,
+}
+
+fn observation_source(row: &HermesRow) -> Result<ObservationSourceIdentityV1, String> {
+    let provider = ProviderId::new(PROVIDER).map_err(|_| "invalid Hermes provider".to_string())?;
+    let session_id =
+        SessionId::new(&row.session_id).map_err(|_| "invalid Hermes session id".to_string())?;
+    ObservationSourceIdentityV1::for_provider(provider, session_id)
+        .map_err(|_| "invalid Hermes observation source".to_string())
+}
+
+#[derive(serde::Deserialize)]
+struct HermesNativeObservation {
+    session_id: String,
+    parent_session_id: Option<String>,
+    role: String,
+    content: Option<String>,
+    reasoning: Option<String>,
+    model: Option<String>,
+    tool_name: Option<String>,
+    tool_calls: Option<Value>,
+    timestamp: Option<f64>,
+    usage: HermesNativeUsage,
+}
+
+#[derive(serde::Deserialize)]
+struct HermesNativeUsage {
+    #[serde(rename = "input_tokens")]
+    input: Option<i64>,
+    #[serde(rename = "output_tokens")]
+    output: Option<i64>,
+    #[serde(rename = "cache_read_tokens")]
+    cache_read: Option<i64>,
+    #[serde(rename = "cache_write_tokens")]
+    cache_write: Option<i64>,
+    #[serde(rename = "reasoning_tokens")]
+    reasoning: Option<i64>,
+}
+
+fn native_observation_record(
+    row: &HermesRow,
+    source: ObservationSourceIdentityV1,
+    range: ObservationSourceRangeV1,
+) -> Result<HermesObservationRecord, ObservationCoverageReason> {
+    if row.timestamp.is_some_and(|value| !value.is_finite()) {
+        return Err(ObservationCoverageReason::MalformedFrame);
+    }
+    let tool_calls = match row
+        .tool_calls
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(value) => Some(
+            serde_json::from_str::<Value>(value)
+                .map_err(|_| ObservationCoverageReason::MalformedFrame)?,
+        ),
+        None => None,
+    };
+    let native = json!({
+        "session_id": row.session_id,
+        "parent_session_id": row.parent_session_id,
+        "role": row.role,
+        "content": row.content,
+        "reasoning": row.reasoning,
+        "model": row.session_model,
+        "tool_name": row.tool_name,
+        "tool_calls": tool_calls,
+        "timestamp": row.timestamp,
+        "usage": {
+            "input_tokens": row.session_input_tokens,
+            "output_tokens": row.session_output_tokens,
+            "cache_read_tokens": row.session_cache_read_tokens,
+            "cache_write_tokens": row.session_cache_write_tokens,
+            "reasoning_tokens": row.session_reasoning_tokens,
+        },
+    });
+    let native_record_id = stable_native_id("hermes.native", &immutable_message_evidence(&native))
+        .map_err(|()| ObservationCoverageReason::MalformedFrame)?;
+    Ok(HermesObservationRecord {
+        native,
+        native_record_id,
+        source,
+        range,
+    })
+}
+
+fn immutable_message_evidence(native: &Value) -> Value {
+    json!({
+        "session_id": native.get("session_id"),
+        "role": native.get("role"),
+        "content": native.get("content"),
+        "reasoning": native.get("reasoning"),
+        "tool_name": native.get("tool_name"),
+        "tool_calls": native.get("tool_calls"),
+        "timestamp_bits": native
+            .get("timestamp")
+            .and_then(Value::as_f64)
+            .map(f64::to_bits),
+    })
+}
+
+fn stable_native_id(prefix: &str, evidence: &Value) -> Result<ObservationId, ()> {
+    let digest = PayloadReferenceV1::for_payload(evidence).map_err(|_| ())?;
+    ObservationId::new(format!("{prefix}.{}", digest.digest().as_str())).map_err(|_| ())
+}
+
+fn normalize_native_observation(
+    native: Value,
+    range: ObservationSourceRangeV1,
+) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
+    let native: HermesNativeObservation =
+        serde_json::from_value(native).map_err(|_| ObservationRecordParseErrorV1::Malformed)?;
+    let provider = ProviderId::new(PROVIDER)
+        .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
+    let session_id = SessionId::new(&native.session_id)
+        .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
+    let identity_evidence = json!({
+        "session_id": native.session_id,
+        "role": native.role,
+        "content": native.content,
+        "reasoning": native.reasoning,
+        "tool_name": native.tool_name,
+        "tool_calls": native.tool_calls,
+        "timestamp_bits": native.timestamp.map(f64::to_bits),
+    });
+    let stable_record_id = stable_native_id("hermes.native", &identity_evidence)
+        .map_err(|()| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
+    let agent_id = stable_native_id("hermes.session", &json!(native.session_id))
+        .map_err(|()| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
+    let mut relations = CanonicalObservationRelationsV1::new(session_id)
+        .with_message_id(stable_record_id.clone())
+        .with_agent_id(agent_id);
+    if let Some(parent_session_id) = native.parent_session_id.as_deref() {
+        let parent_agent_id = stable_native_id("hermes.session", &json!(parent_session_id))
+            .map_err(|()| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
+        relations = relations.with_parent_agent_id(parent_agent_id);
+    }
+
+    let role = canonical_message_role(&native.role)?;
+    let mut facts = Vec::new();
+    if role == CanonicalMessageRoleV1::Tool {
+        facts.push(CanonicalObservationFactV1::ToolResult {
+            invocation_id: None,
+            content: native.content.clone().map_or(Value::Null, Value::String),
+            success: None,
+        });
+    } else {
+        facts.push(CanonicalObservationFactV1::Message {
+            role,
+            content: native.content.clone().map_or(Value::Null, Value::String),
+            model: native.model.clone(),
+            timestamp: native.timestamp.map(|value| value as i64),
+        });
+    }
+    append_tool_invocations(&mut facts, native.tool_calls.as_ref(), &stable_record_id)?;
+
+    if let Some((
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens,
+    )) = canonical_usage(&native.usage)?
+    {
+        facts.push(CanonicalObservationFactV1::Usage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            reasoning_tokens,
+        });
+    }
+    let (visibility, content) = match native.reasoning {
+        Some(content) => (
+            CanonicalReasoningVisibilityV1::Visible,
+            Some(Value::String(content)),
+        ),
+        None if role == CanonicalMessageRoleV1::Assistant => {
+            (CanonicalReasoningVisibilityV1::Unavailable, None)
+        }
+        None => (CanonicalReasoningVisibilityV1::NotApplicable, None),
+    };
+    facts.push(CanonicalObservationFactV1::Reasoning {
+        visibility,
+        content,
+    });
+
+    let mut evidence =
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SqliteRowId, range)
+            .with_native_sequence(range.end());
+    if let Some(timestamp) = native.timestamp {
+        evidence = evidence.with_native_timestamp(timestamp as i64);
+    }
+    CanonicalObservationEnvelopeV1::new(
+        provider,
+        "message",
+        stable_record_id,
+        relations,
+        facts,
+        evidence,
+    )
+    .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)
+}
+
+fn canonical_message_role(
+    role: &str,
+) -> Result<CanonicalMessageRoleV1, ObservationRecordParseErrorV1> {
+    match role {
+        "user" => Ok(CanonicalMessageRoleV1::User),
+        "assistant" => Ok(CanonicalMessageRoleV1::Assistant),
+        "system" => Ok(CanonicalMessageRoleV1::System),
+        "tool" => Ok(CanonicalMessageRoleV1::Tool),
+        _ => Err(ObservationRecordParseErrorV1::InvalidCanonicalEnvelope),
+    }
+}
+
+fn append_tool_invocations(
+    facts: &mut Vec<CanonicalObservationFactV1>,
+    tool_calls: Option<&Value>,
+    message_id: &ObservationId,
+) -> Result<(), ObservationRecordParseErrorV1> {
+    let Some(tool_calls) = tool_calls else {
+        return Ok(());
+    };
+    let calls = tool_calls
+        .as_array()
+        .ok_or(ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
+    for call in calls {
+        let name = call
+            .pointer("/function/name")
+            .or_else(|| call.get("name"))
+            .and_then(Value::as_str)
+            .ok_or(ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
+        let arguments = call
+            .pointer("/function/arguments")
+            .or_else(|| call.get("arguments"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let arguments = match arguments {
+            Value::String(raw) => serde_json::from_str(&raw).unwrap_or(Value::String(raw)),
+            value => value,
+        };
+        let invocation_evidence = match call.get("id") {
+            Some(native_id) => json!({
+                "message_id": message_id.as_str(),
+                "native_tool_id": native_id,
+            }),
+            None => json!({
+                "message_id": message_id.as_str(),
+                "tool_call": call,
+            }),
+        };
+        let invocation_id = stable_native_id("hermes.tool", &invocation_evidence)
+            .map_err(|()| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
+        facts.push(CanonicalObservationFactV1::ToolInvocation {
+            invocation_id,
+            name: name.to_owned(),
+            arguments,
+        });
+    }
+    Ok(())
+}
+
+type CanonicalUsage = (
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+);
+
+fn canonical_usage(
+    usage: &HermesNativeUsage,
+) -> Result<Option<CanonicalUsage>, ObservationRecordParseErrorV1> {
+    let usage = (
+        nonnegative_token_count(usage.input)?,
+        nonnegative_token_count(usage.output)?,
+        nonnegative_token_count(usage.cache_read)?,
+        nonnegative_token_count(usage.cache_write)?,
+        nonnegative_token_count(usage.reasoning)?,
+    );
+    Ok((usage.0.is_some()
+        || usage.1.is_some()
+        || usage.2.is_some()
+        || usage.3.is_some()
+        || usage.4.is_some())
+    .then_some(usage))
+}
+
+fn nonnegative_token_count(
+    value: Option<i64>,
+) -> Result<Option<u64>, ObservationRecordParseErrorV1> {
+    value
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_observation_row(
+    row: &HermesRow,
+    admitted: bool,
+    scope: ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    file_identity: u64,
+    resume_fingerprint: u64,
+) -> Result<HermesAdmission, String> {
+    let source = observation_source(row)?;
+    let start = expected_cursor.as_ref().map_or(0, |cursor| {
+        if cursor.generation() == generation {
+            cursor.position()
+        } else {
+            0
+        }
+    });
+    let end = u64::try_from(row.id).map_err(|_| "invalid Hermes SQLite row id".to_string())?;
+    let range = ObservationSourceRangeV1::new(start, end)
+        .map_err(|_| "invalid Hermes SQLite row range".to_string())?;
+    let coverage = if !admitted || row.active == 0 {
+        Some(ObservationCoverageReason::OutOfScope)
+    } else if !matches!(row.role.as_str(), "user" | "assistant" | "tool" | "system") {
+        Some(ObservationCoverageReason::UnsupportedFact)
+    } else {
+        None
+    };
+    let action = if let Some(reason) = coverage {
+        HermesAdmissionAction::Cover(reason)
+    } else {
+        match native_observation_record(row, source.clone(), range) {
+            Err(reason) => HermesAdmissionAction::Cover(reason),
+            Ok(normalized) => {
+                let encoded = serde_json::to_vec(&normalized.native)
+                    .map_err(|_| "could not encode Hermes observation".to_string())?;
+                if encoded.len() > MAX_OBSERVATION_RECORD_BYTES {
+                    HermesAdmissionAction::Cover(ObservationCoverageReason::OversizedFrame)
+                } else {
+                    match parse_normalized_observation_record_v1(
+                        &encoded,
+                        normalized.range,
+                        ObservationOrderingDomainV1::SqliteRowId,
+                        |native| normalize_native_observation(native, normalized.range),
+                    ) {
+                        Err(
+                            ObservationRecordParseErrorV1::TooLarge
+                            | ObservationRecordParseErrorV1::CanonicalEnvelopeTooLarge,
+                        ) => {
+                            HermesAdmissionAction::Cover(ObservationCoverageReason::OversizedFrame)
+                        }
+                        Err(ObservationRecordParseErrorV1::Empty) => {
+                            HermesAdmissionAction::Cover(ObservationCoverageReason::BlankFrame)
+                        }
+                        Err(_) => {
+                            HermesAdmissionAction::Cover(ObservationCoverageReason::MalformedFrame)
+                        }
+                        Ok(parsed) => {
+                            let identity = ObservationIdentityMaterialV1::for_native_record(
+                                normalized.source,
+                                scope,
+                                generation,
+                                normalized.range,
+                                ObservationOrderingDomainV1::SqliteRowId,
+                                normalized.native_record_id,
+                            )
+                            .map_err(|_| "invalid Hermes observation identity".to_string())?;
+                            let retention = RetentionClass::new(OBSERVATION_RETENTION)
+                                .map_err(|_| "invalid Hermes retention class".to_string())?;
+                            let request = CaptureObservationRequest::new(
+                                parsed,
+                                identity,
+                                expected_cursor.clone(),
+                                retention,
+                                ObservationCancellation::default(),
+                            )
+                            .map_err(|_| "invalid Hermes capture request".to_string())?
+                            .with_resume_checkpoint(file_identity, resume_fingerprint);
+                            HermesAdmissionAction::Capture(Box::new(request))
+                        }
+                    }
+                }
+            }
+        }
+    };
+    Ok(HermesAdmission {
+        source,
+        range,
+        expected_cursor,
+        action,
+    })
+}
+
+fn sqlite_incarnation(path: &Path) -> Result<(ObservationSourceGenerationV1, u64, u64), String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|_| "could not inspect Hermes SQLite authority".to_string())?;
+    #[cfg(unix)]
+    let physical = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let physical = {
+        return Err("Hermes SQLite physical identity is unavailable".to_string());
+    };
+    let mut identity_hasher = Sha256::new();
+    identity_hasher.update(physical.0.to_le_bytes());
+    identity_hasher.update(physical.1.to_le_bytes());
+    let identity_digest = identity_hasher.finalize();
+    let mut identity_bytes = [0_u8; 8];
+    identity_bytes.copy_from_slice(&identity_digest[..8]);
+    let file_identity = u64::from_le_bytes(identity_bytes).max(1);
+
+    let mut resume_hasher = Sha256::new();
+    resume_hasher.update(file_identity.to_le_bytes());
+    resume_hasher.update(metadata.len().to_le_bytes());
+    resume_hasher.update(file_mtime_secs(path).to_le_bytes());
+    let resume_digest = resume_hasher.finalize();
+    let mut resume_bytes = [0_u8; 8];
+    resume_bytes.copy_from_slice(&resume_digest[..8]);
+    let resume_fingerprint = u64::from_le_bytes(resume_bytes);
+    let generation = ObservationSourceGenerationV1::new(file_identity)
+        .map_err(|_| "invalid Hermes SQLite generation".to_string())?;
+    Ok((generation, file_identity, resume_fingerprint))
+}
+
+fn project_scope(project_root: &Path) -> Result<ObservationScopeV1, String> {
+    let layout = crate::storage::resolve_layout_for_current_profile(project_root)
+        .map_err(|_| "could not resolve Hermes project identity".to_string())?;
+    let project_id = layout
+        .identity
+        .project_id
+        .ok_or_else(|| "Hermes project identity is unavailable".to_string())?;
+    let project_id =
+        ProjectId::new(project_id).map_err(|_| "invalid Hermes project identity".to_string())?;
+    Ok(ObservationScopeV1::Project { project_id })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn advance_coverage(
+    facade: &HostAdmissionFacade<'_>,
+    source: ObservationSourceIdentityV1,
+    range: ObservationSourceRangeV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    scope: ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    reason: ObservationCoverageReason,
+    receipt: Option<tracedecay_domain::SanitizationReceiptV1>,
+    file_identity: u64,
+    resume_fingerprint: u64,
+) -> Result<(), String> {
+    let advance = match receipt {
+        Some(receipt) => ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
+            source,
+            scope,
+            generation,
+            ObservationOrderingDomainV1::SqliteRowId,
+            expected_cursor,
+            range,
+            reason,
+            receipt,
+        ),
+        None => ObservationCursorAdvance::for_ordering(
+            source,
+            scope,
+            generation,
+            ObservationOrderingDomainV1::SqliteRowId,
+            expected_cursor,
+            range,
+            reason,
+        ),
+    }
+    .map_err(|_| "invalid Hermes coverage transition".to_string())?
+    .with_resume_checkpoint(file_identity, resume_fingerprint);
+    facade
+        .advance_non_durable_source_cursor(advance, ObservationCancellation::default())
+        .await
+        .map(|_| ())
+        .map_err(host_admission_error)
+}
+
+fn host_admission_error(outcome: HostAdmissionOutcome) -> String {
+    match outcome.status {
+        HostAdmissionStatus::Backpressured => "Hermes observation admission was backpressured",
+        HostAdmissionStatus::Unavailable => "Hermes observation authority is unavailable",
+        HostAdmissionStatus::Unknown => "Hermes observation provider is unsupported",
+        HostAdmissionStatus::Degraded => "Hermes observation admission was degraded",
+        HostAdmissionStatus::Supported
+        | HostAdmissionStatus::AcceptedForReplay
+        | HostAdmissionStatus::Committed
+        | HostAdmissionStatus::ExactDuplicate => "Hermes observation admission was incomplete",
+    }
+    .to_string()
+}
+
+async fn admit_rows(
+    db: &GlobalDb,
+    rows: &[HermesRow],
+    scope: ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    file_identity: u64,
+    resume_fingerprint: u64,
+    route: impl Fn(&HermesRow) -> bool,
+) -> Result<TranscriptIngestStats, String> {
+    let authorities = match scope {
+        ObservationScopeV1::Project { .. } => HostAdmissionAuthorities::new(Some(db), None),
+        ObservationScopeV1::Profile => HostAdmissionAuthorities::new(None, Some(db)),
+    };
+    let facade = HostAdmissionFacade::new(authorities);
+    let mut stats = TranscriptIngestStats::default();
+    let mut sessions = BTreeSet::new();
+    for row in rows {
+        let source = observation_source(row)?;
+        let expected_cursor = facade
+            .get_source_cursor(&source, &scope)
+            .await
+            .map_err(host_admission_error)?;
+        let end = u64::try_from(row.id).map_err(|_| "invalid Hermes SQLite row id".to_string())?;
+        if expected_cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.generation() == generation && cursor.position() >= end)
+        {
+            continue;
+        }
+        let admission = prepare_observation_row(
+            row,
+            route(row),
+            scope.clone(),
+            generation,
+            expected_cursor,
+            file_identity,
+            resume_fingerprint,
+        )?;
+        let HermesAdmission {
+            source,
+            range,
+            expected_cursor,
+            action,
+        } = admission;
+        match action {
+            HermesAdmissionAction::Cover(reason) => {
+                advance_coverage(
+                    &facade,
+                    source,
+                    range,
+                    expected_cursor,
+                    scope.clone(),
+                    generation,
+                    reason,
+                    None,
+                    file_identity,
+                    resume_fingerprint,
+                )
+                .await?;
+            }
+            HermesAdmissionAction::Capture(request) => {
+                match facade
+                    .capture_observation(*request)
+                    .await
+                    .map_err(host_admission_error)?
+                {
+                    CaptureObservationOutcome::Persisted { outcome, .. } => {
+                        if matches!(outcome, ObservationPersistOutcome::Committed(_)) {
+                            stats.messages_upserted = stats.messages_upserted.saturating_add(1);
+                        }
+                        sessions.insert(row.session_id.clone());
+                    }
+                    CaptureObservationOutcome::Rejected { receipt, .. } => {
+                        advance_coverage(
+                            &facade,
+                            source,
+                            range,
+                            expected_cursor,
+                            scope.clone(),
+                            generation,
+                            ObservationCoverageReason::SanitizerRejected,
+                            Some(receipt),
+                            file_identity,
+                            resume_fingerprint,
+                        )
+                        .await?;
+                    }
+                    CaptureObservationOutcome::Quarantined { receipt, .. } => {
+                        advance_coverage(
+                            &facade,
+                            source,
+                            range,
+                            expected_cursor,
+                            scope.clone(),
+                            generation,
+                            ObservationCoverageReason::SanitizerQuarantined,
+                            Some(receipt),
+                            file_identity,
+                            resume_fingerprint,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+    }
+    stats.sessions_upserted = sessions.len() as u64;
+    Ok(stats)
+}
+
 /// Column names of the `messages` table — `active` (v12 rewind soft-delete)
 /// and `reasoning` arrived in later Hermes schema revisions, so the sweep
 /// probes before selecting to stay readable on legacy stores.
-async fn message_columns(conn: &libsql::Connection) -> std::collections::BTreeSet<String> {
+async fn message_columns(
+    conn: &libsql::Connection,
+) -> Result<std::collections::BTreeSet<String>, String> {
     table_columns(conn, "messages").await
 }
 
 async fn table_columns(
     conn: &libsql::Connection,
     table: &str,
-) -> std::collections::BTreeSet<String> {
+) -> Result<std::collections::BTreeSet<String>, String> {
     let mut out = std::collections::BTreeSet::new();
     let query = format!("SELECT name FROM pragma_table_info('{table}')");
-    let Ok(mut rows) = conn.query(&query, ()).await else {
-        return out;
-    };
-    while let Ok(Some(row)) = rows.next().await {
-        if let Ok(name) = row.get::<String>(0) {
-            out.insert(name);
-        }
+    let mut rows = conn
+        .query(&query, ())
+        .await
+        .map_err(|_| "could not inspect Hermes SQLite schema".to_string())?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| "could not read Hermes SQLite schema".to_string())?
+    {
+        let name = row
+            .get::<String>(0)
+            .map_err(|_| "Hermes SQLite schema row is malformed".to_string())?;
+        out.insert(name);
     }
-    out
+    if out.is_empty() {
+        return Err("Hermes SQLite authority is incomplete".to_string());
+    }
+    Ok(out)
 }
 
 fn select_new_messages_sql(
     message_columns: &std::collections::BTreeSet<String>,
     session_columns: &std::collections::BTreeSet<String>,
 ) -> String {
-    // Reasoning-only assistant turns carry no `content`; surface the
-    // reasoning text so the turn stays searchable.
-    let content_expr = if message_columns.contains("reasoning") {
-        "COALESCE(NULLIF(m.content, ''), m.reasoning)"
+    let reasoning_expr = if message_columns.contains("reasoning") {
+        "m.reasoning"
     } else {
-        "m.content"
+        "NULL"
     };
     let active_expr = if message_columns.contains("active") {
         "m.active"
@@ -382,9 +991,9 @@ fn select_new_messages_sql(
         "NULL"
     };
     format!(
-        "SELECT m.id, m.session_id, m.role, {content_expr}, m.tool_name,
+        "SELECT m.id, m.session_id, m.role, m.content, {reasoning_expr}, m.tool_name,
                 m.tool_calls, m.timestamp,
-                s.title, s.model, s.parent_session_id, s.started_at, s.ended_at, s.source, {session_cwd_expr},
+                s.model, s.parent_session_id, {session_cwd_expr},
                 s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_write_tokens,
                 s.reasoning_tokens, {active_expr}
          FROM messages m LEFT JOIN sessions s ON s.id = m.session_id
@@ -394,301 +1003,155 @@ fn select_new_messages_sql(
     )
 }
 
-/// Incrementally ingests one Hermes `state.db`, advancing the shared parse
-/// cursor after every committed chunk. The caller decides whether a source
-/// error is fail-open runtime noise or a migration-blocking failure.
+/// Incrementally scans one Hermes `state.db`; each fully materialized row is
+/// admitted against its session-scoped authoritative SQLite-row cursor. The
+/// caller decides whether a source error is runtime noise or migration-blocking.
 async fn try_ingest_state_db(
     db: &GlobalDb,
     source: &HermesProfileSource,
     project_root: &Path,
 ) -> Result<TranscriptIngestStats, String> {
-    let mut stats = TranscriptIngestStats::default();
     let state_db = &source.state_db;
     let conn = open_read_only_strict(state_db).await?;
-    let path_str = state_db.to_string_lossy().to_string();
-    let cursor_path = format!("{path_str}#{CORRELATION_CURSOR_VERSION}");
-    let mut cursor = {
-        let prev = db.get_parse_offset(&cursor_path).await.unwrap_or_default();
-        StoredCursor {
-            position: prev.byte_offset,
-            mtime: prev.mtime,
-            file_id: prev.file_id,
-        }
-    };
-    let mut sessions_seen = BTreeSet::new();
+    let (generation, file_identity, resume_fingerprint) = sqlite_incarnation(state_db)?;
+    let scope = project_scope(project_root)?;
     let select_sql = select_new_messages_sql(
-        &message_columns(&conn).await,
-        &table_columns(&conn, "sessions").await,
+        &message_columns(&conn).await?,
+        &table_columns(&conn, "sessions").await?,
     );
+    let mut read_cursor = StoredCursor::default();
+    let mut stats = TranscriptIngestStats::default();
     loop {
-        let new = read_new_rows_strict(&conn, &select_sql, cursor).await?;
+        let new = read_new_rows_strict(&conn, &select_sql, read_cursor).await?;
         let row_count = new.items.len();
         if row_count == 0 {
             return Ok(stats);
         }
-        let next_cursor = StoredCursor {
-            position: new.new_cursor.position,
-            mtime: file_mtime_secs(state_db),
-            file_id: 0,
-        };
-        let offset = ParseOffset {
-            byte_offset: next_cursor.position,
-            mtime: next_cursor.mtime,
-            file_id: next_cursor.file_id,
-        };
-        let batches = build_batches(db, &new.items, &path_str, project_root, source).await;
-        if batches.is_empty() {
-            // Only non-conversation rows (e.g. `session_meta`) — still advance
-            // the cursor so the next sweep does not re-read them.
-            db.advance_parse_offset(&cursor_path, offset).await;
-        } else {
-            let message_count: u64 = batches
-                .iter()
-                .map(|batch| batch.messages.len() as u64)
-                .sum();
-            if !db
-                .upsert_transcript_projection_batches(&batches, &cursor_path, offset)
-                .await
-            {
-                return Err(format!(
-                    "could not persist legacy Hermes state rows from '{}'",
-                    state_db.display()
-                ));
-            }
-            for batch in &batches {
-                sessions_seen.insert(batch.session.session_id.clone());
-            }
-            stats.messages_upserted = stats.messages_upserted.saturating_add(message_count);
-            stats.sessions_upserted = sessions_seen.len() as u64;
-        }
-        cursor = next_cursor;
+        let locations = turn_project_locations(&new.items, project_root, source);
+        let admitted = admit_rows(
+            db,
+            &new.items,
+            scope.clone(),
+            generation,
+            file_identity,
+            resume_fingerprint,
+            |row| locations.contains(&row.id),
+        )
+        .await?;
+        stats.messages_upserted = stats
+            .messages_upserted
+            .saturating_add(admitted.messages_upserted);
+        stats.sessions_upserted = stats
+            .sessions_upserted
+            .saturating_add(admitted.sessions_upserted);
+        read_cursor.position = new.new_cursor.position;
         if row_count < CHUNK_ROWS {
             return Ok(stats);
         }
     }
 }
 
-struct ProjectDestinationState<'a> {
-    destination: ProjectIngestDestination<'a>,
-    cursor: StoredCursor,
-    sessions_seen: BTreeSet<String>,
-    writable: bool,
-    cursor_pending: bool,
-}
-
-/// Shared-source equivalent of [`try_ingest_state_db`]. Source rows are read
-/// from the lowest destination cursor; destinations already ahead skip the
-/// prefix and independently commit their projection plus cursor.
+/// Shared-source equivalent of [`try_ingest_state_db`]. The `SQLite` page is read
+/// once, then each destination independently admits routed rows against its own
+/// authoritative observation cursor.
 async fn try_ingest_state_db_for_projects(
     source: &HermesProfileSource,
     destinations: &[ProjectIngestDestination<'_>],
 ) -> Result<TranscriptIngestStats, String> {
     let state_db = &source.state_db;
     let conn = open_read_only_strict(state_db).await?;
-    let path_str = state_db.to_string_lossy().to_string();
-    let cursor_path = format!("{path_str}#{CORRELATION_CURSOR_VERSION}");
-    let mut states = Vec::with_capacity(destinations.len());
-    for destination in destinations {
-        let prev = destination
-            .db
-            .get_parse_offset(&cursor_path)
-            .await
-            .unwrap_or_default();
-        states.push(ProjectDestinationState {
-            destination: *destination,
-            cursor: StoredCursor {
-                position: prev.byte_offset,
-                mtime: prev.mtime,
-                file_id: prev.file_id,
-            },
-            sessions_seen: BTreeSet::new(),
-            writable: true,
-            cursor_pending: false,
-        });
-    }
+    let (generation, file_identity, resume_fingerprint) = sqlite_incarnation(state_db)?;
+    let scopes = destinations
+        .iter()
+        .map(|destination| project_scope(destination.project_root))
+        .collect::<Result<Vec<_>, _>>()?;
     let select_sql = select_new_messages_sql(
-        &message_columns(&conn).await,
-        &table_columns(&conn, "sessions").await,
+        &message_columns(&conn).await?,
+        &table_columns(&conn, "sessions").await?,
     );
-    let destination_matchers = states
+    let destination_matchers = destinations
         .par_iter()
-        .map(|state| ProjectRootMatcher::new(state.destination.project_root))
+        .map(|destination| ProjectRootMatcher::new(destination.project_root))
         .collect::<Vec<_>>();
     let mut destination_routes = HashMap::<PathBuf, Vec<usize>>::new();
-    let mut read_cursor = StoredCursor {
-        position: states
-            .iter()
-            .map(|state| state.cursor.position)
-            .min()
-            .unwrap_or_default(),
-        mtime: 0,
-        file_id: 0,
-    };
+    let mut read_cursor = StoredCursor::default();
     let mut stats = TranscriptIngestStats::default();
-
     loop {
         let new = read_new_rows_strict(&conn, &select_sql, read_cursor).await?;
         let row_count = new.items.len();
         if row_count == 0 {
-            break;
+            return Ok(stats);
         }
-        let source_position = new.new_cursor.position;
-        let mtime = file_mtime_secs(state_db);
-        let destination_locations = turn_project_locations_for_destinations(
+        let locations = turn_project_locations_for_destinations(
             &new.items,
             &destination_matchers,
             source,
             &mut destination_routes,
         );
-        for (state_index, state) in states
-            .iter_mut()
-            .enumerate()
-            .filter(|(_, state)| state.writable)
-        {
-            if source_position <= state.cursor.position {
-                continue;
-            }
-            let destination = &destination_locations[state_index];
-            let first_new = destination
-                .row_indices
-                .partition_point(|&index| new.items[index].id as u64 <= state.cursor.position);
-            let next_cursor = StoredCursor {
-                position: source_position,
-                mtime,
-                file_id: 0,
-            };
-            let offset = ParseOffset {
-                byte_offset: next_cursor.position,
-                mtime: next_cursor.mtime,
-                file_id: 0,
-            };
-            let batches = build_batches_with_locations(
-                state.destination.db,
+        for (index, destination) in destinations.iter().enumerate() {
+            let admitted = admit_rows(
+                destination.db,
                 &new.items,
-                &path_str,
-                state.destination.project_root,
-                source,
-                &destination.by_row_id,
-                Some(&destination.row_indices[first_new..]),
+                scopes[index].clone(),
+                generation,
+                file_identity,
+                resume_fingerprint,
+                |row| locations[index].by_row_id.contains(&row.id),
             )
-            .await;
-            if batches.is_empty() {
-                // Cursor-only transactions across every registered project
-                // dominate cold catch-up. Defer them to one final write; a
-                // crash before that point merely causes an idempotent rescan.
-                state.cursor = next_cursor;
-                state.cursor_pending = true;
-                continue;
-            }
-            if !state
-                .destination
-                .db
-                .upsert_transcript_projection_batches(&batches, &cursor_path, offset)
-                .await
-            {
-                state.writable = false;
-                continue;
-            }
-            stats.messages_upserted = stats.messages_upserted.saturating_add(
-                batches
-                    .iter()
-                    .map(|batch| batch.messages.len() as u64)
-                    .sum::<u64>(),
-            );
-            for batch in &batches {
-                state.sessions_seen.insert(batch.session.session_id.clone());
-            }
-            state.cursor = next_cursor;
-            state.cursor_pending = false;
+            .await?;
+            stats.messages_upserted = stats
+                .messages_upserted
+                .saturating_add(admitted.messages_upserted);
+            stats.sessions_upserted = stats
+                .sessions_upserted
+                .saturating_add(admitted.sessions_upserted);
         }
-        read_cursor.position = source_position;
+        read_cursor.position = new.new_cursor.position;
         if row_count < CHUNK_ROWS {
-            break;
+            return Ok(stats);
         }
     }
-    for state in states
-        .iter()
-        .filter(|state| state.writable && state.cursor_pending)
-    {
-        state
-            .destination
-            .db
-            .advance_parse_offset(
-                &cursor_path,
-                ParseOffset {
-                    byte_offset: state.cursor.position,
-                    mtime: state.cursor.mtime,
-                    file_id: state.cursor.file_id,
-                },
-            )
-            .await;
-    }
-    stats.sessions_upserted = states
-        .iter()
-        .map(|state| state.sessions_seen.len() as u64)
-        .sum();
-    Ok(stats)
 }
 
 async fn try_ingest_user_state_db(
     db: &GlobalDb,
     source: &HermesProfileSource,
-    registered_roots: &[PathBuf],
+    _registered_roots: &[PathBuf],
 ) -> Result<TranscriptIngestStats, String> {
-    let mut stats = TranscriptIngestStats::default();
     let state_db = &source.state_db;
     let conn = open_read_only_strict(state_db).await?;
-    let path_str = state_db.to_string_lossy().to_string();
-    let cursor_path = format!("{path_str}#{USER_CURSOR_VERSION}");
-    let mut cursor = {
-        let prev = db.get_parse_offset(&cursor_path).await.unwrap_or_default();
-        StoredCursor {
-            position: prev.byte_offset,
-            mtime: prev.mtime,
-            file_id: prev.file_id,
-        }
-    };
+    let (generation, file_identity, resume_fingerprint) = sqlite_incarnation(state_db)?;
+    let scope = ObservationScopeV1::Profile;
     let select_sql = select_new_messages_sql(
-        &message_columns(&conn).await,
-        &table_columns(&conn, "sessions").await,
+        &message_columns(&conn).await?,
+        &table_columns(&conn, "sessions").await?,
     );
+    let mut read_cursor = StoredCursor::default();
+    let mut stats = TranscriptIngestStats::default();
     loop {
-        let new = read_new_rows_strict(&conn, &select_sql, cursor).await?;
+        let new = read_new_rows_strict(&conn, &select_sql, read_cursor).await?;
         let row_count = new.items.len();
         if row_count == 0 {
             return Ok(stats);
         }
-        let next_cursor = StoredCursor {
-            position: new.new_cursor.position,
-            mtime: file_mtime_secs(state_db),
-            file_id: 0,
-        };
-        let offset = ParseOffset {
-            byte_offset: next_cursor.position,
-            mtime: next_cursor.mtime,
-            file_id: 0,
-        };
-        let batches = build_user_batches(db, &new.items, &path_str, source, registered_roots).await;
-        if batches.is_empty() {
-            db.advance_parse_offset(&cursor_path, offset).await;
-        } else {
-            let message_count = batches
-                .iter()
-                .map(|batch| batch.messages.len() as u64)
-                .sum::<u64>();
-            if !db
-                .upsert_transcript_projection_batches(&batches, &cursor_path, offset)
-                .await
-            {
-                return Err(format!(
-                    "could not persist projectless Hermes rows from '{}'",
-                    state_db.display()
-                ));
-            }
-            stats.messages_upserted = stats.messages_upserted.saturating_add(message_count);
-            stats.sessions_upserted = stats.sessions_upserted.saturating_add(batches.len() as u64);
-        }
-        cursor = next_cursor;
+        let locations = user_turn_locations(&new.items, source);
+        let admitted = admit_rows(
+            db,
+            &new.items,
+            scope.clone(),
+            generation,
+            file_identity,
+            resume_fingerprint,
+            |row| locations.contains(&row.id),
+        )
+        .await?;
+        stats.messages_upserted = stats
+            .messages_upserted
+            .saturating_add(admitted.messages_upserted);
+        stats.sessions_upserted = stats
+            .sessions_upserted
+            .saturating_add(admitted.sessions_upserted);
+        read_cursor.position = new.new_cursor.position;
         if row_count < CHUNK_ROWS {
             return Ok(stats);
         }
@@ -751,233 +1214,89 @@ fn map_row(rowid: i64, row: &libsql::Row) -> Option<HermesRow> {
         session_id: row.get::<String>(1).ok()?,
         role: row.get::<String>(2).unwrap_or_default(),
         content: row.get::<Option<String>>(3).ok().flatten(),
-        tool_name: row.get::<Option<String>>(4).ok().flatten(),
-        tool_calls: row.get::<Option<String>>(5).ok().flatten(),
-        timestamp: row.get::<Option<f64>>(6).ok().flatten(),
-        session_title: row.get::<Option<String>>(7).ok().flatten(),
+        reasoning: row.get::<Option<String>>(4).ok().flatten(),
+        tool_name: row.get::<Option<String>>(5).ok().flatten(),
+        tool_calls: row.get::<Option<String>>(6).ok().flatten(),
+        timestamp: row.get::<Option<f64>>(7).ok().flatten(),
         session_model: row.get::<Option<String>>(8).ok().flatten(),
         parent_session_id: row.get::<Option<String>>(9).ok().flatten(),
-        session_started_at: row.get::<Option<f64>>(10).ok().flatten(),
-        session_ended_at: row.get::<Option<f64>>(11).ok().flatten(),
-        session_source: row.get::<Option<String>>(12).ok().flatten(),
-        session_cwd: row.get::<Option<String>>(13).ok().flatten(),
-        session_input_tokens: row.get::<Option<i64>>(14).ok().flatten(),
-        session_output_tokens: row.get::<Option<i64>>(15).ok().flatten(),
-        session_cache_read_tokens: row.get::<Option<i64>>(16).ok().flatten(),
-        session_cache_write_tokens: row.get::<Option<i64>>(17).ok().flatten(),
-        session_reasoning_tokens: row.get::<Option<i64>>(18).ok().flatten(),
-        active: row.get::<Option<i64>>(19).ok().flatten().unwrap_or(1),
+        session_cwd: row.get::<Option<String>>(10).ok().flatten(),
+        session_input_tokens: row.get::<Option<i64>>(11).ok().flatten(),
+        session_output_tokens: row.get::<Option<i64>>(12).ok().flatten(),
+        session_cache_read_tokens: row.get::<Option<i64>>(13).ok().flatten(),
+        session_cache_write_tokens: row.get::<Option<i64>>(14).ok().flatten(),
+        session_reasoning_tokens: row.get::<Option<i64>>(15).ok().flatten(),
+        active: row.get::<Option<i64>>(16).ok().flatten().unwrap_or(1),
     })
 }
 
-/// Groups one chunk of rows into per-session [`TranscriptBatch`]es, merging
-/// session metadata with any previously stored row (original `started_at` and
-/// `title` survive incremental sweeps, mirroring the file-source driver).
-async fn build_batches(
-    db: &GlobalDb,
-    rows: &[HermesRow],
-    state_db_path: &str,
-    project_root: &Path,
-    source: &HermesProfileSource,
-) -> Vec<TranscriptBatch> {
-    let turn_locations = turn_project_locations(rows, project_root, source);
-    build_batches_with_locations(
-        db,
-        rows,
-        state_db_path,
-        project_root,
-        source,
-        &turn_locations,
-        None,
-    )
-    .await
-}
-
-async fn build_batches_with_locations(
-    db: &GlobalDb,
-    rows: &[HermesRow],
-    state_db_path: &str,
-    project_root: &Path,
-    source: &HermesProfileSource,
-    turn_locations: &HashMap<i64, HermesSessionLocation>,
-    row_indices: Option<&[usize]>,
-) -> Vec<TranscriptBatch> {
-    let mut order = Vec::new();
-    let mut by_session: HashMap<String, TranscriptBatch> = HashMap::new();
-
-    {
-        let mut add_row = |row: &HermesRow| {
-            if row.role == "session_meta" || row.role.is_empty() {
-                return;
-            }
-            if row.active == 0 {
-                // Rewound/undone turns are soft-deleted in Hermes; surfacing
-                // them as live history would misrepresent the conversation.
-                return;
-            }
-            let Some(location) = turn_locations.get(&row.id) else {
-                return;
-            };
-            let Some(message) = message_from_row(row, state_db_path, source, location) else {
-                return;
-            };
-            let batch = by_session.entry(row.session_id.clone()).or_insert_with(|| {
-                order.push(row.session_id.clone());
-                TranscriptBatch {
-                    session: session_from_row(row, state_db_path, project_root, source, location),
-                    messages: Vec::new(),
-                }
-            });
-            batch.messages.push(message);
-        };
-        if let Some(row_indices) = row_indices {
-            for &index in row_indices {
-                add_row(&rows[index]);
-            }
-        } else {
-            for row in rows {
-                add_row(row);
-            }
-        }
-    }
-
-    let mut batches = Vec::with_capacity(order.len());
-    for session_id in order {
-        let Some(mut batch) = by_session.remove(&session_id) else {
-            continue;
-        };
-        merge_with_existing(db, &mut batch).await;
-        batches.push(batch);
-    }
-    batches
-}
-
-async fn build_user_batches(
-    db: &GlobalDb,
-    rows: &[HermesRow],
-    state_db_path: &str,
-    source: &HermesProfileSource,
-    _registered_roots: &[PathBuf],
-) -> Vec<TranscriptBatch> {
-    let mut order = Vec::new();
-    let mut by_session: HashMap<String, TranscriptBatch> = HashMap::new();
-    let locations = user_turn_locations(rows, source);
-    for row in rows {
-        if row.role == "session_meta" || row.role.is_empty() || row.active == 0 {
-            continue;
-        }
-        let Some(location) = locations.get(&row.id) else {
-            continue;
-        };
-        let Some(message) = message_from_row(row, state_db_path, source, location) else {
-            continue;
-        };
-        let batch = by_session.entry(row.session_id.clone()).or_insert_with(|| {
-            order.push(row.session_id.clone());
-            TranscriptBatch {
-                session: session_from_row(row, state_db_path, Path::new("user"), source, location),
-                messages: Vec::new(),
-            }
-        });
-        batch.messages.push(message);
-    }
-    let mut batches = Vec::with_capacity(order.len());
-    for session_id in order {
-        if let Some(mut batch) = by_session.remove(&session_id) {
-            merge_with_existing(db, &mut batch).await;
-            batches.push(batch);
-        }
-    }
-    batches
-}
-
-fn user_turn_locations(
-    rows: &[HermesRow],
-    source: &HermesProfileSource,
-) -> HashMap<i64, HermesSessionLocation> {
+fn user_turn_locations(rows: &[HermesRow], source: &HermesProfileSource) -> HashSet<i64> {
     let mut by_session: HashMap<&str, Vec<&HermesRow>> = HashMap::new();
     for row in rows {
         by_session.entry(&row.session_id).or_default().push(row);
     }
-    let mut locations = HashMap::new();
+    let mut locations = HashSet::new();
     for session_rows in by_session.into_values() {
-        let recorded_cwd = session_rows.iter().find_map(|row| {
-            let cwd = PathBuf::from(row.session_cwd.as_deref()?.trim());
-            cwd.is_absolute().then_some(cwd)
-        });
-        let fallback = source
-            .legacy_project_pin
-            .clone()
-            .or(recorded_cwd)
-            .or_else(|| source.state_db.parent().map(Path::to_path_buf));
+        let has_fallback = source.legacy_project_pin.is_some()
+            || session_rows
+                .iter()
+                .any(|row| Path::new(row.session_cwd.as_deref().unwrap_or_default()).is_absolute())
+            || source.state_db.parent().is_some();
         let mut turn = Vec::new();
         for row in session_rows {
             if row.role == "user" && !turn.is_empty() {
-                assign_user_turn(&turn, fallback.as_deref(), &mut locations);
+                assign_user_turn(&turn, has_fallback, &mut locations);
                 turn.clear();
             }
             turn.push(row);
         }
-        assign_user_turn(&turn, fallback.as_deref(), &mut locations);
+        assign_user_turn(&turn, has_fallback, &mut locations);
     }
     locations
 }
 
-fn assign_user_turn(
-    rows: &[&HermesRow],
-    fallback: Option<&Path>,
-    locations: &mut HashMap<i64, HermesSessionLocation>,
-) {
-    let explicit = rows
+fn assign_user_turn(rows: &[&HermesRow], has_fallback: bool, locations: &mut HashSet<i64>) {
+    if rows
         .iter()
         .flat_map(|row| structured_tool_project_paths(row))
-        .collect::<Vec<_>>();
-    let cwd = explicit
-        .last()
-        .cloned()
-        .or_else(|| fallback.map(Path::to_path_buf));
-    let Some(cwd) = cwd else {
+        .next_back()
+        .is_none()
+        && !has_fallback
+    {
         return;
-    };
-    let location = HermesSessionLocation {
-        cwd,
-        provenance: "user_scope",
-    };
-    for row in rows {
-        locations.insert(row.id, location.clone());
     }
+    locations.extend(rows.iter().map(|row| row.id));
 }
 
 fn turn_project_locations(
     rows: &[HermesRow],
     project_root: &Path,
     source: &HermesProfileSource,
-) -> HashMap<i64, HermesSessionLocation> {
+) -> HashSet<i64> {
     let mut by_session: HashMap<&str, Vec<&HermesRow>> = HashMap::new();
     for row in rows {
         by_session.entry(&row.session_id).or_default().push(row);
     }
-    let mut locations = HashMap::new();
+    let mut locations = HashSet::new();
     for session_rows in by_session.into_values() {
-        let fallback = session_rows
+        let has_fallback = session_rows
             .iter()
-            .find_map(|row| session_location(row, project_root, source));
+            .any(|row| session_is_candidate_for_project(row, project_root, source));
         let mut turn = Vec::new();
         for row in session_rows {
             if row.role == "user" && !turn.is_empty() {
-                assign_turn_location(&turn, project_root, fallback.as_ref(), &mut locations);
+                assign_turn_location(&turn, project_root, has_fallback, &mut locations);
                 turn.clear();
             }
             turn.push(row);
         }
-        assign_turn_location(&turn, project_root, fallback.as_ref(), &mut locations);
+        assign_turn_location(&turn, project_root, has_fallback, &mut locations);
     }
     locations
 }
 
 struct DestinationTurnLocations {
-    by_row_id: HashMap<i64, HermesSessionLocation>,
-    row_indices: Vec<usize>,
+    by_row_id: HashSet<i64>,
 }
 
 fn turn_project_locations_for_destinations(
@@ -987,42 +1306,33 @@ fn turn_project_locations_for_destinations(
     destination_routes: &mut HashMap<PathBuf, Vec<usize>>,
 ) -> Vec<DestinationTurnLocations> {
     let mut by_session: HashMap<&str, Vec<&HermesRow>> = HashMap::new();
-    let row_indices = rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| (row.id, index))
-        .collect::<HashMap<_, _>>();
     for row in rows {
         by_session.entry(&row.session_id).or_default().push(row);
     }
     let mut locations = (0..destination_matchers.len())
         .map(|_| DestinationTurnLocations {
-            by_row_id: HashMap::new(),
-            row_indices: Vec::new(),
+            by_row_id: HashSet::new(),
         })
         .collect::<Vec<_>>();
     for session_rows in by_session.into_values() {
         let fallback_candidates = if let Some(pin) = source.legacy_project_pin.as_ref() {
-            vec![(pin.clone(), "profile_pin")]
+            vec![pin.clone()]
         } else {
             let mut seen = BTreeSet::new();
             session_rows
                 .iter()
                 .filter_map(|row| {
                     let cwd = PathBuf::from(row.session_cwd.as_deref()?.trim());
-                    (cwd.is_absolute() && seen.insert(cwd.clone())).then_some((cwd, "session_cwd"))
+                    (cwd.is_absolute() && seen.insert(cwd.clone())).then_some(cwd)
                 })
                 .collect::<Vec<_>>()
         };
-        let mut fallbacks = vec![None; destination_matchers.len()];
-        for (cwd, provenance) in fallback_candidates {
+        let mut fallbacks = vec![false; destination_matchers.len()];
+        for cwd in fallback_candidates {
             for destination_index in
                 matching_destinations(&cwd, destination_matchers, destination_routes)
             {
-                fallbacks[destination_index].get_or_insert_with(|| HermesSessionLocation {
-                    cwd: cwd.clone(),
-                    provenance,
-                });
+                fallbacks[destination_index] = true;
             }
         }
         let mut turn = Vec::new();
@@ -1032,7 +1342,6 @@ fn turn_project_locations_for_destinations(
                     &turn,
                     destination_matchers,
                     &fallbacks,
-                    &row_indices,
                     &mut locations,
                     destination_routes,
                 );
@@ -1044,13 +1353,9 @@ fn turn_project_locations_for_destinations(
             &turn,
             destination_matchers,
             &fallbacks,
-            &row_indices,
             &mut locations,
             destination_routes,
         );
-    }
-    for destination in &mut locations {
-        destination.row_indices.sort_unstable();
     }
     locations
 }
@@ -1058,8 +1363,7 @@ fn turn_project_locations_for_destinations(
 fn assign_turn_locations_for_destinations(
     rows: &[&HermesRow],
     destination_matchers: &[ProjectRootMatcher],
-    fallbacks: &[Option<HermesSessionLocation>],
-    row_indices: &HashMap<i64, usize>,
+    fallbacks: &[bool],
     locations: &mut [DestinationTurnLocations],
     destination_routes: &mut HashMap<PathBuf, Vec<usize>>,
 ) {
@@ -1068,30 +1372,21 @@ fn assign_turn_locations_for_destinations(
         .rev()
         .flat_map(|row| structured_tool_project_paths(row))
         .collect::<Vec<_>>();
-    let mut selected = vec![None; destination_matchers.len()];
+    let mut selected = vec![false; destination_matchers.len()];
     if explicit_paths.is_empty() {
-        selected.clone_from_slice(fallbacks);
+        selected.copy_from_slice(fallbacks);
     } else {
         for path in explicit_paths {
             for destination_index in
                 matching_destinations(&path, destination_matchers, destination_routes)
             {
-                selected[destination_index].get_or_insert_with(|| HermesSessionLocation {
-                    cwd: path.clone(),
-                    provenance: "tool_project_path",
-                });
+                selected[destination_index] = true;
             }
         }
     }
-    for (location, destination) in selected.into_iter().zip(locations) {
-        let Some(location) = location else {
-            continue;
-        };
-        for row in rows {
-            destination.by_row_id.insert(row.id, location.clone());
-            if let Some(&index) = row_indices.get(&row.id) {
-                destination.row_indices.push(index);
-            }
+    for (selected, destination) in selected.into_iter().zip(locations) {
+        if selected {
+            destination.by_row_id.extend(rows.iter().map(|row| row.id));
         }
     }
 }
@@ -1116,30 +1411,21 @@ fn matching_destinations(
 fn assign_turn_location(
     rows: &[&HermesRow],
     project_root: &Path,
-    fallback: Option<&HermesSessionLocation>,
-    locations: &mut HashMap<i64, HermesSessionLocation>,
+    has_fallback: bool,
+    locations: &mut HashSet<i64>,
 ) {
     let explicit_paths = rows
         .iter()
         .rev()
         .flat_map(|row| structured_tool_project_paths(row))
         .collect::<Vec<_>>();
-    let location = if explicit_paths.is_empty() {
-        fallback.cloned()
-    } else {
-        explicit_paths
-            .into_iter()
-            .find(|path| path_belongs_to_project(path, project_root))
-            .map(|cwd| HermesSessionLocation {
-                cwd,
-                provenance: "tool_project_path",
-            })
-    };
-    let Some(location) = location else {
-        return;
-    };
-    for row in rows {
-        locations.insert(row.id, location.clone());
+    if (!explicit_paths.is_empty()
+        && explicit_paths
+            .iter()
+            .any(|path| path_belongs_to_project(path, project_root)))
+        || (explicit_paths.is_empty() && has_fallback)
+    {
+        locations.extend(rows.iter().map(|row| row.id));
     }
 }
 
@@ -1185,234 +1471,16 @@ fn structured_tool_project_paths(row: &HermesRow) -> Vec<PathBuf> {
     paths
 }
 
-#[derive(Clone)]
-struct HermesSessionLocation {
-    cwd: PathBuf,
-    provenance: &'static str,
-}
-
-fn session_location(
+fn session_is_candidate_for_project(
     row: &HermesRow,
     project_root: &Path,
     source: &HermesProfileSource,
-) -> Option<HermesSessionLocation> {
-    if let Some(pin) = source.legacy_project_pin.as_ref() {
-        return Some(HermesSessionLocation {
-            cwd: pin.clone(),
-            provenance: "profile_pin",
-        });
-    }
-    let cwd = PathBuf::from(row.session_cwd.as_deref()?.trim());
-    if !cwd.is_absolute() || !path_belongs_to_project(&cwd, project_root) {
-        return None;
-    }
-    Some(HermesSessionLocation {
-        cwd,
-        provenance: "session_cwd",
-    })
-}
-
-fn session_from_row(
-    row: &HermesRow,
-    state_db_path: &str,
-    project_root: &Path,
-    source: &HermesProfileSource,
-    location: &HermesSessionLocation,
-) -> SessionRecord {
-    let mut metadata = Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("hermes_state_db".to_string()),
-    );
-    if let Some(profile) = source.profile.as_deref() {
-        metadata.insert("profile".to_string(), Value::String(profile.to_string()));
-    }
-    if let Some(source) = row.session_source.as_deref() {
-        metadata.insert(
-            "hermes_source".to_string(),
-            Value::String(source.to_string()),
-        );
-    }
-    if let Some(usage) = session_usage_counters(row) {
-        metadata.insert("usage".to_string(), usage);
-    }
-    append_location_metadata(
-        &mut metadata,
-        HERMES_LOCATION_KEYS,
-        TranscriptLocation::new(Some(&location.cwd), location.provenance),
-    );
-    let project = project_root.to_string_lossy().to_string();
-    let parent_session_id = row
-        .parent_session_id
-        .as_deref()
-        .filter(|parent| !parent.is_empty())
-        .map(str::to_string);
-    let is_subagent = parent_session_id.is_some();
-    SessionRecord {
-        provider: PROVIDER.to_string(),
-        session_id: row.session_id.clone(),
-        project_key: project.clone(),
-        project_path: project,
-        title: row
-            .session_title
-            .as_deref()
-            .filter(|title| !title.trim().is_empty())
-            .map(preview_title),
-        started_at: row.session_started_at.map(|secs| secs as i64),
-        ended_at: row.session_ended_at.map(|secs| secs as i64),
-        transcript_path: Some(state_db_path.to_string()),
-        metadata_json: Some(Value::Object(metadata).to_string()),
-        parent_session_id,
-        is_subagent,
-        agent_id: None,
-        parent_tool_use_id: None,
-    }
-}
-
-/// Session-cumulative token counters from the Hermes `sessions` table, mapped
-/// to the counter names the savings dashboard recognizes. Hermes records no
-/// per-message usage (`messages.token_count` is never populated), so the
-/// session row is the only honest granularity; the counters live in *session*
-/// metadata — never message `usage` — so the per-message savings rollup
-/// cannot double-count them. Re-sweeps refresh the values (cumulative
-/// counters only grow).
-fn session_usage_counters(row: &HermesRow) -> Option<Value> {
-    let mut usage = Map::new();
-    for (key, value) in [
-        ("input_tokens", row.session_input_tokens),
-        ("output_tokens", row.session_output_tokens),
-        ("cache_read_input_tokens", row.session_cache_read_tokens),
-        (
-            "cache_creation_input_tokens",
-            row.session_cache_write_tokens,
-        ),
-        ("reasoning_tokens", row.session_reasoning_tokens),
-    ] {
-        if let Some(count) = value.filter(|count| *count > 0) {
-            usage.insert(key.to_string(), Value::from(count));
-        }
-    }
-    (!usage.is_empty()).then_some(Value::Object(usage))
-}
-
-/// Preserve a previously stored session's original `started_at`, `title`,
-/// and metadata keys (e.g. the `hermes_migration` marker left by the legacy
-/// LCM-store import) across incremental sweeps, mirroring the file-source
-/// driver's merge semantics.
-async fn merge_with_existing(db: &GlobalDb, batch: &mut TranscriptBatch) {
-    let existing = db.get_session(PROVIDER, &batch.session.session_id).await;
-    let first_ts = batch.messages.first().and_then(|message| message.timestamp);
-    let last_ts = batch.messages.last().and_then(|message| message.timestamp);
-
-    if let Some(existing) = existing {
-        if existing.title.is_some() {
-            batch.session.title = existing.title;
-        }
-        if existing.started_at.is_some() {
-            batch.session.started_at = existing.started_at;
-        }
-        if batch.session.ended_at.is_none() {
-            batch.session.ended_at = last_ts.or(existing.ended_at);
-        }
-        if let Some(previous) = existing
-            .metadata_json
-            .as_deref()
-            .and_then(|text| serde_json::from_str::<Value>(text).ok())
-            .and_then(|value| value.as_object().cloned())
-        {
-            let mut merged = previous;
-            if let Some(new) = batch
-                .session
-                .metadata_json
-                .as_deref()
-                .and_then(|text| serde_json::from_str::<Value>(text).ok())
-                .and_then(|value| value.as_object().cloned())
-            {
-                merged.extend(new);
-            }
-            batch.session.metadata_json = Some(Value::Object(merged).to_string());
-        }
-    }
-    if batch.session.title.is_none() {
-        batch.session.title = title_from_messages(&batch.messages);
-    }
-    if batch.session.started_at.is_none() {
-        batch.session.started_at = first_ts;
-    }
-    if batch.session.ended_at.is_none() {
-        batch.session.ended_at = last_ts;
-    }
-}
-
-fn message_from_row(
-    row: &HermesRow,
-    state_db_path: &str,
-    source: &HermesProfileSource,
-    location: &HermesSessionLocation,
-) -> Option<SessionMessageRecord> {
-    let content = row
-        .content
-        .as_deref()
-        .filter(|text| !text.trim().is_empty());
-    let tool_calls_value = row
-        .tool_calls
-        .as_deref()
-        .filter(|text| !text.trim().is_empty())
-        .map(|text| {
-            serde_json::from_str::<Value>(text).unwrap_or_else(|_| Value::String(text.to_string()))
-        });
-    // Assistant tool-call turns carry no `content`; fall back to the compact
-    // tool-call JSON so the turn stays searchable. Rows with neither carry no
-    // conversational signal.
-    let text = match (content, row.tool_calls.as_deref()) {
-        (Some(content), _) => content.to_string(),
-        (None, Some(tool_calls)) if !tool_calls.trim().is_empty() => tool_calls.to_string(),
-        _ => return None,
-    };
-
-    let mut tool_names = Vec::new();
-    if let Some(name) = row.tool_name.as_deref().filter(|name| !name.is_empty()) {
-        tool_names.push(name.to_string());
-    }
-    if let Some(value) = tool_calls_value.as_ref() {
-        let (_, mut from_calls) = content_storage_text_and_tools(&Value::Null, Some(value));
-        tool_names.append(&mut from_calls);
-    }
-    tool_names.sort();
-    tool_names.dedup();
-
-    let mut metadata = Map::new();
-    metadata.insert(
-        "source".to_string(),
-        Value::String("hermes_state_db".to_string()),
-    );
-    if let Some(profile) = source.profile.as_deref() {
-        metadata.insert("profile".to_string(), Value::String(profile.to_string()));
-    }
-    append_location_metadata(
-        &mut metadata,
-        HERMES_LOCATION_KEYS,
-        TranscriptLocation::new(Some(&location.cwd), location.provenance),
-    );
-    if let Some(value) = tool_calls_value {
-        metadata.insert("tool_calls".to_string(), value);
-    }
-
-    Some(SessionMessageRecord {
-        provider: PROVIDER.to_string(),
-        message_id: format!("{}:{}", row.session_id, row.id),
-        session_id: row.session_id.clone(),
-        role: row.role.clone(),
-        timestamp: row.timestamp.map(|secs| secs as i64),
-        ordinal: row.id,
-        text,
-        kind: Some("message".to_string()),
-        model: row.session_model.clone(),
-        tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
-        source_path: Some(state_db_path.to_string()),
-        source_offset: Some(row.id),
-        metadata_json: Some(Value::Object(metadata).to_string()),
-    })
+) -> bool {
+    source.legacy_project_pin.is_some()
+        || row.session_cwd.as_deref().is_some_and(|cwd| {
+            let cwd = Path::new(cwd.trim());
+            cwd.is_absolute() && path_belongs_to_project(cwd, project_root)
+        })
 }
 
 fn file_mtime_secs(path: &Path) -> u64 {
@@ -1421,4 +1489,343 @@ fn file_mtime_secs(path: &Path) -> u64 {
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |duration| duration.as_secs())
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+
+    fn fixture(row_id: i64) -> HermesRow {
+        HermesRow {
+            id: row_id,
+            session_id: "session-redacted".to_string(),
+            role: "assistant".to_string(),
+            content: Some("safe fixture content".to_string()),
+            reasoning: Some("safe redacted reasoning".to_string()),
+            tool_name: Some("terminal".to_string()),
+            tool_calls: Some(
+                json!([{
+                    "id": "tool-redacted",
+                    "function": {"name": "terminal", "arguments": "{}"}
+                }])
+                .to_string(),
+            ),
+            timestamp: Some(1_750_000_000.0),
+            session_model: Some("model-redacted".to_string()),
+            parent_session_id: Some("parent-redacted".to_string()),
+            session_cwd: None,
+            session_input_tokens: Some(10),
+            session_output_tokens: Some(5),
+            session_cache_read_tokens: Some(4),
+            session_cache_write_tokens: Some(3),
+            session_reasoning_tokens: Some(2),
+            active: 1,
+        }
+    }
+
+    fn normalized(row: &HermesRow, start: u64) -> HermesObservationRecord {
+        let source = observation_source(row).unwrap();
+        let range = ObservationSourceRangeV1::new(start, row.id as u64).unwrap();
+        native_observation_record(row, source, range).unwrap()
+    }
+
+    fn canonical(row: &HermesRow, start: u64) -> CanonicalObservationEnvelopeV1 {
+        let record = normalized(row, start);
+        let encoded = serde_json::to_vec(&record.native).unwrap();
+        let parsed = parse_normalized_observation_record_v1(
+            &encoded,
+            record.range,
+            ObservationOrderingDomainV1::SqliteRowId,
+            |native| normalize_native_observation(native, record.range),
+        )
+        .unwrap();
+        serde_json::from_value(parsed.value().clone()).unwrap()
+    }
+
+    #[test]
+    fn native_identity_does_not_depend_on_sqlite_row_id() {
+        let first = normalized(&fixture(7), 0);
+        let relocated = normalized(&fixture(700), 0);
+        assert_eq!(first.native_record_id, relocated.native_record_id);
+        assert_ne!(first.range, relocated.range);
+    }
+
+    #[test]
+    fn native_identity_does_not_depend_on_routing_path() {
+        let mut first_row = fixture(7);
+        first_row.session_cwd = Some("/redacted/first".to_string());
+        let mut relocated_row = fixture(7);
+        relocated_row.session_cwd = Some("/redacted/second".to_string());
+        let first = normalized(&first_row, 0);
+        let relocated = normalized(&relocated_row, 0);
+        assert_eq!(first.native_record_id, relocated.native_record_id);
+        assert_eq!(first.native, relocated.native);
+    }
+
+    #[test]
+    fn normalized_payload_contains_only_typed_canonical_facts() {
+        let envelope = canonical(&fixture(7), 0);
+        assert_eq!(envelope.provider().as_str(), PROVIDER);
+        assert_eq!(envelope.native_record_kind(), "message");
+        assert_eq!(
+            envelope.relations().session_id().as_str(),
+            "session-redacted"
+        );
+        assert_eq!(
+            envelope.relations().message_id(),
+            Some(envelope.stable_record_id())
+        );
+        assert!(envelope.relations().agent_id().is_some());
+        assert!(envelope.relations().parent_agent_id().is_some());
+        assert_eq!(
+            envelope.evidence().ordering_domain(),
+            ObservationOrderingDomainV1::SqliteRowId
+        );
+        assert_eq!(
+            envelope.evidence().range(),
+            ObservationSourceRangeV1::new(0, 7).unwrap()
+        );
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: Value::String(content),
+                model: Some(model),
+                timestamp: Some(1_750_000_000),
+            } if content == "safe fixture content" && model == "model-redacted"
+        )));
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::ToolInvocation {
+                name,
+                arguments,
+                ..
+            } if name == "terminal" && arguments == &json!({})
+        )));
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Usage {
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                cache_read_tokens: Some(4),
+                cache_write_tokens: Some(3),
+                reasoning_tokens: Some(2),
+            }
+        )));
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Reasoning {
+                visibility: CanonicalReasoningVisibilityV1::Visible,
+                content: Some(Value::String(content)),
+            } if content == "safe redacted reasoning"
+        )));
+
+        let canonical = serde_json::to_value(&envelope).unwrap();
+        for forbidden in ["hermes", "routing", "cwd", "provenance", "metadata"] {
+            assert!(canonical.get(forbidden).is_none());
+        }
+    }
+
+    #[test]
+    fn canonical_identity_and_parent_relation_match_native_evidence() {
+        let row = fixture(7);
+        let record = normalized(&row, 0);
+        let expected_record_id = record.native_record_id.clone();
+        let expected_parent =
+            stable_native_id("hermes.session", &json!("parent-redacted")).unwrap();
+        let envelope = normalize_native_observation(record.native, record.range).unwrap();
+        assert_eq!(envelope.stable_record_id(), &expected_record_id);
+        assert_eq!(
+            envelope.relations().parent_agent_id(),
+            Some(&expected_parent)
+        );
+    }
+
+    #[test]
+    fn assistant_without_reasoning_is_typed_unavailable() {
+        let mut row = fixture(7);
+        row.reasoning = None;
+        let envelope = canonical(&row, 0);
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Reasoning {
+                visibility: CanonicalReasoningVisibilityV1::Unavailable,
+                content: None,
+            }
+        )));
+    }
+
+    #[test]
+    fn tool_message_becomes_typed_result_without_generic_message_blob() {
+        let mut row = fixture(7);
+        row.role = "tool".to_string();
+        row.reasoning = None;
+        row.tool_calls = None;
+        let envelope = canonical(&row, 0);
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::ToolResult {
+                invocation_id: None,
+                content: Value::String(content),
+                success: None,
+            } if content == "safe fixture content"
+        )));
+        assert!(
+            !envelope
+                .facts()
+                .iter()
+                .any(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
+        );
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Reasoning {
+                visibility: CanonicalReasoningVisibilityV1::NotApplicable,
+                content: None,
+            }
+        )));
+    }
+
+    #[test]
+    fn same_generation_resumes_sqlite_ordering() {
+        let row = fixture(42);
+        let source = observation_source(&row).unwrap();
+        let generation = ObservationSourceGenerationV1::new(17).unwrap();
+        let expected = ObservationSourceCursorV1::for_ordering(
+            source,
+            ObservationScopeV1::Profile,
+            generation,
+            ObservationOrderingDomainV1::SqliteRowId,
+            20,
+        )
+        .unwrap();
+        let admission = prepare_observation_row(
+            &row,
+            true,
+            ObservationScopeV1::Profile,
+            generation,
+            Some(expected),
+            23,
+            29,
+        )
+        .unwrap();
+        assert_eq!(admission.range.start(), 20);
+        assert_eq!(admission.range.end(), 42);
+        assert!(matches!(
+            admission.action,
+            HermesAdmissionAction::Capture(_)
+        ));
+    }
+
+    #[test]
+    fn replacement_generation_restarts_sqlite_ordering() {
+        let row = fixture(42);
+        let source = observation_source(&row).unwrap();
+        let old_generation = ObservationSourceGenerationV1::new(17).unwrap();
+        let expected = ObservationSourceCursorV1::for_ordering(
+            source,
+            ObservationScopeV1::Profile,
+            old_generation,
+            ObservationOrderingDomainV1::SqliteRowId,
+            900,
+        )
+        .unwrap();
+        let admission = prepare_observation_row(
+            &row,
+            true,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(18).unwrap(),
+            Some(expected),
+            23,
+            29,
+        )
+        .unwrap();
+        assert_eq!(admission.range.start(), 0);
+        assert_eq!(admission.range.end(), 42);
+        assert!(matches!(
+            admission.action,
+            HermesAdmissionAction::Capture(_)
+        ));
+    }
+
+    #[test]
+    fn malformed_tool_calls_are_complete_typed_coverage() {
+        let mut row = fixture(7);
+        row.tool_calls = Some("{not-json".to_string());
+        let admission = prepare_observation_row(
+            &row,
+            true,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(17).unwrap(),
+            None,
+            23,
+            29,
+        )
+        .unwrap();
+        assert!(matches!(
+            admission.action,
+            HermesAdmissionAction::Cover(ObservationCoverageReason::MalformedFrame)
+        ));
+    }
+
+    #[test]
+    fn missing_route_is_complete_out_of_scope_coverage() {
+        let admission = prepare_observation_row(
+            &fixture(7),
+            false,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(17).unwrap(),
+            None,
+            23,
+            29,
+        )
+        .unwrap();
+        assert!(matches!(
+            admission.action,
+            HermesAdmissionAction::Cover(ObservationCoverageReason::OutOfScope)
+        ));
+    }
+
+    #[test]
+    fn oversized_record_is_complete_typed_coverage() {
+        let mut row = fixture(7);
+        row.content = Some("x".repeat(MAX_OBSERVATION_RECORD_BYTES));
+        let admission = prepare_observation_row(
+            &row,
+            true,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(17).unwrap(),
+            None,
+            23,
+            29,
+        )
+        .unwrap();
+        assert!(matches!(
+            admission.action,
+            HermesAdmissionAction::Cover(ObservationCoverageReason::OversizedFrame)
+        ));
+    }
+
+    #[test]
+    fn excessive_structure_is_complete_malformed_coverage() {
+        let mut nested = Value::String("redacted".to_string());
+        for _ in 0..128 {
+            nested = json!({ "nested": nested });
+        }
+        let mut row = fixture(7);
+        row.tool_calls = Some(nested.to_string());
+        let admission = prepare_observation_row(
+            &row,
+            true,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(17).unwrap(),
+            None,
+            23,
+            29,
+        )
+        .unwrap();
+        assert!(matches!(
+            admission.action,
+            HermesAdmissionAction::Cover(ObservationCoverageReason::MalformedFrame)
+        ));
+    }
 }

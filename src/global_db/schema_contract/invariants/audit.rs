@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 
 use libsql::{Connection, params};
-use tracedecay_domain::DurableClaudeObservationV1;
+use tracedecay_domain::DurableObservationV1;
 use tracedecay_store::{
-    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ClaudeObservationProjection,
-    ClaudeSessionMessageProjection, ProjectionSkipReason,
+    ObservationProjection, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+    SessionMessageProjection,
 };
 
 use crate::global_db::global_db_operation_error;
@@ -155,7 +155,7 @@ pub(super) async fn audit_checkpoint_is_plausible(
                     SELECT last_sequence FROM observation_projection_checkpoints
                     WHERE projector_version = ?1
                 ), 0)",
-            params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -216,7 +216,7 @@ impl ProjectionAuthorityState {
                         SELECT 1 FROM projection_queue
                         WHERE observation_id = ?2
                     )",
-                params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+                params![SESSION_MESSAGE_PROJECTOR_VERSION_V1, observation_id],
             )
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -276,7 +276,7 @@ impl ProjectionAliasRow {
                 "SELECT output_provider, output_message_id
                  FROM observation_projection_aliases
                  WHERE projector_version = ?1 AND observation_id = ?2",
-                params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+                params![SESSION_MESSAGE_PROJECTOR_VERSION_V1, observation_id],
             )
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -312,7 +312,7 @@ impl ProjectionProvenanceRow {
                         output_digest, message_created
                  FROM observation_projection_provenance
                  WHERE projector_version = ?1 AND observation_id = ?2",
-                params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+                params![SESSION_MESSAGE_PROJECTOR_VERSION_V1, observation_id],
             )
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -352,7 +352,7 @@ impl ProjectionDispositionRow {
             .query(
                 "SELECT receipt_id, reason FROM observation_projection_dispositions
                  WHERE projector_version = ?1 AND observation_id = ?2",
-                params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+                params![SESSION_MESSAGE_PROJECTOR_VERSION_V1, observation_id],
             )
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -413,10 +413,10 @@ impl ProjectionOutputOwnership {
 
 fn validate_alias_binding(
     alias: &ProjectionAliasRow,
-    unaliased: &ClaudeObservationProjection,
-    projection: &ClaudeSessionMessageProjection,
+    unaliased: &ObservationProjection,
+    projection: &SessionMessageProjection,
 ) -> crate::errors::Result<()> {
-    let ClaudeObservationProjection::Message(unaliased_projection) = unaliased else {
+    let ObservationProjection::Message(unaliased_projection) = unaliased else {
         return Err(authority_violation(
             "projection alias is ineligible for a skipped observation",
         ));
@@ -440,7 +440,7 @@ fn validate_alias_binding(
 
 fn validate_provenance_row(
     actual: &ProjectionProvenanceRow,
-    projection: &ClaudeSessionMessageProjection,
+    projection: &SessionMessageProjection,
 ) -> crate::errors::Result<()> {
     let provenance = projection.provenance();
     let message = projection.message();
@@ -461,8 +461,8 @@ async fn validate_message_projection(
     conn: &Connection,
     observation_id: &str,
     state: ProjectionAuthorityState,
-    unaliased: &ClaudeObservationProjection,
-    projection: &ClaudeSessionMessageProjection,
+    unaliased: &ObservationProjection,
+    projection: &SessionMessageProjection,
 ) -> crate::errors::Result<()> {
     if state.alias_rows > 1 {
         return Err(authority_violation(
@@ -498,7 +498,7 @@ async fn validate_message_projection(
 
 async fn validate_skipped_projection(
     conn: &Connection,
-    observation: &DurableClaudeObservationV1,
+    observation: &DurableObservationV1,
     observation_id: &str,
     state: ProjectionAuthorityState,
     reason: ProjectionSkipReason,
@@ -524,7 +524,7 @@ async fn validate_skipped_projection(
 
 async fn validate_projection_effect(
     conn: &Connection,
-    observation: &DurableClaudeObservationV1,
+    observation: &DurableObservationV1,
 ) -> crate::errors::Result<()> {
     let unaliased = crate::global_db::observation_projection::derive_projection(observation)
         .map_err(|error| authority_violation(format!("invalid projection authority: {error}")))?;
@@ -537,10 +537,10 @@ async fn validate_projection_effect(
     let observation_id = observation.observation_id().as_str();
     let state = ProjectionAuthorityState::load(conn, observation_id).await?;
     match effect {
-        ClaudeObservationProjection::Message(projection) => {
+        ObservationProjection::Message(projection) => {
             validate_message_projection(conn, observation_id, state, &unaliased, &projection).await
         }
-        ClaudeObservationProjection::Skipped(reason) => {
+        ObservationProjection::Skipped(reason) => {
             validate_skipped_projection(conn, observation, observation_id, state, reason).await
         }
     }
@@ -549,7 +549,7 @@ async fn validate_projection_effect(
 async fn observation_by_id(
     conn: &Connection,
     observation_id: &str,
-) -> crate::errors::Result<DurableClaudeObservationV1> {
+) -> crate::errors::Result<DurableObservationV1> {
     let mut rows = conn
         .query(
             "SELECT observation_json FROM observations WHERE observation_id = ?1",
@@ -581,7 +581,7 @@ async fn count_suffix_rows(
     let mut rows = conn
         .query(
             &query,
-            params![after_rowid, CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+            params![after_rowid, SESSION_MESSAGE_PROJECTOR_VERSION_V1],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -644,7 +644,7 @@ pub(super) async fn validate_projection_authority_suffix(
                 current_projection_checkpoint,
                 checkpoint.provenance_rowid,
                 checkpoint.disposition_rowid,
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
                 checkpoint.alias_rowid
             ],
         )

@@ -60,6 +60,77 @@ fn daemon_lifecycle_rejects_new_work_after_draining() {
     assert!(!lifecycle.accepting());
 }
 
+#[test]
+fn daemon_client_admission_reports_saturation_and_recovers() {
+    let admission = super::DaemonClientAdmission::new(1);
+    let permit = match admission.try_admit() {
+        super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+        super::DaemonClientAdmissionOutcome::Saturated(_) => panic!("first client rejected"),
+    };
+
+    let response = match admission.try_admit() {
+        super::DaemonClientAdmissionOutcome::Saturated(response) => response,
+        super::DaemonClientAdmissionOutcome::Admitted(_) => panic!("capacity exceeded"),
+    };
+    assert_eq!(
+        response,
+        super::DaemonClientSaturationResponse {
+            kind: super::DaemonClientSaturationKind::ClientCapacityReached,
+            retryable: true,
+            capacity: 1,
+        }
+    );
+
+    drop(permit);
+    assert!(matches!(
+        admission.try_admit(),
+        super::DaemonClientAdmissionOutcome::Admitted(_)
+    ));
+}
+
+#[test]
+fn daemon_client_saturation_response_is_typed_json_rpc_data() {
+    let response = super::DaemonClientSaturationResponse {
+        kind: super::DaemonClientSaturationKind::ClientCapacityReached,
+        retryable: true,
+        capacity: 3,
+    }
+    .into_json_rpc();
+    let data = response
+        .error
+        .expect("error response")
+        .data
+        .expect("typed data");
+
+    assert_eq!(data["kind"], "client_capacity_reached");
+    assert_eq!(data["retryable"], true);
+    assert_eq!(data["capacity"], 3);
+}
+
+#[tokio::test]
+async fn cancelling_daemon_client_releases_admission_capacity() {
+    let admission = super::DaemonClientAdmission::new(1);
+    let permit = match admission.try_admit() {
+        super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+        super::DaemonClientAdmissionOutcome::Saturated(_) => panic!("first client rejected"),
+    };
+    let task = tokio::spawn(async move {
+        let _permit = permit;
+        std::future::pending::<()>().await;
+    });
+    assert!(matches!(
+        admission.try_admit(),
+        super::DaemonClientAdmissionOutcome::Saturated(_)
+    ));
+
+    task.abort();
+    task.await.expect_err("client task cancelled");
+    assert!(matches!(
+        admission.try_admit(),
+        super::DaemonClientAdmissionOutcome::Admitted(_)
+    ));
+}
+
 #[tokio::test]
 async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";

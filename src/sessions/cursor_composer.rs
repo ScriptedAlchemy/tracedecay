@@ -28,13 +28,12 @@
 //!
 //! ## Incremental + dedupe
 //!
-//! Each composer session's watermark (its bubble/header count, since
-//! `lastUpdatedAt` is `null` for the vast majority of envelopes) is persisted
-//! in the shared `parse_offsets` table under a `cursor-composer:<composerId>`
-//! key, so a sweep re-reads a session's bubbles only when it grew. Because a
-//! composer session id equals the stem of its JSONL transcript for ~94% of
-//! sessions, the composer sweep runs *before* the JSONL
-//! [`crate::sessions::cursor::CursorSweepSource`] and hands it the set of
+//! Each composer source advances through its ordered bubbles using the
+//! authoritative observation cursor. The cursor is compare-and-swap bound to
+//! the snapshot generation and `SnapshotOrder`, so a sweep replays only
+//! uncovered positions. Because a composer session id equals the stem of its
+//! JSONL transcript for ~94% of sessions, the composer sweep runs *before* the
+//! JSONL [`crate::sessions::cursor::CursorSweepSource`] and hands it the set of
 //! composer-owned session ids to skip, so the richer composer rows win and no
 //! message row is ever double-ingested.
 
@@ -44,12 +43,28 @@ use std::path::{Path, PathBuf};
 
 use libsql::{Builder, OpenFlags};
 use serde_json::{Value, json};
-use tracedecay_store::{TranscriptStore, TranscriptWriteBatch};
+use sha2::{Digest, Sha256};
+use tracedecay_domain::{
+    CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
+    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
+    CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
+    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ProjectId, ProviderId, RetentionClass, SessionId,
+};
+use tracedecay_store::ObservationPersistOutcome;
+use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
-use crate::global_db::{GlobalDb, ParseOffset};
+use crate::application::host_admission::{
+    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionStatus,
+};
+use crate::application::observation::{
+    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
+};
+use crate::global_db::GlobalDb;
+use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::sessions::shared::path_belongs_to_project;
-use crate::sessions::{SessionMessageRecord, SessionRecord};
-use crate::store::GlobalDbTranscriptStore;
+use crate::sessions::source::TranscriptIngestError;
 
 /// `SQLITE_OPEN_URI` — not exposed by libsql's [`OpenFlags`], so we OR the raw
 /// bit in (libsql forwards `flags.bits()` verbatim to `sqlite3_open_v2`). This
@@ -59,6 +74,299 @@ const SQLITE_OPEN_URI: i32 = 0x0000_0040;
 /// Provider id shared with the JSONL Cursor source so both land in the same
 /// per-project `sessions.db` namespace and dedupe by `(provider, message_id)`.
 const PROVIDER: &str = "cursor";
+const COMPOSER_OBSERVATION_RETENTION: &str = "retention.provider-observation";
+
+pub fn build_cursor_composer_capture_request(
+    composer_id: &str,
+    bubble_id: &str,
+    bubble: &Value,
+    scope: ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    position: u64,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+) -> Result<CaptureObservationRequest, String> {
+    let range =
+        tracedecay_domain::ObservationSourceRangeV1::new(position, position.saturating_add(1))
+            .map_err(|error| format!("invalid Cursor composer position: {error}"))?;
+    let encoded = serde_json::to_vec(bubble)
+        .map_err(|error| format!("could not encode Cursor composer bubble: {error}"))?;
+    let native_record_id = cursor_composer_native_record_id(composer_id, bubble_id)?;
+    let parsed = parse_normalized_observation_record_v1(
+        &encoded,
+        range,
+        ObservationOrderingDomainV1::SnapshotOrder,
+        |native| {
+            normalize_cursor_composer_observation(
+                &native,
+                composer_id,
+                native_record_id.clone(),
+                range,
+                position,
+            )
+        },
+    )
+    .map_err(|error| format!("could not parse Cursor composer bubble: {error}"))?;
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new(PROVIDER)
+            .map_err(|error| format!("invalid Cursor provider id: {error}"))?,
+        SessionId::new(composer_id)
+            .map_err(|error| format!("invalid Cursor composer id: {error}"))?,
+    )
+    .map_err(|error| format!("invalid Cursor composer source: {error}"))?;
+    let identity = ObservationIdentityMaterialV1::for_native_record(
+        source,
+        scope,
+        generation,
+        range,
+        ObservationOrderingDomainV1::SnapshotOrder,
+        native_record_id,
+    )
+    .map_err(|error| format!("invalid Cursor composer identity: {error}"))?;
+    CaptureObservationRequest::new(
+        parsed,
+        identity,
+        expected_cursor,
+        RetentionClass::new(COMPOSER_OBSERVATION_RETENTION)
+            .map_err(|error| format!("invalid Cursor composer retention: {error}"))?,
+        ObservationCancellation::default(),
+    )
+    .map_err(|error| format!("invalid Cursor composer capture request: {error}"))
+}
+
+pub async fn capture_cursor_composer_observation(
+    db: &GlobalDb,
+    request: CaptureObservationRequest,
+) -> Result<CaptureObservationOutcome, TranscriptIngestError> {
+    let authorities = match request.scope() {
+        ObservationScopeV1::Project { .. } => HostAdmissionAuthorities::new(Some(db), None),
+        ObservationScopeV1::Profile => HostAdmissionAuthorities::new(None, Some(db)),
+    };
+    HostAdmissionFacade::new(authorities)
+        .capture_observation(request)
+        .await
+        .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })
+}
+
+fn normalize_cursor_composer_observation(
+    native: &Value,
+    composer_id: &str,
+    stable_record_id: ObservationId,
+    range: tracedecay_domain::ObservationSourceRangeV1,
+    position: u64,
+) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
+    let timestamp = bubble_epoch(native, "createdAt");
+    let relations = CanonicalObservationRelationsV1::new(
+        SessionId::new(composer_id)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+    )
+    .with_message_id(stable_record_id.clone());
+    let mut facts = Vec::new();
+
+    if let Some(text) = native
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+    {
+        facts.push(CanonicalObservationFactV1::Message {
+            role: match native.get("type").and_then(Value::as_i64) {
+                Some(1) => CanonicalMessageRoleV1::User,
+                Some(2) => CanonicalMessageRoleV1::Assistant,
+                _ => CanonicalMessageRoleV1::Unknown,
+            },
+            content: Value::String(text.to_string()),
+            model: ["model", "modelId", "modelName"]
+                .into_iter()
+                .find_map(|key| native.get(key).and_then(Value::as_str))
+                .filter(|model| !model.trim().is_empty())
+                .map(str::to_string),
+            timestamp,
+        });
+    }
+
+    if let Some(tool) = native.get("toolFormerData").filter(|tool| !tool.is_null()) {
+        let invocation_id = composer_observation_id(
+            tool.get("toolCallId")
+                .or_else(|| tool.get("id"))
+                .and_then(Value::as_str),
+            &stable_record_id,
+        );
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("tool")
+            .to_string();
+        facts.push(CanonicalObservationFactV1::ToolInvocation {
+            invocation_id: invocation_id.clone(),
+            name,
+            arguments: Value::Null,
+        });
+        if tool.get("result").is_some_and(|result| !result.is_null()) {
+            facts.push(CanonicalObservationFactV1::ToolResult {
+                invocation_id: Some(invocation_id),
+                content: Value::Null,
+                success: tool
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(|status| matches!(status, "completed" | "success" | "succeeded")),
+            });
+        }
+    }
+
+    if let Some(thinking) = native
+        .pointer("/thinking/text")
+        .filter(|thinking| !thinking.is_null())
+        .cloned()
+    {
+        facts.push(CanonicalObservationFactV1::Reasoning {
+            visibility: CanonicalReasoningVisibilityV1::Visible,
+            content: Some(thinking),
+        });
+    }
+
+    if let Some(token_count) = native.get("tokenCount") {
+        let input_tokens = composer_canonical_u64(token_count.get("inputTokens"));
+        let output_tokens = composer_canonical_u64(token_count.get("outputTokens"));
+        if input_tokens.is_some() || output_tokens.is_some() {
+            facts.push(CanonicalObservationFactV1::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                reasoning_tokens: None,
+            });
+        }
+    }
+
+    append_composer_git_facts(native, &mut facts);
+    if let Some(todos) = native.get("todos").and_then(Value::as_array) {
+        let items = todos
+            .iter()
+            .filter_map(|todo| todo.get("content").and_then(Value::as_str))
+            .filter(|content| !content.trim().is_empty())
+            .map(|content| Value::String(content.to_string()))
+            .collect::<Vec<_>>();
+        if !items.is_empty() {
+            facts.push(CanonicalObservationFactV1::Workflow {
+                evidence_kind: CanonicalWorkflowEvidenceKindV1::Plan,
+                reference: None,
+                content: Some(Value::Array(items)),
+            });
+        }
+    }
+    if native
+        .get("isCompacted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        facts.push(CanonicalObservationFactV1::Compaction {
+            summary: native.get("text").cloned(),
+            input_tokens: None,
+            output_tokens: None,
+        });
+    }
+    if facts.is_empty() {
+        facts.push(CanonicalObservationFactV1::Unknown {
+            native_kind: "bubble".to_string(),
+            state: CanonicalUnknownStateV1::Absent,
+        });
+    }
+
+    let mut evidence =
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range)
+            .with_native_sequence(position);
+    if let Some(timestamp) = timestamp {
+        evidence = evidence.with_native_timestamp(timestamp);
+    }
+    CanonicalObservationEnvelopeV1::new(
+        ProviderId::new(PROVIDER)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+        "bubble",
+        stable_record_id,
+        relations,
+        facts,
+        evidence,
+    )
+    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
+}
+
+fn append_composer_git_facts(native: &Value, facts: &mut Vec<CanonicalObservationFactV1>) {
+    if let Some(commits) = native.get("commits").and_then(Value::as_array) {
+        for commit in commits {
+            let reference = ["hash", "sha", "id"]
+                .into_iter()
+                .find_map(|key| commit.get(key).and_then(Value::as_str))
+                .map(str::to_string);
+            facts.push(CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::Commit,
+                reference,
+                content: None,
+            });
+        }
+    }
+    if native
+        .get("gitDiffs")
+        .and_then(Value::as_array)
+        .is_some_and(|diffs| !diffs.is_empty())
+    {
+        facts.push(CanonicalObservationFactV1::Git {
+            evidence_kind: CanonicalGitEvidenceKindV1::Diff,
+            reference: None,
+            content: None,
+        });
+    }
+    if let Some(pull_requests) = native.get("pullRequests").and_then(Value::as_array) {
+        for pull_request in pull_requests {
+            let reference = ["url", "htmlUrl", "html_url", "id"]
+                .into_iter()
+                .find_map(|key| pull_request.get(key).and_then(Value::as_str))
+                .map(str::to_string);
+            facts.push(CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::PullRequest,
+                reference: reference.clone(),
+                content: None,
+            });
+            facts.push(CanonicalObservationFactV1::Workflow {
+                evidence_kind: CanonicalWorkflowEvidenceKindV1::PullRequest,
+                reference,
+                content: None,
+            });
+        }
+    }
+}
+
+fn composer_observation_id(native_id: Option<&str>, fallback: &ObservationId) -> ObservationId {
+    native_id
+        .and_then(|native_id| ObservationId::new(native_id).ok())
+        .unwrap_or_else(|| fallback.clone())
+}
+
+fn composer_canonical_u64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+    })
+}
+
+fn cursor_composer_native_record_id(
+    composer_id: &str,
+    bubble_id: &str,
+) -> Result<ObservationId, String> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.cursor-composer-native-record.v1\0");
+    hasher.update(composer_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(bubble_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}")
+            .map_err(|error| format!("could not encode Cursor composer identity: {error}"))?;
+    }
+    ObservationId::new(format!("cursor.composer.sha256:{encoded}"))
+        .map_err(|error| format!("invalid Cursor composer native identity: {error}"))
+}
 
 /// Default ceiling on how many *new/changed* composer sessions one sweep pass
 /// ingests, so the first backfill of thousands of sessions never blocks
@@ -87,6 +395,13 @@ impl CursorComposerSweepOutcome {
 pub struct CursorComposerSource {
     state_db_path: PathBuf,
     chats_dir: PathBuf,
+}
+
+struct ComposerIngestContext<'a> {
+    facade: HostAdmissionFacade<'a>,
+    scope: ObservationScopeV1,
+    project_root: Option<&'a Path>,
+    registered_roots: &'a [PathBuf],
 }
 
 impl CursorComposerSource {
@@ -121,27 +436,22 @@ impl CursorComposerSource {
         envelope_cap: usize,
     ) -> CursorComposerSweepOutcome {
         let mut outcome = CursorComposerSweepOutcome::default();
-        let store = GlobalDbTranscriptStore::new(db);
+        let Ok(scope) = project_scope(project_root) else {
+            return outcome;
+        };
+        let context = ComposerIngestContext {
+            facade: HostAdmissionFacade::new(HostAdmissionAuthorities::new(Some(db), None)),
+            scope,
+            project_root: Some(project_root),
+            registered_roots: &[],
+        };
         // ws-hash -> workspace fsPath, harvested from envelopes so per-session
         // store.db files (which key only by ws-hash) can be scoped to a project.
-        let mut workspace_paths: HashMap<String, String> = HashMap::new();
-        self.ingest_state_vscdb(
-            &store,
-            Some(project_root),
-            &[],
-            envelope_cap,
-            &mut outcome,
-            &mut workspace_paths,
-        )
-        .await;
-        self.ingest_chat_store_dbs(
-            &store,
-            Some(project_root),
-            &[],
-            &workspace_paths,
-            &mut outcome,
-        )
-        .await;
+        let mut workspace_paths = HashMap::new();
+        self.ingest_state_vscdb(&context, envelope_cap, &mut outcome, &mut workspace_paths)
+            .await;
+        self.ingest_chat_store_dbs(&context, &workspace_paths, &mut outcome)
+            .await;
         outcome
     }
 
@@ -152,33 +462,23 @@ impl CursorComposerSource {
         envelope_cap: usize,
     ) -> CursorComposerSweepOutcome {
         let mut outcome = CursorComposerSweepOutcome::default();
-        let store = GlobalDbTranscriptStore::new(db);
+        let context = ComposerIngestContext {
+            facade: HostAdmissionFacade::new(HostAdmissionAuthorities::new(None, Some(db))),
+            scope: ObservationScopeV1::Profile,
+            project_root: None,
+            registered_roots,
+        };
         let mut workspace_paths = HashMap::new();
-        self.ingest_state_vscdb(
-            &store,
-            None,
-            registered_roots,
-            envelope_cap,
-            &mut outcome,
-            &mut workspace_paths,
-        )
-        .await;
-        self.ingest_chat_store_dbs(
-            &store,
-            None,
-            registered_roots,
-            &workspace_paths,
-            &mut outcome,
-        )
-        .await;
+        self.ingest_state_vscdb(&context, envelope_cap, &mut outcome, &mut workspace_paths)
+            .await;
+        self.ingest_chat_store_dbs(&context, &workspace_paths, &mut outcome)
+            .await;
         outcome
     }
 
     async fn ingest_state_vscdb(
         &self,
-        store: &GlobalDbTranscriptStore<'_>,
-        project_root: Option<&Path>,
-        registered_roots: &[PathBuf],
+        context: &ComposerIngestContext<'_>,
         envelope_cap: usize,
         outcome: &mut CursorComposerSweepOutcome,
         workspace_paths: &mut HashMap<String, String>,
@@ -225,14 +525,15 @@ impl CursorComposerSource {
                     .entry(ws_hash)
                     .or_insert_with(|| project.path.clone());
             }
-            let selected_project = match project_root {
+            let _selected_project = match context.project_root {
                 Some(root) if path_belongs_to_project(Path::new(&project.path), root) => {
                     ComposerProject {
                         path: project.path.clone(),
                     }
                 }
                 Some(_) => continue,
-                None if registered_roots
+                None if context
+                    .registered_roots
                     .iter()
                     .any(|root| path_belongs_to_project(Path::new(&project.path), root)) =>
                 {
@@ -250,85 +551,110 @@ impl CursorComposerSource {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            let watermark = headers.len() as u64;
-            let offset_key = format!("cursor-composer:{composer_id}");
-            let Ok(prev) = store.get_parse_offset(Path::new(&offset_key)).await else {
-                continue;
-            };
-            let last_updated = epoch_secs_u64(envelope_epoch(&envelope, "lastUpdatedAt"));
-            // Unchanged since last pass -> skip without touching bubbles.
-            if watermark != 0 && watermark <= prev.byte_offset && prev.mtime == last_updated {
-                continue;
-            }
             if ingested_this_pass >= envelope_cap {
                 // Deferred to a later pass; still owned so JSONL stands down.
                 continue;
             }
-
-            let messages = self
-                .build_composer_messages(conn, composer_id, &envelope, &headers)
-                .await;
-            if messages.is_empty() {
+            let Some(generation) = snapshot_generation(&self.state_db_path) else {
                 continue;
+            };
+            let mut session_accepted = false;
+            let mut messages = 0_u64;
+            for (position, header) in headers.iter().enumerate() {
+                let Some(bubble_id) = header.get("bubbleId").and_then(Value::as_str) else {
+                    continue;
+                };
+                let position = position as u64;
+                let Ok(source) = cursor_composer_source(composer_id) else {
+                    break;
+                };
+                let Ok(expected_cursor) = context
+                    .facade
+                    .get_source_cursor(&source, &context.scope)
+                    .await
+                else {
+                    break;
+                };
+                if expected_cursor.as_ref().is_some_and(|cursor| {
+                    cursor.generation() == generation
+                        && cursor.position() >= position.saturating_add(1)
+                }) {
+                    continue;
+                }
+                let Some(bubble) = fetch_bubble(conn, composer_id, bubble_id).await else {
+                    continue;
+                };
+                let Ok(request) = build_cursor_composer_capture_request(
+                    composer_id,
+                    bubble_id,
+                    &bubble,
+                    context.scope.clone(),
+                    generation,
+                    position,
+                    expected_cursor.clone(),
+                ) else {
+                    continue;
+                };
+                match context.facade.capture_observation(request).await {
+                    Ok(CaptureObservationOutcome::Persisted {
+                        outcome: persisted, ..
+                    }) => {
+                        session_accepted = true;
+                        if matches!(persisted, ObservationPersistOutcome::Committed(_)) {
+                            messages = messages.saturating_add(1);
+                        }
+                    }
+                    Ok(CaptureObservationOutcome::Rejected { receipt, .. }) => {
+                        if advance_composer_coverage(
+                            ComposerCoverageContext {
+                                facade: &context.facade,
+                                scope: &context.scope,
+                                generation,
+                            },
+                            source,
+                            position,
+                            expected_cursor,
+                            ObservationCoverageReason::SanitizerRejected,
+                            receipt,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(CaptureObservationOutcome::Quarantined { receipt, .. }) => {
+                        if advance_composer_coverage(
+                            ComposerCoverageContext {
+                                facade: &context.facade,
+                                scope: &context.scope,
+                                generation,
+                            },
+                            source,
+                            position,
+                            expected_cursor,
+                            ObservationCoverageReason::SanitizerQuarantined,
+                            receipt,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
             }
-            let session = composer_session(composer_id, &envelope, &selected_project, &messages);
-            let advanced = ParseOffset {
-                byte_offset: watermark,
-                mtime: last_updated,
-                file_id: 0,
-            };
-            let message_count = messages.len() as u64;
-            let Ok(batch) = TranscriptWriteBatch::upsert(session, messages, prev, advanced) else {
-                continue;
-            };
-            if store.persist_transcript_batch(batch).await.is_ok() {
+            if session_accepted {
                 ingested_this_pass += 1;
-                outcome.add(1, message_count);
+                outcome.add(1, messages);
             }
         }
-    }
-
-    /// Fetch and map every bubble referenced by the envelope's ordered header
-    /// list into provider-neutral rows.
-    async fn build_composer_messages(
-        &self,
-        conn: &libsql::Connection,
-        composer_id: &str,
-        envelope: &Value,
-        headers: &[Value],
-    ) -> Vec<SessionMessageRecord> {
-        let model = envelope
-            .get("modelConfig")
-            .and_then(|c| c.get("modelName"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let mut messages = Vec::new();
-        let mut ordinal: i64 = 0;
-        for header in headers {
-            let Some(bubble_id) = header.get("bubbleId").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(bubble) = fetch_bubble(conn, composer_id, bubble_id).await else {
-                continue;
-            };
-            append_bubble_rows(
-                &mut messages,
-                &mut ordinal,
-                composer_id,
-                bubble_id,
-                &bubble,
-                model.as_deref(),
-            );
-        }
-        append_plan_row(&mut messages, &mut ordinal, composer_id, envelope);
-        messages
     }
 
     async fn ingest_chat_store_dbs(
         &self,
-        store: &GlobalDbTranscriptStore<'_>,
-        project_root: Option<&Path>,
-        registered_roots: &[PathBuf],
+        context: &ComposerIngestContext<'_>,
         workspace_paths: &HashMap<String, String>,
         outcome: &mut CursorComposerSweepOutcome,
     ) {
@@ -341,13 +667,14 @@ impl CursorComposerSource {
             }
             let ws_hash = ws_entry.file_name().to_string_lossy().to_string();
             // Scope by ws-hash -> project mapping harvested from the envelopes.
-            let project_path = match (workspace_paths.get(&ws_hash), project_root) {
+            let _project_path = match (workspace_paths.get(&ws_hash), context.project_root) {
                 (Some(path), Some(root)) if path_belongs_to_project(Path::new(path), root) => {
                     path.clone()
                 }
                 (Some(_), Some(_)) | (None, _) => continue,
                 (Some(path), None)
-                    if registered_roots
+                    if context
+                        .registered_roots
                         .iter()
                         .any(|root| path_belongs_to_project(Path::new(path), root)) =>
                 {
@@ -363,7 +690,7 @@ impl CursorComposerSource {
                 if !store_path.is_file() {
                     continue;
                 }
-                self.ingest_one_store_db(store, &store_path, &project_path, outcome)
+                self.ingest_one_store_db(context, &store_path, outcome)
                     .await;
             }
         }
@@ -371,9 +698,8 @@ impl CursorComposerSource {
 
     async fn ingest_one_store_db(
         &self,
-        store: &GlobalDbTranscriptStore<'_>,
+        context: &ComposerIngestContext<'_>,
         store_path: &Path,
-        project_path: &str,
         outcome: &mut CursorComposerSweepOutcome,
     ) {
         let Some(ro) = open_readonly_immutable(store_path).await else {
@@ -394,88 +720,195 @@ impl CursorComposerSource {
         let session_id = format!("cursor-chat:{}", meta.agent_id);
         outcome.owned_session_ids.insert(session_id.clone());
 
-        let offset_key = format!("cursor-chat:{}", meta.agent_id);
-        let Ok(prev) = store.get_parse_offset(Path::new(&offset_key)).await else {
+        let Some(generation) = snapshot_generation(store_path) else {
             return;
         };
-        let watermark = ordered.len() as u64;
-        let created_secs = epoch_secs_u64(meta.created_at);
-        if watermark != 0 && watermark <= prev.byte_offset && prev.mtime == created_secs {
+        let Ok(source) = cursor_composer_source(&session_id) else {
             return;
-        }
-
-        let mut messages = Vec::new();
+        };
+        let mut session_accepted = false;
+        let mut messages = 0_u64;
         for (ordinal, (role, content)) in ordered.iter().enumerate() {
+            let position = ordinal as u64;
+            let Ok(expected_cursor) = context
+                .facade
+                .get_source_cursor(&source, &context.scope)
+                .await
+            else {
+                return;
+            };
+            if expected_cursor.as_ref().is_some_and(|cursor| {
+                cursor.generation() == generation && cursor.position() >= position.saturating_add(1)
+            }) {
+                continue;
+            }
             let text = crate::sessions::shared::message_storage_text(content);
             if text.trim().is_empty() {
                 continue;
             }
-            messages.push(SessionMessageRecord {
-                provider: PROVIDER.to_string(),
-                message_id: format!("{session_id}:{ordinal}"),
-                session_id: session_id.clone(),
-                role: role.clone(),
-                timestamp: meta.created_at,
-                ordinal: ordinal as i64,
-                text,
-                kind: Some("message".to_string()),
-                model: None,
-                tool_names: None,
-                source_path: Some(store_path.to_string_lossy().to_string()),
-                source_offset: Some(ordinal as i64),
-                metadata_json: serde_json::to_string(&json!({
-                    "source": "cursor_chat_store",
-                    "agent_id": meta.agent_id,
-                    "chat_mode": meta.mode,
-                }))
-                .ok(),
+            let bubble = json!({
+                "type": if role == "user" { 1 } else { 2 },
+                "text": text,
+                "createdAt": meta.created_at.map(|seconds| seconds.saturating_mul(1000)),
             });
+            let Ok(request) = build_cursor_composer_capture_request(
+                &session_id,
+                &format!("chat:{ordinal}"),
+                &bubble,
+                context.scope.clone(),
+                generation,
+                position,
+                expected_cursor.clone(),
+            ) else {
+                continue;
+            };
+            match context.facade.capture_observation(request).await {
+                Ok(CaptureObservationOutcome::Persisted {
+                    outcome: persisted, ..
+                }) => {
+                    session_accepted = true;
+                    if matches!(persisted, ObservationPersistOutcome::Committed(_)) {
+                        messages = messages.saturating_add(1);
+                    }
+                }
+                Ok(CaptureObservationOutcome::Rejected { receipt, .. }) => {
+                    if advance_composer_coverage(
+                        ComposerCoverageContext {
+                            facade: &context.facade,
+                            scope: &context.scope,
+                            generation,
+                        },
+                        source.clone(),
+                        position,
+                        expected_cursor,
+                        ObservationCoverageReason::SanitizerRejected,
+                        receipt,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return;
+                    }
+                }
+                Ok(CaptureObservationOutcome::Quarantined { receipt, .. }) => {
+                    if advance_composer_coverage(
+                        ComposerCoverageContext {
+                            facade: &context.facade,
+                            scope: &context.scope,
+                            generation,
+                        },
+                        source.clone(),
+                        position,
+                        expected_cursor,
+                        ObservationCoverageReason::SanitizerQuarantined,
+                        receipt,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            }
         }
-        if messages.is_empty() {
-            return;
-        }
-        let session = SessionRecord {
-            provider: PROVIDER.to_string(),
-            session_id: session_id.clone(),
-            project_key: project_path.to_string(),
-            project_path: project_path.to_string(),
-            title: meta
-                .name
-                .clone()
-                .or_else(|| crate::sessions::shared::title_from_messages(&messages)),
-            started_at: meta.created_at,
-            ended_at: messages.last().and_then(|m| m.timestamp),
-            transcript_path: Some(store_path.to_string_lossy().to_string()),
-            metadata_json: serde_json::to_string(&json!({
-                "source": "cursor_chat_store",
-                "agent_id": meta.agent_id,
-                "chat_mode": meta.mode,
-            }))
-            .ok(),
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: Some(meta.agent_id.clone()),
-            parent_tool_use_id: None,
-        };
-        let advanced = ParseOffset {
-            byte_offset: watermark,
-            mtime: created_secs,
-            file_id: 0,
-        };
-        let message_count = messages.len() as u64;
-        let Ok(batch) = TranscriptWriteBatch::upsert_with_cursor(
-            PathBuf::from(offset_key),
-            session,
-            messages,
-            prev,
-            advanced,
-        ) else {
-            return;
-        };
-        if store.persist_transcript_batch(batch).await.is_ok() {
-            outcome.add(1, message_count);
+        if session_accepted {
+            outcome.add(1, messages);
         }
     }
+}
+
+fn cursor_composer_source(composer_id: &str) -> Result<ObservationSourceIdentityV1, String> {
+    ObservationSourceIdentityV1::for_provider(
+        ProviderId::new(PROVIDER)
+            .map_err(|error| format!("invalid Cursor provider id: {error}"))?,
+        SessionId::new(composer_id)
+            .map_err(|error| format!("invalid Cursor composer id: {error}"))?,
+    )
+    .map_err(|error| format!("invalid Cursor composer source: {error}"))
+}
+
+fn snapshot_generation(path: &Path) -> Option<ObservationSourceGenerationV1> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::metadata(path).ok()?;
+        let mut hasher = Sha256::new();
+        hasher.update(metadata.dev().to_le_bytes());
+        hasher.update(metadata.ino().to_le_bytes());
+        let digest = hasher.finalize();
+        let mut bytes = [0_u8; 8];
+        bytes.copy_from_slice(&digest[..8]);
+        ObservationSourceGenerationV1::new(u64::from_le_bytes(bytes).max(1)).ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+struct ComposerCoverageContext<'facade, 'db> {
+    facade: &'facade HostAdmissionFacade<'db>,
+    scope: &'facade ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+}
+
+async fn advance_composer_coverage(
+    context: ComposerCoverageContext<'_, '_>,
+    source: ObservationSourceIdentityV1,
+    position: u64,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    reason: ObservationCoverageReason,
+    receipt: tracedecay_domain::SanitizationReceiptV1,
+) -> Result<(), String> {
+    let range =
+        tracedecay_domain::ObservationSourceRangeV1::new(position, position.saturating_add(1))
+            .map_err(|error| format!("invalid Cursor composer coverage range: {error}"))?;
+    let advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
+        source,
+        context.scope.clone(),
+        context.generation,
+        ObservationOrderingDomainV1::SnapshotOrder,
+        expected_cursor,
+        range,
+        reason,
+        receipt,
+    )
+    .map_err(|error| format!("invalid Cursor composer coverage transition: {error}"))?;
+    context
+        .facade
+        .advance_non_durable_source_cursor(advance, ObservationCancellation::default())
+        .await
+        .map(|_| ())
+        .map_err(host_admission_error)
+}
+
+fn project_scope(project_root: &Path) -> Result<ObservationScopeV1, String> {
+    let layout = crate::storage::resolve_layout_for_current_profile(project_root)
+        .map_err(|_| "could not resolve Cursor project identity".to_string())?;
+    let project_id = layout
+        .identity
+        .project_id
+        .ok_or_else(|| "Cursor project identity is unavailable".to_string())?;
+    let project_id =
+        ProjectId::new(project_id).map_err(|_| "invalid Cursor project identity".to_string())?;
+    Ok(ObservationScopeV1::Project { project_id })
+}
+
+fn host_admission_error(outcome: HostAdmissionOutcome) -> String {
+    match outcome.status {
+        HostAdmissionStatus::Backpressured => "Cursor observation admission was backpressured",
+        HostAdmissionStatus::Unavailable => "Cursor observation authority is unavailable",
+        HostAdmissionStatus::Unknown => "Cursor observation provider is unsupported",
+        HostAdmissionStatus::Degraded => "Cursor observation admission was degraded",
+        HostAdmissionStatus::Supported
+        | HostAdmissionStatus::AcceptedForReplay
+        | HostAdmissionStatus::Committed
+        | HostAdmissionStatus::ExactDuplicate => "Cursor observation admission was incomplete",
+    }
+    .to_string()
 }
 
 /// Resolved project for a composer envelope.
@@ -537,336 +970,6 @@ async fn fetch_bubble(
     serde_json::from_str::<Value>(&value).ok()
 }
 
-/// Emit the provider-neutral rows for one bubble, in transcript order:
-/// tool call(s) → reasoning → message text, followed by any PR links.
-fn append_bubble_rows(
-    messages: &mut Vec<SessionMessageRecord>,
-    ordinal: &mut i64,
-    composer_id: &str,
-    bubble_id: &str,
-    bubble: &Value,
-    model: Option<&str>,
-) {
-    let role = bubble_role(bubble);
-    let timestamp = bubble_epoch(bubble, "createdAt");
-    let usage = bubble_usage(bubble);
-
-    // Tool call (`toolFormerData`).
-    if let Some(tfd) = bubble.get("toolFormerData").filter(|v| !v.is_null()) {
-        let name = tfd.get("name").and_then(Value::as_str).unwrap_or("tool");
-        let status = tfd.get("status").and_then(Value::as_str).unwrap_or("");
-        let kind = if is_edit_tool(name) {
-            "file_edit"
-        } else {
-            "tool_call"
-        };
-        let metadata = json!({
-            "source": "cursor_composer",
-            "tool": tfd.get("tool").cloned().unwrap_or(Value::Null),
-            "tool_name": name,
-            "status": status,
-            "tool_call_id": tfd.get("toolCallId").cloned().unwrap_or(Value::Null),
-            "params_bytes": json_field_len(tfd.get("params")),
-            "result_bytes": json_field_len(tfd.get("result")),
-        });
-        push_row(
-            messages,
-            ordinal,
-            composer_id,
-            ComposerRow {
-                message_id: format!("{composer_id}:{bubble_id}:tool"),
-                role: &role,
-                timestamp,
-                text: format!("{name} ({status})").trim().to_string(),
-                kind,
-                model,
-                tool_names: Some(name.to_string()),
-                metadata: &metadata,
-            },
-        );
-    }
-
-    // Reasoning / thinking.
-    if let Some(thinking) = bubble
-        .get("thinking")
-        .and_then(|t| t.get("text"))
-        .and_then(Value::as_str)
-        .filter(|t| !t.trim().is_empty())
-    {
-        push_row(
-            messages,
-            ordinal,
-            composer_id,
-            ComposerRow {
-                message_id: format!("{composer_id}:{bubble_id}:thinking"),
-                role: &role,
-                timestamp,
-                text: thinking.to_string(),
-                kind: "reasoning",
-                model,
-                tool_names: None,
-                metadata: &json!({ "source": "cursor_composer" }),
-            },
-        );
-    }
-
-    // Visible message text.
-    if let Some(text) = bubble
-        .get("text")
-        .and_then(Value::as_str)
-        .filter(|t| !t.trim().is_empty())
-    {
-        let mut metadata = json!({
-            "source": "cursor_composer",
-            "bubble_type": bubble.get("type").cloned().unwrap_or(Value::Null),
-        });
-        merge_git_metadata(&mut metadata, bubble);
-        if let Some(usage) = usage.clone() {
-            metadata["usage"] = usage;
-        }
-        push_row(
-            messages,
-            ordinal,
-            composer_id,
-            ComposerRow {
-                message_id: format!("{composer_id}:{bubble_id}"),
-                role: &role,
-                timestamp,
-                text: text.to_string(),
-                kind: "message",
-                model,
-                tool_names: None,
-                metadata: &metadata,
-            },
-        );
-    }
-
-    // Pull-request links.
-    if let Some(prs) = bubble.get("pullRequests").and_then(Value::as_array) {
-        for (index, pr) in prs.iter().enumerate() {
-            push_row(
-                messages,
-                ordinal,
-                composer_id,
-                ComposerRow {
-                    message_id: format!("{composer_id}:{bubble_id}:pr:{index}"),
-                    role: &role,
-                    timestamp,
-                    text: pr_link_text(pr),
-                    kind: "pr_link",
-                    model,
-                    tool_names: None,
-                    metadata: &json!({ "source": "cursor_composer", "pull_request": pr.clone() }),
-                },
-            );
-        }
-    }
-}
-
-/// One `plan` row per session carrying the envelope's todo list.
-fn append_plan_row(
-    messages: &mut Vec<SessionMessageRecord>,
-    ordinal: &mut i64,
-    composer_id: &str,
-    envelope: &Value,
-) {
-    let Some(todos) = envelope.get("todos").and_then(Value::as_array) else {
-        return;
-    };
-    if todos.is_empty() {
-        return;
-    }
-    let text = todos
-        .iter()
-        .filter_map(|t| t.get("content").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if text.trim().is_empty() {
-        return;
-    }
-    let items: Vec<Value> = todos
-        .iter()
-        .map(|t| {
-            json!({
-                "id": t.get("id").cloned().unwrap_or(Value::Null),
-                "content": t.get("content").cloned().unwrap_or(Value::Null),
-                "status": t.get("status").cloned().unwrap_or(Value::Null),
-            })
-        })
-        .collect();
-    push_row(
-        messages,
-        ordinal,
-        composer_id,
-        ComposerRow {
-            message_id: format!("{composer_id}:plan"),
-            role: "assistant",
-            timestamp: None,
-            text,
-            kind: "plan",
-            model: None,
-            tool_names: None,
-            metadata: &json!({ "source": "cursor_composer", "todos": items }),
-        },
-    );
-}
-
-struct ComposerRow<'a> {
-    message_id: String,
-    role: &'a str,
-    timestamp: Option<i64>,
-    text: String,
-    kind: &'a str,
-    model: Option<&'a str>,
-    tool_names: Option<String>,
-    metadata: &'a Value,
-}
-
-fn push_row(
-    messages: &mut Vec<SessionMessageRecord>,
-    ordinal: &mut i64,
-    composer_id: &str,
-    row: ComposerRow<'_>,
-) {
-    let current = *ordinal;
-    *ordinal += 1;
-    messages.push(SessionMessageRecord {
-        provider: PROVIDER.to_string(),
-        message_id: row.message_id,
-        session_id: composer_id.to_string(),
-        role: row.role.to_string(),
-        timestamp: row.timestamp,
-        ordinal: current,
-        text: row.text,
-        kind: Some(row.kind.to_string()),
-        model: row.model.map(str::to_string),
-        tool_names: row.tool_names,
-        source_path: None,
-        source_offset: Some(current),
-        metadata_json: serde_json::to_string(row.metadata).ok(),
-    });
-}
-
-fn composer_session(
-    composer_id: &str,
-    envelope: &Value,
-    project: &ComposerProject,
-    messages: &[SessionMessageRecord],
-) -> SessionRecord {
-    let created = envelope_epoch(envelope, "createdAt");
-    let ended = envelope_epoch(envelope, "lastUpdatedAt")
-        .or_else(|| messages.last().and_then(|m| m.timestamp));
-    let title = envelope
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|name| !name.trim().is_empty())
-        .map(str::to_string)
-        .or_else(|| crate::sessions::shared::title_from_messages(messages));
-    let mut metadata = json!({
-        "source": "cursor_composer",
-        "composer_id": composer_id,
-        "unified_mode": envelope.get("unifiedMode").cloned().unwrap_or(Value::Null),
-        "subagent_composer_ids": envelope.get("subagentComposerIds").cloned().unwrap_or(Value::Null),
-        "context_tokens_used": envelope.get("contextTokensUsed").cloned().unwrap_or(Value::Null),
-    });
-    if let Some(breakdown) = envelope.get("promptTokenBreakdown") {
-        metadata["prompt_token_breakdown"] = breakdown.clone();
-    }
-    if let Some(repos) = envelope.get("trackedGitRepos") {
-        metadata["tracked_git_repos"] = repos.clone();
-    }
-    SessionRecord {
-        provider: PROVIDER.to_string(),
-        session_id: composer_id.to_string(),
-        project_key: project.path.clone(),
-        project_path: project.path.clone(),
-        title,
-        started_at: created,
-        ended_at: ended,
-        transcript_path: Some(format!("cursor-composer:{composer_id}")),
-        metadata_json: serde_json::to_string(&metadata).ok(),
-        parent_session_id: None,
-        is_subagent: false,
-        agent_id: None,
-        parent_tool_use_id: None,
-    }
-}
-
-/// Map Cursor bubble `type` to a provider-neutral role (1 = user, 2 =
-/// assistant); anything else defaults to assistant so tool/reasoning rows stay
-/// attributed to the model side.
-fn bubble_role(bubble: &Value) -> String {
-    match bubble.get("type").and_then(Value::as_i64) {
-        Some(1) => "user".to_string(),
-        _ => "assistant".to_string(),
-    }
-}
-
-/// Cursor stores token counts as `{inputTokens,outputTokens}` (camelCase),
-/// which the shared usage extractor does not recognize — normalize to the
-/// `snake_case` shape the savings dashboard reads.
-fn bubble_usage(bubble: &Value) -> Option<Value> {
-    let counts = bubble.get("tokenCount")?;
-    let input = counts.get("inputTokens").and_then(Value::as_i64);
-    let output = counts.get("outputTokens").and_then(Value::as_i64);
-    if input.is_none() && output.is_none() {
-        return None;
-    }
-    Some(json!({
-        "input_tokens": input.unwrap_or(0),
-        "output_tokens": output.unwrap_or(0),
-    }))
-}
-
-fn merge_git_metadata(metadata: &mut Value, bubble: &Value) {
-    for (src, dst) in [
-        ("commits", "commits"),
-        ("gitDiffs", "git_diffs"),
-        ("pullRequests", "pull_requests"),
-    ] {
-        if let Some(value) = bubble.get(src).filter(|v| {
-            v.as_array().is_some_and(|a| !a.is_empty()) || (!v.is_array() && !v.is_null())
-        }) {
-            metadata[dst] = value.clone();
-        }
-    }
-}
-
-fn pr_link_text(pr: &Value) -> String {
-    for key in ["url", "htmlUrl", "html_url", "title", "name"] {
-        if let Some(value) = pr
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|v| !v.is_empty())
-        {
-            return value.to_string();
-        }
-    }
-    serde_json::to_string(pr).unwrap_or_default()
-}
-
-fn is_edit_tool(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    [
-        "edit",
-        "apply",
-        "write",
-        "create_file",
-        "search_replace",
-        "delete_file",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-}
-
-fn json_field_len(value: Option<&Value>) -> u64 {
-    value.map_or(0, |v| {
-        v.as_str()
-            .map_or_else(|| serde_json::to_string(v).map_or(0, |s| s.len()), str::len)
-            as u64
-    })
-}
-
 fn envelope_project(envelope: &Value) -> Option<ComposerProject> {
     if let Some(uri) = envelope
         .get("workspaceIdentifier")
@@ -909,24 +1012,12 @@ fn workspace_hash(envelope: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Envelope epoch fields are milliseconds; convert to the seconds the session
-/// tables use. Zero/absent yields `None`.
-fn envelope_epoch(envelope: &Value, key: &str) -> Option<i64> {
-    epoch_ms_to_secs(envelope.get(key).and_then(Value::as_i64))
-}
-
 fn bubble_epoch(bubble: &Value, key: &str) -> Option<i64> {
     epoch_ms_to_secs(bubble.get(key).and_then(Value::as_i64))
 }
 
 fn epoch_ms_to_secs(ms: Option<i64>) -> Option<i64> {
     ms.filter(|v| *v > 0).map(|v| v / 1000)
-}
-
-/// Epoch seconds as the `u64` the `parse_offsets.mtime` column stores (0 when
-/// absent), used as part of the composer watermark.
-fn epoch_secs_u64(secs: Option<i64>) -> u64 {
-    u64::try_from(secs.unwrap_or(0)).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -936,8 +1027,6 @@ fn epoch_secs_u64(secs: Option<i64>) -> u64 {
 struct StoreMeta {
     agent_id: String,
     latest_root_blob_id: Option<String>,
-    name: Option<String>,
-    mode: Option<String>,
     created_at: Option<i64>,
 }
 
@@ -957,12 +1046,6 @@ async fn read_store_meta(conn: &libsql::Connection) -> Option<StoreMeta> {
             .get("latestRootBlobId")
             .and_then(Value::as_str)
             .map(str::to_string),
-        name: meta
-            .get("name")
-            .and_then(Value::as_str)
-            .filter(|n| !n.trim().is_empty())
-            .map(str::to_string),
-        mode: meta.get("mode").and_then(Value::as_str).map(str::to_string),
         created_at: epoch_ms_to_secs(meta.get("createdAt").and_then(Value::as_i64)),
     })
 }
@@ -1127,4 +1210,85 @@ fn encode_hex(bytes: &[u8]) -> String {
         let _ = write!(out, "{byte:02x}");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn composer_capture_request_uses_snapshot_order_and_native_bubble_identity() {
+        let bubble = json!({
+            "type": 2,
+            "text": "redacted fixture",
+        });
+        let request = build_cursor_composer_capture_request(
+            "composer-redacted",
+            "bubble-redacted",
+            &bubble,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            7,
+            None,
+        );
+        assert!(request.is_ok());
+        assert_eq!(
+            cursor_composer_native_record_id("composer-redacted", "bubble-redacted")
+                .unwrap()
+                .as_str(),
+            cursor_composer_native_record_id("composer-redacted", "bubble-redacted")
+                .unwrap()
+                .as_str()
+        );
+    }
+
+    #[test]
+    fn canonical_composer_bubble_is_snapshot_typed_and_redacted() {
+        let native = json!({
+            "type": 2,
+            "text": "redacted response",
+            "createdAt": 1_783_500_600_000_i64,
+            "workspaceIdentifier": {"uri": {"fsPath": "/secret/workspace"}},
+            "toolFormerData": {
+                "name": "Read",
+                "toolCallId": "tool-redacted",
+                "params": {"path": "/secret/workspace/file.rs", "token": "credential-redacted"},
+                "result": {"body": "secret result"},
+                "status": "completed"
+            },
+            "thinking": {"text": "provider-visible summary"},
+            "tokenCount": {"inputTokens": 11, "outputTokens": 7},
+            "commits": [{"sha": "abc123"}],
+            "pullRequests": [{"url": "https://example.invalid/pr/1"}],
+            "todos": [{"content": "redacted plan item"}]
+        });
+        let range = tracedecay_domain::ObservationSourceRangeV1::new(7, 8).unwrap();
+        let record_id =
+            cursor_composer_native_record_id("composer-redacted", "bubble-redacted").unwrap();
+        let envelope = normalize_cursor_composer_observation(
+            &native,
+            "composer-redacted",
+            record_id.clone(),
+            range,
+            7,
+        )
+        .unwrap();
+        let rendered = format!("{envelope:?}");
+        for fact in [
+            "Message",
+            "ToolInvocation",
+            "ToolResult",
+            "Reasoning",
+            "Usage",
+            "Git",
+            "Workflow",
+        ] {
+            assert!(rendered.contains(fact), "missing canonical fact {fact}");
+        }
+        assert!(rendered.contains("SnapshotOrder"));
+        assert!(rendered.contains(record_id.as_str()));
+        assert!(!rendered.contains("/secret/workspace"));
+        assert!(!rendered.contains("credential-redacted"));
+        assert!(!rendered.contains("secret result"));
+    }
 }

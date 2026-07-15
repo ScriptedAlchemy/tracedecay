@@ -1848,17 +1848,6 @@ async fn open_session_db_with_cached_ensure(db_path: &Path) -> Option<GlobalDb> 
     Some(db)
 }
 
-async fn open_session_db_for_bulk_catch_up(db_path: &Path) -> Option<GlobalDb> {
-    if schema_already_ensured(db_path)
-        && let Some(db) = GlobalDb::open_at_assuming_schema(db_path).await
-    {
-        return Some(db);
-    }
-    let db = GlobalDb::open_at_without_structured_backfill(db_path).await?;
-    mark_schema_ensured(db_path);
-    Some(db)
-}
-
 enum LcmStorageResolution {
     Available(Box<LcmStorage>),
     Unavailable(ToolResult),
@@ -2399,13 +2388,9 @@ pub(super) async fn handle_message_search(
                 continue;
             };
             let retained_db = retained_project_db.filter(|db| db.db_path() == db_path);
-            let has_write_authority = retained_db.is_some() || allow_default_registry_fallback;
+            let has_write_authority = retained_db.is_some();
             let db = if let Some(db) = retained_db {
                 Some(Arc::clone(db))
-            } else if request.catch_up && allow_default_registry_fallback {
-                open_session_db_for_bulk_catch_up(&db_path)
-                    .await
-                    .map(Arc::new)
             } else {
                 GlobalDb::open_read_only_at(&db_path).await.map(Arc::new)
             };
@@ -2461,8 +2446,6 @@ pub(super) async fn handle_message_search(
                     )
                     .await;
                 catch_up_failures.extend(outcome.failures);
-            } else if allow_default_registry_fallback {
-                let _ = crate::sessions::ingest_user_global_sources_for_provider(provider).await;
             }
             if provider.is_none() || provider == Some(crate::sessions::SessionProvider::Hermes) {
                 let hermes_destinations = destinations
@@ -2568,8 +2551,7 @@ pub(super) async fn handle_message_search(
             retained_user_db
                 .filter(|db| db.db_path() == crate::sessions::user_sessions_db_path(&profile_root))
         });
-    let catch_up_authorized =
-        request.catch_up && (retained_project_db.is_some() || allow_default_registry_fallback);
+    let catch_up_authorized = request.catch_up && retained_project_db.is_some();
     let (catch_up_leader, mut catch_up_failures) = if catch_up_authorized {
         let provider = request.provider_scope.response_label();
         let key = format!("project:{}:{}", db_path.display(), provider);
@@ -2600,11 +2582,7 @@ pub(super) async fn handle_message_search(
     let db = if let Some(db) = retained_project_db {
         db.as_ref()
     } else {
-        let opened = if perform_catch_up {
-            open_session_db_with_cached_ensure(&db_path).await
-        } else {
-            GlobalDb::open_read_only_at(&db_path).await
-        };
+        let opened = GlobalDb::open_read_only_at(&db_path).await;
         let Some(db) = opened else {
             return Ok(tool_json(
                 Some(cg.project_root()),
@@ -2642,8 +2620,6 @@ pub(super) async fn handle_message_search(
                 .await
             };
             catch_up_failures.extend(outcome.failures);
-        } else if allow_default_registry_fallback {
-            let _ = crate::sessions::ingest_user_global_sources_for_provider(provider).await;
         }
         let outcome = crate::sessions::ingest_project_sources_for_provider(
             db,
@@ -2700,13 +2676,12 @@ pub(super) async fn handle_user_message_search(
     args: Value,
     retained_session_db: Option<&Arc<GlobalDb>>,
     registry_db: Option<&GlobalDb>,
-    allow_owned_session_db: bool,
+    _allow_owned_session_db: bool,
 ) -> Result<ToolResult> {
     let request = parse_message_search_request(&args)?;
     let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
     let retained_session_db = retained_session_db.filter(|db| db.db_path() == sessions_db_path);
-    let catch_up_authorized =
-        request.catch_up && (retained_session_db.is_some() || allow_owned_session_db);
+    let catch_up_authorized = request.catch_up && retained_session_db.is_some();
     let (catch_up_leader, mut catch_up_failures) = if catch_up_authorized {
         let provider = request.provider_scope.response_label();
         let key = format!("user:{}:{}", sessions_db_path.display(), provider);
@@ -2720,32 +2695,26 @@ pub(super) async fn handle_user_message_search(
     } else {
         (None, Vec::new())
     };
-    if catch_up_leader.is_some() {
-        if let Some(db) = retained_session_db {
-            let outcome = if let Some(registry_db) = registry_db {
-                crate::sessions::ingest_user_global_sources_for_provider_with_authorities(
-                    db.as_ref(),
-                    registry_db,
-                    profile_root,
-                    request.provider_scope.provider(),
-                )
-                .await
-            } else {
-                crate::sessions::ingest_user_global_sources_for_provider_at_with_db(
-                    db.as_ref(),
-                    profile_root,
-                    request.provider_scope.provider(),
-                )
-                .await
-            };
-            catch_up_failures.extend(outcome.failures);
-        } else if allow_owned_session_db {
-            let _ = crate::sessions::ingest_user_global_sources_for_provider_at(
+    if catch_up_leader.is_some()
+        && let Some(db) = retained_session_db
+    {
+        let outcome = if let Some(registry_db) = registry_db {
+            crate::sessions::ingest_user_global_sources_for_provider_with_authorities(
+                db.as_ref(),
+                registry_db,
                 profile_root,
                 request.provider_scope.provider(),
             )
-            .await;
-        }
+            .await
+        } else {
+            crate::sessions::ingest_user_global_sources_for_provider_at_with_db(
+                db.as_ref(),
+                profile_root,
+                request.provider_scope.provider(),
+            )
+            .await
+        };
+        catch_up_failures.extend(outcome.failures);
     }
     if let Some(leader) = catch_up_leader {
         leader.finish(&catch_up_failures);

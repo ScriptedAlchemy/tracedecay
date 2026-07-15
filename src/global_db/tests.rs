@@ -8,10 +8,10 @@ use tracedecay_domain::{
     SessionId,
 };
 use tracedecay_store::observation::{
-    CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
+    CursorAdvanceOutcome, NonDurableFrameReason, ObservationCoverageV1, ObservationCursorAdvance,
 };
 use tracedecay_store::{
-    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationStoreError, ProjectionSkipReason,
+    ObservationStoreError, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
 };
 
 #[cfg(unix)]
@@ -248,7 +248,7 @@ async fn seed_skip_projection(conn: &Connection, observation: &DurableClaudeObse
          (projector_version, observation_id, receipt_id, reason)
          VALUES (?1, ?2, ?3, ?4)",
         params![
-            CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+            SESSION_MESSAGE_PROJECTOR_VERSION_V1,
             observation.observation_id().as_str(),
             observation.receipt().receipt().receipt_id().as_str(),
             ProjectionSkipReason::NonConversationalRecord.as_str()
@@ -880,7 +880,7 @@ async fn schema_reensure_repairs_projection_queue_to_checkpoint_frontier() {
              (projector_version, observation_id, receipt_id, reason)
              VALUES (?1, ?2, ?3, ?4)",
             params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
                 first.observation_id().as_str(),
                 first.receipt().receipt().receipt_id().as_str(),
                 ProjectionSkipReason::NonConversationalRecord.as_str()
@@ -892,7 +892,7 @@ async fn schema_reensure_repairs_projection_queue_to_checkpoint_frontier() {
         .execute(
             "INSERT INTO observation_projection_checkpoints(projector_version, last_sequence)
              VALUES (?1, 1)",
-            params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
         )
         .await
         .unwrap();
@@ -951,7 +951,7 @@ async fn schema_reensure_lowers_checkpoint_without_contiguous_projection_evidenc
         .query(
             "SELECT last_sequence FROM observation_projection_checkpoints
              WHERE projector_version = ?1",
-            params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
         )
         .await
         .unwrap();
@@ -980,7 +980,7 @@ async fn schema_reensure_lowers_checkpoint_without_contiguous_projection_evidenc
 }
 
 #[tokio::test]
-async fn schema_reensure_adds_receipt_id_to_legacy_cursor_advances() {
+async fn schema_reensure_migrates_legacy_cursor_advance_coverage() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
     let db = GlobalDb::open_at_without_structured_backfill(&db_path)
@@ -996,10 +996,26 @@ async fn schema_reensure_adds_receipt_id_to_legacy_cursor_advances() {
                  start_offset TEXT NOT NULL,
                  end_offset TEXT NOT NULL,
                  reason TEXT NOT NULL,
+                 receipt_id TEXT,
                  PRIMARY KEY(
                      source_json, scope_json, file_generation, start_offset, end_offset
                  )
              );",
+        )
+        .await
+        .unwrap();
+    let source = ClaudeSourceIdentityV1::new(SessionId::new("session.migration").unwrap()).unwrap();
+    let scope = ObservationScopeV1::Profile;
+    db.conn
+        .execute(
+            "INSERT INTO source_cursor_advances(
+                 source_json, scope_json, file_generation,
+                 start_offset, end_offset, reason, receipt_id
+             ) VALUES (?1, ?2, '7', '10', '20', 'blank_frame', NULL)",
+            params![
+                serde_json::to_string(&source).unwrap(),
+                serde_json::to_string(&scope).unwrap()
+            ],
         )
         .await
         .unwrap();
@@ -1009,10 +1025,32 @@ async fn schema_reensure_adds_receipt_id_to_legacy_cursor_advances() {
         .await
         .unwrap();
     assert!(
-        table_column_exists(reopened.conn(), "source_cursor_advances", "receipt_id")
+        table_column_exists(reopened.conn(), "source_cursor_advances", "coverage_json")
             .await
             .unwrap()
     );
+    assert!(
+        !table_column_exists(reopened.conn(), "source_cursor_advances", "file_generation")
+            .await
+            .unwrap()
+    );
+    let mut rows = reopened
+        .conn
+        .query(
+            "SELECT coverage_json, reason, receipt_id FROM source_cursor_advances",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("migrated cursor advance");
+    let coverage: ObservationCoverageV1 =
+        serde_json::from_str(&row.get::<String>(0).unwrap()).unwrap();
+    assert_eq!(coverage.generation().generation_id(), 7);
+    assert_eq!(coverage.ordering_domain().as_str(), "file_bytes");
+    assert_eq!(coverage.range(), ClaudeByteRangeV1::new(10, 20).unwrap());
+    assert_eq!(row.get::<String>(1).unwrap(), "blank_frame");
+    assert_eq!(row.get::<Option<String>>(2).unwrap(), None);
+    assert!(rows.next().await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -1031,6 +1069,16 @@ async fn schema_reensure_preserves_valid_nondurable_cursor_progress() {
     let source_json = serde_json::to_string(advanced_cursor.source()).unwrap();
     let scope_json = serde_json::to_string(advanced_cursor.scope()).unwrap();
     let advanced_json = serde_json::to_string(&advanced_cursor).unwrap();
+    let coverage_json = serde_json::to_string(&ObservationCoverageV1::new(
+        advanced_cursor.generation(),
+        advanced_cursor.ordering_domain(),
+        ClaudeByteRangeV1::new(
+            committed_cursor.byte_offset(),
+            advanced_cursor.byte_offset(),
+        )
+        .unwrap(),
+    ))
+    .unwrap();
     db.conn
         .execute(
             "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
@@ -1042,16 +1090,9 @@ async fn schema_reensure_preserves_valid_nondurable_cursor_progress() {
     db.conn
         .execute(
             "INSERT INTO source_cursor_advances(
-                source_json, scope_json, file_generation,
-                start_offset, end_offset, reason
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'blank_frame')",
-            params![
-                source_json.as_str(),
-                scope_json.as_str(),
-                advanced_cursor.generation().file_id().to_string(),
-                committed_cursor.byte_offset().to_string(),
-                advanced_cursor.byte_offset().to_string()
-            ],
+                source_json, scope_json, coverage_json, reason
+             ) VALUES (?1, ?2, ?3, 'blank_frame')",
+            params![source_json.as_str(), scope_json.as_str(), coverage_json],
         )
         .await
         .unwrap();
@@ -1301,15 +1342,21 @@ async fn source_cursor_advance_authority_is_cross_checked() {
     let db_path = dir.path().join("global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
     let (_, cursor) = seed_observation(&db.conn, 1, "invalid-advance").await;
+    let coverage_json = serde_json::to_string(&ObservationCoverageV1::new(
+        cursor.generation(),
+        cursor.ordering_domain(),
+        ClaudeByteRangeV1::new(0, 10).unwrap(),
+    ))
+    .unwrap();
     db.conn
         .execute(
             "INSERT INTO source_cursor_advances(
-                 source_json, scope_json, file_generation,
-                 start_offset, end_offset, reason
-             ) VALUES (?1, ?2, '7', '0', '10', 'unknown_reason')",
+                 source_json, scope_json, coverage_json, reason
+             ) VALUES (?1, ?2, ?3, 'unknown_reason')",
             params![
                 serde_json::to_string(cursor.source()).unwrap(),
-                serde_json::to_string(cursor.scope()).unwrap()
+                serde_json::to_string(cursor.scope()).unwrap(),
+                coverage_json
             ],
         )
         .await
@@ -1584,7 +1631,7 @@ async fn checkpoint_with_a_missing_disposition_requeues_the_entire_suffix() {
                  (projector_version, observation_id, receipt_id, reason)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![
-                    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                    SESSION_MESSAGE_PROJECTOR_VERSION_V1,
                     observation.observation_id().as_str(),
                     observation.receipt().receipt().receipt_id().as_str(),
                     ProjectionSkipReason::NonConversationalRecord.as_str()
@@ -1597,7 +1644,7 @@ async fn checkpoint_with_a_missing_disposition_requeues_the_entire_suffix() {
         .execute(
             "INSERT INTO observation_projection_checkpoints(projector_version, last_sequence)
              VALUES (?1, 3)",
-            params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
         )
         .await
         .unwrap();
@@ -1610,7 +1657,7 @@ async fn checkpoint_with_a_missing_disposition_requeues_the_entire_suffix() {
         .query(
             "SELECT last_sequence FROM observation_projection_checkpoints
              WHERE projector_version = ?1",
-            params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
         )
         .await
         .unwrap();
@@ -1662,7 +1709,7 @@ async fn conflicting_projection_outcomes_are_rejected_atomically() {
               output_message_id, output_digest, message_created)
              VALUES (?1, ?2, ?3, 'claude', 'invalid', 'sha256:invalid', 0)",
             params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
                 observation.observation_id().as_str(),
                 observation.receipt().receipt().receipt_id().as_str()
             ],
@@ -1705,7 +1752,7 @@ async fn invalid_projection_skip_reason_is_rejected() {
              (projector_version, observation_id, receipt_id, reason)
              VALUES (?1, ?2, ?3, 'invented_reason')",
             params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
                 observation.observation_id().as_str(),
                 observation.receipt().receipt().receipt_id().as_str()
             ],
@@ -1739,7 +1786,7 @@ async fn projection_alias_on_skipped_observation_is_rejected() {
              (projector_version, observation_id, output_provider, output_message_id)
              VALUES (?1, ?2, 'claude', 'consolidated/source/invalid')",
             params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
                 observation.observation_id().as_str()
             ],
         )
@@ -2805,6 +2852,10 @@ async fn twelve_same_path_handles_serialize_isolated_writes() {
 
 #[tokio::test]
 async fn deferred_read_snapshot_observes_old_or_new_never_partial() {
+    if crate::db::platform_safe_journal_mode() != "WAL" {
+        return;
+    }
+
     async fn read_tokens(connection: &Connection, project_key: &str) -> i64 {
         let mut rows = connection
             .query(

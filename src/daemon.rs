@@ -42,6 +42,89 @@ const MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION: usize = 1_024;
 const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_CONCURRENT_DAEMON_CLIENTS: usize = 64;
+const DAEMON_SATURATION_RESPONSE_DEADLINE: Duration = Duration::from_millis(250);
+
+#[derive(Clone)]
+struct DaemonClientAdmission {
+    permits: Arc<tokio::sync::Semaphore>,
+    capacity: usize,
+}
+
+enum DaemonClientAdmissionOutcome {
+    Admitted(tokio::sync::OwnedSemaphorePermit),
+    Saturated(DaemonClientSaturationResponse),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DaemonClientSaturationResponse {
+    kind: DaemonClientSaturationKind,
+    retryable: bool,
+    capacity: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DaemonClientSaturationKind {
+    ClientCapacityReached,
+}
+
+impl DaemonClientAdmission {
+    fn new(capacity: usize) -> Self {
+        Self {
+            permits: Arc::new(tokio::sync::Semaphore::new(capacity)),
+            capacity,
+        }
+    }
+
+    fn try_admit(&self) -> DaemonClientAdmissionOutcome {
+        match Arc::clone(&self.permits).try_acquire_owned() {
+            Ok(permit) => DaemonClientAdmissionOutcome::Admitted(permit),
+            Err(_) => DaemonClientAdmissionOutcome::Saturated(DaemonClientSaturationResponse {
+                kind: DaemonClientSaturationKind::ClientCapacityReached,
+                retryable: true,
+                capacity: self.capacity,
+            }),
+        }
+    }
+}
+
+impl DaemonClientSaturationResponse {
+    fn into_json_rpc(self) -> JsonRpcResponse {
+        JsonRpcResponse::error_with_data(
+            serde_json::Value::Null,
+            ErrorCode::InternalError,
+            "daemon client capacity reached".to_string(),
+            serde_json::to_value(self).ok(),
+        )
+    }
+}
+
+async fn reject_saturated_daemon_client(
+    stream: BrokerStream,
+    response: DaemonClientSaturationResponse,
+) {
+    let mut transport = BrokerStreamTransport::new(stream);
+    let response = response.into_json_rpc();
+    let write = write_json_rpc_response(&mut transport, &response);
+    match timeout(DAEMON_SATURATION_RESPONSE_DEADLINE, write).await {
+        Ok(Ok(())) => log_daemon_event(
+            "daemon_client",
+            &[("outcome", "client_capacity_reached".to_string())],
+        ),
+        Ok(Err(error)) => log_daemon_event(
+            "daemon_client",
+            &[
+                ("outcome", "saturation_response_failed".to_string()),
+                ("error", error.to_string()),
+            ],
+        ),
+        Err(_) => log_daemon_event(
+            "daemon_client",
+            &[("outcome", "saturation_response_timeout".to_string())],
+        ),
+    }
+}
 
 fn coordinated_dashboard_automation_writer(
     administration: StoreAdministration,
@@ -1043,6 +1126,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     let lifecycle = DaemonLifecycle::default();
     let store_administration = StoreAdministration::default();
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
+    let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let mut clients: JoinSet<Result<()>> = JoinSet::new();
     loop {
         let stream = tokio::select! {
@@ -1055,11 +1139,19 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
             },
             _ = tokio::signal::ctrl_c() => break,
         };
+        let permit = match admission.try_admit() {
+            DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+            DaemonClientAdmissionOutcome::Saturated(response) => {
+                reject_saturated_daemon_client(stream, response).await;
+                continue;
+            }
+        };
         let auth_token = authority.auth_token().to_string();
         let client_lifecycle = lifecycle.clone();
         let store_administration = store_administration.clone();
         let project_open_gates = Arc::clone(&project_open_gates);
         clients.spawn(async move {
+            let _permit = permit;
             serve_windows_broker_client(
                 stream,
                 &auth_token,
@@ -1650,6 +1742,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         .with_pr_autotrack_task(pr_autotrack_task)
         .await;
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let mut client_tasks: JoinSet<Result<()>> = JoinSet::new();
 
     loop {
@@ -1664,9 +1757,17 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
             _ = tokio::signal::ctrl_c() => break,
             _ = sigterm.recv() => break,
         };
+        let permit = match admission.try_admit() {
+            DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+            DaemonClientAdmissionOutcome::Saturated(response) => {
+                reject_saturated_daemon_client(stream, response).await;
+                continue;
+            }
+        };
         let engine = engine.clone();
         let auth_token = authority.auth_token().to_string();
         client_tasks.spawn(async move {
+            let _permit = permit;
             Box::pin(serve_authenticated_socket_client(
                 stream, engine, auth_token,
             ))

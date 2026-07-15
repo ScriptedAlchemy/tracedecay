@@ -494,6 +494,127 @@ async fn hermes_ingest_is_incremental_and_idempotent() {
     assert_eq!(session.ended_at, Some(1_780_629_340));
 }
 
+async fn hermes_projection_signature(
+    db: &GlobalDb,
+) -> Vec<(
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+)> {
+    let mut rows = std::collections::BTreeMap::new();
+    for query in ["billing", "regression"] {
+        for hit in db.search_session_messages("hermes", None, query, 20).await {
+            let message = hit.message;
+            rows.insert(
+                message.message_id.clone(),
+                (
+                    message.message_id,
+                    message.role,
+                    message.text,
+                    message.model,
+                    message.timestamp,
+                    message.tool_names,
+                ),
+            );
+        }
+    }
+    rows.into_values().collect()
+}
+
+#[tokio::test]
+async fn hermes_incremental_ingest_converges_with_full_rebuild() {
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, project) = setup(&tmp);
+    let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
+    let homes = [hermes_home];
+
+    let incremental = GlobalDb::open_at(&tmp.path().join("incremental.db"))
+        .await
+        .unwrap();
+    assert_eq!(
+        ingest_homes(&incremental, &homes, &project)
+            .await
+            .messages_upserted,
+        4
+    );
+
+    let conn = open_state_db(&state_db).await;
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp)
+         VALUES (?1, 'user', 'Also add a regression test', 1780629400.4)",
+        libsql::params![SESSION_ID],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    assert_eq!(
+        ingest_homes(&incremental, &homes, &project)
+            .await
+            .messages_upserted,
+        1
+    );
+
+    let rebuilt = GlobalDb::open_at(&tmp.path().join("rebuilt.db"))
+        .await
+        .unwrap();
+    assert_eq!(
+        ingest_homes(&rebuilt, &homes, &project)
+            .await
+            .messages_upserted,
+        5
+    );
+    assert_eq!(
+        hermes_projection_signature(&incremental).await,
+        hermes_projection_signature(&rebuilt).await
+    );
+}
+
+#[tokio::test]
+async fn hermes_replacement_replay_preserves_message_identity() {
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, project) = setup(&tmp);
+    let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
+    let homes = [hermes_home.clone()];
+    let db = GlobalDb::open_at(&tmp.path().join("projection.db"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        ingest_homes(&db, &homes, &project).await.messages_upserted,
+        4
+    );
+    let before = hermes_projection_signature(&db).await;
+
+    let replacement_root = tmp.path().join("replacement");
+    let replacement = write_hermes_profile(&replacement_root, "test", Some(&project)).await;
+    let conn = open_state_db(&replacement).await;
+    conn.execute(
+        "UPDATE sessions
+         SET model = 'gpt-5.6', input_tokens = 100000, output_tokens = 4000
+         WHERE id = ?1",
+        libsql::params![SESSION_ID],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    let original_profile = state_db.parent().unwrap();
+    let replacement_profile = replacement.parent().unwrap();
+    std::fs::remove_dir_all(original_profile).unwrap();
+    std::fs::rename(replacement_profile, original_profile).unwrap();
+
+    let replay = ingest_homes(&db, &homes, &project).await;
+    assert_eq!(replay.messages_upserted, 0);
+    let after = hermes_projection_signature(&db).await;
+    assert_eq!(
+        before.iter().map(|row| &row.0).collect::<Vec<_>>(),
+        after.iter().map(|row| &row.0).collect::<Vec<_>>()
+    );
+    assert_eq!(before.len(), after.len());
+}
+
 #[tokio::test]
 async fn hermes_shared_sweep_routes_one_source_to_multiple_project_stores() {
     let tmp = TempDir::new().unwrap();

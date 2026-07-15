@@ -2,50 +2,64 @@ use std::error::Error;
 use std::future::Future;
 
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeSourceCursorV1,
-    ClaudeSourceIdentityV1, DurableClaudeObservationV1, ObservationCollisionOutcomeV1,
-    ObservationContractError, ObservationScopeV1, PayloadDigestV1, SanitizationReceiptV1,
-    SanitizerDispositionV1,
+    CanonicalObservationIdV1, DurableObservationV1, ObservationCollisionOutcomeV1,
+    ObservationContractError, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, PayloadDigestV1, SanitizationReceiptV1, SanitizerDispositionV1,
 };
 
 const MAX_REPLAY_LIMIT: usize = 1_000;
 
+fn cursor_transition_covers(
+    expected: Option<&ObservationSourceCursorV1>,
+    next: &ObservationSourceCursorV1,
+    covered: ObservationSourceRangeV1,
+) -> bool {
+    if next.position() != covered.end() {
+        return false;
+    }
+    if next.ordering_domain() == ObservationOrderingDomainV1::FileBytes
+        && expected.is_none_or(|cursor| cursor.generation() != next.generation())
+        && covered.start() != 0
+    {
+        return false;
+    }
+    let Some(expected) = expected else {
+        return true;
+    };
+    if expected.source() != next.source() || expected.scope() != next.scope() {
+        return false;
+    }
+    expected.generation() != next.generation()
+        || (expected.ordering_domain() == next.ordering_domain()
+            && expected.position() == covered.start())
+}
+
 /// Validated request to persist one sanitized observation and advance its source cursor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObservationWrite {
-    observation: DurableClaudeObservationV1,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
-    next_cursor: ClaudeSourceCursorV1,
+    observation: DurableObservationV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    next_cursor: ObservationSourceCursorV1,
 }
 
 impl ObservationWrite {
     pub fn new(
-        observation: DurableClaudeObservationV1,
-        expected_cursor: Option<ClaudeSourceCursorV1>,
-        next_cursor: ClaudeSourceCursorV1,
+        observation: DurableObservationV1,
+        expected_cursor: Option<ObservationSourceCursorV1>,
+        next_cursor: ObservationSourceCursorV1,
     ) -> ObservationStoreResult<Self> {
         if observation.source() != next_cursor.source()
             || observation.scope() != next_cursor.scope()
             || observation.identity().generation() != next_cursor.generation()
-            || observation.identity().position().end() != next_cursor.byte_offset()
+            || observation.identity().ordering_domain() != next_cursor.ordering_domain()
+            || observation.identity().position().end() != next_cursor.position()
+            || !cursor_transition_covers(
+                expected_cursor.as_ref(),
+                &next_cursor,
+                observation.identity().position(),
+            )
         {
-            return Err(ObservationStoreError::CursorObservationMismatch);
-        }
-        let frame_start = observation.identity().position().start();
-        let contiguous = match &expected_cursor {
-            None => frame_start == 0,
-            Some(expected)
-                if expected.source() != next_cursor.source()
-                    || expected.scope() != next_cursor.scope() =>
-            {
-                false
-            }
-            Some(expected) if expected.generation() == next_cursor.generation() => {
-                expected.byte_offset() == frame_start
-            }
-            Some(_) => frame_start == 0,
-        };
-        if !contiguous {
             return Err(ObservationStoreError::CursorObservationMismatch);
         }
         Ok(Self {
@@ -55,77 +69,141 @@ impl ObservationWrite {
         })
     }
 
-    pub fn observation(&self) -> &DurableClaudeObservationV1 {
+    pub fn observation(&self) -> &DurableObservationV1 {
         &self.observation
     }
 
-    pub fn expected_cursor(&self) -> Option<&ClaudeSourceCursorV1> {
+    pub fn expected_cursor(&self) -> Option<&ObservationSourceCursorV1> {
         self.expected_cursor.as_ref()
     }
 
-    pub fn next_cursor(&self) -> &ClaudeSourceCursorV1 {
+    pub fn next_cursor(&self) -> &ObservationSourceCursorV1 {
         &self.next_cursor
     }
 
     pub fn into_parts(
         self,
     ) -> (
-        DurableClaudeObservationV1,
-        Option<ClaudeSourceCursorV1>,
-        ClaudeSourceCursorV1,
+        DurableObservationV1,
+        Option<ObservationSourceCursorV1>,
+        ObservationSourceCursorV1,
     ) {
         (self.observation, self.expected_cursor, self.next_cursor)
     }
 }
 
-/// Fully processed source bytes that intentionally produce no durable observation.
+/// Fully processed provider evidence that intentionally produces no durable observation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum NonDurableFrameReason {
+pub enum ObservationCoverageReason {
     BlankFrame,
     OutOfScope,
     MalformedFrame,
     OversizedFrame,
+    UnknownVersion,
+    UnsupportedFact,
+    DuplicateObservation,
     SanitizerRejected,
     SanitizerQuarantined,
 }
 
-impl NonDurableFrameReason {
+impl ObservationCoverageReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::BlankFrame => "blank_frame",
             Self::OutOfScope => "out_of_scope",
             Self::MalformedFrame => "malformed_frame",
             Self::OversizedFrame => "oversized_frame",
+            Self::UnknownVersion => "unknown_version",
+            Self::UnsupportedFact => "unsupported_fact",
+            Self::DuplicateObservation => "duplicate_observation",
             Self::SanitizerRejected => "sanitizer_rejected",
             Self::SanitizerQuarantined => "sanitizer_quarantined",
         }
     }
 }
 
-/// Validated exact-CAS cursor advance over fully processed non-durable bytes.
+pub type NonDurableFrameReason = ObservationCoverageReason;
+
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationCoverageV1 {
+    generation: ObservationSourceGenerationV1,
+    ordering_domain: ObservationOrderingDomainV1,
+    range: ObservationSourceRangeV1,
+}
+
+impl ObservationCoverageV1 {
+    pub fn new(
+        generation: ObservationSourceGenerationV1,
+        ordering_domain: ObservationOrderingDomainV1,
+        range: ObservationSourceRangeV1,
+    ) -> Self {
+        Self {
+            generation,
+            ordering_domain,
+            range,
+        }
+    }
+
+    pub fn generation(self) -> ObservationSourceGenerationV1 {
+        self.generation
+    }
+
+    pub fn ordering_domain(self) -> ObservationOrderingDomainV1 {
+        self.ordering_domain
+    }
+
+    pub fn range(self) -> ObservationSourceRangeV1 {
+        self.range
+    }
+}
+
+/// Validated exact-CAS cursor advance over fully processed non-durable evidence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObservationCursorAdvance {
-    expected_cursor: Option<ClaudeSourceCursorV1>,
-    next_cursor: ClaudeSourceCursorV1,
-    covered: ClaudeByteRangeV1,
-    reason: NonDurableFrameReason,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    next_cursor: ObservationSourceCursorV1,
+    covered: ObservationSourceRangeV1,
+    reason: ObservationCoverageReason,
     sanitization_receipt: Option<SanitizationReceiptV1>,
 }
 
 impl ObservationCursorAdvance {
     pub fn new(
-        source: ClaudeSourceIdentityV1,
+        source: ObservationSourceIdentityV1,
         scope: ObservationScopeV1,
-        generation: ClaudeFileGenerationV1,
-        expected_cursor: Option<ClaudeSourceCursorV1>,
-        covered: ClaudeByteRangeV1,
-        reason: NonDurableFrameReason,
+        generation: ObservationSourceGenerationV1,
+        expected_cursor: Option<ObservationSourceCursorV1>,
+        covered: ObservationSourceRangeV1,
+        reason: ObservationCoverageReason,
     ) -> ObservationStoreResult<Self> {
         Self::build(
             source,
             scope,
             generation,
+            ObservationOrderingDomainV1::FileBytes,
+            expected_cursor,
+            covered,
+            reason,
+            None,
+        )
+    }
+
+    pub fn for_ordering(
+        source: ObservationSourceIdentityV1,
+        scope: ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+        ordering_domain: ObservationOrderingDomainV1,
+        expected_cursor: Option<ObservationSourceCursorV1>,
+        covered: ObservationSourceRangeV1,
+        reason: ObservationCoverageReason,
+    ) -> ObservationStoreResult<Self> {
+        Self::build(
+            source,
+            scope,
+            generation,
+            ordering_domain,
             expected_cursor,
             covered,
             reason,
@@ -134,18 +212,42 @@ impl ObservationCursorAdvance {
     }
 
     pub fn new_with_sanitization_receipt(
-        source: ClaudeSourceIdentityV1,
+        source: ObservationSourceIdentityV1,
         scope: ObservationScopeV1,
-        generation: ClaudeFileGenerationV1,
-        expected_cursor: Option<ClaudeSourceCursorV1>,
-        covered: ClaudeByteRangeV1,
-        reason: NonDurableFrameReason,
+        generation: ObservationSourceGenerationV1,
+        expected_cursor: Option<ObservationSourceCursorV1>,
+        covered: ObservationSourceRangeV1,
+        reason: ObservationCoverageReason,
         sanitization_receipt: SanitizationReceiptV1,
     ) -> ObservationStoreResult<Self> {
         Self::build(
             source,
             scope,
             generation,
+            ObservationOrderingDomainV1::FileBytes,
+            expected_cursor,
+            covered,
+            reason,
+            Some(sanitization_receipt),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_ordering_with_sanitization_receipt(
+        source: ObservationSourceIdentityV1,
+        scope: ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+        ordering_domain: ObservationOrderingDomainV1,
+        expected_cursor: Option<ObservationSourceCursorV1>,
+        covered: ObservationSourceRangeV1,
+        reason: ObservationCoverageReason,
+        sanitization_receipt: SanitizationReceiptV1,
+    ) -> ObservationStoreResult<Self> {
+        Self::build(
+            source,
+            scope,
+            generation,
+            ordering_domain,
             expected_cursor,
             covered,
             reason,
@@ -155,12 +257,13 @@ impl ObservationCursorAdvance {
 
     #[allow(clippy::too_many_arguments)]
     fn build(
-        source: ClaudeSourceIdentityV1,
+        source: ObservationSourceIdentityV1,
         scope: ObservationScopeV1,
-        generation: ClaudeFileGenerationV1,
-        expected_cursor: Option<ClaudeSourceCursorV1>,
-        covered: ClaudeByteRangeV1,
-        reason: NonDurableFrameReason,
+        generation: ObservationSourceGenerationV1,
+        ordering_domain: ObservationOrderingDomainV1,
+        expected_cursor: Option<ObservationSourceCursorV1>,
+        covered: ObservationSourceRangeV1,
+        reason: ObservationCoverageReason,
         sanitization_receipt: Option<SanitizationReceiptV1>,
     ) -> ObservationStoreResult<Self> {
         let receipt_matches_reason = matches!(
@@ -171,39 +274,36 @@ impl ObservationCursorAdvance {
                     .map(SanitizationReceiptV1::disposition)
             ),
             (
-                NonDurableFrameReason::SanitizerRejected,
+                ObservationCoverageReason::SanitizerRejected,
                 Some(SanitizerDispositionV1::Rejected)
             ) | (
-                NonDurableFrameReason::SanitizerQuarantined,
+                ObservationCoverageReason::SanitizerQuarantined,
                 Some(SanitizerDispositionV1::Quarantined)
             ) | (
-                NonDurableFrameReason::BlankFrame
-                    | NonDurableFrameReason::OutOfScope
-                    | NonDurableFrameReason::MalformedFrame
-                    | NonDurableFrameReason::OversizedFrame,
+                ObservationCoverageReason::DuplicateObservation,
+                Some(SanitizerDispositionV1::Accepted | SanitizerDispositionV1::Redacted)
+            ) | (
+                ObservationCoverageReason::BlankFrame
+                    | ObservationCoverageReason::OutOfScope
+                    | ObservationCoverageReason::MalformedFrame
+                    | ObservationCoverageReason::OversizedFrame
+                    | ObservationCoverageReason::UnknownVersion
+                    | ObservationCoverageReason::UnsupportedFact,
                 None
             )
         );
         if !receipt_matches_reason {
             return Err(ObservationStoreError::CursorSanitizationReceiptMismatch);
         }
-        let next_cursor = ClaudeSourceCursorV1::new(source, scope, generation, covered.end())
-            .map_err(ObservationStoreError::Contract)?;
-        let coverage_starts_at_expected = expected_cursor.as_ref().map_or_else(
-            || covered.start() == 0,
-            |expected| {
-                if expected.generation() == next_cursor.generation() {
-                    expected.byte_offset() == covered.start()
-                } else {
-                    covered.start() == 0
-                }
-            },
-        );
-        if !coverage_starts_at_expected
-            || expected_cursor.as_ref().is_some_and(|expected| {
-                expected.source() != next_cursor.source() || expected.scope() != next_cursor.scope()
-            })
-        {
+        let next_cursor = ObservationSourceCursorV1::for_ordering(
+            source,
+            scope,
+            generation,
+            ordering_domain,
+            covered.end(),
+        )
+        .map_err(ObservationStoreError::Contract)?;
+        if !cursor_transition_covers(expected_cursor.as_ref(), &next_cursor, covered) {
             return Err(ObservationStoreError::CursorCoverageMismatch);
         }
         Ok(Self {
@@ -215,19 +315,27 @@ impl ObservationCursorAdvance {
         })
     }
 
-    pub fn expected_cursor(&self) -> Option<&ClaudeSourceCursorV1> {
+    pub fn expected_cursor(&self) -> Option<&ObservationSourceCursorV1> {
         self.expected_cursor.as_ref()
     }
 
-    pub fn next_cursor(&self) -> &ClaudeSourceCursorV1 {
+    pub fn next_cursor(&self) -> &ObservationSourceCursorV1 {
         &self.next_cursor
     }
 
-    pub fn covered(&self) -> ClaudeByteRangeV1 {
+    pub fn covered(&self) -> ObservationSourceRangeV1 {
         self.covered
     }
 
-    pub fn reason(&self) -> NonDurableFrameReason {
+    pub fn coverage(&self) -> ObservationCoverageV1 {
+        ObservationCoverageV1::new(
+            self.next_cursor.generation(),
+            self.next_cursor.ordering_domain(),
+            self.covered,
+        )
+    }
+
+    pub fn reason(&self) -> ObservationCoverageReason {
         self.reason
     }
 
@@ -250,19 +358,19 @@ pub enum CursorAdvanceOutcome {
     ExactDuplicate,
 }
 
-/// Stable receipt for either a newly committed observation or an exact duplicate.
+/// Stable receipt for committed observation evidence and its authoritative cursor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObservationCommitReceipt {
     sequence: u64,
-    observation: Box<DurableClaudeObservationV1>,
-    committed_cursor: ClaudeSourceCursorV1,
+    observation: Box<DurableObservationV1>,
+    committed_cursor: ObservationSourceCursorV1,
 }
 
 impl ObservationCommitReceipt {
     pub fn new(
         sequence: u64,
-        observation: DurableClaudeObservationV1,
-        committed_cursor: ClaudeSourceCursorV1,
+        observation: DurableObservationV1,
+        committed_cursor: ObservationSourceCursorV1,
     ) -> Self {
         Self {
             sequence,
@@ -275,7 +383,7 @@ impl ObservationCommitReceipt {
         self.sequence
     }
 
-    pub fn observation(&self) -> &DurableClaudeObservationV1 {
+    pub fn observation(&self) -> &DurableObservationV1 {
         self.observation.as_ref()
     }
 
@@ -283,7 +391,7 @@ impl ObservationCommitReceipt {
         self.observation.receipt()
     }
 
-    pub fn committed_cursor(&self) -> &ClaudeSourceCursorV1 {
+    pub fn committed_cursor(&self) -> &ObservationSourceCursorV1 {
         &self.committed_cursor
     }
 }
@@ -292,12 +400,15 @@ impl ObservationCommitReceipt {
 pub enum ObservationPersistOutcome {
     Committed(ObservationCommitReceipt),
     ExactDuplicate(ObservationCommitReceipt),
+    CoveredDuplicate(ObservationCommitReceipt),
 }
 
 impl ObservationPersistOutcome {
     pub fn receipt(&self) -> &ObservationCommitReceipt {
         match self {
-            Self::Committed(receipt) | Self::ExactDuplicate(receipt) => receipt,
+            Self::Committed(receipt)
+            | Self::ExactDuplicate(receipt)
+            | Self::CoveredDuplicate(receipt) => receipt,
         }
     }
 }
@@ -312,8 +423,8 @@ pub struct StoredObservation {
 impl StoredObservation {
     pub fn new(
         sequence: u64,
-        observation: DurableClaudeObservationV1,
-        committed_cursor: ClaudeSourceCursorV1,
+        observation: DurableObservationV1,
+        committed_cursor: ObservationSourceCursorV1,
         projection_status: ObservationProjectionStatus,
     ) -> Self {
         Self::from_commit_receipt(
@@ -340,7 +451,7 @@ impl StoredObservation {
         self.commit_receipt.sequence()
     }
 
-    pub fn observation(&self) -> &DurableClaudeObservationV1 {
+    pub fn observation(&self) -> &DurableObservationV1 {
         self.commit_receipt.observation()
     }
 
@@ -348,7 +459,7 @@ impl StoredObservation {
         self.commit_receipt.sanitization_receipt()
     }
 
-    pub fn committed_cursor(&self) -> &ClaudeSourceCursorV1 {
+    pub fn committed_cursor(&self) -> &ObservationSourceCursorV1 {
         self.commit_receipt.committed_cursor()
     }
 
@@ -397,12 +508,12 @@ impl ObservationReplayRequest {
 pub enum ObservationStoreError {
     #[error("observation cursor does not match its source evidence")]
     CursorObservationMismatch,
-    #[error("covered source bytes are not contiguous with the expected cursor")]
+    #[error("covered source evidence is not contiguous with the expected cursor")]
     CursorCoverageMismatch,
     #[error("source cursor conflict: expected {expected:?}, found {actual:?}")]
     CursorConflict {
-        expected: Box<Option<ClaudeSourceCursorV1>>,
-        actual: Box<Option<ClaudeSourceCursorV1>>,
+        expected: Box<Option<ObservationSourceCursorV1>>,
+        actual: Box<Option<ObservationSourceCursorV1>>,
     },
     #[error("source cursor advance receipt collided with different contents")]
     CursorAdvanceCollision,
@@ -442,9 +553,9 @@ pub trait ObservationStore: Send + Sync {
 
     fn get_source_cursor(
         &self,
-        source: &ClaudeSourceIdentityV1,
+        source: &ObservationSourceIdentityV1,
         scope: &ObservationScopeV1,
-    ) -> impl Future<Output = ObservationStoreResult<Option<ClaudeSourceCursorV1>>> + Send;
+    ) -> impl Future<Output = ObservationStoreResult<Option<ObservationSourceCursorV1>>> + Send;
 
     fn advance_source_cursor(
         &self,

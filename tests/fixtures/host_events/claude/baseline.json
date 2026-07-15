@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "provider": "claude",
+  "cases": [
+    {
+      "state": "supported", "admission_provider": "claude",
+      "request": {"hook_event_name": "SessionStart", "session_id": "<SESSION_ID>", "transcript_path": "<TRANSCRIPT_PATH>", "cwd": "<PROJECT_ROOT>", "source": "startup"},
+      "admission": {"status": "supported", "retryable": false},
+      "response": {"exit_code": 0, "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"<REDACTED_CONTEXT>\"}}", "stderr": ""}
+    },
+    {
+      "state": "degraded", "admission_provider": "claude",
+      "request": {"hook_event_name": "SessionStart", "session_id": "<SESSION_ID>", "transcript_path": "<TRANSCRIPT_PATH>", "cwd": "<PROJECT_ROOT>", "payload": {"malformed": true}},
+      "admission": {"status": "degraded", "retryable": false, "reason_code": "malformed_event"},
+      "response": {"exit_code": 0, "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"<REDACTED_CONTEXT>\"}}", "stderr": ""}
+    },
+    {
+      "state": "unavailable", "admission_provider": "claude",
+      "request": {"hook_event_name": "SessionStart", "session_id": "<SESSION_ID>", "transcript_path": "<TRANSCRIPT_PATH>", "cwd": "<PROJECT_ROOT>", "source": "startup"},
+      "admission": {"status": "unavailable", "retryable": true, "reason_code": "authority_unavailable"},
+      "response": {"exit_code": 0, "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"<REDACTED_CONTEXT>\"}}", "stderr": ""}
+    },
+    {
+      "state": "unknown", "admission_provider": "claude-future",
+      "request": {"hook_event_name": "FutureEvent", "session_id": "<SESSION_ID>", "transcript_path": "<TRANSCRIPT_PATH>", "cwd": "<PROJECT_ROOT>"},
+      "admission": {"status": "unknown", "retryable": false, "reason_code": "unknown_provider"},
+      "response": {"exit_code": 0, "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"<REDACTED_CONTEXT>\"}}", "stderr": ""}
+    }
+  ]
+}

@@ -16325,16 +16325,12 @@ async fn message_search_selects_registered_project_session_db_by_project_id() {
         None,
     )
     .await
-    .expect("all_registered default catch_up should ingest registered transcripts");
+    .expect("all_registered catch_up without retained authority should remain read-only");
     let parsed = extract_json(&catch_up_registered.value);
     assert_eq!(parsed["status"], "ok", "{parsed}");
     assert_eq!(parsed["catch_up"], true, "{parsed}");
-    assert_eq!(parsed["catch_up_performed"], true, "{parsed}");
-    assert_eq!(parsed["count"], 1, "{parsed}");
-    assert_eq!(
-        parsed["results"][0]["message"]["provider"], "cursor",
-        "{parsed}"
-    );
+    assert_eq!(parsed["catch_up_performed"], false, "{parsed}");
+    assert_eq!(parsed["count"], 0, "{parsed}");
 
     for (label, selector) in [
         (
@@ -16377,28 +16373,30 @@ async fn user_message_search_without_daemon_authority_does_not_create_a_writer()
         "fixture must begin without a user sessions database"
     );
 
-    let result = tracedecay::mcp::tools::handle_tool_call_with_registry(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "query": "nothing",
-            "storage_scope": "user",
-            "catch_up": true,
-            "format": "json"
-        }),
-        None,
-        None,
-        Some(&registry),
-        false,
-    )
-    .await
-    .expect("missing retained user authority must fail closed as a tool result");
-    let parsed = extract_json(&result.value);
-    assert_eq!(parsed["status"], "unavailable", "{parsed}");
-    assert!(
-        !user_sessions_db.exists(),
-        "daemon-mode message search must not create an overlapping user writer"
-    );
+    for allow_owned_session_db in [false, true] {
+        let result = tracedecay::mcp::tools::handle_tool_call_with_registry(
+            &cg,
+            "tracedecay_message_search",
+            json!({
+                "query": "nothing",
+                "storage_scope": "user",
+                "catch_up": true,
+                "format": "json"
+            }),
+            None,
+            None,
+            Some(&registry),
+            allow_owned_session_db,
+        )
+        .await
+        .expect("missing retained user authority must fail closed as a tool result");
+        let parsed = extract_json(&result.value);
+        assert_eq!(parsed["status"], "unavailable", "{parsed}");
+        assert!(
+            !user_sessions_db.exists(),
+            "message search must not create a user writer without retained authority"
+        );
+    }
 }
 
 /// Builds a crate that plants a needless `unsafe { }` block inside an

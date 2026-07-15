@@ -297,6 +297,145 @@ async fn composer_watermark_skips_unchanged_and_reingests_growth() {
     assert!(reply.text.contains("Second turn reply"));
 }
 
+/// A bubble discovered after a later header was already covered must not be
+/// hidden by the positional watermark. Incremental replay must converge with a
+/// clean rebuild from the final snapshot.
+#[tokio::test]
+async fn composer_late_header_converges_with_rebuild() {
+    let incremental_tmp = TempDir::new().unwrap();
+    let incremental_project = init_project(&incremental_tmp);
+    let incremental_home = incremental_tmp.path().join("home");
+    let b1 = serde_json::json!({ "type": 1, "text": "First prompt." });
+    let b2 = serde_json::json!({ "type": 2, "text": "Late middle reply." });
+    let b3 = serde_json::json!({ "type": 1, "text": "Third prompt." });
+
+    write_state_vscdb(
+        &incremental_home,
+        &[
+            kv(
+                "composerData:comp-late",
+                &envelope("comp-late", &incremental_project, &["b1", "b3"]),
+            ),
+            kv("bubbleId:comp-late:b1", &b1),
+            kv("bubbleId:comp-late:b3", &b3),
+        ],
+    )
+    .await;
+    let incremental_db = open_project_session_db(&incremental_project).await.unwrap();
+    let source = CursorComposerSource::with_home(&incremental_home);
+    source
+        .ingest(&incremental_db, &incremental_project, CAP)
+        .await;
+
+    write_state_vscdb(
+        &incremental_home,
+        &[
+            kv(
+                "composerData:comp-late",
+                &envelope("comp-late", &incremental_project, &["b1", "b2", "b3"]),
+            ),
+            kv("bubbleId:comp-late:b1", &b1),
+            kv("bubbleId:comp-late:b2", &b2),
+            kv("bubbleId:comp-late:b3", &b3),
+        ],
+    )
+    .await;
+    source
+        .ingest(&incremental_db, &incremental_project, CAP)
+        .await;
+
+    let rebuild_tmp = TempDir::new().unwrap();
+    let rebuild_project = init_project(&rebuild_tmp);
+    let rebuild_home = rebuild_tmp.path().join("home");
+    write_state_vscdb(
+        &rebuild_home,
+        &[
+            kv(
+                "composerData:comp-late",
+                &envelope("comp-late", &rebuild_project, &["b1", "b2", "b3"]),
+            ),
+            kv("bubbleId:comp-late:b1", &b1),
+            kv("bubbleId:comp-late:b2", &b2),
+            kv("bubbleId:comp-late:b3", &b3),
+        ],
+    )
+    .await;
+    let rebuild_db = open_project_session_db(&rebuild_project).await.unwrap();
+    CursorComposerSource::with_home(&rebuild_home)
+        .ingest(&rebuild_db, &rebuild_project, CAP)
+        .await;
+
+    for bubble_id in ["b1", "b2", "b3"] {
+        let message_id = format!("comp-late:{bubble_id}");
+        let incremental = incremental_db
+            .get_session_message("cursor", &message_id)
+            .await
+            .unwrap_or_else(|| panic!("incremental replay lost {bubble_id}"));
+        let rebuilt = rebuild_db
+            .get_session_message("cursor", &message_id)
+            .await
+            .unwrap_or_else(|| panic!("rebuild lost {bubble_id}"));
+        assert_eq!(incremental.role, rebuilt.role);
+        assert_eq!(incremental.text, rebuilt.text);
+        assert_eq!(incremental.kind, rebuilt.kind);
+    }
+}
+
+/// Reordering known headers must preserve native bubble identities while a
+/// newly appended bubble remains ingestible.
+#[tokio::test]
+async fn composer_reordered_headers_keep_native_identity() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    let b1 = serde_json::json!({ "type": 1, "text": "First prompt." });
+    let b2 = serde_json::json!({ "type": 2, "text": "Second reply." });
+    let b3 = serde_json::json!({ "type": 1, "text": "Third prompt." });
+
+    write_state_vscdb(
+        &home,
+        &[
+            kv(
+                "composerData:comp-reorder",
+                &envelope("comp-reorder", &project, &["b1", "b2"]),
+            ),
+            kv("bubbleId:comp-reorder:b1", &b1),
+            kv("bubbleId:comp-reorder:b2", &b2),
+        ],
+    )
+    .await;
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CursorComposerSource::with_home(&home);
+    source.ingest(&db, &project, CAP).await;
+
+    write_state_vscdb(
+        &home,
+        &[
+            kv(
+                "composerData:comp-reorder",
+                &envelope("comp-reorder", &project, &["b2", "b1", "b3"]),
+            ),
+            kv("bubbleId:comp-reorder:b1", &b1),
+            kv("bubbleId:comp-reorder:b2", &b2),
+            kv("bubbleId:comp-reorder:b3", &b3),
+        ],
+    )
+    .await;
+    source.ingest(&db, &project, CAP).await;
+
+    for (bubble_id, text) in [
+        ("b1", "First prompt."),
+        ("b2", "Second reply."),
+        ("b3", "Third prompt."),
+    ] {
+        let message = db
+            .get_session_message("cursor", &format!("comp-reorder:{bubble_id}"))
+            .await
+            .unwrap_or_else(|| panic!("reordered replay lost {bubble_id}"));
+        assert_eq!(message.text, text);
+    }
+}
+
 /// Malformed envelopes are tolerated, and a per-session `store.db` blob DAG is
 /// walked into ordered rows.
 #[tokio::test]

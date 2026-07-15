@@ -121,6 +121,9 @@ pub(crate) fn classify_claude_observation_failure(
         Projection::SequenceOverflow(_) => permanent("observation_projection_sequence_overflow"),
         Projection::NotQueued => permanent("observation_projection_not_queued"),
         Projection::ObservationNotFound => permanent("observation_projection_source_missing"),
+        Projection::UnsupportedProvider(_) => {
+            permanent("observation_projection_provider_unsupported")
+        }
         Projection::InvalidRebuildFrontier { .. } => {
             permanent("observation_projection_frontier_invalid")
         }

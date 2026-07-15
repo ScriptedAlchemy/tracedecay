@@ -18,7 +18,7 @@ use super::model::{
 use super::{
     BENCHMARK_COMMAND, BUILD_COMMIT, BUILD_PROFILE, BUILD_TARGET_DIR, BUILD_TREE, HARNESS_SOURCES,
     MEASURED_REPETITIONS, RECORDS_PER_REPETITION, RESULT_SCHEMA_VERSION, WARMUP_REPETITIONS,
-    WORKLOAD_ID, WORKLOAD_MANIFEST, WORKLOAD_MANIFEST_PATH,
+    WORKLOAD_ID, WORKLOAD_MANIFEST, WORKLOAD_MANIFEST_PATH, WORKLOAD_SCHEMA_VERSION,
 };
 
 pub(super) struct AttestedBuild {
@@ -148,6 +148,9 @@ pub(super) fn validate_evidence_directory(
 }
 
 fn validate_historical_result(result: &ArtifactEnvelope) -> Result<(), String> {
+    if result.schema_version == RESULT_SCHEMA_VERSION {
+        return validate_retired_acceptance_result(result);
+    }
     if result.schema_version != 1
         || result.workload_id != WORKLOAD_ID
         || string(&result.rest, "stale_reason")?.is_empty()
@@ -184,6 +187,30 @@ fn validate_historical_result(result: &ArtifactEnvelope) -> Result<(), String> {
     if no_op_totals.is_empty() || no_op_totals.values().any(|value| value.as_u64() != Some(0)) {
         return Err("historical no-op coordinator reported work".to_string());
     }
+    validate_aggregates(&result.rest, &pipeline, &no_op)
+}
+
+fn validate_retired_acceptance_result(result: &ArtifactEnvelope) -> Result<(), String> {
+    let git_before = result
+        .rest
+        .get("git_before")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "retired acceptance result lacks git_before".to_string())?;
+    if result.workload_id != WORKLOAD_ID
+        || string(&result.rest, "stale_reason")?.is_empty()
+        || unsigned(&result.rest, "superseded_by_workload_schema_version")?
+            != u64::from(WORKLOAD_SCHEMA_VERSION)
+        || !is_lower_hex(string(git_before, "commit")?, 40)
+        || boolean(git_before, "dirty")?
+    {
+        return Err("retired acceptance result provenance is invalid".to_string());
+    }
+    let pipeline = samples(&result.rest, "pipeline_raw_samples")?;
+    let no_op = samples(&result.rest, "no_op_replay_raw_samples")?;
+    validate_sample_sequence(&pipeline, RECORDS_PER_REPETITION)?;
+    validate_no_op_samples(&no_op, 0, 0)?;
+    validate_distribution(&result.rest, "pipeline_batch_latency", &pipeline)?;
+    validate_distribution(&result.rest, "no_op_replay_latency", &no_op)?;
     validate_aggregates(&result.rest, &pipeline, &no_op)
 }
 

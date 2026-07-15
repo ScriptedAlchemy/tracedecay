@@ -457,3 +457,169 @@ async fn cursor_restart_defers_a_partial_final_line() {
         2
     );
 }
+
+#[tokio::test]
+async fn claude_incremental_ingest_converges_with_clean_rebuild() {
+    let incremental_tmp = TempDir::new().unwrap();
+    let (incremental_home, incremental_project) = setup(&incremental_tmp);
+    let incremental_path = write_claude_transcript(
+        &incremental_home,
+        &incremental_project,
+        "claude-convergence",
+    );
+    let incremental_source = ClaudeSource::with_home(&incremental_home);
+    let incremental_db = open_project_session_db(&incremental_project).await.unwrap();
+    assert_eq!(
+        ingest_source(
+            &incremental_db,
+            &incremental_source,
+            &incremental_project,
+            None,
+        )
+        .await
+        .messages_upserted,
+        2
+    );
+    let suffix = serde_json::json!({
+        "type": "user",
+        "cwd": incremental_project,
+        "sessionId": "claude-convergence",
+        "uuid": "u3",
+        "timestamp": "2026-01-01T00:00:10.000Z",
+        "message": {"role": "user", "content": "Verify billing convergence."}
+    });
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&incremental_path)
+            .unwrap(),
+        "{suffix}"
+    )
+    .unwrap();
+    assert_eq!(
+        ingest_source(
+            &incremental_db,
+            &incremental_source,
+            &incremental_project,
+            None,
+        )
+        .await
+        .messages_upserted,
+        1
+    );
+
+    let rebuild_tmp = TempDir::new().unwrap();
+    let (rebuild_home, rebuild_project) = setup(&rebuild_tmp);
+    let rebuild_path =
+        write_claude_transcript(&rebuild_home, &rebuild_project, "claude-convergence");
+    let rebuild_suffix = serde_json::json!({
+        "type": "user",
+        "cwd": rebuild_project,
+        "sessionId": "claude-convergence",
+        "uuid": "u3",
+        "timestamp": "2026-01-01T00:00:10.000Z",
+        "message": {"role": "user", "content": "Verify billing convergence."}
+    });
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rebuild_path)
+            .unwrap(),
+        "{rebuild_suffix}"
+    )
+    .unwrap();
+    let rebuild_source = ClaudeSource::with_home(&rebuild_home);
+    let rebuild_db = open_project_session_db(&rebuild_project).await.unwrap();
+    assert_eq!(
+        ingest_source(&rebuild_db, &rebuild_source, &rebuild_project, None)
+            .await
+            .messages_upserted,
+        3
+    );
+
+    let mut incremental_messages = incremental_db
+        .search_session_messages("claude", None, "billing", 10)
+        .await
+        .into_iter()
+        .map(|hit| (hit.message.message_id, hit.message.role, hit.message.text))
+        .collect::<Vec<_>>();
+    let mut rebuilt_messages = rebuild_db
+        .search_session_messages("claude", None, "billing", 10)
+        .await
+        .into_iter()
+        .map(|hit| (hit.message.message_id, hit.message.role, hit.message.text))
+        .collect::<Vec<_>>();
+    incremental_messages.sort();
+    rebuilt_messages.sort();
+    assert_eq!(incremental_messages, rebuilt_messages);
+    assert_eq!(incremental_messages.len(), 3);
+}
+
+#[tokio::test]
+async fn claude_duplicate_and_conflicting_identity_replay_is_deterministic() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let path = write_claude_transcript(&home, &project, "claude-conflict");
+    let source = ClaudeSource::with_home(&home);
+    let db = open_project_session_db(&project).await.unwrap();
+    assert_eq!(
+        ingest_source(&db, &source, &project, None)
+            .await
+            .messages_upserted,
+        2
+    );
+
+    let conflicting = serde_json::json!({
+        "type": "assistant",
+        "cwd": project,
+        "sessionId": "claude-conflict",
+        "uuid": "u2",
+        "timestamp": "2026-01-01T00:00:05.000Z",
+        "message": {
+            "id": "msg_claude_1",
+            "role": "assistant",
+            "content": "The deterministic conflict winner replaced the billing response."
+        }
+    });
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap(),
+        "{conflicting}\n{conflicting}"
+    )
+    .unwrap();
+
+    let conflict = ingest_source(&db, &source, &project, None).await;
+    assert!(conflict.messages_upserted >= 1);
+    assert_eq!(db.session_message_count().await.unwrap(), 2);
+    let hits = db
+        .search_session_messages("claude", None, "deterministic conflict winner", 10)
+        .await;
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].message.message_id, "msg_claude_1");
+    let final_offset = db
+        .get_parse_offset(&claude_cursor_key(&source, &project))
+        .await
+        .unwrap();
+    drop(db);
+
+    let replay = open_project_session_db(&project).await.unwrap();
+    let unchanged = ingest_source(&replay, &source, &project, None).await;
+    assert_eq!(unchanged.sessions_upserted, 0);
+    assert_eq!(unchanged.messages_upserted, 0);
+    assert_eq!(replay.session_message_count().await.unwrap(), 2);
+    assert_eq!(
+        replay
+            .get_parse_offset(&claude_cursor_key(&source, &project))
+            .await,
+        Some(final_offset)
+    );
+    assert_eq!(
+        replay
+            .search_session_messages("claude", None, "deterministic conflict winner", 10)
+            .await
+            .len(),
+        1
+    );
+}

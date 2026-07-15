@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use crate::accounting::parser::parse_timestamp;
-use crate::privacy::{PR5_MAX_CLAUDE_RECORD_BYTES, parse_claude_record_v1};
+use crate::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_claude_record_v1};
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{content_storage_text_and_tools, preview_truncated};
 use crate::sessions::source::{RawJsonlFrame, RawJsonlFrameReader, SessionDraft};
@@ -26,8 +26,8 @@ pub(crate) struct ClaudeRecordContext<'a> {
     pub raw_tool_event_ids: &'a [String],
 }
 
-/// Minimal PR5 projection result. Rich reasoning/marker families remain V1
-/// enrichments until their explicit PR6 projection contract.
+/// Minimal canonical projection result. Rich reasoning and marker families remain
+/// V1 enrichments until their explicit projection contracts.
 pub(crate) enum ClaudeRecordDisposition {
     Message {
         draft: Box<SessionDraft>,
@@ -130,7 +130,7 @@ fn retain_unchanged_tool_event_ids(metadata: &mut Map<String, Value>, raw_ids: &
 pub(crate) fn transcript_cwd(path: &Path) -> Option<PathBuf> {
     let file = std::fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(file);
-    let mut frames = RawJsonlFrameReader::new(reader, PR5_MAX_CLAUDE_RECORD_BYTES);
+    let mut frames = RawJsonlFrameReader::new(reader, MAX_OBSERVATION_RECORD_BYTES);
     let mut offset = 0_u64;
     for _ in 0..CWD_PROBE_LINES {
         let byte_len = match frames.next_frame().ok()? {

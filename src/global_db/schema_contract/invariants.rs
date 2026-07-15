@@ -1,5 +1,5 @@
 use libsql::{Connection, params};
-use tracedecay_store::CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION;
+use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION_V1;
 
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::normalize_trigger_sql;
@@ -37,7 +37,7 @@ async fn projection_checkpoint(conn: &Connection) -> crate::errors::Result<i64> 
                 SELECT last_sequence FROM observation_projection_checkpoints
                 WHERE projector_version = ?1
              ), 0)",
-            params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;

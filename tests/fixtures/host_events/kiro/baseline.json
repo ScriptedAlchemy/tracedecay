@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "provider": "kiro",
+  "cases": [
+    {
+      "state": "supported", "admission_provider": "kiro",
+      "request": {"hook_event_name": "userPromptSubmit", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "prompt": "<REDACTED_PROMPT>"},
+      "admission": {"status": "supported", "retryable": false},
+      "response": {"exit_code": 0, "stdout": "", "stderr": ""}
+    },
+    {
+      "state": "degraded", "admission_provider": "kiro",
+      "request": {"hook_event_name": "userPromptSubmit", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "payload": {"malformed": true}},
+      "admission": {"status": "degraded", "retryable": false, "reason_code": "malformed_event"},
+      "response": {"exit_code": 0, "stdout": "", "stderr": ""}
+    },
+    {
+      "state": "unavailable", "admission_provider": "kiro",
+      "request": {"hook_event_name": "userPromptSubmit", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "prompt": "<REDACTED_PROMPT>"},
+      "admission": {"status": "unavailable", "retryable": true, "reason_code": "authority_unavailable"},
+      "response": {"exit_code": 0, "stdout": "", "stderr": ""}
+    },
+    {
+      "state": "unknown", "admission_provider": "kiro-future",
+      "request": {"hook_event_name": "futureEvent", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>"},
+      "admission": {"status": "unknown", "retryable": false, "reason_code": "unknown_provider"},
+      "response": {"exit_code": 0, "stdout": "", "stderr": ""}
+    }
+  ]
+}

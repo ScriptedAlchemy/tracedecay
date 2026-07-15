@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 
 use libsql::{Connection, params};
-use tracedecay_domain::{ClaudeSourceCursorV1, DurableClaudeObservationV1};
-use tracedecay_store::CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION;
+use tracedecay_domain::{
+    DurableObservationV1, ObservationOrderingDomainV1, ObservationSourceCursorV1,
+};
+use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION_V1;
 
 use crate::global_db::global_db_operation_error;
 
@@ -16,7 +18,7 @@ struct CommittedCursorCandidate {
     source_json: String,
     scope_json: String,
     cursor_json: String,
-    cursor: ClaudeSourceCursorV1,
+    cursor: ObservationSourceCursorV1,
 }
 
 pub(super) async fn repair_projection_frontier(
@@ -27,7 +29,7 @@ pub(super) async fn repair_projection_frontier(
         .query(
             "SELECT last_sequence FROM observation_projection_checkpoints
              WHERE projector_version = ?1",
-            params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -76,7 +78,7 @@ pub(super) async fn repair_projection_frontier(
              WHERE observation.sequence > ?2 AND observation.sequence <= ?3
              ORDER BY observation.sequence ASC",
             params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
                 coverage_start,
                 checkpoint
             ],
@@ -106,10 +108,7 @@ pub(super) async fn repair_projection_frontier(
         conn.execute(
             "UPDATE observation_projection_checkpoints SET last_sequence = ?2
              WHERE projector_version = ?1",
-            params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
-                repaired_checkpoint
-            ],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1, repaired_checkpoint],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -155,7 +154,8 @@ pub(super) async fn repair_committed_source_cursors(
             Some(stored) if stored == candidate.cursor => {}
             Some(stored)
                 if stored.generation() == candidate.cursor.generation()
-                    && stored.byte_offset() < candidate.cursor.byte_offset() =>
+                    && stored.ordering_domain() == candidate.cursor.ordering_domain()
+                    && stored.position() < candidate.cursor.position() =>
             {
                 write_source_cursor(conn, &candidate).await?;
             }
@@ -207,9 +207,9 @@ async fn latest_committed_source_cursors(
         let cursor_json = row
             .get::<String>(1)
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let observation: DurableClaudeObservationV1 =
+        let observation: DurableObservationV1 =
             decode_authority_json(&observation_json, "committed observation authority JSON")?;
-        let cursor: ClaudeSourceCursorV1 =
+        let cursor: ObservationSourceCursorV1 =
             decode_authority_json(&cursor_json, "committed source cursor authority JSON")?;
         let source_json = encode_authority_json(observation.source(), "observation source JSON")?;
         let scope_json = encode_authority_json(observation.scope(), "observation scope JSON")?;
@@ -227,17 +227,20 @@ async fn latest_committed_source_cursors(
 }
 
 fn is_new_generation_frontier(
-    stored: &ClaudeSourceCursorV1,
-    committed: &ClaudeSourceCursorV1,
+    stored: &ObservationSourceCursorV1,
+    committed: &ObservationSourceCursorV1,
 ) -> bool {
-    stored.generation() > committed.generation() && stored.byte_offset() == 0
+    stored.ordering_domain() == ObservationOrderingDomainV1::FileBytes
+        && committed.ordering_domain() == ObservationOrderingDomainV1::FileBytes
+        && stored.generation() > committed.generation()
+        && stored.position() == 0
 }
 
 async fn read_source_cursor(
     conn: &Connection,
     source_json: &str,
     scope_json: &str,
-) -> crate::errors::Result<Option<ClaudeSourceCursorV1>> {
+) -> crate::errors::Result<Option<ObservationSourceCursorV1>> {
     let mut rows = conn
         .query(
             "SELECT cursor_json FROM source_cursors
@@ -282,19 +285,22 @@ async fn cursor_has_exact_advance_receipt(
     conn: &Connection,
     source_json: &str,
     scope_json: &str,
-    cursor: &ClaudeSourceCursorV1,
+    cursor: &ObservationSourceCursorV1,
 ) -> crate::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM source_cursor_advances
              WHERE source_json = ?1 AND scope_json = ?2
-               AND file_generation = ?3 AND end_offset = ?4
+               AND CAST(json_extract(coverage_json, '$.generation') AS TEXT) = ?3
+               AND json_extract(coverage_json, '$.ordering_domain') = ?4
+               AND CAST(json_extract(coverage_json, '$.range.end') AS TEXT) = ?5
              LIMIT 1",
             params![
                 source_json,
                 scope_json,
-                cursor.generation().file_id().to_string(),
-                cursor.byte_offset().to_string()
+                cursor.generation().generation_id().to_string(),
+                cursor.ordering_domain().as_str(),
+                cursor.position().to_string()
             ],
         )
         .await

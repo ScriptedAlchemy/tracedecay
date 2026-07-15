@@ -3,6 +3,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 mod artifact;
+mod baseline;
 mod manifest;
 mod metrics;
 mod model;
@@ -11,7 +12,7 @@ mod runner;
 mod tests;
 
 const RESULT_SCHEMA_VERSION: u32 = 2;
-const WORKLOAD_SCHEMA_VERSION: u32 = 2;
+const WORKLOAD_SCHEMA_VERSION: u32 = 3;
 const WORKLOAD_ID: &str = "pr5-observation-pipeline-v1";
 const WARMUP_REPETITIONS: usize = 3;
 const MEASURED_REPETITIONS: usize = 30;
@@ -32,6 +33,10 @@ const HARNESS_SOURCES: &[(&str, &str)] = &[
     (
         "src/sessions/claude_observation_benchmark/artifact.rs",
         include_str!("claude_observation_benchmark/artifact.rs"),
+    ),
+    (
+        "src/sessions/claude_observation_benchmark/baseline.rs",
+        include_str!("claude_observation_benchmark/baseline.rs"),
     ),
     (
         "src/sessions/claude_observation_benchmark/manifest.rs",

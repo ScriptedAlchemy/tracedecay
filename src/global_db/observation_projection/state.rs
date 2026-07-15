@@ -1,9 +1,8 @@
 use libsql::{Connection, params};
-use tracedecay_domain::{CanonicalObservationIdV1, DurableClaudeObservationV1};
+use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_store::{
-    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ClaudeObservationProjection,
-    ClaudeSessionMessageProjection, ProjectionCheckpoint, ProjectionStoreError,
-    ProjectionStoreResult,
+    ObservationProjection, ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V1, SessionMessageProjection,
 };
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
@@ -32,7 +31,7 @@ pub(super) fn decode_sequence(value: i64, operation: &'static str) -> Projection
 pub(super) fn decode_observation_row(
     row: &libsql::Row,
     operation: &'static str,
-) -> ProjectionStoreResult<(u64, DurableClaudeObservationV1)> {
+) -> ProjectionStoreResult<(u64, DurableObservationV1)> {
     let sequence = decode_sequence(
         row.get::<i64>(0)
             .map_err(|error| storage(operation, error))?,
@@ -49,7 +48,7 @@ pub(super) fn decode_observation_row(
 pub(super) async fn read_observation(
     conn: &Connection,
     observation_id: &CanonicalObservationIdV1,
-) -> ProjectionStoreResult<Option<(u64, DurableClaudeObservationV1)>> {
+) -> ProjectionStoreResult<Option<(u64, DurableObservationV1)>> {
     let mut rows = conn
         .query(
             "SELECT sequence, observation_json FROM observations WHERE observation_id = ?1",
@@ -74,7 +73,7 @@ pub(super) async fn read_checkpoint(
         .query(
             "SELECT last_sequence FROM observation_projection_checkpoints
              WHERE projector_version = ?1",
-            params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
         )
         .await
         .map_err(|error| storage("read projector checkpoint", error))?;
@@ -103,7 +102,7 @@ pub(super) async fn write_checkpoint(
         "INSERT INTO observation_projection_checkpoints (projector_version, last_sequence)
          VALUES (?1, ?2)
          ON CONFLICT(projector_version) DO UPDATE SET last_sequence = excluded.last_sequence",
-        params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, sequence_i64],
+        params![SESSION_MESSAGE_PROJECTOR_VERSION_V1, sequence_i64],
     )
     .await
     .map_err(|error| storage("write projector checkpoint", error))?;
@@ -204,12 +203,12 @@ pub(super) async fn read_message(
 
 pub(super) struct ProjectionOutputOwner {
     pub(super) sequence: u64,
-    pub(super) observation: DurableClaudeObservationV1,
+    pub(super) observation: DurableObservationV1,
 }
 
 pub(super) struct ProjectionOutputState {
     pub(super) latest: ProjectionOutputOwner,
-    pub(super) canonical: DurableClaudeObservationV1,
+    pub(super) canonical: DurableObservationV1,
     pub(super) projector_owned: bool,
     pub(super) owner_count: u64,
 }
@@ -371,7 +370,7 @@ pub(super) async fn ensure_projection_output_state_cache(
 
 pub(super) async fn read_output_state(
     conn: &Connection,
-    projection: &ClaudeSessionMessageProjection,
+    projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<Option<ProjectionOutputState>> {
     let message = projection.message();
     let mut rows = conn
@@ -387,7 +386,7 @@ pub(super) async fn read_output_state(
                AND state.output_provider = ?2
                AND state.output_message_id = ?3",
             params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
                 message.provider.as_str(),
                 message.message_id.as_str()
             ],
@@ -444,7 +443,7 @@ pub(super) async fn read_output_state(
 
 pub(super) async fn has_other_projector_output_owner(
     conn: &Connection,
-    projection: &ClaudeSessionMessageProjection,
+    projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<bool> {
     let message = projection.message();
     let mut rows = conn
@@ -456,7 +455,7 @@ pub(super) async fn has_other_projector_output_owner(
             params![
                 message.provider.as_str(),
                 message.message_id.as_str(),
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
             ],
         )
         .await
@@ -470,17 +469,17 @@ pub(super) async fn has_other_projector_output_owner(
 
 async fn message_projection(
     conn: &Connection,
-    observation: &DurableClaudeObservationV1,
-) -> ProjectionStoreResult<ClaudeSessionMessageProjection> {
+    observation: &DurableObservationV1,
+) -> ProjectionStoreResult<SessionMessageProjection> {
     match derive_projection_with_alias(conn, observation).await? {
-        ClaudeObservationProjection::Message(projection) => Ok(*projection),
-        ClaudeObservationProjection::Skipped(_) => Err(ProjectionStoreError::ProvenanceCollision),
+        ObservationProjection::Message(projection) => Ok(*projection),
+        ObservationProjection::Skipped(_) => Err(ProjectionStoreError::ProvenanceCollision),
     }
 }
 
 async fn verify_rows(
     conn: &Connection,
-    projection: &ClaudeSessionMessageProjection,
+    projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
     let session = projection.session();
     if !read_session(conn, &session.provider, &session.session_id)
@@ -508,8 +507,8 @@ async fn verify_rows(
 }
 
 pub(super) fn same_projection_lineage(
-    candidate: &DurableClaudeObservationV1,
-    owner: &DurableClaudeObservationV1,
+    candidate: &DurableObservationV1,
+    owner: &DurableObservationV1,
 ) -> bool {
     candidate.source() == owner.source() && candidate.scope() == owner.scope()
 }
@@ -528,7 +527,7 @@ pub(super) async fn verify_output_state(
 
 pub(in super::super) async fn verify_output_authority(
     conn: &Connection,
-    projection: &ClaudeSessionMessageProjection,
+    projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
     let message = projection.message();
     let mut rows = conn
@@ -539,7 +538,7 @@ pub(in super::super) async fn verify_output_authority(
              WHERE projector_version = ?1
                AND output_provider = ?2 AND output_message_id = ?3",
             params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
                 message.provider.as_str(),
                 message.message_id.as_str(),
             ],
@@ -580,7 +579,7 @@ pub(in super::super) async fn verify_output_authority(
                  LIMIT 1"
             ),
             params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
                 message.provider.as_str(),
                 message.message_id.as_str(),
             ],

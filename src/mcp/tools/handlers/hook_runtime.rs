@@ -1,13 +1,20 @@
 use serde_json::{Value, json};
 use std::path::Path;
 
+use crate::application::host_admission::{
+    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
+    HostAdmissionStatus,
+};
+use crate::application::observation::ObservationCancellation;
 use crate::automation::config_error;
 use crate::automation::run_ledger::AutomationRunStatus;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::mcp::tools::ToolResult;
 use crate::sessions::claude_observation::ClaudeObservationIngestError;
+use crate::sessions::source::TranscriptSource;
 use crate::tracedecay::TraceDecay;
+use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use super::{SessionAuthorities, rendered_tool_json};
 
@@ -97,6 +104,13 @@ fn projectless_action_allowed(action: &str, args: &Value) -> bool {
             && args.get("user_scope").and_then(Value::as_bool) == Some(true))
 }
 
+fn host_admission_facade(authorities: SessionAuthorities<'_>) -> HostAdmissionFacade<'_> {
+    HostAdmissionFacade::new(HostAdmissionAuthorities::new(
+        authorities.project.map(AsRef::as_ref),
+        authorities.user.map(AsRef::as_ref),
+    ))
+}
+
 fn required_project_db(authorities: SessionAuthorities<'_>) -> Result<&GlobalDb> {
     authorities
         .project
@@ -111,12 +125,40 @@ fn required_user_db(authorities: SessionAuthorities<'_>) -> Result<&GlobalDb> {
         .ok_or_else(|| config_error("daemon user session database is unavailable"))
 }
 
+fn project_observation_id(project_root: &Path) -> Result<ProjectId> {
+    let marker = crate::storage::read_repository_identity_marker(project_root)
+        .map_err(|_| config_error("project observation identity is unavailable"))?
+        .ok_or_else(|| config_error("project observation identity is unavailable"))?;
+    ProjectId::new(marker.project_id)
+        .map_err(|_| config_error("project observation identity is invalid"))
+}
+
+async fn drain_host_observation_projections(db: &GlobalDb) -> Result<u64> {
+    let stats = crate::sessions::claude_observation::drain_projection_queue(
+        db,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .map_err(|error| map_claude_observation_ingest_error(&error))?;
+    Ok(stats.transcript.messages_upserted)
+}
+
 async fn codex_compact(cg: &TraceDecay, args: &Value, db: &GlobalDb) -> Result<Value> {
     let event_json = required_str(args, "event_json")?;
     if let Some(source) = crate::sessions::codex::CodexSource::new() {
-        crate::sessions::source::try_ingest_source(db, &source, cg.project_root(), None)
+        let project_id = project_observation_id(cg.project_root())?;
+        for path in source.transcript_paths(cg.project_root()) {
+            crate::sessions::codex::try_admit_codex_jsonl_observations_for_project(
+                &path,
+                db,
+                cg.project_root(),
+                project_id.clone(),
+                None,
+            )
             .await
             .map_err(|error| map_transcript_ingest_error(&error))?;
+        }
+        drain_host_observation_projections(db).await?;
     }
     let session_id = serde_json::from_str::<Value>(event_json)
         .ok()
@@ -315,6 +357,30 @@ async fn ingest_transcript(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let max_new_bytes = args.get("max_new_bytes").and_then(Value::as_u64);
+    let admission_scope = if user_scope {
+        HostAdmissionScope::Profile
+    } else {
+        HostAdmissionScope::Project
+    };
+    let admission =
+        host_admission_facade(session_authorities).accept_replay(provider, admission_scope);
+    match admission.status {
+        HostAdmissionStatus::Unavailable => {
+            return Err(TraceDecayError::hook_runtime(
+                admission.reason_code.unwrap_or("authority_unavailable"),
+                admission.retryable,
+                "daemon observation authority is unavailable",
+            ));
+        }
+        HostAdmissionStatus::Unknown => {
+            return Err(TraceDecayError::hook_runtime(
+                admission.reason_code.unwrap_or("unknown_provider"),
+                admission.retryable,
+                "transcript provider is unsupported",
+            ));
+        }
+        _ => {}
+    }
     let mut claude_observation_stats = None;
     let messages_upserted = match (provider, user_scope) {
         ("claude", true) => {
@@ -402,24 +468,39 @@ async fn ingest_transcript(
             let roots = crate::sessions::registered_project_roots_from(global_db)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
-            crate::sessions::source::try_ingest_source(
-                db,
-                &source.for_user_scope(roots),
+            let source = source.for_user_scope(roots);
+            let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::new(None, Some(db)));
+            crate::sessions::kiro::capture_kiro_snapshot_observations(
+                &facade,
+                &source,
                 profile_root,
+                ObservationScopeV1::Profile,
                 max_new_bytes,
             )
             .await
-            .map_err(|error| map_transcript_ingest_error(&error))?
-            .messages_upserted
+            .map_err(|error| map_transcript_ingest_error(&error))?;
+            drain_host_observation_projections(db).await?
         }
         ("kiro", false) => {
             let cg =
                 cg.ok_or_else(|| config_error("project transcript ingest requires a project"))?;
             let db = required_project_db(session_authorities)?;
-            crate::sessions::kiro::try_ingest_kiro_for_project(db, cg.project_root(), max_new_bytes)
-                .await
-                .map_err(|error| map_transcript_ingest_error(&error))?
-                .messages_upserted
+            let source = crate::sessions::kiro::KiroSource::new()
+                .ok_or_else(|| config_error("Kiro transcript source is unavailable"))?;
+            let scope = ObservationScopeV1::Project {
+                project_id: project_observation_id(cg.project_root())?,
+            };
+            let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::new(Some(db), None));
+            crate::sessions::kiro::capture_kiro_snapshot_observations(
+                &facade,
+                &source,
+                cg.project_root(),
+                scope,
+                max_new_bytes,
+            )
+            .await
+            .map_err(|error| map_transcript_ingest_error(&error))?;
+            drain_host_observation_projections(db).await?
         }
         _ => {
             return Err(config_error(format!(
@@ -427,11 +508,26 @@ async fn ingest_transcript(
             )));
         }
     };
+    let authority_changed = messages_upserted > 0
+        || claude_observation_stats
+            .as_ref()
+            .is_some_and(|stats| stats.observations_committed > 0 || stats.cursor_advances > 0);
+    let exact_duplicate = !authority_changed
+        && claude_observation_stats
+            .as_ref()
+            .is_some_and(|stats| stats.observation_duplicates > 0 || stats.cursor_duplicates > 0);
+    let admission = if admission.status == HostAdmissionStatus::AcceptedForReplay {
+        HostAdmissionOutcome::replay_completed(authority_changed, exact_duplicate)
+    } else {
+        admission
+    };
     let mut output = json!({
         "action": "ingest_transcript",
         "provider": provider,
         "user_scope": user_scope,
         "completed": true,
+        "status": admission.status,
+        "admission": admission,
         "messages_upserted": messages_upserted,
     });
     if let Some(stats) = claude_observation_stats {
@@ -470,10 +566,24 @@ pub(crate) fn structured_hook_error_data(error: &TraceDecayError) -> Option<Valu
     let (reason_code, retryable, detail) = error.hook_runtime_context()?;
     Some(json!({
         "tool": "tracedecay_hook_runtime",
+        "status": hook_admission_error_status(reason_code),
         "reason_code": reason_code,
         "retryable": retryable,
         "detail": detail,
     }))
+}
+
+fn hook_admission_error_status(reason_code: &str) -> HostAdmissionStatus {
+    match reason_code {
+        "unknown_provider" => HostAdmissionStatus::Unknown,
+        "authority_unavailable" | "authority_write_failed" | "observation_storage_failed" => {
+            HostAdmissionStatus::Unavailable
+        }
+        "cursor_conflict" | "observation_cursor_conflict" | "observation_cancelled" => {
+            HostAdmissionStatus::Backpressured
+        }
+        _ => HostAdmissionStatus::Degraded,
+    }
 }
 
 async fn user_review(args: &Value, profile_root: &Path) -> Result<Value> {
@@ -693,6 +803,88 @@ mod tests {
         assert!(required_user_db(none).is_err());
     }
 
+    #[tokio::test]
+    async fn transcript_admission_rejects_unknown_provider_without_echoing_hook_payload() {
+        let secret = "hook-secret-unknown-provider";
+        let error = ingest_transcript(
+            None,
+            &json!({
+                "provider": "unknown-provider-v99",
+                "event_json": format!("{{\"raw_source\":\"{secret}\"}}"),
+            }),
+            None,
+            None,
+            SessionAuthorities::default(),
+        )
+        .await
+        .unwrap_err();
+
+        let data = structured_hook_error_data(&error).unwrap();
+        assert_eq!(data["status"], "unknown");
+        assert_eq!(data["reason_code"], "unknown_provider");
+        assert_eq!(data["retryable"], false);
+        assert!(!error.to_string().contains(secret));
+        assert!(!data.to_string().contains(secret));
+    }
+
+    #[tokio::test]
+    async fn supported_transcript_admission_requires_its_authority_without_echoing_payload() {
+        let secret = "hook-secret-unavailable-authority";
+        let error = ingest_transcript(
+            None,
+            &json!({
+                "provider": "claude",
+                "event_json": format!("{{\"malformed\":\"{secret}\"}}"),
+            }),
+            None,
+            None,
+            SessionAuthorities::default(),
+        )
+        .await
+        .unwrap_err();
+
+        let data = structured_hook_error_data(&error).unwrap();
+        assert_eq!(data["status"], "unavailable");
+        assert_eq!(data["reason_code"], "authority_unavailable");
+        assert_eq!(data["retryable"], true);
+        assert!(!error.to_string().contains(secret));
+        assert!(!data.to_string().contains(secret));
+    }
+
+    #[test]
+    fn hook_error_response_fixtures_are_legal_and_redacted() {
+        let secret = "hook-secret-error-fixture";
+        let fixtures = [
+            ("malformed", "malformed_event", false, "degraded"),
+            ("unknown-version", "unknown_version", false, "degraded"),
+            ("degraded", "source_degraded", true, "degraded"),
+            ("no-source", "source_unavailable", true, "degraded"),
+            (
+                "repeated-delivery",
+                "observation_duplicate",
+                false,
+                "degraded",
+            ),
+        ];
+
+        for (fixture, reason_code, retryable, status) in fixtures {
+            let error = TraceDecayError::hook_runtime(
+                reason_code,
+                retryable,
+                format!("transcript fixture {fixture} failed"),
+            );
+            let data = structured_hook_error_data(&error).unwrap();
+            let snapshot = data.to_string();
+
+            assert_eq!(data["tool"], "tracedecay_hook_runtime", "{fixture}");
+            assert_eq!(data["status"], status, "{fixture}");
+            assert_eq!(data["reason_code"], reason_code, "{fixture}");
+            assert_eq!(data["retryable"], retryable, "{fixture}");
+            assert!(!error.to_string().contains(secret), "{fixture}");
+            assert!(!snapshot.contains(secret), "{fixture}");
+        }
+    }
+
     #[test]
     fn cursor_event_numbers_accept_numeric_and_string_forms() {
         let event = json!({ "tokens": "42", "message_count": 7 });
@@ -711,6 +903,7 @@ mod tests {
         assert!(rendered.contains("Claude observation request is invalid"));
         assert!(!rendered.contains("source range"));
         let data = structured_hook_error_data(&mapped).unwrap();
+        assert_eq!(data["status"], "degraded");
         assert_eq!(data["reason_code"], "observation_request_invalid");
         assert_eq!(data["retryable"], false);
     }
@@ -728,6 +921,7 @@ mod tests {
         assert!(!rendered.contains("private store operation"));
         assert!(!rendered.contains("private store source detail"));
         let data = structured_hook_error_data(&mapped).unwrap();
+        assert_eq!(data["status"], "unavailable");
         assert_eq!(data["reason_code"], "observation_storage_failed");
         assert_eq!(data["retryable"], true);
     }

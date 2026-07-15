@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 
 use super::{DashboardState, build_selected_project_state, config_error};
 use crate::errors::Result;
-use crate::global_db::{GlobalDb, ProjectRegistryContext};
+use crate::global_db::ProjectRegistryContext;
 use crate::project_registry::{
     PublicCodeProject, PublicProjectRegistryContext, build_project_registry_view,
 };
@@ -66,9 +66,11 @@ impl DashboardRuntime {
             });
         }
 
-        let db = GlobalDb::open()
-            .await
-            .ok_or_else(|| config_error("could not open tracedecay project registry"))?;
+        let db = self
+            .active
+            .savings_db
+            .as_ref()
+            .ok_or_else(|| config_error("tracedecay project registry is unavailable"))?;
         let context = db
             .project_registry_context_by_id(project_id)
             .await
@@ -122,7 +124,7 @@ pub(crate) async fn list(
     Query(params): Query<ProjectsParams>,
 ) -> Json<Value> {
     let limit = params.limit.unwrap_or(100).clamp(1, 250);
-    let Some(db) = GlobalDb::open().await else {
+    let Some(db) = runtime.active.savings_db.as_ref() else {
         return Json(json!({
             "status": "missing_registry",
             "limit": limit,
@@ -166,7 +168,7 @@ pub(crate) async fn context(
     State(runtime): State<DashboardRuntime>,
     AxumPath(project_id): AxumPath<String>,
 ) -> (StatusCode, Json<Value>) {
-    let Some(db) = GlobalDb::open().await else {
+    let Some(db) = runtime.active.savings_db.as_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({

@@ -197,9 +197,7 @@ pub(super) const TABLES: &[Table] = &[
         [
             column("source_json", "TEXT", true, None, 1),
             column("scope_json", "TEXT", true, None, 2),
-            column("file_generation", "TEXT", true, None, 3),
-            column("start_offset", "TEXT", true, None, 4),
-            column("end_offset", "TEXT", true, None, 5),
+            column("coverage_json", "TEXT", true, None, 3),
             column("reason", "TEXT", true, None, 0),
             column("receipt_id", "TEXT", false, None, 0),
         ],

@@ -4,16 +4,28 @@ use std::fmt::Write as _;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    CanonicalClaudeSanitizationReceiptMaterialV1, CanonicalObservationIdV1, ClaudeByteRangeV1,
-    ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1,
-    ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1, IdempotencyKeyV1,
-    ObservationCollisionOutcomeV1, ObservationScopeV1, PayloadReferenceV1, ProjectId,
-    RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
-    SanitizerDispositionV1, SensitivityV1, SessionId, classify_observation_collision,
+    CanonicalClaudeSanitizationReceiptMaterialV1, CanonicalMessageRoleV1,
+    CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
+    CanonicalObservationIdV1, CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1,
+    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
+    ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
+    IdempotencyKeyV1, ObservationCollisionOutcomeV1, ObservationContractError, ObservationId,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceIdentityV1, PayloadReferenceV1, ProjectId, ProviderId, RetentionClass,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, classify_observation_collision,
 };
 
 fn source(session_id: &str) -> ClaudeSourceIdentityV1 {
     ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap()
+}
+
+fn provider_source(provider: &str, session_id: &str) -> ObservationSourceIdentityV1 {
+    ObservationSourceIdentityV1::for_provider(
+        ProviderId::new(provider).unwrap(),
+        SessionId::new(session_id).unwrap(),
+    )
+    .unwrap()
 }
 
 fn profile_material() -> ClaudeObservationIdentityMaterialV1 {
@@ -84,6 +96,127 @@ fn observation_ids_are_stable_and_payload_objects_are_canonical() {
         durable(material.clone(), first).canonical_payload_bytes(),
         durable(material, reordered).canonical_payload_bytes()
     );
+}
+
+#[test]
+fn claude_identity_wire_and_hash_remain_v1_compatible() {
+    let material = profile_material();
+    let wire = serde_json::to_value(&material).unwrap();
+
+    assert!(wire.get("ordering_domain").is_none());
+    assert!(wire.get("native_record_id").is_none());
+    assert_eq!(
+        CanonicalObservationIdV1::derive(&material)
+            .unwrap()
+            .as_str(),
+        "sha256:92fe6f78f68eb34153f865b770a7fed01b01425730796ac67bbc4973aad527a3"
+    );
+}
+
+#[test]
+fn native_record_identity_is_independent_of_generation_and_ordering_position() {
+    let source = provider_source("hermes", "session.fixture");
+    let native_record_id = ObservationId::new("message.fixture").unwrap();
+    let identity = |generation, start, end| {
+        ClaudeObservationIdentityMaterialV1::for_native_record(
+            source.clone(),
+            ObservationScopeV1::Profile,
+            ClaudeFileGenerationV1::new(generation).unwrap(),
+            ClaudeByteRangeV1::new(start, end).unwrap(),
+            ObservationOrderingDomainV1::SqliteRowId,
+            native_record_id.clone(),
+        )
+        .unwrap()
+    };
+
+    let first = identity(1, 10, 11);
+    let relocated = identity(2, 40, 41);
+    assert_eq!(
+        CanonicalObservationIdV1::derive(&first).unwrap(),
+        CanonicalObservationIdV1::derive(&relocated).unwrap()
+    );
+
+    let wire = serde_json::to_value(&first).unwrap();
+    assert_eq!(wire["ordering_domain"], "sqlite_row_id");
+    assert_eq!(wire["native_record_id"], "message.fixture");
+
+    let payload = PayloadReferenceV1::for_payload(&json!({"message": "safe"})).unwrap();
+    let receipt = CanonicalClaudeSanitizationReceiptMaterialV1::for_durable_payload(
+        &first,
+        ComponentVersion::new("privacy.observation-record.v1").unwrap(),
+        SanitizerDispositionV1::Accepted,
+        &[9; 32],
+        &payload,
+    )
+    .unwrap()
+    .derive_receipt_ref()
+    .unwrap();
+    assert!(
+        receipt
+            .receipt_id()
+            .as_str()
+            .starts_with("privacy.observation.v1.")
+    );
+}
+
+#[test]
+fn canonical_envelope_preserves_typed_facts_without_inventing_relations() {
+    let range = ClaudeByteRangeV1::new(4, 5).unwrap();
+    let envelope = CanonicalObservationEnvelopeV1::new(
+        ProviderId::new("hermes").unwrap(),
+        "message",
+        ObservationId::new("message.fixture").unwrap(),
+        CanonicalObservationRelationsV1::new(SessionId::new("session.fixture").unwrap())
+            .with_message_id(ObservationId::new("message.fixture").unwrap()),
+        vec![
+            CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!({"text": "safe"}),
+                model: Some("model.fixture".to_owned()),
+                timestamp: Some(42),
+            },
+            CanonicalObservationFactV1::Reasoning {
+                visibility: CanonicalReasoningVisibilityV1::Unavailable,
+                content: None,
+            },
+        ],
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SqliteRowId, range)
+            .with_native_sequence(5),
+    )
+    .unwrap();
+
+    envelope.validate().unwrap();
+    assert_eq!(envelope.provider().as_str(), "hermes");
+    assert_eq!(envelope.evidence().range(), range);
+    assert_eq!(
+        envelope.relations().session_id().as_str(),
+        "session.fixture"
+    );
+    assert_eq!(envelope.facts().len(), 2);
+    assert!(
+        serde_json::to_value(&envelope).unwrap()["relations"]
+            .get("thread_id")
+            .is_none()
+    );
+}
+
+#[test]
+fn canonical_envelope_rejects_visible_reasoning_without_content() {
+    let range = ClaudeByteRangeV1::new(1, 2).unwrap();
+    let error = CanonicalObservationEnvelopeV1::new(
+        ProviderId::new("codex").unwrap(),
+        "reasoning",
+        ObservationId::new("reasoning.fixture").unwrap(),
+        CanonicalObservationRelationsV1::new(SessionId::new("session.fixture").unwrap()),
+        vec![CanonicalObservationFactV1::Reasoning {
+            visibility: CanonicalReasoningVisibilityV1::Visible,
+            content: None,
+        }],
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range),
+    )
+    .unwrap_err();
+
+    assert_eq!(error, ObservationContractError::InvalidReasoningVisibility);
 }
 
 #[test]
@@ -241,6 +374,18 @@ fn source_cursors_enforce_their_comparison_domain() {
     );
 
     assert_eq!(first.checked_cmp(&later).unwrap(), Ordering::Less);
+    let row_cursor = ObservationSourceCursorV1::for_ordering(
+        source("session.fixture"),
+        ObservationScopeV1::Profile,
+        generation,
+        ObservationOrderingDomainV1::SqliteRowId,
+        20,
+    )
+    .unwrap();
+    assert_eq!(
+        first.checked_cmp(&row_cursor),
+        Err(ObservationContractError::CursorOrderingDomainMismatch)
+    );
     assert!(
         first
             .checked_cmp(&byte_cursor(

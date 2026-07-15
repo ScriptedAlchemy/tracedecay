@@ -48,19 +48,39 @@
 mod context;
 mod events;
 
+use std::fmt::Write as _;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use tracedecay_domain::{
+    CanonicalBoundaryKindV1, CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1,
+    CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
+    CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1,
+    CanonicalWorkflowEvidenceKindV1, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ProjectId, ProviderId,
+    RetentionClass, SessionId,
+};
+use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
 use crate::accounting::parser::parse_timestamp;
+use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use crate::application::observation::{
+    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
+};
+use crate::global_db::GlobalDb;
+use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
     StoredCursor, append_tool_calls_metadata, content_storage_text_and_tools,
     path_belongs_to_project, title_from_messages,
 };
 use crate::sessions::source::{
-    ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, stream_new_jsonl,
+    MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlSkippedReason, SessionDraft,
+    TranscriptIngestError, TranscriptIngestResult, TranscriptSource, collect_files_with_ext,
+    stream_new_jsonl, try_stream_new_jsonl_raw_strict_with_resume,
 };
 use context::CodexContextState;
 
@@ -395,6 +415,779 @@ impl TranscriptSource for CodexSource {
             new_cursor: new.new_cursor,
         })
     }
+
+    fn try_parse_new(
+        &self,
+        path: &Path,
+        prev: StoredCursor,
+        project_root: &Path,
+        max_new_bytes: Option<u64>,
+    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
+        preflight_codex_jsonl(path, prev, max_new_bytes)?;
+        Ok(self.parse_new(path, prev, project_root, max_new_bytes))
+    }
+}
+
+fn preflight_codex_jsonl(
+    path: &Path,
+    prev: StoredCursor,
+    max_new_bytes: Option<u64>,
+) -> TranscriptIngestResult<()> {
+    let frames = try_stream_new_jsonl_raw_strict_with_resume(
+        path,
+        prev,
+        max_new_bytes,
+        MAX_JSONL_RECORD_BYTES,
+        None,
+    )?;
+    if let Some(crate::sessions::source::JsonlFrameDeferral::Malformed { offset }) = frames.deferred
+    {
+        return Err(TranscriptIngestError::NonDurableRecord {
+            provider: PROVIDER,
+            offset,
+            end_offset: frames.read_through.max(offset),
+            reason: "malformed_jsonl_frame",
+        });
+    }
+    for frame in frames.frames {
+        if serde_json::from_slice::<Value>(&frame.bytes).is_err() {
+            return Err(TranscriptIngestError::NonDurableRecord {
+                provider: PROVIDER,
+                offset: frame.offset,
+                end_offset: frame.end_offset,
+                reason: "malformed_jsonl_frame",
+            });
+        }
+    }
+    Ok(())
+}
+
+const CODEX_OBSERVATION_RETENTION: &str = "retention.provider-observation";
+
+/// Admit a Codex rollout for one exact project identity.
+///
+/// The scheduler supplies the already-resolved project id; each complete record
+/// is routed by the rollout's current Codex cwd, including context reconstructed
+/// before a resumed byte cursor.
+pub async fn try_admit_codex_jsonl_observations_for_project(
+    path: &Path,
+    db: &GlobalDb,
+    project_root: &Path,
+    project_id: ProjectId,
+    max_new_bytes: Option<u64>,
+) -> TranscriptIngestResult<()> {
+    try_admit_codex_jsonl_observations(
+        path,
+        db,
+        CodexObservationAdmission::Project {
+            root: project_root,
+            project_id,
+        },
+        max_new_bytes,
+    )
+    .await
+}
+
+/// Admit Codex records that are not attributable to any registered project.
+///
+/// A scheduler may constrain this pass to one session while it catches up a
+/// profile-owned rollout.
+pub async fn try_admit_codex_jsonl_observations_for_profile(
+    path: &Path,
+    db: &GlobalDb,
+    session_id: Option<&str>,
+    registered_roots: &[PathBuf],
+    max_new_bytes: Option<u64>,
+) -> TranscriptIngestResult<()> {
+    try_admit_codex_jsonl_observations(
+        path,
+        db,
+        CodexObservationAdmission::Profile {
+            session_id,
+            registered_roots,
+        },
+        max_new_bytes,
+    )
+    .await
+}
+
+enum CodexObservationAdmission<'a> {
+    Project {
+        root: &'a Path,
+        project_id: ProjectId,
+    },
+    Profile {
+        session_id: Option<&'a str>,
+        registered_roots: &'a [PathBuf],
+    },
+}
+
+impl CodexObservationAdmission<'_> {
+    fn scope(&self) -> ObservationScopeV1 {
+        match self {
+            Self::Project { project_id, .. } => ObservationScopeV1::Project {
+                project_id: project_id.clone(),
+            },
+            Self::Profile { .. } => ObservationScopeV1::Profile,
+        }
+    }
+
+    fn accepts(&self, cwd: Option<&Path>) -> bool {
+        match self {
+            Self::Project { root, .. } => cwd.is_some_and(|cwd| path_belongs_to_project(cwd, root)),
+            Self::Profile {
+                registered_roots, ..
+            } => cwd.is_none_or(|cwd| {
+                !registered_roots
+                    .iter()
+                    .any(|root| path_belongs_to_project(cwd, root))
+            }),
+        }
+    }
+
+    fn accepts_session(&self, session_id: &str) -> bool {
+        !matches!(self, Self::Profile { session_id: Some(expected), .. } if *expected != session_id)
+    }
+}
+
+async fn try_admit_codex_jsonl_observations(
+    path: &Path,
+    db: &GlobalDb,
+    admission_scope: CodexObservationAdmission<'_>,
+    max_new_bytes: Option<u64>,
+) -> TranscriptIngestResult<()> {
+    let meta = session_meta(path).ok_or_else(|| TranscriptIngestError::InvalidSourceIdentity {
+        provider: PROVIDER,
+        path: path.to_path_buf(),
+    })?;
+    if !admission_scope.accepts_session(&meta.session_id) {
+        return Ok(());
+    }
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new(PROVIDER)?,
+        SessionId::new(&meta.session_id)?,
+    )?;
+    let scope = admission_scope.scope();
+    let authorities = match scope {
+        ObservationScopeV1::Profile => HostAdmissionAuthorities::new(None, Some(db)),
+        ObservationScopeV1::Project { .. } => HostAdmissionAuthorities::new(Some(db), None),
+    };
+    let admission = HostAdmissionFacade::new(authorities);
+    let mut expected_cursor = admission
+        .get_source_cursor(&source, &scope)
+        .await
+        .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
+    let previous = expected_cursor
+        .as_ref()
+        .map_or(StoredCursor::default(), |cursor| StoredCursor {
+            position: cursor.position(),
+            mtime: 0,
+            file_id: cursor.generation().generation_id(),
+        });
+    let resume_state = expected_cursor.as_ref().and_then(|cursor| {
+        Some(crate::sessions::source::JsonlResumeState {
+            generation: cursor.generation().generation_id(),
+            file_identity: cursor.file_identity()?,
+            fingerprint: cursor.resume_fingerprint()?,
+        })
+    });
+    let raw = try_stream_new_jsonl_raw_strict_with_resume(
+        path,
+        previous,
+        max_new_bytes,
+        MAX_JSONL_RECORD_BYTES,
+        resume_state,
+    )?;
+    let generation = ObservationSourceGenerationV1::new(raw.new_cursor.file_id)?;
+    let mut context_state = if expected_cursor.is_some() && raw.start_offset > 0 {
+        CodexContextState::scan_prior(path, raw.start_offset, &meta)
+    } else {
+        CodexContextState::from_meta(&meta)
+    };
+
+    let file_identity = raw.file_identity;
+    let mut skipped = raw.skipped.into_iter().peekable();
+    for frame in raw.frames {
+        while skipped
+            .peek()
+            .is_some_and(|skipped| skipped.offset < frame.offset)
+        {
+            let skipped = skipped
+                .next()
+                .ok_or(TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
+            let reason = match skipped.reason {
+                RawJsonlSkippedReason::Whitespace => ObservationCoverageReason::BlankFrame,
+                RawJsonlSkippedReason::Oversized => ObservationCoverageReason::OversizedFrame,
+            };
+            advance_codex_coverage(
+                &admission,
+                &source,
+                &scope,
+                generation,
+                &mut expected_cursor,
+                skipped.offset,
+                skipped.end_offset,
+                file_identity,
+                skipped.resume_fingerprint,
+                reason,
+                None,
+            )
+            .await?;
+        }
+        let range =
+            tracedecay_domain::ObservationSourceRangeV1::new(frame.offset, frame.end_offset)?;
+        let mut stable_record_id = None;
+        let mut non_durable_reason = None;
+        let parsed = parse_normalized_observation_record_v1(
+            &frame.bytes,
+            range,
+            ObservationOrderingDomainV1::FileBytes,
+            |native| {
+                context_state.observe_context_record(&native, path, &meta);
+                if !admission_scope.accepts(context_state.cwd.as_deref()) {
+                    non_durable_reason = Some(ObservationCoverageReason::OutOfScope);
+                    return Err(ObservationRecordParseErrorV1::NormalizationFailed);
+                }
+                if !codex_observation_record_supported(&native) {
+                    non_durable_reason = Some(ObservationCoverageReason::UnsupportedFact);
+                    return Err(ObservationRecordParseErrorV1::NormalizationFailed);
+                }
+                let record_id = codex_native_record_id(&meta.session_id, &native)
+                    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
+                let envelope = normalize_codex_observation(
+                    &native,
+                    &meta.session_id,
+                    record_id.clone(),
+                    range,
+                )?;
+                stable_record_id = Some(record_id);
+                Ok(envelope)
+            },
+        );
+        let Some(parsed) = parsed.ok() else {
+            advance_codex_coverage(
+                &admission,
+                &source,
+                &scope,
+                generation,
+                &mut expected_cursor,
+                frame.offset,
+                frame.end_offset,
+                file_identity,
+                frame.resume_fingerprint,
+                non_durable_reason.unwrap_or(ObservationCoverageReason::MalformedFrame),
+                None,
+            )
+            .await?;
+            continue;
+        };
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            source.clone(),
+            scope.clone(),
+            generation,
+            range,
+            ObservationOrderingDomainV1::FileBytes,
+            stable_record_id
+                .ok_or(TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?,
+        )?;
+        let request = CaptureObservationRequest::new(
+            parsed,
+            identity,
+            expected_cursor.clone(),
+            RetentionClass::new(CODEX_OBSERVATION_RETENTION)?,
+            ObservationCancellation::default(),
+        )
+        .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?
+        .with_resume_checkpoint(file_identity, frame.resume_fingerprint);
+        match admission.capture_observation(request).await {
+            Ok(CaptureObservationOutcome::Persisted { .. }) => {
+                expected_cursor = Some(
+                    ObservationSourceCursorV1::for_ordering(
+                        source.clone(),
+                        scope.clone(),
+                        generation,
+                        ObservationOrderingDomainV1::FileBytes,
+                        frame.end_offset,
+                    )?
+                    .with_resume_checkpoint(file_identity, frame.resume_fingerprint),
+                );
+            }
+            Ok(CaptureObservationOutcome::Rejected { receipt, .. }) => {
+                advance_codex_coverage(
+                    &admission,
+                    &source,
+                    &scope,
+                    generation,
+                    &mut expected_cursor,
+                    frame.offset,
+                    frame.end_offset,
+                    file_identity,
+                    frame.resume_fingerprint,
+                    ObservationCoverageReason::SanitizerRejected,
+                    Some(receipt),
+                )
+                .await?;
+            }
+            Ok(CaptureObservationOutcome::Quarantined { receipt, .. }) => {
+                advance_codex_coverage(
+                    &admission,
+                    &source,
+                    &scope,
+                    generation,
+                    &mut expected_cursor,
+                    frame.offset,
+                    frame.end_offset,
+                    file_identity,
+                    frame.resume_fingerprint,
+                    ObservationCoverageReason::SanitizerQuarantined,
+                    Some(receipt),
+                )
+                .await?;
+            }
+            Err(outcome) => {
+                return Err(TranscriptIngestError::NonDurableRecord {
+                    provider: PROVIDER,
+                    offset: frame.offset,
+                    end_offset: frame.end_offset,
+                    reason: outcome.reason_code.unwrap_or("host_admission_incomplete"),
+                });
+            }
+        }
+    }
+    for skipped in skipped {
+        let reason = match skipped.reason {
+            RawJsonlSkippedReason::Whitespace => ObservationCoverageReason::BlankFrame,
+            RawJsonlSkippedReason::Oversized => ObservationCoverageReason::OversizedFrame,
+        };
+        advance_codex_coverage(
+            &admission,
+            &source,
+            &scope,
+            generation,
+            &mut expected_cursor,
+            skipped.offset,
+            skipped.end_offset,
+            file_identity,
+            skipped.resume_fingerprint,
+            reason,
+            None,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn advance_codex_coverage(
+    admission: &HostAdmissionFacade<'_>,
+    source: &ObservationSourceIdentityV1,
+    scope: &ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    expected_cursor: &mut Option<ObservationSourceCursorV1>,
+    offset: u64,
+    end_offset: u64,
+    file_identity: u64,
+    resume_fingerprint: u64,
+    reason: ObservationCoverageReason,
+    receipt: Option<tracedecay_domain::SanitizationReceiptV1>,
+) -> TranscriptIngestResult<()> {
+    let range = tracedecay_domain::ObservationSourceRangeV1::new(offset, end_offset)?;
+    let advance = match receipt {
+        Some(receipt) => ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
+            source.clone(),
+            scope.clone(),
+            generation,
+            ObservationOrderingDomainV1::FileBytes,
+            expected_cursor.clone(),
+            range,
+            reason,
+            receipt,
+        ),
+        None => ObservationCursorAdvance::for_ordering(
+            source.clone(),
+            scope.clone(),
+            generation,
+            ObservationOrderingDomainV1::FileBytes,
+            expected_cursor.clone(),
+            range,
+            reason,
+        ),
+    }
+    .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?
+    .with_resume_checkpoint(file_identity, resume_fingerprint);
+    admission
+        .advance_non_durable_source_cursor(advance, ObservationCancellation::default())
+        .await
+        .map_err(|outcome| TranscriptIngestError::NonDurableRecord {
+            provider: PROVIDER,
+            offset,
+            end_offset,
+            reason: outcome
+                .reason_code
+                .unwrap_or("non_durable_cursor_advance_failed"),
+        })?;
+    *expected_cursor = Some(
+        ObservationSourceCursorV1::for_ordering(
+            source.clone(),
+            scope.clone(),
+            generation,
+            ObservationOrderingDomainV1::FileBytes,
+            end_offset,
+        )?
+        .with_resume_checkpoint(file_identity, resume_fingerprint),
+    );
+    Ok(())
+}
+
+fn codex_observation_record_supported(value: &Value) -> bool {
+    matches!(
+        value.get("type").and_then(Value::as_str),
+        Some(
+            "session_meta"
+                | "turn_context"
+                | "event_msg"
+                | "response_item"
+                | "compacted"
+                | "inter_agent_communication"
+        )
+    )
+}
+
+fn normalize_codex_observation(
+    native: &Value,
+    session_id: &str,
+    stable_record_id: ObservationId,
+    range: tracedecay_domain::ObservationSourceRangeV1,
+) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
+    let native_kind = native
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or(ObservationRecordParseErrorV1::NormalizationFailed)?;
+    let payload = native.get("payload").unwrap_or(native);
+    let timestamp = timestamp_from_record(native);
+    let mut relations = CanonicalObservationRelationsV1::new(
+        SessionId::new(session_id)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+    );
+    if matches!(
+        native_kind,
+        "event_msg" | "response_item" | "compacted" | "inter_agent_communication"
+    ) {
+        relations = relations.with_message_id(stable_record_id.clone());
+    }
+
+    let mut facts = Vec::new();
+    match native_kind {
+        "session_meta" => {
+            facts.push(CanonicalObservationFactV1::Boundary {
+                boundary_kind: CanonicalBoundaryKindV1::SessionStart,
+            });
+            append_codex_git_facts(payload, &mut facts);
+            if payload.pointer("/source/subagent").is_some()
+                || payload.get("thread_source").and_then(Value::as_str) == Some("subagent")
+            {
+                facts.push(CanonicalObservationFactV1::Workflow {
+                    evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
+                    reference: None,
+                    content: None,
+                });
+            }
+        }
+        "turn_context" => facts.push(CanonicalObservationFactV1::Unknown {
+            native_kind: "turn_context".to_string(),
+            state: CanonicalUnknownStateV1::Unsupported,
+        }),
+        "event_msg" => append_codex_event_facts(payload, timestamp, &mut facts),
+        "response_item" => {
+            append_codex_response_item_facts(payload, timestamp, &stable_record_id, &mut facts);
+        }
+        "compacted" => {
+            facts.push(CanonicalObservationFactV1::Compaction {
+                summary: payload.get("message").cloned(),
+                input_tokens: canonical_u64(payload.get("input_tokens")),
+                output_tokens: canonical_u64(payload.get("output_tokens")),
+            });
+            facts.push(CanonicalObservationFactV1::Boundary {
+                boundary_kind: CanonicalBoundaryKindV1::CompactionBoundary,
+            });
+        }
+        "inter_agent_communication" => {
+            facts.push(CanonicalObservationFactV1::Workflow {
+                evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
+                reference: None,
+                content: payload
+                    .get("message")
+                    .or_else(|| payload.get("content"))
+                    .cloned(),
+            });
+        }
+        _ => {}
+    }
+    if facts.is_empty() {
+        facts.push(CanonicalObservationFactV1::Unknown {
+            native_kind: native_kind.to_string(),
+            state: CanonicalUnknownStateV1::Unsupported,
+        });
+    }
+
+    let mut evidence =
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range);
+    if let Some(timestamp) = timestamp {
+        evidence = evidence.with_native_timestamp(timestamp);
+    }
+    CanonicalObservationEnvelopeV1::new(
+        ProviderId::new(PROVIDER)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+        native_kind,
+        stable_record_id,
+        relations,
+        facts,
+        evidence,
+    )
+    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
+}
+
+fn append_codex_event_facts(
+    payload: &Value,
+    timestamp: Option<i64>,
+    facts: &mut Vec<CanonicalObservationFactV1>,
+) {
+    match payload.get("type").and_then(Value::as_str) {
+        Some("user_message" | "agent_message") => {
+            let role = if payload.get("type").and_then(Value::as_str) == Some("user_message") {
+                CanonicalMessageRoleV1::User
+            } else {
+                CanonicalMessageRoleV1::Assistant
+            };
+            if let Some(content) = payload.get("message").cloned() {
+                facts.push(CanonicalObservationFactV1::Message {
+                    role,
+                    content,
+                    model: payload
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    timestamp,
+                });
+            }
+        }
+        Some("token_count") => {
+            let usage = payload
+                .get("info")
+                .and_then(|info| {
+                    info.get("last_token_usage")
+                        .or_else(|| info.get("total_token_usage"))
+                })
+                .unwrap_or(payload);
+            let input = canonical_u64(usage.get("input_tokens"));
+            let cache_read = canonical_u64(
+                usage
+                    .get("cached_input_tokens")
+                    .or_else(|| usage.get("cache_read_input_tokens")),
+            );
+            facts.push(CanonicalObservationFactV1::Usage {
+                input_tokens: input.map(|input| input.saturating_sub(cache_read.unwrap_or(0))),
+                output_tokens: canonical_u64(
+                    usage
+                        .get("output_tokens")
+                        .or_else(|| usage.get("completion_tokens")),
+                ),
+                cache_read_tokens: cache_read,
+                cache_write_tokens: canonical_u64(usage.get("cache_write_input_tokens")),
+                reasoning_tokens: canonical_u64(
+                    usage
+                        .get("reasoning_output_tokens")
+                        .or_else(|| usage.get("reasoning_tokens")),
+                ),
+            });
+        }
+        Some("thread_goal_updated" | "task_started" | "task_completed" | "task_failed") => {
+            facts.push(CanonicalObservationFactV1::Workflow {
+                evidence_kind: CanonicalWorkflowEvidenceKindV1::Task,
+                reference: payload
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                content: payload
+                    .get("objective")
+                    .or_else(|| payload.get("message"))
+                    .or_else(|| payload.get("status"))
+                    .cloned(),
+            });
+        }
+        Some(kind) => facts.push(CanonicalObservationFactV1::Unknown {
+            native_kind: kind.to_string(),
+            state: CanonicalUnknownStateV1::Unsupported,
+        }),
+        None => facts.push(CanonicalObservationFactV1::Unknown {
+            native_kind: "event_msg".to_string(),
+            state: CanonicalUnknownStateV1::Absent,
+        }),
+    }
+}
+
+fn append_codex_response_item_facts(
+    payload: &Value,
+    timestamp: Option<i64>,
+    stable_record_id: &ObservationId,
+    facts: &mut Vec<CanonicalObservationFactV1>,
+) {
+    let Some(item_kind) = payload.get("type").and_then(Value::as_str) else {
+        facts.push(CanonicalObservationFactV1::Unknown {
+            native_kind: "response_item".to_string(),
+            state: CanonicalUnknownStateV1::Absent,
+        });
+        return;
+    };
+    match item_kind {
+        "message" => {
+            if let Some(content) = payload.get("content").cloned() {
+                facts.push(CanonicalObservationFactV1::Message {
+                    role: canonical_message_role(payload.get("role").and_then(Value::as_str)),
+                    content,
+                    model: payload
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    timestamp,
+                });
+            }
+        }
+        "function_call" | "custom_tool_call" | "tool_search_call" | "web_search_call" => {
+            let invocation_id = canonical_native_observation_id(
+                payload
+                    .get("call_id")
+                    .or_else(|| payload.get("id"))
+                    .and_then(Value::as_str),
+                stable_record_id,
+            );
+            facts.push(CanonicalObservationFactV1::ToolInvocation {
+                invocation_id,
+                name: response_item_tool_name(payload, item_kind)
+                    .unwrap_or_else(|| item_kind.to_string()),
+                arguments: Value::Null,
+            });
+        }
+        "function_call_output" | "custom_tool_call_output" => {
+            facts.push(CanonicalObservationFactV1::ToolResult {
+                invocation_id: Some(canonical_native_observation_id(
+                    payload.get("call_id").and_then(Value::as_str),
+                    stable_record_id,
+                )),
+                content: Value::Null,
+                success: payload
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(|status| matches!(status, "completed" | "success" | "succeeded")),
+            });
+        }
+        "reasoning" => {
+            let summary = payload.get("summary").filter(|summary| !summary.is_null());
+            let encrypted = payload
+                .get("encrypted_content")
+                .and_then(Value::as_str)
+                .is_some_and(|content| !content.is_empty());
+            let (visibility, content) = if let Some(summary) = summary {
+                (
+                    CanonicalReasoningVisibilityV1::Visible,
+                    Some(summary.clone()),
+                )
+            } else if encrypted {
+                (CanonicalReasoningVisibilityV1::Redacted, None)
+            } else {
+                (CanonicalReasoningVisibilityV1::Unavailable, None)
+            };
+            facts.push(CanonicalObservationFactV1::Reasoning {
+                visibility,
+                content,
+            });
+        }
+        kind => facts.push(CanonicalObservationFactV1::Unknown {
+            native_kind: kind.to_string(),
+            state: CanonicalUnknownStateV1::Unsupported,
+        }),
+    }
+}
+
+fn append_codex_git_facts(payload: &Value, facts: &mut Vec<CanonicalObservationFactV1>) {
+    let Some(git) = payload.get("git") else {
+        return;
+    };
+    if let Some(branch) = git
+        .get("branch")
+        .or_else(|| git.get("current_branch"))
+        .and_then(Value::as_str)
+        .filter(|branch| !branch.is_empty())
+    {
+        facts.push(CanonicalObservationFactV1::Git {
+            evidence_kind: CanonicalGitEvidenceKindV1::Branch,
+            reference: Some(branch.to_string()),
+            content: None,
+        });
+    }
+    if let Some(commit) = git
+        .get("commit_hash")
+        .or_else(|| git.get("commit"))
+        .or_else(|| git.get("head"))
+        .and_then(Value::as_str)
+        .filter(|commit| !commit.is_empty())
+    {
+        facts.push(CanonicalObservationFactV1::Git {
+            evidence_kind: CanonicalGitEvidenceKindV1::Commit,
+            reference: Some(commit.to_string()),
+            content: None,
+        });
+    }
+}
+
+fn canonical_message_role(role: Option<&str>) -> CanonicalMessageRoleV1 {
+    match role {
+        Some("user") => CanonicalMessageRoleV1::User,
+        Some("assistant") => CanonicalMessageRoleV1::Assistant,
+        Some("system" | "developer") => CanonicalMessageRoleV1::System,
+        Some("tool") => CanonicalMessageRoleV1::Tool,
+        _ => CanonicalMessageRoleV1::Unknown,
+    }
+}
+
+fn canonical_native_observation_id(
+    native_id: Option<&str>,
+    fallback: &ObservationId,
+) -> ObservationId {
+    native_id
+        .and_then(|native_id| ObservationId::new(native_id).ok())
+        .unwrap_or_else(|| fallback.clone())
+}
+
+fn canonical_u64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+    })
+}
+
+fn codex_native_record_id(
+    session_id: &str,
+    value: &Value,
+) -> TranscriptIngestResult<ObservationId> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.provider-native-record.v1\0codex\0");
+    hasher.update(session_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(
+        serde_json::to_vec(value)
+            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?,
+    );
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}")
+            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
+    }
+    Ok(ObservationId::new(format!(
+        "codex.native.sha256:{encoded}"
+    ))?)
 }
 
 /// Read the leading `session_meta` line of a rollout for cwd/session-id/model.
@@ -779,6 +1572,16 @@ fn response_item_tool_metadata(
     }
     if let Some(tool_name) = tool_name {
         metadata.insert("tool_name".to_string(), Value::String(tool_name));
+    }
+    if response_item_type == "reasoning" {
+        metadata.insert(
+            "reasoning_visibility".to_string(),
+            Value::String("provider_exposed".to_string()),
+        );
+        metadata.insert(
+            "reasoning_retention".to_string(),
+            Value::String("provider_exposed".to_string()),
+        );
     }
     // Byte counts + truncation flags only — never the raw argument/output bytes.
     if let Some(arguments_bytes) = response_item_arguments_bytes(payload) {
@@ -1574,5 +2377,97 @@ mod goal_event_tests {
             "payload": {"type": "user_message", "message": "hi"}
         });
         assert!(codex_goal_event_from_line(&user).is_none());
+    }
+
+    #[test]
+    fn exposed_reasoning_carries_visibility_without_claiming_hidden_content() {
+        let payload = json!({
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "visible summary"}],
+        });
+        let metadata = response_item_tool_metadata("reasoning", &payload, None, None);
+        assert_eq!(metadata["reasoning_visibility"], "provider_exposed");
+        assert_eq!(metadata["reasoning_retention"], "provider_exposed");
+        assert!(metadata.get("encrypted_content").is_none());
+    }
+
+    #[test]
+    fn observation_admission_routes_project_and_profile_records_by_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        let project_src = project_root.join("src");
+        let other = temp.path().join("other");
+        std::fs::create_dir_all(&project_src).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let status = std::process::Command::new(crate::git::git_program())
+            .args(["init", "--quiet"])
+            .current_dir(&project_root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git init failed");
+
+        let project = CodexObservationAdmission::Project {
+            root: &project_root,
+            project_id: ProjectId::new("project-id").unwrap(),
+        };
+        assert!(project.accepts(Some(&project_src)));
+        assert!(!project.accepts(Some(&other)));
+
+        let registered = vec![project_root];
+        let profile = CodexObservationAdmission::Profile {
+            session_id: Some("session-1"),
+            registered_roots: &registered,
+        };
+        assert!(!profile.accepts(Some(&project_src)));
+        assert!(profile.accepts(Some(&other)));
+        assert!(profile.accepts(None));
+        assert!(profile.accepts_session("session-1"));
+        assert!(!profile.accepts_session("session-2"));
+    }
+
+    #[test]
+    fn native_record_identity_is_stable_across_json_formatting() {
+        let compact: Value = serde_json::from_str(
+            r#"{"type":"event_msg","payload":{"type":"agent_message","message":"redacted"}}"#,
+        )
+        .unwrap();
+        let spaced: Value = serde_json::from_str(
+            r#"{ "payload": { "message": "redacted", "type": "agent_message" }, "type": "event_msg" }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            codex_native_record_id("session-redacted", &compact)
+                .unwrap()
+                .as_str(),
+            codex_native_record_id("session-redacted", &spaced)
+                .unwrap()
+                .as_str()
+        );
+    }
+
+    #[test]
+    fn canonical_codex_record_is_typed_and_redacts_provider_bags() {
+        let native = json!({
+            "timestamp": "2026-07-08T08:49:29Z",
+            "type": "response_item",
+            "cwd": "/secret/project",
+            "payload": {
+                "type": "function_call",
+                "name": "shell",
+                "call_id": "call-redacted",
+                "arguments": {"path": "/secret/project", "token": "credential-redacted"}
+            }
+        });
+        let range = tracedecay_domain::ObservationSourceRangeV1::new(40, 80).unwrap();
+        let record_id = codex_native_record_id("session-redacted", &native).unwrap();
+        let envelope =
+            normalize_codex_observation(&native, "session-redacted", record_id.clone(), range)
+                .unwrap();
+        let rendered = format!("{envelope:?}");
+        assert!(rendered.contains("ToolInvocation"));
+        assert!(rendered.contains("FileBytes"));
+        assert!(rendered.contains(record_id.as_str()));
+        assert!(!rendered.contains("/secret/project"));
+        assert!(!rendered.contains("credential-redacted"));
     }
 }

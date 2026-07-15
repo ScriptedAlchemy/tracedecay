@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "provider": "hermes",
+  "cases": [
+    {
+      "state": "supported", "admission_provider": "hermes",
+      "request": {"event": "turnIngested", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "route": {"cwd": "<PROJECT_ROOT>"}},
+      "admission": {"status": "supported", "retryable": false},
+      "response": {"exit_code": 0, "stdout": "", "stderr": ""}
+    },
+    {
+      "state": "degraded", "admission_provider": "hermes",
+      "request": {"event": "turnIngested", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "route": {"cwd": "<PROJECT_ROOT>"}, "payload": {"malformed": true}},
+      "admission": {"status": "degraded", "retryable": false, "reason_code": "malformed_event"},
+      "response": {"exit_code": 0, "stdout": "", "stderr": ""}
+    },
+    {
+      "state": "unavailable", "admission_provider": "hermes",
+      "request": {"event": "turnIngested", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "route": {"cwd": "<PROJECT_ROOT>"}},
+      "admission": {"status": "unavailable", "retryable": true, "reason_code": "authority_unavailable"},
+      "response": {"exit_code": 0, "stdout": "", "stderr": ""}
+    },
+    {
+      "state": "unknown", "admission_provider": "hermes-future",
+      "request": {"event": "futureEvent", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "route": {"cwd": "<PROJECT_ROOT>"}},
+      "admission": {"status": "unknown", "retryable": false, "reason_code": "unknown_provider"},
+      "response": {"exit_code": 0, "stdout": "", "stderr": ""}
+    }
+  ]
+}

@@ -6,7 +6,7 @@ use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_domain::ObservationScopeV1;
 use tracedecay_store::{
-    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationReplayRequest, ObservationStore,
+    ObservationReplayRequest, ObservationStore, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
     StoredObservation,
 };
 
@@ -20,7 +20,6 @@ use crate::store::GlobalDbObservationStore;
 use super::artifact::{
     attest_build, command_output, git_snapshot, validate_git_snapshots, workload_identity,
 };
-use super::manifest;
 use super::metrics::{
     aggregate_samples, cpu_identity, database_storage_bytes, elapsed_ns, memory_total_kib,
     preflight_platform, process_cpu_ticks, process_peak_rss_kib, process_write_bytes,
@@ -31,6 +30,7 @@ use super::{
     BENCHMARK_COMMAND, BENCHMARK_SECRET_PREFIX, MEASURED_REPETITIONS, RECORDS_PER_REPETITION,
     REDACTION_MARKER, RESULT_SCHEMA_VERSION, WARMUP_REPETITIONS, WORKLOAD_ID,
 };
+use super::{baseline, manifest};
 
 pub(super) struct Fixture {
     _temp: TempDir,
@@ -168,7 +168,7 @@ impl Fixture {
                     COALESCE(SUM(message_created), 0)
                  FROM observation_projection_provenance
                  WHERE projector_version = ?1 AND output_provider = 'claude'",
-                libsql::params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+                libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
             )
             .await
             .expect("count benchmark V1 projection ownership");
@@ -403,5 +403,9 @@ pub(super) async fn run() {
     println!(
         "TRACEDECAY_PR5_BENCHMARK_RESULT={} ",
         serde_json::to_string(&result).expect("serialize benchmark result")
+    );
+    println!(
+        "TRACEDECAY_PROVIDER_OBSERVATION_BASELINES={}",
+        serde_json::to_string(&baseline::catalog()).expect("serialize provider baseline catalog")
     );
 }

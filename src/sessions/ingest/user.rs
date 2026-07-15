@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use crate::application::observation::ObservationCancellation;
 use crate::global_db::GlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::source::{self, TranscriptSource, try_ingest_source};
@@ -7,6 +9,7 @@ use crate::sessions::{
     SessionProvider, claude_observation, cline_like, codex, cursor, cursor_composer, hermes, kiro,
     vibe,
 };
+use tracedecay_domain::ObservationScopeV1;
 
 use super::failure::{
     TranscriptCatchUpFailure, classify_transcript_ingest_failure, claude_catch_up_failure,
@@ -69,7 +72,12 @@ pub async fn ingest_user_codex_sessions(session_id: Option<String>) -> Transcrip
     {
         Ok(stats) => stats,
         Err(error) => {
-            tracing::warn!(reason_code = "transcript_store_read_failed", error = %error, "Codex transcript catch-up failed");
+            let failure = classify_transcript_ingest_failure("codex", "observation", &error);
+            tracing::warn!(
+                reason_code = failure.reason_code,
+                retryable = failure.retryable,
+                "Codex observation catch-up failed"
+            );
             TranscriptIngestStats::default()
         }
     }
@@ -84,8 +92,18 @@ pub(crate) async fn try_ingest_user_codex_sessions_with_db(
     let Some(source) = codex::CodexSource::new() else {
         return Ok(TranscriptIngestStats::default());
     };
-    let source = source.for_user_scope(session_id, registered_roots);
-    try_ingest_source(db, &source, profile_root, None).await
+    let source = source.for_user_scope(session_id.clone(), registered_roots.clone());
+    for path in source.transcript_paths(profile_root) {
+        codex::try_admit_codex_jsonl_observations_for_profile(
+            &path,
+            db,
+            session_id.as_deref(),
+            &registered_roots,
+            None,
+        )
+        .await?;
+    }
+    drain_observation_projections(db, "codex").await
 }
 
 pub async fn ingest_user_cursor_sessions() -> TranscriptIngestStats {
@@ -98,10 +116,15 @@ pub async fn ingest_user_cursor_sessions() -> TranscriptIngestStats {
     let Some(db) = open_user_session_db(&profile_root).await else {
         return TranscriptIngestStats::default();
     };
-    match try_ingest_user_cursor_sessions_with_db(&db, &profile_root, registered_roots).await {
+    match try_ingest_user_cursor_sessions_with_db(&db, registered_roots).await {
         Ok(stats) => stats,
         Err(error) => {
-            tracing::warn!(reason_code = "transcript_store_read_failed", error = %error, "Cursor transcript catch-up failed");
+            let failure = classify_transcript_ingest_failure("cursor", "observation", &error);
+            tracing::warn!(
+                reason_code = failure.reason_code,
+                retryable = failure.retryable,
+                "Cursor observation catch-up failed"
+            );
             TranscriptIngestStats::default()
         }
     }
@@ -109,38 +132,39 @@ pub async fn ingest_user_cursor_sessions() -> TranscriptIngestStats {
 
 async fn try_ingest_user_cursor_sessions_with_db(
     db: &GlobalDb,
-    profile_root: &Path,
     registered_roots: Vec<PathBuf>,
 ) -> source::TranscriptIngestResult<TranscriptIngestStats> {
-    let (composer_stats, owned) = if let Some(source) = cursor_composer::CursorComposerSource::new()
-    {
-        let outcome = source
+    let owned = if let Some(source) = cursor_composer::CursorComposerSource::new() {
+        source
             .ingest_user(
                 db,
                 &registered_roots,
                 cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
             )
-            .await;
-        (
-            TranscriptIngestStats {
-                sessions_upserted: outcome.sessions_upserted,
-                messages_upserted: outcome.messages_upserted,
-            },
-            outcome.owned_session_ids,
-        )
+            .await
+            .owned_session_ids
     } else {
-        (
-            TranscriptIngestStats::default(),
-            std::collections::HashSet::default(),
-        )
+        std::collections::HashSet::default()
     };
-    let Some(source) = cursor::CursorSweepSource::new() else {
-        return Ok(composer_stats);
-    };
-    let source = source
-        .with_skip_session_ids(owned)
-        .for_user_scope(&registered_roots);
-    Ok(composer_stats.merge(try_ingest_source(db, &source, profile_root, None).await?))
+    let sweep =
+        cursor::try_ingest_cursor_user_sweep_capped(db, &registered_roots, None, owned).await?;
+    Ok(TranscriptIngestStats {
+        sessions_upserted: sweep.sessions_upserted,
+        messages_upserted: sweep.messages_upserted,
+    })
+}
+
+async fn drain_observation_projections(
+    db: &GlobalDb,
+    provider: &'static str,
+) -> source::TranscriptIngestResult<TranscriptIngestStats> {
+    let stats = claude_observation::drain_projection_queue(db, &ObservationCancellation::default())
+        .await
+        .map_err(|error| match error {
+            claude_observation::ClaudeObservationIngestError::Transcript(error) => error,
+            _ => source::TranscriptIngestError::InvalidFrameState { provider },
+        })?;
+    Ok(stats.transcript)
 }
 
 pub async fn ingest_user_global_sources() -> TranscriptIngestStats {
@@ -169,21 +193,6 @@ pub async fn ingest_user_global_sources_for_provider(
         return TranscriptIngestStats::default();
     };
     ingest_user_global_sources_for_provider_with_roots(&db, &profile_root, provider, roots)
-        .await
-        .stats
-}
-
-pub(crate) async fn ingest_user_global_sources_for_provider_at(
-    profile_root: &Path,
-    provider: Option<SessionProvider>,
-) -> TranscriptIngestStats {
-    let Some(roots) = try_registered_project_roots_at(profile_root).await else {
-        return TranscriptIngestStats::default();
-    };
-    let Some(db) = open_user_session_db(profile_root).await else {
-        return TranscriptIngestStats::default();
-    };
-    ingest_user_global_sources_for_provider_with_roots(&db, profile_root, provider, roots)
         .await
         .stats
 }
@@ -239,18 +248,26 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots(
         match try_ingest_user_codex_sessions_with_db(db, profile_root, None, roots.clone()).await {
             Ok(source_stats) => stats = stats.merge(source_stats),
             Err(error) => {
-                let failure = classify_transcript_ingest_failure("codex", "transcript", &error);
-                tracing::warn!(reason_code = failure.reason_code, retryable = failure.retryable, error = %error, "Codex transcript catch-up failed");
+                let failure = classify_transcript_ingest_failure("codex", "observation", &error);
+                tracing::warn!(
+                    reason_code = failure.reason_code,
+                    retryable = failure.retryable,
+                    "Codex transcript catch-up failed"
+                );
                 failures.push(failure);
             }
         }
     }
     if provider_selected(provider, SessionProvider::Cursor) {
-        match try_ingest_user_cursor_sessions_with_db(db, profile_root, roots.clone()).await {
+        match try_ingest_user_cursor_sessions_with_db(db, roots.clone()).await {
             Ok(source_stats) => stats = stats.merge(source_stats),
             Err(error) => {
-                let failure = classify_transcript_ingest_failure("cursor", "transcript", &error);
-                tracing::warn!(reason_code = failure.reason_code, retryable = failure.retryable, error = %error, "Cursor transcript catch-up failed");
+                let failure = classify_transcript_ingest_failure("cursor", "observation", &error);
+                tracing::warn!(
+                    reason_code = failure.reason_code,
+                    retryable = failure.retryable,
+                    "Cursor transcript catch-up failed"
+                );
                 failures.push(failure);
             }
         }
@@ -283,41 +300,94 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots(
             }
         }
     }
-    let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
-    if provider_selected(provider, SessionProvider::Vibe)
-        && let Some(source) = vibe::VibeSource::new()
-    {
-        sources.push(Box::new(source.for_user_scope(roots.clone())));
-    }
-    if provider_selected(provider, SessionProvider::Cline)
-        && let Some(source) = cline_like::ClineLikeSource::cline()
-    {
-        sources.push(Box::new(source.for_user_scope(roots.clone())));
-    }
-    if provider_selected(provider, SessionProvider::RooCode)
-        && let Some(source) = cline_like::ClineLikeSource::roo_code()
-    {
-        sources.push(Box::new(source.for_user_scope(roots.clone())));
-    }
-    if provider_selected(provider, SessionProvider::Kilo)
-        && let Some(source) = cline_like::ClineLikeSource::kilo()
-    {
-        sources.push(Box::new(source.for_user_scope(roots.clone())));
-    }
+    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::new(None, Some(db)));
     if provider_selected(provider, SessionProvider::Kiro)
         && let Some(source) = kiro::KiroSource::new()
     {
-        sources.push(Box::new(source.for_user_scope(roots)));
+        let source = source.for_user_scope(roots.clone());
+        if let Err(error) = kiro::capture_kiro_snapshot_observations(
+            &facade,
+            &source,
+            profile_root,
+            ObservationScopeV1::Profile,
+            None,
+        )
+        .await
+        {
+            let failure = classify_transcript_ingest_failure("kiro", "observation", &error);
+            tracing::warn!(
+                reason_code = failure.reason_code,
+                retryable = failure.retryable,
+                "user Kiro observation catch-up failed"
+            );
+            failures.push(failure);
+        }
     }
-    for source in sources {
-        let provider = source.provider();
-        match try_ingest_source(db, source.as_ref(), profile_root, None).await {
+    for (candidate, source) in [
+        (SessionProvider::Cline, cline_like::ClineLikeSource::cline()),
+        (
+            SessionProvider::RooCode,
+            cline_like::ClineLikeSource::roo_code(),
+        ),
+        (SessionProvider::Kilo, cline_like::ClineLikeSource::kilo()),
+    ] {
+        if !provider_selected(provider, candidate) {
+            continue;
+        }
+        let Some(source) = source else {
+            continue;
+        };
+        let source = source.for_user_scope(roots.clone());
+        if let Err(error) = cline_like::capture_cline_like_snapshot_observations(
+            &facade,
+            &source,
+            profile_root,
+            ObservationScopeV1::Profile,
+            None,
+        )
+        .await
+        {
+            let failure = classify_transcript_ingest_failure(candidate.id(), "observation", &error);
+            tracing::warn!(
+                provider = candidate.id(),
+                reason_code = failure.reason_code,
+                retryable = failure.retryable,
+                "user snapshot observation catch-up failed"
+            );
+            failures.push(failure);
+        }
+    }
+
+    if provider_selected(provider, SessionProvider::Vibe)
+        && let Some(source) = vibe::VibeSource::new()
+    {
+        let source = source.for_user_scope(roots);
+        match try_ingest_source(db, &source, profile_root, None).await {
             Ok(source_stats) => stats = stats.merge(source_stats),
             Err(error) => {
-                let failure = classify_transcript_ingest_failure(provider, "transcript", &error);
-                tracing::warn!(provider, reason_code = failure.reason_code, retryable = failure.retryable, error = %error, "user transcript catch-up failed");
+                let failure = classify_transcript_ingest_failure("vibe", "transcript", &error);
+                tracing::warn!(
+                    reason_code = failure.reason_code,
+                    retryable = failure.retryable,
+                    "user Vibe transcript catch-up failed"
+                );
                 failures.push(failure);
             }
+        }
+    }
+
+    match drain_observation_projections(db, provider.map_or("observation", SessionProvider::id))
+        .await
+    {
+        Ok(projection_stats) => stats = stats.merge(projection_stats),
+        Err(error) => {
+            let failure = classify_transcript_ingest_failure("observation", "projection", &error);
+            tracing::warn!(
+                reason_code = failure.reason_code,
+                retryable = failure.retryable,
+                "user observation projection drain failed"
+            );
+            failures.push(failure);
         }
     }
     if stats.messages_upserted > 0 {

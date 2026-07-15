@@ -294,7 +294,11 @@ where
             }
             Ok(FrameCaptureOutcome::Persisted(CapturedClaudeFrame {
                 committed_cursor: receipt.committed_cursor().clone(),
-                exact_duplicate: matches!(outcome, ObservationPersistOutcome::ExactDuplicate(_)),
+                exact_duplicate: matches!(
+                    outcome,
+                    ObservationPersistOutcome::ExactDuplicate(_)
+                        | ObservationPersistOutcome::CoveredDuplicate(_)
+                ),
             }))
         }
         CaptureClaudeObservationOutcome::Rejected { receipt, .. } => {
@@ -503,7 +507,7 @@ async fn prepare_source<'a>(
     }
 
     let generation = ClaudeFileGenerationV1::new(scan.file_generation)?;
-    let sanitizer = ClaudeRecordSanitizerV1::pr5()?;
+    let sanitizer = ClaudeRecordSanitizerV1::claude_v1()?;
     let application = ObservationApplication::new(observation_store, sanitizer);
     let retention_class = RetentionClass::new(CLAUDE_TRANSCRIPT_RETENTION_CLASS)?;
     let capture_context = FrameCaptureContext {
@@ -671,7 +675,7 @@ async fn process_source(
     }
 }
 
-async fn drain_projection_queue(
+pub(crate) async fn drain_projection_queue(
     db: &crate::global_db::GlobalDb,
     cancellation: &ObservationCancellation,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
@@ -1591,7 +1595,7 @@ mod tests {
         let store = GlobalDbObservationStore::new(&fixture.db);
         let application = ObservationApplication::new(
             store,
-            ClaudeRecordSanitizerV1::pr5().expect("PR5 sanitizer"),
+            ClaudeRecordSanitizerV1::claude_v1().expect("Claude V1 sanitizer"),
         );
         let capture = capture_frame(
             &application,
@@ -1666,7 +1670,7 @@ mod tests {
     async fn malformed_partial_and_oversized_frames_preserve_all_observation_state() {
         let oversized = format!(
             "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
-            "x".repeat(crate::privacy::PR5_MAX_CLAUDE_RECORD_BYTES)
+            "x".repeat(crate::privacy::MAX_OBSERVATION_RECORD_BYTES)
         );
         for (session_id, frame, non_durable_covered) in [
             (
@@ -1692,7 +1696,7 @@ mod tests {
     async fn valid_prefix_commits_once_before_invalid_suffix_without_cursor_drift() {
         let oversized = format!(
             "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
-            "x".repeat(crate::privacy::PR5_MAX_CLAUDE_RECORD_BYTES)
+            "x".repeat(crate::privacy::MAX_OBSERVATION_RECORD_BYTES)
         );
         for (session_id, suffix, non_durable_covered) in [
             (

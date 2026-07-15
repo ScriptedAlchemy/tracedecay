@@ -2,13 +2,14 @@ use std::error::Error;
 use std::future::Future;
 
 use tracedecay_domain::{
-    CanonicalObservationIdV1, DurableClaudeObservationV1, ObservationContractError,
-    PayloadDigestV1, PayloadReferenceV1,
+    CanonicalObservationIdV1, DurableObservationV1, ObservationContractError, PayloadDigestV1,
+    PayloadReferenceV1,
 };
 
 use crate::{SessionMessageRecord, SessionRecord};
 
-pub const CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION: &str = "claude-session-message-v1";
+pub const SESSION_MESSAGE_PROJECTOR_VERSION_V1: &str = "claude-session-message-v1";
+pub const CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION_V1;
 
 /// Immutable provenance for one observation-derived searchable message row.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,7 +28,7 @@ impl ProjectionProvenance {
     }
 
     pub fn projector_version(&self) -> &'static str {
-        CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION
+        SESSION_MESSAGE_PROJECTOR_VERSION_V1
     }
 }
 
@@ -45,15 +46,15 @@ impl ProjectionSkipReason {
     }
 }
 
-/// Deterministic effect derived from one receipt-bound Claude observation.
+/// Deterministic effect derived from one receipt-bound observation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ClaudeObservationProjection {
-    Message(Box<ClaudeSessionMessageProjection>),
+pub enum ObservationProjection {
+    Message(Box<SessionMessageProjection>),
     Skipped(ProjectionSkipReason),
 }
 
-impl ClaudeObservationProjection {
-    pub fn message(&self) -> Option<&ClaudeSessionMessageProjection> {
+impl ObservationProjection {
+    pub fn message(&self) -> Option<&SessionMessageProjection> {
         match self {
             Self::Message(projection) => Some(projection),
             Self::Skipped(_) => None,
@@ -68,12 +69,12 @@ impl ClaudeObservationProjection {
     }
 
     pub fn for_message(
-        observation: &DurableClaudeObservationV1,
+        observation: &DurableObservationV1,
         session: SessionRecord,
         message: SessionMessageRecord,
     ) -> ProjectionStoreResult<Self> {
         let digest_value = serde_json::json!({
-            "projector_version": CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+            "projector_version": SESSION_MESSAGE_PROJECTOR_VERSION_V1,
             "session": &session,
             "message": &message,
         });
@@ -81,7 +82,7 @@ impl ClaudeObservationProjection {
             .map_err(ProjectionStoreError::Contract)?
             .digest()
             .clone();
-        Ok(Self::Message(Box::new(ClaudeSessionMessageProjection {
+        Ok(Self::Message(Box::new(SessionMessageProjection {
             session,
             message,
             provenance: ProjectionProvenance {
@@ -98,23 +99,23 @@ impl ClaudeObservationProjection {
     }
 
     pub fn for_skip(
-        _observation: &DurableClaudeObservationV1,
+        _observation: &DurableObservationV1,
         reason: ProjectionSkipReason,
     ) -> ProjectionStoreResult<Self> {
         Ok(Self::Skipped(reason))
     }
 }
 
-/// Pure output of the PR5 Claude observation projector.
+/// Deterministic searchable message derived from one durable observation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClaudeSessionMessageProjection {
+pub struct SessionMessageProjection {
     session: SessionRecord,
     message: SessionMessageRecord,
     provenance: ProjectionProvenance,
     output_digest: PayloadDigestV1,
 }
 
-impl ClaudeSessionMessageProjection {
+impl SessionMessageProjection {
     pub fn session(&self) -> &SessionRecord {
         &self.session
     }
@@ -132,6 +133,9 @@ impl ClaudeSessionMessageProjection {
     }
 }
 
+pub type ClaudeObservationProjection = ObservationProjection;
+pub type ClaudeSessionMessageProjection = SessionMessageProjection;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectionCheckpoint {
     last_sequence: u64,
@@ -143,7 +147,7 @@ impl ProjectionCheckpoint {
     }
 
     pub fn projector_version(&self) -> &'static str {
-        CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION
+        SESSION_MESSAGE_PROJECTOR_VERSION_V1
     }
 
     pub fn last_sequence(&self) -> u64 {
@@ -213,6 +217,8 @@ pub enum ProjectionStoreError {
     NotQueued,
     #[error("observation does not exist")]
     ObservationNotFound,
+    #[error("provider {0} does not have a projection mapper")]
+    UnsupportedProvider(String),
     #[error("projection output collided at {provider}/{message_id}")]
     OutputCollision {
         provider: String,

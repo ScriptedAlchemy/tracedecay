@@ -206,7 +206,7 @@ pub(super) fn try_parse_claude_transcript(
     // Legacy callers still use this trait path. They must receive the same
     // sanitizer-issued payload as observation-first ingestion, never the
     // parser's raw `Value` relabelled as sanitized.
-    let sanitizer = ClaudeRecordSanitizerV1::pr5()?;
+    let sanitizer = ClaudeRecordSanitizerV1::claude_v1()?;
     let source = ClaudeSourceIdentityV1::for_source(
         SessionId::new(scan.identity.session_id.clone())?,
         SessionId::new(scan.identity.source_id.clone())?,

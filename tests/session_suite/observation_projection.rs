@@ -3,11 +3,16 @@ use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ClaudeByteRangeV1, ClaudeFileGenerationV1,
-    ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
-    ComponentVersion, DurableClaudeObservationV1, ObservationScopeV1, PayloadDigestV1,
-    PayloadReferenceV1, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId,
+    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationIdV1, CanonicalObservationRelationsV1,
+    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
+    ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
+    DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadDigestV1, PayloadReferenceV1, ProviderId, RetentionClass, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    SessionId,
 };
 use tracedecay_store::{
     CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationPersistOutcome,
@@ -86,6 +91,61 @@ fn observation_in_generation(
         payload,
     )
     .unwrap()
+}
+
+fn canonical_observation(provider: &str, ordinal: u64) -> DurableObservationV1 {
+    let provider_id = ProviderId::new(provider).unwrap();
+    let session_id = SessionId::new(format!("session.projection-{provider}")).unwrap();
+    let source =
+        ObservationSourceIdentityV1::for_provider(provider_id.clone(), session_id.clone()).unwrap();
+    let generation = ObservationSourceGenerationV1::new(1).unwrap();
+    let range = ObservationSourceRangeV1::new(0, 1).unwrap();
+    let record_id = ObservationId::new(format!("record.projection-{provider}")).unwrap();
+    let envelope = CanonicalObservationEnvelopeV1::new(
+        provider_id,
+        "message",
+        record_id.clone(),
+        CanonicalObservationRelationsV1::new(session_id),
+        vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::Assistant,
+            content: json!({"text": format!("{provider} convergence canary")}),
+            model: Some("model.fixture".to_owned()),
+            timestamp: Some(1_750_000_000 + i64::try_from(ordinal).unwrap()),
+        }],
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+    )
+    .unwrap();
+    let payload = serde_json::to_value(envelope).unwrap();
+    let identity = ObservationIdentityMaterialV1::for_native_record(
+        source,
+        ObservationScopeV1::Profile,
+        generation,
+        range,
+        ObservationOrderingDomainV1::SnapshotOrder,
+        record_id,
+    )
+    .unwrap();
+
+    DurableObservationV1::new(
+        identity,
+        receipt(&format!("receipt.projection-{provider}"), &payload),
+        RetentionClass::new("retention.projection-test").unwrap(),
+        payload,
+    )
+    .unwrap()
+}
+
+fn canonical_write(observation: DurableObservationV1) -> ObservationWrite {
+    let identity = observation.identity();
+    let next_cursor = ObservationSourceCursorV1::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        identity.generation(),
+        identity.ordering_domain(),
+        identity.position().end(),
+    )
+    .unwrap();
+    ObservationWrite::new(observation, None, next_cursor).unwrap()
 }
 
 fn write(
@@ -290,18 +350,21 @@ async fn projection_provenance_rows(
 }
 
 async fn projected_message_texts(tmp: &TempDir) -> Vec<String> {
+    projected_message_texts_where(tmp, "WHERE provider = 'claude'").await
+}
+
+async fn all_projected_message_texts(tmp: &TempDir) -> Vec<String> {
+    projected_message_texts_where(tmp, "").await
+}
+
+async fn projected_message_texts_where(tmp: &TempDir, predicate: &str) -> Vec<String> {
     let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
         .build()
         .await
         .unwrap();
     let conn = db.connect().unwrap();
-    let mut rows = conn
-        .query(
-            "SELECT text FROM session_messages WHERE provider = 'claude' ORDER BY message_id",
-            (),
-        )
-        .await
-        .unwrap();
+    let sql = format!("SELECT text FROM session_messages {predicate} ORDER BY message_id");
+    let mut rows = conn.query(&sql, ()).await.unwrap();
     let mut texts = Vec::new();
     while let Some(row) = rows.next().await.unwrap() {
         texts.push(row.get(0).unwrap());
@@ -1043,7 +1106,8 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
             .project_observation(candidate.observation_id())
             .await
             .unwrap();
-        assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0, 0));
+        let recovered_counts = projection_counts(&tmp).await;
+        assert_eq!(recovered_counts, (1, 1, 1, 1, 0, 0));
         assert_eq!(
             reopened_db
                 .search_session_messages("claude", Some("user"), &searchable, 10)
@@ -1051,6 +1115,15 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
                 .len(),
             1
         );
+        let replay = reopened_store
+            .project_observation(candidate.observation_id())
+            .await
+            .unwrap();
+        assert!(matches!(
+            replay,
+            ProjectionPersistOutcome::ExactDuplicate(_)
+        ));
+        assert_eq!(projection_counts(&tmp).await, recovered_counts);
     }
 }
 
@@ -1119,6 +1192,17 @@ async fn divergent_output_collision_is_typed_and_rolls_back_every_projection_wri
     assert_eq!(texts.len(), 1);
     assert!(texts[0].contains("original collision canary"));
     assert!(!texts[0].contains("divergent collision canary"));
+
+    let rebuild_error = store
+        .rebuild_projection(2)
+        .await
+        .expect_err("rebuild must preserve divergent-output collision semantics");
+    assert!(matches!(
+        rebuild_error,
+        ProjectionStoreError::OutputCollision { provider, message_id }
+            if provider == "claude" && message_id == "shared-message"
+    ));
+    assert_eq!(projection_counts(&tmp).await, counts_before);
 }
 
 #[tokio::test]
@@ -1296,6 +1380,10 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
             .count(),
         1
     );
+    let incrementally_projected_texts = texts;
+    let incremental_provenance = projection_provenance_rows(&tmp).await;
+    let incremental_ownership = projection_ownership_rows(&tmp).await;
+    let incremental_output_ids = projection_output_ids(&incremental_provenance);
 
     let rebuilt_empty = store.rebuild_projection(0).await.unwrap();
     assert_eq!(rebuilt_empty.projected_rows(), 0);
@@ -1306,6 +1394,77 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     assert_eq!(rebuilt_full.projected_rows(), 3);
     assert_eq!(rebuilt_full.skipped_observations(), 0);
     assert_eq!(projection_counts(&tmp).await, (1, 3, 3, 1, 0, 0));
+    assert_eq!(
+        projected_message_texts(&tmp).await,
+        incrementally_projected_texts
+    );
+    assert_eq!(
+        projection_provenance_rows(&tmp).await,
+        incremental_provenance
+    );
+    assert_eq!(projection_ownership_rows(&tmp).await, incremental_ownership);
+    let rebuilt_provenance = projection_provenance_rows(&tmp).await;
+    assert_eq!(
+        projection_output_ids(&rebuilt_provenance),
+        incremental_output_ids
+    );
+}
+
+#[tokio::test]
+async fn canonical_provider_incremental_and_rebuild_projection_converge() {
+    const PROVIDERS: [&str; 7] = [
+        "codex", "cursor", "hermes", "kiro", "cline", "roo-code", "kilo",
+    ];
+
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+
+    for (index, provider) in PROVIDERS.into_iter().enumerate() {
+        let observation = canonical_observation(provider, index as u64 + 1);
+        let outcome = store
+            .persist_observation(canonical_write(observation))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ObservationPersistOutcome::Committed(_)));
+    }
+    while let Some(observation_id) = store.next_queued_observation().await.unwrap() {
+        assert!(matches!(
+            store.project_observation(&observation_id).await.unwrap(),
+            ProjectionPersistOutcome::Projected(_)
+        ));
+    }
+
+    let incremental_texts = all_projected_message_texts(&tmp).await;
+    assert_eq!(incremental_texts.len(), PROVIDERS.len());
+    for provider in PROVIDERS {
+        assert!(
+            incremental_texts
+                .iter()
+                .any(|text| text == &format!("{provider} convergence canary")),
+            "missing projected {provider} message"
+        );
+    }
+    let incremental_provenance = projection_provenance_rows(&tmp).await;
+    let incremental_ownership = projection_ownership_rows(&tmp).await;
+    let incremental_output_ids = projection_output_ids(&incremental_provenance);
+
+    let cleared = store.rebuild_projection(0).await.unwrap();
+    assert_eq!(cleared.projected_rows(), 0);
+    let rebuilt = store
+        .rebuild_projection(PROVIDERS.len() as u64)
+        .await
+        .unwrap();
+    assert_eq!(rebuilt.projected_rows(), PROVIDERS.len());
+    assert_eq!(rebuilt.skipped_observations(), 0);
+    assert_eq!(all_projected_message_texts(&tmp).await, incremental_texts);
+    let rebuilt_provenance = projection_provenance_rows(&tmp).await;
+    assert_eq!(rebuilt_provenance, incremental_provenance);
+    assert_eq!(projection_ownership_rows(&tmp).await, incremental_ownership);
+    assert_eq!(
+        projection_output_ids(&rebuilt_provenance),
+        incremental_output_ids
+    );
 }
 
 #[tokio::test]

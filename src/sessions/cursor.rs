@@ -1,8 +1,26 @@
+use std::fmt::Write as _;
+use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use tracedecay_domain::{
+    CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
+    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
+    CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
+    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ProjectId, ProviderId, RetentionClass, SessionId,
+};
+use tracedecay_store::ObservationPersistOutcome;
+use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
+use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use crate::application::observation::{
+    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
+};
 use crate::global_db::GlobalDb;
+use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
     StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
@@ -10,14 +28,14 @@ use crate::sessions::shared::{
     content_storage_text_and_tools, paths_equal, title_from_messages,
 };
 use crate::sessions::source::{
-    ParsedTranscript, SessionDraft, TranscriptIngestResult, TranscriptSource,
-    collect_files_with_ext, stream_new_jsonl, try_ingest_source,
+    MAX_JSONL_RECORD_BYTES, ParsedTranscript, SessionDraft, TranscriptIngestError,
+    TranscriptIngestResult, TranscriptSource, collect_files_with_ext, stream_new_jsonl,
+    try_stream_new_jsonl_raw_strict_with_resume,
 };
 use crate::storage::{
     SESSIONS_DB_FILENAME, default_profile_project_id, default_profile_root,
     profile_sharded_data_root, resolve_layout_for_current_profile,
 };
-
 const PROJECT_SESSION_DB_FILENAME: &str = SESSIONS_DB_FILENAME;
 const CURSOR_EVENT_LOCATION_KEYS: TranscriptLocationMetadataKeys =
     TranscriptLocationMetadataKeys::new(
@@ -167,6 +185,585 @@ impl TranscriptSource for CursorEventSource {
             self.user_scope,
         )
     }
+
+    fn try_parse_new(
+        &self,
+        path: &Path,
+        prev: StoredCursor,
+        project_root: &Path,
+        max_new_bytes: Option<u64>,
+    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
+        preflight_cursor_jsonl(path, prev, max_new_bytes)?;
+        Ok(self.parse_new(path, prev, project_root, max_new_bytes))
+    }
+}
+
+fn preflight_cursor_jsonl(
+    path: &Path,
+    prev: StoredCursor,
+    max_new_bytes: Option<u64>,
+) -> TranscriptIngestResult<()> {
+    let frames = try_stream_new_jsonl_raw_strict_with_resume(
+        path,
+        prev,
+        max_new_bytes,
+        MAX_JSONL_RECORD_BYTES,
+        None,
+    )?;
+    if let Some(crate::sessions::source::JsonlFrameDeferral::Malformed { offset }) = frames.deferred
+    {
+        return Err(TranscriptIngestError::NonDurableRecord {
+            provider: "cursor",
+            offset,
+            end_offset: frames.read_through.max(offset),
+            reason: "malformed_jsonl_frame",
+        });
+    }
+    for frame in frames.frames {
+        if serde_json::from_slice::<Value>(&frame.bytes).is_err() {
+            return Err(TranscriptIngestError::NonDurableRecord {
+                provider: "cursor",
+                offset: frame.offset,
+                end_offset: frame.end_offset,
+                reason: "malformed_jsonl_frame",
+            });
+        }
+    }
+    Ok(())
+}
+
+const CURSOR_OBSERVATION_RETENTION: &str = "retention.provider-observation";
+
+async fn admit_cursor_jsonl_observations(
+    event: &Value,
+    parent_session_id: &str,
+    path: &Path,
+    db: &GlobalDb,
+    user_scope: bool,
+    max_new_bytes: Option<u64>,
+) -> TranscriptIngestResult<()> {
+    let subagent = cursor_subagent_identity(path, parent_session_id);
+    let session_id = subagent
+        .as_ref()
+        .map_or(parent_session_id, |(session_id, _)| session_id.as_str());
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("cursor")?,
+        SessionId::new(session_id)?,
+    )?;
+    let scope = cursor_observation_scope(event, user_scope)?;
+    let authorities = if user_scope {
+        HostAdmissionAuthorities::new(None, Some(db))
+    } else {
+        HostAdmissionAuthorities::new(Some(db), None)
+    };
+    let admission = HostAdmissionFacade::new(authorities);
+    let mut expected_cursor = admission
+        .get_source_cursor(&source, &scope)
+        .await
+        .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "cursor" })?;
+    let previous = expected_cursor.as_ref().map_or(
+        StoredCursor {
+            position: 0,
+            mtime: 0,
+            file_id: 0,
+        },
+        |cursor| StoredCursor {
+            position: cursor.position(),
+            mtime: 0,
+            file_id: cursor.generation().generation_id(),
+        },
+    );
+    let resume_state = expected_cursor.as_ref().and_then(|cursor| {
+        Some(crate::sessions::source::JsonlResumeState {
+            generation: cursor.generation().generation_id(),
+            file_identity: cursor.file_identity()?,
+            fingerprint: cursor.resume_fingerprint()?,
+        })
+    });
+    let raw = try_stream_new_jsonl_raw_strict_with_resume(
+        path,
+        previous,
+        max_new_bytes,
+        MAX_JSONL_RECORD_BYTES,
+        resume_state,
+    )?;
+    let generation = ObservationSourceGenerationV1::new(raw.new_cursor.file_id)?;
+
+    for frame in raw.frames {
+        let range =
+            tracedecay_domain::ObservationSourceRangeV1::new(frame.offset, frame.end_offset)?;
+        let mut stable_record_id = None;
+        let mut unsupported_record = false;
+        let parsed = parse_normalized_observation_record_v1(
+            &frame.bytes,
+            range,
+            ObservationOrderingDomainV1::FileBytes,
+            |native| {
+                if native.get("role").and_then(Value::as_str).is_none() {
+                    unsupported_record = true;
+                    return Err(ObservationRecordParseErrorV1::NormalizationFailed);
+                }
+                let record_id = observation_native_record_id("cursor", session_id, &native)
+                    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
+                let envelope =
+                    normalize_cursor_observation(&native, session_id, record_id.clone(), range)?;
+                stable_record_id = Some(record_id);
+                Ok(envelope)
+            },
+        )
+        .map_err(|_| TranscriptIngestError::NonDurableRecord {
+            provider: "cursor",
+            offset: frame.offset,
+            end_offset: frame.end_offset,
+            reason: if unsupported_record {
+                "unknown_cursor_record_type"
+            } else {
+                "invalid_cursor_record"
+            },
+        })?;
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            source.clone(),
+            scope.clone(),
+            generation,
+            range,
+            ObservationOrderingDomainV1::FileBytes,
+            stable_record_id
+                .ok_or(TranscriptIngestError::InvalidFrameState { provider: "cursor" })?,
+        )?;
+        let request = CaptureObservationRequest::new(
+            parsed,
+            identity,
+            expected_cursor.clone(),
+            RetentionClass::new(CURSOR_OBSERVATION_RETENTION)?,
+            ObservationCancellation::default(),
+        )
+        .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "cursor" })?
+        .with_resume_checkpoint(raw.file_identity, frame.resume_fingerprint);
+        let non_durable = match admission.capture_observation(request).await {
+            Ok(CaptureObservationOutcome::Persisted { outcome, .. }) => {
+                match outcome {
+                    ObservationPersistOutcome::Committed(_)
+                    | ObservationPersistOutcome::ExactDuplicate(_)
+                    | ObservationPersistOutcome::CoveredDuplicate(_) => {
+                        if expected_cursor.as_ref().is_none_or(|cursor| {
+                            cursor.generation() != generation
+                                || cursor.position() < frame.end_offset
+                        }) {
+                            expected_cursor = Some(
+                                ObservationSourceCursorV1::for_ordering(
+                                    source.clone(),
+                                    scope.clone(),
+                                    generation,
+                                    ObservationOrderingDomainV1::FileBytes,
+                                    frame.end_offset,
+                                )?
+                                .with_resume_checkpoint(
+                                    raw.file_identity,
+                                    frame.resume_fingerprint,
+                                ),
+                            );
+                        }
+                    }
+                }
+                None
+            }
+            Ok(CaptureObservationOutcome::Rejected { receipt, .. }) => Some((
+                receipt,
+                ObservationCoverageReason::SanitizerRejected,
+                "privacy_rejected_cursor_record",
+            )),
+            Ok(CaptureObservationOutcome::Quarantined { receipt, .. }) => Some((
+                receipt,
+                ObservationCoverageReason::SanitizerQuarantined,
+                "privacy_quarantined_cursor_record",
+            )),
+            Err(outcome) => {
+                return Err(TranscriptIngestError::NonDurableRecord {
+                    provider: "cursor",
+                    offset: frame.offset,
+                    end_offset: frame.end_offset,
+                    reason: outcome.reason_code.unwrap_or("host_admission_incomplete"),
+                });
+            }
+        };
+        if let Some((receipt, coverage_reason, error_reason)) = non_durable {
+            let advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
+                source.clone(),
+                scope.clone(),
+                generation,
+                ObservationOrderingDomainV1::FileBytes,
+                expected_cursor.clone(),
+                range,
+                coverage_reason,
+                receipt,
+            )
+            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "cursor" })?
+            .with_resume_checkpoint(raw.file_identity, frame.resume_fingerprint);
+            admission
+                .advance_non_durable_source_cursor(advance, ObservationCancellation::default())
+                .await
+                .map_err(|outcome| TranscriptIngestError::NonDurableRecord {
+                    provider: "cursor",
+                    offset: frame.offset,
+                    end_offset: frame.end_offset,
+                    reason: outcome
+                        .reason_code
+                        .unwrap_or("non_durable_cursor_advance_failed"),
+                })?;
+            return Err(TranscriptIngestError::NonDurableRecord {
+                provider: "cursor",
+                offset: frame.offset,
+                end_offset: frame.end_offset,
+                reason: error_reason,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn cursor_observation_scope(
+    event: &Value,
+    user_scope: bool,
+) -> TranscriptIngestResult<ObservationScopeV1> {
+    if user_scope {
+        return Ok(ObservationScopeV1::Profile);
+    }
+    let (_, project_path) = event_project(event);
+    Ok(ObservationScopeV1::Project {
+        project_id: ProjectId::new(default_profile_project_id(Path::new(&project_path)))?,
+    })
+}
+
+fn normalize_cursor_observation(
+    native: &Value,
+    session_id: &str,
+    stable_record_id: ObservationId,
+    range: tracedecay_domain::ObservationSourceRangeV1,
+) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
+    let native_kind = native
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.trim().is_empty())
+        .unwrap_or("message");
+    let message = native.get("message").filter(|message| message.is_object());
+    let content = message
+        .and_then(|message| message.get("content"))
+        .or_else(|| native.get("content"))
+        .or_else(|| native.get("message").filter(|message| !message.is_object()));
+    let timestamp = record_timestamp(native).or_else(|| timestamp_tag_from_record(native));
+    let relations = CanonicalObservationRelationsV1::new(
+        SessionId::new(session_id)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+    )
+    .with_message_id(stable_record_id.clone());
+    let mut facts = Vec::new();
+
+    if let Some(content) = content {
+        if let Some(message_content) = canonical_cursor_message_content(content) {
+            facts.push(CanonicalObservationFactV1::Message {
+                role: canonical_cursor_role(native.get("role").and_then(Value::as_str)),
+                content: message_content,
+                model: cursor_record_message_model(native, message.unwrap_or(native)),
+                timestamp,
+            });
+        }
+        append_cursor_content_facts(content, &stable_record_id, &mut facts);
+    }
+    append_cursor_usage_fact(native, message, &mut facts);
+    append_cursor_git_facts(native, &mut facts);
+
+    if native_kind.to_ascii_lowercase().contains("compact") {
+        facts.push(CanonicalObservationFactV1::Compaction {
+            summary: content.and_then(canonical_cursor_message_content),
+            input_tokens: None,
+            output_tokens: None,
+        });
+    }
+    if facts.is_empty() {
+        facts.push(CanonicalObservationFactV1::Unknown {
+            native_kind: native_kind.to_string(),
+            state: CanonicalUnknownStateV1::Absent,
+        });
+    }
+
+    let mut evidence =
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range);
+    if let Some(timestamp) = timestamp {
+        evidence = evidence.with_native_timestamp(timestamp);
+    }
+    CanonicalObservationEnvelopeV1::new(
+        ProviderId::new("cursor")
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+        native_kind,
+        stable_record_id,
+        relations,
+        facts,
+        evidence,
+    )
+    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
+}
+
+fn canonical_cursor_message_content(content: &Value) -> Option<Value> {
+    match content {
+        Value::String(text) if !text.trim().is_empty() => Some(Value::String(text.clone())),
+        Value::Array(items) => {
+            let text = items
+                .iter()
+                .filter(|item| {
+                    !matches!(
+                        item.get("type").and_then(Value::as_str),
+                        Some("tool_use" | "tool_result" | "thinking" | "reasoning")
+                    )
+                })
+                .filter_map(|item| {
+                    item.get("text")
+                        .or_else(|| item.get("content"))
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.trim().is_empty())
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>();
+            (!text.is_empty()).then(|| Value::Array(text.into_iter().map(Value::String).collect()))
+        }
+        Value::Object(map) => map
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| Value::String(text.to_string())),
+        _ => None,
+    }
+}
+
+fn append_cursor_content_facts(
+    content: &Value,
+    stable_record_id: &ObservationId,
+    facts: &mut Vec<CanonicalObservationFactV1>,
+) {
+    let Some(items) = content.as_array() else {
+        return;
+    };
+    for item in items {
+        match item.get("type").and_then(Value::as_str) {
+            Some("tool_use") => {
+                let invocation_id = canonical_cursor_observation_id(
+                    item.get("id").and_then(Value::as_str),
+                    stable_record_id,
+                );
+                let name = item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or("tool")
+                    .to_string();
+                facts.push(CanonicalObservationFactV1::ToolInvocation {
+                    invocation_id,
+                    name: name.clone(),
+                    arguments: Value::Null,
+                });
+                if is_subagent_dispatch_tool(&name) {
+                    facts.push(CanonicalObservationFactV1::Workflow {
+                        evidence_kind: CanonicalWorkflowEvidenceKindV1::Subagent,
+                        reference: item.get("id").and_then(Value::as_str).map(str::to_string),
+                        content: None,
+                    });
+                }
+            }
+            Some("tool_result") => {
+                facts.push(CanonicalObservationFactV1::ToolResult {
+                    invocation_id: item
+                        .get("tool_use_id")
+                        .or_else(|| item.get("id"))
+                        .and_then(Value::as_str)
+                        .map(|id| canonical_cursor_observation_id(Some(id), stable_record_id)),
+                    content: Value::Null,
+                    success: item
+                        .get("is_error")
+                        .and_then(Value::as_bool)
+                        .map(|error| !error),
+                });
+            }
+            Some("thinking" | "reasoning") => {
+                let content = item
+                    .get("text")
+                    .or_else(|| item.get("thinking"))
+                    .filter(|content| !content.is_null())
+                    .cloned();
+                facts.push(CanonicalObservationFactV1::Reasoning {
+                    visibility: if content.is_some() {
+                        CanonicalReasoningVisibilityV1::Visible
+                    } else {
+                        CanonicalReasoningVisibilityV1::Unavailable
+                    },
+                    content,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn append_cursor_usage_fact(
+    native: &Value,
+    message: Option<&Value>,
+    facts: &mut Vec<CanonicalObservationFactV1>,
+) {
+    let usage = native
+        .get("usage")
+        .or_else(|| native.get("tokenCount"))
+        .or_else(|| message.and_then(|message| message.get("usage")))
+        .or_else(|| message.and_then(|message| message.get("tokenCount")));
+    let Some(usage) = usage else {
+        return;
+    };
+    let input_tokens = cursor_canonical_u64(
+        usage
+            .get("input_tokens")
+            .or_else(|| usage.get("inputTokens")),
+    );
+    let output_tokens = cursor_canonical_u64(
+        usage
+            .get("output_tokens")
+            .or_else(|| usage.get("outputTokens")),
+    );
+    let cache_read_tokens = cursor_canonical_u64(
+        usage
+            .get("cache_read_tokens")
+            .or_else(|| usage.get("cacheReadTokens")),
+    );
+    let cache_write_tokens = cursor_canonical_u64(
+        usage
+            .get("cache_write_tokens")
+            .or_else(|| usage.get("cacheWriteTokens")),
+    );
+    let reasoning_tokens = cursor_canonical_u64(
+        usage
+            .get("reasoning_tokens")
+            .or_else(|| usage.get("reasoningTokens")),
+    );
+    if input_tokens.is_some()
+        || output_tokens.is_some()
+        || cache_read_tokens.is_some()
+        || cache_write_tokens.is_some()
+        || reasoning_tokens.is_some()
+    {
+        facts.push(CanonicalObservationFactV1::Usage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            reasoning_tokens,
+        });
+    }
+}
+
+fn append_cursor_git_facts(native: &Value, facts: &mut Vec<CanonicalObservationFactV1>) {
+    if let Some(branch) = native
+        .get("branch")
+        .or_else(|| native.pointer("/git/branch"))
+        .and_then(Value::as_str)
+        .filter(|branch| !branch.is_empty())
+    {
+        facts.push(CanonicalObservationFactV1::Git {
+            evidence_kind: CanonicalGitEvidenceKindV1::Branch,
+            reference: Some(branch.to_string()),
+            content: None,
+        });
+    }
+    if let Some(commit) = native
+        .get("commit")
+        .or_else(|| native.get("commit_hash"))
+        .or_else(|| native.pointer("/git/commit"))
+        .and_then(Value::as_str)
+        .filter(|commit| !commit.is_empty())
+    {
+        facts.push(CanonicalObservationFactV1::Git {
+            evidence_kind: CanonicalGitEvidenceKindV1::Commit,
+            reference: Some(commit.to_string()),
+            content: None,
+        });
+    }
+    if native
+        .get("gitDiffs")
+        .and_then(Value::as_array)
+        .is_some_and(|diffs| !diffs.is_empty())
+    {
+        facts.push(CanonicalObservationFactV1::Git {
+            evidence_kind: CanonicalGitEvidenceKindV1::Diff,
+            reference: None,
+            content: None,
+        });
+    }
+    if let Some(pull_requests) = native.get("pullRequests").and_then(Value::as_array) {
+        for pull_request in pull_requests {
+            let reference = ["url", "htmlUrl", "html_url", "id"]
+                .into_iter()
+                .find_map(|key| pull_request.get(key).and_then(Value::as_str))
+                .map(str::to_string);
+            facts.push(CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::PullRequest,
+                reference: reference.clone(),
+                content: None,
+            });
+            facts.push(CanonicalObservationFactV1::Workflow {
+                evidence_kind: CanonicalWorkflowEvidenceKindV1::PullRequest,
+                reference,
+                content: None,
+            });
+        }
+    }
+}
+
+fn canonical_cursor_role(role: Option<&str>) -> CanonicalMessageRoleV1 {
+    match role {
+        Some("user") => CanonicalMessageRoleV1::User,
+        Some("assistant") => CanonicalMessageRoleV1::Assistant,
+        Some("system" | "developer") => CanonicalMessageRoleV1::System,
+        Some("tool") => CanonicalMessageRoleV1::Tool,
+        _ => CanonicalMessageRoleV1::Unknown,
+    }
+}
+
+fn canonical_cursor_observation_id(
+    native_id: Option<&str>,
+    fallback: &ObservationId,
+) -> ObservationId {
+    native_id
+        .and_then(|native_id| ObservationId::new(native_id).ok())
+        .unwrap_or_else(|| fallback.clone())
+}
+
+fn cursor_canonical_u64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+    })
+}
+
+fn observation_native_record_id(
+    provider: &str,
+    session_id: &str,
+    value: &Value,
+) -> TranscriptIngestResult<ObservationId> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.provider-native-record.v1\0");
+    hasher.update(provider.as_bytes());
+    hasher.update([0]);
+    hasher.update(session_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(
+        serde_json::to_vec(value)
+            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "cursor" })?,
+    );
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}")
+            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "cursor" })?;
+    }
+    Ok(ObservationId::new(format!(
+        "{provider}.native.sha256:{encoded}"
+    ))?)
 }
 
 /// Parse the newly-appended portion of one Cursor transcript file into a
@@ -283,7 +880,7 @@ pub async fn ingest_cursor_transcript_event(
     event_json: &str,
     db: &GlobalDb,
 ) -> CursorTranscriptIngestStats {
-    cursor_ingest_or_default(try_ingest_cursor_transcript_event(event_json, db).await)
+    cursor_ingest_or_default(&try_ingest_cursor_transcript_event(event_json, db).await)
 }
 
 pub async fn try_ingest_cursor_transcript_event(
@@ -303,7 +900,7 @@ pub async fn ingest_cursor_transcript_event_capped(
     max_new_bytes: Option<u64>,
 ) -> CursorTranscriptIngestStats {
     cursor_ingest_or_default(
-        try_ingest_cursor_transcript_event_capped(event_json, db, max_new_bytes).await,
+        &try_ingest_cursor_transcript_event_capped(event_json, db, max_new_bytes).await,
     )
 }
 
@@ -336,11 +933,19 @@ pub async fn try_ingest_cursor_transcript_event_capped(
         include_subagents: true,
         user_scope: false,
     };
-    let stats = try_ingest_source(db, &source, &project_root, max_new_bytes).await?;
-    Ok(CursorTranscriptIngestStats {
-        sessions_upserted: stats.sessions_upserted,
-        messages_upserted: stats.messages_upserted,
-    })
+    let parent_session_id = event_session_id(&source.event, &source.transcript_path);
+    for path in source.transcript_paths(&project_root) {
+        admit_cursor_jsonl_observations(
+            &source.event,
+            &parent_session_id,
+            &path,
+            db,
+            false,
+            max_new_bytes,
+        )
+        .await?;
+    }
+    drain_cursor_observation_projections(db).await
 }
 
 pub async fn ingest_cursor_user_transcript_event_capped(
@@ -349,7 +954,7 @@ pub async fn ingest_cursor_user_transcript_event_capped(
     max_new_bytes: Option<u64>,
 ) -> CursorTranscriptIngestStats {
     cursor_ingest_or_default(
-        try_ingest_cursor_user_transcript_event_capped(event_json, db, max_new_bytes).await,
+        &try_ingest_cursor_user_transcript_event_capped(event_json, db, max_new_bytes).await,
     )
 }
 
@@ -376,7 +981,7 @@ pub async fn ingest_cursor_user_transcript_event_capped_with_registered_roots(
     registered_roots: &[PathBuf],
 ) -> CursorTranscriptIngestStats {
     cursor_ingest_or_default(
-        try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
+        &try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
             event_json,
             db,
             max_new_bytes,
@@ -437,23 +1042,125 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_registered_root
         include_subagents: true,
         user_scope: true,
     };
-    let stats = try_ingest_source(db, &source, &placeholder, max_new_bytes).await?;
+    let parent_session_id = event_session_id(&source.event, &source.transcript_path);
+    for path in source.transcript_paths(&placeholder) {
+        admit_cursor_jsonl_observations(
+            &source.event,
+            &parent_session_id,
+            &path,
+            db,
+            true,
+            max_new_bytes,
+        )
+        .await?;
+    }
+    drain_cursor_observation_projections(db).await
+}
+
+/// Canonically admit Cursor JSONL transcripts discovered during a project startup
+/// sweep. Composer-owned session ids are skipped before discovery results reach
+/// observation admission.
+pub async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
+    project_root: &Path,
+    db: &GlobalDb,
+    max_new_bytes: Option<u64>,
+    skip_session_ids: std::collections::HashSet<String, S>,
+) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
+    let Some(source) = CursorSweepSource::new() else {
+        return Ok(CursorTranscriptIngestStats::default());
+    };
+    admit_cursor_sweep_observations(
+        &source.with_skip_session_ids(skip_session_ids.into_iter().collect()),
+        project_root,
+        db,
+        max_new_bytes,
+        false,
+    )
+    .await
+}
+
+/// Canonically admit Cursor JSONL transcripts discovered during a profile startup
+/// sweep. Registered project slugs and composer-owned session ids are excluded
+/// before observation admission.
+pub async fn try_ingest_cursor_user_sweep_capped<S: BuildHasher>(
+    db: &GlobalDb,
+    registered_roots: &[PathBuf],
+    max_new_bytes: Option<u64>,
+    skip_session_ids: std::collections::HashSet<String, S>,
+) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
+    let Some(source) = CursorSweepSource::new() else {
+        return Ok(CursorTranscriptIngestStats::default());
+    };
+    admit_cursor_sweep_observations(
+        &source
+            .with_skip_session_ids(skip_session_ids.into_iter().collect())
+            .for_user_scope(registered_roots),
+        Path::new(""),
+        db,
+        max_new_bytes,
+        true,
+    )
+    .await
+}
+
+async fn admit_cursor_sweep_observations(
+    source: &CursorSweepSource,
+    project_root: &Path,
+    db: &GlobalDb,
+    max_new_bytes: Option<u64>,
+    user_scope: bool,
+) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
+    for path in source.transcript_paths(project_root) {
+        let Some(parent_session_id) = sweep_parent_session_id(&path) else {
+            continue;
+        };
+        let event = cursor_sweep_event(&parent_session_id, project_root, user_scope);
+        admit_cursor_jsonl_observations(
+            &event,
+            &parent_session_id,
+            &path,
+            db,
+            user_scope,
+            max_new_bytes,
+        )
+        .await?;
+    }
+    drain_cursor_observation_projections(db).await
+}
+
+async fn drain_cursor_observation_projections(
+    db: &GlobalDb,
+) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
+    let stats = crate::sessions::claude_observation::drain_projection_queue(
+        db,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .map_err(|error| match error {
+        crate::sessions::claude_observation::ClaudeObservationIngestError::Transcript(error) => {
+            error
+        }
+        _ => TranscriptIngestError::InvalidFrameState { provider: "cursor" },
+    })?;
     Ok(CursorTranscriptIngestStats {
-        sessions_upserted: stats.sessions_upserted,
-        messages_upserted: stats.messages_upserted,
+        sessions_upserted: stats.transcript.sessions_upserted,
+        messages_upserted: stats.transcript.messages_upserted,
     })
 }
 
 fn cursor_ingest_or_default(
-    result: TranscriptIngestResult<CursorTranscriptIngestStats>,
+    result: &TranscriptIngestResult<CursorTranscriptIngestStats>,
 ) -> CursorTranscriptIngestStats {
-    match result {
-        Ok(stats) => stats,
-        Err(error) => {
-            tracing::error!(error = %error, "Cursor transcript ingest failed");
+    result.as_ref().map_or_else(
+        |_| {
+            tracing::error!(
+                reason_code = "cursor_observation_ingest_failed",
+                "Cursor transcript ingest failed"
+            );
             CursorTranscriptIngestStats::default()
-        }
-    }
+        },
+        |stats| *stats,
+    )
 }
 
 fn cursor_event_workspace_roots(event: &Value) -> Vec<PathBuf> {
@@ -663,18 +1370,7 @@ impl TranscriptSource for CursorSweepSource {
         // transcripts `<session-id>.jsonl`) and the project root as `cwd` so
         // `event_project` scopes the session exactly like the hook path.
         let user_scope = self.user_registered_slugs.is_some();
-        let event = if user_scope {
-            serde_json::json!({
-                "session_id": parent_session_id,
-                "tracedecay_location_provenance": "user_sweep",
-            })
-        } else {
-            serde_json::json!({
-                "session_id": parent_session_id,
-                "cwd": project_root.to_string_lossy(),
-                "tracedecay_location_provenance": "sweep_project_root",
-            })
-        };
+        let event = cursor_sweep_event(&parent_session_id, project_root, user_scope);
         parse_cursor_jsonl(
             &event,
             &parent_session_id,
@@ -683,6 +1379,34 @@ impl TranscriptSource for CursorSweepSource {
             max_new_bytes,
             user_scope,
         )
+    }
+
+    fn try_parse_new(
+        &self,
+        path: &Path,
+        prev: StoredCursor,
+        project_root: &Path,
+        max_new_bytes: Option<u64>,
+    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
+        preflight_cursor_jsonl(path, prev, max_new_bytes)?;
+        Ok(self.parse_new(path, prev, project_root, max_new_bytes))
+    }
+}
+
+/// Synthesizes the minimal hook-shaped event used by startup sweeps so their
+/// scope and location provenance match the legacy parser's behavior.
+fn cursor_sweep_event(parent_session_id: &str, project_root: &Path, user_scope: bool) -> Value {
+    if user_scope {
+        serde_json::json!({
+            "session_id": parent_session_id,
+            "tracedecay_location_provenance": "user_sweep",
+        })
+    } else {
+        serde_json::json!({
+            "session_id": parent_session_id,
+            "cwd": project_root.to_string_lossy(),
+            "tracedecay_location_provenance": "sweep_project_root",
+        })
     }
 }
 
@@ -1005,6 +1729,8 @@ fn event_message(
             record,
             message,
             content,
+            event,
+            context.source_offset,
             context.event_cwd,
             context.event_location_provenance,
         ))
@@ -1075,6 +1801,8 @@ fn event_dispatch_messages(
             source_offset: Some(context.source_offset),
             metadata_json: serde_json::to_string(&dispatch_message_metadata(
                 record,
+                event,
+                context.source_offset,
                 tool_use_id,
                 context.event_cwd,
                 context.event_location_provenance,
@@ -1301,6 +2029,8 @@ fn message_metadata(
     record: &Value,
     message: &Value,
     content: &Value,
+    event: &Value,
+    source_offset: i64,
     event_cwd: Option<&Path>,
     location_provenance: &str,
 ) -> Value {
@@ -1313,6 +2043,7 @@ fn message_metadata(
         "raw_type".to_string(),
         record.get("type").cloned().unwrap_or(Value::Null),
     );
+    append_host_event_ordering(&mut metadata, event, source_offset);
     append_location_metadata(
         &mut metadata,
         CURSOR_EVENT_LOCATION_KEYS,
@@ -1329,8 +2060,44 @@ fn message_metadata(
     Value::Object(metadata)
 }
 
+fn append_host_event_ordering(
+    metadata: &mut serde_json::Map<String, Value>,
+    event: &Value,
+    transcript_offset: i64,
+) {
+    metadata.insert(
+        "cursor_transcript_offset".to_string(),
+        Value::from(transcript_offset),
+    );
+    if let Some(event_id) = ["event_id", "eventId"]
+        .into_iter()
+        .find_map(|key| event.get(key).and_then(Value::as_str))
+        .filter(|value| !value.is_empty())
+    {
+        metadata.insert(
+            "cursor_host_event_id".to_string(),
+            Value::String(event_id.to_string()),
+        );
+    }
+    if let Some(sequence) = ["event_sequence", "eventSequence", "sequence"]
+        .into_iter()
+        .find_map(|key| event.get(key))
+        .filter(|value| value.is_i64() || value.is_u64() || value.is_string())
+    {
+        metadata.insert("cursor_host_event_sequence".to_string(), sequence.clone());
+    }
+    if let Some(timestamp) = record_timestamp(event) {
+        metadata.insert(
+            "cursor_host_event_timestamp".to_string(),
+            Value::from(timestamp),
+        );
+    }
+}
+
 fn dispatch_message_metadata(
     record: &Value,
+    event: &Value,
+    source_offset: i64,
     tool_use_id: Option<&str>,
     event_cwd: Option<&Path>,
     location_provenance: &str,
@@ -1348,10 +2115,87 @@ fn dispatch_message_metadata(
         "tool_use_id".to_string(),
         tool_use_id.map_or(Value::Null, |id| Value::String(id.to_string())),
     );
+    append_host_event_ordering(&mut metadata, event, source_offset);
     append_location_metadata(
         &mut metadata,
         CURSOR_EVENT_LOCATION_KEYS,
         TranscriptLocation::new(event_cwd, location_provenance),
     );
     Value::Object(metadata)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn host_event_ordering_is_kept_distinct_from_transcript_ordering() {
+        let event = json!({
+            "event_id": "evt-redacted",
+            "event_sequence": 41,
+            "timestamp": 1_783_500_600_i64,
+        });
+        let mut metadata = serde_json::Map::new();
+        append_host_event_ordering(&mut metadata, &event, 128);
+        assert_eq!(metadata["cursor_host_event_id"], "evt-redacted");
+        assert_eq!(metadata["cursor_host_event_sequence"], 41);
+        assert_eq!(metadata["cursor_host_event_timestamp"], 1_783_500_600_i64);
+        assert_eq!(metadata["cursor_transcript_offset"], 128);
+    }
+
+    #[test]
+    fn native_record_identity_is_stable_across_json_formatting() {
+        let compact: Value = serde_json::from_str(
+            r#"{"role":"assistant","message":{"content":"redacted fixture"}}"#,
+        )
+        .unwrap();
+        let spaced: Value = serde_json::from_str(
+            r#"{ "message": { "content": "redacted fixture" }, "role": "assistant" }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            observation_native_record_id("cursor", "session-redacted", &compact)
+                .unwrap()
+                .as_str(),
+            observation_native_record_id("cursor", "session-redacted", &spaced)
+                .unwrap()
+                .as_str()
+        );
+    }
+
+    #[test]
+    fn canonical_cursor_record_keeps_typed_tools_and_excludes_hook_paths() {
+        let native = json!({
+            "role": "assistant",
+            "cwd": "/secret/worktree",
+            "workspace_roots": ["/secret/worktree"],
+            "message": {
+                "content": [
+                    {"type": "text", "text": "redacted answer"},
+                    {
+                        "type": "tool_use",
+                        "id": "tool-redacted",
+                        "name": "Read",
+                        "input": {"path": "/secret/worktree/file.rs", "token": "credential-redacted"}
+                    },
+                    {"type": "thinking", "thinking": "provider-visible summary"}
+                ]
+            }
+        });
+        let range = tracedecay_domain::ObservationSourceRangeV1::new(10, 90).unwrap();
+        let record_id =
+            observation_native_record_id("cursor", "session-redacted", &native).unwrap();
+        let envelope =
+            normalize_cursor_observation(&native, "session-redacted", record_id.clone(), range)
+                .unwrap();
+        let rendered = format!("{envelope:?}");
+        assert!(rendered.contains("Message"));
+        assert!(rendered.contains("ToolInvocation"));
+        assert!(rendered.contains("Reasoning"));
+        assert!(rendered.contains("FileBytes"));
+        assert!(rendered.contains(record_id.as_str()));
+        assert!(!rendered.contains("/secret/worktree"));
+        assert!(!rendered.contains("credential-redacted"));
+    }
 }

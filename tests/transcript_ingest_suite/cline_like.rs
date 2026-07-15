@@ -2,7 +2,9 @@ use tempfile::TempDir;
 use tracedecay::global_db::{GlobalDb, ParseOffset};
 use tracedecay::sessions::cline_like::ClineLikeSource;
 use tracedecay::sessions::cursor::{open_project_session_db, project_session_db_path};
-use tracedecay::sessions::source::ingest_source;
+use tracedecay::sessions::source::{
+    StoredCursor, TranscriptIngestError, TranscriptSource, ingest_source,
+};
 
 use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree, setup};
 
@@ -146,7 +148,7 @@ async fn assert_provider_ingests(
     transcript_project: &std::path::Path,
 ) {
     let stats = ingest_source(db, &source, ingest_project, None).await;
-    assert_eq!(stats.messages_upserted, 2);
+    assert_eq!(stats.messages_upserted, 3);
 
     let results = db
         .search_session_messages(
@@ -185,10 +187,25 @@ async fn assert_provider_ingests(
         metadata["cline_like_task_location_provenance"].as_str(),
         Some("task_metadata")
     );
-    assert_eq!(metadata["usage"]["input_tokens"], 1200);
-    assert_eq!(metadata["usage"]["output_tokens"], 350);
-    assert_eq!(metadata["usage"]["cache_read_input_tokens"], 8000);
-    assert_eq!(metadata["usage"]["cache_creation_input_tokens"], 500);
+    assert!(metadata.get("usage").is_none());
+    let usage_hits = db
+        .search_session_messages(provider, None, "input_tokens", 10)
+        .await;
+    assert_eq!(usage_hits.len(), 1);
+    assert_eq!(usage_hits[0].message.kind.as_deref(), Some("usage"));
+    let usage_metadata: serde_json::Value = serde_json::from_str(
+        usage_hits[0]
+            .message
+            .metadata_json
+            .as_deref()
+            .expect("usage metadata"),
+    )
+    .unwrap();
+    assert_eq!(usage_metadata["usage"]["input_tokens"], 1200);
+    assert_eq!(usage_metadata["usage"]["output_tokens"], 350);
+    assert_eq!(usage_metadata["usage"]["cache_read_input_tokens"], 8000);
+    assert_eq!(usage_metadata["usage"]["cache_creation_input_tokens"], 500);
+    assert_eq!(usage_metadata["correlation"], "unavailable");
     let expected_content = serde_json::json!([
         {"type": "text", "text": "The billing pipeline regression is fixed."},
         {"type": "tool_use", "name": "read_file"}
@@ -311,7 +328,7 @@ async fn cline_ui_messages_only_change_triggers_usage_refresh() {
         ingest_source(&db, &source, &project, None)
             .await
             .messages_upserted,
-        2
+        3
     );
     assert_eq!(
         ingest_source(&db, &source, &project, None)
@@ -321,6 +338,22 @@ async fn cline_ui_messages_only_change_triggers_usage_refresh() {
     );
 
     let ui_path = api.parent().unwrap().join("ui_messages.json");
+    let committed = parse_offset_for_task_history(&db, &project, &api)
+        .await
+        .expect("initial task generation cursor");
+    std::fs::write(&ui_path, r#"[{"type":"say","say":"api_req_started""#).unwrap();
+    assert_eq!(
+        ingest_source(&db, &source, &project, None)
+            .await
+            .messages_upserted,
+        0
+    );
+    assert_eq!(
+        parse_offset_for_task_history(&db, &project, &api).await,
+        Some(committed),
+        "incomplete companion snapshot must not replace the committed generation"
+    );
+
     std::fs::write(
         &ui_path,
         serde_json::to_string_pretty(&serde_json::json!([
@@ -344,23 +377,21 @@ async fn cline_ui_messages_only_change_triggers_usage_refresh() {
         ingest_source(&db, &source, &project, None)
             .await
             .messages_upserted,
-        2
+        3
     );
-    let results = db
-        .search_session_messages(
-            "cline",
-            Some(project.to_string_lossy().as_ref()),
-            "billing",
-            10,
-        )
+    let usage = db
+        .search_session_messages("cline", None, "input_tokens", 10)
         .await;
-    let assistant = results
-        .iter()
-        .find(|hit| hit.message.tool_names.as_deref() == Some("read_file"))
-        .expect("assistant message");
-    let metadata: serde_json::Value =
-        serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["usage"]["input_tokens"], 2200);
+    assert!(usage.iter().any(|hit| {
+        let metadata: serde_json::Value = serde_json::from_str(
+            hit.message
+                .metadata_json
+                .as_deref()
+                .expect("usage metadata"),
+        )
+        .unwrap();
+        metadata["usage"]["input_tokens"] == 2200
+    }));
 }
 
 #[tokio::test]
@@ -407,7 +438,7 @@ async fn cline_usage_index_skips_unemitted_assistant_entries() {
         ingest_source(&db, &source, &project, None)
             .await
             .messages_upserted,
-        1
+        2
     );
     let hits = db
         .search_session_messages("cline", None, "usage target", 10)
@@ -415,11 +446,98 @@ async fn cline_usage_index_skips_unemitted_assistant_entries() {
     assert_eq!(hits.len(), 1);
     let metadata: serde_json::Value =
         serde_json::from_str(hits[0].message.metadata_json.as_deref().unwrap()).unwrap();
+    assert!(metadata.get("usage").is_none());
+    let usage = db
+        .search_session_messages("cline", None, "input_tokens", 10)
+        .await;
+    assert_eq!(usage.len(), 1);
+    let metadata: serde_json::Value =
+        serde_json::from_str(usage[0].message.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["usage"]["input_tokens"], 777);
 }
 
 #[tokio::test]
-async fn cline_parse_failures_advance_content_hash_cursor() {
+async fn cline_fallback_identity_survives_snapshot_insertion() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let api = write_task(
+        &vscode_storage_root(&home, "saoudrizwan.claude-dev"),
+        &project,
+        "cline-stable-identity",
+    );
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClineLikeSource::cline_with_home(&home);
+    ingest_source(&db, &source, &project, None).await;
+    let before = db
+        .search_session_messages("cline", None, "regression is fixed", 10)
+        .await;
+    let assistant_id = before
+        .iter()
+        .find(|hit| hit.message.tool_names.as_deref() == Some("read_file"))
+        .expect("assistant before insertion")
+        .message
+        .message_id
+        .clone();
+
+    std::fs::write(
+        &api,
+        serde_json::json!([
+            {"role": "user", "content": "New earlier context", "ts": 1_799_999_999_i64},
+            {"role": "user", "content": "Investigate the billing pipeline regression", "ts": 1_800_000_000_i64},
+            {
+                "role": "assistant",
+                "model": "claude-sonnet-4.6",
+                "content": [
+                    {"type": "text", "text": "The billing pipeline regression is fixed."},
+                    {"type": "tool_use", "name": "read_file"}
+                ],
+                "ts": 1_800_000_010_i64
+            }
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    ingest_source(&db, &source, &project, None).await;
+
+    let after = db
+        .search_session_messages("cline", None, "regression is fixed", 10)
+        .await;
+    let assistant = after
+        .iter()
+        .find(|hit| hit.message.tool_names.as_deref() == Some("read_file"))
+        .expect("assistant after insertion");
+    assert_eq!(assistant.message.message_id, assistant_id);
+}
+
+#[test]
+fn cline_complete_malformed_snapshot_is_typed_non_durable() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let root = vscode_storage_root(&home, "saoudrizwan.claude-dev");
+    let dir = root.join("cline-malformed-json");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("task_metadata.json"),
+        serde_json::json!({"workspacePath": project}).to_string(),
+    )
+    .unwrap();
+    let api = dir.join("api_conversation_history.json");
+    std::fs::write(&api, "{not-json]").unwrap();
+
+    let source = ClineLikeSource::cline_with_home(&home);
+    assert!(matches!(
+        source.try_parse_new(&api, StoredCursor::default(), &project, None),
+        Err(TranscriptIngestError::NonDurableRecord {
+            provider: "cline",
+            reason: "malformed snapshot JSON",
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn cline_incomplete_snapshot_does_not_advance_content_hash_cursor() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let root = vscode_storage_root(&home, "saoudrizwan.claude-dev");
@@ -431,17 +549,31 @@ async fn cline_parse_failures_advance_content_hash_cursor() {
     )
     .unwrap();
     let api = dir.join("api_conversation_history.json");
-    std::fs::write(&api, "{not json").unwrap();
+    std::fs::write(&api, r#"[{"role":"user","content":"still writing""#).unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClineLikeSource::cline_with_home(&home);
     let stats = ingest_source(&db, &source, &project, None).await;
     assert_eq!(stats.messages_upserted, 0);
 
-    let offset = parse_offset_for_task_history(&db, &project, &api)
-        .await
-        .expect("invalid changed task history should still advance its cursor");
-    assert_ne!(offset.byte_offset, 0);
+    assert!(
+        parse_offset_for_task_history(&db, &project, &api)
+            .await
+            .is_none(),
+        "incomplete changed task history must not advance its cursor"
+    );
+
+    std::fs::write(
+        &api,
+        serde_json::json!([{"role":"user","content":"completed later"}]).to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        ingest_source(&db, &source, &project, None)
+            .await
+            .messages_upserted,
+        1
+    );
 }
 
 #[tokio::test]
@@ -538,7 +670,7 @@ async fn cline_like_user_scope_includes_only_unregistered_tasks() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClineLikeSource::cline_with_home(&home).for_user_scope(vec![project.clone()]);
     let stats = ingest_source(&db, &source, tmp.path(), None).await;
-    assert_eq!(stats.messages_upserted, 2);
+    assert_eq!(stats.messages_upserted, 3);
     assert!(db.get_session("cline", "registered-task").await.is_none());
     assert!(db.get_session("cline", "mixed-task").await.is_none());
     let session = db.get_session("cline", "user-task").await.unwrap();

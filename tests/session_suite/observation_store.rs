@@ -7,12 +7,15 @@ use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
-    ObservationCollisionOutcomeV1, ObservationScopeV1, PayloadReferenceV1, RetentionClass,
-    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
-    SensitivityV1, SessionId,
+    ObservationCollisionOutcomeV1, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadReferenceV1, ProviderId, RetentionClass, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    SessionId,
 };
 use tracedecay_store::observation::{
-    CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
+    CursorAdvanceOutcome, NonDurableFrameReason, ObservationCoverageV1, ObservationCursorAdvance,
 };
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStatus, ObservationReplayRequest,
@@ -95,6 +98,82 @@ fn write(
 ) -> ObservationWrite {
     let next_cursor = cursor(observation.identity().position().end());
     ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap()
+}
+
+fn native_source() -> ObservationSourceIdentityV1 {
+    ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("hermes").unwrap(),
+        SessionId::new("session.observation-store-native").unwrap(),
+    )
+    .unwrap()
+}
+
+fn native_cursor(generation: u64, position: u64) -> ObservationSourceCursorV1 {
+    ObservationSourceCursorV1::for_ordering(
+        native_source(),
+        scope(),
+        ObservationSourceGenerationV1::new(generation).unwrap(),
+        ObservationOrderingDomainV1::SqliteRowId,
+        position,
+    )
+    .unwrap()
+}
+
+fn native_observation(
+    generation: u64,
+    start: u64,
+    end: u64,
+    receipt_id: &str,
+    native_record_id: &str,
+    body: &str,
+) -> DurableClaudeObservationV1 {
+    let payload = json!({
+        "kind": "assistant_message",
+        "body": body,
+    });
+    let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
+    let receipt = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new(receipt_id).unwrap(),
+            ComponentVersion::new("privacy.observation-record.v1").unwrap(),
+        )
+        .unwrap(),
+        SanitizerDispositionV1::Accepted,
+        SensitivityV1::NonSensitive,
+        Some(payload_reference),
+    )
+    .unwrap();
+    let identity = ObservationIdentityMaterialV1::for_native_record(
+        native_source(),
+        scope(),
+        ObservationSourceGenerationV1::new(generation).unwrap(),
+        ObservationSourceRangeV1::new(start, end).unwrap(),
+        ObservationOrderingDomainV1::SqliteRowId,
+        ObservationId::new(native_record_id).unwrap(),
+    )
+    .unwrap();
+
+    DurableClaudeObservationV1::new(
+        identity,
+        receipt,
+        RetentionClass::new("retention.test").unwrap(),
+        payload,
+    )
+    .unwrap()
+}
+
+fn native_write(
+    observation: DurableClaudeObservationV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+) -> ObservationWrite {
+    let generation = observation.identity().generation().generation_id();
+    let position = observation.identity().position().end();
+    ObservationWrite::new(
+        observation,
+        expected_cursor,
+        native_cursor(generation, position),
+    )
+    .unwrap()
 }
 
 fn cursor_advance(
@@ -522,6 +601,149 @@ async fn exact_duplicate_returns_original_receipt_without_mutating_cursor_or_sto
 }
 
 #[tokio::test]
+async fn relocated_native_duplicate_advances_coverage_without_reinserting_observation() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let original = native_observation(
+        1,
+        41,
+        42,
+        "receipt.native.original",
+        "hermes.message.stable",
+        "stable payload",
+    );
+    let original_outcome = store
+        .persist_observation(native_write(original.clone(), None))
+        .await
+        .unwrap();
+    let original_receipt = match original_outcome {
+        ObservationPersistOutcome::Committed(receipt) => receipt,
+        other => panic!("first native observation must commit, got {other:?}"),
+    };
+    let original_cursor = native_cursor(1, 42);
+    let counts_after_original = user_table_counts(&tmp).await;
+
+    let relocated = native_observation(
+        2,
+        71,
+        72,
+        "receipt.native.relocated",
+        "hermes.message.stable",
+        "stable payload",
+    );
+    assert_eq!(relocated.observation_id(), original.observation_id());
+    let relocated_write = native_write(relocated.clone(), Some(original_cursor));
+    let relocated_outcome = store
+        .persist_observation(relocated_write.clone())
+        .await
+        .unwrap();
+    let coverage_receipt = match relocated_outcome {
+        ObservationPersistOutcome::CoveredDuplicate(receipt) => receipt,
+        other => panic!("relocated native record must advance coverage, got {other:?}"),
+    };
+    assert_eq!(coverage_receipt.sequence(), original_receipt.sequence());
+    assert_eq!(coverage_receipt.observation(), &relocated);
+    assert_eq!(coverage_receipt.committed_cursor(), &native_cursor(2, 72));
+    assert_eq!(
+        store
+            .get_source_cursor(&native_source(), &scope())
+            .await
+            .unwrap(),
+        Some(native_cursor(2, 72))
+    );
+    let deltas = table_deltas(&counts_after_original, &user_table_counts(&tmp).await);
+    assert_eq!(
+        deltas,
+        BTreeMap::from([
+            ("sanitization_receipts".to_owned(), 1),
+            ("source_cursor_advances".to_owned(), 1),
+        ])
+    );
+
+    let stored = store
+        .get_observation(original.observation_id())
+        .await
+        .unwrap()
+        .expect("original observation remains authoritative");
+    assert_eq!(stored.sequence(), original_receipt.sequence());
+    assert_eq!(stored.observation(), &original);
+    let replay = store
+        .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].observation(), &original);
+
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let conn = raw_db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT coverage_json, reason, receipt_id FROM source_cursor_advances",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("duplicate coverage row");
+    let coverage: ObservationCoverageV1 =
+        serde_json::from_str(&row.get::<String>(0).unwrap()).unwrap();
+    assert_eq!(coverage.generation().generation_id(), 2);
+    assert_eq!(
+        coverage.ordering_domain(),
+        ObservationOrderingDomainV1::SqliteRowId
+    );
+    assert_eq!(
+        coverage.range(),
+        ObservationSourceRangeV1::new(71, 72).unwrap()
+    );
+    assert_eq!(row.get::<String>(1).unwrap(), "duplicate_observation");
+    assert_eq!(row.get::<String>(2).unwrap(), "receipt.native.relocated");
+    assert!(rows.next().await.unwrap().is_none());
+
+    let counts_after_relocation = user_table_counts(&tmp).await;
+    let retry = store.persist_observation(relocated_write).await.unwrap();
+    assert!(matches!(
+        retry,
+        ObservationPersistOutcome::CoveredDuplicate(_)
+    ));
+    assert_eq!(user_table_counts(&tmp).await, counts_after_relocation);
+
+    let next = native_observation(
+        2,
+        72,
+        73,
+        "receipt.native.next",
+        "hermes.message.next",
+        "next payload",
+    );
+    let next_outcome = store
+        .persist_observation(native_write(next.clone(), Some(native_cursor(2, 72))))
+        .await
+        .unwrap();
+    assert!(matches!(
+        next_outcome,
+        ObservationPersistOutcome::Committed(_)
+    ));
+    assert_eq!(
+        store
+            .get_source_cursor(&native_source(), &scope())
+            .await
+            .unwrap(),
+        Some(native_cursor(2, 73))
+    );
+    let replay = store
+        .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(replay.len(), 2);
+    assert_eq!(replay[0].observation(), &original);
+    assert_eq!(replay[1].observation(), &next);
+}
+
+#[tokio::test]
 async fn cursor_only_progress_persists_non_payload_receipt_and_retries_idempotently() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
@@ -565,16 +787,17 @@ async fn cursor_only_progress_persists_non_payload_receipt_and_retries_idempoten
     let conn = raw_db.connect().unwrap();
     let mut rows = conn
         .query(
-            "SELECT start_offset, end_offset, reason
-             FROM source_cursor_advances",
+            "SELECT coverage_json, reason FROM source_cursor_advances",
             (),
         )
         .await
         .unwrap();
     let receipt = rows.next().await.unwrap().expect("cursor advance receipt");
-    assert_eq!(receipt.get::<String>(0).unwrap(), "0");
-    assert_eq!(receipt.get::<String>(1).unwrap(), "10");
-    assert_eq!(receipt.get::<String>(2).unwrap(), "blank_frame");
+    let coverage: ObservationCoverageV1 =
+        serde_json::from_str(&receipt.get::<String>(0).unwrap()).unwrap();
+    assert_eq!(coverage.range().start(), 0);
+    assert_eq!(coverage.range().end(), 10);
+    assert_eq!(receipt.get::<String>(1).unwrap(), "blank_frame");
     assert!(rows.next().await.unwrap().is_none());
 }
 
@@ -1109,14 +1332,16 @@ async fn concurrent_exact_retry_commits_one_sequence_and_returns_one_duplicate()
         .iter()
         .find_map(|outcome| match outcome {
             ObservationPersistOutcome::Committed(receipt) => Some(receipt),
-            ObservationPersistOutcome::ExactDuplicate(_) => None,
+            ObservationPersistOutcome::ExactDuplicate(_)
+            | ObservationPersistOutcome::CoveredDuplicate(_) => None,
         })
         .expect("one concurrent writer must commit");
     let duplicate = outcomes
         .iter()
         .find_map(|outcome| match outcome {
             ObservationPersistOutcome::ExactDuplicate(receipt) => Some(receipt),
-            ObservationPersistOutcome::Committed(_) => None,
+            ObservationPersistOutcome::Committed(_)
+            | ObservationPersistOutcome::CoveredDuplicate(_) => None,
         })
         .expect("the other concurrent writer must observe the duplicate");
 

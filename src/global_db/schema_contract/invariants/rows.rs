@@ -1,9 +1,10 @@
 use libsql::{Connection, params};
 use serde::{Serialize, de::DeserializeOwned};
 use tracedecay_domain::{
-    ClaudeSourceCursorV1, ClaudeSourceIdentityV1, DurableClaudeObservationV1, ObservationScopeV1,
-    SanitizationReceiptV1,
+    DurableObservationV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceIdentityV1, SanitizationReceiptV1, SanitizerDispositionV1,
 };
+use tracedecay_store::observation::ObservationCoverageV1;
 
 use crate::global_db::{global_db_operation_error, global_db_operation_message};
 
@@ -39,18 +40,6 @@ pub(super) fn encode_authority_json<T: Serialize>(
 ) -> crate::errors::Result<String> {
     serde_json::to_string(value)
         .map_err(|error| authority_violation(format!("cannot encode {authority}: {error}")))
-}
-
-fn parse_canonical_u64(value: &str, authority: &str) -> crate::errors::Result<u64> {
-    let parsed = value
-        .parse::<u64>()
-        .map_err(|error| authority_violation(format!("invalid {authority}: {error}")))?;
-    if parsed.to_string() != value {
-        return Err(authority_violation(format!(
-            "invalid non-canonical {authority}"
-        )));
-    }
-    Ok(parsed)
 }
 
 pub(super) async fn validate_receipt_authority_rows(
@@ -159,9 +148,9 @@ pub(super) async fn validate_observation_authority_rows(
             ));
         };
 
-        let observation: DurableClaudeObservationV1 =
+        let observation: DurableObservationV1 =
             decode_authority_json(&observation_json, "committed observation authority JSON")?;
-        let cursor: ClaudeSourceCursorV1 =
+        let cursor: ObservationSourceCursorV1 =
             decode_authority_json(&cursor_json, "committed source cursor authority JSON")?;
         let stored_receipt: SanitizationReceiptV1 =
             decode_authority_json(&receipt_json, "sanitization receipt authority JSON")?;
@@ -178,7 +167,7 @@ pub(super) async fn validate_observation_authority_rows(
         if cursor.source() != observation.source()
             || cursor.scope() != observation.scope()
             || cursor.generation() != observation.identity().generation()
-            || cursor.byte_offset() != observation.identity().position().end()
+            || cursor.position() != observation.identity().position().end()
         {
             return Err(authority_violation(
                 "committed source cursor disagrees with observation source evidence",
@@ -213,11 +202,11 @@ pub(super) async fn validate_source_cursor_authority_rows(
         let cursor_json = row
             .get::<String>(2)
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let source: ClaudeSourceIdentityV1 =
+        let source: ObservationSourceIdentityV1 =
             decode_authority_json(&source_json, "source cursor identity JSON")?;
         let scope: ObservationScopeV1 =
             decode_authority_json(&scope_json, "source cursor scope JSON")?;
-        let cursor: ClaudeSourceCursorV1 =
+        let cursor: ObservationSourceCursorV1 =
             decode_authority_json(&cursor_json, "source cursor authority JSON")?;
         if cursor.source() != &source
             || cursor.scope() != &scope
@@ -234,9 +223,8 @@ pub(super) async fn validate_source_cursor_authority_rows(
 
     let mut rows = conn
         .query(
-            "SELECT advance.source_json, advance.scope_json, advance.file_generation,
-                    advance.start_offset, advance.end_offset, advance.reason,
-                    advance.receipt_id, receipt.receipt_json
+            "SELECT advance.source_json, advance.scope_json, advance.coverage_json,
+                    advance.reason, advance.receipt_id, receipt.receipt_json
              FROM source_cursor_advances AS advance
              LEFT JOIN sanitization_receipts AS receipt
                ON receipt.receipt_id = advance.receipt_id",
@@ -255,59 +243,72 @@ pub(super) async fn validate_source_cursor_authority_rows(
         let scope_json = row
             .get::<String>(1)
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let file_generation = row
+        let coverage_json = row
             .get::<String>(2)
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let start_offset = row
+        let reason = row
             .get::<String>(3)
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let end_offset = row
-            .get::<String>(4)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let reason = row
-            .get::<String>(5)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
         let receipt_id = row
-            .get::<Option<String>>(6)
+            .get::<Option<String>>(4)
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
         let receipt_json = row
-            .get::<Option<String>>(7)
+            .get::<Option<String>>(5)
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let source: ClaudeSourceIdentityV1 =
+        let source: ObservationSourceIdentityV1 =
             decode_authority_json(&source_json, "source cursor advance identity JSON")?;
         let scope: ObservationScopeV1 =
             decode_authority_json(&scope_json, "source cursor advance scope JSON")?;
-        let generation = parse_canonical_u64(&file_generation, "source cursor file generation")?;
-        let start = parse_canonical_u64(&start_offset, "source cursor advance start offset")?;
-        let end = parse_canonical_u64(&end_offset, "source cursor advance end offset")?;
-        let expected_disposition = match reason.as_str() {
-            "sanitizer_rejected" => Some("rejected"),
-            "sanitizer_quarantined" => Some("quarantined"),
-            _ => None,
-        };
-        let receipt_matches = match (expected_disposition, receipt_id, receipt_json) {
-            (None, None, None) => true,
-            (Some(expected), Some(receipt_id), Some(receipt_json)) => {
+        let coverage: ObservationCoverageV1 =
+            decode_authority_json(&coverage_json, "source cursor advance coverage JSON")?;
+        let receipt_matches = match (reason.as_str(), receipt_id, receipt_json) {
+            (
+                "blank_frame" | "out_of_scope" | "malformed_frame" | "oversized_frame"
+                | "unknown_version" | "unsupported_fact",
+                None,
+                None,
+            ) => true,
+            (
+                "sanitizer_rejected" | "sanitizer_quarantined" | "duplicate_observation",
+                Some(receipt_id),
+                Some(receipt_json),
+            ) => {
                 let receipt: SanitizationReceiptV1 = decode_authority_json(
                     &receipt_json,
                     "source cursor advance sanitization receipt JSON",
                 )?;
+                let disposition_matches = match reason.as_str() {
+                    "sanitizer_rejected" => {
+                        receipt.disposition() == SanitizerDispositionV1::Rejected
+                    }
+                    "sanitizer_quarantined" => {
+                        receipt.disposition() == SanitizerDispositionV1::Quarantined
+                    }
+                    "duplicate_observation" => matches!(
+                        receipt.disposition(),
+                        SanitizerDispositionV1::Accepted | SanitizerDispositionV1::Redacted
+                    ),
+                    _ => false,
+                };
                 receipt.receipt().receipt_id().as_str() == receipt_id
-                    && receipt.disposition().as_str() == expected
-                    && receipt.payload().is_none()
+                    && disposition_matches
+                    && (reason == "duplicate_observation") == receipt.payload().is_some()
             }
             _ => false,
         };
         if source_json != encode_authority_json(&source, "source cursor advance identity JSON")?
             || scope_json != encode_authority_json(&scope, "source cursor advance scope JSON")?
-            || generation == 0
-            || end <= start
+            || coverage_json
+                != encode_authority_json(&coverage, "source cursor advance coverage JSON")?
             || !matches!(
                 reason.as_str(),
                 "blank_frame"
                     | "out_of_scope"
                     | "malformed_frame"
                     | "oversized_frame"
+                    | "unknown_version"
+                    | "unsupported_fact"
+                    | "duplicate_observation"
                     | "sanitizer_rejected"
                     | "sanitizer_quarantined"
             )

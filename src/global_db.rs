@@ -1,10 +1,9 @@
 //! User-level database that tracks all `TraceDecay` projects and their saved tokens.
 //!
-//! Stored at `~/.tracedecay/global.db`, this DB holds one row per project with
-//! the project's DB path and its cumulative
-//! tokens-saved count. Read paths are generally best-effort; authoritative
-//! open and maintenance APIs preserve failures for callers that must fail
-//! closed.
+//! Stored at `~/.tracedecay/global.db`, this database holds one row per project
+//! with the project's database path and its cumulative tokens-saved count. Read
+//! paths are generally best-effort; authoritative open and maintenance
+//! interfaces preserve failures for callers that must fail closed.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -380,6 +379,11 @@ impl std::ops::Deref for GlobalDbReadConnection {
 }
 
 impl GlobalDbWriterConnection<'_> {
+    #[cfg(test)]
+    pub(crate) async fn execute_batch(&self, sql: &str) -> Result<(), libsql::Error> {
+        self.conn.execute_batch(sql).await.map(|_| ())
+    }
+
     pub(crate) async fn execute(
         &self,
         sql: &str,
@@ -5326,7 +5330,7 @@ impl GlobalDb {
         drop(self);
     }
 }
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod checkpoint_tests;
 #[cfg(test)]

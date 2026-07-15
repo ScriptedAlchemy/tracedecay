@@ -90,7 +90,7 @@ fn bounded_scan_blocks_oversized_frame_and_suffix_at_one_mib() {
     let path = dir.path().join("session-42.jsonl");
     let oversized = format!(
         "{{\"payload\":\"{}\"}}\n",
-        "x".repeat(crate::privacy::PR5_MAX_CLAUDE_RECORD_BYTES)
+        "x".repeat(crate::privacy::MAX_OBSERVATION_RECORD_BYTES)
     );
     std::fs::write(&path, format!("{oversized}{{\"type\":\"summary\"}}\n")).unwrap();
 

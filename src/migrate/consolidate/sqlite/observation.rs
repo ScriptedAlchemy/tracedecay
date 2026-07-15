@@ -191,24 +191,20 @@ pub(super) async fn verify_observation_union(
         conn,
         &format!(
             "WITH expected AS (
-                 SELECT source_json, scope_json, file_generation,
-                        start_offset, end_offset, reason, receipt_id
+                 SELECT source_json, scope_json, coverage_json, reason, receipt_id
                  FROM {target_schema}.source_cursor_advances
                  UNION
-                 SELECT source_json, scope_json, file_generation,
-                        start_offset, end_offset, reason, receipt_id
+                 SELECT source_json, scope_json, coverage_json, reason, receipt_id
                  FROM {source_schema}.source_cursor_advances
              )
              SELECT
                (SELECT COUNT(*) FROM (
                     SELECT * FROM expected
-                    EXCEPT SELECT source_json, scope_json, file_generation,
-                                  start_offset, end_offset, reason, receipt_id
+                    EXCEPT SELECT source_json, scope_json, coverage_json, reason, receipt_id
                            FROM main.source_cursor_advances
                 ))
              + (SELECT COUNT(*) FROM (
-                    SELECT source_json, scope_json, file_generation,
-                           start_offset, end_offset, reason, receipt_id
+                    SELECT source_json, scope_json, coverage_json, reason, receipt_id
                     FROM main.source_cursor_advances
                     EXCEPT SELECT * FROM expected
                 ))"
@@ -508,7 +504,7 @@ pub(in super::super) async fn preflight_observation_merge(conn: &Connection) -> 
         "SELECT COUNT(*)
          FROM source.source_cursor_advances AS source
          JOIN main.source_cursor_advances AS target USING(
-             source_json, scope_json, file_generation, start_offset, end_offset
+             source_json, scope_json, coverage_json
          )
          WHERE source.reason IS NOT target.reason
             OR source.receipt_id IS NOT target.receipt_id",
@@ -574,11 +570,9 @@ async fn merge_source_cursors(conn: &Connection) -> Result<()> {
 async fn merge_source_cursor_advances(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "INSERT OR IGNORE INTO source_cursor_advances(
-             source_json, scope_json, file_generation,
-             start_offset, end_offset, reason, receipt_id
+             source_json, scope_json, coverage_json, reason, receipt_id
          )
-         SELECT source_json, scope_json, file_generation,
-                start_offset, end_offset, reason, receipt_id
+         SELECT source_json, scope_json, coverage_json, reason, receipt_id
          FROM source.source_cursor_advances;",
     )
     .await

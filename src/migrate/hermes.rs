@@ -430,11 +430,9 @@ async fn migrate_candidate(
         })?),
         None => None,
     };
-    let source = source_snapshot.as_ref().map(|snapshot| {
-        let transaction: &libsql::Transaction = snapshot;
-        let connection: &Connection = transaction;
-        connection
-    });
+    let source = source_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot as &Connection);
 
     migrate_candidate_snapshot(
         user_home,
@@ -599,10 +597,9 @@ async fn migrate_candidate_snapshot(
         ),
         None => None,
     };
-    let source_memory = source_memory_snapshot.as_ref().map(|transaction| {
-        let connection: &Connection = transaction;
-        connection
-    });
+    let source_memory = source_memory_snapshot
+        .as_ref()
+        .map(|transaction| transaction as &Connection);
     let fingerprint = logical_source_fingerprint(
         source,
         candidate.primary_path(),

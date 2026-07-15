@@ -26,6 +26,7 @@ pub(crate) use access::{
     DatabaseDeletionFence, DatabaseDeletionStates, WriterOwnership, database_path_is_tombstoned,
     enter_daemon_database_scope, is_lock_contended, probe_writer_owner,
 };
+pub(crate) use connection::DatabaseWriterConnection;
 pub use connection::{Database, SQLITE_UNSAFE_FAST_ENV};
 pub(crate) use connection::{
     DatabaseWriterConnection, platform_safe_journal_mode, platform_safe_synchronous_mode,

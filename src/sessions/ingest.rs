@@ -16,7 +16,7 @@ pub use user::{
     registered_project_roots, try_registered_project_roots, user_sessions_db_path,
 };
 pub(crate) use user::{
-    ingest_user_global_sources_for_provider_at, ingest_user_global_sources_for_provider_at_with_db,
+    ingest_user_global_sources_for_provider_at_with_db,
     ingest_user_global_sources_for_provider_with_authorities, registered_project_roots_from,
     try_ingest_user_codex_sessions_with_db,
 };

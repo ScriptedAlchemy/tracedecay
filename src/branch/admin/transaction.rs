@@ -201,11 +201,7 @@ where
             let after = metadata_after.as_deref().ok_or_else(|| {
                 config_error("tracked branch deletion cannot remove branch metadata entirely")
             })?;
-            crate::branch_meta::save_branch_meta_serialized(tracedecay_dir, after).map_err(
-                |error| config_error(format!("failed to publish branch metadata: {error}")),
-            )?;
-            sync_file(&tracedecay_dir.join(BRANCH_META_FILENAME))?;
-            sync_directory(tracedecay_dir)?;
+            publish_metadata(tracedecay_dir, after)?;
         }
         return Ok(());
     }
@@ -284,11 +280,7 @@ where
             let after = journal.metadata_after.as_deref().ok_or_else(|| {
                 config_error("tracked branch deletion cannot remove branch metadata entirely")
             })?;
-            crate::branch_meta::save_branch_meta_serialized(tracedecay_dir, after).map_err(
-                |error| config_error(format!("failed to publish branch metadata: {error}")),
-            )?;
-            sync_file(&tracedecay_dir.join(BRANCH_META_FILENAME))?;
-            sync_directory(tracedecay_dir)?;
+            publish_metadata(tracedecay_dir, after)?;
         }
         hook(TransactionPhase::AfterCommitBeforeCleanup)?;
         cleanup_committed(tracedecay_dir, &journal)
@@ -820,6 +812,20 @@ fn load_journal(tracedecay_dir: &Path) -> Result<Option<DeletionJournal>> {
             path.display()
         ))
     })
+}
+
+fn publish_metadata(tracedecay_dir: &Path, serialized: &str) -> Result<()> {
+    let path = tracedecay_dir.join(BRANCH_META_FILENAME);
+    crate::branch_meta::save_branch_meta_serialized(tracedecay_dir, serialized).map_err(
+        |error| {
+            config_error(format!(
+                "cannot publish branch metadata '{}': {error}",
+                path.display()
+            ))
+        },
+    )?;
+    sync_file(&path)?;
+    sync_directory(tracedecay_dir)
 }
 
 fn read_current_metadata(tracedecay_dir: &Path) -> Result<Option<String>> {

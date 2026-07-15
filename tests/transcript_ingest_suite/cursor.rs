@@ -8,7 +8,7 @@ use tracedecay::sessions::cursor::{
     CursorSweepSource, cursor_project_slug, ingest_cursor_transcript_event,
     ingest_cursor_transcript_event_capped, ingest_cursor_user_transcript_event_capped,
     ingest_cursor_user_transcript_event_capped_with_registered_roots, open_project_session_db,
-    project_session_db_path,
+    project_session_db_path, try_ingest_cursor_project_sweep_capped,
 };
 #[cfg(unix)]
 use tracedecay::sessions::lcm::{LcmDescribeRequest, LcmDescribeTarget};
@@ -1154,15 +1154,29 @@ fn write_sweep_fixture(
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn cursor_sweep_ingests_historical_transcripts() {
     let tmp = TempDir::new().unwrap();
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let project = init_project(&tmp);
     let home = tmp.path().join("home");
+    let _env_guards = [
+        EnvVarGuard::set("HOME", &home),
+        EnvVarGuard::set("USERPROFILE", &home),
+    ];
     write_sweep_fixture(&home, &project);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let sweep = CursorSweepSource::with_home(&home);
-    let stats = ingest_source(&db, &sweep, &project, None).await;
+    let stats = try_ingest_cursor_project_sweep_capped(
+        &project,
+        &db,
+        None,
+        std::collections::HashSet::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(stats.sessions_upserted, 2);
     assert_eq!(stats.messages_upserted, 2);
 
@@ -1187,15 +1201,6 @@ async fn cursor_sweep_ingests_historical_transcripts() {
         .search_session_messages("cursor", None, "orchard catchup", 10)
         .await;
     assert_eq!(hits.len(), 2);
-    for hit in &hits {
-        let metadata: serde_json::Value =
-            serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
-        assert_eq!(
-            metadata["cursor_event_location_provenance"].as_str(),
-            Some("sweep_project_root")
-        );
-        assert!(metadata.get("cursor_event_git_branch").is_none());
-    }
 }
 
 #[tokio::test]

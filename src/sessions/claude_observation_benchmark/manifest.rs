@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::baseline::ProviderBaseline;
 use super::{
     BENCHMARK_COMMAND, CONCURRENCY, EVIDENCE_RUNNER, MEASURED_REPETITIONS, RECORDS_PER_REPETITION,
     WARMUP_REPETITIONS, WORKLOAD_ID, WORKLOAD_IMPLEMENTATION, WORKLOAD_MANIFEST,
@@ -17,6 +18,7 @@ pub(super) struct WorkloadManifest {
     profile: String,
     repetitions: Value,
     input: Value,
+    provider_baselines: Vec<ProviderBaseline>,
     phases: Vec<String>,
     setup_excluded: Vec<String>,
     verification_excluded: Vec<String>,
@@ -30,6 +32,7 @@ pub(super) fn validate() {
     let manifest = serde_json::from_str::<WorkloadManifest>(WORKLOAD_MANIFEST)
         .expect("deserialize PR5 benchmark workload manifest");
     assert_eq!(manifest, expected());
+    super::baseline::validate(&manifest.provider_baselines);
 }
 
 #[cfg(test)]
@@ -65,6 +68,7 @@ fn expected() -> WorkloadManifest {
             "unique_ids": true,
             "secret_shaped_field_per_record": true
         }),
+        provider_baselines: super::baseline::expected(),
         phases: strings(&[
             "scan_complete_transcript",
             "parse_records",

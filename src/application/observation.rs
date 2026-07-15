@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use thiserror::Error;
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1,
-    ObservationContractError, RetentionClass, SanitizationReceiptV1,
+    CanonicalObservationIdV1, ObservationContractError, ObservationIdentityMaterialV1,
+    ObservationSourceCursorV1, RetentionClass, SanitizationReceiptV1,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
@@ -13,8 +13,8 @@ use tracedecay_store::{
 };
 
 use crate::privacy::{
-    ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ParsedClaudeRecordV1,
-    PrivacySanitizerError, SanitizationFindingV1, SanitizedClaudeRecordV1,
+    ObservationSanitizationOutcomeV1, ParsedObservationRecordV1, PrivacySanitizerError,
+    RecordSanitizerV1, SanitizationFindingV1, SanitizedObservationRecordV1,
 };
 
 /// Cloneable, operation-local cancellation shared by application adapters.
@@ -34,32 +34,37 @@ impl ObservationCancellation {
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum CaptureClaudeObservationRequestError {
-    #[error("parsed Claude observation source range does not match observation identity")]
+pub enum CaptureObservationRequestError {
+    #[error("parsed observation source range does not match observation identity")]
     SourceRangeMismatch,
+    #[error("parsed observation ordering domain does not match observation identity")]
+    OrderingDomainMismatch,
 }
 
-/// One validated, bounded Claude frame ready for the mandatory privacy boundary.
-pub struct CaptureClaudeObservationRequest {
-    parsed_record: ParsedClaudeRecordV1,
-    identity: ClaudeObservationIdentityMaterialV1,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
+/// One validated, bounded provider record ready for the mandatory privacy boundary.
+pub struct CaptureObservationRequest {
+    parsed_record: ParsedObservationRecordV1,
+    identity: ObservationIdentityMaterialV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
     resume_checkpoint: Option<(u64, u64)>,
     retention_class: RetentionClass,
     cancellation: ObservationCancellation,
 }
 
-impl CaptureClaudeObservationRequest {
+impl CaptureObservationRequest {
     pub fn new(
-        parsed_record: ParsedClaudeRecordV1,
-        identity: ClaudeObservationIdentityMaterialV1,
-        expected_cursor: Option<ClaudeSourceCursorV1>,
+        parsed_record: ParsedObservationRecordV1,
+        identity: ObservationIdentityMaterialV1,
+        expected_cursor: Option<ObservationSourceCursorV1>,
         retention_class: RetentionClass,
         cancellation: ObservationCancellation,
-    ) -> Result<Self, CaptureClaudeObservationRequestError> {
+    ) -> Result<Self, CaptureObservationRequestError> {
         let position = identity.position();
         if *parsed_record.source_range() != position {
-            return Err(CaptureClaudeObservationRequestError::SourceRangeMismatch);
+            return Err(CaptureObservationRequestError::SourceRangeMismatch);
+        }
+        if parsed_record.ordering_domain() != identity.ordering_domain() {
+            return Err(CaptureObservationRequestError::OrderingDomainMismatch);
         }
         Ok(Self {
             parsed_record,
@@ -71,12 +76,23 @@ impl CaptureClaudeObservationRequest {
         })
     }
 
+    pub fn provider(&self) -> &str {
+        self.identity.source().provider().as_str()
+    }
+
+    pub fn scope(&self) -> &tracedecay_domain::ObservationScopeV1 {
+        self.identity.scope()
+    }
+
     #[must_use]
     pub fn with_resume_checkpoint(mut self, file_identity: u64, resume_fingerprint: u64) -> Self {
         self.resume_checkpoint = Some((file_identity, resume_fingerprint));
         self
     }
 }
+
+pub type CaptureClaudeObservationRequest = CaptureObservationRequest;
+pub type CaptureClaudeObservationRequestError = CaptureObservationRequestError;
 
 pub struct GetObservationRequest {
     observation_id: CanonicalObservationIdV1,
@@ -125,11 +141,11 @@ impl ReplayObservationsRequest {
 
 /// Result of mandatory sanitization and, when permitted, authoritative persistence.
 #[derive(Debug)]
-pub enum CaptureClaudeObservationOutcome {
+pub enum CaptureObservationOutcome {
     Persisted {
         outcome: ObservationPersistOutcome,
         projection_status: ObservationProjectionStatus,
-        sanitized_record: SanitizedClaudeRecordV1,
+        sanitized_record: SanitizedObservationRecordV1,
         findings: Vec<SanitizationFindingV1>,
     },
     Rejected {
@@ -142,7 +158,7 @@ pub enum CaptureClaudeObservationOutcome {
     },
 }
 
-impl CaptureClaudeObservationOutcome {
+impl CaptureObservationOutcome {
     pub fn sanitization_receipt(&self) -> &SanitizationReceiptV1 {
         match self {
             Self::Persisted { outcome, .. } => outcome.receipt().sanitization_receipt(),
@@ -158,6 +174,8 @@ impl CaptureClaudeObservationOutcome {
         }
     }
 }
+
+pub type CaptureClaudeObservationOutcome = CaptureObservationOutcome;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObservationReplayCoverage {
@@ -209,26 +227,26 @@ impl ObservationReplayPage {
 
 #[derive(Debug, Error)]
 pub enum ObservationApplicationError {
-    #[error("Claude observation contract is invalid")]
+    #[error("observation contract is invalid")]
     Contract(#[from] ObservationContractError),
-    #[error("Claude observation sanitization failed")]
+    #[error("observation sanitization failed")]
     Privacy(#[from] PrivacySanitizerError),
-    #[error("Claude observation store operation failed")]
+    #[error("observation store operation failed")]
     Store(#[from] ObservationStoreError),
-    #[error("persisted Claude observation is not readable from the authoritative store")]
+    #[error("persisted observation is not readable from the authoritative store")]
     PersistedObservationUnavailable,
-    #[error("Claude observation operation was cancelled")]
+    #[error("observation operation was cancelled")]
     Cancelled,
 }
 
 /// Application-owned composition of sanitizer and an already-authoritative store.
 pub struct ObservationApplication<S> {
     store: S,
-    sanitizer: ClaudeRecordSanitizerV1,
+    sanitizer: RecordSanitizerV1,
 }
 
 impl<S: ObservationStore> ObservationApplication<S> {
-    pub fn new(store: S, sanitizer: ClaudeRecordSanitizerV1) -> Self {
+    pub fn new(store: S, sanitizer: RecordSanitizerV1) -> Self {
         Self { store, sanitizer }
     }
 
@@ -255,11 +273,11 @@ impl<S: ObservationStore> ObservationApplication<S> {
         Ok(outcome)
     }
 
-    pub async fn capture_claude_observation(
+    pub async fn capture_observation(
         &self,
-        request: CaptureClaudeObservationRequest,
-    ) -> Result<CaptureClaudeObservationOutcome, ObservationApplicationError> {
-        let CaptureClaudeObservationRequest {
+        request: CaptureObservationRequest,
+    ) -> Result<CaptureObservationOutcome, ObservationApplicationError> {
+        let CaptureObservationRequest {
             parsed_record,
             identity,
             expected_cursor,
@@ -277,16 +295,17 @@ impl<S: ObservationStore> ObservationApplication<S> {
             return Err(ObservationApplicationError::Cancelled);
         }
         match sanitized {
-            ClaudeSanitizationOutcomeV1::Durable {
+            ObservationSanitizationOutcomeV1::Durable {
                 observation,
                 sanitized_record,
                 findings,
             } => {
                 let identity = observation.identity();
-                let mut next_cursor = ClaudeSourceCursorV1::new(
+                let mut next_cursor = ObservationSourceCursorV1::for_ordering(
                     identity.source().clone(),
                     identity.scope().clone(),
                     identity.generation(),
+                    identity.ordering_domain(),
                     identity.position().end(),
                 )?;
                 if let Some((file_identity, resume_fingerprint)) = resume_checkpoint {
@@ -309,20 +328,27 @@ impl<S: ObservationStore> ObservationApplication<S> {
                 let projection_status = stored
                     .ok_or(ObservationApplicationError::PersistedObservationUnavailable)?
                     .projection_status();
-                Ok(CaptureClaudeObservationOutcome::Persisted {
+                Ok(CaptureObservationOutcome::Persisted {
                     outcome,
                     projection_status,
                     sanitized_record,
                     findings,
                 })
             }
-            ClaudeSanitizationOutcomeV1::Rejected { receipt, findings } => {
-                Ok(CaptureClaudeObservationOutcome::Rejected { receipt, findings })
+            ObservationSanitizationOutcomeV1::Rejected { receipt, findings } => {
+                Ok(CaptureObservationOutcome::Rejected { receipt, findings })
             }
-            ClaudeSanitizationOutcomeV1::Quarantined { receipt, findings } => {
-                Ok(CaptureClaudeObservationOutcome::Quarantined { receipt, findings })
+            ObservationSanitizationOutcomeV1::Quarantined { receipt, findings } => {
+                Ok(CaptureObservationOutcome::Quarantined { receipt, findings })
             }
         }
+    }
+
+    pub async fn capture_claude_observation(
+        &self,
+        request: CaptureClaudeObservationRequest,
+    ) -> Result<CaptureClaudeObservationOutcome, ObservationApplicationError> {
+        self.capture_observation(request).await
     }
 
     pub async fn get_observation(
@@ -420,14 +446,14 @@ mod tests {
     };
     use tracedecay_store::{ObservationCommitReceipt, ObservationStoreResult};
 
-    use crate::privacy::{PR5_MAX_CLAUDE_RECORD_BYTES, parse_claude_record_v1};
+    use crate::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_claude_record_v1};
 
     use super::*;
 
     #[derive(Default)]
     struct FakeStore {
         observations: Mutex<Vec<StoredObservation>>,
-        source_cursors: Mutex<Vec<ClaudeSourceCursorV1>>,
+        source_cursors: Mutex<Vec<ObservationSourceCursorV1>>,
         cancel_on_persist: Mutex<Option<ObservationCancellation>>,
         cancel_on_get: Mutex<Option<ObservationCancellation>>,
         cancel_on_replay: Mutex<Option<ObservationCancellation>>,
@@ -479,7 +505,7 @@ mod tests {
             &self,
             source: &ClaudeSourceIdentityV1,
             scope: &ObservationScopeV1,
-        ) -> ObservationStoreResult<Option<ClaudeSourceCursorV1>> {
+        ) -> ObservationStoreResult<Option<ObservationSourceCursorV1>> {
             Ok(self
                 .source_cursors
                 .lock()
@@ -583,9 +609,10 @@ mod tests {
         };
         let generation = ClaudeFileGenerationV1::new(1).unwrap();
         let expected_cursor = (start != 0).then(|| {
-            ClaudeSourceCursorV1::new(source.clone(), scope.clone(), generation, start).unwrap()
+            ObservationSourceCursorV1::new(source.clone(), scope.clone(), generation, start)
+                .unwrap()
         });
-        let identity = ClaudeObservationIdentityMaterialV1::new(
+        let identity = ObservationIdentityMaterialV1::new(
             source,
             scope,
             generation,
@@ -605,7 +632,7 @@ mod tests {
     fn application() -> ObservationApplication<FakeStore> {
         ObservationApplication::new(
             FakeStore::default(),
-            ClaudeRecordSanitizerV1::pr5().unwrap(),
+            RecordSanitizerV1::claude_v1().unwrap(),
         )
     }
 
@@ -703,7 +730,7 @@ mod tests {
             .await
             .unwrap();
         let sanitized_record = match &outcome {
-            CaptureClaudeObservationOutcome::Persisted {
+            CaptureObservationOutcome::Persisted {
                 sanitized_record, ..
             } => sanitized_record,
             other => panic!("capture must persist, got {other:?}"),
@@ -711,7 +738,7 @@ mod tests {
         assert!(!sanitized_record.payload().to_string().contains(secret));
         assert!(matches!(
             outcome,
-            CaptureClaudeObservationOutcome::Persisted { .. }
+            CaptureObservationOutcome::Persisted { .. }
         ));
         let page = application
             .replay_observations(ReplayObservationsRequest::new(
@@ -741,7 +768,7 @@ mod tests {
     #[test]
     fn request_accepts_only_bounded_parser_evidence_for_the_identity_range() {
         let identity = |start, end| {
-            ClaudeObservationIdentityMaterialV1::new(
+            ObservationIdentityMaterialV1::new(
                 ClaudeSourceIdentityV1::new(SessionId::new("session.frame-test").unwrap()).unwrap(),
                 ObservationScopeV1::Profile,
                 ClaudeFileGenerationV1::new(1).unwrap(),
@@ -752,7 +779,7 @@ mod tests {
         let retention = || RetentionClass::new("retention.application-test").unwrap();
 
         assert!(parse_claude_record_v1(&[], ClaudeByteRangeV1::new(0, 1).unwrap()).is_err());
-        let oversized = vec![b'x'; PR5_MAX_CLAUDE_RECORD_BYTES + 1];
+        let oversized = vec![b'x'; MAX_OBSERVATION_RECORD_BYTES + 1];
         let oversized_end = u64::try_from(oversized.len()).unwrap();
         assert!(
             parse_claude_record_v1(
@@ -792,7 +819,7 @@ mod tests {
             .await
             .unwrap();
         let first_sanitized_record = match first {
-            CaptureClaudeObservationOutcome::Persisted {
+            CaptureObservationOutcome::Persisted {
                 sanitized_record, ..
             } => sanitized_record,
             other => panic!("first capture must persist, got {other:?}"),
@@ -813,7 +840,7 @@ mod tests {
             .await
             .unwrap();
         match duplicate {
-            CaptureClaudeObservationOutcome::Persisted {
+            CaptureObservationOutcome::Persisted {
                 outcome,
                 projection_status,
                 sanitized_record,
@@ -956,7 +983,7 @@ mod tests {
             .capture_claude_observation(request(&record))
             .await
             .unwrap();
-        let CaptureClaudeObservationOutcome::Persisted { outcome, .. } = retry else {
+        let CaptureObservationOutcome::Persisted { outcome, .. } = retry else {
             panic!("retry must persist");
         };
         assert!(matches!(
@@ -977,7 +1004,7 @@ mod tests {
             .await
             .unwrap();
         let observation_id = match capture {
-            CaptureClaudeObservationOutcome::Persisted { outcome, .. } => {
+            CaptureObservationOutcome::Persisted { outcome, .. } => {
                 outcome.receipt().observation().observation_id().clone()
             }
             other => panic!("capture must persist, got {other:?}"),

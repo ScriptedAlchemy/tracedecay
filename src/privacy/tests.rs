@@ -1,15 +1,19 @@
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
-    ClaudeSourceIdentityV1, ObservationScopeV1, PayloadReferenceV1, RetentionClass,
-    SanitizerDispositionV1, SensitivityV1, SessionId,
+    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ClaudeByteRangeV1,
+    ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1, ClaudeSourceIdentityV1,
+    ObservationId, ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1,
+    PayloadReferenceV1, ProviderId, RetentionClass, SanitizerDispositionV1, SensitivityV1,
+    SessionId,
 };
 
 use super::{
-    ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1,
-    ClaudeSanitizerPolicyV1, DetectionConfidenceV1, PR5_CLAUDE_SANITIZER_VERSION,
-    PR5_MAX_CLAUDE_RECORD_BYTES, PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1,
-    parse_claude_record_v1,
+    CLAUDE_SANITIZER_VERSION_V1, ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1,
+    ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1, DetectionConfidenceV1,
+    MAX_OBSERVATION_RECORD_BYTES, OBSERVATION_SANITIZER_VERSION_V1, PrivacyDetectorV1,
+    PrivacySanitizerError, SanitizationActionV1, parse_claude_record_v1,
+    parse_normalized_observation_record_v1, parse_observation_record_v1,
 };
 
 fn identity_for(record: &[u8]) -> ClaudeObservationIdentityMaterialV1 {
@@ -91,6 +95,22 @@ fn parsed_record_token_preserves_verified_source_evidence() {
 }
 
 #[test]
+fn generic_parser_preserves_native_ordering_domain() {
+    let record = br#"{"type":"message"}"#;
+    let range = ClaudeByteRangeV1::new(7, 7 + record.len() as u64).unwrap();
+
+    let parsed =
+        parse_observation_record_v1(record, range, ObservationOrderingDomainV1::SqliteRowId)
+            .expect("parse provider record");
+
+    assert_eq!(parsed.source_range(), &range);
+    assert_eq!(
+        parsed.ordering_domain(),
+        ObservationOrderingDomainV1::SqliteRowId
+    );
+}
+
+#[test]
 fn parsed_record_rejects_mismatched_range_and_canonical_oversize() {
     let record = br#"{"type":"assistant"}"#;
     let mismatched =
@@ -100,7 +120,7 @@ fn parsed_record_rejects_mismatched_range_and_canonical_oversize() {
         Some(ClaudeRecordParseErrorV1::RangeLengthMismatch)
     );
 
-    let oversized = vec![b' '; PR5_MAX_CLAUDE_RECORD_BYTES + 1];
+    let oversized = vec![b' '; MAX_OBSERVATION_RECORD_BYTES + 1];
     let oversized_range =
         ClaudeByteRangeV1::new(0, oversized.len() as u64).expect("non-empty oversized range");
     assert_eq!(
@@ -118,8 +138,8 @@ fn sanitize_parsed_consumes_token_without_reparsing_raw_bytes() {
         parse_claude_record_v1(&record, identity.position()).expect("parse sanitizer fixture once");
     record.fill(b'!');
 
-    let outcome = ClaudeRecordSanitizerV1::pr5()
-        .expect("valid PR5 sanitizer")
+    let outcome = ClaudeRecordSanitizerV1::claude_v1()
+        .expect("valid Claude V1 sanitizer")
         .sanitize_parsed(parsed, identity, retention_class())
         .expect("sanitize parser-issued token");
 
@@ -140,12 +160,135 @@ fn sanitize_parsed_rejects_identity_range_mismatch() {
         ClaudeByteRangeV1::new(1, record.len() as u64 + 1).expect("valid shifted range");
     let parsed = parse_claude_record_v1(&record, shifted_range).expect("parse shifted fixture");
 
-    let error = ClaudeRecordSanitizerV1::pr5()
-        .expect("valid PR5 sanitizer")
+    let error = ClaudeRecordSanitizerV1::claude_v1()
+        .expect("valid Claude V1 sanitizer")
         .sanitize_parsed(parsed, identity_for(&record), retention_class())
         .expect_err("mismatched identity range must fail");
 
     assert!(matches!(error, PrivacySanitizerError::SourceRangeMismatch));
+}
+
+#[test]
+fn sanitize_parsed_rejects_ordering_domain_mismatch() {
+    let record = serde_json::to_vec(&json!({"message": "ordinary ordering fixture"}))
+        .expect("serialize ordering fixture");
+    let identity = identity_for(&record);
+    let parsed = parse_observation_record_v1(
+        &record,
+        identity.position(),
+        ObservationOrderingDomainV1::SqliteRowId,
+    )
+    .expect("parse row-ordered fixture");
+
+    let error = ClaudeRecordSanitizerV1::claude_v1()
+        .expect("valid Claude V1 sanitizer")
+        .sanitize_parsed(parsed, identity, retention_class())
+        .expect_err("mismatched ordering domain must fail");
+
+    assert!(matches!(
+        error,
+        PrivacySanitizerError::OrderingDomainMismatch
+    ));
+}
+
+#[test]
+fn provider_sanitizer_uses_provider_neutral_policy_and_receipt_domain() {
+    let record = serde_json::to_vec(&json!({"message": "ordinary provider fixture"}))
+        .expect("serialize provider fixture");
+    let range = ClaudeByteRangeV1::new(10, 11).expect("valid row range");
+    let parsed = parse_normalized_observation_record_v1(
+        &record,
+        range,
+        ObservationOrderingDomainV1::SqliteRowId,
+        |native| {
+            CanonicalObservationEnvelopeV1::new(
+                ProviderId::new("hermes").unwrap(),
+                "message",
+                ObservationId::new("message.provider-fixture").unwrap(),
+                CanonicalObservationRelationsV1::new(
+                    SessionId::new("session.provider-fixture").unwrap(),
+                )
+                .with_message_id(ObservationId::new("message.provider-fixture").unwrap()),
+                vec![CanonicalObservationFactV1::Message {
+                    role: CanonicalMessageRoleV1::Assistant,
+                    content: native,
+                    model: None,
+                    timestamp: None,
+                }],
+                CanonicalObservationEvidenceV1::new(
+                    ObservationOrderingDomainV1::SqliteRowId,
+                    range,
+                ),
+            )
+            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+        },
+    )
+    .expect("parse provider fixture");
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("hermes").unwrap(),
+        SessionId::new("session.provider-fixture").unwrap(),
+    )
+    .unwrap();
+    let identity = ClaudeObservationIdentityMaterialV1::for_native_record(
+        source,
+        ObservationScopeV1::Profile,
+        ClaudeFileGenerationV1::new(3).unwrap(),
+        range,
+        ObservationOrderingDomainV1::SqliteRowId,
+        ObservationId::new("message.provider-fixture").unwrap(),
+    )
+    .unwrap();
+
+    let outcome = ClaudeRecordSanitizerV1::observation_v1()
+        .expect("valid provider sanitizer")
+        .sanitize_parsed(parsed, identity, retention_class())
+        .expect("sanitize provider fixture");
+
+    assert_eq!(
+        outcome.receipt().receipt().sanitizer_version().as_str(),
+        OBSERVATION_SANITIZER_VERSION_V1
+    );
+    assert!(
+        outcome
+            .receipt()
+            .receipt()
+            .receipt_id()
+            .as_str()
+            .starts_with("privacy.observation.v1.")
+    );
+    assert!(outcome.durable_observation().is_some());
+}
+
+#[test]
+fn provider_sanitizer_rejects_raw_provider_json_without_normalization() {
+    let record = br#"{"message":"must normalize"}"#;
+    let range = ClaudeByteRangeV1::new(1, 2).unwrap();
+    let parsed =
+        parse_observation_record_v1(record, range, ObservationOrderingDomainV1::SqliteRowId)
+            .unwrap();
+    let identity = ClaudeObservationIdentityMaterialV1::for_native_record(
+        ObservationSourceIdentityV1::for_provider(
+            ProviderId::new("hermes").unwrap(),
+            SessionId::new("session.raw-provider").unwrap(),
+        )
+        .unwrap(),
+        ObservationScopeV1::Profile,
+        ClaudeFileGenerationV1::new(1).unwrap(),
+        range,
+        ObservationOrderingDomainV1::SqliteRowId,
+        ObservationId::new("message.raw-provider").unwrap(),
+    )
+    .unwrap();
+
+    let error = ClaudeRecordSanitizerV1::observation_v1()
+        .unwrap()
+        .sanitize_parsed(parsed, identity, retention_class())
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        PrivacySanitizerError::CanonicalEnvelopeRequired
+    ));
 }
 
 #[test]
@@ -158,7 +301,7 @@ fn clean_record_is_accepted_and_receipt_binds_the_payload() {
     let record = serde_json::to_vec(&expected_payload).expect("serialize clean fixture");
 
     let outcome = sanitize(
-        &ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer"),
+        &ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
         &record,
     );
     let observation = outcome
@@ -194,7 +337,7 @@ fn json_is_parsed_before_unknown_fields_are_scanned() {
     });
     let valid_record = serde_json::to_vec(&payload).expect("serialize unknown-field fixture");
 
-    let sanitizer = ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer");
+    let sanitizer = ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer");
     let valid_outcome = sanitize(&sanitizer, &valid_record);
     let valid_observation = valid_outcome
         .durable_observation()
@@ -249,7 +392,7 @@ fn default_exact_formats_are_detected_and_redacted() {
     });
     let record = serde_json::to_vec(&payload).expect("serialize exact-format fixture");
     let outcome = sanitize(
-        &ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer"),
+        &ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
         &record,
     );
     let observation = outcome
@@ -288,8 +431,8 @@ fn default_exact_formats_are_detected_and_redacted() {
 
 #[test]
 fn configured_sensitive_keys_redact_nested_values() {
-    let policy = ClaudeSanitizerPolicyV1::pr5()
-        .expect("valid PR5 policy")
+    let policy = ClaudeSanitizerPolicyV1::claude_v1()
+        .expect("valid Claude V1 policy")
         .with_sensitive_keys(["custom credential"]);
     let sanitizer = ClaudeRecordSanitizerV1::new(policy);
     let payload = json!({
@@ -358,7 +501,7 @@ fn normalized_secret_key_variants_and_semantic_suffixes_are_redacted() {
     let record = serde_json::to_vec(&payload).expect("serialize semantic-key fixture");
 
     let outcome = sanitize(
-        &ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer"),
+        &ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
         &record,
     );
     let observation = outcome
@@ -411,7 +554,7 @@ fn quoted_assignments_with_punctuation_are_redacted() {
     let record = serde_json::to_vec(&payload).expect("serialize quoted-assignment fixture");
 
     let outcome = sanitize(
-        &ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer"),
+        &ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
         &record,
     );
     let observation = outcome
@@ -444,7 +587,7 @@ fn credential_bearing_object_keys_quarantine_without_key_collisions() {
         .collect(),
     );
     let record = serde_json::to_vec(&payload).expect("serialize sensitive-key-name fixture");
-    let sanitizer = ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer");
+    let sanitizer = ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer");
     let identity = identity_for(&record);
 
     let first = sanitize_with_identity(&sanitizer, &record, identity.clone());
@@ -478,7 +621,7 @@ fn wholesale_sensitive_value_redaction_skips_nested_object_keys() {
     let record = serde_json::to_vec(&payload).expect("serialize wholesale-redaction fixture");
 
     let outcome = sanitize(
-        &ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer"),
+        &ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
         &record,
     );
 
@@ -503,7 +646,7 @@ fn contextual_high_entropy_token_is_detected() {
     let record = serde_json::to_vec(&payload).expect("serialize entropy fixture");
 
     let outcome = sanitize(
-        &ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer"),
+        &ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
         &record,
     );
     let observation = outcome
@@ -533,7 +676,7 @@ fn findings_never_contain_detected_secret_text() {
         .expect("serialize finding-safety fixture");
 
     let outcome = sanitize(
-        &ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer"),
+        &ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer"),
         &record,
     );
     let diagnostic = format!("{:?}", outcome.findings());
@@ -566,8 +709,8 @@ fn invalid_records_stop_at_the_parser_and_policy_limited_records_have_no_payload
         assert_eq!(parse_claude_record_v1(&record, range).err(), Some(expected));
     }
 
-    let limited_policy = ClaudeSanitizerPolicyV1::pr5()
-        .expect("valid PR5 policy")
+    let limited_policy = ClaudeSanitizerPolicyV1::claude_v1()
+        .expect("valid Claude V1 policy")
         .with_limits(32, 16, 100)
         .expect("valid small test limits");
     let limited_sanitizer = ClaudeRecordSanitizerV1::new(limited_policy);
@@ -589,8 +732,8 @@ fn invalid_records_stop_at_the_parser_and_policy_limited_records_have_no_payload
 
 #[test]
 fn structure_bound_failures_are_quarantined_without_payloads() {
-    let depth_policy = ClaudeSanitizerPolicyV1::pr5()
-        .expect("valid PR5 policy")
+    let depth_policy = ClaudeSanitizerPolicyV1::claude_v1()
+        .expect("valid Claude V1 policy")
         .with_limits(1_024, 3, 100)
         .expect("valid depth test limits");
     let depth_record = serde_json::to_vec(&json!({ "a": { "b": { "c": "value" } } }))
@@ -608,8 +751,8 @@ fn structure_bound_failures_are_quarantined_without_payloads() {
         SanitizationActionV1::Quarantined,
     );
 
-    let value_policy = ClaudeSanitizerPolicyV1::pr5()
-        .expect("valid PR5 policy")
+    let value_policy = ClaudeSanitizerPolicyV1::claude_v1()
+        .expect("valid Claude V1 policy")
         .with_limits(1_024, 16, 4)
         .expect("valid value-count test limits");
     let value_record =
@@ -630,12 +773,12 @@ fn structure_bound_failures_are_quarantined_without_payloads() {
 
 #[test]
 fn receipt_ids_are_deterministic_and_use_the_fixed_sanitizer_version() {
-    assert_eq!(PR5_CLAUDE_SANITIZER_VERSION, "privacy.claude-record.v1");
-    assert_eq!(PR5_MAX_CLAUDE_RECORD_BYTES, 1_048_576);
-    let sanitizer = ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer");
+    assert_eq!(CLAUDE_SANITIZER_VERSION_V1, "privacy.claude-record.v1");
+    assert_eq!(MAX_OBSERVATION_RECORD_BYTES, 1_048_576);
+    let sanitizer = ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer");
     assert_eq!(
         sanitizer.policy().version().as_str(),
-        PR5_CLAUDE_SANITIZER_VERSION
+        CLAUDE_SANITIZER_VERSION_V1
     );
 
     let record = serde_json::to_vec(&json!({ "message": "ordinary deterministic fixture" }))
@@ -650,7 +793,7 @@ fn receipt_ids_are_deterministic_and_use_the_fixed_sanitizer_version() {
     );
     assert_eq!(
         first.receipt().receipt().sanitizer_version().as_str(),
-        PR5_CLAUDE_SANITIZER_VERSION
+        CLAUDE_SANITIZER_VERSION_V1
     );
 
     let changed_record =
@@ -679,7 +822,7 @@ fn equal_length_distinct_secrets_produce_distinct_raw_bound_receipts() {
     let second_record = serde_json::to_vec(&json!({"password": "bravo456?"})).unwrap();
     assert_eq!(first_record.len(), second_record.len());
     let identity = identity_for(&first_record);
-    let sanitizer = ClaudeRecordSanitizerV1::pr5().expect("valid PR5 sanitizer");
+    let sanitizer = ClaudeRecordSanitizerV1::claude_v1().expect("valid Claude V1 sanitizer");
 
     let first = sanitize_with_identity(&sanitizer, &first_record, identity.clone());
     let second = sanitize_with_identity(&sanitizer, &second_record, identity);
@@ -704,14 +847,14 @@ fn equal_length_distinct_secrets_produce_distinct_raw_bound_receipts() {
 
 #[test]
 fn custom_policy_behavior_has_a_deterministic_version_fingerprint() {
-    let default = ClaudeSanitizerPolicyV1::pr5().expect("valid default policy");
-    let first = ClaudeSanitizerPolicyV1::pr5()
+    let default = ClaudeSanitizerPolicyV1::claude_v1().expect("valid default policy");
+    let first = ClaudeSanitizerPolicyV1::claude_v1()
         .expect("valid default policy")
         .with_sensitive_keys(["custom_one", "custom_two"]);
-    let reordered = ClaudeSanitizerPolicyV1::pr5()
+    let reordered = ClaudeSanitizerPolicyV1::claude_v1()
         .expect("valid default policy")
         .with_sensitive_keys(["custom_two", "custom_one"]);
-    let limited = ClaudeSanitizerPolicyV1::pr5()
+    let limited = ClaudeSanitizerPolicyV1::claude_v1()
         .expect("valid default policy")
         .with_limits(1_024, 16, 100)
         .expect("fingerprint custom limits");

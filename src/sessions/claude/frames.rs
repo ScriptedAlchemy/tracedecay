@@ -4,7 +4,7 @@ use serde_json::Value;
 use tracedecay_domain::ClaudeByteRangeV1;
 
 use crate::privacy::{
-    PR5_MAX_CLAUDE_RECORD_BYTES, ParsedClaudeRecordV1, SanitizedClaudeRecordV1,
+    MAX_OBSERVATION_RECORD_BYTES, ParsedClaudeRecordV1, SanitizedClaudeRecordV1,
     parse_claude_record_v1,
 };
 use crate::sessions::shared::StoredCursor;
@@ -191,7 +191,7 @@ pub(crate) fn try_scan_claude_source_frames_with_resume(
         &identity.source_path,
         previous,
         max_new_bytes,
-        PR5_MAX_CLAUDE_RECORD_BYTES,
+        MAX_OBSERVATION_RECORD_BYTES,
         resume_state,
     )?;
     let mut frames = Vec::new();

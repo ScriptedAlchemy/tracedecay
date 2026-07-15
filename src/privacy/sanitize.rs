@@ -16,8 +16,10 @@ use super::detect::{
 };
 use super::parse::{ParseLimits, ParsedClaudeRecordV1, ParsedPolicyLimitViolation};
 
-pub const PR5_CLAUDE_SANITIZER_VERSION: &str = "privacy.claude-record.v1";
-const PR5_POLICY_FINGERPRINT_DOMAIN: &[u8] = b"tracedecay.privacy.claude.policy.v1\0";
+pub const CLAUDE_SANITIZER_VERSION_V1: &str = "privacy.claude-record.v1";
+pub const OBSERVATION_SANITIZER_VERSION_V1: &str = "privacy.observation-record.v1";
+const CLAUDE_POLICY_FINGERPRINT_DOMAIN: &[u8] = b"tracedecay.privacy.claude.policy.v1\0";
+const OBSERVATION_POLICY_FINGERPRINT_DOMAIN: &[u8] = b"tracedecay.privacy.observation.policy.v1\0";
 
 #[derive(Debug, Error)]
 pub enum PrivacySanitizerError {
@@ -25,8 +27,14 @@ pub enum PrivacySanitizerError {
     InvalidPolicy,
     #[error("privacy detector is unavailable")]
     DetectorUnavailable,
-    #[error("parsed Claude record range does not match observation identity")]
+    #[error("parsed observation record range does not match observation identity")]
     SourceRangeMismatch,
+    #[error("parsed observation ordering domain does not match observation identity")]
+    OrderingDomainMismatch,
+    #[error("provider observation did not cross the canonical normalization boundary")]
+    CanonicalEnvelopeRequired,
+    #[error("canonical observation provider does not match observation identity")]
+    CanonicalProviderMismatch,
     #[error("privacy domain contract rejected sanitizer output")]
     DomainContract(#[source] ObservationContractError),
 }
@@ -50,23 +58,33 @@ pub struct ClaudeSanitizerPolicyV1 {
     max_depth: usize,
     max_values: usize,
     sensitive_keys: BTreeSet<String>,
+    provider_neutral: bool,
     valid: bool,
 }
 
 impl ClaudeSanitizerPolicyV1 {
-    pub fn pr5() -> Result<Self, PrivacySanitizerError> {
-        let version = ComponentVersion::new(PR5_CLAUDE_SANITIZER_VERSION)
+    pub fn claude_v1() -> Result<Self, PrivacySanitizerError> {
+        let version = ComponentVersion::new(CLAUDE_SANITIZER_VERSION_V1)
             .map_err(|_| PrivacySanitizerError::InvalidPolicy)?;
-        let sensitive_keys = pr5_sensitive_keys();
-        let limits = ParseLimits::pr5();
+        let sensitive_keys = default_sensitive_keys();
+        let limits = ParseLimits::default_policy();
         Ok(Self {
             version,
             max_record_bytes: limits.record_bytes,
             max_depth: limits.depth,
             max_values: limits.values,
             sensitive_keys,
+            provider_neutral: false,
             valid: true,
         })
+    }
+
+    pub fn observation_v1() -> Result<Self, PrivacySanitizerError> {
+        let mut policy = Self::claude_v1()?;
+        policy.provider_neutral = true;
+        policy.version = ComponentVersion::new(OBSERVATION_SANITIZER_VERSION_V1)
+            .map_err(|_| PrivacySanitizerError::InvalidPolicy)?;
+        Ok(policy)
     }
 
     #[must_use]
@@ -95,19 +113,29 @@ impl ClaudeSanitizerPolicyV1 {
     }
 
     fn refresh_version(&mut self) -> Result<(), PrivacySanitizerError> {
-        let limits = ParseLimits::pr5();
+        let limits = ParseLimits::default_policy();
         if self.max_record_bytes == limits.record_bytes
             && self.max_depth == limits.depth
             && self.max_values == limits.values
-            && self.sensitive_keys == pr5_sensitive_keys()
+            && self.sensitive_keys == default_sensitive_keys()
         {
-            self.version = ComponentVersion::new(PR5_CLAUDE_SANITIZER_VERSION)
-                .map_err(|_| PrivacySanitizerError::InvalidPolicy)?;
+            let version = if self.provider_neutral {
+                OBSERVATION_SANITIZER_VERSION_V1
+            } else {
+                CLAUDE_SANITIZER_VERSION_V1
+            };
+            self.version =
+                ComponentVersion::new(version).map_err(|_| PrivacySanitizerError::InvalidPolicy)?;
             return Ok(());
         }
 
         let mut hasher = Sha256::new();
-        hasher.update(PR5_POLICY_FINGERPRINT_DOMAIN);
+        let fingerprint_domain = if self.provider_neutral {
+            OBSERVATION_POLICY_FINGERPRINT_DOMAIN
+        } else {
+            CLAUDE_POLICY_FINGERPRINT_DOMAIN
+        };
+        hasher.update(fingerprint_domain);
         for value in [self.max_record_bytes, self.max_depth, self.max_values] {
             let value = u64::try_from(value).map_err(|_| PrivacySanitizerError::InvalidPolicy)?;
             hasher.update(value.to_be_bytes());
@@ -123,10 +151,13 @@ impl ClaudeSanitizerPolicyV1 {
             write!(&mut fingerprint, "{byte:02x}")
                 .map_err(|_| PrivacySanitizerError::InvalidPolicy)?;
         }
-        self.version = ComponentVersion::new(format!(
-            "{PR5_CLAUDE_SANITIZER_VERSION}.policy.{fingerprint}"
-        ))
-        .map_err(|_| PrivacySanitizerError::InvalidPolicy)?;
+        let base_version = if self.provider_neutral {
+            OBSERVATION_SANITIZER_VERSION_V1
+        } else {
+            CLAUDE_SANITIZER_VERSION_V1
+        };
+        self.version = ComponentVersion::new(format!("{base_version}.policy.{fingerprint}"))
+            .map_err(|_| PrivacySanitizerError::InvalidPolicy)?;
         Ok(())
     }
 
@@ -135,7 +166,7 @@ impl ClaudeSanitizerPolicyV1 {
     }
 }
 
-fn pr5_sensitive_keys() -> BTreeSet<String> {
+fn default_sensitive_keys() -> BTreeSet<String> {
     [
         "api_key",
         "api_token",
@@ -172,8 +203,12 @@ impl ClaudeRecordSanitizerV1 {
         Self { policy }
     }
 
-    pub fn pr5() -> Result<Self, PrivacySanitizerError> {
-        Ok(Self::new(ClaudeSanitizerPolicyV1::pr5()?))
+    pub fn claude_v1() -> Result<Self, PrivacySanitizerError> {
+        Ok(Self::new(ClaudeSanitizerPolicyV1::claude_v1()?))
+    }
+
+    pub fn observation_v1() -> Result<Self, PrivacySanitizerError> {
+        Ok(Self::new(ClaudeSanitizerPolicyV1::observation_v1()?))
     }
 
     pub fn policy(&self) -> &ClaudeSanitizerPolicyV1 {
@@ -192,6 +227,17 @@ impl ClaudeRecordSanitizerV1 {
         }
         if *parsed.source_range() != identity.position() {
             return Err(PrivacySanitizerError::SourceRangeMismatch);
+        }
+        if parsed.ordering_domain() != identity.ordering_domain() {
+            return Err(PrivacySanitizerError::OrderingDomainMismatch);
+        }
+        if self.policy.provider_neutral {
+            let canonical_provider = parsed
+                .canonical_provider()
+                .ok_or(PrivacySanitizerError::CanonicalEnvelopeRequired)?;
+            if canonical_provider != identity.source().provider() {
+                return Err(PrivacySanitizerError::CanonicalProviderMismatch);
+            }
         }
         if let Err(kind) = parsed.verify_limits(self.parse_limits()) {
             return self.non_durable_outcome_from_digest(kind, parsed.raw_digest(), &identity);
@@ -356,6 +402,11 @@ pub enum ClaudeSanitizationOutcomeV1 {
         findings: Vec<SanitizationFindingV1>,
     },
 }
+
+pub type RecordSanitizerPolicyV1 = ClaudeSanitizerPolicyV1;
+pub type RecordSanitizerV1 = ClaudeRecordSanitizerV1;
+pub type SanitizedObservationRecordV1 = SanitizedClaudeRecordV1;
+pub type ObservationSanitizationOutcomeV1 = ClaudeSanitizationOutcomeV1;
 
 impl ClaudeSanitizationOutcomeV1 {
     pub fn durable_observation(&self) -> Option<&DurableClaudeObservationV1> {

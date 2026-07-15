@@ -182,10 +182,20 @@ pub(crate) async fn resolve_lcm_store(
         };
     }
     if !allow_direct_session_open {
+        let project_db_path = cg.store_layout().sessions_db_path.clone();
+        if let Some(db) = GlobalDb::open_read_only_at(&project_db_path).await {
+            let conn = db.owned_read_connection().await;
+            return LcmStoreSelection {
+                conn,
+                lcm_db: None,
+                path: project_db_path.display().to_string(),
+                scope: storage_mode_label(&cg.store_layout().storage_mode).to_string(),
+            };
+        }
         return LcmStoreSelection {
             conn: None,
             lcm_db: None,
-            path: cg.store_layout().sessions_db_path.display().to_string(),
+            path: project_db_path.display().to_string(),
             scope: "unavailable".to_string(),
         };
     }
@@ -288,7 +298,12 @@ async fn build_state_inner(
     automation_writer: DashboardAutomationWriter,
 ) -> DashboardState {
     let (mem_conn, mem_db_path, mem_db) = resolve_project_memory_store(cg).await;
-    let lcm = resolve_lcm_store(cg, retained_project_session_db, allow_direct_session_open).await;
+    let lcm = resolve_lcm_store(
+        cg,
+        retained_project_session_db.clone(),
+        allow_direct_session_open,
+    )
+    .await;
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let store_root = cg.store_layout().data_root.clone();
     let config_path = cg.store_layout().config_path.clone();
@@ -298,8 +313,19 @@ async fn build_state_inner(
         .unwrap_or_default();
     let code_diagnostics =
         code_diagnostics_broker(cg.project_root().to_path_buf(), code_diagnostics_settings);
-    let savings_db = GlobalDb::open().await.map(Arc::new);
-    let savings_db_path = crate::global_db::global_db_path()
+    let global_db_path = crate::global_db::global_db_path();
+    let savings_db = if let Some(retained) =
+        retained_project_session_db.filter(|db| global_db_path.as_deref() == Some(db.db_path()))
+    {
+        Some(retained)
+    } else if allow_direct_session_open {
+        GlobalDb::open().await.map(Arc::new)
+    } else if let Some(path) = global_db_path.as_deref() {
+        GlobalDb::open_read_only_at(path).await.map(Arc::new)
+    } else {
+        None
+    };
+    let savings_db_path = global_db_path
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     let state = DashboardState {
@@ -428,21 +454,28 @@ fn spawn_session_catch_up_ingest(
         }
         if let Some(registry_db) = registry_db
             && let Ok(profile_root) = crate::storage::default_profile_root()
-            && let Some(user_db) = crate::sessions::open_user_session_db(&profile_root).await
         {
-            let outcome = crate::sessions::ingest_user_global_sources_for_startup_with_db(
-                &user_db,
-                registry_db.as_ref(),
-                &profile_root,
-            )
-            .await;
-            for failure in &outcome.failures {
+            let user_db_path = crate::sessions::user_sessions_db_path(&profile_root);
+            if db.db_path() == user_db_path {
+                let outcome = crate::sessions::ingest_user_global_sources_for_startup_with_db(
+                    db.as_ref(),
+                    registry_db.as_ref(),
+                    &profile_root,
+                )
+                .await;
+                for failure in &outcome.failures {
+                    eprintln!(
+                        "Session catch-up incomplete: provider={} source={} reason_code={} retryable={}",
+                        failure.provider, failure.source, failure.reason_code, failure.retryable
+                    );
+                }
+                stats = stats.merge(outcome.stats);
+            } else {
                 eprintln!(
-                    "Session catch-up incomplete: provider={} source={} reason_code={} retryable={}",
-                    failure.provider, failure.source, failure.reason_code, failure.retryable
+                    "User session catch-up skipped: retained authority is unavailable for {}.",
+                    user_db_path.display()
                 );
             }
-            stats = stats.merge(outcome.stats);
         }
         if stats.sessions_upserted > 0 || stats.messages_upserted > 0 {
             eprintln!(
@@ -1100,5 +1133,25 @@ mod authority_tests {
             !db_path.exists(),
             "fail-closed selection must not create a DB"
         );
+    }
+
+    #[tokio::test]
+    async fn daemon_dashboard_without_retained_authority_is_read_only() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
+            .expect("fixture source");
+        let cg = TraceDecay::init(project.path())
+            .await
+            .expect("project init");
+        let db_path = cg.store_layout().sessions_db_path.clone();
+        let writable = GlobalDb::open_at(&db_path).await.expect("session DB");
+        drop(writable);
+
+        let selected = resolve_lcm_store(&cg, None, false).await;
+
+        assert!(selected.conn.is_some());
+        assert!(selected.lcm_db.is_none());
+        assert_ne!(selected.scope, "unavailable");
     }
 }

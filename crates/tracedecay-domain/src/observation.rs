@@ -1,9 +1,10 @@
-//! Pure contracts for sanitized Claude transcript observations.
+//! Pure contracts for sanitized provider observations.
 //!
 //! These values deliberately exclude filesystem paths, ambient working
 //! directories, database row identifiers, and provider display labels from
 //! durable identity. Capture code resolves those runtime details before it
-//! constructs this boundary.
+//! constructs this boundary. Claude compatibility aliases preserve the legacy
+//! wire format while later providers retain typed native ordering evidence.
 
 use std::cmp::Ordering;
 
@@ -14,7 +15,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::research::{
-    ComponentVersion, ProjectId, ProviderId, RetentionClass, SanitizationReceiptId,
+    ComponentVersion, ObservationId, ProjectId, ProviderId, RetentionClass, SanitizationReceiptId,
     SanitizationReceiptRefV1, SessionId, canonical_json_bytes,
 };
 
@@ -22,33 +23,39 @@ const CLAUDE_OBSERVATION_ID_DOMAIN: &[u8] = b"tracedecay.claude.observation.v1\0
 const OBSERVATION_ID_DOMAIN: &[u8] = b"tracedecay.observation.v1\0";
 const LEGACY_IDEMPOTENCY_KEY_DOMAIN: &[u8] = b"tracedecay.claude.idempotency.v1\0";
 const CLAUDE_RECEIPT_ID_DOMAIN: &[u8] = b"tracedecay.privacy.claude.receipt.v1\0";
+const OBSERVATION_RECEIPT_ID_DOMAIN: &[u8] = b"tracedecay.privacy.observation.receipt.v1\0";
 const CLAUDE_RECEIPT_SENSITIVITY_DOMAIN: &[u8] = b"sensitivity\0";
 const CLAUDE_RECEIPT_RAW_DIGEST_DOMAIN: &[u8] = b"raw-record-sha256\0";
 const CLAUDE_RECEIPT_SANITIZED_PAYLOAD_DOMAIN: &[u8] = b"sanitized-payload-digest\0";
 const CLAUDE_RECEIPT_NO_PAYLOAD_DOMAIN: &[u8] = b"no-durable-payload\0";
 const CLAUDE_RECEIPT_ID_PREFIX: &str = "privacy.claude.v1.";
+const OBSERVATION_RECEIPT_ID_PREFIX: &str = "privacy.observation.v1.";
 
 /// Pure validation failures at the observation contract boundary.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ObservationContractError {
-    #[error("Claude source identity is invalid")]
+    #[error("observation source identity is invalid")]
     InvalidSourceIdentity,
+    #[error("native observation record identity is invalid")]
+    InvalidNativeRecordIdentity,
     #[error("project observation scope is invalid")]
     InvalidProjectScope,
-    #[error("Claude file generation must be non-zero")]
+    #[error("observation source generation must be non-zero")]
     InvalidFileGeneration,
-    #[error("Claude record byte range must be non-empty and increasing")]
+    #[error("observation source range must be non-empty and increasing")]
     InvalidByteRange,
     #[error("{field} must be a canonical SHA-256 digest")]
     InvalidDigest { field: &'static str },
     #[error("canonical observation encoding failed")]
     CanonicalEncoding,
-    #[error("source cursors belong to different Claude sessions")]
+    #[error("source cursors belong to different provider sources")]
     CursorSourceMismatch,
     #[error("source cursors belong to different observation scopes")]
     CursorScopeMismatch,
-    #[error("source cursors belong to different file generations")]
+    #[error("source cursors belong to different source generations")]
     CursorGenerationMismatch,
+    #[error("source cursors use different ordering domains")]
+    CursorOrderingDomainMismatch,
     #[error("sanitization receipt reference is invalid")]
     InvalidReceiptReference,
     #[error("unclassified content cannot cross the durable boundary")]
@@ -65,6 +72,18 @@ pub enum ObservationContractError {
     ObservationIdentityMismatch,
     #[error("serialized idempotency key does not match its source evidence")]
     IdempotencyKeyMismatch,
+    #[error("canonical observation envelope version is unsupported")]
+    UnsupportedCanonicalEnvelopeVersion,
+    #[error("canonical observation record kind is invalid")]
+    InvalidCanonicalRecordKind,
+    #[error("canonical observation envelope must contain at least one fact")]
+    CanonicalFactsRequired,
+    #[error("durable canonical observation payload is invalid")]
+    InvalidCanonicalPayload,
+    #[error("canonical observation ordering evidence is invalid")]
+    InvalidCanonicalOrderingEvidence,
+    #[error("canonical reasoning visibility disagrees with its content")]
+    InvalidReasoningVisibility,
 }
 
 /// Stable logical identity of one provider observation source.
@@ -192,7 +211,39 @@ impl ObservationScopeV1 {
     }
 }
 
-/// Native file generation identity produced by Claude JSONL framing.
+/// Native ordering authority for one provider source.
+///
+/// Numeric positions are comparable only within the same source, scope,
+/// generation, and ordering domain.
+#[derive(
+    Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ObservationOrderingDomainV1 {
+    #[default]
+    FileBytes,
+    SqliteRowId,
+    SnapshotOrder,
+    DaemonSequence,
+}
+
+impl ObservationOrderingDomainV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FileBytes => "file_bytes",
+            Self::SqliteRowId => "sqlite_row_id",
+            Self::SnapshotOrder => "snapshot_order",
+            Self::DaemonSequence => "daemon_sequence",
+        }
+    }
+}
+
+fn is_file_bytes_ordering(domain: &ObservationOrderingDomainV1) -> bool {
+    *domain == ObservationOrderingDomainV1::FileBytes
+}
+
+/// Native source generation or incarnation identity.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct ObservationSourceGenerationV1(u64);
@@ -278,22 +329,73 @@ pub struct ObservationIdentityMaterialV1 {
     scope: ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
     position: ObservationSourceRangeV1,
+    #[serde(default, skip_serializing_if = "is_file_bytes_ordering")]
+    ordering_domain: ObservationOrderingDomainV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_record_id: Option<ObservationId>,
 }
 
 impl ObservationIdentityMaterialV1 {
+    /// Constructs legacy file-byte identity material.
     pub fn new(
         source: ObservationSourceIdentityV1,
         scope: ObservationScopeV1,
         generation: ObservationSourceGenerationV1,
         position: ObservationSourceRangeV1,
     ) -> Result<Self, ObservationContractError> {
+        Self::for_ordered_record(
+            source,
+            scope,
+            generation,
+            position,
+            ObservationOrderingDomainV1::FileBytes,
+            None,
+        )
+    }
+
+    /// Constructs provider identity with an explicit ordering domain and stable
+    /// native record key. The key may itself be a canonical content digest when
+    /// the provider exposes no immutable identifier.
+    pub fn for_native_record(
+        source: ObservationSourceIdentityV1,
+        scope: ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+        position: ObservationSourceRangeV1,
+        ordering_domain: ObservationOrderingDomainV1,
+        native_record_id: ObservationId,
+    ) -> Result<Self, ObservationContractError> {
+        Self::for_ordered_record(
+            source,
+            scope,
+            generation,
+            position,
+            ordering_domain,
+            Some(native_record_id),
+        )
+    }
+
+    fn for_ordered_record(
+        source: ObservationSourceIdentityV1,
+        scope: ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+        position: ObservationSourceRangeV1,
+        ordering_domain: ObservationOrderingDomainV1,
+        native_record_id: Option<ObservationId>,
+    ) -> Result<Self, ObservationContractError> {
         source.validate()?;
         scope.validate()?;
+        if let Some(record_id) = &native_record_id {
+            record_id
+                .validate()
+                .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?;
+        }
         Ok(Self {
             source,
             scope,
             generation,
             position,
+            ordering_domain,
+            native_record_id,
         })
     }
 
@@ -313,9 +415,23 @@ impl ObservationIdentityMaterialV1 {
         self.position
     }
 
+    pub fn ordering_domain(&self) -> ObservationOrderingDomainV1 {
+        self.ordering_domain
+    }
+
+    pub fn native_record_id(&self) -> Option<&ObservationId> {
+        self.native_record_id.as_ref()
+    }
+
     pub fn validate(&self) -> Result<(), ObservationContractError> {
         self.source.validate()?;
-        self.scope.validate()
+        self.scope.validate()?;
+        if let Some(record_id) = &self.native_record_id {
+            record_id
+                .validate()
+                .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?;
+        }
+        Ok(())
     }
 }
 
@@ -362,16 +478,31 @@ impl CanonicalObservationIdV1 {
         material: &ObservationIdentityMaterialV1,
     ) -> Result<Self, ObservationContractError> {
         material.validate()?;
-        let domain = if is_default_observation_provider(material.source().provider()) {
-            CLAUDE_OBSERVATION_ID_DOMAIN
-        } else {
-            OBSERVATION_ID_DOMAIN
-        };
-        Self::new(domain_digest(domain, material)?)
+        if is_default_observation_provider(material.source().provider()) {
+            return Self::new(domain_digest(CLAUDE_OBSERVATION_ID_DOMAIN, material)?);
+        }
+        if let Some(native_record_id) = material.native_record_id() {
+            #[derive(Serialize)]
+            struct NativeIdentity<'a> {
+                source: &'a ObservationSourceIdentityV1,
+                scope: &'a ObservationScopeV1,
+                native_record_id: &'a ObservationId,
+            }
+
+            return Self::new(domain_digest(
+                OBSERVATION_ID_DOMAIN,
+                &NativeIdentity {
+                    source: material.source(),
+                    scope: material.scope(),
+                    native_record_id,
+                },
+            )?);
+        }
+        Self::new(domain_digest(OBSERVATION_ID_DOMAIN, material)?)
     }
 }
 
-/// Durable byte cursor tied to one provider source, owner, and source generation.
+/// Durable cursor tied to one provider source, owner, generation, and ordering domain.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct ObservationSourceCursorV1 {
@@ -379,6 +510,8 @@ pub struct ObservationSourceCursorV1 {
     scope: ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
     byte_offset: u64,
+    #[serde(default, skip_serializing_if = "is_file_bytes_ordering")]
+    ordering_domain: ObservationOrderingDomainV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     file_identity: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -386,11 +519,28 @@ pub struct ObservationSourceCursorV1 {
 }
 
 impl ObservationSourceCursorV1 {
+    /// Constructs the legacy-compatible file-byte cursor.
     pub fn new(
         source: ObservationSourceIdentityV1,
         scope: ObservationScopeV1,
         generation: ObservationSourceGenerationV1,
         byte_offset: u64,
+    ) -> Result<Self, ObservationContractError> {
+        Self::for_ordering(
+            source,
+            scope,
+            generation,
+            ObservationOrderingDomainV1::FileBytes,
+            byte_offset,
+        )
+    }
+
+    pub fn for_ordering(
+        source: ObservationSourceIdentityV1,
+        scope: ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+        ordering_domain: ObservationOrderingDomainV1,
+        position: u64,
     ) -> Result<Self, ObservationContractError> {
         source.validate()?;
         scope.validate()?;
@@ -398,7 +548,8 @@ impl ObservationSourceCursorV1 {
             source,
             scope,
             generation,
-            byte_offset,
+            byte_offset: position,
+            ordering_domain,
             file_identity: None,
             resume_fingerprint: None,
         })
@@ -427,6 +578,14 @@ impl ObservationSourceCursorV1 {
         self.byte_offset
     }
 
+    pub fn position(&self) -> u64 {
+        self.byte_offset
+    }
+
+    pub fn ordering_domain(&self) -> ObservationOrderingDomainV1 {
+        self.ordering_domain
+    }
+
     pub fn file_identity(&self) -> Option<u64> {
         self.file_identity
     }
@@ -446,12 +605,472 @@ impl ObservationSourceCursorV1 {
         if self.generation != other.generation {
             return Err(ObservationContractError::CursorGenerationMismatch);
         }
+        if self.ordering_domain != other.ordering_domain {
+            return Err(ObservationContractError::CursorOrderingDomainMismatch);
+        }
         Ok(self.byte_offset.cmp(&other.byte_offset))
     }
 }
 
 /// Compatibility name for Claude JSONL source cursors.
 pub type ClaudeSourceCursorV1 = ObservationSourceCursorV1;
+
+pub const CANONICAL_OBSERVATION_ENVELOPE_VERSION_V1: u16 = 1;
+
+/// Provider-neutral semantic payload produced from one decoded native record.
+///
+/// This value is transient until the privacy boundary sanitizes its serialized
+/// form. It is not a second persistence authority or a provider metadata bag.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalObservationEnvelopeV1 {
+    version: u16,
+    provider: ProviderId,
+    native_record_kind: String,
+    stable_record_id: ObservationId,
+    relations: CanonicalObservationRelationsV1,
+    facts: Vec<CanonicalObservationFactV1>,
+    evidence: CanonicalObservationEvidenceV1,
+}
+
+impl CanonicalObservationEnvelopeV1 {
+    pub fn new(
+        provider: ProviderId,
+        native_record_kind: impl Into<String>,
+        stable_record_id: ObservationId,
+        relations: CanonicalObservationRelationsV1,
+        facts: Vec<CanonicalObservationFactV1>,
+        evidence: CanonicalObservationEvidenceV1,
+    ) -> Result<Self, ObservationContractError> {
+        let envelope = Self {
+            version: CANONICAL_OBSERVATION_ENVELOPE_VERSION_V1,
+            provider,
+            native_record_kind: native_record_kind.into(),
+            stable_record_id,
+            relations,
+            facts,
+            evidence,
+        };
+        envelope.validate()?;
+        Ok(envelope)
+    }
+
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+
+    pub fn provider(&self) -> &ProviderId {
+        &self.provider
+    }
+
+    pub fn native_record_kind(&self) -> &str {
+        &self.native_record_kind
+    }
+
+    pub fn stable_record_id(&self) -> &ObservationId {
+        &self.stable_record_id
+    }
+
+    pub fn relations(&self) -> &CanonicalObservationRelationsV1 {
+        &self.relations
+    }
+
+    pub fn facts(&self) -> &[CanonicalObservationFactV1] {
+        &self.facts
+    }
+
+    pub fn evidence(&self) -> &CanonicalObservationEvidenceV1 {
+        &self.evidence
+    }
+
+    pub fn validate(&self) -> Result<(), ObservationContractError> {
+        if self.version != CANONICAL_OBSERVATION_ENVELOPE_VERSION_V1 {
+            return Err(ObservationContractError::UnsupportedCanonicalEnvelopeVersion);
+        }
+        self.provider
+            .validate()
+            .map_err(|_| ObservationContractError::InvalidSourceIdentity)?;
+        self.stable_record_id
+            .validate()
+            .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?;
+        validate_canonical_label(&self.native_record_kind)?;
+        self.relations.validate()?;
+        self.evidence.validate()?;
+        if self.facts.is_empty() {
+            return Err(ObservationContractError::CanonicalFactsRequired);
+        }
+        for fact in &self.facts {
+            fact.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalObservationRelationsV1 {
+    session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thread_id: Option<ObservationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    turn_id: Option<ObservationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_id: Option<ObservationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_message_id: Option<ObservationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_id: Option<ObservationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_agent_id: Option<ObservationId>,
+}
+
+impl CanonicalObservationRelationsV1 {
+    pub fn new(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            thread_id: None,
+            turn_id: None,
+            message_id: None,
+            parent_message_id: None,
+            agent_id: None,
+            parent_agent_id: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_thread_id(mut self, thread_id: ObservationId) -> Self {
+        self.thread_id = Some(thread_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_turn_id(mut self, turn_id: ObservationId) -> Self {
+        self.turn_id = Some(turn_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_message_id(mut self, message_id: ObservationId) -> Self {
+        self.message_id = Some(message_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_parent_message_id(mut self, parent_message_id: ObservationId) -> Self {
+        self.parent_message_id = Some(parent_message_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_agent_id(mut self, agent_id: ObservationId) -> Self {
+        self.agent_id = Some(agent_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_parent_agent_id(mut self, parent_agent_id: ObservationId) -> Self {
+        self.parent_agent_id = Some(parent_agent_id);
+        self
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    pub fn message_id(&self) -> Option<&ObservationId> {
+        self.message_id.as_ref()
+    }
+
+    pub fn agent_id(&self) -> Option<&ObservationId> {
+        self.agent_id.as_ref()
+    }
+
+    pub fn parent_agent_id(&self) -> Option<&ObservationId> {
+        self.parent_agent_id.as_ref()
+    }
+
+    fn validate(&self) -> Result<(), ObservationContractError> {
+        self.session_id
+            .validate()
+            .map_err(|_| ObservationContractError::InvalidSourceIdentity)?;
+        for id in [
+            self.thread_id.as_ref(),
+            self.turn_id.as_ref(),
+            self.message_id.as_ref(),
+            self.parent_message_id.as_ref(),
+            self.agent_id.as_ref(),
+            self.parent_agent_id.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            id.validate()
+                .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalObservationEvidenceV1 {
+    ordering_domain: ObservationOrderingDomainV1,
+    range: ObservationSourceRangeV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_timestamp: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
+}
+
+impl CanonicalObservationEvidenceV1 {
+    pub fn new(
+        ordering_domain: ObservationOrderingDomainV1,
+        range: ObservationSourceRangeV1,
+    ) -> Self {
+        Self {
+            ordering_domain,
+            range,
+            native_sequence: None,
+            native_timestamp: None,
+            revision: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_native_sequence(mut self, native_sequence: u64) -> Self {
+        self.native_sequence = Some(native_sequence);
+        self
+    }
+
+    #[must_use]
+    pub fn with_native_timestamp(mut self, native_timestamp: i64) -> Self {
+        self.native_timestamp = Some(native_timestamp);
+        self
+    }
+
+    pub fn with_revision(
+        mut self,
+        revision: impl Into<String>,
+    ) -> Result<Self, ObservationContractError> {
+        let revision = revision.into();
+        validate_canonical_label(&revision)?;
+        self.revision = Some(revision);
+        Ok(self)
+    }
+
+    pub fn ordering_domain(&self) -> ObservationOrderingDomainV1 {
+        self.ordering_domain
+    }
+
+    pub fn range(&self) -> ObservationSourceRangeV1 {
+        self.range
+    }
+
+    pub fn native_sequence(&self) -> Option<u64> {
+        self.native_sequence
+    }
+
+    pub fn native_timestamp(&self) -> Option<i64> {
+        self.native_timestamp
+    }
+
+    pub fn revision(&self) -> Option<&str> {
+        self.revision.as_deref()
+    }
+
+    fn validate(&self) -> Result<(), ObservationContractError> {
+        if let Some(revision) = &self.revision {
+            validate_canonical_label(revision)
+                .map_err(|_| ObservationContractError::InvalidCanonicalOrderingEvidence)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalMessageRoleV1 {
+    User,
+    Assistant,
+    System,
+    Tool,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalReasoningVisibilityV1 {
+    Visible,
+    Redacted,
+    Unavailable,
+    NotApplicable,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalGitEvidenceKindV1 {
+    Diff,
+    FileEdit,
+    Commit,
+    Branch,
+    PullRequest,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalWorkflowEvidenceKindV1 {
+    Plan,
+    Task,
+    Subagent,
+    ModelFallback,
+    Attribution,
+    PullRequest,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalBoundaryKindV1 {
+    SessionStart,
+    SessionEnd,
+    TurnStart,
+    TurnEnd,
+    CompactionBoundary,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalUnknownStateV1 {
+    Absent,
+    Null,
+    Unsupported,
+    Redacted,
+    Unrecoverable,
+    Malformed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CanonicalObservationFactV1 {
+    Message {
+        role: CanonicalMessageRoleV1,
+        content: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<i64>,
+    },
+    ToolInvocation {
+        invocation_id: ObservationId,
+        name: String,
+        arguments: Value,
+    },
+    ToolResult {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invocation_id: Option<ObservationId>,
+        content: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        success: Option<bool>,
+    },
+    Usage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_write_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_tokens: Option<u64>,
+    },
+    Compaction {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<u64>,
+    },
+    Reasoning {
+        visibility: CanonicalReasoningVisibilityV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<Value>,
+    },
+    Git {
+        evidence_kind: CanonicalGitEvidenceKindV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<Value>,
+    },
+    Workflow {
+        evidence_kind: CanonicalWorkflowEvidenceKindV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<Value>,
+    },
+    Boundary {
+        boundary_kind: CanonicalBoundaryKindV1,
+    },
+    Unknown {
+        native_kind: String,
+        state: CanonicalUnknownStateV1,
+    },
+}
+
+impl CanonicalObservationFactV1 {
+    fn validate(&self) -> Result<(), ObservationContractError> {
+        match self {
+            Self::ToolInvocation {
+                invocation_id,
+                name,
+                ..
+            } => {
+                invocation_id
+                    .validate()
+                    .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?;
+                validate_canonical_label(name)?;
+            }
+            Self::ToolResult {
+                invocation_id: Some(invocation_id),
+                ..
+            } => invocation_id
+                .validate()
+                .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?,
+            Self::Reasoning {
+                visibility,
+                content,
+            } if (*visibility == CanonicalReasoningVisibilityV1::Visible) != content.is_some() => {
+                return Err(ObservationContractError::InvalidReasoningVisibility);
+            }
+            Self::Git { reference, .. } | Self::Workflow { reference, .. } => {
+                if let Some(reference) = reference {
+                    validate_canonical_label(reference)?;
+                }
+            }
+            Self::Unknown { native_kind, .. } => validate_canonical_label(native_kind)?,
+            Self::Message { .. }
+            | Self::ToolResult { .. }
+            | Self::Usage { .. }
+            | Self::Compaction { .. }
+            | Self::Reasoning { .. }
+            | Self::Boundary { .. } => {}
+        }
+        Ok(())
+    }
+}
+
+fn validate_canonical_label(value: &str) -> Result<(), ObservationContractError> {
+    if value.trim().is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        return Err(ObservationContractError::InvalidCanonicalRecordKind);
+    }
+    Ok(())
+}
 
 /// Canonical content-addressed reference to a sanitized JSON payload.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -526,9 +1145,40 @@ impl SensitivityV1 {
     }
 }
 
-/// Canonical inputs used to derive one Claude sanitization receipt reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReceiptDomainV1 {
+    Claude,
+    Observation,
+}
+
+impl ReceiptDomainV1 {
+    fn for_identity(identity: &ObservationIdentityMaterialV1) -> Self {
+        if is_default_observation_provider(identity.source().provider()) {
+            Self::Claude
+        } else {
+            Self::Observation
+        }
+    }
+
+    fn digest_domain(self) -> &'static [u8] {
+        match self {
+            Self::Claude => CLAUDE_RECEIPT_ID_DOMAIN,
+            Self::Observation => OBSERVATION_RECEIPT_ID_DOMAIN,
+        }
+    }
+
+    fn id_prefix(self) -> &'static str {
+        match self {
+            Self::Claude => CLAUDE_RECEIPT_ID_PREFIX,
+            Self::Observation => OBSERVATION_RECEIPT_ID_PREFIX,
+        }
+    }
+}
+
+/// Canonical inputs used to derive one sanitization receipt reference.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalClaudeSanitizationReceiptMaterialV1 {
+    receipt_domain: ReceiptDomainV1,
     sanitizer_version: ComponentVersion,
     observation_id: CanonicalObservationIdV1,
     disposition: SanitizerDispositionV1,
@@ -550,6 +1200,7 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
         let observation_id = CanonicalObservationIdV1::derive(identity)?;
         let raw_digest = Sha256::digest(&evidence).into();
         Ok(Self {
+            receipt_domain: ReceiptDomainV1::for_identity(identity),
             sanitizer_version,
             observation_id,
             disposition,
@@ -598,6 +1249,7 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
         validate_receipt_sensitivity(disposition, sensitivity)?;
         let observation_id = CanonicalObservationIdV1::derive(identity)?;
         Ok(Self {
+            receipt_domain: ReceiptDomainV1::for_identity(identity),
             sanitizer_version,
             observation_id,
             disposition,
@@ -636,6 +1288,7 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
         validate_receipt_sensitivity(disposition, sensitivity)?;
         let observation_id = CanonicalObservationIdV1::derive(identity)?;
         Ok(Self {
+            receipt_domain: ReceiptDomainV1::for_identity(identity),
             sanitizer_version,
             observation_id,
             disposition,
@@ -649,20 +1302,21 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
     pub fn derive_receipt_ref(&self) -> Result<SanitizationReceiptRefV1, ObservationContractError> {
         let mut hasher = Sha256::new();
         if let Some(evidence) = &self.legacy_evidence {
-            hasher.update(CLAUDE_RECEIPT_ID_DOMAIN);
+            hasher.update(self.receipt_domain.digest_domain());
             hasher.update(self.sanitizer_version.as_str().as_bytes());
             hasher.update(self.observation_id.as_str().as_bytes());
             hasher.update(self.disposition.as_str().as_bytes());
             hasher.update(evidence);
             let receipt_id = SanitizationReceiptId::new(format!(
-                "{CLAUDE_RECEIPT_ID_PREFIX}{}",
+                "{}{}",
+                self.receipt_domain.id_prefix(),
                 format_hex(&hasher.finalize())
             ))
             .map_err(|_| ObservationContractError::InvalidReceiptReference)?;
             return SanitizationReceiptRefV1::new(receipt_id, self.sanitizer_version.clone())
                 .map_err(|_| ObservationContractError::InvalidReceiptReference);
         }
-        update_hash_frame(&mut hasher, CLAUDE_RECEIPT_ID_DOMAIN);
+        update_hash_frame(&mut hasher, self.receipt_domain.digest_domain());
         update_hash_frame(&mut hasher, self.sanitizer_version.as_str().as_bytes());
         update_hash_frame(&mut hasher, self.observation_id.as_str().as_bytes());
         update_hash_frame(&mut hasher, self.disposition.as_str().as_bytes());
@@ -677,7 +1331,8 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
             update_hash_frame(&mut hasher, CLAUDE_RECEIPT_NO_PAYLOAD_DOMAIN);
         }
         let receipt_id = SanitizationReceiptId::new(format!(
-            "{CLAUDE_RECEIPT_ID_PREFIX}{}",
+            "{}{}",
+            self.receipt_domain.id_prefix(),
             format_hex(&hasher.finalize())
         ))
         .map_err(|_| ObservationContractError::InvalidReceiptReference)?;
@@ -685,6 +1340,9 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
             .map_err(|_| ObservationContractError::InvalidReceiptReference)
     }
 }
+
+pub type CanonicalObservationSanitizationReceiptMaterialV1 =
+    CanonicalClaudeSanitizationReceiptMaterialV1;
 
 fn validate_receipt_sensitivity(
     disposition: SanitizerDispositionV1,

@@ -1,7 +1,9 @@
 use tempfile::TempDir;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::kiro::KiroSource;
-use tracedecay::sessions::source::ingest_source;
+use tracedecay::sessions::source::{
+    StoredCursor, TranscriptIngestError, TranscriptSource, ingest_source,
+};
 
 use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree, setup};
 
@@ -179,24 +181,24 @@ async fn kiro_legacy_chat_populates_searchable_messages() {
     );
     assert_eq!(session.started_at, Some(1_800_000_000));
     assert_eq!(session.ended_at, Some(1_800_000_001));
-    let first = db
-        .get_session_message("kiro", "kiro-workflow-1:0")
-        .await
-        .unwrap();
+    let first = results
+        .iter()
+        .find(|hit| hit.message.ordinal == 0)
+        .expect("first Kiro message");
     let first_metadata: serde_json::Value =
-        serde_json::from_str(first.metadata_json.as_deref().unwrap()).unwrap();
+        serde_json::from_str(first.message.metadata_json.as_deref().unwrap()).unwrap();
     assert_metadata_path_eq(&first_metadata["kiro_workspace_cwd"], &linked_worktree);
     assert_metadata_path_eq(&first_metadata["kiro_workspace_worktree"], &linked_worktree);
     assert_eq!(
         first_metadata["kiro_workspace_location_provenance"].as_str(),
         Some("workspace_mapping")
     );
-    assert_eq!(first.timestamp, Some(1_800_000_000));
-    let second = db
-        .get_session_message("kiro", "kiro-workflow-1:1")
-        .await
-        .unwrap();
-    assert_eq!(second.timestamp, Some(1_800_000_001));
+    assert_eq!(first.message.timestamp, Some(1_800_000_000));
+    let second = results
+        .iter()
+        .find(|hit| hit.message.ordinal == 1)
+        .expect("second Kiro message");
+    assert_eq!(second.message.timestamp, Some(1_800_000_001));
 
     assert_eq!(
         ingest_source(&db, &source, &project, None)
@@ -242,24 +244,118 @@ async fn kiro_workspace_sessions_json_is_ingested() {
     );
     assert_eq!(session.started_at, Some(1_800_000_000));
     assert_eq!(session.ended_at, Some(1_800_000_010));
-    let first = db
-        .get_session_message("kiro", "sess-modern:0")
-        .await
-        .unwrap();
+    let first = results
+        .iter()
+        .find(|hit| hit.message.ordinal == 0)
+        .expect("first Kiro message");
     let first_metadata: serde_json::Value =
-        serde_json::from_str(first.metadata_json.as_deref().unwrap()).unwrap();
+        serde_json::from_str(first.message.metadata_json.as_deref().unwrap()).unwrap();
     assert_metadata_path_eq(&first_metadata["kiro_workspace_cwd"], &linked_worktree);
     assert_metadata_path_eq(&first_metadata["kiro_workspace_worktree"], &linked_worktree);
     assert_eq!(
         first_metadata["kiro_workspace_location_provenance"].as_str(),
         Some("workspace_mapping")
     );
-    assert_eq!(first.timestamp, Some(1_800_000_000));
-    let second = db
-        .get_session_message("kiro", "sess-modern:1")
-        .await
-        .unwrap();
-    assert_eq!(second.timestamp, Some(1_800_000_010));
+    assert_eq!(first.message.timestamp, Some(1_800_000_000));
+    let second = results
+        .iter()
+        .find(|hit| hit.message.ordinal == 1)
+        .expect("second Kiro message");
+    assert_eq!(second.message.timestamp, Some(1_800_000_010));
+}
+
+#[tokio::test]
+async fn kiro_fallback_identity_survives_snapshot_insertion() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let path = write_workspace_session_json(&home, &project, "sess-stable");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = KiroSource::with_home(&home);
+    ingest_source(&db, &source, &project, None).await;
+    let before = db
+        .search_session_messages("kiro", None, "regression is fixed", 10)
+        .await;
+    let assistant_id = before
+        .iter()
+        .find(|hit| hit.message.role == "assistant")
+        .expect("assistant before insertion")
+        .message
+        .message_id
+        .clone();
+
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "sessionId": "sess-stable",
+            "modelId": "claude-sonnet-4.6",
+            "messages": [
+                {"role": "user", "content": "New earlier context", "timestamp": 1_799_999_999_000_i64},
+                {"role": "user", "content": "Investigate the billing pipeline regression", "timestamp": 1_800_000_000_000_i64},
+                {"role": "assistant", "content": "The billing pipeline regression is fixed.", "timestamp": 1_800_000_010_000_i64}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    ingest_source(&db, &source, &project, None).await;
+
+    let after = db
+        .search_session_messages("kiro", None, "regression is fixed", 10)
+        .await;
+    let assistant = after
+        .iter()
+        .find(|hit| hit.message.role == "assistant")
+        .expect("assistant after insertion");
+    assert_eq!(assistant.message.message_id, assistant_id);
+}
+
+#[test]
+fn kiro_complete_malformed_snapshot_is_typed_non_durable() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let path = write_workspace_session_json(&home, &project, "sess-malformed");
+    std::fs::write(&path, "{not-json]").unwrap();
+
+    let source = KiroSource::with_home(&home);
+    assert!(matches!(
+        source.try_parse_new(&path, StoredCursor::default(), &project, None),
+        Err(TranscriptIngestError::NonDurableRecord {
+            provider: "kiro",
+            reason: "malformed snapshot JSON",
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn kiro_incomplete_snapshot_does_not_advance_frontier() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let path = write_workspace_session_json(&home, &project, "sess-incomplete");
+    std::fs::write(&path, r#"{"sessionId":"sess-incomplete","messages":["#).unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = KiroSource::with_home(&home);
+    assert_eq!(
+        ingest_source(&db, &source, &project, None)
+            .await
+            .messages_upserted,
+        0
+    );
+    assert!(
+        db.get_parse_offset(path.to_string_lossy().as_ref())
+            .await
+            .is_none()
+    );
+
+    write_workspace_session_json(&home, &project, "sess-incomplete");
+    assert_eq!(
+        ingest_source(&db, &source, &project, None)
+            .await
+            .messages_upserted,
+        2
+    );
 }
 
 #[tokio::test]

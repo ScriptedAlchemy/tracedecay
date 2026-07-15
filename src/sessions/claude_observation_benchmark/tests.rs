@@ -9,7 +9,6 @@ use super::artifact::{
     validate_evidence_directory, validate_git_snapshots, validate_release_profile,
     verify_git_toplevel, workload_identity,
 };
-use super::manifest;
 use super::metrics::{
     PhaseAggregate, aggregate_samples, parse_clock_ticks_per_second, parse_cpu_identity,
     parse_proc_stat_cpu_ticks, parse_proc_value, ticks_to_ms, validate_no_op_invariants,
@@ -23,6 +22,7 @@ use super::{
     BENCHMARK_COMMAND, HARNESS_SOURCES, MEASURED_REPETITIONS, RECORDS_PER_REPETITION,
     RESULT_SCHEMA_VERSION, WARMUP_REPETITIONS, WORKLOAD_ID, WORKLOAD_MANIFEST,
 };
+use super::{baseline, manifest};
 
 type CounterMutation = (&'static str, fn(&mut NoOpTotals));
 
@@ -33,6 +33,58 @@ fn workload_manifest_matches_executable_contract() {
     assert_eq!(identity.manifest_sha256.len(), 64);
     assert_eq!(identity.harness_sha256.len(), 64);
     assert_eq!(identity.harness_paths.len(), HARNESS_SOURCES.len());
+}
+
+#[test]
+fn provider_baselines_are_versioned_bounded_and_redacted() {
+    let catalog = baseline::catalog();
+    let serialized = serde_json::to_value(&catalog).unwrap();
+    assert_eq!(serialized["schema_version"], 1);
+    assert_eq!(
+        serialized["catalog_id"],
+        "provider-observation-baselines-v1"
+    );
+    let baselines = serialized["baselines"].as_array().unwrap();
+    assert_eq!(baselines.len(), 8);
+    assert_eq!(
+        baselines
+            .iter()
+            .map(|baseline| baseline["provider"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "claude", "codex", "cursor", "hermes", "kiro", "cline", "roo-code", "kilo",
+        ]
+    );
+    for baseline in baselines {
+        assert_eq!(baseline["checks"].as_array().unwrap().len(), 10);
+        assert_eq!(
+            baseline["bounds"]["records_per_repetition"],
+            RECORDS_PER_REPETITION
+        );
+        assert_eq!(
+            baseline["bounds"]["replay_limit"],
+            RECORDS_PER_REPETITION + 1
+        );
+        assert_eq!(
+            baseline["bounds"]["max_backlog_records"],
+            RECORDS_PER_REPETITION
+        );
+        assert_eq!(baseline["bounds"]["fair_rotation_providers"], 8);
+        let fixture = &baseline["fixture"];
+        assert_eq!(fixture["format"], "deterministic_redacted_synthetic_v1");
+        assert!(
+            fixture["redacted_secret"]
+                .as_str()
+                .unwrap()
+                .contains("redacted")
+        );
+        assert!(
+            !fixture["redacted_secret"]
+                .as_str()
+                .unwrap()
+                .contains("benchmark-secret-")
+        );
+    }
 }
 
 #[test]

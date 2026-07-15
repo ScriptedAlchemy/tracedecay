@@ -1,21 +1,24 @@
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
 use tracedecay::application::observation::{
-    CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest, GetObservationRequest,
-    ObservationApplication, ObservationApplicationError, ObservationCancellation,
-    ReplayObservationsRequest,
+    CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest, CaptureObservationOutcome,
+    CaptureObservationRequest, GetObservationRequest, ObservationApplication,
+    ObservationApplicationError, ObservationCancellation, ReplayObservationsRequest,
 };
 use tracedecay::privacy::{
-    ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1, parse_claude_record_v1,
+    ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1, RecordSanitizerV1, parse_claude_record_v1,
+    parse_observation_record_v1,
 };
 use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
-    ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ObservationScopeV1, RetentionClass, SessionId,
+    ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
 };
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationReplayRequest,
-    ObservationStore, ProjectionPersistOutcome,
+    ObservationStore, ProjectionPersistOutcome, ProjectionStoreError,
 };
 
 use crate::common::{isolated_lcm_db_path, open_lcm_db};
@@ -145,7 +148,7 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
     let db = open_lcm_db(&tmp).await;
     let application = ObservationApplication::new(
         GlobalDbObservationStore::new(&db),
-        ClaudeRecordSanitizerV1::pr5().unwrap(),
+        ClaudeRecordSanitizerV1::claude_v1().unwrap(),
     );
     let session_id = "session.observation-privacy";
     let secret = "sk-proj-observation-sink-canary-1234567890";
@@ -258,7 +261,7 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
     let application = ObservationApplication::new(
         GlobalDbObservationStore::new(&db),
         ClaudeRecordSanitizerV1::new(
-            ClaudeSanitizerPolicyV1::pr5()
+            ClaudeSanitizerPolicyV1::claude_v1()
                 .unwrap()
                 .with_limits(1, usize::MAX, usize::MAX)
                 .unwrap(),
@@ -267,7 +270,7 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
     let quarantine_application = ObservationApplication::new(
         GlobalDbObservationStore::new(&db),
         ClaudeRecordSanitizerV1::new(
-            ClaudeSanitizerPolicyV1::pr5()
+            ClaudeSanitizerPolicyV1::claude_v1()
                 .unwrap()
                 .with_limits(usize::MAX, 2, usize::MAX)
                 .unwrap(),
@@ -332,5 +335,79 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
             .unwrap()
             .observations()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn native_ordering_domain_survives_authoritative_capture() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let application = ObservationApplication::new(
+        GlobalDbObservationStore::new(&db),
+        RecordSanitizerV1::observation_v1().unwrap(),
+    );
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new("hermes").unwrap(),
+        SessionId::new("session.native-ordering").unwrap(),
+    )
+    .unwrap();
+    let range = ObservationSourceRangeV1::new(41, 42).unwrap();
+    let ordering_domain = ObservationOrderingDomainV1::SqliteRowId;
+    let record = serde_json::to_vec(&conversational_record(
+        "message-native-ordering",
+        "native ordering payload",
+        "safe-value",
+    ))
+    .unwrap();
+    let parsed = parse_observation_record_v1(&record, range, ordering_domain).unwrap();
+    let request = CaptureObservationRequest::new(
+        parsed,
+        ObservationIdentityMaterialV1::for_native_record(
+            source.clone(),
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(GENERATION).unwrap(),
+            range,
+            ordering_domain,
+            ObservationId::new("hermes.message.native-ordering").unwrap(),
+        )
+        .unwrap(),
+        None,
+        RetentionClass::new("retention.observation-application-test").unwrap(),
+        ObservationCancellation::default(),
+    )
+    .unwrap();
+
+    let outcome = application.capture_observation(request).await.unwrap();
+    let observation_id = match &outcome {
+        CaptureObservationOutcome::Persisted { outcome, .. } => {
+            assert!(matches!(outcome, ObservationPersistOutcome::Committed(_)));
+            outcome.receipt().observation().observation_id().clone()
+        }
+        other => panic!("native observation must persist, got {other:?}"),
+    };
+    let cursor = store
+        .get_source_cursor(&source, &ObservationScopeV1::Profile)
+        .await
+        .unwrap()
+        .expect("native cursor");
+    assert_eq!(cursor.ordering_domain(), ordering_domain);
+    assert_eq!(cursor.position(), 42);
+
+    let projection_error = store
+        .project_observation(&observation_id)
+        .await
+        .expect_err("an unmapped provider must fail closed");
+    assert!(matches!(
+        projection_error,
+        ProjectionStoreError::UnsupportedProvider(provider) if provider == "hermes"
+    ));
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        0
+    );
+    assert_eq!(
+        store.next_queued_observation().await.unwrap().as_ref(),
+        Some(&observation_id)
     );
 }

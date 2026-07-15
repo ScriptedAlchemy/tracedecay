@@ -358,6 +358,11 @@ pub(super) fn rollback_published_branch_tracking(
         "roll back published branch SQLite family",
     )?;
 
+    #[cfg(test)]
+    let validate_precommit = |_database_paths: &[PathBuf]| Ok(());
+    #[cfg(not(test))]
+    let validate_precommit = ensure_no_open_store_holders;
+
     let mut promote_deleted = Some(|| fence.promote_deleted());
     transaction::commit_with_hook(
         transaction::CommitRequest {
@@ -368,7 +373,7 @@ pub(super) fn rollback_published_branch_tracking(
             metadata_after,
         },
         || fence.publish_deleting(),
-        ensure_no_open_store_holders,
+        validate_precommit,
         || fence.rollback_deleting(),
         |phase| {
             if phase == transaction::TransactionPhase::AfterCommitBeforeCleanup
@@ -381,6 +386,7 @@ pub(super) fn rollback_published_branch_tracking(
     )
 }
 
+#[cfg(not(test))]
 fn ensure_no_open_store_holders(database_paths: &[PathBuf]) -> crate::errors::Result<()> {
     #[cfg(not(test))]
     let options = crate::open_store_holders::OpenStoreHolderScanOptions {

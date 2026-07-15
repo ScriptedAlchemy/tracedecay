@@ -1,9 +1,9 @@
 use libsql::params;
 use tracedecay_domain::CanonicalObservationIdV1;
 use tracedecay_store::{
-    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ClaudeObservationProjection, ProjectionCheckpoint,
-    ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionStoreError,
-    ProjectionStoreResult,
+    ObservationProjection, ProjectionCheckpoint, ProjectionPersistOutcome,
+    ProjectionRebuildOutcome, ProjectionStoreError, ProjectionStoreResult,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V1,
 };
 
 use super::super::GlobalDb;
@@ -87,10 +87,8 @@ impl GlobalDb {
             .await
             .map_err(|error| storage("commit projection transaction", error))?;
         Ok(match effect {
-            ClaudeObservationProjection::Message(_) => {
-                ProjectionPersistOutcome::Projected(checkpoint)
-            }
-            ClaudeObservationProjection::Skipped(reason) => {
+            ObservationProjection::Message(_) => ProjectionPersistOutcome::Projected(checkpoint),
+            ObservationProjection::Skipped(reason) => {
                 ProjectionPersistOutcome::Skipped { checkpoint, reason }
             }
         })
@@ -157,7 +155,7 @@ impl GlobalDb {
                       AND retained.output_message_id = current.output_message_id
                       AND retained.projector_version <> current.projector_version
                    )",
-                params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+                params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
             )
             .await
             .map_err(|error| storage("materialize retained projection outputs", error))?;
@@ -177,7 +175,7 @@ impl GlobalDb {
                           AND retained.output_message_id = provenance.output_message_id
                       )
                  )",
-                params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+                params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
             )
             .await
             .map_err(|error| storage("clear projection rows for rebuild", error))?;
@@ -191,7 +189,7 @@ impl GlobalDb {
                     WHERE retained.output_provider = observation_projection_provenance.output_provider
                       AND retained.output_message_id = observation_projection_provenance.output_message_id
                    )",
-                params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+                params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
             )
             .await
             .map_err(|error| storage("clear projection provenance for rebuild", error))?;
@@ -206,14 +204,14 @@ impl GlobalDb {
         transaction
             .execute(
                 "DELETE FROM observation_projection_dispositions WHERE projector_version = ?1",
-                params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+                params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
             )
             .await
             .map_err(|error| storage("clear projection dispositions for rebuild", error))?;
         transaction
             .execute(
                 "DELETE FROM observation_projection_checkpoints WHERE projector_version = ?1",
-                params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+                params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
             )
             .await
             .map_err(|error| storage("clear projection checkpoint for rebuild", error))?;
@@ -249,8 +247,8 @@ impl GlobalDb {
             for (sequence, observation) in page {
                 let effect = derive_projection_with_alias(&transaction, &observation).await?;
                 match effect {
-                    ClaudeObservationProjection::Message(_) => projected_rows += 1,
-                    ClaudeObservationProjection::Skipped(_) => skipped_observations += 1,
+                    ObservationProjection::Message(_) => projected_rows += 1,
+                    ObservationProjection::Skipped(_) => skipped_observations += 1,
                 }
                 apply_effect(&transaction, sequence, &observation, &effect).await?;
                 last_sequence = i64::try_from(sequence)

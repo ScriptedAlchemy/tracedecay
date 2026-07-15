@@ -141,14 +141,19 @@ async fn verify_sqlite_backup(path: &Path) -> Result<(), LcmError> {
 }
 
 fn sync_file(path: &Path) -> Result<(), LcmError> {
-    fs::File::open(path)
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
         .and_then(|file| file.sync_all())
         .map_err(|error| LcmError::Io(error.to_string()))
 }
 
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), LcmError> {
-    sync_file(path)
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| LcmError::Io(error.to_string()))
 }
 
 #[cfg(not(unix))]
