@@ -28,9 +28,9 @@ use crate::sessions::{
     },
 };
 
-mod observation_store;
 mod observation;
 mod observation_projection;
+mod observation_store;
 mod transcript;
 
 pub use observation_store::{ProjectObservationStoreError, ProjectObservationStoreResolution};

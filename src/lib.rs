@@ -27,6 +27,7 @@ pub mod accounting;
 pub mod agents;
 mod analytics;
 pub mod analytics_bridge;
+pub mod application;
 pub mod ast_grep_search;
 pub mod automation;
 pub mod bench;
