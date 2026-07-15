@@ -139,6 +139,7 @@ pub fn print_status_header(
 }
 
 /// Inputs for rendering the compact status table.
+#[derive(Clone, Copy)]
 pub struct StatusTable<'a> {
     pub stats: &'a GraphStats,
     pub tokens_saved: u64,
