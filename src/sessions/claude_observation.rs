@@ -344,6 +344,7 @@ async fn process_source(
             ..ClaudeObservationIngestStats::default()
         });
     }
+    let source_deferred = matches!(scan.coverage, ClaudeFrameCoverage::Deferred { .. });
 
     let generation = ClaudeFileGenerationV1::new(scan.file_generation)?;
     let sanitizer = ClaudeRecordSanitizerV1::pr5()?;
@@ -375,7 +376,10 @@ async fn process_source(
         return Err(ClaudeObservationIngestError::NonContiguousCoverage);
     }
 
-    let mut stats = ClaudeObservationIngestStats::default();
+    let mut stats = ClaudeObservationIngestStats {
+        deferred_sources: u64::from(source_deferred),
+        ..ClaudeObservationIngestStats::default()
+    };
     let mut observation_cursor = observation_cursor;
     let mut sanitized_frames = Vec::new();
     for segment in segments {
@@ -760,6 +764,73 @@ mod tests {
         );
     }
 
+    async fn assert_invalid_suffix_preserves_valid_prefix(session_id: &str, suffix: &[u8]) {
+        let fixture = Fixture::new(session_id).await;
+        let marker = format!("valid prefix before {session_id}");
+        let record = json!({
+            "type": "user",
+            "sessionId": session_id,
+            "uuid": format!("message-{session_id}"),
+            "timestamp": "2026-07-15T00:00:00Z",
+            "cwd": fixture.temp.path(),
+            "message": { "role": "user", "content": marker },
+        });
+        let mut bytes = format!("{record}\n").into_bytes();
+        let suffix_start = u64::try_from(bytes.len()).unwrap();
+        bytes.extend_from_slice(suffix);
+        fs::write(&fixture.transcript, bytes).expect("write valid prefix and invalid suffix");
+
+        let source_adapter = fixture.source(session_id);
+        let source = ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap();
+        let first = fixture
+            .ingest(&source_adapter, None, ObservationCancellation::default())
+            .await
+            .expect("valid prefix must commit before invalid suffix defers");
+        assert_eq!(first.observations_committed, 1);
+        assert_eq!(first.transcript.messages_upserted, 1);
+        assert_eq!(first.projections_completed, 1);
+        assert_eq!(first.deferred_sources, 1);
+
+        let store = GlobalDbObservationStore::new(&fixture.db);
+        let source_cursor = store
+            .get_source_cursor(&source, &ObservationScopeV1::Profile)
+            .await
+            .unwrap()
+            .expect("valid prefix source cursor");
+        assert_eq!(source_cursor.byte_offset(), suffix_start);
+        let identity = identify_claude_source(&fixture.transcript).unwrap();
+        let transcript_store = GlobalDbTranscriptStore::new(&fixture.db);
+        let transcript_cursor = load_transcript_cursor(&transcript_store, identity.cursor_key)
+            .await
+            .expect("valid prefix transcript cursor");
+        assert_eq!(transcript_cursor.checkpoint.state.position, suffix_start);
+        assert_eq!(
+            store
+                .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            fixture
+                .db
+                .search_session_messages("claude", Some("user"), &marker, 10)
+                .await
+                .len(),
+            1
+        );
+
+        let committed = ingest_state_counts(&fixture).await;
+        let retry = fixture
+            .ingest(&source_adapter, None, ObservationCancellation::default())
+            .await
+            .expect("invalid suffix retry must remain deferred");
+        assert_eq!(retry.deferred_sources, 1);
+        assert_eq!(retry.transcript, TranscriptIngestStats::default());
+        assert_eq!(ingest_state_counts(&fixture).await, committed);
+    }
+
     #[tokio::test]
     async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_row() {
         let fixture = Fixture::new("production-session").await;
@@ -903,6 +974,26 @@ mod tests {
             ("invalid-oversized", oversized.as_bytes()),
         ] {
             assert_invalid_frame_preserves_observation_state(session_id, frame).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_prefix_commits_once_before_invalid_suffix_without_cursor_drift() {
+        let oversized = format!(
+            "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
+            "x".repeat(crate::privacy::PR5_MAX_CLAUDE_RECORD_BYTES)
+        );
+        for (session_id, suffix) in [
+            (
+                "prefix-malformed",
+                br#"{"type":"user",malformed}
+"#
+                .as_slice(),
+            ),
+            ("prefix-partial", br#"{"type":"user""#.as_slice()),
+            ("prefix-oversized", oversized.as_bytes()),
+        ] {
+            assert_invalid_suffix_preserves_valid_prefix(session_id, suffix).await;
         }
     }
 }

@@ -67,6 +67,56 @@ fn storage_message(operation: &'static str, message: impl Into<String>) -> Obser
     storage(operation, std::io::Error::other(message.into()))
 }
 
+#[cfg(any(test, feature = "test-transport"))]
+const TEST_OBSERVATION_PERSIST_BARRIER_DIR_ENV: &str =
+    "TRACEDECAY_TEST_OBSERVATION_PERSIST_BARRIER_DIR";
+
+/// One-shot, cross-process test barrier after the authoritative transaction begins.
+///
+/// The daemon atomically claims an `armed` file, publishes `arrived`, and waits for `release`.
+/// The wait is bounded so a failed test cannot leave a live daemon blocked indefinitely.
+#[cfg(any(test, feature = "test-transport"))]
+async fn wait_at_observation_persist_test_barrier(session_id: &str) -> ObservationStoreResult<()> {
+    let Some(root) = std::env::var_os(TEST_OBSERVATION_PERSIST_BARRIER_DIR_ENV) else {
+        return Ok(());
+    };
+    let root = std::path::PathBuf::from(root);
+    let armed = root.join("armed");
+    let expected_session = match std::fs::read_to_string(&armed) {
+        Ok(expected) => expected,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage("read observation test barrier", error)),
+    };
+    if expected_session.trim() != session_id {
+        return Ok(());
+    }
+    let claimed = root.join("claimed");
+    match std::fs::rename(&armed, &claimed) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage("claim observation test barrier", error)),
+    }
+    std::fs::write(root.join("arrived"), b"arrived\n")
+        .map_err(|error| storage("publish observation test barrier arrival", error))?;
+
+    let release = root.join("release");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match release.try_exists() {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => return Err(storage("read observation test barrier release", error)),
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(storage_message(
+                "wait at observation test barrier",
+                "timed out waiting for release",
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 fn encode<T: serde::Serialize>(
     value: &T,
     operation: &'static str,
@@ -241,6 +291,11 @@ impl GlobalDb {
             .begin_authoritative_transaction()
             .await
             .map_err(|error| storage("begin observation transaction", error))?;
+        #[cfg(any(test, feature = "test-transport"))]
+        wait_at_observation_persist_test_barrier(
+            write.observation().source().session_id().as_str(),
+        )
+        .await?;
 
         let candidate = write.observation();
         if let Some(existing) =

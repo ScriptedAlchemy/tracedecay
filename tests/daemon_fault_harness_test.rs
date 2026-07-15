@@ -2,15 +2,15 @@ mod common;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(unix)]
-use std::time::Duration;
+#[cfg(all(unix, feature = "test-transport"))]
+use std::{path::Path, time::Duration};
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "test-transport"))]
 use serde_json::Value;
 use serde_json::json;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "test-transport"))]
 use tracedecay::client_identity::DaemonClientIdentity;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "test-transport"))]
 use tracedecay::daemon::{DaemonHandshake, call_tool};
 use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
@@ -25,11 +25,16 @@ use tracedecay_store::{
     ObservationWrite,
 };
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "test-transport"))]
 use common::{daemon_socket_path, spawn_tracedecay_daemon, tracedecay_command_with_home};
 use common::{isolated_lcm_db_path, open_lcm_db, spawn_tracedecay_daemon_with, tempdir_or_panic};
 
 const GENERATION: u64 = 23;
+
+#[cfg(all(unix, feature = "test-transport"))]
+const OBSERVATION_PERSIST_BARRIER_DIR_ENV: &str = "TRACEDECAY_TEST_OBSERVATION_PERSIST_BARRIER_DIR";
+#[cfg(all(unix, feature = "test-transport"))]
+const DAEMON_TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn source(stage: &str) -> ClaudeSourceIdentityV1 {
     ClaudeSourceIdentityV1::new(SessionId::new(format!("session.daemon-fault.{stage}")).unwrap())
@@ -83,7 +88,7 @@ fn write(stage: &str, observation: DurableClaudeObservationV1) -> ObservationWri
     ObservationWrite::new(observation, None, cursor(stage, 100)).unwrap()
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "test-transport"))]
 fn json_tool_payload(response: &Value, operation: &str) -> Value {
     response["content"]
         .as_array()
@@ -95,6 +100,41 @@ fn json_tool_payload(response: &Value, operation: &str) -> Value {
             })
         })
         .unwrap_or_else(|| panic!("{operation} should return JSON content"))
+}
+
+#[cfg(all(unix, feature = "test-transport"))]
+async fn expect_bounded_tool_response(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    tool_name: &str,
+    arguments: Value,
+    operation: &str,
+) -> Value {
+    tokio::time::timeout(
+        DAEMON_TOOL_CALL_TIMEOUT,
+        call_tool(socket_path, handshake, tool_name, arguments),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{operation} timed out"))
+    .unwrap_or_else(|error| panic!("{operation} failed: {error}"))
+}
+
+#[cfg(all(unix, feature = "test-transport"))]
+async fn wait_for_observation_barrier_arrival(barrier_dir: &Path) {
+    tokio::time::timeout(DAEMON_TOOL_CALL_TIMEOUT, async {
+        loop {
+            if barrier_dir
+                .join("arrived")
+                .try_exists()
+                .expect("read observation barrier arrival")
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("daemon should reach the observation persistence barrier");
 }
 
 async fn set_statement_fault(tmp: &tempfile::TempDir, stage: &str, table: &str, enabled: bool) {
@@ -267,7 +307,7 @@ fn configured_daemon_can_be_killed_and_reaped() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "test-transport"))]
 #[tokio::test]
 async fn killed_daemon_retries_in_flight_claude_observation_once_via_public_apis() {
     let home = tempdir_or_panic();
@@ -292,7 +332,11 @@ async fn killed_daemon_retries_in_flight_claude_observation_once_via_public_apis
         String::from_utf8_lossy(&init.stderr)
     );
 
-    let mut daemon = spawn_tracedecay_daemon(home.path());
+    let barrier_dir = home.path().join("observation-persist-barrier");
+    std::fs::create_dir_all(&barrier_dir).unwrap();
+    let mut daemon = spawn_tracedecay_daemon_with(home.path(), |command| {
+        command.env(OBSERVATION_PERSIST_BARRIER_DIR_ENV, &barrier_dir);
+    });
     let profile_root = home.path().join(".tracedecay");
     let socket_path = daemon_socket_path(home.path());
     let handshake = DaemonHandshake {
@@ -319,14 +363,14 @@ async fn killed_daemon_retries_in_flight_claude_observation_once_via_public_apis
             "format": "json",
         })
     };
-    call_tool(
+    expect_bounded_tool_response(
         &socket_path,
         &handshake,
         "tracedecay_hook_runtime",
         ingest_args("bootstrap-user-store"),
+        "bootstrap user session store",
     )
-    .await
-    .expect("bootstrap user session store");
+    .await;
 
     let session_id = "claude-daemon-kill";
     let marker = "deterministic daemon observation boundary";
@@ -348,22 +392,14 @@ async fn killed_daemon_retries_in_flight_claude_observation_once_via_public_apis
     )
     .unwrap();
 
-    // A separate writer owns the database before the production daemon request starts.
-    // This is the strongest deterministic process-level barrier available without
-    // adding a production killpoint: the daemon reaches the observation commit
-    // boundary and waits for SQLite's immediate transaction lock.
-    let user_db_path = home.path().join(".tracedecay/user-sessions.db");
-    let barrier_db = libsql::Builder::new_local(&user_db_path)
-        .build()
-        .await
-        .unwrap();
-    let barrier = barrier_db.connect().unwrap();
-    barrier.execute_batch("BEGIN IMMEDIATE;").await.unwrap();
+    // Arm the feature-gated one-shot barrier. Its arrival receipt proves that the
+    // public daemon request reached the production observation persistence boundary.
+    std::fs::write(barrier_dir.join("armed"), format!("{session_id}\n")).unwrap();
 
     let interrupted_socket = socket_path.clone();
     let interrupted_handshake = handshake.clone();
     let interrupted_args = ingest_args(session_id);
-    let mut interrupted = tokio::spawn(async move {
+    let interrupted = tokio::spawn(async move {
         call_tool(
             &interrupted_socket,
             &interrupted_handshake,
@@ -372,20 +408,14 @@ async fn killed_daemon_retries_in_flight_claude_observation_once_via_public_apis
         )
         .await
     });
-    assert!(
-        tokio::time::timeout(Duration::from_millis(250), &mut interrupted)
-            .await
-            .is_err(),
-        "daemon request should be waiting at the database writer barrier"
-    );
+    wait_for_observation_barrier_arrival(&barrier_dir).await;
+    assert!(!interrupted.is_finished());
 
     let killed = daemon
         .kill_and_wait()
         .expect("in-flight daemon should be killed and reaped");
     assert!(!killed.success());
-    barrier.execute_batch("ROLLBACK;").await.unwrap();
-    drop(barrier);
-    drop(barrier_db);
+    std::fs::write(barrier_dir.join("release"), b"release\n").unwrap();
     assert!(
         tokio::time::timeout(Duration::from_secs(2), interrupted)
             .await
@@ -396,33 +426,33 @@ async fn killed_daemon_retries_in_flight_claude_observation_once_via_public_apis
     );
 
     let _restarted = spawn_tracedecay_daemon(home.path());
-    let committed = call_tool(
+    let committed = expect_bounded_tool_response(
         &socket_path,
         &handshake,
         "tracedecay_hook_runtime",
         ingest_args(session_id),
+        "retry interrupted Claude observation",
     )
-    .await
-    .expect("retry interrupted Claude observation");
+    .await;
     let committed_payload = json_tool_payload(&committed, "observation retry");
     assert_eq!(committed_payload["observations_committed"], 1);
     assert_eq!(committed_payload["messages_upserted"], 1);
 
-    let replayed = call_tool(
+    let replayed = expect_bounded_tool_response(
         &socket_path,
         &handshake,
         "tracedecay_hook_runtime",
         ingest_args(session_id),
+        "replay committed Claude observation",
     )
-    .await
-    .expect("replay committed Claude observation");
+    .await;
     let replayed_payload = json_tool_payload(&replayed, "observation replay");
     assert_eq!(replayed_payload["observations_committed"], 0);
     assert_eq!(replayed_payload["messages_upserted"], 0);
 
     let mut project_handshake = handshake.clone();
     project_handshake.project_path = Some(project.path().to_path_buf());
-    let search = call_tool(
+    let search = expect_bounded_tool_response(
         &socket_path,
         &project_handshake,
         "tracedecay_message_search",
@@ -434,9 +464,9 @@ async fn killed_daemon_retries_in_flight_claude_observation_once_via_public_apis
             "catch_up": false,
             "format": "json",
         }),
+        "user message search",
     )
-    .await
-    .expect("user message search");
+    .await;
     let payload = json_tool_payload(&search, "message search");
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["count"], 1, "retry must remain exactly once");
