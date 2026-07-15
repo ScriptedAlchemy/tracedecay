@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "Pure domain contracts for TraceDecay V2"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

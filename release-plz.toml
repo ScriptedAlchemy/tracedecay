@@ -17,3 +17,15 @@ publish = true
 publish_allow_dirty = true
 publish_timeout = "1h"
 semver_check = false
+
+# Publish workspace libraries before the root crate, but reserve the root
+# package's v{{ version }} tag and GitHub release for binary distribution.
+[[package]]
+name = "tracedecay-domain"
+git_release_enable = false
+git_tag_enable = false
+
+[[package]]
+name = "tracedecay-store"
+git_release_enable = false
+git_tag_enable = false
