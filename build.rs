@@ -373,9 +373,9 @@ fn append_plugin_files(
         }
         let deploy = format!("{deploy_prefix}/{relative}");
         let source = format!("{source_prefix}/{relative}");
-        let _ = write!(
+        let _ = writeln!(
             code,
-            "    PluginFile {{ relative: {deploy:?}, contents: include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/plugin/{source}\")) }},\n"
+            "    PluginFile {{ relative: {deploy:?}, contents: include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/plugin/{source}\")) }},"
         );
     }
     code.push_str("];\n");
@@ -452,11 +452,11 @@ fn append_generated_plugin_files(
     const_name: &str,
     files: impl IntoIterator<Item = (String, String)>,
 ) {
-    let _ = write!(code, "pub const {const_name}: &[PluginFile] = &[\n");
+    let _ = writeln!(code, "pub const {const_name}: &[PluginFile] = &[");
     for (relative, contents) in files {
-        let _ = write!(
+        let _ = writeln!(
             code,
-            "    PluginFile {{ relative: {relative:?}, contents: {contents:?} }},\n"
+            "    PluginFile {{ relative: {relative:?}, contents: {contents:?} }},"
         );
     }
     code.push_str("];\n");
