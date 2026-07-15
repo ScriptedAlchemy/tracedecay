@@ -1,11 +1,15 @@
 # Agent Notes
 
-## Cargo
+## Local Cargo Development (Zack's Machine Only)
 
-- Do not commit an absolute `[build].target-dir`; hosted CI and published packages must use repo-local or runner-local paths.
-- **Default: build into the checkout's own repo-local `target/` directory** (each worktree
-  has its own; checkouts under `/fast/projects/` are already on the fast disk, so this is
-  both isolated and fast). No `CARGO_TARGET_DIR` override needed in the normal case.
+- This section is an agent/workspace convention for developing TraceDecay in Zack's local
+  checkouts. It is not a TraceDecay product requirement, public contributor requirement,
+  published Cargo configuration, or hosted-CI policy.
+- Do not encode these machine-specific paths or cache choices in tracked product behavior,
+  repository Cargo configuration, public documentation, or CI solely to satisfy this section.
+- **Local default: build into the checkout's own repo-local `target/` directory** (each
+  worktree has its own; checkouts under `/fast/projects/` are already on this machine's fast
+  disk, so this is both isolated and fast). No `CARGO_TARGET_DIR` override needed normally.
 - **If the repo-local target dir is locked/contended** (another process holds the cargo
   build lock — "Blocking waiting for file lock on build directory" — or a concurrent agent
   owns the checkout), fall back to a cache target dir on the fast volume:
@@ -18,13 +22,8 @@
 - Run normal repo commands from the repo root: `cargo check`, `cargo test`, `cargo test-all`, `cargo nextest run --workspace --no-fail-fast`.
 - Toolchain caches (`sccache`, cargo registry) live under `/fast/cache/` and need no
   per-agent changes.
-- CI is unchanged and keeps runner-local paths:
-
-```sh
-CARGO_TARGET_DIR="${RUNNER_TEMP:-/tmp}/tracedecay-cargo-target" \
-TRACEDECAY_DATA_DIR="${RUNNER_TEMP:-/tmp}/tracedecay-test-profile/.tracedecay" \
-cargo test-all
-```
+- Hosted CI and other developers follow their own environment/repository defaults; never
+  assume this machine's `/fast` layout exists elsewhere.
 
 ## Learned User Preferences
 
