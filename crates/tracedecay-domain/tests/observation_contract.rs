@@ -161,13 +161,13 @@ fn source_cursors_enforce_their_comparison_domain() {
     let first = byte_cursor(
         "session.fixture",
         ObservationScopeV1::Profile,
-        generation.clone(),
+        generation,
         10,
     );
     let later = byte_cursor(
         "session.fixture",
         ObservationScopeV1::Profile,
-        generation.clone(),
+        generation,
         20,
     );
 
@@ -177,7 +177,7 @@ fn source_cursors_enforce_their_comparison_domain() {
             .checked_cmp(&byte_cursor(
                 "session.other",
                 ObservationScopeV1::Profile,
-                generation.clone(),
+                generation,
                 20,
             ))
             .is_err()
@@ -189,7 +189,7 @@ fn source_cursors_enforce_their_comparison_domain() {
                 ObservationScopeV1::Project {
                     project_id: ProjectId::new("project.fixture").unwrap(),
                 },
-                generation.clone(),
+                generation,
                 20,
             ))
             .is_err()
