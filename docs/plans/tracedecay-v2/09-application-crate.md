@@ -39,10 +39,13 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - Preserve repository, worktree, branch, project, and user scope through every call.
 - Return structured freshness, coverage, provenance, warnings, and continuation data where relevant.
 - Make mutation retries safe through operation-specific idempotency keys and daemon-owned transactions.
-- Source edits preview one immutable file set and content digests, then apply by
-  idempotency key and compare-and-swap guards. Multi-file publication is atomic;
-  interruption rolls back or enters restart recovery before reindexing the
-  committed generation. CLI `--dry-run` and tool `dry_run` mean this same preview.
+- Source edits use one journaled all-or-recoverable `EditTransaction`. Preview
+  pins the file set and digests; apply revalidates every digest/CAS guard, stages
+  sibling files, journals recovery data, and commits in deterministic order.
+  A single file publishes by atomic rename; portable multi-file atomicity is not
+  claimed. Success is reported only after every file commits. After a crash,
+  reconciliation completes or rolls back the journal before new edits or
+  reindexing. CLI `--dry-run` and tool `dry_run` mean this same preview.
 - `str_replace` is a compatibility binding to one-operation
   `multi_str_replace`; `insert_at_symbol` binds typed `insert_at`. Keep
   `replace_symbol`, in-process structural rewrite, and `move_symbol` as typed

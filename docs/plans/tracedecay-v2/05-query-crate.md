@@ -2,11 +2,14 @@
 
 ## Status / Role
 
-- Status: pending after the completed PR4 authoritative store boundary.
-- PR5 delivers the first production query path.
+- Status: modules first after the completed PR4 authoritative store boundary.
+- PR5 adds only the observation read/replay needed by its capture vertical in
+  existing store and application modules. Extract `tracedecay-query` only when
+  PR8+ reuse, dependency isolation, or compile-time savings justify the boundary.
 - PR7 adds facts and provenance, PR8 adds LCM/session retrieval, PR9 adds lexical code search, and PR10 adds semantic search.
 - PR11 composes query use cases in application and policy. PR12 exposes them through CLI, MCP, HTTP, and dashboard surfaces.
-- tracedecay-query is a transport-neutral execution library. It does not replace domain-specific query contracts with one universal query language.
+- If extracted, `tracedecay-query` is a transport-neutral execution library. It
+  does not replace domain-specific query contracts with one universal language.
 
 ## Outcome
 
@@ -41,12 +44,16 @@ Every product surface can run the same bounded query use case and receive determ
   only. They preserve the kernel's scope, temporal mode, watermarks, ordering,
   cursors, coverage, authorization, and cancellation without private fallback.
 
-- **PR5 — minimal path:** implement one typed activity/session listing request end to end through a read port, with explicit scope, bounded page size, stable order, cursor, cancellation, and coverage.
-- **PR5 — scope:** accept only application-resolved Profile, Project, Repository, Checkout, Worktree, Ref, and Snapshot roots. Never infer CWD, current project, first project, current branch, or another client’s prior selection.
-- **PR5 — snapshots:** capture selected shard watermarks before reads. Frozen pages never observe later rows; unavailable or stale shards remain named in coverage.
-- **PR5 — pagination:** bind opaque authenticated cursors to the canonical request digest, access digest, scope generation, schema, ranking profile, index generations, expiry, shard positions, and global cutoff.
-- **PR5 — execution:** reject work above declared budgets before expensive I/O, cap concurrency, propagate cancellation, and never emit a cursor for an uncommitted merge state.
-- **PR5 — purity:** reads never update retrieval, usage, hint, ranking, or memory counters. Application records adoption later as an explicit event.
+- **PR5 — observation read:** add one typed observation point-read plus bounded
+  sequence replay from the already resolved canonical profile or project store.
+  Return sanitized content or payload reference, sanitization receipt, source
+  identity/cursor, projection status, and explicit coverage.
+- **PR5 — boundary:** use the existing store/application path with bounded
+  reads and cancellation. Do not add activity/session search, multi-root query,
+  ranking, shard merge, authenticated distributed cursors, or a query framework.
+- **PR8+ — shared execution:** introduce frozen multi-root watermarks,
+  authenticated cursors, budgets, shard selection/merge, and reusable query
+  execution only with the temporal and later retrieval product slices.
 - **PR7 — facts/provenance:** add typed fact, assertion, evidence, contradiction, supersession, trust, and as-of requests. Preserve source and privacy-domain identity through merge and hydration.
 - **PR8 — LCM/session:** add typed recent-session, message, occurrence, logical-copy, summary-DAG, current, as-of, evolution, and forensic requests. Native rows remain addressable; representative views report hidden and unknown counts.
 - **PR9 — lexical code:** add exact identifier, phrase, token, field, bounded fuzzy, relation, path, impact, affected-test, facet, and timeline requests. Exact identifiers precede approximate candidates.
@@ -59,7 +66,9 @@ Every product surface can run the same bounded query use case and receive determ
 
 ## Acceptance
 
-- PR5 direct tests cover explicit multi-root scope, no ambient fallback, irrelevant-shard pruning, captured watermarks, deterministic equal-score ordering, cursor tampering/mismatch/expiry, partial coverage, cancellation, and concurrency caps.
+- PR5 direct tests cover point-read, bounded ordered replay, receipt/source/cursor
+  and projection status, partial or unavailable coverage, cancellation, exact
+  retry, and canonical profile/project ownership without ambient fallback.
 - PR7 direct tests cover provenance preservation, contradiction/supersession, as-of knowledge, denied payloads, redacted frontiers, and unknown denominators.
 - PR8 direct tests cover native versus representative views, copied prompts, punctuation/CJK/emoji, provider filters, summary freshness, temporal resolution, and restart-stable pagination.
 - PR9 direct tests compare lexical inclusion and declared ordering with redacted V1 fixtures and cover exact identifiers, fuzzy bounds, graph limits, impact roles, facets, and deterministic diversity.
