@@ -162,12 +162,6 @@ fn state_round_trips_and_defaults_when_absent() {
 
 // ---- Reconcile: removal + idempotency (no index required) -------------------
 
-// `StoreAdministration` requires a fallible external-holder verifier callback.
-#[allow(clippy::unnecessary_wraps)]
-fn prove_no_open_store_holders(_database_paths: &[PathBuf]) -> crate::errors::Result<()> {
-    Ok(())
-}
-
 #[tokio::test]
 async fn reconcile_untracks_closed_pr_and_cleans_store() {
     use crate::branch_meta::{BranchMeta, load_branch_meta, save_branch_meta};
@@ -197,8 +191,7 @@ async fn reconcile_untracks_closed_pr_and_cleans_store() {
     save_state(data_root.path(), &state).unwrap();
 
     // Empty discovery => PR 5 is closed/merged => must be untracked.
-    let daemon_administration =
-        StoreAdministration::with_external_holder_verifier(prove_no_open_store_holders);
+    let daemon_administration = StoreAdministration::with_external_holder_verifier(|_| Ok(()));
     let administration = PrStoreAdministration::new(&daemon_administration);
     let report = reconcile_project_with_administration(
         repo_root.path(),
