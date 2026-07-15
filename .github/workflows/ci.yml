@@ -339,8 +339,11 @@ jobs:
         with:
           shared-key: ci-clippy-full-${{ runner.os }}
           cache-on-failure: true
-      - name: Run blocking Clippy policy
+      - name: Run blocking Clippy policy with all features
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Run blocking Clippy policy without default features
+        run: cargo clippy --workspace --all-targets --no-default-features --locked -- -D warnings
 
   fmt:
     name: Format
