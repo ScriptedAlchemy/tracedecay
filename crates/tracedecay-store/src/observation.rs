@@ -114,15 +114,19 @@ impl ObservationCursorAdvance {
     ) -> ObservationStoreResult<Self> {
         let next_cursor = ClaudeSourceCursorV1::new(source, scope, generation, covered.end())
             .map_err(ObservationStoreError::Contract)?;
-        let expected_offset = expected_cursor
-            .as_ref()
-            .map(ClaudeSourceCursorV1::byte_offset)
-            .unwrap_or_default();
-        if expected_offset != covered.start()
+        let coverage_starts_at_expected = expected_cursor.as_ref().map_or_else(
+            || covered.start() == 0,
+            |expected| {
+                if expected.generation() == next_cursor.generation() {
+                    expected.byte_offset() == covered.start()
+                } else {
+                    covered.start() == 0
+                }
+            },
+        );
+        if !coverage_starts_at_expected
             || expected_cursor.as_ref().is_some_and(|expected| {
-                expected.source() != next_cursor.source()
-                    || expected.scope() != next_cursor.scope()
-                    || expected.generation() != next_cursor.generation()
+                expected.source() != next_cursor.source() || expected.scope() != next_cursor.scope()
             })
         {
             return Err(ObservationStoreError::CursorCoverageMismatch);

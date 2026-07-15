@@ -561,6 +561,63 @@ async fn cursor_only_progress_rejects_non_contiguous_and_stale_coverage() {
 }
 
 #[tokio::test]
+async fn cursor_only_progress_allows_file_replacement_from_zero_with_exact_cas() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    store
+        .advance_source_cursor(cursor_advance(
+            None,
+            0,
+            42,
+            NonDurableFrameReason::BlankFrame,
+        ))
+        .await
+        .unwrap();
+
+    let replacement_generation = ClaudeFileGenerationV1::new(GENERATION + 1).unwrap();
+    let advance = ObservationCursorAdvance::new(
+        source(),
+        scope(),
+        replacement_generation.clone(),
+        Some(cursor(42)),
+        ClaudeByteRangeV1::new(0, 10).unwrap(),
+        NonDurableFrameReason::OutOfScope,
+    )
+    .unwrap();
+    let replacement_cursor =
+        ClaudeSourceCursorV1::new(source(), scope(), replacement_generation, 10).unwrap();
+
+    assert_eq!(
+        store.advance_source_cursor(advance.clone()).await.unwrap(),
+        CursorAdvanceOutcome::Committed
+    );
+    assert_eq!(
+        store.advance_source_cursor(advance).await.unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate
+    );
+    assert_eq!(
+        store.get_source_cursor(&source(), &scope()).await.unwrap(),
+        Some(replacement_cursor)
+    );
+}
+
+#[test]
+fn cursor_only_progress_rejects_file_replacement_after_zero() {
+    assert!(matches!(
+        ObservationCursorAdvance::new(
+            source(),
+            scope(),
+            ClaudeFileGenerationV1::new(GENERATION + 1).unwrap(),
+            Some(cursor(42)),
+            ClaudeByteRangeV1::new(1, 10).unwrap(),
+            NonDurableFrameReason::OutOfScope,
+        ),
+        Err(ObservationStoreError::CursorCoverageMismatch)
+    ));
+}
+
+#[tokio::test]
 async fn cursor_only_progress_survives_restart() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_lcm_db_path(&tmp);
