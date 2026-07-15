@@ -4409,7 +4409,11 @@ async fn add_fact_to_shard(
 async fn add_fact_relation_to_shard(fixture: &Fixture, project_id: &str) {
     let layout = layout_for_id(&fixture.project, &fixture.profile, project_id).unwrap();
     let (graph, _) = test_open(&layout.graph_db_path).await;
-    let memory = MemoryStore::new(graph.conn());
+    let writer = graph
+        .writer_connection("seed consolidation relation fixture")
+        .await
+        .unwrap();
+    let memory = writer.memory_store();
     let source_fact_id = memory
         .list_facts(None, Some(0.0), 10)
         .await
@@ -4447,6 +4451,8 @@ async fn add_fact_relation_to_shard(fixture: &Fixture, project_id: &str) {
         )
         .await
         .unwrap();
+    drop(memory);
+    drop(writer);
     graph.checkpoint().await.unwrap();
     graph.close();
 }
@@ -4471,7 +4477,12 @@ async fn add_untracked_branch(layout: &StoreLayout, name: &str, fact_content: &s
     let path = branches.join(format!("{name}.db"));
     fs::copy(&layout.graph_db_path, &path).unwrap();
     let (db, _) = test_open(&path).await;
-    MemoryStore::new(db.conn())
+    let writer = db
+        .writer_connection("seed untracked branch fixture")
+        .await
+        .unwrap();
+    writer
+        .memory_store()
         .add_fact(
             AddFactRequest {
                 content: fact_content.to_string(),
@@ -4486,6 +4497,7 @@ async fn add_untracked_branch(layout: &StoreLayout, name: &str, fact_content: &s
         )
         .await
         .unwrap();
+    drop(writer);
     db.checkpoint().await.unwrap();
     db.close();
 }
@@ -4512,17 +4524,16 @@ async fn execute_sql(path: &Path, sql: &str) {
 }
 
 async fn rewrite_page_size(path: &Path, page_size: i64) {
-    let (db, _) = test_open(path).await;
-    db.checkpoint().await.unwrap();
-    db.writer_connection("rewrite page size fixture")
-        .await
-        .unwrap()
+    // Page-size fixture generation must use one exclusive connection: the
+    // normal Database wrapper intentionally retains a separate read handle.
+    let db = libsql::Builder::new_local(path).build().await.unwrap();
+    let connection = db.connect().unwrap();
+    connection
         .execute_batch(&format!(
             "PRAGMA journal_mode = DELETE; PRAGMA page_size = {page_size}; VACUUM;"
         ))
         .await
         .unwrap();
-    db.close();
 }
 
 async fn database_page_size(path: &Path) -> i64 {
