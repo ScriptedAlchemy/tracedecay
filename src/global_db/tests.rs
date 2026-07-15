@@ -1,5 +1,158 @@
 use super::*;
 
+#[cfg(unix)]
+fn colliding_non_unicode_project_paths(root: &Path) -> (PathBuf, PathBuf) {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    (
+        root.join(OsString::from_vec(vec![b'p', 0x80])),
+        root.join(OsString::from_vec(vec![b'p', 0x81])),
+    )
+}
+
+#[cfg(windows)]
+fn colliding_non_unicode_project_paths(root: &Path) -> (PathBuf, PathBuf) {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt as _;
+
+    (
+        root.join(OsString::from_wide(&[u16::from(b'p'), 0xd800])),
+        root.join(OsString::from_wide(&[u16::from(b'p'), 0xd801])),
+    )
+}
+
+#[cfg(any(unix, windows))]
+async fn replace_native_alias_with_legacy(db: &GlobalDb, project_path: &Path, project_id: &str) {
+    let native_alias = project_path_alias_key(project_path);
+    let legacy_alias = GlobalDb::canonical_project_key(project_path);
+    assert_ne!(native_alias, legacy_alias);
+    db.conn
+        .execute(
+            "DELETE FROM project_aliases WHERE alias_path = ?1",
+            params![native_alias],
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
+             VALUES (?1, ?2, 1)
+             ON CONFLICT(alias_path) DO UPDATE SET project_id = excluded.project_id",
+            params![legacy_alias, project_id],
+        )
+        .await
+        .unwrap();
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn unique_legacy_non_unicode_alias_migrates_to_native_key() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .expect("open global db");
+    let (project_path, _) = colliding_non_unicode_project_paths(dir.path());
+    db.upsert_code_project("proj_legacy", &project_path, None, None, None)
+        .await
+        .expect("register legacy project");
+    replace_native_alias_with_legacy(&db, &project_path, "proj_legacy").await;
+
+    let context = db
+        .project_registry_context_by_alias(&project_path)
+        .await
+        .expect("unique legacy owner should migrate");
+    assert_eq!(context.project.project_id, "proj_legacy");
+    assert_eq!(
+        db.project_id_by_alias_key(&project_path_alias_key(&project_path))
+            .await
+            .as_deref(),
+        Some("proj_legacy")
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn colliding_legacy_non_unicode_alias_fails_closed() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .expect("open global db");
+    let (first, second) = colliding_non_unicode_project_paths(dir.path());
+    db.upsert_code_project("proj_first", &first, None, None, None)
+        .await
+        .expect("register first project");
+    db.upsert_code_project("proj_second", &second, None, None, None)
+        .await
+        .expect("register second project");
+    replace_native_alias_with_legacy(&db, &first, "proj_first").await;
+    db.conn
+        .execute(
+            "DELETE FROM project_aliases WHERE alias_path = ?1",
+            params![project_path_alias_key(&second)],
+        )
+        .await
+        .unwrap();
+
+    assert!(db.project_registry_context_by_alias(&first).await.is_none());
+    assert!(
+        db.project_id_by_alias_key(&project_path_alias_key(&first))
+            .await
+            .is_none()
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn unique_legacy_non_unicode_git_common_alias_migrates_to_native_key() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .expect("open global db");
+    let project_root = dir.path().join("project");
+    let (git_common_dir, _) = colliding_non_unicode_project_paths(dir.path());
+    db.upsert_code_project(
+        "proj_common",
+        &project_root,
+        Some(&git_common_dir),
+        None,
+        None,
+    )
+    .await
+    .expect("register project");
+    let native_alias = format!("git-common-dir:{}", project_path_alias_key(&git_common_dir));
+    let legacy_alias = format!(
+        "git-common-dir:{}",
+        GlobalDb::canonical_project_key(&git_common_dir)
+    );
+    db.conn
+        .execute(
+            "DELETE FROM project_aliases WHERE alias_path = ?1",
+            params![native_alias.as_str()],
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
+             VALUES (?1, 'proj_common', 1)",
+            params![legacy_alias],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        db.project_id_by_git_common_dir_alias(&git_common_dir)
+            .await
+            .as_deref(),
+        Some("proj_common")
+    );
+    assert_eq!(
+        db.project_id_by_alias_key(&native_alias).await.as_deref(),
+        Some("proj_common")
+    );
+}
+
 #[test]
 fn global_db_disables_mmap_on_every_platform() {
     assert_eq!(global_db_mmap_size_guard(), 0);

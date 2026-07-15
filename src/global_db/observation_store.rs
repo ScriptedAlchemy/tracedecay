@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use super::{CodeProjectRecord, GlobalDb, StoreInstanceRecord, project_identity_aliases};
+use super::{CodeProjectRecord, GlobalDb, StoreInstanceRecord};
 
 /// The already-existing project store authorized to persist sanitized observations.
 ///
@@ -209,11 +209,15 @@ impl GlobalDb {
                 });
             }
         }
-        let git_common_dir = crate::worktree::git_common_dir(project_root);
-        for alias in project_identity_aliases(project_root, git_common_dir.as_deref()) {
-            if let Some(project_id) = self.project_id_by_alias_key(&alias).await {
-                project_ids.insert(project_id);
-            }
+        if let Some(project_id) = self.project_id_by_path_alias(project_root).await {
+            project_ids.insert(project_id);
+        }
+        if let Some(git_common_dir) = crate::worktree::git_common_dir(project_root)
+            && let Some(project_id) = self
+                .project_id_by_git_common_dir_alias(&git_common_dir)
+                .await
+        {
+            project_ids.insert(project_id);
         }
         Ok(project_ids.into_iter().collect())
     }
@@ -273,48 +277,28 @@ impl GlobalDb {
             .db_path()
             .parent()
             .ok_or_else(|| noncanonical("registry database has no profile root".to_string()))?;
-        let canonical_profile_root = profile_root.canonicalize().map_err(|_| {
-            ProjectObservationStoreError::UnavailableStore {
-                project_id: project.project_id.clone(),
-                store_id: store.store_id.clone(),
-                path: profile_root.to_path_buf(),
+        let validated = crate::storage::ValidatedProfileShard::resolve_existing(
+            profile_root,
+            &project.project_id,
+        )
+        .map_err(|error| match error {
+            crate::storage::ProfileShardValidationError::Unavailable { path } => {
+                ProjectObservationStoreError::UnavailableStore {
+                    project_id: project_id.clone(),
+                    store_id: store_id.clone(),
+                    path,
+                }
+            }
+            crate::storage::ProfileShardValidationError::NonCanonical { reason } => {
+                noncanonical(reason)
             }
         })?;
-        let store_root = profile_root.join(&expected_relpath);
-        require_regular_directory(&project, &store, &store_root)?;
-        let canonical_store_root = store_root
-            .canonicalize()
-            .map_err(|_| unavailable(&project, &store, &store_root))?;
-        if canonical_store_root != canonical_profile_root.join(&expected_relpath) {
-            return Err(noncanonical(format!(
-                "store root resolves outside '{}'",
-                expected_relpath.display()
-            )));
-        }
-
-        let manifest_path = profile_root.join(expected_manifest_relpath);
-        require_regular_file(&project, &store, &manifest_path)?;
-        validate_store_manifest(&project, &store, &canonical_store_root, &manifest_path)?;
-        let database_path = store_root.join(crate::storage::SESSIONS_DB_FILENAME);
-        require_regular_file(&project, &store, &database_path)?;
-        match crate::storage::has_sqlite_database_header(&database_path) {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(noncanonical(format!(
-                    "'{}' is not a SQLite database",
-                    database_path.display()
-                )));
-            }
-            Err(_) => return Err(unavailable(&project, &store, &database_path)),
-        }
 
         Ok(ProjectObservationStoreResolution {
             project,
             store,
-            store_root: canonical_store_root,
-            database_path: database_path
-                .canonicalize()
-                .map_err(|_| unavailable_path(&project_id, &store_id, &database_path))?,
+            store_root: validated.store_root().to_path_buf(),
+            database_path: validated.sessions_db_path().to_path_buf(),
         })
     }
 }
@@ -333,112 +317,4 @@ fn canonical_project_directory(
         });
     }
     Ok(canonical)
-}
-
-fn validate_store_manifest(
-    project: &CodeProjectRecord,
-    store: &StoreInstanceRecord,
-    store_root: &Path,
-    manifest_path: &Path,
-) -> Result<(), ProjectObservationStoreError> {
-    let manifest = crate::storage::read_store_manifest(manifest_path).map_err(|error| {
-        ProjectObservationStoreError::NonCanonicalStore {
-            project_id: project.project_id.clone(),
-            store_id: store.store_id.clone(),
-            reason: format!("store manifest is invalid: {error}"),
-        }
-    })?;
-    let invalid = |reason: String| ProjectObservationStoreError::NonCanonicalStore {
-        project_id: project.project_id.clone(),
-        store_id: store.store_id.clone(),
-        reason,
-    };
-    if manifest.schema_version != crate::storage::STORE_MANIFEST_SCHEMA_VERSION {
-        return Err(invalid(format!(
-            "manifest schema must be {}, found {}",
-            crate::storage::STORE_MANIFEST_SCHEMA_VERSION,
-            manifest.schema_version
-        )));
-    }
-    if manifest.project_id.as_deref() != Some(project.project_id.as_str()) {
-        return Err(invalid(
-            "manifest project id does not match the registry".to_string(),
-        ));
-    }
-    if manifest.store_kind != crate::storage::StoreKind::CodeProject {
-        return Err(invalid(
-            "manifest store kind must be 'code_project'".to_string(),
-        ));
-    }
-    if manifest.storage_mode != crate::storage::StorageMode::ProfileSharded {
-        return Err(invalid(
-            "manifest storage mode must be 'profile_sharded'".to_string(),
-        ));
-    }
-    if manifest.sessions_db_relpath != Path::new(crate::storage::SESSIONS_DB_FILENAME) {
-        return Err(invalid(format!(
-            "manifest sessions database path must be '{}'",
-            crate::storage::SESSIONS_DB_FILENAME
-        )));
-    }
-    let manifest_data_root = manifest
-        .data_root
-        .canonicalize()
-        .map_err(|_| invalid("manifest data root is unavailable".to_string()))?;
-    if manifest_data_root != store_root {
-        return Err(invalid(
-            "manifest data root does not match the registered store".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn require_regular_directory(
-    project: &CodeProjectRecord,
-    store: &StoreInstanceRecord,
-    path: &Path,
-) -> Result<(), ProjectObservationStoreError> {
-    let metadata =
-        std::fs::symlink_metadata(path).map_err(|_| unavailable(project, store, path))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(ProjectObservationStoreError::NonCanonicalStore {
-            project_id: project.project_id.clone(),
-            store_id: store.store_id.clone(),
-            reason: format!("'{}' is not a regular directory", path.display()),
-        });
-    }
-    Ok(())
-}
-
-fn require_regular_file(
-    project: &CodeProjectRecord,
-    store: &StoreInstanceRecord,
-    path: &Path,
-) -> Result<(), ProjectObservationStoreError> {
-    let metadata =
-        std::fs::symlink_metadata(path).map_err(|_| unavailable(project, store, path))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(ProjectObservationStoreError::NonCanonicalStore {
-            project_id: project.project_id.clone(),
-            store_id: store.store_id.clone(),
-            reason: format!("'{}' is not a regular file", path.display()),
-        });
-    }
-    Ok(())
-}
-
-fn unavailable(
-    project: &CodeProjectRecord,
-    store: &StoreInstanceRecord,
-    path: &Path,
-) -> ProjectObservationStoreError {
-    unavailable_path(&project.project_id, &store.store_id, path)
-}
-
-fn unavailable_path(project_id: &str, store_id: &str, path: &Path) -> ProjectObservationStoreError {
-    ProjectObservationStoreError::UnavailableStore {
-        project_id: project_id.to_string(),
-        store_id: store_id.to_string(),
-        path: path.to_path_buf(),
-    }
 }

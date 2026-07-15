@@ -764,10 +764,7 @@ fn like_pattern(query: &str) -> String {
 fn repo_identity_aliases(git_common_dir: Option<&Path>) -> Vec<String> {
     let mut aliases = Vec::new();
     if let Some(path) = git_common_dir {
-        aliases.push(format!(
-            "git-common-dir:{}",
-            GlobalDb::canonical_project_key(path)
-        ));
+        aliases.push(format!("git-common-dir:{}", project_path_alias_key(path)));
     }
     aliases
 }
@@ -790,11 +787,75 @@ fn git_remote_search_alias(remote: Option<&str>) -> Option<String> {
     Some(format!("git-remote-name:{}", name.to_ascii_lowercase()))
 }
 
-fn project_identity_aliases(project_root: &Path, git_common_dir: Option<&Path>) -> Vec<String> {
-    let mut aliases = Vec::with_capacity(2);
-    aliases.push(GlobalDb::canonical_project_key(project_root));
-    aliases.extend(repo_identity_aliases(git_common_dir));
-    aliases
+const NATIVE_PROJECT_PATH_ALIAS_PREFIX: &str = "tracedecay-project-path-v1";
+
+#[derive(Clone, Copy)]
+enum LegacyPathAliasKind {
+    ProjectRoot,
+    GitCommonDir,
+}
+
+impl LegacyPathAliasKind {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::ProjectRoot => "",
+            Self::GitCommonDir => "git-common-dir:",
+        }
+    }
+
+    fn owner_query(self) -> &'static str {
+        match self {
+            Self::ProjectRoot => {
+                "SELECT project_id FROM code_projects WHERE canonical_root = ?1 ORDER BY project_id"
+            }
+            Self::GitCommonDir => {
+                "SELECT project_id FROM code_projects WHERE git_common_dir = ?1 ORDER BY project_id"
+            }
+        }
+    }
+}
+
+fn canonical_project_path(project_path: &Path) -> PathBuf {
+    std::fs::canonicalize(project_path).unwrap_or_else(|_| project_path.to_path_buf())
+}
+
+fn project_path_alias_key(project_path: &Path) -> String {
+    let canonical = canonical_project_path(project_path);
+    if let Some(path) = canonical.to_str() {
+        return path.to_string();
+    }
+    native_project_path_alias_key(&canonical)
+}
+
+#[cfg(unix)]
+fn native_project_path_alias_key(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    encode_native_project_path_alias("unix-bytes", path.as_os_str().as_bytes())
+}
+
+#[cfg(windows)]
+fn native_project_path_alias_key(path: &Path) -> String {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let bytes = path
+        .as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    encode_native_project_path_alias("windows-utf16le", &bytes)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn native_project_path_alias_key(path: &Path) -> String {
+    encode_native_project_path_alias("rust-os-str", path.as_os_str().as_encoded_bytes())
+}
+
+fn encode_native_project_path_alias(platform: &str, native_path: &[u8]) -> String {
+    format!(
+        "{NATIVE_PROJECT_PATH_ALIAS_PREFIX}-{platform}-{}",
+        hex::encode(native_path)
+    )
 }
 
 fn normalize_git_remote_url(remote: &str) -> Option<String> {
@@ -1584,15 +1645,16 @@ impl GlobalDb {
         paths
     }
 
-    /// Canonical registry key for a project path. Falls back to the lossy path
-    /// string when canonicalization fails (e.g. the path no longer exists) so
-    /// upserts and lookups always agree on a single key per project, instead of
-    /// creating divergent rows for `/p`, `/p/`, and symlinked spellings (#6).
+    /// Canonical display/legacy key for a project path.
+    ///
+    /// Native-path identity and authority lookups must use
+    /// [`project_path_alias_key`] instead: this representation is deliberately
+    /// lossy for non-Unicode paths so it can remain compatible with persisted
+    /// text fields and human-facing output.
     pub fn canonical_project_key(project_path: &Path) -> String {
-        std::fs::canonicalize(project_path)
-            .unwrap_or_else(|_| project_path.to_path_buf())
+        canonical_project_path(project_path)
             .to_string_lossy()
-            .to_string()
+            .into_owned()
     }
 
     pub fn is_explicit_project_path_selector(selector: &str) -> bool {
@@ -1691,7 +1753,7 @@ impl GlobalDb {
         alias_path: &Path,
         project_id: &str,
     ) -> Option<ProjectAliasRecord> {
-        let alias = Self::canonical_project_key(alias_path);
+        let alias = project_path_alias_key(alias_path);
         self.upsert_project_alias_key(&alias, project_id).await
     }
 
@@ -1841,8 +1903,9 @@ impl GlobalDb {
         &self,
         alias_path: &Path,
     ) -> Option<ProjectStoreResolution> {
-        let alias = Self::canonical_project_key(alias_path);
-        self.resolve_project_store_by_alias_key(&alias).await
+        let project_id = self.project_id_by_path_alias(alias_path).await?;
+        let project = self.get_code_project(&project_id).await?;
+        self.resolve_project_store_for_project(&project).await
     }
 
     pub async fn resolve_project_store_by_identity(
@@ -1897,15 +1960,6 @@ impl GlobalDb {
             if ambiguous { None } else { match_project }
         }?;
         self.resolve_project_store_for_project(&match_project).await
-    }
-
-    async fn resolve_project_store_by_alias_key(
-        &self,
-        alias: &str,
-    ) -> Option<ProjectStoreResolution> {
-        let project_id = self.project_id_by_alias_key(alias).await?;
-        let project = self.get_code_project(&project_id).await?;
-        self.resolve_project_store_for_project(&project).await
     }
 
     async fn resolve_project_store_for_project(
@@ -2256,8 +2310,8 @@ impl GlobalDb {
         &self,
         alias_path: &Path,
     ) -> Option<ProjectRegistryContext> {
-        let alias = Self::canonical_project_key(alias_path);
-        self.project_registry_context_by_alias_key(&alias).await
+        let project_id = self.project_id_by_path_alias(alias_path).await?;
+        self.project_registry_context_by_id(&project_id).await
     }
 
     pub async fn project_registry_context_by_identity(
@@ -2271,14 +2325,6 @@ impl GlobalDb {
         self.project_registry_context_by_id(&project_id).await
     }
 
-    async fn project_registry_context_by_alias_key(
-        &self,
-        alias: &str,
-    ) -> Option<ProjectRegistryContext> {
-        let project_id = self.project_id_by_alias_key(alias).await?;
-        self.project_registry_context_by_id(&project_id).await
-    }
-
     async fn project_id_by_identity(
         &self,
         project_root: &Path,
@@ -2289,12 +2335,68 @@ impl GlobalDb {
             Ok(None) => {}
             Err(_) => return None,
         }
-        for alias in project_identity_aliases(project_root, git_common_dir) {
-            if let Some(project_id) = self.project_id_by_alias_key(&alias).await {
-                return Some(project_id);
-            }
+        if let Some(project_id) = self.project_id_by_path_alias(project_root).await {
+            return Some(project_id);
+        }
+        if let Some(project_id) = self
+            .project_id_by_git_common_dir_alias(git_common_dir?)
+            .await
+        {
+            return Some(project_id);
         }
         None
+    }
+
+    async fn project_id_by_path_alias(&self, path: &Path) -> Option<String> {
+        self.project_id_by_native_path_alias(path, LegacyPathAliasKind::ProjectRoot)
+            .await
+    }
+
+    async fn project_id_by_git_common_dir_alias(&self, path: &Path) -> Option<String> {
+        self.project_id_by_native_path_alias(path, LegacyPathAliasKind::GitCommonDir)
+            .await
+    }
+
+    async fn project_id_by_native_path_alias(
+        &self,
+        path: &Path,
+        kind: LegacyPathAliasKind,
+    ) -> Option<String> {
+        let native_path = project_path_alias_key(path);
+        let native_alias = format!("{}{native_path}", kind.prefix());
+        if let Some(project_id) = self.project_id_by_alias_key(&native_alias).await {
+            return Some(project_id);
+        }
+
+        let legacy_path = Self::canonical_project_key(path);
+        if native_path == legacy_path {
+            return None;
+        }
+        let legacy_alias = format!("{}{legacy_path}", kind.prefix());
+        let legacy_project_id = self.project_id_by_alias_key(&legacy_alias).await?;
+        let mut rows = self
+            .conn
+            .query(kind.owner_query(), params![legacy_path])
+            .await
+            .ok()?;
+        let owner: String = rows.next().await.ok()??.get(0).ok()?;
+        if owner != legacy_project_id || rows.next().await.ok()?.is_some() {
+            return None;
+        }
+        drop(rows);
+
+        let now = crate::tracedecay::current_timestamp();
+        self.conn
+            .execute(
+                "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(alias_path) DO NOTHING",
+                params![native_alias.as_str(), legacy_project_id.as_str(), now],
+            )
+            .await
+            .ok()?;
+        let migrated_project_id = self.project_id_by_alias_key(&native_alias).await?;
+        (migrated_project_id == legacy_project_id).then_some(migrated_project_id)
     }
 
     async fn project_id_by_alias_key(&self, alias: &str) -> Option<String> {
@@ -2456,7 +2558,7 @@ impl GlobalDb {
 
     /// Registers or updates a project's tokens-saved count. Best-effort.
     pub async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
-        let path_str = Self::canonical_project_key(project_path);
+        let path_str = project_path_alias_key(project_path);
         let _ = self
             .conn
             .execute(
@@ -2470,7 +2572,7 @@ impl GlobalDb {
 
     /// Returns the stored `tokens_saved` count for a specific project, or 0 if not found.
     pub async fn get_project_tokens(&self, project_path: &Path) -> u64 {
-        let path_str = Self::canonical_project_key(project_path);
+        let path_str = project_path_alias_key(project_path);
         let Ok(mut rows) = self
             .conn
             .query(
@@ -2672,7 +2774,7 @@ impl GlobalDb {
 
     /// Removes a project's row from the global DB. Best-effort.
     pub async fn delete_project(&self, project_path: &Path) {
-        let path_str = Self::canonical_project_key(project_path);
+        let path_str = project_path_alias_key(project_path);
         let _ = self
             .conn
             .execute("DELETE FROM projects WHERE path = ?1", params![path_str])

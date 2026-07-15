@@ -1,0 +1,60 @@
+#![cfg(any(unix, windows))]
+
+use std::path::{Path, PathBuf};
+
+use tempfile::TempDir;
+use tracedecay::global_db::GlobalDb;
+
+#[cfg(unix)]
+fn non_unicode_alias_paths(root: &Path) -> (PathBuf, PathBuf) {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    (
+        root.join(OsString::from_vec(vec![b'p', 0x80])),
+        root.join(OsString::from_vec(vec![b'p', 0x81])),
+    )
+}
+
+#[cfg(windows)]
+fn non_unicode_alias_paths(root: &Path) -> (PathBuf, PathBuf) {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt as _;
+
+    (
+        root.join(OsString::from_wide(&[u16::from(b'p'), 0xd800])),
+        root.join(OsString::from_wide(&[u16::from(b'p'), 0xd801])),
+    )
+}
+
+#[tokio::test]
+async fn project_alias_lookup_preserves_distinct_native_paths() {
+    let dir = TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("profile/global.db"))
+        .await
+        .unwrap();
+    let (first, second) = non_unicode_alias_paths(dir.path());
+    assert_eq!(
+        first.to_string_lossy(),
+        second.to_string_lossy(),
+        "fixture paths must collide under lossy Unicode conversion"
+    );
+
+    db.upsert_code_project("proj_native_first", &first, None, None, None)
+        .await
+        .unwrap();
+    db.upsert_code_project("proj_native_second", &second, None, None, None)
+        .await
+        .unwrap();
+
+    let first_context = db.project_registry_context_by_alias(&first).await.unwrap();
+    let second_context = db.project_registry_context_by_alias(&second).await.unwrap();
+    assert_eq!(first_context.project.project_id, "proj_native_first");
+    assert_eq!(second_context.project.project_id, "proj_native_second");
+    assert_ne!(
+        first_context.aliases[0].alias_path,
+        second_context.aliases[0].alias_path
+    );
+    db.checkpoint().await;
+    db.close();
+}
