@@ -157,11 +157,7 @@ pub(crate) async fn handle_wipe(all: bool) -> tracedecay::errors::Result<()> {
     } else if !wiped_paths.is_empty()
         && let Some(gdb) = gdb.as_ref()
     {
-        let path_strs: Vec<String> = wiped_paths
-            .iter()
-            .map(|p| p.to_string_lossy().to_string())
-            .collect();
-        gdb.delete_projects(&path_strs).await;
+        gdb.delete_projects(&wiped_paths).await;
     }
 
     eprintln!();

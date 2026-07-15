@@ -464,12 +464,16 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             );
             let mut stale_storage_projects = Vec::new();
             for project_path in global_db.list_project_paths().await {
-                let path = Path::new(&project_path);
-                if !prefixes.is_empty() && !prefixes.iter().any(|prefix| path.starts_with(prefix)) {
+                let project_path = PathBuf::from(project_path);
+                if !prefixes.is_empty()
+                    && !prefixes
+                        .iter()
+                        .any(|prefix| project_path.starts_with(prefix))
+                {
                     continue;
                 }
                 let location = global::classify_project_storage_with_registry(
-                    path,
+                    &project_path,
                     Some(&global_db),
                     Some(&profile_root),
                 )
@@ -497,9 +501,11 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                         &project.canonical_root,
                     ))
                 })
-                .chain(stale_storage_projects.iter().map(|path| {
-                    tracedecay::global_db::GlobalDb::canonical_project_key(Path::new(path))
-                }))
+                .chain(
+                    stale_storage_projects
+                        .iter()
+                        .map(|path| tracedecay::global_db::GlobalDb::canonical_project_key(path)),
+                )
                 .collect::<std::collections::BTreeSet<_>>();
             let candidate_count = candidate_paths.len();
             let metadata_candidate_count = stale.len() + stale_storage_projects.len();

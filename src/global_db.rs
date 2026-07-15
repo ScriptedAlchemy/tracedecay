@@ -20,6 +20,7 @@ use serde_json::Value as JsonValue;
 pub use tracedecay_store::ParseOffset;
 
 use crate::db::DatabaseAuthority;
+use crate::errors::TraceDecayError;
 use crate::sessions::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
     lcm::{
@@ -400,6 +401,16 @@ fn global_db_path_override() -> Option<PathBuf> {
 
 fn global_db_mmap_size_guard() -> u64 {
     0
+}
+
+fn global_db_operation_error(
+    operation: &'static str,
+    error: impl std::fmt::Display,
+) -> TraceDecayError {
+    TraceDecayError::Database {
+        message: error.to_string(),
+        operation: operation.to_string(),
+    }
 }
 
 /// Returns the path to the global database: `global.db` inside the user-level
@@ -1050,8 +1061,8 @@ impl GlobalDb {
         read_only: bool,
         authority: DatabaseAuthority,
         slot: Option<GlobalDbSlot>,
-    ) -> Option<Self> {
-        let authority = authority.hold_for(db_path, "open global database").ok()?;
+    ) -> crate::errors::Result<Self> {
+        let authority = authority.hold_for(db_path, "open global database")?;
         let db_path = authority.canonical_database_path().to_path_buf();
         let storage_root = db_path
             .parent()
@@ -1062,8 +1073,13 @@ impl GlobalDb {
         } else {
             Builder::new_local(&db_path)
         };
-        let db = builder.build().await.ok()?;
-        let conn = db.connect().ok()?;
+        let db = builder
+            .build()
+            .await
+            .map_err(|error| global_db_operation_error("build global database", error))?;
+        let conn = db
+            .connect()
+            .map_err(|error| global_db_operation_error("connect global database", error))?;
 
         // Install the lock wait before journal-mode negotiation. Fresh daemon
         // startup can briefly overlap another connection creating this file;
@@ -1071,14 +1087,16 @@ impl GlobalDb {
         // immediately with `database is locked` and disables the store.
         conn.execute_batch("PRAGMA busy_timeout = 5000;")
             .await
-            .ok()?;
+            .map_err(|error| {
+                global_db_operation_error("configure global database busy timeout", error)
+            })?;
 
         conn.execute_batch(&format!(
             "PRAGMA mmap_size = {};",
             global_db_mmap_size_guard()
         ))
         .await
-        .ok()?;
+        .map_err(|error| global_db_operation_error("configure global database mmap", error))?;
 
         let pragmas = if read_only {
             "PRAGMA foreign_keys = ON;".to_string()
@@ -1091,9 +1109,11 @@ impl GlobalDb {
                  PRAGMA foreign_keys = ON;"
             )
         };
-        conn.execute_batch(&pragmas).await.ok()?;
+        conn.execute_batch(&pragmas).await.map_err(|error| {
+            global_db_operation_error("configure global database pragmas", error)
+        })?;
 
-        Some(Self {
+        Ok(Self {
             inner: Arc::new(GlobalDbInner {
                 conn,
                 transaction: tokio::sync::Mutex::new(()),
@@ -1121,9 +1141,8 @@ impl GlobalDb {
         Self::best_effort_open(Self::try_open_at(db_path).await)
     }
 
-    /// Result-preserving counterpart to [`Self::open_at`]. Authority failures
-    /// retain their exact ownership/profile diagnostic; storage-open failures
-    /// remain `Ok(None)` under the global database's best-effort contract.
+    /// Result-preserving counterpart to [`Self::open_at`]. Authority, storage,
+    /// and mandatory schema failures retain their operation context.
     pub async fn try_open_at(db_path: &std::path::Path) -> crate::errors::Result<Option<Self>> {
         Self::try_open_at_with_backfill(db_path, true).await
     }
@@ -1163,31 +1182,25 @@ impl GlobalDb {
         let mut schema = slot.lock().await;
         if schema.ensured {
             drop(schema);
-            let Some(db) =
-                Self::open_local(&canonical_path, false, authority, Some(Arc::clone(&slot))).await
-            else {
-                return Ok(None);
-            };
+            let db = Self::open_local(&canonical_path, false, authority, Some(Arc::clone(&slot)))
+                .await?;
             if spawn_structured_backfill {
                 db.spawn_structured_backfill();
             }
             return Ok(Some(db));
         }
-        if let Some(parent) = canonical_path.parent()
-            && std::fs::create_dir_all(parent).is_err()
-        {
-            return Ok(None);
+        if let Some(parent) = canonical_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                global_db_operation_error("create global database directory", error)
+            })?;
         }
-        let Some(db) = Self::open_at_unsynchronized(
+        let db = Self::open_at_unsynchronized(
             &canonical_path,
             spawn_structured_backfill,
             authority,
             Arc::clone(&slot),
         )
-        .await
-        else {
-            return Ok(None);
-        };
+        .await?;
         schema.ensured = true;
         Ok(Some(db))
     }
@@ -1197,7 +1210,7 @@ impl GlobalDb {
         spawn_structured_backfill: bool,
         authority: DatabaseAuthority,
         slot: GlobalDbSlot,
-    ) -> Option<Self> {
+    ) -> crate::errors::Result<Self> {
         let db = Self::open_local(db_path, false, authority, Some(slot)).await?;
 
         db.conn
@@ -1264,7 +1277,9 @@ impl GlobalDb {
                 ON graph_scopes(project_id, store_id)",
             )
             .await
-            .ok()?;
+            .map_err(|error| {
+                global_db_operation_error("initialize global project registry schema", error)
+            })?;
         let _ = db.migrate_project_rows_to_canonical_keys().await;
 
         db.conn
@@ -1393,24 +1408,70 @@ impl GlobalDb {
                 END",
         )
         .await
-        .ok()?;
-        ensure_session_parent_columns(&db.conn).await?;
-        ensure_parse_offset_columns(&db.conn).await?;
+        .map_err(|error| {
+            global_db_operation_error("initialize global transcript schema", error)
+        })?;
+        ensure_session_parent_columns(&db.conn)
+            .await
+            .ok_or_else(|| {
+                global_db_operation_error(
+                    "ensure global session parent schema",
+                    "session parent schema migration failed",
+                )
+            })?;
+        ensure_parse_offset_columns(&db.conn).await.ok_or_else(|| {
+            global_db_operation_error(
+                "ensure global parse offset schema",
+                "parse offset schema migration failed",
+            )
+        })?;
         observation::ensure_observation_schema(&db.conn)
             .await
-            .ok()?;
+            .map_err(|error| global_db_operation_error("initialize observation schema", error))?;
+        for query in [
+            "SELECT receipt_id, sanitizer_version, payload_digest, receipt_json
+             FROM sanitization_receipts LIMIT 0",
+            "SELECT sequence, observation_id, payload_digest, receipt_id, observation_json,
+                    committed_cursor_json
+             FROM observations LIMIT 0",
+            "SELECT source_json, scope_json, cursor_json FROM source_cursors LIMIT 0",
+            "SELECT observation_id, observation_sequence FROM projection_queue LIMIT 0",
+        ] {
+            db.conn.query(query, ()).await.map_err(|error| {
+                global_db_operation_error("initialize observation schema", error)
+            })?;
+        }
         observation_projection::ensure_observation_projection_schema(&db.conn)
             .await
-            .ok()?;
+            .map_err(|error| {
+                global_db_operation_error("initialize observation projection schema", error)
+            })?;
+        for query in [
+            "SELECT projector_version, observation_id, receipt_id, output_provider,
+                    output_message_id, output_digest, message_created
+             FROM observation_projection_provenance LIMIT 0",
+            "SELECT projector_version, last_sequence
+             FROM observation_projection_checkpoints LIMIT 0",
+            "SELECT projector_version, observation_id, receipt_id, reason
+             FROM observation_projection_dispositions LIMIT 0",
+        ] {
+            db.conn.query(query, ()).await.map_err(|error| {
+                global_db_operation_error("initialize observation projection schema", error)
+            })?;
+        }
         crate::sessions::lcm::schema::ensure_lcm_schema(&db.conn)
             .await
-            .ok()?;
+            .map_err(|error| global_db_operation_error("initialize LCM schema", error))?;
         crate::sessions::git_correlation::ensure_git_correlation_schema(&db.conn)
             .await
-            .ok()?;
+            .map_err(|error| {
+                global_db_operation_error("initialize git correlation schema", error)
+            })?;
         crate::sessions::workflow_index::ensure_workflow_index_schema(&db.conn)
             .await
-            .ok()?;
+            .map_err(|error| {
+                global_db_operation_error("initialize workflow index schema", error)
+            })?;
         // One-off self-heal: re-derive timestamps and token-usage counters
         // for legacy messages ingested before extraction existed.
         // Marker-guarded (runs once per store) and fail-open, like the LCM
@@ -1424,7 +1485,7 @@ impl GlobalDb {
             db.spawn_structured_backfill();
         }
 
-        Some(db)
+        Ok(db)
     }
 
     /// Opens a writable database at an explicit path assuming its schema was
@@ -1439,9 +1500,16 @@ impl GlobalDb {
             return None;
         }
         let authority =
-            DatabaseAuthority::for_runtime(db_path, "open global database assuming schema").ok()?;
+            match DatabaseAuthority::for_runtime(db_path, "open global database assuming schema") {
+                Ok(authority) => authority,
+                Err(error) => return Self::best_effort_open(Err(error)),
+            };
         let canonical_path = authority.canonical_database_path().to_path_buf();
-        Self::open_local(&canonical_path, false, authority, None).await
+        Self::best_effort_open(
+            Self::open_local(&canonical_path, false, authority, None)
+                .await
+                .map(Some),
+        )
     }
 
     /// Opens an existing database without creating directories, creating schema,
@@ -1451,9 +1519,16 @@ impl GlobalDb {
             return None;
         }
         let authority =
-            DatabaseAuthority::for_runtime(db_path, "open global database read-only").ok()?;
+            match DatabaseAuthority::for_runtime(db_path, "open global database read-only") {
+                Ok(authority) => authority,
+                Err(error) => return Self::best_effort_open(Err(error)),
+            };
         let canonical_path = authority.canonical_database_path().to_path_buf();
-        Self::open_local(&canonical_path, true, authority, None).await
+        Self::best_effort_open(
+            Self::open_local(&canonical_path, true, authority, None)
+                .await
+                .map(Some),
+        )
     }
 
     /// Opens (or creates) the global database. Returns `None` if the home
@@ -2806,7 +2881,7 @@ impl GlobalDb {
     /// Chunks the input at 256 paths per statement to stay well clear of
     /// `SQLite`'s default 999-parameter limit while still reducing N round trips
     /// to ⌈N/256⌉.
-    pub async fn delete_projects(&self, project_paths: &[String]) -> usize {
+    pub async fn delete_projects(&self, project_paths: &[PathBuf]) -> usize {
         const CHUNK: usize = 256;
         let mut total: usize = 0;
         for chunk in project_paths.chunks(CHUNK) {
@@ -2820,7 +2895,7 @@ impl GlobalDb {
             );
             let values: Vec<libsql::Value> = chunk
                 .iter()
-                .map(|p| libsql::Value::Text(Self::canonical_project_key(Path::new(p))))
+                .map(|path| libsql::Value::Text(project_path_alias_key(path)))
                 .collect();
             if let Ok(n) = self.conn.execute(&sql, values).await {
                 total = total.saturating_add(n as usize);

@@ -45,6 +45,51 @@ async fn replace_native_alias_with_legacy(db: &GlobalDb, project_path: &Path, pr
         .unwrap();
 }
 
+async fn create_conflicting_schema_view(db_path: &Path, view_name: &str) {
+    let raw_db = Builder::new_local(db_path).build().await.unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute_batch(&format!(
+            "CREATE VIEW {view_name} AS SELECT 1 AS incompatible"
+        ))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn try_open_at_reports_observation_schema_failure() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    create_conflicting_schema_view(&db_path, "observations").await;
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("observation schema conflict unexpectedly opened");
+    };
+    let TraceDecayError::Database { message, operation } = error else {
+        panic!("unexpected error: {error}");
+    };
+    assert_eq!(operation, "initialize observation schema");
+    assert!(message.contains("observations"), "{message}");
+    assert!(GlobalDb::open_at(&db_path).await.is_none());
+}
+
+#[tokio::test]
+async fn try_open_at_reports_observation_projection_schema_failure() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    create_conflicting_schema_view(&db_path, "observation_projection_provenance").await;
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("observation projection schema conflict unexpectedly opened");
+    };
+    let TraceDecayError::Database { message, operation } = error else {
+        panic!("unexpected error: {error}");
+    };
+    assert_eq!(operation, "initialize observation projection schema");
+    assert!(message.contains("projector_version"), "{message}");
+    assert!(GlobalDb::open_at(&db_path).await.is_none());
+}
+
 #[cfg(any(unix, windows))]
 #[tokio::test]
 async fn unique_legacy_non_unicode_alias_migrates_to_native_key() {
@@ -100,6 +145,30 @@ async fn colliding_legacy_non_unicode_alias_fails_closed() {
             .await
             .is_none()
     );
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn bulk_project_deletion_preserves_native_non_unicode_aliases() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .expect("open global db");
+    let (first, second) = colliding_non_unicode_project_paths(dir.path());
+    assert_ne!(
+        project_path_alias_key(&first),
+        project_path_alias_key(&second)
+    );
+    assert_eq!(
+        GlobalDb::canonical_project_key(&first),
+        GlobalDb::canonical_project_key(&second)
+    );
+    db.upsert(&first, 11).await;
+    db.upsert(&second, 22).await;
+
+    assert_eq!(db.delete_projects(std::slice::from_ref(&first)).await, 1);
+    assert_eq!(db.get_project_tokens(&first).await, 0);
+    assert_eq!(db.get_project_tokens(&second).await, 22);
 }
 
 #[cfg(any(unix, windows))]
