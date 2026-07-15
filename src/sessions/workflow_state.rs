@@ -33,7 +33,7 @@ pub async fn list_unfinished(
     db: &GlobalDb,
     limit: usize,
 ) -> Result<Vec<WorkflowStateItem>, String> {
-    let conn = db.dashboard_connection();
+    let conn = db.read_connection();
     query_unfinished(&conn, limit).await
 }
 

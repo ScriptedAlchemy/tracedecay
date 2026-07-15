@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 use std::collections::{HashMap, HashSet};
 
-use crate::db::Database;
+use crate::db::{Database, DatabaseWriterConnection};
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
 
@@ -204,7 +204,7 @@ impl<'a> GraphQueryManager<'a> {
     /// guaranteed `drop_*_temp_table()` even on the error path.
     async fn find_dead_code_inner(
         &self,
-        connection: &crate::db::connection::DatabaseWriterConnection<'_>,
+        connection: &DatabaseWriterConnection<'_>,
         visibility_filter: &str,
         kind_filter: &str,
     ) -> Result<Vec<Node>> {
