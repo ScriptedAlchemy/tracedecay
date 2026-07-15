@@ -481,6 +481,77 @@ async fn bounded_next_queue_item_resumes_after_restart_and_drains_idempotently()
 }
 
 #[tokio::test]
+async fn stale_exact_duplicate_queue_item_is_consumed_before_later_observation() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let first = observation(
+        "session-stale-queue",
+        0,
+        100,
+        "receipt.stale-queue-1",
+        conversational_payload("message-stale-queue-1", "stale queue first canary"),
+    );
+    let second = observation(
+        "session-stale-queue",
+        100,
+        200,
+        "receipt.stale-queue-2",
+        conversational_payload("message-stale-queue-2", "stale queue second canary"),
+    );
+    persist(&store, first.clone(), None).await;
+    persist(
+        &store,
+        second.clone(),
+        Some(cursor("session-stale-queue", 100)),
+    )
+    .await;
+    store
+        .project_observation(first.observation_id())
+        .await
+        .unwrap();
+
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    raw_db
+        .connect()
+        .unwrap()
+        .execute(
+            "INSERT INTO projection_queue (observation_id, observation_sequence)
+             VALUES (?1, 1)",
+            libsql::params![first.observation_id().as_str()],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.next_queued_observation().await.unwrap().as_ref(),
+        Some(first.observation_id())
+    );
+    assert!(matches!(
+        store
+            .project_observation(first.observation_id())
+            .await
+            .unwrap(),
+        ProjectionPersistOutcome::ExactDuplicate(_)
+    ));
+    assert_eq!(
+        store.next_queued_observation().await.unwrap().as_ref(),
+        Some(second.observation_id())
+    );
+
+    drain_projection_queue(&store).await;
+    assert!(store.next_queued_observation().await.unwrap().is_none());
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        2
+    );
+    assert_eq!(projection_counts(&tmp).await, (1, 2, 2, 1, 0, 0));
+}
+
+#[tokio::test]
 async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;

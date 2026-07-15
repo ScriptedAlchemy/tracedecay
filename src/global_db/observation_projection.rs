@@ -255,6 +255,19 @@ async fn queued_sequence(
     .map(Some)
 }
 
+async fn consume_projection_queue_item(
+    conn: &Connection,
+    observation_id: &CanonicalObservationIdV1,
+) -> ProjectionStoreResult<()> {
+    conn.execute(
+        "DELETE FROM projection_queue WHERE observation_id = ?1",
+        params![observation_id.as_str()],
+    )
+    .await
+    .map_err(|error| storage("consume projection queue item", error))?;
+    Ok(())
+}
+
 async fn read_session(
     conn: &Connection,
     provider: &str,
@@ -935,6 +948,11 @@ impl GlobalDb {
         let effect = derive_projection_with_alias(&transaction, &observation).await?;
         if sequence <= checkpoint.last_sequence() {
             verify_effect(&transaction, &observation, &effect).await?;
+            consume_projection_queue_item(&transaction, observation_id).await?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| storage("commit projection transaction", error))?;
             return Ok(ProjectionPersistOutcome::ExactDuplicate(checkpoint));
         }
         let expected = checkpoint.last_sequence().saturating_add(1);
@@ -949,13 +967,7 @@ impl GlobalDb {
         }
 
         apply_effect(&transaction, sequence, &observation, &effect).await?;
-        transaction
-            .execute(
-                "DELETE FROM projection_queue WHERE observation_id = ?1",
-                params![observation_id.as_str()],
-            )
-            .await
-            .map_err(|error| storage("consume projection queue item", error))?;
+        consume_projection_queue_item(&transaction, observation_id).await?;
         let checkpoint = write_checkpoint(&transaction, sequence).await?;
         transaction
             .commit()
