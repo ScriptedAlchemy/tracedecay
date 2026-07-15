@@ -32,11 +32,14 @@ use crate::sessions::shared::{
     title_from_messages,
 };
 use crate::sessions::source::{
-    ParsedTranscript, SessionDraft, StrictJsonlOutcome, TranscriptSource, collect_files_with_ext,
-    stream_new_jsonl_strict,
+    BoundedJsonlRecord, ParsedTranscript, SessionDraft, StrictJsonlOutcome, TranscriptSource,
+    collect_files_with_ext, read_bounded_jsonl_record, stream_new_jsonl_strict,
 };
 
 const PROVIDER: &str = "claude";
+// Includes the terminating newline. Records above this bound stay retryable
+// at their starting cursor instead of allocating or logging their contents.
+const MAX_JSONL_RECORD_BYTES: usize = 16 * 1024 * 1024;
 
 /// Shared cross-source telemetry-row `kind` vocabulary. Cursor/Codex adapters
 /// tag their structured marker rows with the same strings so `message_search`
@@ -163,7 +166,8 @@ impl TranscriptSource for ClaudeSource {
                 .and_then(|info| transcript_cwd(&info.parent_transcript_path))
         });
 
-        let new = match stream_new_jsonl_strict(path, prev, max_new_bytes)? {
+        let new = match stream_new_jsonl_strict(path, prev, max_new_bytes, MAX_JSONL_RECORD_BYTES)?
+        {
             StrictJsonlOutcome::Complete(parsed) => parsed,
             StrictJsonlOutcome::Deferred { parsed, reason } => {
                 tracing::debug!(
@@ -471,15 +475,20 @@ impl SessionAccumulator {
 
 /// Reads the session `cwd` from an early line of a Claude transcript.
 pub(crate) fn transcript_cwd(path: &Path) -> Option<PathBuf> {
-    use std::io::BufRead;
     let file = std::fs::File::open(path).ok()?;
-    let reader = std::io::BufReader::new(file);
-    for line in reader.lines().take(CWD_PROBE_LINES).map_while(Result::ok) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+    let mut reader = std::io::BufReader::new(file);
+    let mut record = Vec::new();
+    for _ in 0..CWD_PROBE_LINES {
+        match read_bounded_jsonl_record(&mut reader, &mut record, MAX_JSONL_RECORD_BYTES).ok()? {
+            BoundedJsonlRecord::Eof
+            | BoundedJsonlRecord::Partial
+            | BoundedJsonlRecord::Oversized => return None,
+            BoundedJsonlRecord::Complete => {}
+        }
+        if record.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        if let Ok(value) = serde_json::from_slice::<Value>(&record) {
             if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
                 if !cwd.is_empty() {
                     return Some(PathBuf::from(cwd));
