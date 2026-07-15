@@ -17,6 +17,7 @@
 use libsql::{Connection, params};
 use sha2::{Digest, Sha256};
 
+use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 
 /// Sentinel session id used for cross-session cache rows. Picked so it cannot
@@ -166,7 +167,7 @@ pub(crate) struct ReadCacheWrite<'a> {
     reason = "preserves the public read-cache API"
 )]
 pub async fn put(
-    conn: &Connection,
+    db: &Database,
     project_id: &str,
     session_id: &str,
     file_path: &str,
@@ -178,7 +179,7 @@ pub async fn put(
     token_count: u32,
 ) -> Result<()> {
     put_write(
-        conn,
+        db,
         ReadCacheWrite {
             project_id,
             session_id,
@@ -194,7 +195,7 @@ pub async fn put(
     .await
 }
 
-pub(crate) async fn put_write(conn: &Connection, write: ReadCacheWrite<'_>) -> Result<()> {
+pub(crate) async fn put_write(db: &Database, write: ReadCacheWrite<'_>) -> Result<()> {
     let ReadCacheWrite {
         project_id,
         session_id,
@@ -207,7 +208,8 @@ pub(crate) async fn put_write(conn: &Connection, write: ReadCacheWrite<'_>) -> R
         token_count,
     } = write;
     let now = unix_seconds();
-    conn.execute(
+    db.execute_write(
+        "read_cache::put",
         "INSERT OR REPLACE INTO read_cache
             (project_id, session_id, file_path, mtime_ns, mode, args_hash,
              digest, body, token_count, created_at)
@@ -225,29 +227,20 @@ pub(crate) async fn put_write(conn: &Connection, write: ReadCacheWrite<'_>) -> R
             now
         ],
     )
-    .await
-    .map_err(|e| TraceDecayError::Database {
-        message: format!("read_cache insert failed: {e}"),
-        operation: "read_cache::put".to_string(),
-    })?;
+    .await?;
     Ok(())
 }
 
 /// Deletes rows older than [`MAX_AGE_SECS`]. Returns the number of rows
 /// removed. Safe to call from any context.
-pub async fn sweep(conn: &Connection) -> Result<u64> {
+pub async fn sweep(db: &Database) -> Result<u64> {
     let cutoff = unix_seconds() - MAX_AGE_SECS;
-    let removed = conn
-        .execute(
-            "DELETE FROM read_cache WHERE created_at < ?1",
-            params![cutoff],
-        )
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("read_cache sweep failed: {e}"),
-            operation: "read_cache::sweep".to_string(),
-        })?;
-    Ok(removed)
+    db.execute_write(
+        "read_cache::sweep",
+        "DELETE FROM read_cache WHERE created_at < ?1",
+        params![cutoff],
+    )
+    .await
 }
 
 fn unix_seconds() -> i64 {

@@ -257,7 +257,10 @@ fn update_rejected_secret_like(err: &TraceDecayError) -> Option<String> {
 }
 
 fn action_mutates_memory(action: &str) -> bool {
-    matches!(action, "add" | "update" | "remove")
+    matches!(
+        action,
+        "add" | "update" | "remove" | "search" | "probe" | "related" | "reason" | "list"
+    )
 }
 
 async fn record_retrieval_counts(

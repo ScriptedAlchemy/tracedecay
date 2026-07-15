@@ -2376,7 +2376,7 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
 
     if !cg.is_read_only() {
         read_cache::put_write(
-            conn,
+            cg.db(),
             read_cache::ReadCacheWrite {
                 project_id: &project_id,
                 session_id: GLOBAL_SESSION,

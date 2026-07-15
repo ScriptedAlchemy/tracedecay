@@ -33,6 +33,15 @@ pub(crate) struct DatabaseWriterConnection<'a> {
     conn: Connection,
 }
 
+/// Opaque, serialized access to memory mutations for integration fixtures.
+///
+/// This capability intentionally exposes neither the writable connection nor
+/// arbitrary SQL execution.
+#[doc(hidden)]
+pub struct DatabaseMemoryWriter<'a> {
+    writer: DatabaseWriterConnection<'a>,
+}
+
 /// An immediate transaction that retains the canonical writer lane until the
 /// transaction commits, rolls back, or is dropped.
 pub(crate) struct DatabaseWriteTransaction<'a> {
@@ -49,6 +58,11 @@ impl Deref for DatabaseWriteTransaction<'_> {
 }
 
 impl DatabaseWriterConnection<'_> {
+    #[cfg(test)]
+    pub(crate) async fn execute_batch(&self, sql: &str) -> libsql::Result<()> {
+        self.conn.execute_batch(sql).await.map(|_| ())
+    }
+
     pub(crate) async fn execute(
         &self,
         sql: &str,
@@ -76,6 +90,14 @@ impl DatabaseWriterConnection<'_> {
 
     pub(crate) fn fact_retriever(&self) -> crate::memory::retrieval::FactRetriever<'_> {
         crate::memory::retrieval::FactRetriever::new(&self.conn)
+    }
+}
+
+impl DatabaseMemoryWriter<'_> {
+    /// Returns a memory store whose writable connection remains protected by
+    /// the canonical database writer lane for this capability's lifetime.
+    pub fn store(&self) -> crate::memory::store::MemoryStore<'_> {
+        self.writer.memory_store()
     }
 }
 
@@ -372,6 +394,16 @@ impl Database {
         Ok(DatabaseWriterConnection {
             _guard: guard,
             conn,
+        })
+    }
+
+    /// Acquires opaque, serialized access to memory mutations.
+    #[doc(hidden)]
+    pub async fn memory_writer(&self) -> Result<DatabaseMemoryWriter<'_>> {
+        Ok(DatabaseMemoryWriter {
+            writer: self
+                .writer_connection("memory store writer capability")
+                .await?,
         })
     }
 
@@ -899,6 +931,7 @@ mod tests {
             before.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
             0
         );
+        drop(before);
         transaction.commit().await.unwrap();
 
         let mut after = db
@@ -908,6 +941,51 @@ mod tests {
             .unwrap();
         assert_eq!(
             after.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn opaque_memory_writer_serializes_and_mutates_without_raw_connection_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("graph.db");
+        let authority = DatabaseAuthority::acquire_test(&path, "memory writer capability").unwrap();
+        let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+        let first = db.memory_writer().await.unwrap();
+        let mut second = Box::pin(db.memory_writer());
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut second)
+                .await
+                .is_err()
+        );
+        drop(first);
+        let second = second.await.unwrap();
+        second
+            .store()
+            .add_fact(
+                crate::memory::types::AddFactRequest {
+                    content: "opaque writer fixture".to_string(),
+                    category: crate::memory::types::MemoryCategory::General,
+                    source: Some("test".to_string()),
+                    tags: Vec::new(),
+                    entities: Vec::new(),
+                    trust: None,
+                    metadata: serde_json::json!({}),
+                },
+                crate::memory::trust::DEFAULT_TRUST,
+            )
+            .await
+            .unwrap();
+        drop(second);
+
+        let mut rows = db
+            .conn()
+            .query("SELECT COUNT(*) FROM memory_facts", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
             1
         );
     }

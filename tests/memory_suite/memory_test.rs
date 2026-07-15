@@ -4,7 +4,6 @@ use tracedecay::memory::diff::vector_similarity;
 use tracedecay::memory::encoding::HolographicEncoder;
 use tracedecay::memory::entities::{extract_entities, normalize_entity};
 use tracedecay::memory::retrieval::FactRetriever;
-use tracedecay::memory::store::MemoryStore;
 use tracedecay::memory::trust::{
     DEFAULT_TRUST, apply_feedback, clamp_trust, trust_bucket, trust_distribution,
 };
@@ -24,7 +23,8 @@ async fn make_project() -> (TempDir, TraceDecay) {
 #[tokio::test]
 async fn fact_relations_rewire_and_deduplicate_when_facts_merge() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
     let a = store
         .add_fact(
             fact_request("alpha relation fact", MemoryCategory::Project, 0.9),
@@ -92,7 +92,8 @@ async fn fact_relations_rewire_and_deduplicate_when_facts_merge() {
 #[tokio::test]
 async fn grooming_batch_prevalidates_before_mutating_and_rejects_conflicting_links() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
     let fact = store
         .add_fact(
             fact_request("batch validation fact", MemoryCategory::Project, 0.9),
@@ -136,7 +137,8 @@ async fn grooming_batch_prevalidates_before_mutating_and_rejects_conflicting_lin
 #[tokio::test]
 async fn entity_grooming_rewires_links_supports_alias_retrieval_and_repairs_vectors() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
     let mut first_request =
         fact_request("TraceDecay owns graph memory", MemoryCategory::Project, 0.9);
     first_request.entities = vec!["TraceDecay".to_string()];
@@ -763,7 +765,8 @@ fn vector_deserialize_accepts_legacy_f64_blobs_for_forward_compatibility_and_bac
 #[tokio::test]
 async fn memory_store_marks_and_rebuilds_dirty_banks() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     let fact = store
         .add_fact(
@@ -820,7 +823,8 @@ async fn memory_store_marks_and_rebuilds_dirty_banks() {
 #[tokio::test]
 async fn rebuild_dirty_banks_preserves_rows_updated_during_rebuild() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     store
         .add_fact(
@@ -859,7 +863,8 @@ async fn rebuild_dirty_banks_preserves_rows_updated_during_rebuild() {
 #[tokio::test]
 async fn mark_bank_dirty_advances_marker_on_same_second_redirty() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     store
         .add_fact(
@@ -895,7 +900,8 @@ async fn mark_bank_dirty_advances_marker_on_same_second_redirty() {
 #[tokio::test]
 async fn memory_store_add_list_get_and_deduplicates_by_content() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     let mut request = fact_request(
         "Use SQLite-backed holographic memory",
@@ -943,7 +949,8 @@ async fn memory_store_add_list_get_and_deduplicates_by_content() {
 #[tokio::test]
 async fn memory_store_refreshes_vector_when_duplicate_add_merges_entities() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
     let encoder = HolographicEncoder;
     let content = "persist duplicate vector content";
 
@@ -984,7 +991,8 @@ async fn memory_store_refreshes_vector_when_duplicate_add_merges_entities() {
 #[tokio::test]
 async fn memory_store_links_explicit_and_extracted_entities_and_updates_fields() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     let mut request = fact_request(
         r#"Project Phoenix stores facts in src/memory/store.rs via HolographicEncoder::encode_fact"#,
@@ -1032,7 +1040,8 @@ async fn memory_store_links_explicit_and_extracted_entities_and_updates_fields()
 #[tokio::test]
 async fn memory_store_rejects_secret_like_fact_updates_without_mutating() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
     let fact = store
         .add_fact(
             fact_request(
@@ -1092,7 +1101,8 @@ async fn memory_store_rejects_secret_like_fact_updates_without_mutating() {
 #[tokio::test]
 async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     let fact = store
         .add_fact(
@@ -1195,7 +1205,8 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
 #[tokio::test]
 async fn compute_missing_vectors_backfills_legacy_f64_precision_to_f32() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
     let fact = store
         .add_fact(
             fact_request(
@@ -1246,7 +1257,8 @@ async fn compute_missing_vectors_backfills_legacy_f64_precision_to_f32() {
 #[tokio::test]
 async fn compact_vectors_keep_recall_ordering_after_bank_rebuild() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
     let retriever = FactRetriever::new(db.conn());
     for (content, trust) in [
         (
@@ -1306,7 +1318,8 @@ async fn compact_vectors_keep_recall_ordering_after_bank_rebuild() {
 #[tokio::test]
 async fn remove_fact_defers_vacuum_while_peer_connections_are_live() {
     let (db, tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
     let db_path = tmp.path().join("tracedecay.db");
     let mut fact_ids = Vec::new();
     let vector = HolographicEncoder::serialize(&vec![0.0; HolographicEncoder::DIMENSIONS])
@@ -1373,7 +1386,8 @@ async fn remove_fact_defers_vacuum_while_peer_connections_are_live() {
 #[tokio::test]
 async fn memory_store_records_feedback_audit_and_retrieval_counts() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
     let fact = store
         .add_fact(
             fact_request(
@@ -1665,7 +1679,8 @@ async fn memory_status_repair_preserves_fact_updated_at() {
 #[tokio::test]
 async fn fact_retriever_search_sanitizes_fts_chars_and_trust_weights_ordering() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
     let retriever = FactRetriever::new(db.conn());
 
     store
@@ -1718,7 +1733,8 @@ async fn fact_retriever_search_sanitizes_fts_chars_and_trust_weights_ordering() 
 #[tokio::test]
 async fn fact_retriever_search_includes_old_entity_only_matches() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
     let retriever = FactRetriever::new(db.conn());
 
     let mut matching = fact_request(
@@ -1759,7 +1775,8 @@ async fn fact_retriever_search_includes_old_entity_only_matches() {
 #[tokio::test]
 async fn fact_retriever_probe_related_reason_and_contradiction() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
     let retriever = FactRetriever::new(db.conn());
 
     let mut first = fact_request(
@@ -1836,7 +1853,8 @@ async fn fact_retriever_probe_related_reason_and_contradiction() {
 #[tokio::test]
 async fn fact_retriever_reason_applies_entity_predicates_before_limit() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
     let retriever = FactRetriever::new(db.conn());
 
     let mut matching = fact_request(
@@ -1881,7 +1899,8 @@ async fn fact_retriever_reason_applies_entity_predicates_before_limit() {
 #[tokio::test]
 async fn fact_retriever_reason_deduplicates_entity_predicates() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
     let retriever = FactRetriever::new(db.conn());
 
     let mut request = fact_request(
@@ -1923,7 +1942,8 @@ async fn fact_retriever_reason_deduplicates_entity_predicates() {
 #[tokio::test]
 async fn remove_fact_hard_deletes_fts_entity_links_and_feedback_events() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     let mut request = fact_request(
         "hard delete cascade fixture fact",
@@ -2066,7 +2086,8 @@ async fn search_facts_bump_access_count_only_for_returned_results() {
 #[tokio::test]
 async fn add_fact_reports_near_duplicates_and_skips_normalized_equivalents() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     let encoder = HolographicEncoder;
     let retriever = FactRetriever::new(db.conn());
@@ -2196,7 +2217,8 @@ async fn add_fact_reports_near_duplicates_and_skips_normalized_equivalents() {
 #[tokio::test]
 async fn add_fact_flags_possible_conflict_on_negation_cues() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     let original = store
         .add_fact(
@@ -2243,7 +2265,8 @@ async fn add_fact_flags_possible_conflict_on_negation_cues() {
 #[tokio::test]
 async fn add_fact_rejects_secret_like_content_without_storing() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     let rejected = store
         .add_fact(
@@ -2285,7 +2308,8 @@ async fn add_fact_rejects_secret_like_content_without_storing() {
 #[tokio::test]
 async fn memory_oplog_records_mutations_with_hashes_not_content() {
     let (db, _tmp) = make_memory_store().await;
-    let store = MemoryStore::new(db.conn());
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     let fact = store
         .add_fact(

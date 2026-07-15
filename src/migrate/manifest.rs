@@ -485,7 +485,32 @@ pub fn verify_migration_manifest(manifest: &MigrationManifest) -> MigrationVerif
 pub async fn apply_migration_manifest(
     manifest: &mut MigrationManifest,
 ) -> io::Result<MigrationApplyReport> {
+    apply_migration_manifest_with_lease(manifest, None).await
+}
+
+/// Applies a manifest while reusing the caller's exclusive destination lease.
+///
+/// The caller must keep the matching maintenance database scope alive through
+/// any registry, enrollment-marker, and finalization work that follows.
+pub async fn apply_migration_manifest_with_destination_lease(
+    manifest: &mut MigrationManifest,
+    destination_lease: &crate::lifecycle_lease::LifecycleLease,
+) -> io::Result<MigrationApplyReport> {
+    apply_migration_manifest_with_lease(manifest, Some(destination_lease)).await
+}
+
+async fn apply_migration_manifest_with_lease(
+    manifest: &mut MigrationManifest,
+    destination_lease: Option<&crate::lifecycle_lease::LifecycleLease>,
+) -> io::Result<MigrationApplyReport> {
     let (project_root, source_data_dir, profile_root, project_id) = manifest_destination(manifest)?;
+    if let Some(lease) = destination_lease
+        && (!lease.is_exclusive() || !lease.guards_profile(&profile_root))
+    {
+        return Err(invalid_manifest(
+            "migration apply destination lease must exclusively guard the destination profile",
+        ));
+    }
     let source_metadata = source_data_dir.symlink_metadata().map_err(|error| {
         invalid_manifest(&format!(
             "migration source data_dir '{}' is unavailable: {error}",
@@ -523,13 +548,20 @@ pub async fn apply_migration_manifest(
     let operation = format!("migration apply {}", manifest.migration_id);
     let mut lifecycle_leases = Vec::with_capacity(profile_roots.len());
     for root in &profile_roots {
+        if destination_lease.is_some_and(|lease| lease.guards_profile(root)) {
+            continue;
+        }
         lifecycle_leases.push(
             crate::lifecycle_lease::acquire_exclusive_for_profile(root, &operation)
                 .map_err(|error| invalid_manifest(&error.to_string()))?,
         );
     }
-    let mut database_scopes = Vec::with_capacity(profile_roots.len());
-    for (lease, root) in lifecycle_leases.iter().zip(&profile_roots) {
+    let mut database_scopes = Vec::with_capacity(lifecycle_leases.len());
+    for lease in &lifecycle_leases {
+        let root = profile_roots
+            .iter()
+            .find(|root| lease.guards_profile(root))
+            .expect("migration lease must guard one requested profile root");
         database_scopes.push(
             crate::db::enter_maintenance_database_scope(lease, root, &operation)
                 .map_err(|error| invalid_manifest(&error.to_string()))?,

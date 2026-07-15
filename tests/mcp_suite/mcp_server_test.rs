@@ -1106,7 +1106,7 @@ async fn test_server_stats_include_response_handle_metrics() {
     let retrieved = handle_tool_call(
         &cg,
         "tracedecay_retrieve",
-        json!({ "handle": handle }),
+        json!({ "handle": handle, "format": "json" }),
         None,
         None,
     )
@@ -1119,7 +1119,10 @@ async fn test_server_stats_include_response_handle_metrics() {
     let missing = handle_tool_call(
         &cg,
         "tracedecay_retrieve",
-        json!({ "handle": "rh_0123456789abcdef01234567" }),
+        json!({
+            "handle": "rh_0123456789abcdef01234567",
+            "format": "json"
+        }),
         None,
         None,
     )
@@ -1137,7 +1140,7 @@ async fn test_server_stats_include_response_handle_metrics() {
     let expired_result = handle_tool_call(
         &cg,
         "tracedecay_retrieve",
-        json!({ "handle": expired.handle }),
+        json!({ "handle": expired.handle, "format": "json" }),
         None,
         None,
     )

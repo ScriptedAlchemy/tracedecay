@@ -907,7 +907,6 @@ pub(crate) async fn seed_session_message_in_db(
 }
 
 pub(crate) async fn seed_duplicate_facts(cg: &TraceDecay) {
-    let conn = cg.db().conn();
     let vec_a = HolographicEncoder::serialize(&[0.20, 0.35, 0.50]).unwrap();
     let vec_b = HolographicEncoder::serialize(&[0.21, 0.34, 0.49]).unwrap();
     for (fact_id, content, vector, trust_score) in [
@@ -924,29 +923,31 @@ pub(crate) async fn seed_duplicate_facts(cg: &TraceDecay) {
             0.95_f64,
         ),
     ] {
-        conn.execute(
-            "INSERT INTO memory_facts
+        cg.db()
+            .execute_write(
+                "seed duplicate memory fact",
+                "INSERT INTO memory_facts
                 (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count,
                  created_at, updated_at, hrr_vector, hrr_algebra, hrr_dim, access_count)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            libsql::params![
-                fact_id,
-                content,
-                "project",
-                "[\"cache\",\"policy\"]",
-                trust_score,
-                0_i64,
-                0_i64,
-                1_700_000_000_i64 + fact_id,
-                1_700_000_100_i64 + fact_id,
-                libsql::Value::Blob(vector),
-                "amari_fhrr",
-                HolographicEncoder::DIMENSIONS as i64,
-                0_i64,
-            ],
-        )
-        .await
-        .unwrap();
+                libsql::params![
+                    fact_id,
+                    content,
+                    "project",
+                    "[\"cache\",\"policy\"]",
+                    trust_score,
+                    0_i64,
+                    0_i64,
+                    1_700_000_000_i64 + fact_id,
+                    1_700_000_100_i64 + fact_id,
+                    libsql::Value::Blob(vector),
+                    "amari_fhrr",
+                    HolographicEncoder::DIMENSIONS as i64,
+                    0_i64,
+                ],
+            )
+            .await
+            .unwrap();
     }
 }
 
