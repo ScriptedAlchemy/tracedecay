@@ -53,6 +53,11 @@ requirements and boundaries, not separate crate-first work queues.
 - One typed kernel owns each mechanism. Public names and compatibility aliases
   are bindings, never alternate query, edit, storage, rendering, health, or
   workflow implementations.
+- [Git intelligence and safe repository operations](36-git-aware-change-context-and-index-transactions.md)
+  progress from PR7 provenance anchors through PR9 read-only semantic evidence,
+  PR11 daemon-serialized index/commit transactions, and PR12 shared surface
+  bindings. They never autonomously mutate branches, worktrees, refs, or
+  published history.
 - Preserve stock Cargo compatibility. Developer-local build wrappers and cache
   layouts are never repository or CI requirements.
 - Use explicit cancellation and typed progress for long operations. Do not add

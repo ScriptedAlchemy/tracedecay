@@ -21,3 +21,8 @@ Retained product behavior has direct owners:
 Developer agents may coordinate through their native tools. That activity is
 not TraceDecay runtime state. These Markdown plans are documentation only and
 cannot be imported or executed by any product workflow.
+
+[Plan 36](36-git-aware-change-context-and-index-transactions.md) is user-facing
+repository tooling over Git evidence and explicit index transactions. It must
+never become a plan parser, task tracker, delivery ledger, agent orchestrator,
+or mechanism for executing these Markdown files.

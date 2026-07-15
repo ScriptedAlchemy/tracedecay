@@ -44,6 +44,12 @@ Every public surface resolves stable capability IDs to the same application use 
   rewrite, exact/symbol edit, temporal retrieval, configuration, health, and
   every other tool bind stable typed application operations. A surface name or
   alias has zero business logic.
+- **PR11 — Git index capability:** catalog the daemon-owned
+  `GitIndexTransaction` operations `stage_hunks`, `unstage_hunks`, and
+  `commit_index` as typed application handlers with distinct effect classes,
+  immutable preview/CAS requirements, idempotency keys, and receipt contracts.
+  Do not catalog generic Git execution or autonomous merge, rebase,
+  cherry-pick, branch/tag/ref mutation, or history rewriting.
 - **PR11 — configuration boundary:** code/config-file inspection is a scoped
   source operation; product settings use the typed configuration authority.
   Similar presentation does not merge their authorization or effects.
@@ -79,6 +85,12 @@ Every public surface resolves stable capability IDs to the same application use 
   typed catalog entry, bounded schema, policy classification, and tested
   handler. Never expose arbitrary method or payload forwarding.
 - **PR12 — schemas:** surface adapters use reviewed typed schemas or schema references from the owning contract. The catalog does not generate domain types from prose or source parsing.
+- **PR12 — Git bindings:** expose exactly `git_preview` and `git_apply` to CLI
+  and MCP. Both surfaces share one request/result schema: preview returns the
+  immutable transaction plan and digest; apply accepts that identity plus CAS
+  evidence and returns the canonical receipt or typed stale/conflict state.
+  Internal `stage_hunks`, `unstage_hunks`, and `commit_index` remain application
+  operations, not additional public tools.
 - **PR12 — discovery:** return bounded capability metadata filtered by surface, profile, availability, scope, and authorization. Never expose secrets, config bodies, private paths, or unavailable administrative details.
 - **PR12 — output:** all surfaces consume the same typed application result before rendering. Markdown is the human/agent default where appropriate; structured JSON remains explicit.
 - **PR12 — drift:** direct tests enumerate compiled bindings and assert each references a valid catalog entry and handler. This is runtime contract validation, not source extraction.
@@ -94,6 +106,9 @@ Every public surface resolves stable capability IDs to the same application use 
 - PR11 integration tests prove every catalog entry resolves to one real application handler with matching scope, effect, privacy, and schema contracts.
 - Policy tests cover routing among available entries, missing capability, denied scope, stale availability, and no silent substitution.
 - PR12 parity tests invoke representative read, write, administrative, streaming, and long-running use cases through CLI, MCP, HTTP, and LSP adapters and compare typed results before rendering.
+- PR12 Git parity tests compare CLI and MCP `git_preview`/`git_apply` semantic
+  results before rendering, including Markdown/JSON equivalence, stale CAS,
+  conflicting index state, idempotent replay, and receipt identity.
 - PR14 contract tests add dashboard binding, dashboard actions, and dashboard parity on the same typed requests and CapabilityIds.
 - PR18 SDK parity tests require every advertised SDK binding to resolve to the
   shipped typed method and canonical application handler.

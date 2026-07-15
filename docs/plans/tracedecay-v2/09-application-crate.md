@@ -42,6 +42,10 @@ Every user-visible operation has one direct typed application entry point. CLI, 
   backed by the PR9 in-process code-intelligence kernel.
 - One source-edit `EditTransaction` for preview and apply across exact, symbol,
   insert, move, and structural rewrites.
+- One daemon-owned `GitIndexTransaction` for typed `stage_hunks`,
+  `unstage_hunks`, and `commit_index` execution against a real locked Git
+  index. It owns immutable previews, CAS revalidation, idempotency, receipts,
+  and explicit effect classes without exposing arbitrary Git execution.
 
 ## Does not own
 
@@ -57,6 +61,8 @@ Every user-visible operation has one direct typed application entry point. CLI, 
   [35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 - Developer plan parsing, Markdown execution, task scheduling, agent orchestration, edit bundles, generated inventories, or compatibility ledgers.
 - JavaScript workflow execution. PR17 workflows are real typed product operations, not developer-plan machinery.
+- Merge, rebase, cherry-pick, branch/tag/ref mutation, history rewriting, or an
+  autonomous Git workflow engine.
 
 ## Required behavior
 
@@ -93,6 +99,15 @@ Every user-visible operation has one direct typed application entry point. CLI, 
   claimed. Success is reported only after every file commits. After a crash,
   reconciliation completes or rolls back the journal before new edits or
   reindexing. CLI `--dry-run` and tool `dry_run` mean this same preview.
+- PR11 Git index mutations use `GitIndexTransaction`. Preview pins repository,
+  worktree, HEAD/index identity, selected hunks, path/content digests, intended
+  effect class, and canonical transaction digest. Apply acquires the real Git
+  index lock, revalidates every CAS guard, executes only the previewed
+  `stage_hunks`, `unstage_hunks`, or `commit_index` steps, and releases the lock
+  on every outcome. A reused idempotency key returns the same durable receipt;
+  mismatched input fails closed. Concurrent index change, stale HEAD/content,
+  lock contention, and patch conflict remain distinct typed states. No partial
+  success is reported as committed.
 - `str_replace` is a compatibility binding to one-operation
   `multi_str_replace`; `insert_at_symbol` binds typed `insert_at`. Keep
   `replace_symbol`, in-process structural rewrite, and `move_symbol` as typed
@@ -125,6 +140,10 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - CLI, MCP, HTTP, hooks, automations, and dashboard paths share those contracts rather than reimplementing behavior.
 - Dependency checks prove the crate is transport- and storage-neutral.
 - Authorization, scope, cancellation, idempotency, freshness, coverage, and error semantics have direct tests.
+- `GitIndexTransaction` tests use a real repository and index lock and cover
+  preview immutability, CAS drift, conflicting hunks, concurrent index change,
+  idempotent replay, crash-safe receipts, lock release, and exact effect-class
+  enforcement without permitting generic or history-mutating Git commands.
 - Unsupported, absent, indexing, stale, cancelled, timed-out, failed, and partial
   provider states have direct tests; none collapse to a clean empty result.
   Empty output is valid only for supported, successfully completed requests with

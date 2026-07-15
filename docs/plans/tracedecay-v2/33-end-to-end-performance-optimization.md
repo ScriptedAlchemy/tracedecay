@@ -35,6 +35,10 @@ regression discovered by an earlier slice.
 - Report p50/p95/p99 latency and throughput for ingest, sync/catch-up,
   projection, index build/update, exact/temporal/graph/semantic query, and the
   representative end-to-end journeys.
+- Measure [Plan 36](36-git-aware-change-context-and-index-transactions.md)
+  status/diff/hunk preview and explicit index-transaction apply separately,
+  including repository size, changed-path and hunk count, index-lock wait,
+  bytes parsed/applied, and stale-preview rejection cost.
 - Measure LSP cold and warm gateway/analyzer startup, workspace indexing,
   hover and navigation, edit-to-diagnostic and edit-to-context latency,
   request coalescing and cancellation propagation, cache-key hit/miss
@@ -94,6 +98,18 @@ regression discovered by an earlier slice.
   their owning contracts require it.
 - Bound cross-project fan-out, graph traversal, reranking, result buffering,
   and per-client concurrency with explicit partial or unavailable coverage.
+
+### Git intelligence and index transactions
+
+- Set reviewed workload-specific p95 latency, peak-memory, and bytes-read
+  budgets for Plan 36 read-only queries and preview; set bounded index-lock hold
+  and apply/revalidation budgets for explicit mutations.
+- Reuse native Git object, diff, patch, and index behavior plus the canonical
+  graph/query caches. Do not build a second repository graph or retain patch
+  content as a performance cache.
+- Optimization cannot weaken `HunkRef` preconditions, preview revalidation,
+  index-lock ownership, atomicity, receipts, or rejection of autonomous
+  branch/worktree/ref/history mutation.
 
 ### LSP gateway and analyzers
 

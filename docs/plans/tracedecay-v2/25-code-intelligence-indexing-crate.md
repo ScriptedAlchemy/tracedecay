@@ -19,6 +19,8 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
   structural search, outline, rewrite, analyzer routing, and host LSP
   projection.
 - Canonical symbol, occurrence, relationship, diagnostic, and test-attribution records.
+- Generation-exact mappings from native Git file and hunk evidence to canonical
+  symbols, callers, change-hazard evidence, and affected-test candidates.
 - Content-addressed incremental reuse and bounded sanitized dirty-worktree
   indexing overlays captured from repository state. Unsaved per-client LSP
   document overlays are separate Plan 35 daemon session state.
@@ -36,6 +38,9 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 - A host-facing analyzer broker; the Plan 35 daemon gateway is the sole broker
   presented to LSP hosts.
 - A second repository identity, intake queue, or write path.
+- Git object storage, revision traversal, status, blame, rename detection, or a
+  patch/diff engine. Native Git owns those semantics; this boundary indexes and
+  joins only receipt-bound evidence supplied by capture/application ports.
 
 ## Required behavior
 
@@ -87,6 +92,23 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 - Record rename, move, split, and merge candidates with evidence and confidence.
 - Keep ambiguous lineage explicit; do not silently merge unrelated symbols.
 
+### Git evidence joins
+
+- PR7 anchors exact commit, tree, blob, index, or captured-worktree evidence.
+  PR9 consumes native Git status, history, blame, and working/staged/range diff
+  results through typed ports and addresses hunks with `HunkRef`; it never
+  reconstructs patches from indexed rows.
+- Map a hunk to symbols only when repository identity, path/content identity,
+  source side, and code generation match. Tree-sitter supplies canonical syntax
+  spans; `ast-grep-core` supplies requested structural-pattern matches; neither
+  replaces Git diff/blame/history nor creates a parallel symbol graph.
+- Derive callers, hazards, and affected-test candidates from the canonical graph
+  and test-attribution evidence with bounded traversal and explicit evidence
+  class. A hunk-to-symbol match does not prove runtime impact or test execution.
+- Preserve separate Git/capture provenance and watermarks, code-index generation
+  and graph provenance, and diagnostic/test provenance. Joined results expose
+  every relevant watermark plus mismatch, staleness, and partial coverage.
+
 ### Diagnostics and tests
 
 - Attach compiler and language-server diagnostics to exact file and symbol
@@ -117,6 +139,11 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 - Rename, move, split, merge, ambiguous-lineage, parse-error, deletion, and unsupported-language fixtures remain truthful.
 - Diagnostic and test attribution never crosses snapshots, never upgrades
   inference to fact, and never publishes stale or cleared evidence as current.
+- Working, staged, and committed-range fixtures prove native Git hunk identity
+  maps deterministically to generation-matched symbols while mismatch, binary,
+  rename, deletion, ambiguous lineage, and missing-generation cases remain
+  explicit. Caller, hazard, and affected-test results retain their own graph and
+  test-evidence provenance rather than inheriting certainty from the Git hunk.
 - Canonical descriptor fixtures prove analyzer routing and host LSP projection
   use the same extension, language-ID, root-marker, and capability facts without
   copying executable commands or settings into this boundary.

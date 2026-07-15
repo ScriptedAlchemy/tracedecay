@@ -39,6 +39,10 @@ Every operational and product metric states what was measured, over which popula
   reuse and overlay freshness; diagnostic add and clear; provider conflicts;
   host delivery path; partial coverage and drops; and bridge reconnect.
 - LSP telemetry contains no paths, source, symbols, or diagnostic messages.
+- [Plan 36](36-git-aware-change-context-and-index-transactions.md) telemetry may
+  identify the operation kind and privacy-safe outcome only. Patch content,
+  paths, commit messages, author identity, and conflict content never enter
+  canonical events, aggregates, exports, or drill-down anchors.
 - Identify scope, capability, operation, result, event and observation time, duration or quantity, unit, producer revision, trace, and privacy classification.
 - Use stable idempotency keys so retries and replay cannot double count.
 - Record terminal outcomes separately from attempts and preserve cancellation, rejection, timeout, partial success, and unknown outcomes.
@@ -127,6 +131,9 @@ decision with collision, ambiguity, maintenance, and privacy review.
   in PR14; PR18 SDK conformance adds the same parity fixtures for each shipped
   SDK.
 - Privacy fixtures prove events and drill-down anchors contain no prohibited raw content.
+- Git fixtures prove patch, path, commit-message, author, and conflict content
+  never enters telemetry while attempts, typed outcomes, latency, and dropped
+  coverage remain truthful.
 - LSP fixtures reconcile session, request, analyzer, cache, diagnostic,
   coverage, drop, and reconnect events while proving paths, source, symbols,
   and messages never enter telemetry.

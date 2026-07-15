@@ -37,6 +37,10 @@ Every product surface can run the same bounded query use case and receive determ
 - Immutable query-evidence input types for current diagnostics, code
   navigation, and impact/affected-test hybrid reads bound to exact generation,
   file, symbol, span, producer, and freshness evidence.
+- Typed Git requests for working-tree, staged, and revision-range diffs plus
+  status, history, blame, and hunk lookup. `HunkRef` binds repository identity,
+  immutable side anchors or an explicitly captured mutable-state watermark,
+  path identity, native Git diff options, and hunk coordinates.
 - Read-only ports implemented by root store/projector adapters.
 
 ## Does not own
@@ -46,6 +50,9 @@ Every product surface can run the same bounded query use case and receive determ
 - SQLite/libSQL connections, SQL, migrations, projector writes, model downloads, HTTP, SSE framing, MCP, CLI, or dashboard code.
 - Task plans, work items, boards, leases, attempts, workflow execution, or agent orchestration.
 - Source parsing, generated inventories, generated architecture views, or plan-document enforcement.
+- A Git object database, revision walker, blame implementation, patch parser,
+  or independent diff engine. Native Git supplies repository facts and diff
+  semantics; the query layer types, bounds, joins, and explains them.
 - An LSP-specific graph or query engine, ranking, hydration, scope, or fallback
   path; LSP remains a transport adapter under
   [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
@@ -82,11 +89,28 @@ Every product surface can run the same bounded query use case and receive determ
   canonical multi-root composition, and federation for retrieval slices that
   require cross-root scope.
 - **PR7 — facts/provenance:** add typed fact, assertion, evidence, contradiction, supersession, trust, and as-of requests. Preserve source and privacy-domain identity through merge and hydration.
+- **PR7 — immutable Git evidence:** anchors may identify retained commit, tree,
+  blob, index, and captured-worktree evidence. Mutable ref names and ambient
+  checkout state are routing inputs only; resolution records the exact object
+  identity or captured state watermark that was observed.
 - **PR8 — LCM/session:** add typed recent-session, message, occurrence,
   logical-copy, summary-DAG, current, as-of, evolution, and forensic requests
   over current-project/single-root scope. Native rows remain addressable;
   representative views report hidden and unknown counts.
 - **PR9 — lexical code:** add exact identifier, phrase, token, field, bounded fuzzy, relation, path, impact, affected-test, facet, and timeline requests. Exact identifiers precede approximate candidates. Impact and affected-test requests may merge only explicit typed reference/dispatch evidence inputs alongside graph, Git, and test inputs; that evidence never proves a test executed or a change was delivered.
+- **PR9 — Git queries:** add typed working-tree, staged, and arbitrary revision-
+  range diff requests plus status, history, blame, and `HunkRef` resolution.
+  Native Git remains authoritative for objects, revision traversal, status,
+  blame, rename detection, and patch/hunk production. Results can join hunks to
+  generation-matched symbols, callers, change hazards, and affected-test
+  candidates through the code graph; Tree-sitter maps source spans to canonical
+  structure and `ast-grep-core` evaluates explicit structural patterns only.
+  No layer reimplements Git history, blame, or diff semantics.
+- **PR9 — dual provenance:** Git evidence provenance and repository-state
+  watermarks remain distinct from code-index generation, graph, diagnostic,
+  and test-attribution provenance. Joins report both watermarks, mismatch and
+  partial coverage explicitly; a matching path or line never implies matching
+  content or generation.
 - **PR9 — diagnostics/navigation:** add typed current-diagnostic and
   code-navigation reads over exact clean-generation and graph-backed evidence,
   covering declaration, definition, type-definition, implementation,
@@ -119,8 +143,15 @@ Every product surface can run the same bounded query use case and receive determ
   and projection status, partial or unavailable coverage, cancellation, exact
   retry, and canonical profile/project ownership without ambient fallback.
 - PR7 direct tests cover provenance preservation, contradiction/supersession, as-of knowledge, denied payloads, redacted frontiers, and unknown denominators.
+- PR7 tests also prove Git anchors resolve immutable objects or retained
+  captured state after ref movement, checkout removal, and index rebuild.
 - PR8 direct tests cover native versus representative views, copied prompts, punctuation/CJK/emoji, provider filters, summary freshness, temporal resolution, and restart-stable pagination.
 - PR9 direct tests compare lexical inclusion and declared ordering with redacted V1 fixtures and cover exact identifiers, fuzzy bounds, graph limits, impact roles, facets, deterministic diversity, and generation-exact clean-generation/graph-backed diagnostic and navigation reads.
+- PR9 Git tests cover working, staged, committed-range, rename, deletion,
+  binary, merge-history, blame, and hunk queries; stable `HunkRef` replay;
+  symbol/caller/hazard/affected-test joins; bounded partial coverage; and
+  rejection or explicit degradation when Git and code-generation watermarks do
+  not match native content.
 - PR12 direct tests cover analyzer-derived hover, signature help, type hierarchy, and rename-candidate merging from explicit typed evidence inputs only.
 - PR10 direct tests cover incompatible representations, privacy isolation, missing artifacts, exact fallback, semantic failure, rerank caps, and byte-stable lexical fallback.
 - PR11/PR12 contract tests submit equivalent typed requests through application,

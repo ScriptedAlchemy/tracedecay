@@ -20,6 +20,9 @@ and index rebuilds, while deletion and retention remain explicit.
 - Provenance relations such as `captured_from`, `produced`, `observed`, `executed_in`,
   `discussed`, `copied_from`, and `derived_from`.
 - Evidence time, source generation, projection watermark, coverage, and drift state.
+- Immutable Git evidence coordinates: canonical repository identity; commit,
+  tree, and blob object identity; parent/side role; path identity; and retained
+  index or worktree-capture watermark when no immutable Git object exists.
 - Safe tombstones for expired, redacted, or deleted targets.
 - Rules for distinguishing direct authorship from copied coordination text.
 
@@ -57,12 +60,26 @@ and index rebuilds, while deletion and retention remain explicit.
    safe tombstone needed to explain the target state and prevent ID reuse.
 10. Later query slices return anchors for exact results, omissions, and explanations;
     transport and UI layers pass them through without defining another reference type.
+11. A Git anchor never treats a branch, tag, symbolic ref, checkout path, or current
+    `HEAD` as immutable evidence. PR7 resolves routing inputs to exact retained Git
+    objects or a receipt-bound index/worktree capture in the authoritative anchor
+    transaction; ref movement cannot change what an existing anchor means.
+12. Commit, tree, and blob anchors preserve native object identity and repository
+    ownership. Patch hunks use the PR9 `HunkRef`, which references anchored sides (or
+    captured mutable-state watermarks) plus native Git diff options and coordinates;
+    it does not create a second content or provenance identity.
+13. Git provenance, capture/projection watermarks, and later code-index generation
+    watermarks remain separate typed evidence. Resolution reports each and any drift;
+    path/line similarity cannot silently upgrade mismatched evidence.
 
 ## Acceptance
 
 - PR7 tests atomic observation-and-anchor creation, idempotent replay, rollback, native
   alias collisions, copied-prompt attribution, and unauthorized resolution.
 - Rebuilding projections preserves anchor IDs and source lineage.
+- Moving refs, rewriting a branch, or removing a checkout does not retarget retained
+  commit/tree/blob or captured-state anchors; unavailable objects return a safe typed
+  state rather than resolving against ambient `HEAD`.
 - Moving a project or deleting a worktree does not break a retained project/session
   anchor.
 - Redaction, expiry, and deletion return safe typed tombstones with no payload bytes.

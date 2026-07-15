@@ -75,6 +75,10 @@ provider source or daemon-admitted host event
   Hermes, and Kiro so PR13 can later replace hook execution without guessing
   current event or response semantics. PR6 does not move query, model, sync, or
   storage work into hooks.
+- Preserve provider-native Git evidence without interpreting or acting on it.
+  [Plan 36](36-git-aware-change-context-and-index-transactions.md) owns the PR7+
+  provenance, read-only semantic evidence, safe transaction, and surface phases;
+  no phase autonomously mutates branches, worktrees, refs, or published history.
 - Record bounded per-provider parse/commit/replay, no-op, backlog, and resource
   baselines for later PR20 comparison. A severe regression or unbounded path
   found here is fixed here, not deferred.

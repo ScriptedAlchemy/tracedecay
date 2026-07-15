@@ -117,6 +117,17 @@ storage, availability, or fallback logic.
   LSP `textDocument/codeAction` is deferred from PR12 and cannot ship until a
   separate owner defines typed candidate consumption, policy classification, a
   canonical preview/`EditTransaction` route, and acceptance fixtures.
+- Git index mutation exposes exactly two public operations on both CLI and
+  MCP: `git_preview` and `git_apply`. They share one typed schema and call the
+  PR11 daemon-owned `GitIndexTransaction`; adapters cannot invoke its internal
+  `stage_hunks`, `unstage_hunks`, or `commit_index` steps independently.
+  `git_preview` returns selected hunks, intended effect class, CAS evidence,
+  and an immutable transaction digest without locking or mutating the index.
+  `git_apply` requires that preview identity, acquires the real index lock,
+  revalidates CAS state, and returns an idempotent receipt or a typed stale,
+  conflict, lock-contended, denied, or invalid-effect result. Neither operation
+  is generic Git execution or permits autonomous merge, rebase, cherry-pick,
+  branch/tag/ref mutation, or history rewriting.
 
 Literal grep, AST structural match, body source, graph node records, and context
 composition remain distinct because their evidence and semantics differ.
@@ -179,6 +190,12 @@ Parity is verified from public behavior, not from a generated inventory:
 10. run LSP lifecycle, negotiation, document-version, cancellation,
     notification/response separation, backpressure, daemon-failure, and direct
     upstream semantic-parity fixtures.
+11. invoke `git_preview` and `git_apply` through CLI and MCP and compare their
+    canonical semantic results, then prove compact Markdown and JSON preserve
+    the same transaction identity, selected hunks, effect class, receipt, and
+    typed stale/conflict state;
+12. exercise concurrent index changes, real index-lock contention, preview CAS
+    drift, retry idempotency, and forbidden generic/history-changing requests.
 
 ## PR 12 deliverables
 
@@ -192,6 +209,8 @@ Parity is verified from public behavior, not from a generated inventory:
 - removal of handler-local database/query behavior, raw JSON renderers, double encoding, irreversible truncation, and writable fallback;
 - removal of the `admin_cli` registry and session/analytics handler copies;
 - focused CLI/MCP parity and concurrency tests.
+- exactly `git_preview` and `git_apply` as shared-schema CLI/MCP Git bindings,
+  with preview/CAS enforcement, typed receipts, and stale/conflict parity.
 
 ## Done
 
@@ -203,4 +222,6 @@ Parity is verified from public behavior, not from a generated inventory:
 - Compact Markdown and canonical JSON agree semantically.
 - Direct tests cover every shipped binding and failure class touched by PR 12.
 - Rejected arguments have CLI/MCP/HTTP parity without recording values or private payloads.
+- Git preview/apply Markdown and JSON agree semantically, and no generic Git or
+  autonomous ref/history mutation surface exists.
 - No generated surface inventory, plan parser, task editor, or executor is introduced.

@@ -27,6 +27,9 @@ choreography or storage knowledge.
   route catalogs, UI components, task graphs, plan executors, or agent schedulers.
 - Worktree creation, provisioning, branch deletion, repository mutation, or task-driven
   authority expansion.
+- Git index, hunk, and commit evidence or explicit index transactions; those are owned by
+  [Plan 36](36-git-aware-change-context-and-index-transactions.md) and consume this plan's
+  resolved repository/worktree identity.
 - Provider `project_key`, process CWD, host profile, path hash, branch database, or store
   filename as public identity.
 
@@ -62,7 +65,8 @@ choreography or storage knowledge.
     dirty state, holders, related sessions/PRs, provenance, confidence, and ambiguity.
 11. TraceDecay never creates a worktree. Discovery or association never grants cleanup.
     No product tool, workflow, or automation creates Git branches or worktrees
-    or deletes branches; PR15 owns scope resolution and safe worktree cleanup only.
+    or deletes branches, moves refs, or rewrites history; PR15 owns scope resolution and
+    safe worktree cleanup only.
 12. Cleanup begins with a read-only daemon inspection. Dirty/untracked files, active
     holders, unpushed or unmerged commits, open or uncertain PRs, shared references,
     ambiguous identity, stale evidence, or missing authorization block cleanup.

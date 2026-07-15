@@ -69,6 +69,11 @@ It does not expose one symbol-aware apply operation that carries a preview acros
 - This plan owns rename and API-migration semantics, preview/apply contracts,
   compatibility-preservation rules, stale-preview behavior, and the end-to-end
   acceptance matrix.
+- [Plan 36](36-git-aware-change-context-and-index-transactions.md) owns the
+  canonical `HunkRef` and `GitIndexTransaction`. Refactoring manifests reuse
+  those hunk identities, and any requested staging or commit reuses that index
+  transaction after the workspace edit succeeds; this plan creates no second
+  patch model, index writer, or Git receipt.
 - [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)'s
   `prepareRename` and `rename` bind only to read-only candidate/preview
   UseCaseIds. They never bind directly to `tracedecay_rename_symbol`,
@@ -93,6 +98,11 @@ It does not expose one symbol-aware apply operation that carries a preview acros
 `tracedecay_rename_preview` remains read-only and becomes the canonical planner for a one-symbol rename. It resolves the expected old symbol identity, validates the proposed repository-style name, enumerates impact, classifies every known occurrence, and emits an immutable preview manifest.
 
 `tracedecay_rename_symbol` is the apply operation. It accepts a preview identifier and digest rather than independently rediscovering a target from a bare name. `dry_run: true` executes the same revalidation and edit planning path but performs no writes.
+
+Rename and API-migration apply mutate workspace files only. Staging or
+committing is a separate explicit Plan 36 operation over revalidated
+`HunkRef`s; refactoring never autonomously creates branches/worktrees, moves
+refs, rewrites history, merges, rebases, tags, or pushes.
 
 A pure rename may update a bound symbol across:
 
@@ -368,3 +378,7 @@ End-to-end gates:
 9. Natural-language evals select pure rename for identity-preserving changes and API migration for provider-neutral promotion or compatibility work.
 10. The implementation reuses canonical graph, edit, diagnostics, formatting, and catalog owners; acceptance rejects a copied resolver, replacement engine, transaction path, or duplicate tool definition.
 11. Analyzer-candidate merge fixtures prove graph-only, analyzer-only, disagreement, stale-analyzer, overlay-vs-clean, provenance-preserving dedupe, and cross-project merge behavior; dirty overlay candidates never become durable preview truth without save or replan against clean content.
+12. Optional staging/commit fixtures prove the refactoring manifest's exact
+    `HunkRef`s flow through the canonical `GitIndexTransaction`, reject drift,
+    and never invoke an autonomous branch, worktree, ref, history, or remote
+    mutation.

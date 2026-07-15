@@ -54,6 +54,8 @@ not be rebuilt.
 - Exactly one fenced daemon remains the sole mutable SQLite authority for each
   shard. Producers send typed commands or observations; readers use
   daemon/application APIs.
+- Git intelligence is evidence-first and user-directed. TraceDecay never
+  autonomously mutates branches, worktrees, refs, or published history.
 - Project facts and project sessions are project-wide. User activity is
   profile-wide. Only code indexes vary by branch/worktree/snapshot.
 - Missing authority, scope, privacy state, or recovery proof fails closed.
@@ -86,12 +88,12 @@ not be rebuilt.
 |---|---|
 | PR5 (complete) | Sanitized observation vertical: one real provider from parse through sanitizer, daemon-owned persistence, replay, and restart. |
 | PR6 | Provider coverage and event normalization: remaining hosts/sources, daemon host-admission spool for non-replayable events, identities, dedupe, partial input, backpressure, and canonical event relations. |
-| PR7 | Memory, facts, and provenance: project/profile ownership, evidence, corrections, trust, curation, migration, and deletion lineage. |
+| PR7 | Memory, facts, and provenance: project/profile ownership, evidence, corrections, trust, curation, migration, deletion lineage, and generation-bound repository provenance anchors. |
 | PR8 | Session/LCM temporal retrieval: occurrences, copies, summaries, supersession, current/as-of/evolution retrieval, and stable context assembly. |
-| PR9 | Code intelligence and lexical retrieval: deterministic extraction, generations, lineage, generation-bound managed diagnostics/tests, exact/phrase/BM25 search, and V1 parity. |
+| PR9 | Code intelligence and lexical retrieval: deterministic extraction, generations, lineage, generation-bound managed diagnostics/tests, exact/phrase/BM25 search, V1 parity, and typed read-only Git status/diff/history/blame/hunk intelligence enriched by graph impact. |
 | PR10 | Native semantic retrieval and ranking: gated FastEmbed artifacts, immutable vector generations, hybrid ranking, redundancy augmentation, evaluation, and lexical fallback. |
-| PR11 | Policy, application, catalog, and configuration core: typed use cases, grants, routing, replay, operations, capabilities, analyzer policy/settings, and one runtime configuration authority. |
-| PR12 | CLI, MCP, HTTP API, LSP gateway, and output convergence: one schema registry, dispatcher, and binding taxonomy; stable errors/cursors, compact Markdown, canonical JSON, SSE, cancellation, managed diagnostics, and surface parity. |
+| PR11 | Policy, application, catalog, and configuration core: typed use cases, grants, routing, replay, operations, capabilities, analyzer policy/settings, one runtime configuration authority, and daemon-serialized `stage_hunks`/`unstage_hunks`/`commit_index` transactions with `HunkRef` compare-and-swap and receipts. |
+| PR12 | CLI, MCP, HTTP API, LSP gateway, and output convergence: one schema registry, dispatcher, and binding taxonomy; stable errors/cursors, compact Markdown, canonical JSON, SSE, cancellation, managed diagnostics, surface parity, and shared Git preview/apply bindings. |
 | PR13 | Hooks, Context Scout, and host bundles: bounded hook ingestion, asynchronous suggestions, Codex/Claude/Cursor/Hermes/Kiro projections, one TraceDecay semantic/diagnostic contract delivered per host (Claude Code LSP plugin; Cursor desktop native-diagnostics adapter with duplicate-analyzer avoidance; hook/MCP/CLI capability paths for Cursor cloud, Codex, and other supported hosts as applicable), install/repair, and stock-host conformance. |
 | PR14 | Dashboard, Doctor, observability, and configuration operations: Brain/Explorer/Loom foundations, one truthful health/recovery kernel, metrics/SLOs, Settings, and direct remediation. |
 | PR15 | Cross-project, repository, and worktree behavior: canonical scope resolution, federation, globally routable evidence, graph/query/LSP workspace coverage, and multi-repository workflows. |
@@ -122,6 +124,9 @@ are stable.
   PR11–PR13, PR14, PR15, and PR16 generation-bound diagnostics, analyzer
   policy, daemon LSP gateway, gateway-specific finding/state schema consumed by
   dashboard/Doctor, multi-root scope, and remote-node behavior.
+- Plan [36](36-git-aware-change-context-and-index-transactions.md): PR7
+  provenance anchors, PR9 read-only semantic Git evidence, PR11 safe
+  daemon-serialized index/commit transactions, and PR12 CLI/MCP/HTTP bindings.
 - Plans 11, 14, and 26: PR14 product UI, Doctor, observability, regression, and
   operational quality.
 - Plan 16: PR15 canonical scope. Plan 24 is a permanent tombstone for the

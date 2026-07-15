@@ -41,6 +41,13 @@ Hints, retrieval choices, routing, correlation, diagnostics, curation, schedulin
 - **PR11 — outcomes:** distinguish shown, suppressed, ignored, acted on, contradicted, expired, and unknown. Missing feedback is unknown, never success or failure.
 - **PR11 — retrieval:** select declared query/ranking profiles and candidate limits without opening stores or reranking results itself.
 - **PR11 — routing:** choose among cataloged capabilities using explicit availability, freshness, scope, effect, and truth-source metadata. Never invent a fallback capability.
+- **PR11 — Git effects:** policy may classify a proposed Git index mutation by
+  scope, authority, freshness, conflict risk, and effect class, but it never
+  opens the index or executes Git. Application owns the typed
+  `GitIndexTransaction`, revalidates the immutable preview digest/CAS guards,
+  and returns an idempotent receipt or a typed stale/conflict/denied result.
+  Policy cannot propose or authorize a generic Git command, merge, rebase,
+  cherry-pick, branch/tag/ref mutation, or history rewrite.
 - **PR11 — analyzer routing:** decide only among cataloged analyzers and typed
   code/diagnostic capabilities from explicit availability, privacy, scope,
   configuration, and resource evidence. Publish canonical policy
@@ -63,6 +70,9 @@ Hints, retrieval choices, routing, correlation, diagnostics, curation, schedulin
 - Replay tests cover exact, recorded, and current-best-effort behavior plus missing inputs, version drift, and named substitutions.
 - Hint tests cover repetition, cooldown, token budget, sensitivity, host limits, competing candidates, and outcome attribution.
 - Retrieval/routing tests cover unavailable capabilities, stale truth, scope mismatch, no silent fallback, and unchanged query ordering.
+- Git-routing tests cover preview/apply separation, effect classification,
+  stale preview rejection, index conflicts, denied authority, and the absence
+  of generic or history-mutating Git effects.
 - Correlation tests preserve local/live disagreement and both watermarks.
 - Diagnostics, scheduler, and memory tests prove evaluators cannot mutate and application handlers revalidate stale decisions.
 - Concurrent evaluation tests use immutable snapshots and remain deterministic while application state changes.
