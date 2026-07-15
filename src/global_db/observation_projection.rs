@@ -285,6 +285,8 @@ fn derive_projection(
 
     match map_sanitized_claude_record(observation.payload(), &context) {
         ClaudeRecordDisposition::Message { draft, message } => {
+            let draft = *draft;
+            let message = *message;
             let timestamp = message.timestamp;
             let session = SessionRecord {
                 provider: "claude".to_string(),
