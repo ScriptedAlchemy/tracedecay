@@ -161,7 +161,40 @@ pub(crate) struct ReadCacheWrite<'a> {
 /// `(project_id, session_id, file_path, mode, args_hash)`; a re-`put` with
 /// matching keys replaces the prior row, which is how stale entries (mtime
 /// mismatch) get evicted.
-pub(crate) async fn put(conn: &Connection, write: ReadCacheWrite<'_>) -> Result<()> {
+#[expect(
+    clippy::too_many_arguments,
+    reason = "preserves the public read-cache API"
+)]
+pub async fn put(
+    conn: &Connection,
+    project_id: &str,
+    session_id: &str,
+    file_path: &str,
+    mtime_ns: i64,
+    mode: &str,
+    args_hash: &str,
+    digest: &str,
+    body: &[u8],
+    token_count: u32,
+) -> Result<()> {
+    put_write(
+        conn,
+        ReadCacheWrite {
+            project_id,
+            session_id,
+            file_path,
+            mtime_ns,
+            mode,
+            args_hash,
+            digest,
+            body,
+            token_count,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn put_write(conn: &Connection, write: ReadCacheWrite<'_>) -> Result<()> {
     let ReadCacheWrite {
         project_id,
         session_id,

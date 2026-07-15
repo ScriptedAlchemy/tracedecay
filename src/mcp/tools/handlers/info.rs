@@ -2374,7 +2374,7 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
     let digest = read_cache::digest_bytes(body_text.as_bytes());
 
     if !cg.is_read_only() {
-        read_cache::put(
+        read_cache::put_write(
             conn,
             read_cache::ReadCacheWrite {
                 project_id: &project_id,
