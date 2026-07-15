@@ -2,12 +2,12 @@ use std::cmp::Ordering;
 
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ClaudeByteRangeV1, ClaudeFileGenerationV1,
-    ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
-    ComponentVersion, DurableClaudeObservationV1, IdempotencyKeyV1, ObservationCollisionOutcomeV1,
-    ObservationScopeV1, PayloadReferenceV1, ProjectId, RetentionClass, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, classify_observation_collision,
+    CanonicalClaudeSanitizationReceiptMaterialV1, CanonicalObservationIdV1, ClaudeByteRangeV1,
+    ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1,
+    ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1, IdempotencyKeyV1,
+    ObservationCollisionOutcomeV1, ObservationScopeV1, PayloadReferenceV1, ProjectId,
+    RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+    SanitizerDispositionV1, SensitivityV1, SessionId, classify_observation_collision,
 };
 
 fn source(session_id: &str) -> ClaudeSourceIdentityV1 {
@@ -67,8 +67,9 @@ fn observation_ids_are_stable_and_payload_objects_are_canonical() {
     );
     assert_eq!(
         idempotency_key.as_str(),
-        "sha256:13b3a18339fe0dbf5a1ccc894e24cf1626ca88babef32869bf7dc85f6a626abb"
+        "sha256:92fe6f78f68eb34153f865b770a7fed01b01425730796ac67bbc4973aad527a3"
     );
+    assert_eq!(observation_id, idempotency_key);
 
     let first: Value = serde_json::from_str(r#"{"z":2,"nested":{"b":2,"a":1},"a":1}"#).unwrap();
     let reordered: Value = serde_json::from_str(r#"{"a":1,"nested":{"a":1,"b":2},"z":2}"#).unwrap();
@@ -81,6 +82,48 @@ fn observation_ids_are_stable_and_payload_objects_are_canonical() {
         durable(material.clone(), first).canonical_payload_bytes(),
         durable(material, reordered).canonical_payload_bytes()
     );
+}
+
+#[test]
+fn receipt_derivation_is_canonical_and_preserves_existing_ids() {
+    let material = CanonicalClaudeSanitizationReceiptMaterialV1::new(
+        &profile_material(),
+        ComponentVersion::new("sanitizer.fixture.v1").unwrap(),
+        SanitizerDispositionV1::Accepted,
+        b"evidence.fixture",
+    )
+    .unwrap();
+    let receipt = material.derive_receipt_ref().unwrap();
+
+    assert_eq!(
+        receipt.receipt_id().as_str(),
+        "privacy.claude.v1.cd2fffcfc651eafe4c7f923686dd238c7791b9355600cf82b7b0707a049d7a0d"
+    );
+    assert_eq!(receipt.sanitizer_version().as_str(), "sanitizer.fixture.v1");
+    assert_eq!(SanitizerDispositionV1::Accepted.as_str(), "accepted");
+    assert_eq!(SanitizerDispositionV1::Redacted.as_str(), "redacted");
+    assert_eq!(SanitizerDispositionV1::Rejected.as_str(), "rejected");
+    assert_eq!(SanitizerDispositionV1::Quarantined.as_str(), "quarantined");
+}
+
+#[test]
+fn idempotency_wire_field_is_a_canonical_identity_alias() {
+    let observation = durable(profile_material(), json!({"message": "safe"}));
+    let wire = serde_json::to_value(&observation).unwrap();
+
+    assert_eq!(observation.idempotency_key(), observation.observation_id());
+    assert_eq!(wire["idempotency_key"], wire["observation_id"]);
+
+    let mut legacy_wire = wire.clone();
+    legacy_wire["idempotency_key"] = Value::String(
+        "sha256:13b3a18339fe0dbf5a1ccc894e24cf1626ca88babef32869bf7dc85f6a626abb".to_owned(),
+    );
+    let decoded: DurableClaudeObservationV1 = serde_json::from_value(legacy_wire).unwrap();
+    assert_eq!(decoded.idempotency_key(), decoded.observation_id());
+
+    let mut invalid_wire = wire;
+    invalid_wire["idempotency_key"] = Value::String(format!("sha256:{}", "0".repeat(64)));
+    assert!(serde_json::from_value::<DurableClaudeObservationV1>(invalid_wire).is_err());
 }
 
 #[test]

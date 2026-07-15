@@ -7,17 +7,21 @@
 
 use std::cmp::Ordering;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::research::{
-    ProjectId, RetentionClass, SanitizationReceiptRefV1, SessionId, canonical_json_bytes,
+    ComponentVersion, ProjectId, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
+    SessionId, canonical_json_bytes,
 };
 
 const OBSERVATION_ID_DOMAIN: &[u8] = b"tracedecay.claude.observation.v1\0";
-const IDEMPOTENCY_KEY_DOMAIN: &[u8] = b"tracedecay.claude.idempotency.v1\0";
+const LEGACY_IDEMPOTENCY_KEY_DOMAIN: &[u8] = b"tracedecay.claude.idempotency.v1\0";
+const CLAUDE_RECEIPT_ID_DOMAIN: &[u8] = b"tracedecay.privacy.claude.receipt.v1\0";
+const CLAUDE_RECEIPT_ID_PREFIX: &str = "privacy.claude.v1.";
 
 /// Pure validation failures at the observation contract boundary.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -253,8 +257,10 @@ macro_rules! sha256_newtype {
 }
 
 sha256_newtype!(CanonicalObservationIdV1, "observation identity");
-sha256_newtype!(IdempotencyKeyV1, "idempotency key");
 sha256_newtype!(PayloadDigestV1, "payload digest");
+
+/// Wire-compatible name for the canonical observation identity.
+pub type IdempotencyKeyV1 = CanonicalObservationIdV1;
 
 impl CanonicalObservationIdV1 {
     pub fn derive(
@@ -262,15 +268,6 @@ impl CanonicalObservationIdV1 {
     ) -> Result<Self, ObservationContractError> {
         material.validate()?;
         Self::new(domain_digest(OBSERVATION_ID_DOMAIN, material)?)
-    }
-}
-
-impl IdempotencyKeyV1 {
-    pub fn derive(
-        material: &ClaudeObservationIdentityMaterialV1,
-    ) -> Result<Self, ObservationContractError> {
-        material.validate()?;
-        Self::new(domain_digest(IDEMPOTENCY_KEY_DOMAIN, material)?)
     }
 }
 
@@ -373,6 +370,15 @@ impl SanitizerDispositionV1 {
     pub fn permits_durable_payload(self) -> bool {
         matches!(self, Self::Accepted | Self::Redacted)
     }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Redacted => "redacted",
+            Self::Rejected => "rejected",
+            Self::Quarantined => "quarantined",
+        }
+    }
 }
 
 /// Classification applied before content crosses a durable sink.
@@ -383,6 +389,48 @@ pub enum SensitivityV1 {
     NonSensitive,
     Sensitive,
     Secret,
+}
+
+/// Canonical inputs used to derive one Claude sanitization receipt reference.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalClaudeSanitizationReceiptMaterialV1 {
+    sanitizer_version: ComponentVersion,
+    observation_id: CanonicalObservationIdV1,
+    disposition: SanitizerDispositionV1,
+    evidence: Vec<u8>,
+}
+
+impl CanonicalClaudeSanitizationReceiptMaterialV1 {
+    pub fn new(
+        identity: &ClaudeObservationIdentityMaterialV1,
+        sanitizer_version: ComponentVersion,
+        disposition: SanitizerDispositionV1,
+        evidence: impl AsRef<[u8]>,
+    ) -> Result<Self, ObservationContractError> {
+        let observation_id = CanonicalObservationIdV1::derive(identity)?;
+        Ok(Self {
+            sanitizer_version,
+            observation_id,
+            disposition,
+            evidence: evidence.as_ref().to_vec(),
+        })
+    }
+
+    pub fn derive_receipt_ref(&self) -> Result<SanitizationReceiptRefV1, ObservationContractError> {
+        let mut hasher = Sha256::new();
+        hasher.update(CLAUDE_RECEIPT_ID_DOMAIN);
+        hasher.update(self.sanitizer_version.as_str().as_bytes());
+        hasher.update(self.observation_id.as_str().as_bytes());
+        hasher.update(self.disposition.as_str().as_bytes());
+        hasher.update(&self.evidence);
+        let receipt_id = SanitizationReceiptId::new(format!(
+            "{CLAUDE_RECEIPT_ID_PREFIX}{}",
+            format_hex(&hasher.finalize())
+        ))
+        .map_err(|_| ObservationContractError::InvalidReceiptReference)?;
+        SanitizationReceiptRefV1::new(receipt_id, self.sanitizer_version.clone())
+            .map_err(|_| ObservationContractError::InvalidReceiptReference)
+    }
 }
 
 /// Receipt binding sanitizer version, disposition, classification, and payload.
@@ -466,10 +514,9 @@ impl<'de> Deserialize<'de> for SanitizationReceiptV1 {
 }
 
 /// Durable Claude observation that can only be built from receipt-bound content.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DurableClaudeObservationV1 {
     observation_id: CanonicalObservationIdV1,
-    idempotency_key: IdempotencyKeyV1,
     identity: ClaudeObservationIdentityMaterialV1,
     receipt: SanitizationReceiptV1,
     retention_class: RetentionClass,
@@ -492,10 +539,8 @@ impl DurableClaudeObservationV1 {
             return Err(ObservationContractError::ReceiptPayloadMismatch);
         }
         let observation_id = CanonicalObservationIdV1::derive(&identity)?;
-        let idempotency_key = IdempotencyKeyV1::derive(&identity)?;
         Ok(Self {
             observation_id,
-            idempotency_key,
             identity,
             receipt,
             retention_class,
@@ -508,7 +553,7 @@ impl DurableClaudeObservationV1 {
     }
 
     pub fn idempotency_key(&self) -> &IdempotencyKeyV1 {
-        &self.idempotency_key
+        &self.observation_id
     }
 
     pub fn identity(&self) -> &ClaudeObservationIdentityMaterialV1 {
@@ -546,6 +591,22 @@ impl DurableClaudeObservationV1 {
     }
 }
 
+impl Serialize for DurableClaudeObservationV1 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut wire = serializer.serialize_struct("DurableClaudeObservationV1", 6)?;
+        wire.serialize_field("observation_id", &self.observation_id)?;
+        wire.serialize_field("idempotency_key", self.idempotency_key())?;
+        wire.serialize_field("identity", &self.identity)?;
+        wire.serialize_field("receipt", &self.receipt)?;
+        wire.serialize_field("retention_class", &self.retention_class)?;
+        wire.serialize_field("payload", &self.payload)?;
+        wire.end()
+    }
+}
+
 impl<'de> Deserialize<'de> for DurableClaudeObservationV1 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -577,7 +638,11 @@ impl<'de> Deserialize<'de> for DurableClaudeObservationV1 {
                 ObservationContractError::ObservationIdentityMismatch,
             ));
         }
-        if observation.idempotency_key != expected_idempotency_key {
+        let legacy_idempotency_key =
+            legacy_idempotency_key(&observation.identity).map_err(serde::de::Error::custom)?;
+        if expected_idempotency_key != *observation.idempotency_key()
+            && expected_idempotency_key != legacy_idempotency_key
+        {
             return Err(serde::de::Error::custom(
                 ObservationContractError::IdempotencyKeyMismatch,
             ));
@@ -634,16 +699,25 @@ fn domain_digest(
     Ok(format_sha256(&hasher.finalize()))
 }
 
+fn legacy_idempotency_key(
+    material: &ClaudeObservationIdentityMaterialV1,
+) -> Result<IdempotencyKeyV1, ObservationContractError> {
+    IdempotencyKeyV1::new(domain_digest(LEGACY_IDEMPOTENCY_KEY_DOMAIN, material)?)
+}
+
 fn sha256_digest(bytes: &[u8]) -> String {
     format_sha256(&Sha256::digest(bytes))
 }
 
 fn format_sha256(digest: &[u8]) -> String {
+    format!("sha256:{}", format_hex(digest))
+}
+
+fn format_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
 
-    let mut encoded = String::with_capacity("sha256:".len() + digest.len() * 2);
-    encoded.push_str("sha256:");
-    for byte in digest {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
     }
     encoded

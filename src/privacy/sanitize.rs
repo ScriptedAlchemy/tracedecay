@@ -1,13 +1,11 @@
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ClaudeObservationIdentityMaterialV1, ComponentVersion,
-    DurableClaudeObservationV1, ObservationContractError, PayloadReferenceV1, RetentionClass,
-    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
-    SensitivityV1,
+    CanonicalClaudeSanitizationReceiptMaterialV1, ClaudeObservationIdentityMaterialV1,
+    ComponentVersion, DurableClaudeObservationV1, ObservationContractError, PayloadReferenceV1,
+    RetentionClass, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
 };
 
 use super::detect::{
@@ -158,11 +156,13 @@ impl ClaudeRecordSanitizerV1 {
             SensitivityV1::Secret
         };
         let payload_reference = PayloadReferenceV1::for_payload(&detected.payload)?;
-        let receipt_ref = self.receipt_ref(
+        let receipt_ref = CanonicalClaudeSanitizationReceiptMaterialV1::new(
             &identity,
+            self.policy.version.clone(),
             disposition,
             payload_reference.digest().as_str().as_bytes(),
-        )?;
+        )?
+        .derive_receipt_ref()?;
         let receipt = SanitizationReceiptV1::new(
             receipt_ref,
             disposition,
@@ -203,7 +203,13 @@ impl ClaudeRecordSanitizerV1 {
             }
         };
         let raw_digest = Sha256::digest(record);
-        let receipt_ref = self.receipt_ref(identity, disposition, &raw_digest)?;
+        let receipt_ref = CanonicalClaudeSanitizationReceiptMaterialV1::new(
+            identity,
+            self.policy.version.clone(),
+            disposition,
+            &raw_digest,
+        )?
+        .derive_receipt_ref()?;
         let receipt =
             SanitizationReceiptV1::new(receipt_ref, disposition, SensitivityV1::Sensitive, None)?;
         let finding =
@@ -221,31 +227,6 @@ impl ClaudeRecordSanitizerV1 {
                 return Err(PrivacySanitizerError::InvalidPolicy);
             }
         })
-    }
-
-    fn receipt_ref(
-        &self,
-        identity: &ClaudeObservationIdentityMaterialV1,
-        disposition: SanitizerDispositionV1,
-        evidence: &[u8],
-    ) -> Result<SanitizationReceiptRefV1, PrivacySanitizerError> {
-        let observation_id = CanonicalObservationIdV1::derive(identity)?;
-        let mut hasher = Sha256::new();
-        hasher.update(b"tracedecay.privacy.claude.receipt.v1\0");
-        hasher.update(self.policy.version.as_str().as_bytes());
-        hasher.update(observation_id.as_str().as_bytes());
-        hasher.update(disposition_name(disposition).as_bytes());
-        hasher.update(evidence);
-        let digest = hasher.finalize();
-        let mut receipt_id = String::from("privacy.claude.v1.");
-        for byte in digest {
-            write!(&mut receipt_id, "{byte:02x}")
-                .map_err(|_| PrivacySanitizerError::InvalidPolicy)?;
-        }
-        let receipt_id = SanitizationReceiptId::new(receipt_id)
-            .map_err(|_| PrivacySanitizerError::InvalidPolicy)?;
-        SanitizationReceiptRefV1::new(receipt_id, self.policy.version.clone())
-            .map_err(|_| PrivacySanitizerError::InvalidPolicy)
     }
 }
 
@@ -286,14 +267,5 @@ impl ClaudeSanitizationOutcomeV1 {
             | Self::Rejected { findings, .. }
             | Self::Quarantined { findings, .. } => findings,
         }
-    }
-}
-
-fn disposition_name(disposition: SanitizerDispositionV1) -> &'static str {
-    match disposition {
-        SanitizerDispositionV1::Accepted => "accepted",
-        SanitizerDispositionV1::Redacted => "redacted",
-        SanitizerDispositionV1::Rejected => "rejected",
-        SanitizerDispositionV1::Quarantined => "quarantined",
     }
 }
