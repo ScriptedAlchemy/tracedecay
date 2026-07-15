@@ -1252,7 +1252,8 @@ async fn retire_legacy_registry_owners(
     let db = GlobalDb::open_at(&global_path)
         .await
         .ok_or_else(|| config_error("could not open global registry for consolidation cleanup"))?;
-    let conn = db.conn();
+    let conn = db.writer_connection().await;
+    let conn = &*conn;
     conn.execute("BEGIN IMMEDIATE", ())
         .await
         .map_err(|error| config_error(format!("could not begin registry cleanup: {error}")))?;

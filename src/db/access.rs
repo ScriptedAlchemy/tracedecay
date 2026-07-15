@@ -327,6 +327,10 @@ impl DatabaseAuthority {
     pub(crate) fn canonical_database_path(&self) -> &Path {
         &self.inner.identity.database_path
     }
+
+    pub(crate) fn database_identity_key(&self) -> &Path {
+        &self.inner.identity.database_key
+    }
 }
 
 impl DatabaseIdentity {

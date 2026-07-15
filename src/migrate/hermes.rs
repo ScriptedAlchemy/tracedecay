@@ -425,22 +425,30 @@ async fn migrate_candidate(
         None => None,
     };
     if let Some(source) = source_db.as_ref() {
-        source.conn().execute("BEGIN", ()).await.map_err(|error| {
-            CandidateError::Failed(format!("could not snapshot source: {error}"))
-        })?;
+        source
+            .read_connection()
+            .execute("BEGIN", ())
+            .await
+            .map_err(|error| {
+                CandidateError::Failed(format!("could not snapshot source: {error}"))
+            })?;
     }
 
     let result = migrate_candidate_snapshot(
         user_home,
         hermes_homes,
         candidate,
-        source_db.as_ref().map(GlobalDb::conn),
+        source_db.as_ref().map(GlobalDb::read_connection),
         tracedecay_profile_root,
         fail_after_table,
     )
     .await;
     let finish = match source_db.as_ref() {
-        Some(source) => source.conn().execute("COMMIT", ()).await.map(|_| ()),
+        Some(source) => source
+            .read_connection()
+            .execute("COMMIT", ())
+            .await
+            .map(|_| ()),
         None => Ok(()),
     };
     match (result, finish) {
@@ -613,12 +621,17 @@ async fn migrate_candidate_snapshot(
         .await
         .ok_or_else(|| CandidateError::Failed("could not open target session store".to_string()))?;
     if let Some(source) = source {
-        ensure_message_identity_matches(source, target_db.conn(), "session_messages", "text")
-            .await
-            .map_err(CandidateError::Failed)?;
         ensure_message_identity_matches(
             source,
-            target_db.conn(),
+            target_db.read_connection(),
+            "session_messages",
+            "text",
+        )
+        .await
+        .map_err(CandidateError::Failed)?;
+        ensure_message_identity_matches(
+            source,
+            target_db.read_connection(),
             "lcm_raw_messages",
             "content_hash",
         )
@@ -637,10 +650,11 @@ async fn migrate_candidate_snapshot(
         None => 0,
     };
 
+    let target_conn = target_db.writer_connection().await;
     let result = merge_snapshot(MergeSnapshotRequest {
         source,
         source_path: candidate.primary_path(),
-        target: target_db.conn(),
+        target: &target_conn,
         target_path: &target_layout.sessions_db_path,
         target_project: &target_project.root,
         target_project_id: &target_layout.project_id,

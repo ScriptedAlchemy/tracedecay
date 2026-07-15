@@ -6,7 +6,9 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_sqlite_owner() {
     let project_path = common::canonical_existing_path(project.path());
     let profile_root = home_path.join(".tracedecay");
     let socket_path = common::daemon_socket_path(&home_path);
-    let mut daemon = spawn_daemon(&home_path, &socket_path);
+    let daemon_stderr_path = home_path.join("daemon.stderr.log");
+    let daemon_stderr = std::fs::File::create(&daemon_stderr_path).expect("create daemon stderr");
+    let mut daemon = spawn_daemon_with_stderr(&home_path, &socket_path, daemon_stderr);
     let db_path = init_project(&home_path, &project_path, &socket_path);
 
     let mut clients = (0..CLIENT_COUNT)
@@ -167,4 +169,9 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_sqlite_owner() {
         );
     }
     stop_child(&mut daemon);
+    let daemon_stderr = std::fs::read_to_string(&daemon_stderr_path).expect("read daemon stderr");
+    assert!(
+        !daemon_stderr.contains("database is locked"),
+        "daemon encountered SQLite writer contention:\n{daemon_stderr}"
+    );
 }

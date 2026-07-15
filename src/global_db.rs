@@ -344,12 +344,25 @@ pub struct GlobalDb {
 #[doc(hidden)]
 pub struct GlobalDbInner {
     conn: Connection,
-    transaction: tokio::sync::Mutex<()>,
+    transaction: Arc<tokio::sync::Mutex<()>>,
     storage_root: PathBuf,
     db_path: PathBuf,
     db: LibsqlDatabase,
     _authority: DatabaseAuthority,
     _slot: Option<GlobalDbSlot>,
+}
+
+pub(crate) struct GlobalDbWriterConnection<'a> {
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+    conn: &'a Connection,
+}
+
+impl std::ops::Deref for GlobalDbWriterConnection<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.conn
+    }
 }
 
 impl Deref for GlobalDb {
@@ -365,14 +378,18 @@ struct GlobalDbSchemaState {
     ensured: bool,
 }
 
-type GlobalDbSlot = Arc<tokio::sync::Mutex<GlobalDbSchemaState>>;
+struct GlobalDbSlotState {
+    schema: tokio::sync::Mutex<GlobalDbSchemaState>,
+    writer: Arc<tokio::sync::Mutex<()>>,
+}
 
-static GLOBAL_DB_SLOTS: LazyLock<
-    std::sync::Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<GlobalDbSchemaState>>>>,
-> = LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+type GlobalDbSlot = Arc<GlobalDbSlotState>;
+
+static GLOBAL_DB_SLOTS: LazyLock<std::sync::Mutex<HashMap<PathBuf, Weak<GlobalDbSlotState>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 fn global_db_slot(authority: &DatabaseAuthority) -> GlobalDbSlot {
-    let identity = authority.canonical_database_path();
+    let identity = authority.database_identity_key();
     let mut slots = GLOBAL_DB_SLOTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -380,7 +397,10 @@ fn global_db_slot(authority: &DatabaseAuthority) -> GlobalDbSlot {
     if let Some(slot) = slots.get(identity).and_then(Weak::upgrade) {
         return slot;
     }
-    let slot = Arc::new(tokio::sync::Mutex::new(GlobalDbSchemaState::default()));
+    let slot = Arc::new(GlobalDbSlotState {
+        schema: tokio::sync::Mutex::new(GlobalDbSchemaState::default()),
+        writer: Arc::new(tokio::sync::Mutex::new(())),
+    });
     slots.insert(identity.to_path_buf(), Arc::downgrade(&slot));
     slot
 }
@@ -1031,6 +1051,12 @@ impl GlobalDb {
         slot: Option<GlobalDbSlot>,
     ) -> crate::errors::Result<Self> {
         let authority = authority.hold_for(db_path, "open global database")?;
+        let slot = slot.unwrap_or_else(|| global_db_slot(&authority));
+        let _writer = if read_only {
+            None
+        } else {
+            Some(Arc::clone(&slot.writer).lock_owned().await)
+        };
         let db_path = authority.canonical_database_path().to_path_buf();
         let storage_root = db_path
             .parent()
@@ -1084,12 +1110,12 @@ impl GlobalDb {
         Ok(Self {
             inner: Arc::new(GlobalDbInner {
                 conn,
-                transaction: tokio::sync::Mutex::new(()),
+                transaction: Arc::clone(&slot.writer),
                 storage_root,
                 db_path,
                 db,
                 _authority: authority,
-                _slot: slot,
+                _slot: Some(slot),
             }),
         })
     }
@@ -1147,7 +1173,7 @@ impl GlobalDb {
         let authority = DatabaseAuthority::for_runtime(db_path, "open global database")?;
         let canonical_path = authority.canonical_database_path().to_path_buf();
         let slot = global_db_slot(&authority);
-        let mut schema = slot.lock().await;
+        let mut schema = slot.schema.lock().await;
         if schema.ensured {
             drop(schema);
             let db = Self::open_local(&canonical_path, false, authority, Some(Arc::clone(&slot)))
@@ -1182,10 +1208,12 @@ impl GlobalDb {
     ) -> crate::errors::Result<Self> {
         let db = Self::open_local(db_path, false, authority, Some(slot)).await?;
 
+        let writer = db.transaction.lock().await;
         schema_stages::ensure_registry(&db).await?;
         schema_stages::ensure_transcript(&db).await?;
         schema_stages::ensure_observation_authority(&db).await?;
         schema_stages::ensure_composed_context(&db).await?;
+        drop(writer);
         db.recover_pending_payload_deletes().await?;
         // Recover structured rows skipped by legacy transcript parsers. This
         // runs on every open (per hook event, per CLI/MCP invocation), so it
@@ -1261,11 +1289,24 @@ impl GlobalDb {
         self.conn.clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
 
+    pub(crate) fn read_connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    pub(crate) async fn writer_connection(&self) -> GlobalDbWriterConnection<'_> {
+        GlobalDbWriterConnection {
+            _guard: self.transaction.lock().await,
+            conn: &self.conn,
+        }
+    }
+
     async fn recover_pending_payload_deletes(&self) -> crate::errors::Result<()> {
+        let _writer = self.transaction.lock().await;
         crate::sessions::lcm::gc::drain_pending_payload_deletes(&self.conn, &self.storage_root)
             .await
             .map(|_| ())
@@ -1503,6 +1544,7 @@ impl GlobalDb {
         let primary_root_bytes = encode_native_project_path(&canonical_project_root);
         let current_root_alias = project_path_alias_key(&canonical_project_root);
         let git_common_dir_text = git_common_dir.map(|path| path.to_string_lossy().to_string());
+        let writer = self.transaction.lock().await;
         let transaction = self.begin_authoritative_transaction().await.ok()?;
         transaction
             .execute(
@@ -1547,6 +1589,7 @@ impl GlobalDb {
             .await
             .ok()?;
         transaction.commit().await.ok()?;
+        drop(writer);
         for alias in repo_identity_aliases(git_common_dir) {
             self.upsert_project_alias_key(&alias, project_id).await?;
         }
@@ -1571,6 +1614,7 @@ impl GlobalDb {
         project_id: &str,
     ) -> Option<ProjectAliasRecord> {
         let now = crate::tracedecay::current_timestamp();
+        let _writer = self.transaction.lock().await;
         self.conn
             .execute(
                 "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
@@ -1604,6 +1648,7 @@ impl GlobalDb {
         upsert: StoreInstanceUpsert,
     ) -> Option<StoreInstanceRecord> {
         let now = crate::tracedecay::current_timestamp();
+        let _writer = self.transaction.lock().await;
         self.conn
             .execute(
                 "INSERT INTO store_instances
@@ -1636,6 +1681,7 @@ impl GlobalDb {
     }
 
     pub async fn upsert_graph_scope(&self, upsert: GraphScopeUpsert) -> Option<GraphScopeRecord> {
+        let _writer = self.transaction.lock().await;
         self.conn
             .execute(
                 "INSERT INTO graph_scopes
@@ -1670,6 +1716,7 @@ impl GlobalDb {
         &self,
         upsert: StoreArtifactUpsert,
     ) -> Option<StoreArtifactRecord> {
+        let _writer = self.transaction.lock().await;
         self.conn
             .execute(
                 "INSERT INTO store_artifacts
@@ -1895,6 +1942,7 @@ impl GlobalDb {
     /// profile-sharded store files on disk.
     pub async fn delete_code_projects(&self, project_ids: &[String]) -> usize {
         const CHUNK: usize = 256;
+        let _writer = self.transaction.lock().await;
         let mut total: usize = 0;
         for chunk in project_ids.chunks(CHUNK) {
             let placeholders = vec!["?"; chunk.len()];
@@ -2206,6 +2254,7 @@ impl GlobalDb {
         drop(rows);
 
         let now = crate::tracedecay::current_timestamp();
+        let _writer = self.transaction.lock().await;
         self.conn
             .execute(
                 "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
@@ -2379,6 +2428,7 @@ impl GlobalDb {
     /// Registers or updates a project's tokens-saved count. Best-effort.
     pub async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
         let path_str = project_path_alias_key(project_path);
+        let _writer = self.transaction.lock().await;
         let _ = self
             .conn
             .execute(
@@ -2432,6 +2482,7 @@ impl GlobalDb {
         ts: i64,
     ) {
         let project_path = Self::canonical_project_key(Path::new(project_path));
+        let _writer = self.transaction.lock().await;
         let result = self
             .conn
             .execute(
@@ -2520,6 +2571,7 @@ impl GlobalDb {
     /// accounting DB. Deliberately NOT part of the shared `open_at` DDL batch
     /// so project-local session stores keep their schema untouched.
     pub async fn ensure_token_count_cache(&self) -> bool {
+        let _writer = self.transaction.lock().await;
         self.conn
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS dashboard_token_counts (
@@ -2570,6 +2622,7 @@ impl GlobalDb {
     /// Upserts freshly computed token counts for one session store.
     /// Best-effort: the cache is an optimization, so errors are swallowed.
     pub async fn save_token_counts(&self, store: &str, rows: &[TokenCountUpsert]) {
+        let _writer = self.transaction.lock().await;
         let now = crate::tracedecay::current_timestamp();
         for row in rows {
             let _ = self
@@ -2594,6 +2647,7 @@ impl GlobalDb {
 
     /// Removes a project's row from the global DB. Best-effort.
     pub async fn delete_project(&self, project_path: &Path) {
+        let _writer = self.transaction.lock().await;
         let path_str = project_path_alias_key(project_path);
         let _ = self
             .conn
@@ -2614,6 +2668,7 @@ impl GlobalDb {
     /// Path-native companion used by internal filesystem maintenance callers.
     pub async fn delete_project_paths<P: AsRef<Path>>(&self, project_paths: &[P]) -> usize {
         const CHUNK: usize = 256;
+        let _writer = self.transaction.lock().await;
         let mut total: usize = 0;
         for chunk in project_paths.chunks(CHUNK) {
             let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
@@ -2641,6 +2696,7 @@ impl GlobalDb {
         config: &crate::retention::RetentionConfig,
         now_secs: i64,
     ) -> crate::errors::Result<Vec<crate::retention::RetentionTableReport>> {
+        let _writer = self.transaction.lock().await;
         crate::retention::prune_global_tables(
             &self.conn,
             config,
@@ -4217,6 +4273,7 @@ impl GlobalDb {
         &self,
         record: &crate::sessions::git_correlation::CommitSessionRecord,
     ) -> Result<bool, crate::sessions::git_correlation::GitCorrelationError> {
+        let _writer = self.transaction.lock().await;
         crate::sessions::git_correlation::upsert_commit_session(&self.conn, record).await
     }
 
@@ -4233,6 +4290,7 @@ impl GlobalDb {
             &crate::sessions::git_correlation::SpanScanTarget,
         ) -> Vec<crate::sessions::git_correlation::ScannedCommit>,
     {
+        let _writer = self.transaction.lock().await;
         crate::sessions::git_correlation::run_commit_attribution_sweep(&self.conn, gap_secs, scan)
             .await
     }
@@ -4290,6 +4348,7 @@ impl GlobalDb {
         key: &str,
         value: i64,
     ) -> Result<(), crate::sessions::git_correlation::GitCorrelationError> {
+        let _writer = self.transaction.lock().await;
         crate::sessions::git_correlation::write_meta_value(&self.conn, key, value).await
     }
 
@@ -4325,6 +4384,7 @@ impl GlobalDb {
         &self,
         run: &crate::sessions::workflow_index::WorkflowRun,
     ) -> Result<(), crate::sessions::workflow_index::WorkflowIndexError> {
+        let _writer = self.transaction.lock().await;
         crate::sessions::workflow_index::upsert_run(&self.conn, run).await
     }
 
@@ -4335,6 +4395,7 @@ impl GlobalDb {
         &self,
         agent: &crate::sessions::workflow_index::WorkflowAgent,
     ) -> Result<(), crate::sessions::workflow_index::WorkflowIndexError> {
+        let _writer = self.transaction.lock().await;
         crate::sessions::workflow_index::upsert_agent(&self.conn, agent).await
     }
 
@@ -4798,6 +4859,7 @@ impl GlobalDb {
 
     /// Insert a parsed turn. Returns `true` if inserted, `false` if duplicate.
     pub async fn insert_turn(&self, turn: &crate::types::CostTurn) -> bool {
+        let _writer = self.transaction.lock().await;
         self.conn
             .execute(
                 "INSERT OR IGNORE INTO turns
@@ -4971,6 +5033,7 @@ impl GlobalDb {
 
     /// Checkpoints the WAL. Best-effort.
     pub async fn checkpoint(&self) {
+        let _writer = self.transaction.lock().await;
         let _ = self
             .conn
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")

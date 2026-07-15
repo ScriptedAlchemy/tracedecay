@@ -94,7 +94,7 @@ pub async fn diff_registry_reconstruction_report(
             plans: vec![plan.clone()],
             issues: Vec::new(),
         };
-        let issues = preflight_registry_reconstruction(db.conn(), &single).await;
+        let issues = preflight_registry_reconstruction(db.read_connection(), &single).await;
         if !issues.is_empty() {
             diff.issues.extend(issues);
             continue;
@@ -109,7 +109,7 @@ pub async fn diff_registry_reconstruction_report(
                 plans: vec![eligible[left].clone(), eligible[right].clone()],
                 issues: Vec::new(),
             };
-            let issues = preflight_registry_reconstruction(db.conn(), &pair).await;
+            let issues = preflight_registry_reconstruction(db.read_connection(), &pair).await;
             if issues.is_empty() {
                 continue;
             }
@@ -127,7 +127,7 @@ pub async fn diff_registry_reconstruction_report(
         if conflicts[index] {
             continue;
         }
-        match registry_plan_has_missing_rows(db.conn(), plan).await {
+        match registry_plan_has_missing_rows(db.read_connection(), plan).await {
             Ok(true) => diff.missing_plans += 1,
             Ok(false) => {}
             Err(issue) => diff.issues.push(issue),
@@ -234,7 +234,8 @@ pub async fn apply_registry_reconstruction_report(
     db: &GlobalDb,
     report: &RegistryReconstructionReport,
 ) -> std::result::Result<RegistryReconstructionApplyReport, Vec<String>> {
-    let conn = db.conn();
+    let conn = db.writer_connection().await;
+    let conn = &*conn;
     conn.execute("BEGIN IMMEDIATE", ()).await.map_err(|error| {
         vec![format!(
             "could not start atomic registry reconstruction: {error}"

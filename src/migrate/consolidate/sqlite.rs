@@ -394,50 +394,41 @@ pub(super) async fn merge_sessions(
     let target = GlobalDb::try_open_at(target_path)
         .await?
         .ok_or_else(|| db_message("merge_sessions", "could not open target sessions DB"))?;
-    attach_as(target.conn(), source_path, "source").await?;
-    attach_as(target.conn(), target_input_path, "target_input").await?;
-    target
-        .conn()
-        .execute("PRAGMA foreign_keys = OFF", ())
+    let conn = target.writer_connection().await;
+    attach_as(&conn, source_path, "source").await?;
+    attach_as(&conn, target_input_path, "target_input").await?;
+    conn.execute("PRAGMA foreign_keys = OFF", ())
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
-    target
-        .conn()
-        .execute("BEGIN IMMEDIATE", ())
+    conn.execute("BEGIN IMMEDIATE", ())
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
-    let preflight =
-        match reject_session_content_collisions(target.conn(), "source", "target_input").await {
-            Ok(()) => match build_consolidation_message_map(
-                target.conn(),
-                "source",
-                "target_input",
-                source_project_id,
-            )
-            .await
-            {
-                Ok(()) => {
-                    match projection::materialize(target.conn(), "target_input", "source").await {
-                        Ok(()) => preflight_observation_merge(target.conn()).await,
-                        Err(error) => Err(error),
-                    }
-                }
+    let preflight = match reject_session_content_collisions(&conn, "source", "target_input").await {
+        Ok(()) => match build_consolidation_message_map(
+            &conn,
+            "source",
+            "target_input",
+            source_project_id,
+        )
+        .await
+        {
+            Ok(()) => match projection::materialize(&conn, "target_input", "source").await {
+                Ok(()) => preflight_observation_merge(&conn).await,
                 Err(error) => Err(error),
             },
             Err(error) => Err(error),
-        };
+        },
+        Err(error) => Err(error),
+    };
     if let Err(error) = preflight {
-        let _ = target.conn().execute("ROLLBACK", ()).await;
-        let _ = target.conn().execute("DETACH DATABASE source", ()).await;
-        let _ = target
-            .conn()
-            .execute("DETACH DATABASE target_input", ())
-            .await;
+        let _ = conn.execute("ROLLBACK", ()).await;
+        let _ = conn.execute("DETACH DATABASE source", ()).await;
+        let _ = conn.execute("DETACH DATABASE target_input", ()).await;
         return Err(error);
     }
-    let result = match merge_sessions_tx(target.conn(), offsets).await {
-        Ok(()) => match verify_observation_merge(target.conn()).await {
-            Ok(()) => crate::sessions::lcm::schema::rebuild_raw_fts(target.conn())
+    let result = match merge_sessions_tx(&conn, offsets).await {
+        Ok(()) => match verify_observation_merge(&conn).await {
+            Ok(()) => crate::sessions::lcm::schema::rebuild_raw_fts(&conn)
                 .await
                 .ok_or_else(|| db_message("merge_sessions", "could not rebuild raw-message FTS")),
             Err(error) => Err(error),
@@ -445,28 +436,22 @@ pub(super) async fn merge_sessions(
         Err(error) => Err(error),
     };
     match result {
-        Ok(()) => target
-            .conn()
+        Ok(()) => conn
             .execute("COMMIT", ())
             .await
             .map_err(|error| db_error("merge_sessions", error))?,
         Err(error) => {
-            let _ = target.conn().execute("ROLLBACK", ()).await;
-            let _ = target.conn().execute("DETACH DATABASE source", ()).await;
-            let _ = target
-                .conn()
-                .execute("DETACH DATABASE target_input", ())
-                .await;
+            let _ = conn.execute("ROLLBACK", ()).await;
+            let _ = conn.execute("DETACH DATABASE source", ()).await;
+            let _ = conn.execute("DETACH DATABASE target_input", ()).await;
             return Err(error);
         }
     };
     // The merge is durable once COMMIT succeeds. Cleanup cannot turn that success into
     // an ambiguous error that callers might retry as if the merge had rolled back.
-    let _ = target.conn().execute("DETACH DATABASE source", ()).await;
-    let _ = target
-        .conn()
-        .execute("DETACH DATABASE target_input", ())
-        .await;
+    let _ = conn.execute("DETACH DATABASE source", ()).await;
+    let _ = conn.execute("DETACH DATABASE target_input", ()).await;
+    drop(conn);
     target.checkpoint().await;
     target.close();
     Ok(())
@@ -479,26 +464,27 @@ async fn normalize_sessions(path: &Path) -> Result<()> {
             format!("could not open '{}'", path.display()),
         )
     })?;
-    crate::sessions::lcm::schema::ensure_lcm_schema(db.conn())
+    let conn = db.writer_connection().await;
+    crate::sessions::lcm::schema::ensure_lcm_schema(&conn)
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
-    crate::sessions::git_correlation::ensure_git_correlation_schema(db.conn())
+    crate::sessions::git_correlation::ensure_git_correlation_schema(&conn)
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
-    crate::sessions::workflow_index::ensure_workflow_index_schema(db.conn())
+    crate::sessions::workflow_index::ensure_workflow_index_schema(&conn)
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
-    db.conn()
-        .execute(
-            "CREATE TABLE IF NOT EXISTS session_backfill_meta (
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS session_backfill_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 updated_at INTEGER NOT NULL DEFAULT (unixepoch())
             )",
-            (),
-        )
-        .await
-        .map_err(|error| db_error("normalize_sessions", error))?;
+        (),
+    )
+    .await
+    .map_err(|error| db_error("normalize_sessions", error))?;
+    drop(conn);
     if !db.ensure_token_count_cache().await {
         return Err(db_message(
             "normalize_sessions",
@@ -521,8 +507,8 @@ async fn reject_session_registry_rows(path: &Path) -> Result<()> {
         "graph_scopes",
         "store_artifacts",
     ] {
-        if table_exists(db.conn(), "main", table).await?
-            && table_max_count(db.conn(), table).await? > 0
+        if table_exists(db.read_connection(), "main", table).await?
+            && table_max_count(db.read_connection(), table).await? > 0
         {
             return Err(db_message(
                 "merge_sessions",
@@ -1155,7 +1141,7 @@ async fn db_table_max(path: &Path, table: &str, column: &str) -> Result<i64> {
     let db = GlobalDb::open_read_only_at(path)
         .await
         .ok_or_else(|| db_message("table_max", format!("could not open '{}'", path.display())))?;
-    let value = table_max(db.conn(), table, column).await?;
+    let value = table_max(db.read_connection(), table, column).await?;
     db.close();
     Ok(value)
 }

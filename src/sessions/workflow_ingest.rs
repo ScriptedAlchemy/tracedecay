@@ -99,10 +99,11 @@ pub(crate) async fn ingest_workflow_runs_from(
     // Persist the advanced watermark so the next sweep skips everything we just
     // processed. Best-effort: a write failure only means the next sweep does a
     // little redundant (idempotent) work.
-    if max_mtime > watermark
-        && let Err(err) = bump_ingest_watermark(&conn, INGEST_WATERMARK_KEY, max_mtime).await
-    {
-        tracing::debug!(error = %err, "workflow ingest watermark not advanced");
+    if max_mtime > watermark {
+        let conn = db.writer_connection().await;
+        if let Err(err) = bump_ingest_watermark(&conn, INGEST_WATERMARK_KEY, max_mtime).await {
+            tracing::debug!(error = %err, "workflow ingest watermark not advanced");
+        }
     }
 
     stats

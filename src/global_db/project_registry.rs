@@ -414,6 +414,7 @@ async fn legacy_code_project_path(
             format!("project '{project_id}' has ambiguous legacy current roots"),
         ));
     }
+    let _writer = db.transaction.lock().await;
     let updated = db
         .conn
         .execute(

@@ -67,7 +67,7 @@ impl<'db> LcmStore<'db> {
         limit: usize,
     ) -> Result<LcmPayloadExpansion, LcmError> {
         expand_payload(
-            self.db.conn(),
+            self.db.read_connection(),
             &self.storage_root,
             provider,
             session_id,

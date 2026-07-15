@@ -501,7 +501,7 @@ pub fn try_acquire_structured_backfill_lock(db_path: &Path) -> Option<std::fs::F
 /// Re-parses the next bounded transcript batch and inserts rows missing from
 /// legacy stores.
 pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<StructuredBackfillStats> {
-    let conn = db.conn();
+    let conn = db.read_connection();
     // Cheap pre-check before the lock: skip entirely when every provider is
     // already at (or past) its target version and no legacy global marker
     // remains to migrate.
@@ -515,10 +515,12 @@ pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<Structured
     let Some(_sweep_lock) = try_acquire_structured_backfill_lock(db.db_path()) else {
         return Some(StructuredBackfillStats::default());
     };
-    ensure_backfill_meta_table(conn).await?;
+    let writer = db.writer_connection().await;
+    ensure_backfill_meta_table(&writer).await?;
     // One-time migration from the single global marker to per-provider markers,
     // so a store that already completed the global sweep does not re-sweep.
-    migrate_legacy_global_marker(conn).await?;
+    migrate_legacy_global_marker(&writer).await?;
+    drop(writer);
 
     // Sweep each provider independently against its own marker + cursor. A
     // provider already at its target version is skipped without touching its
@@ -632,7 +634,8 @@ async fn sweep_provider(
     let candidates =
         load_structured_candidates(conn, provider, &cursor, STRUCTURED_BACKFILL_BATCH).await?;
     if candidates.is_empty() {
-        mark_structured_backfill_complete(conn, provider, target_version).await?;
+        let writer = db.writer_connection().await;
+        mark_structured_backfill_complete(&writer, provider, target_version).await?;
         return Some(());
     }
 
@@ -685,7 +688,8 @@ async fn sweep_provider(
             }
         }
         stats.files_scanned += 1;
-        write_backfill_cursor(conn, &cursor_key, &candidate.source_path).await?;
+        let writer = db.writer_connection().await;
+        write_backfill_cursor(&writer, &cursor_key, &candidate.source_path).await?;
     }
 
     Some(())
@@ -851,17 +855,17 @@ async fn write_backfill_cursor(conn: &Connection, key: &str, value: &str) -> Opt
 /// monotonicity guard rejects backwards moves.
 #[doc(hidden)]
 pub async fn write_structured_backfill_cursor_for_test(db: &GlobalDb, value: &str) -> Option<()> {
-    let conn = db.conn();
-    ensure_backfill_meta_table(conn).await?;
+    let conn = db.writer_connection().await;
+    ensure_backfill_meta_table(&conn).await?;
     let key = structured_cursor_key("codex", structured_backfill_target_version("codex"));
-    write_backfill_cursor(conn, &key, value).await
+    write_backfill_cursor(&conn, &key, value).await
 }
 
 /// Test-only accessor: reads the Codex structured-backfill watermark for `db`.
 #[doc(hidden)]
 pub async fn read_structured_backfill_cursor_for_test(db: &GlobalDb) -> String {
     let key = structured_cursor_key("codex", structured_backfill_target_version("codex"));
-    read_backfill_cursor(db.conn(), &key).await
+    read_backfill_cursor(db.read_connection(), &key).await
 }
 
 /// Marks one provider's sweep complete at `target_version` and drops that

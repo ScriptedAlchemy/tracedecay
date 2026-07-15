@@ -109,6 +109,26 @@ pub(super) fn spawn_daemon(home: &Path, socket_path: &Path) -> ChildGuard {
     child
 }
 
+pub(super) fn spawn_daemon_with_stderr(
+    home: &Path,
+    socket_path: &Path,
+    stderr: std::fs::File,
+) -> ChildGuard {
+    let mut child = ChildGuard::new(
+        common::tracedecay_command_with_home(home)
+            .env_remove(SQLITE_UNSAFE_FAST_ENV)
+            .args(["daemon", "run", "--socket"])
+            .arg(socket_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .expect("spawn daemon"),
+    );
+    wait_for_socket(socket_path, &mut child);
+    child
+}
+
 pub(super) fn stop_child(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();

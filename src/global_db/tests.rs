@@ -137,7 +137,7 @@ async fn require_schema_reensure(db: &GlobalDb) {
         .get(db.db_path())
         .and_then(Weak::upgrade)
         .expect("authoritative open has schema slot");
-    slot.lock().await.ensured = false;
+    slot.schema.lock().await.ensured = false;
 }
 
 fn schema_authority_fixture(
@@ -2665,6 +2665,91 @@ async fn analytics_batch_error_rolls_back_prior_rows_and_releases_writer() {
 }
 
 #[tokio::test]
+async fn same_path_handles_share_writer_for_accounting() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("global.db");
+    let first = GlobalDb::open_at(&path)
+        .await
+        .expect("first global DB open");
+    let second = std::sync::Arc::new(
+        GlobalDb::open_at(&path)
+            .await
+            .expect("second global DB open"),
+    );
+    let savings = std::sync::Arc::new(
+        GlobalDb::open_at(&path)
+            .await
+            .expect("savings global DB open"),
+    );
+    assert!(std::sync::Arc::ptr_eq(
+        &first.transaction,
+        &second.transaction
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &first.transaction,
+        &savings.transaction
+    ));
+    second
+        .conn()
+        .execute_batch("PRAGMA busy_timeout = 1;")
+        .await
+        .unwrap();
+    savings
+        .conn()
+        .execute_batch("PRAGMA busy_timeout = 1;")
+        .await
+        .unwrap();
+
+    let writer = first.transaction.lock().await;
+    let transaction = first.begin_authoritative_transaction().await.unwrap();
+    let event = AnalyticsEventInsert {
+        provider: "daemon_hook".to_string(),
+        project_id: "project".to_string(),
+        session_id: Some("session".to_string()),
+        timestamp: 1,
+        event_kind: "hook_route".to_string(),
+        hook_name: Some("runtime".to_string()),
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: None,
+        outcome: Some("observed".to_string()),
+        metadata_json: None,
+    };
+    let analytics = second.append_analytics_event(&event);
+    tokio::pin!(analytics);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut analytics)
+            .await
+            .is_err(),
+        "second handle bypassed the shared writer"
+    );
+
+    let savings_write = savings.record_savings("/project", "tracedecay_runtime", 100, 50, 1);
+    tokio::pin!(savings_write);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut savings_write)
+            .await
+            .is_err(),
+        "savings handle bypassed the shared writer"
+    );
+
+    transaction.commit().await.unwrap();
+    drop(writer);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut analytics)
+            .await
+            .expect("analytics append timed out")
+            .is_ok()
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), &mut savings_write)
+        .await
+        .expect("savings insert timed out");
+    assert_eq!(first.sum_savings(None, 0).await.calls, 1);
+}
+
+#[tokio::test]
 async fn turn_batch_error_rolls_back_prior_rows_and_releases_writer() {
     let dir = tempfile::TempDir::new().unwrap();
     let db = GlobalDb::open_at(&dir.path().join("global.db"))
@@ -2739,6 +2824,24 @@ async fn global_db_slot_uses_database_authority_canonical_identity() {
     ));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn global_db_slot_uses_database_authority_file_identity_across_symlinks() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let direct_path = dir.path().join("global.db");
+    let direct = GlobalDb::open_at(&direct_path)
+        .await
+        .expect("direct global DB open");
+    let alias_path = dir.path().join("global-alias.db");
+    std::os::unix::fs::symlink(&direct_path, &alias_path).unwrap();
+    let alias = GlobalDb::open_at(&alias_path)
+        .await
+        .expect("symlink global DB open");
+
+    assert_eq!(direct.db_path(), alias.db_path());
+    assert!(Arc::ptr_eq(&direct.transaction, &alias.transaction));
+}
+
 #[tokio::test]
 async fn assuming_schema_open_cannot_poison_full_schema_ensure() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -2788,7 +2891,7 @@ async fn distinct_global_db_paths_do_not_share_an_initialization_lock() {
     let first_authority =
         DatabaseAuthority::for_runtime(&first_path, "hold first global DB slot").unwrap();
     let first_slot = global_db_slot(&first_authority);
-    let _first_guard = first_slot.lock().await;
+    let _first_guard = first_slot.schema.lock().await;
 
     let second = tokio::time::timeout(
         std::time::Duration::from_secs(30),
