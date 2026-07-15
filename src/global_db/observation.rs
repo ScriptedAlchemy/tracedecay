@@ -3,6 +3,7 @@ use tracedecay_domain::{
     CanonicalObservationIdV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
     ObservationCollisionOutcomeV1, ObservationScopeV1, classify_observation_collision,
 };
+use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
     ObservationCommitReceipt, ObservationPersistOutcome, ObservationProjectionStatus,
     ObservationReplayRequest, ObservationStoreError, ObservationStoreResult, ObservationWrite,
@@ -22,7 +23,6 @@ pub(super) async fn ensure_observation_schema(conn: &Connection) -> Result<(), l
         CREATE TABLE IF NOT EXISTS observations (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             observation_id TEXT NOT NULL UNIQUE,
-            idempotency_key TEXT NOT NULL UNIQUE,
             payload_digest TEXT NOT NULL,
             receipt_id TEXT NOT NULL,
             observation_json TEXT NOT NULL,
@@ -90,7 +90,7 @@ async fn read_observation_row(
     sql: &'static str,
     value: &str,
     operation: &'static str,
-) -> ObservationStoreResult<Option<(ObservationCommitReceipt, String)>> {
+) -> ObservationStoreResult<Option<ObservationCommitReceipt>> {
     let mut rows = conn
         .query(sql, params![value])
         .await
@@ -113,26 +113,20 @@ async fn read_observation_row(
     let cursor_json = row
         .get::<String>(2)
         .map_err(|error| storage(operation, error))?;
-    let idempotency_key = row
-        .get::<String>(3)
-        .map_err(|error| storage(operation, error))?;
-    Ok(Some((
-        ObservationCommitReceipt::new(
-            sequence,
-            decode(&observation_json, operation)?,
-            decode(&cursor_json, operation)?,
-        ),
-        idempotency_key,
+    Ok(Some(ObservationCommitReceipt::new(
+        sequence,
+        decode(&observation_json, operation)?,
+        decode(&cursor_json, operation)?,
     )))
 }
 
 async fn read_by_observation_id(
     conn: &Connection,
     observation_id: &CanonicalObservationIdV1,
-) -> ObservationStoreResult<Option<(ObservationCommitReceipt, String)>> {
+) -> ObservationStoreResult<Option<ObservationCommitReceipt>> {
     read_observation_row(
         conn,
-        "SELECT sequence, observation_json, committed_cursor_json, idempotency_key
+        "SELECT sequence, observation_json, committed_cursor_json
          FROM observations WHERE observation_id = ?1",
         observation_id.as_str(),
         "read observation",
@@ -140,18 +134,25 @@ async fn read_by_observation_id(
     .await
 }
 
-async fn read_by_idempotency_key(
-    conn: &Connection,
-    idempotency_key: &str,
-) -> ObservationStoreResult<Option<(ObservationCommitReceipt, String)>> {
-    read_observation_row(
-        conn,
-        "SELECT sequence, observation_json, committed_cursor_json, idempotency_key
-         FROM observations WHERE idempotency_key = ?1",
-        idempotency_key,
-        "read observation by idempotency key",
-    )
-    .await
+async fn has_legacy_idempotency_column(conn: &Connection) -> ObservationStoreResult<bool> {
+    let mut rows = conn
+        .query("PRAGMA table_info(observations)", ())
+        .await
+        .map_err(|error| storage("inspect observation schema", error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("inspect observation schema", error))?
+    {
+        if row
+            .get::<String>(1)
+            .map_err(|error| storage("inspect observation schema", error))?
+            == "idempotency_key"
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn read_cursor(
@@ -178,6 +179,24 @@ async fn read_cursor(
         .get::<String>(0)
         .map_err(|error| storage("read observation source cursor", error))?;
     decode(&cursor_json, "decode observation source cursor").map(Some)
+}
+
+async fn write_cursor(
+    conn: &Connection,
+    source_json: &str,
+    scope_json: &str,
+    cursor_json: &str,
+) -> ObservationStoreResult<()> {
+    conn.execute(
+        "INSERT INTO source_cursors (source_json, scope_json, cursor_json)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(source_json, scope_json) DO UPDATE SET
+            cursor_json = excluded.cursor_json",
+        params![source_json, scope_json, cursor_json],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| storage("advance observation source cursor", error))
 }
 
 async fn read_projection_status(
@@ -224,7 +243,7 @@ impl GlobalDb {
             .map_err(|error| storage("begin observation transaction", error))?;
 
         let candidate = write.observation();
-        if let Some((existing, _)) =
+        if let Some(existing) =
             read_by_observation_id(&transaction, candidate.observation_id()).await?
         {
             let existing_observation = existing.observation();
@@ -240,9 +259,11 @@ impl GlobalDb {
                 }
                 ObservationCollisionOutcomeV1::IdentityCollision => {
                     Err(ObservationStoreError::ObservationCollision {
-                        observation_id: candidate.observation_id().clone(),
-                        existing_digest: existing_observation.payload_reference().digest().clone(),
-                        candidate_digest: candidate.payload_reference().digest().clone(),
+                        observation_id: Box::new(candidate.observation_id().clone()),
+                        existing_digest: Box::new(
+                            existing_observation.payload_reference().digest().clone(),
+                        ),
+                        candidate_digest: Box::new(candidate.payload_reference().digest().clone()),
                         outcome,
                     })
                 }
@@ -252,20 +273,13 @@ impl GlobalDb {
                 )),
             };
         }
-        if read_by_idempotency_key(&transaction, candidate.idempotency_key().as_str())
-            .await?
-            .is_some()
-        {
-            return Err(ObservationStoreError::IdempotencyCollision);
-        }
-
         let source_json = encode(candidate.source(), "encode observation source")?;
         let scope_json = encode(candidate.scope(), "encode observation scope")?;
         let actual_cursor = read_cursor(&transaction, &source_json, &scope_json).await?;
         if actual_cursor.as_ref() != write.expected_cursor() {
             return Err(ObservationStoreError::CursorConflict {
-                expected: write.expected_cursor().cloned(),
-                actual: actual_cursor,
+                expected: Box::new(write.expected_cursor().cloned()),
+                actual: Box::new(actual_cursor),
             });
         }
 
@@ -313,24 +327,42 @@ impl GlobalDb {
             return Err(ObservationStoreError::SanitizationReceiptCollision);
         }
 
-        transaction
-            .execute(
-                "INSERT INTO observations
+        let insert_result = if has_legacy_idempotency_column(&transaction).await? {
+            transaction
+                .execute(
+                    "INSERT INTO observations
                     (observation_id, idempotency_key, payload_digest, receipt_id,
                      observation_json, committed_cursor_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    candidate.observation_id().as_str(),
-                    candidate.idempotency_key().as_str(),
-                    payload_digest,
-                    receipt_id,
-                    observation_json.as_str(),
-                    cursor_json.as_str()
-                ],
-            )
-            .await
-            .map_err(|error| storage("insert immutable observation", error))?;
-        let (committed, _) = read_by_observation_id(&transaction, candidate.observation_id())
+                    params![
+                        candidate.observation_id().as_str(),
+                        candidate.observation_id().as_str(),
+                        payload_digest,
+                        receipt_id,
+                        observation_json.as_str(),
+                        cursor_json.as_str()
+                    ],
+                )
+                .await
+        } else {
+            transaction
+                .execute(
+                    "INSERT INTO observations
+                        (observation_id, payload_digest, receipt_id,
+                         observation_json, committed_cursor_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        candidate.observation_id().as_str(),
+                        payload_digest,
+                        receipt_id,
+                        observation_json.as_str(),
+                        cursor_json.as_str()
+                    ],
+                )
+                .await
+        };
+        insert_result.map_err(|error| storage("insert immutable observation", error))?;
+        let committed = read_by_observation_id(&transaction, candidate.observation_id())
             .await?
             .ok_or_else(|| {
                 storage_message(
@@ -339,20 +371,7 @@ impl GlobalDb {
                 )
             })?;
 
-        transaction
-            .execute(
-                "INSERT INTO source_cursors (source_json, scope_json, cursor_json)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(source_json, scope_json) DO UPDATE SET
-                    cursor_json = excluded.cursor_json",
-                params![
-                    source_json.as_str(),
-                    scope_json.as_str(),
-                    cursor_json.as_str()
-                ],
-            )
-            .await
-            .map_err(|error| storage("advance observation source cursor", error))?;
+        write_cursor(&transaction, &source_json, &scope_json, &cursor_json).await?;
         transaction
             .execute(
                 "INSERT INTO projection_queue (observation_id, observation_sequence)
@@ -386,19 +405,47 @@ impl GlobalDb {
         read_cursor(&self.conn, &source_json, &scope_json).await
     }
 
+    pub(crate) async fn advance_observation_source_cursor_result(
+        &self,
+        advance: ObservationCursorAdvance,
+    ) -> ObservationStoreResult<CursorAdvanceOutcome> {
+        let _writer = self.transaction.lock().await;
+        let transaction = self
+            .begin_authoritative_transaction()
+            .await
+            .map_err(|error| storage("begin observation cursor transaction", error))?;
+        let source_json = encode(advance.next_cursor().source(), "encode observation source")?;
+        let scope_json = encode(advance.next_cursor().scope(), "encode observation scope")?;
+        let actual_cursor = read_cursor(&transaction, &source_json, &scope_json).await?;
+        if actual_cursor.as_ref() == Some(advance.next_cursor()) {
+            return Ok(CursorAdvanceOutcome::ExactDuplicate);
+        }
+        if actual_cursor.as_ref() != advance.expected_cursor() {
+            return Err(ObservationStoreError::CursorConflict {
+                expected: Box::new(advance.expected_cursor().cloned()),
+                actual: Box::new(actual_cursor),
+            });
+        }
+        let cursor_json = encode(advance.next_cursor(), "encode committed observation cursor")?;
+        write_cursor(&transaction, &source_json, &scope_json, &cursor_json).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| storage("commit observation cursor transaction", error))?;
+        Ok(CursorAdvanceOutcome::Committed)
+    }
+
     pub(crate) async fn get_observation_result(
         &self,
         observation_id: &CanonicalObservationIdV1,
     ) -> ObservationStoreResult<Option<StoredObservation>> {
         let _reader = self.transaction.lock().await;
-        let Some((receipt, _)) = read_by_observation_id(&self.conn, observation_id).await? else {
+        let Some(receipt) = read_by_observation_id(&self.conn, observation_id).await? else {
             return Ok(None);
         };
         let projection_status = read_projection_status(&self.conn, observation_id).await?;
-        Ok(Some(StoredObservation::new(
-            receipt.sequence(),
-            receipt.observation().clone(),
-            receipt.committed_cursor().clone(),
+        Ok(Some(StoredObservation::from_commit_receipt(
+            receipt,
             projection_status,
         )))
     }
@@ -459,10 +506,12 @@ impl GlobalDb {
                 0 => ObservationProjectionStatus::NotQueued,
                 _ => ObservationProjectionStatus::Queued,
             };
-            observations.push(StoredObservation::new(
-                sequence,
-                decode(&observation_json, "decode replayed observation")?,
-                decode(&committed_cursor_json, "decode replayed observation cursor")?,
+            observations.push(StoredObservation::from_commit_receipt(
+                ObservationCommitReceipt::new(
+                    sequence,
+                    decode(&observation_json, "decode replayed observation")?,
+                    decode(&committed_cursor_json, "decode replayed observation cursor")?,
+                ),
                 projection_status,
             ));
         }

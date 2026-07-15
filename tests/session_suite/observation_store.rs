@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
@@ -9,6 +10,9 @@ use tracedecay_domain::{
     ObservationCollisionOutcomeV1, ObservationScopeV1, PayloadReferenceV1, RetentionClass,
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     SensitivityV1, SessionId,
+};
+use tracedecay_store::observation::{
+    CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
 };
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStatus, ObservationReplayRequest,
@@ -77,6 +81,23 @@ fn write(
 ) -> ObservationWrite {
     let next_cursor = cursor(observation.identity().position().end());
     ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap()
+}
+
+fn cursor_advance(
+    expected_cursor: Option<ClaudeSourceCursorV1>,
+    start: u64,
+    end: u64,
+    reason: NonDurableFrameReason,
+) -> ObservationCursorAdvance {
+    ObservationCursorAdvance::new(
+        source(),
+        scope(),
+        ClaudeFileGenerationV1::new(GENERATION).unwrap(),
+        expected_cursor,
+        ClaudeByteRangeV1::new(start, end).unwrap(),
+        reason,
+    )
+    .unwrap()
 }
 
 async fn user_table_counts(tmp: &TempDir) -> BTreeMap<String, i64> {
@@ -161,6 +182,7 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
         .unwrap()
         .expect("committed observation must be point-readable");
     assert_eq!(stored.sequence(), receipt.sequence());
+    assert_eq!(stored.commit_receipt(), &receipt);
     assert_eq!(stored.observation(), &candidate);
     assert_eq!(stored.sanitization_receipt(), candidate.receipt());
     assert_eq!(stored.committed_cursor(), &expected_cursor);
@@ -174,6 +196,19 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
         .await
         .unwrap();
     let raw_conn = raw_db.connect().unwrap();
+    let mut columns = raw_conn
+        .query("PRAGMA table_info(observations)", ())
+        .await
+        .unwrap();
+    let mut column_names = Vec::new();
+    while let Some(row) = columns.next().await.unwrap() {
+        column_names.push(row.get::<String>(1).unwrap());
+    }
+    assert!(
+        !column_names.iter().any(|name| name == "idempotency_key"),
+        "new schemas must use observation_id as the sole idempotency identity"
+    );
+    drop(columns);
     assert!(
         raw_conn
             .execute(
@@ -209,6 +244,132 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
         deltas.get("projection_queue"),
         Some(&1),
         "the commit must enqueue exactly one unique projection job"
+    );
+}
+
+#[tokio::test]
+async fn legacy_idempotency_column_rows_remain_readable_and_writable() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_lcm_db_path(&tmp);
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let original = observation(0, 100, "receipt.legacy.original", "legacy payload");
+    let original_cursor = cursor(100);
+    let legacy_idempotency_key = {
+        let mut hasher = Sha256::new();
+        hasher.update(b"tracedecay.claude.idempotency.v1\0");
+        hasher.update(
+            tracedecay_domain::research::canonical_json_bytes(original.identity()).unwrap(),
+        );
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    };
+    let mut legacy_wire = serde_json::to_value(&original).unwrap();
+    legacy_wire["idempotency_key"] = legacy_idempotency_key.clone().into();
+
+    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute_batch(
+            "CREATE TABLE sanitization_receipts (
+                receipt_id TEXT PRIMARY KEY,
+                sanitizer_version TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                receipt_json TEXT NOT NULL
+            );
+            CREATE TABLE observations (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                observation_id TEXT NOT NULL UNIQUE,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                payload_digest TEXT NOT NULL,
+                receipt_id TEXT NOT NULL,
+                observation_json TEXT NOT NULL,
+                committed_cursor_json TEXT NOT NULL,
+                FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
+            );",
+        )
+        .await
+        .unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO sanitization_receipts
+                (receipt_id, sanitizer_version, payload_digest, receipt_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            libsql::params![
+                original.receipt().receipt().receipt_id().as_str(),
+                original.receipt().receipt().sanitizer_version().as_str(),
+                original.payload_reference().digest().as_str(),
+                serde_json::to_string(original.receipt()).unwrap()
+            ],
+        )
+        .await
+        .unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO observations
+                (observation_id, idempotency_key, payload_digest, receipt_id,
+                 observation_json, committed_cursor_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            libsql::params![
+                original.observation_id().as_str(),
+                legacy_idempotency_key,
+                original.payload_reference().digest().as_str(),
+                original.receipt().receipt().receipt_id().as_str(),
+                serde_json::to_string(&legacy_wire).unwrap(),
+                serde_json::to_string(&original_cursor).unwrap()
+            ],
+        )
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    let db = tracedecay::global_db::GlobalDb::open_at(&db_path)
+        .await
+        .unwrap();
+    let store = GlobalDbObservationStore::new(&db);
+    let stored = store
+        .get_observation(original.observation_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.observation(), &original);
+    assert_eq!(stored.committed_cursor(), &original_cursor);
+    assert_eq!(
+        stored.projection_status(),
+        ObservationProjectionStatus::NotQueued
+    );
+
+    let duplicate = store
+        .persist_observation(write(original.clone(), None))
+        .await
+        .unwrap();
+    assert!(matches!(
+        duplicate,
+        ObservationPersistOutcome::ExactDuplicate(receipt)
+            if receipt == *stored.commit_receipt()
+    ));
+
+    let next = observation(100, 200, "receipt.legacy.next", "next payload");
+    store
+        .persist_observation(write(next.clone(), None))
+        .await
+        .unwrap();
+    let verify_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let verify_conn = verify_db.connect().unwrap();
+    let mut rows = verify_conn
+        .query(
+            "SELECT idempotency_key FROM observations WHERE observation_id = ?1",
+            libsql::params![next.observation_id().as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        next.observation_id().as_str()
     );
 }
 
@@ -257,6 +418,190 @@ async fn exact_duplicate_returns_original_receipt_without_mutating_cursor_or_sto
 }
 
 #[tokio::test]
+async fn cursor_only_progress_persists_no_skipped_rows_and_retries_idempotently() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let before = user_table_counts(&tmp).await;
+    let advance = cursor_advance(None, 0, 10, NonDurableFrameReason::BlankFrame);
+
+    assert_eq!(advance.covered(), ClaudeByteRangeV1::new(0, 10).unwrap());
+    assert_eq!(advance.reason(), NonDurableFrameReason::BlankFrame);
+    assert_eq!(
+        store.advance_source_cursor(advance.clone()).await.unwrap(),
+        CursorAdvanceOutcome::Committed
+    );
+    assert_eq!(
+        store.advance_source_cursor(advance).await.unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate
+    );
+    assert_eq!(
+        store.get_source_cursor(&source(), &scope()).await.unwrap(),
+        Some(cursor(10))
+    );
+    assert!(
+        store
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        table_deltas(&before, &user_table_counts(&tmp).await),
+        BTreeMap::from([("source_cursors".to_owned(), 1)])
+    );
+}
+
+#[tokio::test]
+async fn covered_gap_and_observation_commit_atomically() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    store
+        .advance_source_cursor(cursor_advance(
+            None,
+            0,
+            10,
+            NonDurableFrameReason::OutOfScope,
+        ))
+        .await
+        .unwrap();
+    let candidate = observation(20, 30, "receipt.covered-gap", "retained payload");
+    let write = write(candidate.clone(), Some(cursor(10)));
+
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_covered_gap_enqueue
+             BEFORE INSERT ON projection_queue BEGIN
+                SELECT RAISE(ABORT, 'injected covered gap failure');
+             END;",
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.persist_observation(write.clone()).await,
+        Err(ObservationStoreError::Storage { .. })
+    ));
+    assert_eq!(
+        store.get_source_cursor(&source(), &scope()).await.unwrap(),
+        Some(cursor(10))
+    );
+    assert!(
+        store
+            .get_observation(candidate.observation_id())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    raw_conn
+        .execute_batch("DROP TRIGGER fail_covered_gap_enqueue")
+        .await
+        .unwrap();
+    store.persist_observation(write).await.unwrap();
+    assert_eq!(
+        store.get_source_cursor(&source(), &scope()).await.unwrap(),
+        Some(cursor(30))
+    );
+    assert!(
+        store
+            .get_observation(candidate.observation_id())
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn cursor_only_progress_rejects_non_contiguous_and_stale_coverage() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    store
+        .advance_source_cursor(cursor_advance(
+            None,
+            0,
+            10,
+            NonDurableFrameReason::SanitizerRejected,
+        ))
+        .await
+        .unwrap();
+
+    let stale = cursor_advance(
+        Some(cursor(0)),
+        0,
+        20,
+        NonDurableFrameReason::SanitizerRejected,
+    );
+    assert!(matches!(
+        store.advance_source_cursor(stale).await,
+        Err(ObservationStoreError::CursorConflict { expected, actual })
+            if expected.as_ref() == &Some(cursor(0)) && actual.as_ref() == &Some(cursor(10))
+    ));
+    assert!(matches!(
+        ObservationCursorAdvance::new(
+            source(),
+            scope(),
+            ClaudeFileGenerationV1::new(GENERATION).unwrap(),
+            Some(cursor(10)),
+            ClaudeByteRangeV1::new(11, 20).unwrap(),
+            NonDurableFrameReason::SanitizerRejected,
+        ),
+        Err(ObservationStoreError::CursorCoverageMismatch)
+    ));
+    assert_eq!(
+        store.get_source_cursor(&source(), &scope()).await.unwrap(),
+        Some(cursor(10))
+    );
+}
+
+#[tokio::test]
+async fn cursor_only_progress_survives_restart() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_lcm_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    store
+        .advance_source_cursor(cursor_advance(
+            None,
+            0,
+            10,
+            NonDurableFrameReason::SanitizerQuarantined,
+        ))
+        .await
+        .unwrap();
+    drop(store);
+    drop(db);
+
+    let reopened = tracedecay::global_db::GlobalDb::open_at_assuming_schema(&db_path)
+        .await
+        .unwrap();
+    let store = GlobalDbObservationStore::new(&reopened);
+    assert_eq!(
+        store.get_source_cursor(&source(), &scope()).await.unwrap(),
+        Some(cursor(10))
+    );
+    store
+        .advance_source_cursor(cursor_advance(
+            Some(cursor(10)),
+            10,
+            20,
+            NonDurableFrameReason::SanitizerQuarantined,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_source_cursor(&source(), &scope()).await.unwrap(),
+        Some(cursor(20))
+    );
+}
+
+#[tokio::test]
 async fn identity_collision_is_typed_and_leaves_all_authoritative_state_unchanged() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
@@ -293,9 +638,15 @@ async fn identity_collision_is_typed_and_leaves_all_authoritative_state_unchange
             candidate_digest,
             outcome,
         } => {
-            assert_eq!(&observation_id, original.observation_id());
-            assert_eq!(&existing_digest, original.payload_reference().digest());
-            assert_eq!(&candidate_digest, colliding.payload_reference().digest());
+            assert_eq!(observation_id.as_ref(), original.observation_id());
+            assert_eq!(
+                existing_digest.as_ref(),
+                original.payload_reference().digest()
+            );
+            assert_eq!(
+                candidate_digest.as_ref(),
+                colliding.payload_reference().digest()
+            );
             assert_eq!(outcome, ObservationCollisionOutcomeV1::IdentityCollision);
         }
         other => panic!("expected typed observation collision, got {other:?}"),
@@ -516,10 +867,9 @@ async fn stale_exact_cas_cursor_conflict_rolls_back_every_candidate_write() {
         .expect_err("a stale exact-CAS owner must lose");
     assert!(matches!(
         error,
-        ObservationStoreError::CursorConflict {
-            expected: None,
-            actual: Some(actual),
-        } if actual == durable_cursor
+        ObservationStoreError::CursorConflict { expected, actual }
+            if expected.as_ref().is_none()
+                && actual.as_ref().as_ref() == Some(&durable_cursor)
     ));
 
     assert_eq!(

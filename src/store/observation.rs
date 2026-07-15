@@ -1,6 +1,7 @@
 use tracedecay_domain::{
     CanonicalObservationIdV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ObservationScopeV1,
 };
+use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationReplayRequest,
     ObservationStore, ObservationStoreResult, ObservationWrite, ProjectionCheckpoint,
@@ -35,6 +36,15 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
     ) -> ObservationStoreResult<Option<ClaudeSourceCursorV1>> {
         self.db
             .get_observation_source_cursor_result(source, scope)
+            .await
+    }
+
+    async fn advance_source_cursor(
+        &self,
+        advance: ObservationCursorAdvance,
+    ) -> ObservationStoreResult<CursorAdvanceOutcome> {
+        self.db
+            .advance_observation_source_cursor_result(advance)
             .await
     }
 
