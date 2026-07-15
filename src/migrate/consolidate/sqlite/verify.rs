@@ -72,6 +72,19 @@ async fn verify_attached_tables(conn: &Connection, offsets: &SessionMergeOffsets
     for spec in verification_specs(offsets) {
         verify_table(conn, &spec).await?;
     }
+    verify_observation_cursors(conn).await?;
+    for table in [
+        "observation_projection_checkpoints",
+        "observation_projection_dispositions",
+        "observation_projection_provenance",
+    ] {
+        if query_i64(conn, &format!("SELECT COUNT(*) FROM {table}")).await? != 0 {
+            return Err(db_message(
+                "verify_consolidation",
+                format!("destination {table} contains stale projection state"),
+            ));
+        }
+    }
     for (label, backing, fts) in [
         (
             "session message FTS",
@@ -101,6 +114,50 @@ async fn verify_attached_tables(conn: &Connection, offsets: &SessionMergeOffsets
                 format!("destination {label} differs from its durable backing table"),
             ));
         }
+    }
+    Ok(())
+}
+
+async fn verify_observation_cursors(conn: &Connection) -> Result<()> {
+    let differences = query_i64(
+        conn,
+        "WITH input_cursors AS (
+             SELECT source_json, scope_json, cursor_json FROM target_input.source_cursors
+             UNION ALL
+             SELECT source_json, scope_json, cursor_json FROM source_input.source_cursors
+         ), expected AS (
+             SELECT source_json, scope_json,
+                    MIN(json_extract(cursor_json, '$.generation')) AS generation_min,
+                    MAX(json_extract(cursor_json, '$.generation')) AS generation_max,
+                    MAX(CAST(json_extract(cursor_json, '$.byte_offset') AS INTEGER)) AS byte_offset
+             FROM input_cursors GROUP BY source_json, scope_json
+         )
+         SELECT
+           (SELECT COUNT(*) FROM (
+                SELECT source_json, scope_json FROM expected
+                EXCEPT SELECT source_json, scope_json FROM main.source_cursors
+            ))
+         + (SELECT COUNT(*) FROM (
+                SELECT source_json, scope_json FROM main.source_cursors
+                EXCEPT SELECT source_json, scope_json FROM expected
+            ))
+         + (SELECT COUNT(*)
+              FROM expected AS e
+              JOIN main.source_cursors AS d
+                ON d.source_json=e.source_json AND d.scope_json=e.scope_json
+             WHERE e.generation_min IS NOT e.generation_max
+                OR json_extract(d.cursor_json, '$.generation') IS NOT e.generation_max
+                OR CAST(json_extract(d.cursor_json, '$.byte_offset') AS INTEGER)
+                   IS NOT e.byte_offset)",
+    )
+    .await?;
+    if differences != 0 {
+        return Err(db_message(
+            "verify_consolidation",
+            format!(
+                "destination source cursor union differs from frozen inputs: {differences} difference(s)"
+            ),
+        ));
     }
     Ok(())
 }
@@ -266,6 +323,32 @@ fn verification_specs(offsets: &SessionMergeOffsets) -> Vec<TableVerification> {
                  SELECT name, version, applied_at FROM target_input.session_schema_migrations
                  UNION ALL SELECT name, version, applied_at FROM source_input.session_schema_migrations
              ) GROUP BY name",
+        ),
+        custom(
+            "sanitization receipt",
+            "sanitization_receipts",
+            "receipt_id, sanitizer_version, payload_digest, receipt_json",
+            "SELECT receipt_id, sanitizer_version, payload_digest, receipt_json
+             FROM target_input.sanitization_receipts
+             UNION
+             SELECT receipt_id, sanitizer_version, payload_digest, receipt_json
+             FROM source_input.sanitization_receipts",
+        ),
+        custom(
+            "observation",
+            "observations",
+            "observation_id, payload_digest, receipt_id, observation_json, committed_cursor_json",
+            "SELECT observation_id, payload_digest, receipt_id, observation_json,
+                    committed_cursor_json FROM target_input.observations
+             UNION
+             SELECT observation_id, payload_digest, receipt_id, observation_json,
+                    committed_cursor_json FROM source_input.observations",
+        ),
+        custom(
+            "observation projection queue",
+            "projection_queue",
+            "observation_id, observation_sequence",
+            "SELECT observation_id, sequence FROM main.observations",
         ),
         custom_owned(
             "LCM raw message",
