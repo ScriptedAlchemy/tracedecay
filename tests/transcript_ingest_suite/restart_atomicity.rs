@@ -6,11 +6,17 @@ use tracedecay::sessions::cline_like::ClineLikeSource;
 use tracedecay::sessions::cursor::{
     ingest_cursor_transcript_event, open_project_session_db, project_session_db_path,
 };
-use tracedecay::sessions::source::ingest_source;
+use tracedecay::sessions::source::{TranscriptSource, ingest_source};
 
 use crate::claude::write_claude_transcript;
 use crate::cline_like::{parse_offset_for_task_history, vscode_storage_root, write_task};
 use crate::support::{init_project, setup};
+
+fn claude_cursor_key(source: &ClaudeSource, project: &std::path::Path) -> String {
+    let paths = source.transcript_paths(project);
+    assert_eq!(paths.len(), 1);
+    paths[0].to_string_lossy().into_owned()
+}
 
 async fn set_session_message_projection_failure(project: &std::path::Path, enabled: bool) {
     let db = libsql::Builder::new_local(project_session_db_path(project))
@@ -35,10 +41,11 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let path = write_claude_transcript(&home, &project, "claude-restart");
-    let path_key = path.to_string_lossy().to_string();
+    let source = ClaudeSource::with_home(&home);
+    let path_key = claude_cursor_key(&source, &project);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let first = ingest_source(&db, &ClaudeSource::with_home(&home), &project, None).await;
+    let first = ingest_source(&db, &source, &project, None).await;
     assert_eq!(first.messages_upserted, 2);
     let first_offset = db.get_parse_offset(&path_key).await.unwrap();
     let first_session = db.get_session("claude", "claude-restart").await.unwrap();
@@ -66,7 +73,7 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
     set_session_message_projection_failure(&project, true).await;
 
     let rejected = open_project_session_db(&project).await.unwrap();
-    let failed = ingest_source(&rejected, &ClaudeSource::with_home(&home), &project, None).await;
+    let failed = ingest_source(&rejected, &source, &project, None).await;
     assert_eq!(failed.messages_upserted, 0);
     assert_eq!(
         rejected.get_parse_offset(&path_key).await,
@@ -89,7 +96,7 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
     set_session_message_projection_failure(&project, false).await;
 
     let reopened = open_project_session_db(&project).await.unwrap();
-    let suffix = ingest_source(&reopened, &ClaudeSource::with_home(&home), &project, None).await;
+    let suffix = ingest_source(&reopened, &source, &project, None).await;
     assert_eq!(suffix.messages_upserted, 1);
     let final_offset = reopened.get_parse_offset(&path_key).await.unwrap();
     assert!(final_offset.byte_offset > first_offset.byte_offset);
@@ -100,7 +107,7 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
     drop(reopened);
 
     let replay = open_project_session_db(&project).await.unwrap();
-    let unchanged = ingest_source(&replay, &ClaudeSource::with_home(&home), &project, None).await;
+    let unchanged = ingest_source(&replay, &source, &project, None).await;
     assert_eq!(unchanged.sessions_upserted, 0);
     assert_eq!(unchanged.messages_upserted, 0);
     assert_eq!(replay.get_parse_offset(&path_key).await, Some(final_offset));
@@ -112,11 +119,12 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let path = write_claude_transcript(&home, &project, "claude-malformed-frame");
-    let path_key = path.to_string_lossy().to_string();
+    let source = ClaudeSource::with_home(&home);
+    let path_key = claude_cursor_key(&source, &project);
     let valid_prefix = std::fs::read_to_string(&path).unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let initial = ingest_source(&db, &ClaudeSource::with_home(&home), &project, None).await;
+    let initial = ingest_source(&db, &source, &project, None).await;
     assert_eq!(initial.messages_upserted, 2);
     let prefix_offset = db.get_parse_offset(&path_key).await.unwrap();
     assert_eq!(prefix_offset.byte_offset, valid_prefix.len() as u64);
@@ -137,7 +145,7 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     .unwrap();
 
     let rejected = open_project_session_db(&project).await.unwrap();
-    let malformed = ingest_source(&rejected, &ClaudeSource::with_home(&home), &project, None).await;
+    let malformed = ingest_source(&rejected, &source, &project, None).await;
     assert_eq!(malformed.messages_upserted, 0);
     assert_eq!(
         rejected
@@ -162,7 +170,7 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     std::fs::write(&path, format!("{valid_prefix}{repaired}\n{suffix}\n")).unwrap();
 
     let retry = open_project_session_db(&project).await.unwrap();
-    let recovered = ingest_source(&retry, &ClaudeSource::with_home(&home), &project, None).await;
+    let recovered = ingest_source(&retry, &source, &project, None).await;
     assert!(recovered.messages_upserted >= 2);
     assert_eq!(retry.session_message_count().await.unwrap(), 4);
     assert!(retry.get_session_message("claude", "u3").await.is_some());
@@ -175,7 +183,7 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     drop(retry);
 
     let replay = open_project_session_db(&project).await.unwrap();
-    let unchanged = ingest_source(&replay, &ClaudeSource::with_home(&home), &project, None).await;
+    let unchanged = ingest_source(&replay, &source, &project, None).await;
     assert_eq!(unchanged.sessions_upserted, 0);
     assert_eq!(unchanged.messages_upserted, 0);
     assert_eq!(replay.get_parse_offset(&path_key).await, Some(final_offset));
@@ -188,7 +196,8 @@ async fn claude_restart_defers_a_partial_final_line() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let path = write_claude_transcript(&home, &project, "claude-partial");
-    let path_key = path.to_string_lossy().to_string();
+    let source = ClaudeSource::with_home(&home);
+    let path_key = claude_cursor_key(&source, &project);
     let complete_len = std::fs::metadata(&path).unwrap().len();
     let partial = serde_json::json!({
         "type": "user",
@@ -207,15 +216,14 @@ async fn claude_restart_defers_a_partial_final_line() {
         .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let first = ingest_source(&db, &ClaudeSource::with_home(&home), &project, None).await;
+    let first = ingest_source(&db, &source, &project, None).await;
     assert_eq!(first.messages_upserted, 2);
     let committed_offset = db.get_parse_offset(&path_key).await.unwrap();
     assert_eq!(committed_offset.byte_offset, complete_len);
     drop(db);
 
     let reopened = open_project_session_db(&project).await.unwrap();
-    let still_partial =
-        ingest_source(&reopened, &ClaudeSource::with_home(&home), &project, None).await;
+    let still_partial = ingest_source(&reopened, &source, &project, None).await;
     assert_eq!(still_partial.messages_upserted, 0);
     assert_eq!(
         reopened.get_parse_offset(&path_key).await,
@@ -228,7 +236,7 @@ async fn claude_restart_defers_a_partial_final_line() {
         .unwrap()
         .write_all(b"\n")
         .unwrap();
-    let completed = ingest_source(&reopened, &ClaudeSource::with_home(&home), &project, None).await;
+    let completed = ingest_source(&reopened, &source, &project, None).await;
     assert_eq!(completed.messages_upserted, 1);
     assert_eq!(reopened.session_message_count().await.unwrap(), 3);
     let final_offset = reopened.get_parse_offset(&path_key).await.unwrap();
@@ -239,7 +247,7 @@ async fn claude_restart_defers_a_partial_final_line() {
     drop(reopened);
 
     let replay = open_project_session_db(&project).await.unwrap();
-    let unchanged = ingest_source(&replay, &ClaudeSource::with_home(&home), &project, None).await;
+    let unchanged = ingest_source(&replay, &source, &project, None).await;
     assert_eq!(unchanged.sessions_upserted, 0);
     assert_eq!(unchanged.messages_upserted, 0);
     assert_eq!(replay.get_parse_offset(&path_key).await, Some(final_offset));
