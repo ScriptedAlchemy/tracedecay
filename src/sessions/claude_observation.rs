@@ -783,6 +783,7 @@ pub(crate) async fn ingest_source_with_observations(
     cancellation: ObservationCancellation,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
     let (paths, deferred) = scheduled_source_paths(db, source, project_root).await?;
+    let scheduled_source_count = paths.len();
     let mut stats = ClaudeObservationIngestStats {
         deferred_sources: u64::try_from(deferred).unwrap_or(u64::MAX),
         ..ClaudeObservationIngestStats::default()
@@ -825,7 +826,9 @@ pub(crate) async fn ingest_source_with_observations(
         remaining_bytes = remaining_bytes.saturating_sub(outcome.source_bytes_scanned);
         stats = stats.merge(outcome);
     }
-    advance_source_frontier(db, attempted_sources).await?;
+    if deferred > 0 || attempted_sources < scheduled_source_count {
+        advance_source_frontier(db, attempted_sources).await?;
+    }
     let projection_stats = drain_projection_queue(db, &cancellation).await?;
     if let Some((failed_sources, first_reason_code, first_retryable)) = source_failures {
         return Err(ClaudeObservationIngestError::SourceFailures {
@@ -1224,6 +1227,15 @@ mod tests {
         assert_eq!(stats.transcript.messages_upserted, 1);
         assert_eq!(stats.projections_completed, 1);
         assert_eq!(stats.deferred_sources, 0, "{stats:?}");
+        assert!(
+            fixture
+                .db
+                .get_parse_offset_result(CLAUDE_SOURCE_FRONTIER_KEY)
+                .await
+                .unwrap()
+                .is_none(),
+            "a fully covered source set does not need a durable scheduling frontier"
+        );
         let store = GlobalDbObservationStore::new(&fixture.db);
         let observations = store
             .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
