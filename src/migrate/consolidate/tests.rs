@@ -2668,6 +2668,206 @@ async fn observation_projection_remap_survives_drain_and_rebuild_to_zero() {
 }
 
 #[tokio::test]
+async fn shared_projection_owner_and_newer_source_owner_remain_lossless() {
+    let temp = TempDir::new().unwrap();
+    let target_path = temp.path().join("target-sessions.db");
+    let source_path = temp.path().join("source-sessions.db");
+    let target_input_path = temp.path().join("target-input-sessions.db");
+    let session_id = "session.migration.shared-owner";
+    let message_id = "shared-owner-message";
+    let remapped_message_id = "consolidated/proj_source/shared-owner-message";
+    let shared = migration_observation_generation(
+        session_id,
+        17,
+        0,
+        10,
+        "receipt.migration.shared-owner",
+        message_id,
+        "older target body",
+    );
+    let newer = migration_observation_generation(
+        session_id,
+        18,
+        0,
+        10,
+        "receipt.migration.newer-owner",
+        message_id,
+        "newer source body",
+    );
+    let shared_id = shared.observation_id().as_str().to_owned();
+    let newer_id = newer.observation_id().as_str().to_owned();
+
+    let target = GlobalDb::open_at_without_structured_backfill(&target_path)
+        .await
+        .unwrap();
+    persist_migration_observation(&target, shared.clone(), None).await;
+    assert_eq!(project_all_migration_observations(&target).await, 1);
+    set_migration_cursor(&target, session_id, 18, 0).await;
+    target.checkpoint().await;
+    target.close();
+
+    let source = GlobalDb::open_at_without_structured_backfill(&source_path)
+        .await
+        .unwrap();
+    persist_migration_observation(&source, shared, None).await;
+    assert_eq!(project_all_migration_observations(&source).await, 1);
+    persist_migration_observation(
+        &source,
+        newer,
+        Some(migration_cursor_generation_for(session_id, 17, 10)),
+    )
+    .await;
+    assert_eq!(project_all_migration_observations(&source).await, 1);
+    assert_projection_ownership(&source_path, message_id, 1, 1).await;
+    source.checkpoint().await;
+    source.close();
+
+    let offsets = sqlite::plan_session_offsets(&target_path, &source_path)
+        .await
+        .unwrap();
+    copy_sqlite_family_exact(&target_path, &target_input_path).unwrap();
+    sqlite::merge_sessions(
+        &target_path,
+        &source_path,
+        &target_input_path,
+        "proj_source",
+        &offsets,
+    )
+    .await
+    .unwrap();
+    assert_no_projection_alias(&target_path, &shared_id).await;
+    assert_projection_alias(&target_path, &newer_id, remapped_message_id).await;
+    assert_message_text(&target_path, message_id, "older target body").await;
+    assert_message_absent(&target_path, remapped_message_id).await;
+
+    let merged = GlobalDb::open_at_without_structured_backfill(&target_path)
+        .await
+        .unwrap();
+    assert_eq!(project_all_migration_observations(&merged).await, 2);
+    assert_message_text(&target_path, message_id, "older target body").await;
+    assert_message_text(&target_path, remapped_message_id, "newer source body").await;
+    assert_no_orphaned_projection_provenance(&target_path).await;
+
+    sqlite::merge_sessions(
+        &target_path,
+        &source_path,
+        &target_input_path,
+        "proj_source",
+        &offsets,
+    )
+    .await
+    .unwrap();
+    assert_eq!(project_all_migration_observations(&merged).await, 2);
+    assert_message_text(&target_path, message_id, "older target body").await;
+    assert_message_text(&target_path, remapped_message_id, "newer source body").await;
+    assert_no_orphaned_projection_provenance(&target_path).await;
+
+    GlobalDbObservationStore::new(&merged)
+        .rebuild_projection(0)
+        .await
+        .unwrap();
+    assert_message_absent(&target_path, message_id).await;
+    assert_message_absent(&target_path, remapped_message_id).await;
+    assert_eq!(
+        sqlite::count_rows(&target_path, "observation_projection_provenance")
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(project_all_migration_observations(&merged).await, 2);
+    merged.close();
+    assert_message_text(&target_path, message_id, "older target body").await;
+    assert_message_text(&target_path, remapped_message_id, "newer source body").await;
+    assert_no_orphaned_projection_provenance(&target_path).await;
+}
+
+#[tokio::test]
+async fn observation_authority_collision_fails_before_session_merge_mutation() {
+    let temp = TempDir::new().unwrap();
+    let target_path = temp.path().join("target-sessions.db");
+    let source_path = temp.path().join("source-sessions.db");
+    let target_input_path = temp.path().join("target-input-sessions.db");
+    let receipt_id = "receipt.migration.preflight-collision";
+    let target = GlobalDb::open_at_without_structured_backfill(&target_path)
+        .await
+        .unwrap();
+    persist_migration_observation(
+        &target,
+        migration_observation_for(
+            "session.migration.preflight-target",
+            receipt_id,
+            "preflight-target-message",
+            "target receipt payload",
+        ),
+        None,
+    )
+    .await;
+    target.checkpoint().await;
+    target.close();
+
+    let source = GlobalDb::open_at_without_structured_backfill(&source_path)
+        .await
+        .unwrap();
+    persist_migration_observation(
+        &source,
+        migration_observation_for(
+            "session.migration.preflight-source",
+            receipt_id,
+            "preflight-source-message",
+            "source receipt payload",
+        ),
+        None,
+    )
+    .await;
+    source.checkpoint().await;
+    source.close();
+
+    let offsets = sqlite::plan_session_offsets(&target_path, &source_path)
+        .await
+        .unwrap();
+    copy_sqlite_family_exact(&target_path, &target_input_path).unwrap();
+    let before = (
+        sqlite::count_rows(&target_path, "sanitization_receipts")
+            .await
+            .unwrap(),
+        sqlite::count_rows(&target_path, "observations")
+            .await
+            .unwrap(),
+        sqlite::count_rows(&target_path, "source_cursors")
+            .await
+            .unwrap(),
+    );
+    let error = sqlite::merge_sessions(
+        &target_path,
+        &source_path,
+        &target_input_path,
+        "proj_source",
+        &offsets,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("sanitization receipt identity collision")
+    );
+    assert_eq!(
+        (
+            sqlite::count_rows(&target_path, "sanitization_receipts")
+                .await
+                .unwrap(),
+            sqlite::count_rows(&target_path, "observations")
+                .await
+                .unwrap(),
+            sqlite::count_rows(&target_path, "source_cursors")
+                .await
+                .unwrap(),
+        ),
+        before
+    );
+}
+
+#[tokio::test]
 async fn malformed_target_only_cursor_fails_before_consolidation_mutation() {
     let temp = TempDir::new().unwrap();
     let target_path = temp.path().join("target-sessions.db");
@@ -2731,25 +2931,32 @@ async fn unrepresentable_projection_alias_fails_before_consolidation_mutation() 
     let target_path = temp.path().join("target-sessions.db");
     let source_path = temp.path().join("source-sessions.db");
     let target_input_path = temp.path().join("target-input-sessions.db");
-    let observation = migration_observation(
-        0,
-        10,
+    let target_observation = migration_observation_for(
+        "session.migration.alias-target",
         "receipt.migration.alias-conflict",
         "alias-conflict-message",
+        "target alias body",
     );
-    let observation_id = observation.observation_id().as_str().to_owned();
+    let source_observation = migration_observation_for(
+        "session.migration.alias-source",
+        "receipt.migration.alias-source",
+        "alias-conflict-message",
+        "source alias body",
+    );
+    let observation_id = source_observation.observation_id().as_str().to_owned();
     let target = GlobalDb::open_at_without_structured_backfill(&target_path)
         .await
         .unwrap();
-    persist_migration_observation(&target, observation.clone(), None).await;
-    insert_projection_alias(&target, &observation_id, "target-output").await;
+    persist_migration_observation(&target, target_observation, None).await;
+    assert_eq!(project_all_migration_observations(&target).await, 1);
     target.checkpoint().await;
     target.close();
 
     let source = GlobalDb::open_at_without_structured_backfill(&source_path)
         .await
         .unwrap();
-    persist_migration_observation(&source, observation, None).await;
+    persist_migration_observation(&source, source_observation, None).await;
+    assert_eq!(project_all_migration_observations(&source).await, 1);
     insert_projection_alias(&source, &observation_id, "source-output").await;
     source.checkpoint().await;
     source.close();
@@ -2772,7 +2979,7 @@ async fn unrepresentable_projection_alias_fails_before_consolidation_mutation() 
             .to_string()
             .contains("projection output collision cannot be represented")
     );
-    assert_projection_alias(&target_path, &observation_id, "target-output").await;
+    assert_no_projection_alias(&target_path, &observation_id).await;
 }
 
 fn migration_source() -> ClaudeSourceIdentityV1 {
@@ -2784,10 +2991,18 @@ fn migration_cursor(byte_offset: u64) -> ClaudeSourceCursorV1 {
 }
 
 fn migration_cursor_for(session_id: &str, byte_offset: u64) -> ClaudeSourceCursorV1 {
+    migration_cursor_generation_for(session_id, 17, byte_offset)
+}
+
+fn migration_cursor_generation_for(
+    session_id: &str,
+    generation: u64,
+    byte_offset: u64,
+) -> ClaudeSourceCursorV1 {
     ClaudeSourceCursorV1::new(
         ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap(),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(17).unwrap(),
+        ClaudeFileGenerationV1::new(generation).unwrap(),
         byte_offset,
     )
     .unwrap()
@@ -2809,17 +3024,43 @@ fn migration_observation(
     )
 }
 
+fn migration_observation_generation(
+    session_id: &str,
+    generation: u64,
+    start: u64,
+    end: u64,
+    receipt_id: &str,
+    message_id: &str,
+    body: &str,
+) -> DurableClaudeObservationV1 {
+    migration_observation_range_generation(
+        session_id, generation, start, end, receipt_id, message_id, body,
+    )
+}
+
 fn migration_observation_for(
     session_id: &str,
     receipt_id: &str,
     message_id: &str,
     body: &str,
 ) -> DurableClaudeObservationV1 {
-    migration_observation_range(session_id, 0, 10, receipt_id, message_id, body)
+    migration_observation_range_generation(session_id, 17, 0, 10, receipt_id, message_id, body)
 }
 
 fn migration_observation_range(
     session_id: &str,
+    start: u64,
+    end: u64,
+    receipt_id: &str,
+    message_id: &str,
+    body: &str,
+) -> DurableClaudeObservationV1 {
+    migration_observation_range_generation(session_id, 17, start, end, receipt_id, message_id, body)
+}
+
+fn migration_observation_range_generation(
+    session_id: &str,
+    generation: u64,
     start: u64,
     end: u64,
     receipt_id: &str,
@@ -2852,7 +3093,7 @@ fn migration_observation_range(
     let identity = ClaudeObservationIdentityMaterialV1::new(
         ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap(),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(17).unwrap(),
+        ClaudeFileGenerationV1::new(generation).unwrap(),
         ClaudeByteRangeV1::new(start, end).unwrap(),
     )
     .unwrap();
@@ -2995,6 +3236,130 @@ async fn assert_projection_alias(path: &Path, observation_id: &str, output_messa
         output_message_id
     );
     db.close();
+}
+
+async fn assert_no_projection_alias(path: &Path, observation_id: &str) {
+    let db = GlobalDb::open_at_without_structured_backfill(path)
+        .await
+        .unwrap();
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT COUNT(*) FROM observation_projection_aliases WHERE observation_id=?1",
+            libsql::params![observation_id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        0
+    );
+    db.close();
+}
+
+async fn assert_projection_ownership(
+    path: &Path,
+    output_message_id: &str,
+    created: i64,
+    retained: i64,
+) {
+    let db = GlobalDb::open_at_without_structured_backfill(path)
+        .await
+        .unwrap();
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT SUM(message_created), SUM(1-message_created)
+             FROM observation_projection_provenance WHERE output_message_id=?1",
+            libsql::params![output_message_id],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), created);
+    assert_eq!(row.get::<i64>(1).unwrap(), retained);
+    db.close();
+}
+
+async fn assert_message_text(path: &Path, message_id: &str, expected: &str) {
+    let db = GlobalDb::open_at_without_structured_backfill(path)
+        .await
+        .unwrap();
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT text FROM session_messages WHERE provider='claude' AND message_id=?1",
+            libsql::params![message_id],
+        )
+        .await
+        .unwrap();
+    let actual = rows
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap();
+    assert!(
+        actual.contains(expected),
+        "{actual:?} does not contain {expected:?}"
+    );
+    assert!(rows.next().await.unwrap().is_none());
+    db.close();
+}
+
+async fn assert_message_absent(path: &Path, message_id: &str) {
+    let db = GlobalDb::open_at_without_structured_backfill(path)
+        .await
+        .unwrap();
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT COUNT(*) FROM session_messages WHERE provider='claude' AND message_id=?1",
+            libsql::params![message_id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        0
+    );
+    db.close();
+}
+
+async fn assert_no_orphaned_projection_provenance(path: &Path) {
+    let db = GlobalDb::open_at_without_structured_backfill(path)
+        .await
+        .unwrap();
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT COUNT(*)
+             FROM observation_projection_provenance AS provenance
+             LEFT JOIN session_messages AS message
+               ON message.provider=provenance.output_provider
+              AND message.message_id=provenance.output_message_id
+             WHERE message.message_id IS NULL",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        0
+    );
+    db.close();
+}
+
+async fn set_migration_cursor(db: &GlobalDb, session_id: &str, generation: u64, byte_offset: u64) {
+    let cursor = migration_cursor_generation_for(session_id, generation, byte_offset);
+    db.conn()
+        .execute(
+            "UPDATE source_cursors SET cursor_json=?1",
+            libsql::params![serde_json::to_string(&cursor).unwrap()],
+        )
+        .await
+        .unwrap();
 }
 
 async fn insert_projection_alias(db: &GlobalDb, observation_id: &str, output_message_id: &str) {

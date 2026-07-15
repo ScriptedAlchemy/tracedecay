@@ -6,7 +6,7 @@ use libsql::Connection;
 
 use super::{
     SessionMergeOffsets, attach_as, build_consolidation_message_map, db_error, db_message,
-    mapped_parent_metadata, mapped_turn_message_id, query_i64, read_source_cursor_rows,
+    mapped_parent_metadata, mapped_turn_message_id, projection, query_i64, read_source_cursor_rows,
 };
 use crate::errors::Result;
 
@@ -75,13 +75,18 @@ async fn verify_attached_tables(conn: &Connection, offsets: &SessionMergeOffsets
         verify_table(conn, &spec).await?;
     }
     verify_observation_cursors(conn).await?;
-    for table in ["observation_projection_checkpoints"] {
-        if query_i64(conn, &format!("SELECT COUNT(*) FROM {table}")).await? != 0 {
-            return Err(db_message(
-                "verify_consolidation",
-                format!("destination {table} contains stale projection state"),
-            ));
-        }
+    projection::verify(conn).await?;
+    if query_i64(
+        conn,
+        "SELECT COUNT(*) FROM observation_projection_checkpoints",
+    )
+    .await?
+        != 0
+    {
+        return Err(db_message(
+            "verify_consolidation",
+            "destination observation_projection_checkpoints contains stale projection state",
+        ));
     }
     for (label, backing, fts) in [
         (
@@ -292,37 +297,7 @@ fn verification_specs(offsets: &SessionMergeOffsets) -> Vec<TableVerification> {
             "session message",
             "session_messages",
             "provider, message_id, session_id, role, timestamp, ordinal, text, kind, model, tool_names, source_path, source_offset, metadata_json",
-            format!("SELECT provider, message_id, session_id, role, timestamp, ordinal, text,
-                    kind, model, tool_names, source_path, source_offset, metadata_json
-             FROM target_input.session_messages
-             UNION ALL
-             SELECT s.provider, COALESCE(m.mapped_id, s.message_id), s.session_id,
-                    s.role, s.timestamp, s.ordinal, s.text, s.kind, s.model,
-                    s.tool_names, s.source_path, s.source_offset, {session_metadata}
-             FROM source_input.session_messages s
-             LEFT JOIN consolidation_message_map m
-               ON m.provider=s.provider AND m.original_id=s.message_id
-             WHERE (m.mapped_id IS NOT NULL OR NOT EXISTS (
-                 SELECT 1 FROM target_input.session_messages t
-                 WHERE t.provider=s.provider AND t.message_id=s.message_id
-             ))
-             AND NOT (
-                 m.mapped_id IS NOT NULL
-                 AND EXISTS (
-                     SELECT 1
-                     FROM source_input.observation_projection_provenance p
-                     WHERE p.output_provider=s.provider
-                       AND p.output_message_id=s.message_id
-                       AND p.message_created=1
-                 )
-                 AND NOT EXISTS (
-                     SELECT 1
-                     FROM source_input.observation_projection_provenance p
-                     WHERE p.output_provider=s.provider
-                       AND p.output_message_id=s.message_id
-                       AND p.message_created=0
-                 )
-             )"),
+            projection::expected_session_messages(&session_metadata),
         ),
         custom(
             "session schema migration",
@@ -352,63 +327,6 @@ fn verification_specs(offsets: &SessionMergeOffsets) -> Vec<TableVerification> {
              UNION
              SELECT observation_id, payload_digest, receipt_id, observation_json,
                     committed_cursor_json FROM source_input.observations",
-        ),
-        custom(
-            "observation projection alias",
-            "observation_projection_aliases",
-            "projector_version, observation_id, output_provider, output_message_id",
-            "SELECT projector_version, observation_id, output_provider, output_message_id
-             FROM target_input.observation_projection_aliases
-             UNION
-             SELECT a.projector_version, a.observation_id, a.output_provider,
-                    COALESCE(m.mapped_id, a.output_message_id)
-             FROM source_input.observation_projection_aliases AS a
-             LEFT JOIN consolidation_message_map AS m
-               ON m.provider=a.output_provider AND m.original_id=a.output_message_id
-             UNION
-             SELECT p.projector_version, p.observation_id, p.output_provider, m.mapped_id
-             FROM source_input.observation_projection_provenance AS p
-             JOIN consolidation_message_map AS m
-               ON m.provider=p.output_provider AND m.original_id=p.output_message_id",
-        ),
-        custom(
-            "observation projection provenance",
-            "observation_projection_provenance",
-            "projector_version, observation_id, receipt_id, output_provider, output_message_id, output_digest, message_created",
-            "WITH merged AS (
-                 SELECT projector_version, observation_id, receipt_id, output_provider,
-                        output_message_id, output_digest, message_created
-                 FROM target_input.observation_projection_provenance
-                 UNION ALL
-                 SELECT p.projector_version, p.observation_id, p.receipt_id,
-                        p.output_provider, p.output_message_id,
-                        p.output_digest,
-                        CASE WHEN EXISTS (
-                              SELECT 1 FROM target_input.session_messages AS t
-                              WHERE t.provider=p.output_provider
-                                AND t.message_id=p.output_message_id
-                          ) THEN 0
-                          ELSE p.message_created
-                        END
-                 FROM source_input.observation_projection_provenance AS p
-                 LEFT JOIN consolidation_message_map AS m
-                   ON m.provider=p.output_provider AND m.original_id=p.output_message_id
-                 WHERE m.mapped_id IS NULL
-             )
-             SELECT projector_version, observation_id, MIN(receipt_id),
-                    MIN(output_provider), MIN(output_message_id), MIN(output_digest),
-                    MIN(message_created)
-             FROM merged GROUP BY projector_version, observation_id",
-        ),
-        custom(
-            "observation projection disposition",
-            "observation_projection_dispositions",
-            "projector_version, observation_id, receipt_id, reason",
-            "SELECT projector_version, observation_id, receipt_id, reason
-             FROM target_input.observation_projection_dispositions
-             UNION
-             SELECT projector_version, observation_id, receipt_id, reason
-             FROM source_input.observation_projection_dispositions",
         ),
         custom(
             "observation projection queue",
