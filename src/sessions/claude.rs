@@ -148,6 +148,10 @@ impl TranscriptSource for ClaudeSource {
         collect_files_with_ext(&self.projects_dir, "jsonl", MAX_SCAN_DEPTH)
     }
 
+    fn cursor_path(&self, transcript_path: &Path) -> PathBuf {
+        claude_cursor_path(transcript_path)
+    }
+
     fn parse_new(
         &self,
         path: &Path,
@@ -307,6 +311,53 @@ impl TranscriptSource for ClaudeSource {
             new_cursor: new.new_cursor,
         })
     }
+}
+
+const CLAUDE_CURSOR_KEY_PREFIX: &str = "tracedecay-claude-cursor-v1";
+
+fn claude_cursor_path(path: &Path) -> PathBuf {
+    if path.to_str().is_some() {
+        return path.to_path_buf();
+    }
+
+    claude_non_unicode_cursor_path(path)
+}
+
+#[cfg(unix)]
+fn claude_non_unicode_cursor_path(path: &Path) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+
+    PathBuf::from(encode_claude_cursor_key(
+        "unix-bytes",
+        path.as_os_str().as_bytes(),
+    ))
+}
+
+#[cfg(windows)]
+fn claude_non_unicode_cursor_path(path: &Path) -> PathBuf {
+    use std::os::windows::ffi::OsStrExt;
+
+    let bytes: Vec<u8> = path
+        .as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    PathBuf::from(encode_claude_cursor_key("windows-utf16le", &bytes))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn claude_non_unicode_cursor_path(path: &Path) -> PathBuf {
+    PathBuf::from(encode_claude_cursor_key(
+        "rust-os-str",
+        path.as_os_str().as_encoded_bytes(),
+    ))
+}
+
+fn encode_claude_cursor_key(platform: &str, native_path: &[u8]) -> String {
+    format!(
+        "{CLAUDE_CURSOR_KEY_PREFIX}-{platform}-{}",
+        hex::encode(native_path)
+    )
 }
 
 /// Identity + spawn provenance for a subagent transcript, assembled from the
@@ -1360,6 +1411,55 @@ fn record_cwd(record: &Value) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn cursor_key_round_trips_native_bytes_without_collisions() {
+        let native_path: Vec<u8> = r"C:\Users\zack\.claude\projects\session.jsonl"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let other_native_path: Vec<u8> = r"C:\Users\other.jsonl"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let key = encode_claude_cursor_key("windows-utf16le", &native_path);
+        let encoded = key
+            .strip_prefix("tracedecay-claude-cursor-v1-windows-utf16le-")
+            .expect("versioned platform prefix");
+
+        assert_eq!(hex::decode(encoded).unwrap(), native_path);
+        assert_ne!(
+            key,
+            encode_claude_cursor_key("windows-utf16le", &other_native_path)
+        );
+        assert_ne!(
+            key,
+            encode_claude_cursor_key("unix-bytes", &native_path),
+            "platform tag is part of the durable identity"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_paths_that_render_identically_have_distinct_cursor_keys() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let first = PathBuf::from(OsString::from_vec(b"session-\xff.jsonl".to_vec()));
+        let second = PathBuf::from(OsString::from_vec(b"session-\xfe.jsonl".to_vec()));
+        assert_eq!(first.to_string_lossy(), second.to_string_lossy());
+
+        let source = ClaudeSource::with_home(Path::new("/unused"));
+        assert_ne!(source.cursor_path(&first), source.cursor_path(&second));
+    }
+
+    #[test]
+    fn unicode_paths_keep_the_legacy_cursor_key() {
+        let path = Path::new("/tmp/claude-session.jsonl");
+        let source = ClaudeSource::with_home(Path::new("/unused"));
+
+        assert_eq!(source.cursor_path(path), path);
+    }
 
     #[test]
     fn structured_git_operation_becomes_host_commit_evidence() {

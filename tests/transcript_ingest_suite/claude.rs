@@ -7,7 +7,7 @@ use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::git_correlation::{
     CommitEvidence, CommitRelation, GitRefFilter, SessionsForQuery, SpanOverlapKind,
 };
-use tracedecay::sessions::source::ingest_source;
+use tracedecay::sessions::source::{TranscriptSource, ingest_source};
 
 use crate::support::{assert_metadata_path_eq, init_git_repo, init_project_at, run_git, setup};
 
@@ -73,6 +73,41 @@ fn write_claude_rows(home: &std::path::Path, session: &str, rows: &[serde_json::
         format!("{contents}\n"),
     )
     .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_non_utf8_cursor_key_survives_atomic_persistence() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let dir = home.join(".claude/projects/-non-utf8");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(OsString::from_vec(b"session-\xff.jsonl".to_vec()));
+    let row = serde_json::json!({
+        "type": "user",
+        "cwd": project,
+        "sessionId": "native-session-id",
+        "uuid": "native-path-row",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "message": {"role": "user", "content": "Native path evidence"}
+    });
+    std::fs::write(&path, format!("{row}\n")).unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 1);
+
+    let cursor_key = source.cursor_path(&path).to_string_lossy().into_owned();
+    let offset = db
+        .get_parse_offset(&cursor_key)
+        .await
+        .expect("lossless cursor key persisted");
+    assert_eq!(offset.byte_offset, std::fs::metadata(&path).unwrap().len());
+    assert_eq!(db.get_parse_offset(&path.to_string_lossy()).await, None);
 }
 
 #[tokio::test]

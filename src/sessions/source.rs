@@ -107,6 +107,13 @@ pub trait TranscriptSource: Send + Sync {
     /// are tolerated by the driver.
     fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf>;
 
+    /// Durable identity used to load and advance this transcript's parse
+    /// cursor. Providers may override this when the physical path cannot be
+    /// represented injectively by the store's legacy text key.
+    fn cursor_path(&self, transcript_path: &Path) -> PathBuf {
+        transcript_path.to_path_buf()
+    }
+
     /// Parse only the new content of `path` given the previously stored cursor.
     ///
     /// Returns `None` to mean "ingest nothing and do not advance the cursor"
@@ -163,7 +170,8 @@ async fn ingest_one<S: TranscriptIngestStore>(
     project_root: &Path,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestStats {
-    let Ok(prev_offset) = store.get_parse_offset(path).await else {
+    let cursor_path = source.cursor_path(path);
+    let Ok(prev_offset) = store.get_parse_offset(&cursor_path).await else {
         return TranscriptIngestStats::default();
     };
     let prev = StoredCursor {
@@ -183,21 +191,18 @@ async fn ingest_one<S: TranscriptIngestStore>(
     if parsed.messages.is_empty() {
         // Non-message append (e.g. blank/undecodable rows) still advances the
         // cursor so the next ingest only sees genuinely new content.
-        let batch = match TranscriptWriteBatch::advance_offset(
-            path.to_path_buf(),
-            prev_offset,
-            next_offset,
-        ) {
-            Ok(batch) => batch,
-            Err(error) => {
-                tracing::debug!(
-                    transcript_path = %path.display(),
-                    error = %error,
-                    "rejected invalid transcript offset batch"
-                );
-                return TranscriptIngestStats::default();
-            }
-        };
+        let batch =
+            match TranscriptWriteBatch::advance_offset(cursor_path, prev_offset, next_offset) {
+                Ok(batch) => batch,
+                Err(error) => {
+                    tracing::debug!(
+                        transcript_path = %path.display(),
+                        error = %error,
+                        "rejected invalid transcript offset batch"
+                    );
+                    return TranscriptIngestStats::default();
+                }
+            };
         if let Err(error) = store.persist_transcript_batch(batch).await {
             tracing::debug!(
                 transcript_path = %path.display(),
@@ -255,18 +260,23 @@ async fn ingest_one<S: TranscriptIngestStore>(
     };
 
     let messages_upserted = parsed.messages.len() as u64;
-    let batch =
-        match TranscriptWriteBatch::upsert(session, parsed.messages, prev_offset, next_offset) {
-            Ok(batch) => batch,
-            Err(error) => {
-                tracing::debug!(
-                    transcript_path = %path.display(),
-                    error = %error,
-                    "rejected invalid transcript batch"
-                );
-                return TranscriptIngestStats::default();
-            }
-        };
+    let batch = match TranscriptWriteBatch::upsert_with_cursor(
+        cursor_path,
+        session,
+        parsed.messages,
+        prev_offset,
+        next_offset,
+    ) {
+        Ok(batch) => batch,
+        Err(error) => {
+            tracing::debug!(
+                transcript_path = %path.display(),
+                error = %error,
+                "rejected invalid transcript batch"
+            );
+            return TranscriptIngestStats::default();
+        }
+    };
     if let Err(error) = store
         .persist_transcript_batch_with_git_evidence(batch, &commit_records, &span_observations)
         .await
