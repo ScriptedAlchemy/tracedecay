@@ -11,7 +11,8 @@ use super::backend::{
 };
 use super::config::AutomationConfig;
 use super::fact_proposals::{
-    FactProposalRecord, FactProposalState, apply_fact_proposal, record_session_fact_proposals,
+    FactProposalRecord, FactProposalState, apply_fact_proposal, list_applying_fact_proposals,
+    record_session_fact_proposals,
 };
 use super::lifecycle::{
     AgentRunFinalizer, AgentTaskRunContext, BackendTaskRun, SchedulerGate,
@@ -260,7 +261,7 @@ pub async fn run_session_reflector_with_backend(
     run_session_reflector_for_store(
         cg.store_layout().dashboard_root.clone(),
         cg.store_layout().sessions_db_path.clone(),
-        memory_db.conn(),
+        &memory_db,
         Some(cg.store_layout().project_root.as_path()),
         config,
         backend,
@@ -280,7 +281,7 @@ pub async fn run_user_session_reflector_with_backend(
     run_session_reflector_for_store(
         user_automation_root(profile_root),
         user_sessions_db_path(profile_root),
-        memory_db.conn(),
+        &memory_db,
         None,
         config,
         backend,
@@ -292,7 +293,7 @@ pub async fn run_user_session_reflector_with_backend(
 async fn run_session_reflector_for_store(
     dashboard_root: PathBuf,
     sessions_db_path: PathBuf,
-    memory_conn: &libsql::Connection,
+    memory_db: &crate::db::Database,
     digest_root: Option<&std::path::Path>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
@@ -320,7 +321,7 @@ async fn run_session_reflector_for_store(
     } = match build_session_reflector_evidence(
         &run.dashboard_root,
         &sessions_db_path,
-        memory_conn,
+        memory_db.conn(),
         &options,
     )
     .await?
@@ -368,7 +369,7 @@ async fn run_session_reflector_for_store(
         )
         .await?;
     let (report, record) = finalize_session_reflector_success(
-        memory_conn,
+        memory_db,
         digest_root,
         &finalizer,
         ProposedAgentOutput {
@@ -403,7 +404,7 @@ struct ProposedAgentOutput<'a> {
 }
 
 async fn finalize_session_reflector_success(
-    memory_conn: &libsql::Connection,
+    memory_db: &crate::db::Database,
     digest_root: Option<&std::path::Path>,
     finalizer: &AgentRunFinalizer<'_>,
     output: ProposedAgentOutput<'_>,
@@ -418,9 +419,10 @@ async fn finalize_session_reflector_success(
     let dashboard_root = finalizer.dashboard_root();
     let run_id = finalizer.run_id();
     let (accepted_facts, rejected_facts) =
-        validate_fact_proposals_on_connection(memory_conn, proposals, evidence).await?;
+        validate_session_fact_proposals(memory_db, proposals, evidence).await?;
     let accepted_count = accepted_facts.len();
     let rejected_count = rejected_facts.len();
+    auto_apply_session_fact_proposals(memory_db, digest_root, dashboard_root, Vec::new()).await?;
     let mut proposal_records = record_session_fact_proposals(
         dashboard_root,
         run_id,
@@ -432,7 +434,7 @@ async fn finalize_session_reflector_success(
     let auto_apply_facts = MemoryApplyPolicy::should_apply(accepted_count);
     let applied_fact_proposals = if auto_apply_facts {
         auto_apply_session_fact_proposals(
-            memory_conn,
+            memory_db,
             digest_root,
             dashboard_root,
             std::mem::take(&mut proposal_records),
@@ -534,22 +536,45 @@ async fn finalize_session_reflector_success(
     Ok((report, record))
 }
 
+async fn validate_session_fact_proposals(
+    memory_db: &crate::db::Database,
+    proposals: &[Value],
+    evidence: &Value,
+) -> Result<(Vec<Value>, Vec<Value>)> {
+    let reader = memory_db
+        .begin_isolated_read_snapshot("validate session fact proposals")
+        .await?;
+    validate_fact_proposals_on_connection(&reader, proposals, evidence).await
+}
+
 async fn auto_apply_session_fact_proposals(
-    memory_conn: &libsql::Connection,
+    memory_db: &crate::db::Database,
     digest_root: Option<&std::path::Path>,
     dashboard_root: &std::path::Path,
-    proposal_records: Vec<FactProposalRecord>,
+    mut proposal_records: Vec<FactProposalRecord>,
 ) -> Result<Vec<FactProposalRecord>> {
+    let mut known_ids = proposal_records
+        .iter()
+        .map(|record| record.proposal_id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    for record in list_applying_fact_proposals(dashboard_root).await? {
+        if known_ids.insert(record.proposal_id.clone()) {
+            proposal_records.push(record);
+        }
+    }
     let mut applied = Vec::with_capacity(proposal_records.len());
     for record in proposal_records {
-        if record.state != FactProposalState::PendingApproval {
+        if !matches!(
+            record.state,
+            FactProposalState::PendingApproval | FactProposalState::Applying
+        ) {
             applied.push(record);
             continue;
         }
         applied.push(
             apply_fact_proposal(
                 dashboard_root,
-                memory_conn,
+                memory_db,
                 &record.proposal_id,
                 Some("session_reflector:auto_apply".to_string()),
             )
@@ -561,11 +586,19 @@ async fn auto_apply_session_fact_proposals(
         .any(|record| record.state == FactProposalState::Applied)
         && let Some(digest_root) = digest_root
     {
-        crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-            memory_conn,
-            digest_root,
-        )
-        .await;
+        match memory_db
+            .begin_isolated_read_snapshot("refresh session reflector memory digest")
+            .await
+        {
+            Ok(reader) => {
+                crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+                    &reader,
+                    digest_root,
+                )
+                .await;
+            }
+            Err(error) => eprintln!("warning: memory digest refresh failed: {error}"),
+        }
     }
     Ok(applied)
 }
@@ -1376,7 +1409,7 @@ pub async fn run_combined_review_with_backend(
     };
 
     let (reflector_report, reflector_record) = finalize_session_reflector_success(
-        memory_db.conn(),
+        &memory_db,
         Some(cg.store_layout().project_root.as_path()),
         &reflector_finalizer,
         ProposedAgentOutput {
@@ -1726,4 +1759,93 @@ fn default_skill_writer_query() -> String {
 
 fn default_skill_writer_evidence_limit() -> usize {
     20
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn proposal_validation_does_not_wait_for_the_writer_lane() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("memory.db");
+        let authority =
+            crate::db::DatabaseAuthority::acquire_test(&path, "automation validation writer lane")
+                .unwrap();
+        let (db, _) = crate::db::Database::initialize(&path, &authority)
+            .await
+            .unwrap();
+        let existing_fact_id = {
+            let writer = db
+                .writer_connection("seed automation validation")
+                .await
+                .unwrap();
+            writer
+                .memory_store()
+                .add_fact(
+                    crate::memory::types::AddFactRequest {
+                        content: "Committed memory baseline".to_string(),
+                        category: crate::memory::types::MemoryCategory::Project,
+                        source: None,
+                        tags: vec!["automation".to_string()],
+                        entities: vec!["TraceDecay".to_string()],
+                        trust: Some(0.8),
+                        metadata: json!({}),
+                    },
+                    crate::memory::trust::DEFAULT_TRUST,
+                )
+                .await
+                .unwrap()
+                .fact
+                .unwrap()
+                .fact_id
+        };
+        let transaction = db
+            .begin_write_transaction("hold automation validation writer")
+            .await
+            .unwrap();
+        transaction
+            .execute(
+                "UPDATE memory_facts SET content = 'Validation stays read-only' WHERE fact_id = ?1",
+                [existing_fact_id],
+            )
+            .await
+            .unwrap();
+        let proposals = [json!({
+            "content": "Validation stays read-only",
+            "category": "project",
+            "tags": ["automation"],
+            "entities": ["TraceDecay"],
+            "trust": 0.8,
+            "source_span": {"session_id": "session", "message_id": "message"},
+            "reason": "bounded test evidence"
+        })];
+        let evidence = json!({
+            "hits": [{
+                "kind": "raw_message",
+                "session_id": "session",
+                "message_id": "message"
+            }]
+        });
+
+        let validated = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            validate_session_fact_proposals(&db, &proposals, &evidence),
+        )
+        .await
+        .expect("read-only validation must not wait for writer authority")
+        .unwrap();
+        assert_eq!(validated.0.len(), 1);
+        assert!(validated.1.is_empty());
+        assert_eq!(
+            crate::memory::store::MemoryStore::new(db.conn())
+                .get_fact(existing_fact_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .access_count,
+            0
+        );
+        transaction.rollback().await.unwrap();
+    }
 }

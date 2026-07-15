@@ -119,9 +119,15 @@ pub(super) async fn merge_graph_facts(
     let authority = crate::db::DatabaseAuthority::for_runtime(target_path, "merge graph facts")?;
     let (target, _) = Database::open(target_path, &authority).await?;
     for offset in offsets {
-        merge_one_graph(target.conn(), offset).await?;
+        merge_one_graph(&target, offset).await?;
     }
-    MemoryStore::new(target.conn()).rebuild_all_banks().await?;
+    {
+        let transaction = target
+            .begin_write_transaction("rebuild merged memory banks")
+            .await?;
+        MemoryStore::new(&transaction).rebuild_all_banks().await?;
+        transaction.commit().await?;
+    }
     target.checkpoint().await?;
     target.close();
     Ok(())
@@ -148,30 +154,18 @@ async fn graph_maxima(path: &Path) -> Result<(i64, i64, i64, i64)> {
     Ok(result)
 }
 
-async fn merge_one_graph(conn: &Connection, offset: &GraphMergeOffsets) -> Result<()> {
-    attach_as(conn, &offset.source_path, "source").await?;
-    conn.execute("PRAGMA foreign_keys = OFF", ())
+async fn merge_one_graph(db: &Database, offset: &GraphMergeOffsets) -> Result<()> {
+    let transaction = db.begin_write_transaction("merge graph facts").await?;
+    attach_as(&transaction, &offset.source_path, "source").await?;
+    transaction
+        .execute("PRAGMA defer_foreign_keys = ON", ())
         .await
         .map_err(|error| db_error("merge_graph_facts", error))?;
-    conn.execute("BEGIN IMMEDIATE", ())
+    merge_one_graph_tx(&transaction, offset).await?;
+    transaction
+        .commit()
         .await
-        .map_err(|error| db_error("merge_graph_facts", error))?;
-    let result = merge_one_graph_tx(conn, offset).await;
-    match result {
-        Ok(()) => conn
-            .execute("COMMIT", ())
-            .await
-            .map_err(|error| db_error("merge_graph_facts", error))?,
-        Err(error) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            let _ = conn.execute("DETACH DATABASE source", ()).await;
-            return Err(error);
-        }
-    };
-    conn.execute("DETACH DATABASE source", ())
-        .await
-        .map_err(|error| db_error("merge_graph_facts", error))?;
-    Ok(())
+        .map_err(|error| db_error("merge_graph_facts", error))
 }
 
 async fn merge_one_graph_tx(conn: &Connection, offset: &GraphMergeOffsets) -> Result<()> {
@@ -394,64 +388,30 @@ pub(super) async fn merge_sessions(
     let target = GlobalDb::try_open_at(target_path)
         .await?
         .ok_or_else(|| db_message("merge_sessions", "could not open target sessions DB"))?;
-    let conn = target.writer_connection().await;
-    attach_as(&conn, source_path, "source").await?;
-    attach_as(&conn, target_input_path, "target_input").await?;
-    conn.execute("PRAGMA foreign_keys = OFF", ())
+    let transaction = target
+        .begin_write_transaction()
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
-    conn.execute("BEGIN IMMEDIATE", ())
+    attach_as(&transaction, source_path, "source").await?;
+    attach_as(&transaction, target_input_path, "target_input").await?;
+    transaction
+        .execute("PRAGMA defer_foreign_keys = ON", ())
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
-    let preflight = match reject_session_content_collisions(&conn, "source", "target_input").await {
-        Ok(()) => match build_consolidation_message_map(
-            &conn,
-            "source",
-            "target_input",
-            source_project_id,
-        )
+    reject_session_content_collisions(&transaction, "source", "target_input").await?;
+    build_consolidation_message_map(&transaction, "source", "target_input", source_project_id)
+        .await?;
+    projection::materialize(&transaction, "target_input", "source").await?;
+    preflight_observation_merge(&transaction).await?;
+    merge_sessions_tx(&transaction, offsets).await?;
+    verify_observation_merge(&transaction).await?;
+    crate::sessions::lcm::schema::rebuild_raw_fts(&transaction)
         .await
-        {
-            Ok(()) => match projection::materialize(&conn, "target_input", "source").await {
-                Ok(()) => preflight_observation_merge(&conn).await,
-                Err(error) => Err(error),
-            },
-            Err(error) => Err(error),
-        },
-        Err(error) => Err(error),
-    };
-    if let Err(error) = preflight {
-        let _ = conn.execute("ROLLBACK", ()).await;
-        let _ = conn.execute("DETACH DATABASE source", ()).await;
-        let _ = conn.execute("DETACH DATABASE target_input", ()).await;
-        return Err(error);
-    }
-    let result = match merge_sessions_tx(&conn, offsets).await {
-        Ok(()) => match verify_observation_merge(&conn).await {
-            Ok(()) => crate::sessions::lcm::schema::rebuild_raw_fts(&conn)
-                .await
-                .ok_or_else(|| db_message("merge_sessions", "could not rebuild raw-message FTS")),
-            Err(error) => Err(error),
-        },
-        Err(error) => Err(error),
-    };
-    match result {
-        Ok(()) => conn
-            .execute("COMMIT", ())
-            .await
-            .map_err(|error| db_error("merge_sessions", error))?,
-        Err(error) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            let _ = conn.execute("DETACH DATABASE source", ()).await;
-            let _ = conn.execute("DETACH DATABASE target_input", ()).await;
-            return Err(error);
-        }
-    };
-    // The merge is durable once COMMIT succeeds. Cleanup cannot turn that success into
-    // an ambiguous error that callers might retry as if the merge had rolled back.
-    let _ = conn.execute("DETACH DATABASE source", ()).await;
-    let _ = conn.execute("DETACH DATABASE target_input", ()).await;
-    drop(conn);
+        .ok_or_else(|| db_message("merge_sessions", "could not rebuild raw-message FTS"))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| db_error("merge_sessions", error))?;
     target.checkpoint().await;
     target.close();
     Ok(())
@@ -464,27 +424,34 @@ async fn normalize_sessions(path: &Path) -> Result<()> {
             format!("could not open '{}'", path.display()),
         )
     })?;
-    let conn = db.writer_connection().await;
-    crate::sessions::lcm::schema::ensure_lcm_schema(&conn)
+    let transaction = db
+        .begin_write_transaction()
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
-    crate::sessions::git_correlation::ensure_git_correlation_schema(&conn)
+    crate::sessions::lcm::schema::ensure_lcm_schema(&transaction)
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
-    crate::sessions::workflow_index::ensure_workflow_index_schema(&conn)
+    crate::sessions::git_correlation::ensure_git_correlation_schema(&transaction)
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS session_backfill_meta (
+    crate::sessions::workflow_index::ensure_workflow_index_schema(&transaction)
+        .await
+        .map_err(|error| db_error("normalize_sessions", error))?;
+    transaction
+        .execute(
+            "CREATE TABLE IF NOT EXISTS session_backfill_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 updated_at INTEGER NOT NULL DEFAULT (unixepoch())
             )",
-        (),
-    )
-    .await
-    .map_err(|error| db_error("normalize_sessions", error))?;
-    drop(conn);
+            (),
+        )
+        .await
+        .map_err(|error| db_error("normalize_sessions", error))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| db_error("normalize_sessions", error))?;
     if !db.ensure_token_count_cache().await {
         return Err(db_message(
             "normalize_sessions",

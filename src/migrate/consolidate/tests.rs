@@ -979,7 +979,9 @@ async fn verification_rejects_a_missing_unique_row_when_target_is_larger() {
         .join(crate::config::DB_FILENAME);
     let (graph, _) = test_open(&graph_path).await;
     graph
-        .conn()
+        .writer_connection("remove legacy fact fixture")
+        .await
+        .unwrap()
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
              DELETE FROM memory_facts WHERE content = 'legacy durable fact';",
@@ -1160,8 +1162,8 @@ async fn lcm_representation_drift_uses_the_selected_target_row() {
     let source = GlobalDb::open_at_without_structured_backfill(&source_sessions)
         .await
         .unwrap();
-    source
-        .conn()
+    let transaction = source.begin_write_transaction().await.unwrap();
+    transaction
         .execute(
             "UPDATE lcm_raw_messages
              SET message_id=?1, content=?2, content_hash=?3,
@@ -1175,6 +1177,7 @@ async fn lcm_representation_drift_uses_the_selected_target_row() {
         )
         .await
         .unwrap();
+    transaction.commit().await.unwrap();
     source.checkpoint().await;
     source.close();
 
@@ -1341,10 +1344,11 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
         let db = GlobalDb::open_at_without_structured_backfill(&layout.sessions_db_path)
             .await
             .unwrap();
-        crate::sessions::lcm::payload::upsert_payload_metadata(db.conn(), &payload)
+        let writer = db.begin_write_transaction().await.unwrap();
+        crate::sessions::lcm::payload::upsert_payload_metadata(&writer, &payload)
             .await
             .unwrap();
-        db.conn()
+        writer
             .execute(
                 "UPDATE session_messages
                  SET message_id='message-current-session', text=?1
@@ -1353,7 +1357,7 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
             )
             .await
             .unwrap();
-        db.conn()
+        writer
             .execute(
                 "UPDATE lcm_raw_messages
                  SET message_id='message-current-session', content=NULL,
@@ -1363,6 +1367,7 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
             )
             .await
             .unwrap();
+        writer.commit().await.unwrap();
         db.checkpoint().await;
         db.close();
     }
@@ -1693,25 +1698,19 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
     let target_db = GlobalDb::open_at_without_structured_backfill(&target.sessions_db_path)
         .await
         .unwrap();
-    target_db
-        .conn()
+    let writer = target_db.begin_write_transaction().await.unwrap();
+    writer
         .execute(
             "ATTACH DATABASE ?1 AS source_input",
             libsql::params![source.sessions_db_path.to_string_lossy().to_string()],
         )
         .await
         .unwrap();
-    sqlite::build_consolidation_message_map(
-        target_db.conn(),
-        "source_input",
-        "main",
-        &fixture.source_id,
-    )
-    .await
-    .unwrap();
+    sqlite::build_consolidation_message_map(&writer, "source_input", "main", &fixture.source_id)
+        .await
+        .unwrap();
 
-    let mut rows = target_db
-        .conn()
+    let mut rows = writer
         .query("SELECT COUNT(*) FROM consolidation_message_map", ())
         .await
         .unwrap();
@@ -1724,8 +1723,7 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
         format!("family-depth-{}", DEPTH - 1),
         format!("family-wide-{}", WIDTH - 1),
     ] {
-        let mut rows = target_db
-            .conn()
+        let mut rows = writer
             .query(
                 "SELECT mapped_id FROM consolidation_message_map
                  WHERE provider='codex' AND original_id=?1",
@@ -1748,7 +1746,7 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
         "{} SELECT COUNT(*) FROM variant_family",
         sqlite::session_variant_family_cte()
     );
-    let family_plan = explain_query_plan(target_db.conn(), &family_plan_sql).await;
+    let family_plan = explain_query_plan(&writer, &family_plan_sql).await;
     assert!(
         family_plan
             .iter()
@@ -1762,8 +1760,7 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
         "recursive family step must not rescan source session messages: {family_plan:?}"
     );
 
-    let reserved_plan =
-        explain_query_plan(target_db.conn(), sqlite::reserved_message_collision_sql()).await;
+    let reserved_plan = explain_query_plan(&writer, sqlite::reserved_message_collision_sql()).await;
     assert!(
         reserved_plan
             .iter()
@@ -1777,7 +1774,7 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
          FROM (SELECT 'message-current-session' AS message_id,
                       'legacy-session' AS session_id) s"
     );
-    let turn_plan = explain_query_plan(target_db.conn(), &turn_plan_sql).await;
+    let turn_plan = explain_query_plan(&writer, &turn_plan_sql).await;
     assert!(
         turn_plan
             .iter()
@@ -1785,11 +1782,7 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
         "turn-owner lookup must use its primary key: {turn_plan:?}"
     );
 
-    target_db
-        .conn()
-        .execute("DETACH DATABASE source_input", ())
-        .await
-        .unwrap();
+    writer.commit().await.unwrap();
     target_db.close();
 }
 
@@ -1869,8 +1862,8 @@ async fn synthetic_message_key_parent_reference_collision_fails_before_merge() {
     let source_db = GlobalDb::open_at_without_structured_backfill(&source.sessions_db_path)
         .await
         .unwrap();
-    source_db
-        .conn()
+    let transaction = source_db.begin_write_transaction().await.unwrap();
+    transaction
         .execute(
             "UPDATE session_messages
              SET message_id='message-current-session', text='source divergent projection',
@@ -1880,6 +1873,7 @@ async fn synthetic_message_key_parent_reference_collision_fails_before_merge() {
         )
         .await
         .unwrap();
+    transaction.commit().await.unwrap();
     source_db.checkpoint().await;
     source_db.close();
 
@@ -1908,8 +1902,8 @@ async fn synthetic_message_key_collision_fails_before_merge() {
     let source = GlobalDb::open_at_without_structured_backfill(&source_sessions)
         .await
         .unwrap();
-    source
-        .conn()
+    let transaction = source.begin_write_transaction().await.unwrap();
+    transaction
         .execute(
             "UPDATE session_messages
              SET message_id='message-current-session', text='source divergent projection'
@@ -1918,8 +1912,7 @@ async fn synthetic_message_key_collision_fails_before_merge() {
         )
         .await
         .unwrap();
-    source
-        .conn()
+    transaction
         .execute(
             "INSERT INTO session_messages(
                  provider, message_id, session_id, role, ordinal, text, kind
@@ -1928,6 +1921,7 @@ async fn synthetic_message_key_collision_fails_before_merge() {
         )
         .await
         .unwrap();
+    transaction.commit().await.unwrap();
     source.checkpoint().await;
     source.close();
 
@@ -2057,8 +2051,8 @@ async fn divergent_summary_node_identity_remains_a_hard_error() {
         ),
     ] {
         let (db, _) = test_open(path).await;
-        db.conn()
-            .execute(
+        db.execute_write(
+                "seed summary collision fixture",
                 "INSERT INTO lcm_summary_nodes(
                      node_id, provider, conversation_id, session_id, depth, summary_text,
                      summary_hash, summary_token_count, source_token_count, created_at
@@ -2899,7 +2893,9 @@ async fn another_projector_claim_does_not_suppress_source_projection_claim() {
     persist_migration_observation(&target, observation.clone(), None).await;
     assert_eq!(project_all_migration_observations(&target).await, 1);
     target
-        .conn()
+        .writer_connection()
+        .await
+        .unwrap()
         .execute(
             "UPDATE observation_projection_provenance
              SET projector_version='test-projector-v2'",
@@ -3164,7 +3160,9 @@ async fn source_cursor_advance_receipts_merge_losslessly_and_idempotently() {
         .await
         .unwrap();
     target
-        .conn()
+        .writer_connection()
+        .await
+        .unwrap()
         .execute(
             "INSERT INTO source_cursor_advances(
                  source_json, scope_json, file_generation,
@@ -3192,7 +3190,9 @@ async fn source_cursor_advance_receipts_merge_losslessly_and_idempotently() {
     .unwrap();
     let receipt_json = serde_json::to_string(&receipt).unwrap();
     source
-        .conn()
+        .writer_connection()
+        .await
+        .unwrap()
         .execute(
             "INSERT INTO sanitization_receipts(
                  receipt_id, sanitizer_version, payload_digest, receipt_json
@@ -3357,7 +3357,9 @@ async fn post_merge_projection_verification_rolls_back_transaction() {
         .unwrap();
     drop(rows);
     target
-        .conn()
+        .writer_connection()
+        .await
+        .unwrap()
         .execute_batch(
             "CREATE TRIGGER corrupt_consolidated_projection_test
              AFTER INSERT ON observation_projection_provenance BEGIN
@@ -3437,7 +3439,9 @@ async fn malformed_target_only_cursor_fails_before_consolidation_mutation() {
     let wrong_cursor = migration_cursor_for("session.migration.wrong", 10);
     let wrong_cursor_json = serde_json::to_string(&wrong_cursor).unwrap();
     target
-        .conn()
+        .writer_connection()
+        .await
+        .unwrap()
         .execute(
             "UPDATE source_cursors SET cursor_json=?1",
             libsql::params![wrong_cursor_json.clone()],
@@ -3606,7 +3610,9 @@ async fn inconsistent_projection_alias_fails_authority_preflight_without_target_
     persist_migration_observation(&source, observation, None).await;
     assert_eq!(project_all_migration_observations(&source).await, 1);
     source
-        .conn()
+        .writer_connection()
+        .await
+        .unwrap()
         .execute(
             "INSERT INTO observation_projection_aliases(
                  projector_version, observation_id, output_provider, output_message_id
@@ -4051,7 +4057,9 @@ async fn assert_no_orphaned_projection_provenance(path: &Path) {
 
 async fn set_migration_cursor(db: &GlobalDb, session_id: &str, generation: u64, byte_offset: u64) {
     let cursor = migration_cursor_generation_for(session_id, generation, byte_offset);
-    db.conn()
+    db.writer_connection()
+        .await
+        .unwrap()
         .execute(
             "UPDATE source_cursors SET cursor_json=?1",
             libsql::params![serde_json::to_string(&cursor).unwrap()],
@@ -4061,7 +4069,9 @@ async fn set_migration_cursor(db: &GlobalDb, session_id: &str, generation: u64, 
 }
 
 async fn insert_projection_alias(db: &GlobalDb, observation_id: &str, output_message_id: &str) {
-    db.conn()
+    db.writer_connection()
+        .await
+        .unwrap()
         .execute(
             "INSERT INTO observation_projection_aliases(
                  projector_version, observation_id, output_provider, output_message_id
@@ -4482,7 +4492,9 @@ fn sqlite_family_bytes(path: &Path) -> u64 {
 
 async fn execute_sql(path: &Path, sql: &str) {
     let (db, _) = test_open(path).await;
-    db.conn().execute_batch(sql).await.unwrap();
+    db.execute_write_batch("execute consolidation fixture SQL", sql)
+        .await
+        .unwrap();
     db.checkpoint().await.unwrap();
     db.close();
 }
@@ -4490,7 +4502,9 @@ async fn execute_sql(path: &Path, sql: &str) {
 async fn rewrite_page_size(path: &Path, page_size: i64) {
     let (db, _) = test_open(path).await;
     db.checkpoint().await.unwrap();
-    db.conn()
+    db.writer_connection("rewrite page size fixture")
+        .await
+        .unwrap()
         .execute_batch(&format!(
             "PRAGMA journal_mode = DELETE; PRAGMA page_size = {page_size}; VACUUM;"
         ))

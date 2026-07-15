@@ -20,7 +20,6 @@ impl GlobalDb {
     pub(crate) async fn next_queued_observation_result(
         &self,
     ) -> ProjectionStoreResult<Option<CanonicalObservationIdV1>> {
-        let _reader = self.transaction.lock().await;
         let mut rows = self
             .conn
             .query(
@@ -49,9 +48,8 @@ impl GlobalDb {
         &self,
         observation_id: &CanonicalObservationIdV1,
     ) -> ProjectionStoreResult<ProjectionPersistOutcome> {
-        let _writer = self.transaction.lock().await;
         let transaction = self
-            .begin_authoritative_transaction()
+            .begin_write_transaction()
             .await
             .map_err(|error| storage("begin projection transaction", error))?;
         ensure_projection_output_state_cache(&transaction).await?;
@@ -101,7 +99,6 @@ impl GlobalDb {
     pub(crate) async fn projection_checkpoint_result(
         &self,
     ) -> ProjectionStoreResult<ProjectionCheckpoint> {
-        let _reader = self.transaction.lock().await;
         read_checkpoint(&self.conn).await
     }
 
@@ -109,9 +106,8 @@ impl GlobalDb {
         &self,
         frontier_sequence: u64,
     ) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
-        let _writer = self.transaction.lock().await;
         let transaction = self
-            .begin_authoritative_transaction()
+            .begin_write_transaction()
             .await
             .map_err(|error| storage("begin projection rebuild", error))?;
         ensure_projection_output_state_cache(&transaction).await?;

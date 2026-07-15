@@ -6,14 +6,14 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use libsql::params;
 use serde_json::Value;
 
 use crate::accounting::parser::parse_timestamp;
 use crate::global_db::GlobalDb;
 use crate::sessions::shared::ProjectRootMatcher;
 use crate::sessions::workflow_index::{
-    INGEST_WATERMARK_KEY, WorkflowAgent, WorkflowRun, WorkflowStatus, bump_ingest_watermark,
-    read_ingest_watermark,
+    INGEST_WATERMARK_KEY, WorkflowAgent, WorkflowRun, WorkflowStatus, read_ingest_watermark,
 };
 
 const RESULT_SUMMARY_CAP: usize = 600;
@@ -56,8 +56,8 @@ pub(crate) async fn ingest_workflow_runs_from(
     project_root: &Path,
     projects_dir: &Path,
 ) -> WorkflowIngestStats {
-    let conn = db.dashboard_connection();
-    let watermark = read_ingest_watermark(&conn, INGEST_WATERMARK_KEY).await;
+    let conn = db.read_connection();
+    let watermark = read_ingest_watermark(conn, INGEST_WATERMARK_KEY).await;
 
     let mut stats = WorkflowIngestStats::default();
     let mut max_mtime = watermark;
@@ -100,9 +100,25 @@ pub(crate) async fn ingest_workflow_runs_from(
     // processed. Best-effort: a write failure only means the next sweep does a
     // little redundant (idempotent) work.
     if max_mtime > watermark {
-        let conn = db.writer_connection().await;
-        if let Err(err) = bump_ingest_watermark(&conn, INGEST_WATERMARK_KEY, max_mtime).await {
-            tracing::debug!(error = %err, "workflow ingest watermark not advanced");
+        match db.writer_connection().await {
+            Ok(conn) => {
+                if let Err(err) = conn
+                    .execute(
+                        "INSERT INTO workflow_index_meta(key, value)
+                         VALUES (?1, ?2)
+                         ON CONFLICT(key) DO UPDATE SET
+                             value = MAX(value, excluded.value),
+                             updated_at = unixepoch()",
+                        params![INGEST_WATERMARK_KEY, max_mtime],
+                    )
+                    .await
+                {
+                    tracing::debug!(error = %err, "workflow ingest watermark not advanced");
+                }
+            }
+            Err(err) => {
+                tracing::debug!(error = %err, "workflow ingest writer unavailable");
+            }
         }
     }
 

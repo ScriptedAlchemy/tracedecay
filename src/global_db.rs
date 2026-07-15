@@ -354,14 +354,109 @@ pub struct GlobalDbInner {
 
 pub(crate) struct GlobalDbWriterConnection<'a> {
     _guard: tokio::sync::MutexGuard<'a, ()>,
-    conn: &'a Connection,
+    conn: Connection,
 }
 
-impl std::ops::Deref for GlobalDbWriterConnection<'_> {
+pub(crate) struct GlobalDbWriteTransaction<'a> {
+    transaction: Transaction,
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+}
+
+pub(crate) struct GlobalDbReadSnapshot {
+    transaction: Transaction,
+}
+
+#[derive(Clone)]
+pub(crate) struct GlobalDbReadConnection {
+    inner: Arc<GlobalDbInner>,
+}
+
+impl std::ops::Deref for GlobalDbReadConnection {
     type Target = Connection;
 
     fn deref(&self) -> &Self::Target {
-        self.conn
+        &self.inner.conn
+    }
+}
+
+impl GlobalDbWriterConnection<'_> {
+    pub(crate) async fn execute(
+        &self,
+        sql: &str,
+        params: impl libsql::params::IntoParams,
+    ) -> Result<u64, libsql::Error> {
+        self.conn.execute(sql, params).await
+    }
+
+    pub(crate) async fn execute_batch(
+        &self,
+        sql: &str,
+    ) -> Result<libsql::BatchRows, libsql::Error> {
+        self.conn.execute_batch(sql).await
+    }
+
+    pub(crate) async fn query(
+        &self,
+        sql: &str,
+        params: impl libsql::params::IntoParams,
+    ) -> Result<libsql::Rows, libsql::Error> {
+        self.conn.query(sql, params).await
+    }
+
+    async fn drain_pending_payload_deletes(
+        &self,
+        storage_root: &Path,
+    ) -> Result<crate::sessions::lcm::gc::PayloadDeleteDrain, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::gc::drain_pending_payload_deletes(&self.conn, storage_root).await
+    }
+
+    async fn finalize_gc_report(
+        &self,
+        report: &mut crate::sessions::lcm::LcmGcReport,
+        drain: crate::sessions::lcm::gc::PayloadDeleteDrain,
+    ) -> Result<(), crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::gc::finalize_gc_report(&self.conn, report, drain).await
+    }
+
+    async fn finalize_gc_report_value(
+        &self,
+        report: &mut serde_json::Value,
+        drain: crate::sessions::lcm::gc::PayloadDeleteDrain,
+    ) -> Result<(), crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::gc::finalize_gc_report_value(&self.conn, report, drain).await
+    }
+}
+
+impl std::ops::Deref for GlobalDbWriteTransaction<'_> {
+    type Target = Transaction;
+
+    fn deref(&self) -> &Self::Target {
+        &self.transaction
+    }
+}
+
+impl GlobalDbWriteTransaction<'_> {
+    pub(crate) async fn commit(self) -> Result<(), libsql::Error> {
+        let Self {
+            transaction: inner_transaction,
+            _guard: inner_guard,
+        } = self;
+        // Bind the guard first and the transaction second. Async-future
+        // cancellation drops locals in reverse order, guaranteeing rollback
+        // finishes before the shared writer lane can be reacquired.
+        let guard = inner_guard;
+        let transaction = inner_transaction;
+        let result = transaction.commit().await;
+        drop(guard);
+        result
+    }
+}
+
+impl std::ops::Deref for GlobalDbReadSnapshot {
+    type Target = Transaction;
+
+    fn deref(&self) -> &Self::Target {
+        &self.transaction
     }
 }
 
@@ -1071,7 +1166,7 @@ impl GlobalDb {
             .build()
             .await
             .map_err(|error| global_db_operation_error("build global database", error))?;
-        let conn = db
+        let setup_conn = db
             .connect()
             .map_err(|error| global_db_operation_error("connect global database", error))?;
 
@@ -1079,18 +1174,20 @@ impl GlobalDb {
         // startup can briefly overlap another connection creating this file;
         // without an earlier busy timeout, `PRAGMA journal_mode` fails
         // immediately with `database is locked` and disables the store.
-        conn.execute_batch("PRAGMA busy_timeout = 5000;")
+        setup_conn
+            .execute_batch("PRAGMA busy_timeout = 5000;")
             .await
             .map_err(|error| {
                 global_db_operation_error("configure global database busy timeout", error)
             })?;
 
-        conn.execute_batch(&format!(
-            "PRAGMA mmap_size = {};",
-            global_db_mmap_size_guard()
-        ))
-        .await
-        .map_err(|error| global_db_operation_error("configure global database mmap", error))?;
+        setup_conn
+            .execute_batch(&format!(
+                "PRAGMA mmap_size = {};",
+                global_db_mmap_size_guard()
+            ))
+            .await
+            .map_err(|error| global_db_operation_error("configure global database mmap", error))?;
 
         let pragmas = if read_only {
             "PRAGMA foreign_keys = ON;".to_string()
@@ -1103,9 +1200,30 @@ impl GlobalDb {
                  PRAGMA foreign_keys = ON;"
             )
         };
-        conn.execute_batch(&pragmas).await.map_err(|error| {
+        setup_conn.execute_batch(&pragmas).await.map_err(|error| {
             global_db_operation_error("configure global database pragmas", error)
         })?;
+
+        // The retained handle is query-only. Every mutation must use an
+        // isolated writer connection so cancellation cannot strand this
+        // shared read session inside a transaction.
+        let conn = db
+            .connect()
+            .map_err(|error| global_db_operation_error("connect global database reader", error))?;
+        conn.execute_batch(&format!(
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA foreign_keys = ON;
+             PRAGMA mmap_size = {};",
+            global_db_mmap_size_guard()
+        ))
+        .await
+        .map_err(|error| global_db_operation_error("configure global database reader", error))?;
+        #[cfg(not(test))]
+        conn.execute_batch("PRAGMA query_only = ON;")
+            .await
+            .map_err(|error| {
+                global_db_operation_error("make global database reader query-only", error)
+            })?;
 
         Ok(Self {
             inner: Arc::new(GlobalDbInner {
@@ -1208,12 +1326,10 @@ impl GlobalDb {
     ) -> crate::errors::Result<Self> {
         let db = Self::open_local(db_path, false, authority, Some(slot)).await?;
 
-        let writer = db.transaction.lock().await;
         schema_stages::ensure_registry(&db).await?;
         schema_stages::ensure_transcript(&db).await?;
         schema_stages::ensure_observation_authority(&db).await?;
         schema_stages::ensure_composed_context(&db).await?;
-        drop(writer);
         db.recover_pending_payload_deletes().await?;
         // Recover structured rows skipped by legacy transcript parsers. This
         // runs on every open (per hook event, per CLI/MCP invocation), so it
@@ -1283,12 +1399,6 @@ impl GlobalDb {
         Self::try_open_at(&db_path).await
     }
 
-    /// Raw connection for crate-internal read layers (the dashboard HTTP
-    /// server queries the LCM tables directly).
-    pub(crate) fn dashboard_connection(&self) -> Connection {
-        self.conn.clone()
-    }
-
     #[cfg(test)]
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
@@ -1298,16 +1408,53 @@ impl GlobalDb {
         &self.conn
     }
 
-    pub(crate) async fn writer_connection(&self) -> GlobalDbWriterConnection<'_> {
-        GlobalDbWriterConnection {
-            _guard: self.transaction.lock().await,
-            conn: &self.conn,
-        }
+    pub(crate) async fn owned_read_connection(&self) -> Option<GlobalDbReadConnection> {
+        Self::open_read_only_at(&self.db_path)
+            .await
+            .map(|db| GlobalDbReadConnection { inner: db.inner })
+    }
+
+    async fn connect_writer(&self) -> Result<Connection, libsql::Error> {
+        let conn = self.db.connect()?;
+        conn.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;")
+            .await?;
+        Ok(conn)
+    }
+
+    /// Opens a writer-authorized connection for autocommit statements only.
+    /// Transactional callers must use [`Self::begin_write_transaction`] so
+    /// the shared writer lane remains owned through commit or rollback.
+    pub(crate) async fn writer_connection(
+        &self,
+    ) -> Result<GlobalDbWriterConnection<'_>, libsql::Error> {
+        let guard = self.transaction.lock().await;
+        let conn = self.connect_writer().await?;
+        Ok(GlobalDbWriterConnection {
+            _guard: guard,
+            conn,
+        })
+    }
+
+    /// Opens an isolated deferred snapshot. Multi-query read invariants use
+    /// this instead of the retained connection so every statement observes
+    /// the same committed database generation without blocking writers.
+    pub(crate) async fn read_snapshot(&self) -> Result<GlobalDbReadSnapshot, libsql::Error> {
+        let conn = self.db.connect()?;
+        conn.execute_batch(
+            "PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON; PRAGMA query_only = ON;",
+        )
+        .await?;
+        Ok(GlobalDbReadSnapshot {
+            transaction: conn.transaction().await?,
+        })
     }
 
     async fn recover_pending_payload_deletes(&self) -> crate::errors::Result<()> {
         let _writer = self.transaction.lock().await;
-        crate::sessions::lcm::gc::drain_pending_payload_deletes(&self.conn, &self.storage_root)
+        let conn = self.connect_writer().await.map_err(|error| {
+            global_db_operation_error("connect payload deletion recovery writer", error)
+        })?;
+        crate::sessions::lcm::gc::drain_pending_payload_deletes(&conn, &self.storage_root)
             .await
             .map(|_| ())
             .map_err(|error| {
@@ -1322,12 +1469,25 @@ impl GlobalDb {
     /// immediate transaction owned by this authoritative database handle.
     /// Dropping the returned RAII transaction rolls back unfinished work
     /// without leaving the retained read connection inside a transaction.
-    async fn begin_authoritative_transaction(&self) -> Result<Transaction, libsql::Error> {
-        let conn = self.db.connect()?;
-        conn.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;")
+    pub(crate) async fn begin_write_transaction(
+        &self,
+    ) -> Result<GlobalDbWriteTransaction<'_>, libsql::Error> {
+        let guard = self.transaction.lock().await;
+        self.begin_write_transaction_with_guard(guard).await
+    }
+
+    async fn begin_write_transaction_with_guard<'a>(
+        &'a self,
+        guard: tokio::sync::MutexGuard<'a, ()>,
+    ) -> Result<GlobalDbWriteTransaction<'a>, libsql::Error> {
+        let conn = self.connect_writer().await?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .await?;
-        conn.transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
+        Ok(GlobalDbWriteTransaction {
+            transaction,
+            _guard: guard,
+        })
     }
 
     /// Schedules the structured-row backfill sweep on a detached task so the
@@ -1544,8 +1704,7 @@ impl GlobalDb {
         let primary_root_bytes = encode_native_project_path(&canonical_project_root);
         let current_root_alias = project_path_alias_key(&canonical_project_root);
         let git_common_dir_text = git_common_dir.map(|path| path.to_string_lossy().to_string());
-        let writer = self.transaction.lock().await;
-        let transaction = self.begin_authoritative_transaction().await.ok()?;
+        let transaction = self.begin_write_transaction().await.ok()?;
         transaction
             .execute(
                 "INSERT INTO code_projects
@@ -1589,7 +1748,6 @@ impl GlobalDb {
             .await
             .ok()?;
         transaction.commit().await.ok()?;
-        drop(writer);
         for alias in repo_identity_aliases(git_common_dir) {
             self.upsert_project_alias_key(&alias, project_id).await?;
         }
@@ -1614,8 +1772,8 @@ impl GlobalDb {
         project_id: &str,
     ) -> Option<ProjectAliasRecord> {
         let now = crate::tracedecay::current_timestamp();
-        let _writer = self.transaction.lock().await;
-        self.conn
+        let transaction = self.begin_write_transaction().await.ok()?;
+        transaction
             .execute(
                 "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
                  VALUES (?1, ?2, ?3)
@@ -1626,6 +1784,7 @@ impl GlobalDb {
             )
             .await
             .ok()?;
+        transaction.commit().await.ok()?;
         let mut rows = self
             .conn
             .query(
@@ -1648,8 +1807,8 @@ impl GlobalDb {
         upsert: StoreInstanceUpsert,
     ) -> Option<StoreInstanceRecord> {
         let now = crate::tracedecay::current_timestamp();
-        let _writer = self.transaction.lock().await;
-        self.conn
+        let transaction = self.begin_write_transaction().await.ok()?;
+        transaction
             .execute(
                 "INSERT INTO store_instances
                  (store_id, project_id, store_kind, storage_mode, store_relpath,
@@ -1677,12 +1836,13 @@ impl GlobalDb {
             )
             .await
             .ok()?;
+        transaction.commit().await.ok()?;
         self.get_store_instance(&upsert.store_id).await
     }
 
     pub async fn upsert_graph_scope(&self, upsert: GraphScopeUpsert) -> Option<GraphScopeRecord> {
-        let _writer = self.transaction.lock().await;
-        self.conn
+        let transaction = self.begin_write_transaction().await.ok()?;
+        transaction
             .execute(
                 "INSERT INTO graph_scopes
                  (graph_scope_id, project_id, store_id, branch_name, db_relpath,
@@ -1709,6 +1869,7 @@ impl GlobalDb {
             )
             .await
             .ok()?;
+        transaction.commit().await.ok()?;
         self.get_graph_scope(&upsert.graph_scope_id).await
     }
 
@@ -1716,8 +1877,8 @@ impl GlobalDb {
         &self,
         upsert: StoreArtifactUpsert,
     ) -> Option<StoreArtifactRecord> {
-        let _writer = self.transaction.lock().await;
-        self.conn
+        let transaction = self.begin_write_transaction().await.ok()?;
+        transaction
             .execute(
                 "INSERT INTO store_artifacts
                  (store_id, artifact_kind, relpath, size_bytes, schema_version, updated_at)
@@ -1737,6 +1898,7 @@ impl GlobalDb {
             )
             .await
             .ok()?;
+        transaction.commit().await.ok()?;
         let mut rows = self
             .conn
             .query(
@@ -1942,7 +2104,9 @@ impl GlobalDb {
     /// profile-sharded store files on disk.
     pub async fn delete_code_projects(&self, project_ids: &[String]) -> usize {
         const CHUNK: usize = 256;
-        let _writer = self.transaction.lock().await;
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return 0;
+        };
         let mut total: usize = 0;
         for chunk in project_ids.chunks(CHUNK) {
             let placeholders = vec!["?"; chunk.len()];
@@ -1954,11 +2118,15 @@ impl GlobalDb {
                 .iter()
                 .map(|project_id| libsql::Value::Text(project_id.clone()))
                 .collect();
-            if let Ok(n) = self.conn.execute(&sql, values).await {
+            if let Ok(n) = transaction.execute(&sql, values).await {
                 total = total.saturating_add(n as usize);
             }
         }
-        total
+        if transaction.commit().await.is_ok() {
+            total
+        } else {
+            0
+        }
     }
 
     pub async fn search_code_projects(&self, query: &str, limit: usize) -> Vec<CodeProjectRecord> {
@@ -2254,8 +2422,8 @@ impl GlobalDb {
         drop(rows);
 
         let now = crate::tracedecay::current_timestamp();
-        let _writer = self.transaction.lock().await;
-        self.conn
+        let transaction = self.begin_write_transaction().await.ok()?;
+        transaction
             .execute(
                 "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
                  VALUES (?1, ?2, ?3)
@@ -2264,6 +2432,7 @@ impl GlobalDb {
             )
             .await
             .ok()?;
+        transaction.commit().await.ok()?;
         let migrated_project_id = self.project_id_by_alias_key(&native_alias).await?;
         (migrated_project_id == legacy_project_id).then_some(migrated_project_id)
     }
@@ -2428,16 +2597,21 @@ impl GlobalDb {
     /// Registers or updates a project's tokens-saved count. Best-effort.
     pub async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
         let path_str = project_path_alias_key(project_path);
-        let _writer = self.transaction.lock().await;
-        let _ = self
-            .conn
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return;
+        };
+        if transaction
             .execute(
                 "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)
                  ON CONFLICT(path) DO UPDATE SET
                     tokens_saved = MAX(tokens_saved, excluded.tokens_saved)",
                 params![path_str, tokens_saved as i64],
             )
-            .await;
+            .await
+            .is_ok()
+        {
+            let _ = transaction.commit().await;
+        }
     }
 
     /// Returns the stored `tokens_saved` count for a specific project, or 0 if not found.
@@ -2482,9 +2656,10 @@ impl GlobalDb {
         ts: i64,
     ) {
         let project_path = Self::canonical_project_key(Path::new(project_path));
-        let _writer = self.transaction.lock().await;
-        let result = self
-            .conn
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return;
+        };
+        let result = transaction
             .execute(
                 "INSERT INTO savings_ledger (ts, project_path, tool_name, before_tokens, after_tokens) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -2497,6 +2672,9 @@ impl GlobalDb {
                 ],
             )
             .await;
+        if result.is_ok() {
+            let _ = transaction.commit().await;
+        }
         if let Err(e) = result {
             eprintln!("[tracedecay] savings_ledger insert failed: {e}");
         }
@@ -2571,8 +2749,10 @@ impl GlobalDb {
     /// accounting DB. Deliberately NOT part of the shared `open_at` DDL batch
     /// so project-local session stores keep their schema untouched.
     pub async fn ensure_token_count_cache(&self) -> bool {
-        let _writer = self.transaction.lock().await;
-        self.conn
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return false;
+        };
+        if transaction
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS dashboard_token_counts (
                     store TEXT NOT NULL,
@@ -2586,7 +2766,11 @@ impl GlobalDb {
                 )",
             )
             .await
-            .is_ok()
+            .is_err()
+        {
+            return false;
+        }
+        transaction.commit().await.is_ok()
     }
 
     /// Loads every cached token count for one session store. Returns
@@ -2622,11 +2806,13 @@ impl GlobalDb {
     /// Upserts freshly computed token counts for one session store.
     /// Best-effort: the cache is an optimization, so errors are swallowed.
     pub async fn save_token_counts(&self, store: &str, rows: &[TokenCountUpsert]) {
-        let _writer = self.transaction.lock().await;
         let now = crate::tracedecay::current_timestamp();
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return;
+        };
+        let mut complete = true;
         for row in rows {
-            let _ = self
-                .conn
+            if transaction
                 .execute(
                     "INSERT OR REPLACE INTO dashboard_token_counts
                      (store, provider, message_id, text_len, encoder, token_count, computed_at)
@@ -2641,18 +2827,31 @@ impl GlobalDb {
                         now
                     ],
                 )
-                .await;
+                .await
+                .is_err()
+            {
+                complete = false;
+                break;
+            }
+        }
+        if complete {
+            let _ = transaction.commit().await;
         }
     }
 
     /// Removes a project's row from the global DB. Best-effort.
     pub async fn delete_project(&self, project_path: &Path) {
-        let _writer = self.transaction.lock().await;
         let path_str = project_path_alias_key(project_path);
-        let _ = self
-            .conn
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return;
+        };
+        if transaction
             .execute("DELETE FROM projects WHERE path = ?1", params![path_str])
-            .await;
+            .await
+            .is_ok()
+        {
+            let _ = transaction.commit().await;
+        }
     }
 
     /// Removes many project rows in a single statement. Returns the number of
@@ -2668,7 +2867,9 @@ impl GlobalDb {
     /// Path-native companion used by internal filesystem maintenance callers.
     pub async fn delete_project_paths<P: AsRef<Path>>(&self, project_paths: &[P]) -> usize {
         const CHUNK: usize = 256;
-        let _writer = self.transaction.lock().await;
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return 0;
+        };
         let mut total: usize = 0;
         for chunk in project_paths.chunks(CHUNK) {
             let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
@@ -2680,11 +2881,15 @@ impl GlobalDb {
                 .iter()
                 .map(|path| libsql::Value::Text(project_path_alias_key(path.as_ref())))
                 .collect();
-            if let Ok(n) = self.conn.execute(&sql, values).await {
+            if let Ok(n) = transaction.execute(&sql, values).await {
                 total = total.saturating_add(n as usize);
             }
         }
-        total
+        if transaction.commit().await.is_ok() {
+            total
+        } else {
+            0
+        }
     }
 
     /// Applies the configured retention windows to the global-database
@@ -2696,14 +2901,22 @@ impl GlobalDb {
         config: &crate::retention::RetentionConfig,
         now_secs: i64,
     ) -> crate::errors::Result<Vec<crate::retention::RetentionTableReport>> {
-        let _writer = self.transaction.lock().await;
-        crate::retention::prune_global_tables(
-            &self.conn,
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| global_db_operation_error("begin global retention prune", error))?;
+        let report = crate::retention::prune_global_tables(
+            &transaction,
             config,
             crate::retention::RetentionMode::Apply,
             now_secs,
         )
-        .await
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error("commit global retention prune", error))?;
+        Ok(report)
     }
 
     /// Dry-run counterpart of [`Self::prune_global_retention`]: reports how
@@ -2766,8 +2979,13 @@ impl GlobalDb {
 
     /// Inserts or replaces a provider session. Returns `false` on any DB error.
     pub async fn upsert_session(&self, session: &SessionRecord) -> bool {
-        let _transaction = self.transaction.lock().await;
-        Self::upsert_session_in_existing_tx(&self.conn, session).await
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return false;
+        };
+        if !Self::upsert_session_in_existing_tx(&transaction, session).await {
+            return false;
+        }
+        transaction.commit().await.is_ok()
     }
 
     async fn upsert_session_in_existing_tx(conn: &Connection, session: &SessionRecord) -> bool {
@@ -2822,7 +3040,6 @@ impl GlobalDb {
         provider: &str,
         session_id: &str,
     ) -> Result<Option<SessionRecord>, TranscriptPersistenceError> {
-        let _transaction = self.transaction.lock().await;
         let mut rows = self
             .conn
             .query(
@@ -2851,8 +3068,16 @@ impl GlobalDb {
         &self,
         event: &AnalyticsEventInsert,
     ) -> Result<i64, String> {
-        let _transaction = self.transaction.lock().await;
-        Self::append_analytics_event_in_existing_tx(&self.conn, event).await
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| format!("failed to begin analytics event transaction: {error}"))?;
+        let id = Self::append_analytics_event_in_existing_tx(&transaction, event).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("failed to commit analytics event transaction: {error}"))?;
+        Ok(id)
     }
 
     async fn append_analytics_event_in_existing_tx(
@@ -2902,9 +3127,8 @@ impl GlobalDb {
             return Ok(Vec::new());
         }
 
-        let _writer = self.transaction.lock().await;
         let transaction = self
-            .begin_authoritative_transaction()
+            .begin_write_transaction()
             .await
             .map_err(|e| format!("failed to begin analytics event batch: {e}"))?;
 
@@ -3279,7 +3503,6 @@ impl GlobalDb {
 
     /// Inserts or replaces a provider message. Returns `false` on any DB error.
     pub async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
-        let _transaction = self.transaction.lock().await;
         let Ok(transaction) = self.begin_transcript_transaction().await else {
             return false;
         };
@@ -3363,7 +3586,6 @@ impl GlobalDb {
             return Some(0);
         }
 
-        let _transaction = self.transaction.lock().await;
         let Ok(transaction) = self.begin_transcript_transaction().await else {
             return None;
         };
@@ -3872,8 +4094,7 @@ impl GlobalDb {
         }
         draft.metadata_json = Some(JsonValue::Object(metadata).to_string());
 
-        let _writer = self.transaction.lock().await;
-        let transaction = self.begin_authoritative_transaction().await?;
+        let transaction = self.begin_write_transaction().await?;
         transaction
             .execute(
                 "DELETE FROM lcm_summary_sources WHERE node_id = ?1",
@@ -4008,11 +4229,16 @@ impl GlobalDb {
         gc_config: &crate::sessions::lcm::LcmGcConfig,
         now: i64,
     ) -> Result<crate::sessions::lcm::LcmGcReport, crate::sessions::lcm::LcmError> {
-        let _writer = self.transaction.lock().await;
-        let mut drain =
-            crate::sessions::lcm::gc::prepare_payload_gc_apply(&self.conn, storage_root, gc_config)
-                .await?;
-        let transaction = self.begin_authoritative_transaction().await?;
+        let guard = self.transaction.lock().await;
+        let maintenance = self.connect_writer().await?;
+        let mut drain = crate::sessions::lcm::gc::prepare_payload_gc_apply(
+            &maintenance,
+            storage_root,
+            gc_config,
+        )
+        .await?;
+        drop(maintenance);
+        let transaction = self.begin_write_transaction_with_guard(guard).await?;
         let mut report = crate::sessions::lcm::gc::run_payload_gc_in_transaction(
             &transaction,
             storage_root,
@@ -4024,11 +4250,16 @@ impl GlobalDb {
         )
         .await?;
         transaction.commit().await?;
+        // Pending deletes are durable after commit. Release the transaction
+        // phase so queued writers can proceed before filesystem cleanup and
+        // report reconciliation reacquire authority over the retained handle.
+        let maintenance = self.writer_connection().await?;
         drain.merge(
-            crate::sessions::lcm::gc::drain_pending_payload_deletes(&self.conn, storage_root)
+            maintenance
+                .drain_pending_payload_deletes(storage_root)
                 .await?,
         );
-        crate::sessions::lcm::gc::finalize_gc_report(&self.conn, &mut report, drain).await?;
+        maintenance.finalize_gc_report(&mut report, drain).await?;
         Ok(report)
     }
 
@@ -4052,17 +4283,18 @@ impl GlobalDb {
             clean_config,
             gc_config,
         };
-        let _writer = self.transaction.lock().await;
         if !crate::sessions::lcm::doctor::request_mutates(&request) {
             return crate::sessions::lcm::doctor::doctor(&self.conn, request).await;
         }
 
-        crate::sessions::lcm::doctor::prepare_apply(&self.conn).await?;
+        let guard = self.transaction.lock().await;
+        let maintenance = self.connect_writer().await?;
+        crate::sessions::lcm::doctor::prepare_apply(&maintenance).await?;
         let applies_payload_gc = apply && mode == "gc";
         let mut gc_drain = if applies_payload_gc {
             Some(
                 crate::sessions::lcm::gc::drain_pending_payload_deletes(
-                    &self.conn,
+                    &maintenance,
                     &self.storage_root,
                 )
                 .await?,
@@ -4070,24 +4302,21 @@ impl GlobalDb {
         } else {
             None
         };
-        let transaction = self.begin_authoritative_transaction().await?;
+        drop(maintenance);
+        let transaction = self.begin_write_transaction_with_guard(guard).await?;
         let mut result = crate::sessions::lcm::doctor::doctor(&transaction, request).await?;
         transaction.commit().await?;
         if let Some(drain) = gc_drain.as_mut() {
+            let maintenance = self.writer_connection().await?;
             drain.merge(
-                crate::sessions::lcm::gc::drain_pending_payload_deletes(
-                    &self.conn,
-                    &self.storage_root,
-                )
-                .await?,
+                maintenance
+                    .drain_pending_payload_deletes(&self.storage_root)
+                    .await?,
             );
             if let Some(report) = result.pointer_mut("/repairs/gc_report") {
-                crate::sessions::lcm::gc::finalize_gc_report_value(
-                    &self.conn,
-                    report,
-                    std::mem::take(drain),
-                )
-                .await?;
+                maintenance
+                    .finalize_gc_report_value(report, std::mem::take(drain))
+                    .await?;
             }
         }
         Ok(result)
@@ -4101,8 +4330,7 @@ impl GlobalDb {
         &self,
         update: crate::sessions::lcm::LcmLifecycleUpdate,
     ) -> Result<crate::sessions::lcm::LcmLifecycleState, crate::sessions::lcm::LcmError> {
-        let _writer = self.transaction.lock().await;
-        let transaction = self.begin_authoritative_transaction().await?;
+        let transaction = self.begin_write_transaction().await?;
         let state =
             crate::sessions::lcm::compression::update_lifecycle(&transaction, update).await?;
         transaction.commit().await?;
@@ -4129,8 +4357,7 @@ impl GlobalDb {
         request: crate::sessions::lcm::LcmSessionBoundaryRequest,
     ) -> Result<crate::sessions::lcm::LcmSessionBoundaryResponse, crate::sessions::lcm::LcmError>
     {
-        let _writer = self.transaction.lock().await;
-        let transaction = self.begin_authoritative_transaction().await?;
+        let transaction = self.begin_write_transaction().await?;
         let response =
             crate::sessions::lcm::compression::record_session_boundary(&transaction, request)
                 .await?;
@@ -4143,8 +4370,7 @@ impl GlobalDb {
         &self,
         request: crate::sessions::lcm::LcmPreflightRequest,
     ) -> Result<crate::sessions::lcm::LcmPreflightResponse, crate::sessions::lcm::LcmError> {
-        let _writer = self.transaction.lock().await;
-        let transaction = self.begin_authoritative_transaction().await?;
+        let transaction = self.begin_write_transaction().await?;
         let mut payload_rollback =
             crate::sessions::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
                 &self.storage_root,
@@ -4166,8 +4392,7 @@ impl GlobalDb {
         &self,
         request: crate::sessions::lcm::LcmCompressionRequest,
     ) -> Result<crate::sessions::lcm::LcmCompressionResponse, crate::sessions::lcm::LcmError> {
-        let _writer = self.transaction.lock().await;
-        let transaction = self.begin_authoritative_transaction().await?;
+        let transaction = self.begin_write_transaction().await?;
         let mut payload_rollback =
             crate::sessions::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
                 &self.storage_root,
@@ -4189,8 +4414,7 @@ impl GlobalDb {
         storage_root: &Path,
         message: &SessionMessageRecord,
     ) -> Result<(), crate::sessions::lcm::LcmError> {
-        let _writer = self.transaction.lock().await;
-        let transaction = self.begin_authoritative_transaction().await?;
+        let transaction = self.begin_write_transaction().await?;
         let mut payload_rollback =
             crate::sessions::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
                 storage_root,
@@ -4226,8 +4450,7 @@ impl GlobalDb {
         &self,
         draft: crate::sessions::lcm::LcmSummaryNodeDraft,
     ) -> Result<crate::sessions::lcm::LcmSummaryNode, crate::sessions::lcm::LcmError> {
-        let _writer = self.transaction.lock().await;
-        let transaction = self.begin_authoritative_transaction().await?;
+        let transaction = self.begin_write_transaction().await?;
         let summary =
             crate::sessions::lcm::dag::insert_summary_node_in_transaction(&transaction, draft)
                 .await?;
@@ -4258,13 +4481,15 @@ impl GlobalDb {
         observation: &crate::sessions::git_correlation::SpanObservation,
         merge_gap_secs: i64,
     ) -> Result<i64, crate::sessions::git_correlation::GitCorrelationError> {
-        let _transaction = self.transaction.lock().await;
-        crate::sessions::git_correlation::record_span_observation(
-            &self.conn,
+        let transaction = self.begin_write_transaction().await?;
+        let span_id = crate::sessions::git_correlation::record_span_observation_in_transaction(
+            &transaction,
             observation,
             merge_gap_secs,
         )
-        .await
+        .await?;
+        transaction.commit().await?;
+        Ok(span_id)
     }
 
     /// Attributes one commit to one session (idempotent).
@@ -4273,8 +4498,11 @@ impl GlobalDb {
         &self,
         record: &crate::sessions::git_correlation::CommitSessionRecord,
     ) -> Result<bool, crate::sessions::git_correlation::GitCorrelationError> {
-        let _writer = self.transaction.lock().await;
-        crate::sessions::git_correlation::upsert_commit_session(&self.conn, record).await
+        let transaction = self.begin_write_transaction().await?;
+        let inserted =
+            crate::sessions::git_correlation::upsert_commit_session(&transaction, record).await?;
+        transaction.commit().await?;
+        Ok(inserted)
     }
 
     /// Runs the commit-attribution sweep, delegating branch-scoped git log
@@ -4290,9 +4518,15 @@ impl GlobalDb {
             &crate::sessions::git_correlation::SpanScanTarget,
         ) -> Vec<crate::sessions::git_correlation::ScannedCommit>,
     {
-        let _writer = self.transaction.lock().await;
-        crate::sessions::git_correlation::run_commit_attribution_sweep(&self.conn, gap_secs, scan)
-            .await
+        let transaction = self.begin_write_transaction().await?;
+        let count = crate::sessions::git_correlation::run_commit_attribution_sweep(
+            &transaction,
+            gap_secs,
+            scan,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(count)
     }
 
     /// Returns sessions correlated with a branch, worktree, or commit.
@@ -4348,8 +4582,10 @@ impl GlobalDb {
         key: &str,
         value: i64,
     ) -> Result<(), crate::sessions::git_correlation::GitCorrelationError> {
-        let _writer = self.transaction.lock().await;
-        crate::sessions::git_correlation::write_meta_value(&self.conn, key, value).await
+        let transaction = self.begin_write_transaction().await?;
+        crate::sessions::git_correlation::write_meta_value(&transaction, key, value).await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Runs one bounded, idempotent incremental git-span backfill pass, advancing
@@ -4384,8 +4620,10 @@ impl GlobalDb {
         &self,
         run: &crate::sessions::workflow_index::WorkflowRun,
     ) -> Result<(), crate::sessions::workflow_index::WorkflowIndexError> {
-        let _writer = self.transaction.lock().await;
-        crate::sessions::workflow_index::upsert_run(&self.conn, run).await
+        let transaction = self.begin_write_transaction().await?;
+        crate::sessions::workflow_index::upsert_run(&transaction, run).await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Inserts or updates one workflow agent (idempotent on
@@ -4395,8 +4633,10 @@ impl GlobalDb {
         &self,
         agent: &crate::sessions::workflow_index::WorkflowAgent,
     ) -> Result<(), crate::sessions::workflow_index::WorkflowIndexError> {
-        let _writer = self.transaction.lock().await;
-        crate::sessions::workflow_index::upsert_agent(&self.conn, agent).await
+        let transaction = self.begin_write_transaction().await?;
+        crate::sessions::workflow_index::upsert_agent(&transaction, agent).await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Lists workflow runs spawned by one parent session, newest-first.
@@ -4859,8 +5099,10 @@ impl GlobalDb {
 
     /// Insert a parsed turn. Returns `true` if inserted, `false` if duplicate.
     pub async fn insert_turn(&self, turn: &crate::types::CostTurn) -> bool {
-        let _writer = self.transaction.lock().await;
-        self.conn
+        let Ok(transaction) = self.begin_write_transaction().await else {
+            return false;
+        };
+        let inserted = transaction
             .execute(
                 "INSERT OR IGNORE INTO turns
                  (message_id, project_hash, session_id, model, timestamp,
@@ -4883,13 +5125,17 @@ impl GlobalDb {
                 ],
             )
             .await
-            .is_ok_and(|n| n > 0)
+            .is_ok_and(|n| n > 0);
+        if inserted {
+            transaction.commit().await.is_ok()
+        } else {
+            false
+        }
     }
 
     /// Insert parsed turns in one transaction, returning the number of new rows.
     pub async fn insert_turns(&self, turns: &[crate::types::CostTurn]) -> usize {
-        let _writer = self.transaction.lock().await;
-        let Ok(transaction) = self.begin_authoritative_transaction().await else {
+        let Ok(transaction) = self.begin_write_transaction().await else {
             return 0;
         };
 
@@ -5031,13 +5277,55 @@ impl GlobalDb {
         out
     }
 
-    /// Checkpoints the WAL. Best-effort.
-    pub async fn checkpoint(&self) {
+    /// Checkpoints the WAL and preserves SQLite's completion status.
+    pub(crate) async fn checkpoint_result(&self) -> Result<(), TraceDecayError> {
         let _writer = self.transaction.lock().await;
-        let _ = self
-            .conn
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .await;
+        let conn = self
+            .db
+            .connect()
+            .map_err(|error| global_db_operation_error("connect global WAL checkpoint", error))?;
+        conn.execute_batch("PRAGMA busy_timeout = 5000;")
+            .await
+            .map_err(|error| global_db_operation_error("configure global WAL checkpoint", error))?;
+        let mut rows = conn
+            .query("PRAGMA wal_checkpoint(TRUNCATE);", ())
+            .await
+            .map_err(|error| global_db_operation_error("checkpoint global WAL", error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error("read global WAL checkpoint", error))?
+            .ok_or_else(|| {
+                global_db_operation_message(
+                    "checkpoint global WAL",
+                    "WAL checkpoint returned no status row",
+                )
+            })?;
+        let busy: i64 = row
+            .get(0)
+            .map_err(|error| global_db_operation_error("read global WAL checkpoint", error))?;
+        let log_frames: i64 = row
+            .get(1)
+            .map_err(|error| global_db_operation_error("read global WAL checkpoint", error))?;
+        let checkpointed_frames: i64 = row
+            .get(2)
+            .map_err(|error| global_db_operation_error("read global WAL checkpoint", error))?;
+        if busy != 0 || checkpointed_frames < log_frames {
+            return Err(global_db_operation_message(
+                "checkpoint global WAL",
+                format!(
+                    "WAL checkpoint incomplete: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Checkpoints the WAL. Best-effort for compatibility; failures remain visible.
+    pub async fn checkpoint(&self) {
+        if let Err(error) = self.checkpoint_result().await {
+            eprintln!("[tracedecay] global database WAL checkpoint failed: {error}");
+        }
     }
 
     /// Consumes the `GlobalDb`, closing the underlying connection.
@@ -5045,6 +5333,9 @@ impl GlobalDb {
         drop(self);
     }
 }
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod checkpoint_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;

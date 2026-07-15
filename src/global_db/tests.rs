@@ -2476,8 +2476,7 @@ async fn cancelled_authoritative_transaction_isolated_from_retained_connection_a
     let task_db = Arc::clone(&db);
     let task_session = session.clone();
     let task = tokio::spawn(async move {
-        let _writer = task_db.transaction.lock().await;
-        let transaction = task_db.begin_authoritative_transaction().await.unwrap();
+        let transaction = task_db.begin_write_transaction().await.unwrap();
         assert!(GlobalDb::upsert_session_in_existing_tx(&transaction, &task_session).await);
         let mut payload_rollback =
             crate::sessions::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
@@ -2522,8 +2521,29 @@ async fn cancelled_authoritative_transaction_isolated_from_retained_connection_a
         .unwrap();
     assert!(!GlobalDb::upsert_session_in_existing_tx(&db.conn, &session).await);
 
+    let queued_session = SessionRecord {
+        session_id: "queued-after-cancellation".to_string(),
+        ..session.clone()
+    };
+    let queued_db = Arc::clone(&db);
+    let queued_write = tokio::spawn(async move { queued_db.upsert_session(&queued_session).await });
+    tokio::pin!(queued_write);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut queued_write)
+            .await
+            .is_err(),
+        "queued writer bypassed the transaction's shared writer guard"
+    );
+
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut queued_write)
+            .await
+            .expect("queued writer remained blocked after cancellation")
+            .expect("queued writer task failed"),
+        "queued writer failed after the cancelled transaction rolled back"
+    );
     assert!(!payload_path.exists());
     db.conn()
         .execute_batch("PRAGMA busy_timeout = 5000;")
@@ -2566,8 +2586,7 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     let task_db = Arc::clone(&db);
     let task_update = update.clone();
     let task = tokio::spawn(async move {
-        let _writer = task_db.transaction.lock().await;
-        let transaction = task_db.begin_authoritative_transaction().await.unwrap();
+        let transaction = task_db.begin_write_transaction().await.unwrap();
         crate::sessions::lcm::compression::update_lifecycle(&transaction, task_update)
             .await
             .unwrap();
@@ -2607,7 +2626,9 @@ async fn analytics_batch_error_rolls_back_prior_rows_and_releases_writer() {
     let db = GlobalDb::open_at(&dir.path().join("global.db"))
         .await
         .expect("global DB open");
-    db.conn()
+    db.writer_connection()
+        .await
+        .unwrap()
         .execute_batch(
             "CREATE TRIGGER fail_analytics_batch
              BEFORE INSERT ON analytics_events
@@ -2651,7 +2672,9 @@ async fn analytics_batch_error_rolls_back_prior_rows_and_releases_writer() {
     );
     drop(rows);
 
-    db.conn()
+    db.writer_connection()
+        .await
+        .unwrap()
         .execute("DROP TRIGGER fail_analytics_batch", ())
         .await
         .unwrap();
@@ -2700,8 +2723,7 @@ async fn same_path_handles_share_writer_for_accounting() {
         .await
         .unwrap();
 
-    let writer = first.transaction.lock().await;
-    let transaction = first.begin_authoritative_transaction().await.unwrap();
+    let transaction = first.begin_write_transaction().await.unwrap();
     let event = AnalyticsEventInsert {
         provider: "daemon_hook".to_string(),
         project_id: "project".to_string(),
@@ -2736,7 +2758,6 @@ async fn same_path_handles_share_writer_for_accounting() {
     );
 
     transaction.commit().await.unwrap();
-    drop(writer);
     assert!(
         tokio::time::timeout(std::time::Duration::from_secs(1), &mut analytics)
             .await
@@ -2750,12 +2771,76 @@ async fn same_path_handles_share_writer_for_accounting() {
 }
 
 #[tokio::test]
+async fn twelve_same_path_handles_serialize_isolated_writes() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("global.db");
+    let mut handles = Vec::new();
+    for _ in 0..12 {
+        handles.push(Arc::new(
+            GlobalDb::open_at(&path)
+                .await
+                .expect("open shared global DB handle"),
+        ));
+    }
+
+    let mut writes = tokio::task::JoinSet::new();
+    for (index, db) in handles.iter().cloned().enumerate() {
+        writes.spawn(async move {
+            db.record_savings(
+                "/shared/project",
+                &format!("writer-{index}"),
+                10,
+                5,
+                index as i64,
+            )
+            .await;
+        });
+    }
+    while let Some(result) = writes.join_next().await {
+        result.unwrap();
+    }
+
+    assert_eq!(handles[0].sum_savings(None, 0).await.calls, 12);
+}
+
+#[tokio::test]
+async fn deferred_read_snapshot_observes_old_or_new_never_partial() {
+    async fn read_tokens(connection: &Connection, project_key: &str) -> i64 {
+        let mut rows = connection
+            .query(
+                "SELECT tokens_saved FROM projects WHERE path = ?1",
+                params![project_key],
+            )
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    }
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&path).await.expect("open global DB");
+    let project = dir.path().join("snapshot-project");
+    let project_key = project_path_alias_key(&project);
+    db.upsert(&project, 1).await;
+
+    let snapshot = db.read_snapshot().await.unwrap();
+    assert_eq!(read_tokens(&snapshot, &project_key).await, 1);
+
+    db.upsert(&project, 2).await;
+
+    assert_eq!(read_tokens(&snapshot, &project_key).await, 1);
+    assert_eq!(db.get_project_tokens(&project).await, 2);
+}
+
+#[tokio::test]
 async fn turn_batch_error_rolls_back_prior_rows_and_releases_writer() {
     let dir = tempfile::TempDir::new().unwrap();
     let db = GlobalDb::open_at(&dir.path().join("global.db"))
         .await
         .expect("global DB open");
-    db.conn()
+    db.writer_connection()
+        .await
+        .unwrap()
         .execute_batch(
             "CREATE TRIGGER fail_turn_batch
              BEFORE INSERT ON turns
@@ -2798,7 +2883,9 @@ async fn turn_batch_error_rolls_back_prior_rows_and_releases_writer() {
     );
     drop(rows);
 
-    db.conn()
+    db.writer_connection()
+        .await
+        .unwrap()
         .execute("DROP TRIGGER fail_turn_batch", ())
         .await
         .unwrap();

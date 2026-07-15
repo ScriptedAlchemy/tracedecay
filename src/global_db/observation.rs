@@ -526,9 +526,8 @@ impl GlobalDb {
         &self,
         write: ObservationWrite,
     ) -> ObservationStoreResult<ObservationPersistOutcome> {
-        let _writer = self.transaction.lock().await;
         let transaction = self
-            .begin_authoritative_transaction()
+            .begin_write_transaction()
             .await
             .map_err(|error| storage("begin observation transaction", error))?;
         let candidate = write.observation();
@@ -655,9 +654,8 @@ impl GlobalDb {
         &self,
         advance: ObservationCursorAdvance,
     ) -> ObservationStoreResult<CursorAdvanceOutcome> {
-        let _writer = self.transaction.lock().await;
         let transaction = self
-            .begin_authoritative_transaction()
+            .begin_write_transaction()
             .await
             .map_err(|error| storage("begin observation cursor transaction", error))?;
         let source_json = encode(advance.next_cursor().source(), "encode observation source")?;
@@ -725,11 +723,14 @@ impl GlobalDb {
         &self,
         observation_id: &CanonicalObservationIdV1,
     ) -> ObservationStoreResult<Option<StoredObservation>> {
-        let _reader = self.transaction.lock().await;
-        let Some(receipt) = read_by_observation_id(&self.conn, observation_id).await? else {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage("begin observation read snapshot", error))?;
+        let Some(receipt) = read_by_observation_id(&snapshot, observation_id).await? else {
             return Ok(None);
         };
-        let projection_status = read_projection_status(&self.conn, observation_id).await?;
+        let projection_status = read_projection_status(&snapshot, observation_id).await?;
         Ok(Some(StoredObservation::from_commit_receipt(
             receipt,
             projection_status,

@@ -424,40 +424,27 @@ async fn migrate_candidate(
         })?),
         None => None,
     };
-    if let Some(source) = source_db.as_ref() {
-        source
-            .read_connection()
-            .execute("BEGIN", ())
-            .await
-            .map_err(|error| {
-                CandidateError::Failed(format!("could not snapshot source: {error}"))
-            })?;
-    }
+    let source_snapshot = match source_db.as_ref() {
+        Some(source) => Some(source.read_snapshot().await.map_err(|error| {
+            CandidateError::Failed(format!("could not snapshot source: {error}"))
+        })?),
+        None => None,
+    };
+    let source = source_snapshot.as_ref().map(|snapshot| {
+        let transaction: &libsql::Transaction = snapshot;
+        let connection: &Connection = transaction;
+        connection
+    });
 
-    let result = migrate_candidate_snapshot(
+    migrate_candidate_snapshot(
         user_home,
         hermes_homes,
         candidate,
-        source_db.as_ref().map(GlobalDb::read_connection),
+        source,
         tracedecay_profile_root,
         fail_after_table,
     )
-    .await;
-    let finish = match source_db.as_ref() {
-        Some(source) => source
-            .read_connection()
-            .execute("COMMIT", ())
-            .await
-            .map(|_| ()),
-        None => Ok(()),
-    };
-    match (result, finish) {
-        (Ok(outcome), Ok(())) => Ok(outcome),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(CandidateError::Failed(format!(
-            "could not close source snapshot: {error}"
-        ))),
-    }
+    .await
 }
 
 async fn migrate_legacy_state_store(
@@ -581,7 +568,7 @@ async fn migrate_candidate_snapshot(
     // store. Legacy memory facts are not: without a project pin or durable
     // session attribution their scope cannot be proven, so leave that source
     // database untouched for a later explicit recovery.
-    let source_memory = match candidate
+    let source_memory_db = match candidate
         .source_memory_db
         .as_deref()
         .filter(|_| !target_project.user_scope)
@@ -600,20 +587,28 @@ async fn migrate_candidate_snapshot(
                         path.display()
                     ))
                 })?;
-            db.conn().execute("BEGIN", ()).await.map_err(|error| {
-                CandidateError::Failed(format!("could not snapshot legacy memory store: {error}"))
-            })?;
             Some(db)
         }
         None => None,
     };
+    let source_memory_snapshot = match source_memory_db.as_ref() {
+        Some(db) => Some(
+            db.begin_isolated_read_snapshot("snapshot legacy memory migration source")
+                .await
+                .map_err(|error| CandidateError::Failed(error.to_string()))?,
+        ),
+        None => None,
+    };
+    let source_memory = source_memory_snapshot.as_ref().map(|transaction| {
+        let connection: &Connection = transaction;
+        connection
+    });
     let fingerprint = logical_source_fingerprint(
         source,
         candidate.primary_path(),
         source_memory
-            .as_ref()
             .zip(candidate.source_memory_db.as_deref())
-            .map(|(db, path)| (db.conn(), path)),
+            .map(|(connection, path)| (connection, path)),
     )
     .await
     .map_err(CandidateError::Failed)?;
@@ -638,9 +633,9 @@ async fn migrate_candidate_snapshot(
         .await
         .map_err(CandidateError::Failed)?;
     }
-    let memory_rows = match source_memory.as_ref() {
+    let memory_rows = match source_memory {
         Some(source_memory) => merge_memory_snapshot(
-            source_memory.conn(),
+            source_memory,
             target_layout.graph_db_path.as_deref().ok_or_else(|| {
                 CandidateError::Failed("project memory target disappeared".to_string())
             })?,
@@ -650,30 +645,22 @@ async fn migrate_candidate_snapshot(
         None => 0,
     };
 
-    let target_conn = target_db.writer_connection().await;
-    let result = merge_snapshot(MergeSnapshotRequest {
-        source,
-        source_path: candidate.primary_path(),
-        target: &target_conn,
-        target_path: &target_layout.sessions_db_path,
-        target_project: &target_project.root,
-        target_project_id: &target_layout.project_id,
-        fingerprint: &fingerprint,
-        source_schema_version,
-        initial_rows_copied: memory_rows,
-        fail_after_table,
-    })
+    let result = merge_snapshot(
+        &target_db,
+        MergeSnapshotRequest {
+            source,
+            source_path: candidate.primary_path(),
+            target_path: &target_layout.sessions_db_path,
+            target_project: &target_project.root,
+            target_project_id: &target_layout.project_id,
+            fingerprint: &fingerprint,
+            source_schema_version,
+            initial_rows_copied: memory_rows,
+            fail_after_table,
+        },
+    )
     .await
     .map_err(CandidateError::Failed)?;
-    if let Some(source_memory) = source_memory.as_ref() {
-        source_memory
-            .conn()
-            .execute("COMMIT", ())
-            .await
-            .map_err(|error| {
-                CandidateError::Failed(format!("could not close legacy memory snapshot: {error}"))
-            })?;
-    }
     let migration = LegacyHermesMigration {
         source_db: candidate.primary_path().to_path_buf(),
         target_project: target_project.root,
@@ -1283,29 +1270,19 @@ async fn merge_memory_snapshot(source: &Connection, target_path: &Path) -> Resul
         Database::initialize(target_path, &authority).await
     }
     .map_err(|error| format!("could not open target memory store: {error}"))?;
-    target
-        .conn()
-        .execute("BEGIN IMMEDIATE", ())
+    let transaction = target
+        .begin_write_transaction("merge memory migration snapshot")
         .await
         .map_err(|error| format!("could not begin target memory migration: {error}"))?;
-    let result = copy_memory_tables(source, target.conn()).await;
-    let rows_copied = match result {
-        Ok(rows_copied) => {
-            if let Err(error) = target.conn().execute("COMMIT", ()).await {
-                let _ = target.conn().execute("ROLLBACK", ()).await;
-                return Err(format!("could not commit target memory migration: {error}"));
-            }
-            rows_copied
-        }
-        Err(error) => {
-            let _ = target.conn().execute("ROLLBACK", ()).await;
-            return Err(error);
-        }
-    };
-    MemoryStore::new(target.conn())
+    let rows_copied = copy_memory_tables(source, &transaction).await?;
+    MemoryStore::new(&transaction)
         .rebuild_all_banks()
         .await
         .map_err(|error| format!("could not rebuild migrated memory banks: {error}"))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| format!("could not commit target memory migration: {error}"))?;
     Ok(rows_copied)
 }
 
@@ -2371,7 +2348,12 @@ mod tests {
 
     async fn seed_memory_fact(path: &Path, content: &str) -> i64 {
         let (db, _) = test_initialize(path).await;
-        MemoryStore::new(db.conn())
+        let writer = db
+            .writer_connection("seed legacy memory fact")
+            .await
+            .unwrap();
+        writer
+            .memory_store()
             .add_fact(
                 AddFactRequest {
                     content: content.to_string(),
@@ -2550,9 +2532,9 @@ mod tests {
         let initial_rows_copied = first.migrated[0].rows_copied;
         let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
         let target = GlobalDb::open_at(&layout.sessions_db_path).await.unwrap();
+        let target_writer = target.writer_connection().await.unwrap();
         assert_eq!(
-            target
-                .conn()
+            target_writer
                 .execute(
                     "DELETE FROM session_messages WHERE provider = 'hermes' AND message_id = 'message-session-1'",
                     (),
@@ -2561,6 +2543,7 @@ mod tests {
                 .unwrap(),
             1
         );
+        drop(target_writer);
         drop(target);
 
         let repaired = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
@@ -2810,7 +2793,12 @@ mod tests {
         seed_source(&source_sessions, &[("session", &project)]).await;
         let source_fact_id = seed_memory_fact(&source_memory, "shared durable fact").await;
         let (source_db, _) = test_open(&source_memory).await;
-        MemoryStore::new(source_db.conn())
+        let source_writer = source_db
+            .writer_connection("seed legacy memory feedback")
+            .await
+            .unwrap();
+        source_writer
+            .memory_store()
             .record_feedback_event(FeedbackRequest {
                 fact_id: source_fact_id,
                 action: FeedbackAction::Helpful,
@@ -2819,11 +2807,16 @@ mod tests {
             })
             .await
             .unwrap();
+        drop(source_writer);
         drop(source_db);
 
         let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
         let (target_db, _) = test_initialize(&layout.graph_db_path).await;
-        let target_store = MemoryStore::new(target_db.conn());
+        let target_writer = target_db
+            .writer_connection("seed target memory collision")
+            .await
+            .unwrap();
+        let target_store = target_writer.memory_store();
         let target_fact = target_store
             .add_fact(
                 AddFactRequest {
@@ -2850,6 +2843,7 @@ mod tests {
             })
             .await
             .unwrap();
+        drop(target_writer);
         drop(target_db);
 
         let first = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
@@ -2951,8 +2945,8 @@ mod tests {
         let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
         seed_source(&layout.sessions_db_path, &[("session-1", &project)]).await;
         let target = GlobalDb::open_at(&layout.sessions_db_path).await.unwrap();
-        target
-            .conn()
+        let target_writer = target.writer_connection().await.unwrap();
+        target_writer
             .execute(
                 "UPDATE sessions SET title = 'different target title'
                  WHERE provider = 'hermes' AND session_id = 'session-1'",
@@ -2960,6 +2954,7 @@ mod tests {
             )
             .await
             .unwrap();
+        drop(target_writer);
         drop(target);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
@@ -3135,14 +3130,15 @@ mod tests {
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         seed_source(&source, &[("session", &legacy_project)]).await;
         let source_rw = GlobalDb::open_at(&source).await.unwrap();
-        source_rw
-            .conn()
+        let source_writer = source_rw.writer_connection().await.unwrap();
+        source_writer
             .execute(
                 "UPDATE sessions SET project_path = ?1 WHERE session_id = 'session'",
                 [project_alias.to_string_lossy().to_string()],
             )
             .await
             .unwrap();
+        drop(source_writer);
         drop(source_rw);
 
         fs::create_dir_all(&profile_root).unwrap();
@@ -3403,14 +3399,15 @@ mod tests {
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         seed_source(&source, &[("session", &user_home)]).await;
         let source_rw = GlobalDb::open_at(&source).await.unwrap();
-        source_rw
-            .conn()
+        let source_writer = source_rw.writer_connection().await.unwrap();
+        source_writer
             .execute(
                 "UPDATE sessions SET project_key = '', project_path = '', metadata_json = '{invalid' WHERE session_id = 'session'",
                 (),
             )
             .await
             .unwrap();
+        drop(source_writer);
         drop(source_rw);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
@@ -3429,14 +3426,15 @@ mod tests {
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         seed_source(&source, &[("session", &user_home)]).await;
         let source_rw = GlobalDb::open_at(&source).await.unwrap();
-        source_rw
-            .conn()
+        let source_writer = source_rw.writer_connection().await.unwrap();
+        source_writer
             .execute(
                 "UPDATE sessions SET project_key = '', project_path = '', metadata_json = '{\"project_root\":42}' WHERE session_id = 'session'",
                 (),
             )
             .await
             .unwrap();
+        drop(source_writer);
         drop(source_rw);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
@@ -3514,14 +3512,15 @@ mod tests {
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         seed_source(&source, &[("session", &project)]).await;
         let source_rw = GlobalDb::open_at(&source).await.unwrap();
-        source_rw
-            .conn()
+        let source_writer = source_rw.writer_connection().await.unwrap();
+        source_writer
             .execute(
                 "UPDATE sessions SET project_path = ?1 WHERE session_id = 'session'",
                 [vanished.to_string_lossy().to_string()],
             )
             .await
             .unwrap();
+        drop(source_writer);
         drop(source_rw);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
@@ -3566,14 +3565,15 @@ mod tests {
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         seed_source(&source, &[("session", &project)]).await;
         let source_rw = GlobalDb::open_at(&source).await.unwrap();
-        source_rw
-            .conn()
+        let source_writer = source_rw.writer_connection().await.unwrap();
+        source_writer
             .execute(
                 "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'lcm'",
                 [crate::sessions::lcm::LCM_SCHEMA_VERSION + 1],
             )
             .await
             .unwrap();
+        drop(source_writer);
         drop(source_rw);
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
@@ -3597,6 +3597,29 @@ mod tests {
         let source = user_home.join(".hermes/.tracedecay/sessions.db");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         seed_source(&source, &[("session", &project)]).await;
+        let payload_ref = "migration-payload";
+        let payload = b"legacy payload";
+        let source_payload_dir = source.parent().unwrap().join("lcm-payloads");
+        fs::create_dir_all(&source_payload_dir).unwrap();
+        fs::write(source_payload_dir.join(payload_ref), payload).unwrap();
+        let source_db = GlobalDb::open_at(&source).await.unwrap();
+        let source_writer = source_db.writer_connection().await.unwrap();
+        source_writer
+            .execute(
+                "INSERT INTO lcm_external_payloads (
+                    payload_ref, provider, session_id, message_id, kind, content_hash,
+                    byte_count, char_count, created_at
+                 ) VALUES (?1, 'hermes', 'session', 'message-session', 'text', ?2, ?3, ?3, 1)",
+                params![
+                    payload_ref,
+                    hex::encode(Sha256::digest(payload)),
+                    payload.len() as i64
+                ],
+            )
+            .await
+            .unwrap();
+        drop(source_writer);
+        drop(source_db);
         let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
         let target = GlobalDb::open_at(&layout.sessions_db_path).await.unwrap();
         assert_eq!(count(target.conn(), "sessions").await, 0);
@@ -3615,6 +3638,13 @@ mod tests {
             .unwrap();
         assert_eq!(count(target.conn(), "sessions").await, 0);
         assert_eq!(marker_count(&layout.sessions_db_path), 0);
+        let target_payload = layout
+            .sessions_db_path
+            .parent()
+            .unwrap()
+            .join("lcm-payloads")
+            .join(payload_ref);
+        assert!(!target_payload.exists());
         drop(target);
         let source_after = GlobalDb::open_read_only_at(&source).await.unwrap();
         assert_eq!(count(source_after.conn(), "sessions").await, 1);
@@ -3622,6 +3652,27 @@ mod tests {
 
         let retry = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(retry.migrated.len(), 1, "{retry:?}");
+        assert_eq!(fs::read(target_payload).unwrap(), payload);
+    }
+
+    #[tokio::test]
+    async fn memory_merge_waits_for_the_shared_writer_lane() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("source-memory.db");
+        let target_path = temp.path().join("target-memory.db");
+        seed_memory_fact(&source_path, "legacy fact").await;
+        let (source, _) = test_open_read_only(&source_path).await;
+        let (target, _) = test_initialize(&target_path).await;
+        let writer = target.writer().await;
+        let mut merge = Box::pin(merge_memory_snapshot(source.conn(), &target_path));
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut merge)
+                .await
+                .is_err()
+        );
+        drop(writer);
+        assert!(merge.await.unwrap() > 0);
     }
 
     #[test]
