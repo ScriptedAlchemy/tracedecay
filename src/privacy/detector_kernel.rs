@@ -350,7 +350,9 @@ pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
             end += 1;
         }
         let candidate = &text[start..end];
-        if candidate.starts_with('/') && candidate[1..].contains('/') {
+        let macos_temp_path = candidate.starts_with("/private/var/folders/")
+            || candidate.starts_with("/var/folders/");
+        if macos_temp_path {
             let mut component_start = 0usize;
             for component in candidate.split('/') {
                 let component_end = component_start + component.len();
@@ -546,18 +548,31 @@ mod tests {
         let above_threshold = "abcdefghij123456789".repeat(2);
         assert!(!looks_high_entropy_token(&below_threshold));
         assert!(looks_high_entropy_token(&above_threshold));
+    }
 
-        let ordinary_temp_path =
-            "/private/var/folders/ab/cd0123456789abcdefghijklmnopqrst/T/";
-        assert!(high_entropy_ranges(ordinary_temp_path).is_empty());
+    #[test]
+    fn entropy_kernel_preserves_ordinary_macos_temp_paths() {
+        let path = "/private/var/folders/ab/cd0123456789abcdefghijklmnopqrst/T/";
+        assert!(looks_high_entropy_token(path));
+        assert!(high_entropy_ranges(path).is_empty());
+    }
 
-        let secret_component =
-            "Qm9vZ2llV29vZ2llMTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A4OTc2NTQzMjE";
-        let path = format!("/private/var/{secret_component}/project");
-        let component_start = "/private/var/".len();
+    #[test]
+    fn entropy_kernel_redacts_high_entropy_macos_temp_path_components() {
+        let secret = "Qm9vZ2llV29vZ2llMTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A4OTc2NTQzMjE";
+        let path = format!("/private/var/folders/ab/{secret}/T/");
+        let start = "/private/var/folders/ab/".len();
         assert_eq!(
             high_entropy_ranges(&path),
-            vec![component_start..component_start + secret_component.len()]
+            vec![start..start + secret.len()]
         );
+    }
+
+    #[test]
+    fn entropy_kernel_redacts_slash_bearing_secrets_with_short_components() {
+        let secret = "/AbCdEfGhIjKlMnOpQrStUvWxYz01234/56789aBcDeFgHiJkLmNoPqRsTuVwXy";
+        assert!(secret.split('/').all(|part| part.len() < 36));
+        assert!(looks_high_entropy_token(secret));
+        assert_eq!(high_entropy_ranges(secret), vec![0..secret.len()]);
     }
 }

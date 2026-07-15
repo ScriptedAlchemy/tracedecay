@@ -489,14 +489,14 @@ pub(super) fn validate_git_snapshots(
 }
 
 pub(super) fn workload_identity() -> WorkloadIdentity {
-    let manifest_sha256 = portable_text_sha256(WORKLOAD_MANIFEST.as_bytes());
+    let manifest_sha256 = sha256_hex(WORKLOAD_MANIFEST.as_bytes());
     let harness_sha256 = harness_sources_sha256(
         HARNESS_SOURCES
             .iter()
             .map(|(path, source)| (*path, source.as_bytes())),
     );
     assert_eq!(
-        portable_text_sha256(
+        sha256_hex(
             &fs::read(repository_root().join(WORKLOAD_MANIFEST_PATH))
                 .expect("read workload manifest")
         ),
@@ -538,29 +538,10 @@ fn harness_sources_sha256<'a>(sources: impl IntoIterator<Item = (&'a str, &'a [u
     for (path, source) in sources {
         digest.update(path.as_bytes());
         digest.update([0]);
-        digest.update(portable_text(source));
+        digest.update(source);
         digest.update([0]);
     }
     hex::encode(digest.finalize())
-}
-
-pub(super) fn portable_text_sha256(bytes: &[u8]) -> String {
-    sha256_hex(&portable_text(bytes))
-}
-
-fn portable_text(bytes: &[u8]) -> Vec<u8> {
-    let mut normalized = Vec::with_capacity(bytes.len());
-    let mut offset = 0;
-    while offset < bytes.len() {
-        if bytes[offset] == b'\r' && bytes.get(offset + 1) == Some(&b'\n') {
-            normalized.push(b'\n');
-            offset += 2;
-        } else {
-            normalized.push(bytes[offset]);
-            offset += 1;
-        }
-    }
-    normalized
 }
 
 pub(super) fn command_output(command: &str, args: &[&str]) -> String {

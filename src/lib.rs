@@ -75,5 +75,7 @@ pub mod tracedecay;
 pub mod types;
 pub mod upgrade;
 pub mod user_config;
+#[cfg(windows)]
+mod windows_file;
 pub mod worktree;
 mod yaml_scalar;

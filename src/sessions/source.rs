@@ -808,16 +808,21 @@ fn stable_jsonl_file_id(
     }
     #[cfg(windows)]
     {
-        use std::hash::{Hash, Hasher};
         use std::os::windows::fs::MetadataExt;
 
-        // `same_file::Handle` hashes the volume and native file index from the
-        // same open file used for framing. Creation time remains an additional
-        // discriminator on file systems with weak native identities.
-        let native_handle = same_file::Handle::from_file(file.try_clone()?)?;
-        let mut native_identity = std::collections::hash_map::DefaultHasher::new();
-        native_handle.hash(&mut native_identity);
-        hasher.update(native_identity.finish().to_le_bytes());
+        match crate::windows_file::information(file) {
+            Ok(information) => {
+                hasher.update(information.volume_serial_number.to_le_bytes());
+                hasher.update(information.file_index.to_le_bytes());
+            }
+            Err(_) => {
+                // Some virtual file systems do not expose native handle
+                // identity. Keep creation time plus the head fingerprint as
+                // the deterministic fallback used before native IDs existed.
+                hasher.update(0_u32.to_le_bytes());
+                hasher.update(0_u64.to_le_bytes());
+            }
+        }
         hasher.update(meta.creation_time().to_le_bytes());
     }
     #[cfg(not(any(unix, windows)))]
