@@ -79,7 +79,7 @@ pub(crate) async fn apply(
 ) -> (StatusCode, Json<Value>) {
     match apply_fact_proposal(
         &state.dashboard_root,
-        &state.mem_conn,
+        &state.mem_db,
         &id,
         Some("dashboard".to_string()),
     )

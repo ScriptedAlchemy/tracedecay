@@ -123,6 +123,7 @@ impl<'a> GraphQueryManager<'a> {
         kinds: &[NodeKind],
         include_public: bool,
     ) -> Result<Vec<Node>> {
+        let connection = self.db.writer_connection("find dead code").await?;
         let kind_filter = if kinds.is_empty() {
             String::new()
         } else {
@@ -181,15 +182,21 @@ impl<'a> GraphQueryManager<'a> {
         //   probe is now against a ~15K-row indexed lookup table, not a
         //   correlated subquery the optimiser can re-shape.
         let result = self
-            .find_dead_code_inner(visibility_filter, &kind_filter)
+            .find_dead_code_inner(&connection, visibility_filter, &kind_filter)
             .await;
 
         // Always drop both temp tables, even on the error path, so a
         // failed query does not leak rows to the next caller on the same
         // connection. Best-effort: a drop failure shouldn't mask the
         // original error.
-        let _ = self.db.drop_test_annotated_targets_temp_table().await;
-        let _ = self.db.drop_test_marker_temp_table().await;
+        let _ = self
+            .db
+            .drop_test_annotated_targets_temp_table_unlocked(&connection)
+            .await;
+        let _ = self
+            .db
+            .drop_test_marker_temp_table_unlocked(&connection)
+            .await;
         result
     }
 
@@ -197,15 +204,20 @@ impl<'a> GraphQueryManager<'a> {
     /// guaranteed `drop_*_temp_table()` even on the error path.
     async fn find_dead_code_inner(
         &self,
+        connection: &crate::db::connection::DatabaseWriterConnection<'_>,
         visibility_filter: &str,
         kind_filter: &str,
     ) -> Result<Vec<Node>> {
-        let marker_ids = self.db.collect_test_marker_ids().await?;
+        let marker_ids = self.db.collect_test_marker_ids_on(connection).await?;
         let test_annotated_targets_filter = if marker_ids.is_empty() {
             ""
         } else {
-            self.db.populate_test_marker_temp_table(&marker_ids).await?;
-            self.db.populate_test_annotated_targets_temp_table().await?;
+            self.db
+                .populate_test_marker_temp_table_unlocked(connection, &marker_ids)
+                .await?;
+            self.db
+                .populate_test_annotated_targets_temp_table_unlocked(connection)
+                .await?;
             "AND id NOT IN (SELECT target FROM temp.test_annotated_targets)"
         };
 
@@ -227,15 +239,13 @@ impl<'a> GraphQueryManager<'a> {
              {test_annotated_targets_filter}"
         );
 
-        let mut rows =
-            self.db
-                .conn()
-                .query(&sql, ())
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to find dead code: {e}"),
-                    operation: "find_dead_code".to_string(),
-                })?;
+        let mut rows = connection
+            .query(&sql, ())
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to find dead code: {e}"),
+                operation: "find_dead_code".to_string(),
+            })?;
 
         let mut dead = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {

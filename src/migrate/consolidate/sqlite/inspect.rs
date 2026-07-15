@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use libsql::{Builder, Connection, Database as LibsqlDatabase};
+use libsql::{Builder, Connection, Database as LibsqlDatabase, Transaction, TransactionBehavior};
 
 use super::{
     LCM_RAW_MESSAGE_DIVERGENCE_PREDICATE, attach, db_error, db_message, query_i64,
@@ -32,7 +32,7 @@ struct LcmMessageCollisionCounts {
 }
 
 pub(in crate::migrate::consolidate) struct OfflineDatabaseGuards {
-    _holds: Vec<(Connection, LibsqlDatabase)>,
+    _holds: Vec<(Transaction, LibsqlDatabase)>,
     _authorities: Vec<crate::db::DatabaseAuthority>,
 }
 
@@ -143,16 +143,19 @@ pub(in crate::migrate::consolidate) async fn acquire_offline_guards(
         conn.execute_batch("PRAGMA busy_timeout = 0;")
             .await
             .map_err(|error| db_error("acquire_offline_guards", error))?;
-        conn.execute("BEGIN IMMEDIATE", ()).await.map_err(|error| {
-            db_message(
-                "acquire_offline_guards",
-                format!(
-                    "database '{}' is still writable by another process: {error}; stop MCP/CLI writers and retry",
-                    path.display()
-                ),
-            )
-        })?;
-        holds.push((conn, db));
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|error| {
+                db_message(
+                    "acquire_offline_guards",
+                    format!(
+                        "database '{}' is still writable by another process: {error}; stop MCP/CLI writers and retry",
+                        path.display()
+                    ),
+                )
+            })?;
+        holds.push((transaction, db));
         authorities.push(authority);
     }
     Ok(OfflineDatabaseGuards {

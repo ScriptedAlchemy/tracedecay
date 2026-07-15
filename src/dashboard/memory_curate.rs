@@ -26,7 +26,6 @@ use super::util::{qmarks, query_rows};
 use super::{DashboardState, code_diagnostics_broker, storage_mode_label, token_count};
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
-use crate::memory::store::MemoryStore;
 use crate::memory::types::MemoryGroomingOperation;
 use crate::tracedecay::TraceDecay;
 
@@ -126,16 +125,17 @@ impl Default for MemoryCurateOptions {
 /// Minimal dashboard state over the project memory store — no LCM store,
 /// savings DB, or token-count cache warmup (those belong to the server).
 async fn cli_state(cg: &TraceDecay) -> DashboardState {
-    let (mem_conn, mem_db_path, mem_guard) = super::resolve_project_memory_store(cg).await;
+    let (mem_conn, mem_db_path, mem_db) = super::resolve_project_memory_store(cg).await;
     let store_layout = cg.store_layout();
     DashboardState {
         project_id: store_layout.identity.project_id.clone(),
         graph_conn: cg.dashboard_connection(),
         _database_guards: std::iter::once(cg.dashboard_database_guard())
-            .chain(mem_guard)
+            .chain(std::iter::once(mem_db.clone()))
             .collect(),
         graph_db_path: cg.dashboard_db_path().display().to_string(),
         mem_conn,
+        mem_db,
         mem_db_path,
         lcm_conn: None,
         lcm_db: None,
@@ -168,12 +168,14 @@ fn user_state(
     dashboard_root: &std::path::Path,
 ) -> DashboardState {
     let conn = memory_db.conn().clone();
+    let mem_db = Arc::new(memory_db.clone());
     DashboardState {
         project_id: None,
         graph_conn: conn.clone(),
-        _database_guards: vec![Arc::new(memory_db.clone())],
+        _database_guards: vec![mem_db.clone()],
         graph_db_path: memory_db_path.display().to_string(),
         mem_conn: conn,
+        mem_db,
         mem_db_path: memory_db_path.display().to_string(),
         lcm_conn: None,
         lcm_db: None,
@@ -267,7 +269,11 @@ async fn run_memory_curate_with_state(
             } else {
                 let grooming_ops = parse_grooming_ops(&valid)?;
                 if !grooming_ops.is_empty() {
-                    let store = MemoryStore::new(&state.mem_conn);
+                    let writer = state
+                        .mem_db
+                        .writer_connection("apply memory grooming batch")
+                        .await?;
+                    let store = writer.memory_store();
                     let grooming_report = store
                         .apply_grooming_batch(&grooming_ops, options.min_confidence)
                         .await?;
@@ -881,7 +887,11 @@ mod tests {
         let (db, _) = Database::initialize(&memory_path, &authority)
             .await
             .unwrap();
-        db.conn()
+        let writer = db
+            .writer_connection("seed memory curation test")
+            .await
+            .unwrap();
+        writer
             .execute(
                 "INSERT INTO memory_facts
                     (fact_id, content, category, trust_score, created_at, updated_at, source)
@@ -890,6 +900,7 @@ mod tests {
             )
             .await
             .unwrap();
+        drop(writer);
         let options = MemoryCurateOptions {
             llm_ops: Some(json!({ "ops": [] })),
             ..MemoryCurateOptions::default()

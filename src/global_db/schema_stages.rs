@@ -1,5 +1,3 @@
-use libsql::TransactionBehavior;
-
 use super::schema_contract::{
     ensure_authority_invariants, restore_immutability_after_canonical_repair,
     suspend_immutability_for_canonical_repair, validate_authority_rows_exhaustive,
@@ -11,7 +9,11 @@ use super::{
 };
 
 pub(super) async fn ensure_registry(db: &GlobalDb) -> crate::errors::Result<()> {
-    db.conn
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .map_err(|error| global_db_operation_error("begin global registry schema", error))?;
+    transaction
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS projects (
             path TEXT PRIMARY KEY,
@@ -81,12 +83,16 @@ pub(super) async fn ensure_registry(db: &GlobalDb) -> crate::errors::Result<()> 
         .map_err(|error| {
             global_db_operation_error("initialize global project registry schema", error)
         })?;
-    ensure_code_project_native_root_columns(&db.conn)
+    ensure_code_project_native_root_columns(&transaction)
         .await
         .map_err(|error| {
             global_db_operation_error("ensure native code project root schema", error)
         })?;
-    validate_registry_schema_contract(&db.conn).await?;
+    validate_registry_schema_contract(&transaction).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| global_db_operation_error("commit global registry schema", error))?;
     db.migrate_project_rows_to_canonical_keys()
         .await
         .map_err(|error| global_db_operation_error("migrate global project rows", error))?;
@@ -94,8 +100,11 @@ pub(super) async fn ensure_registry(db: &GlobalDb) -> crate::errors::Result<()> 
 }
 
 pub(super) async fn ensure_transcript(db: &GlobalDb) -> crate::errors::Result<()> {
-    db.conn
-        .execute_batch(
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .map_err(|error| global_db_operation_error("begin global transcript schema", error))?;
+    transaction.execute_batch(
         "CREATE TABLE IF NOT EXISTS turns (
             message_id TEXT PRIMARY KEY,
             project_hash TEXT NOT NULL,
@@ -223,19 +232,21 @@ pub(super) async fn ensure_transcript(db: &GlobalDb) -> crate::errors::Result<()
     .map_err(|error| {
         global_db_operation_error("initialize global transcript schema", error)
     })?;
-    ensure_session_parent_columns(&db.conn)
+    ensure_session_parent_columns(&transaction)
         .await
         .map_err(|error| global_db_operation_error("ensure global session parent schema", error))?;
-    ensure_parse_offset_columns(&db.conn)
+    ensure_parse_offset_columns(&transaction)
         .await
         .map_err(|error| global_db_operation_error("ensure global parse offset schema", error))?;
-    Ok(())
+    transaction
+        .commit()
+        .await
+        .map_err(|error| global_db_operation_error("commit global transcript schema", error))
 }
 
 pub(super) async fn ensure_observation_authority(db: &GlobalDb) -> crate::errors::Result<()> {
     let transaction = db
-        .conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .begin_write_transaction()
         .await
         .map_err(|error| global_db_operation_error("begin observation authority schema", error))?;
     observation::ensure_observation_schema(&transaction).await?;
@@ -254,15 +265,10 @@ pub(super) async fn ensure_observation_authority(db: &GlobalDb) -> crate::errors
 
 impl GlobalDb {
     pub(crate) async fn audit_observation_authority(&self) -> crate::errors::Result<()> {
-        let _writer = self.transaction.lock().await;
-        let transaction = self.conn.transaction().await.map_err(|error| {
+        let snapshot = self.read_snapshot().await.map_err(|error| {
             global_db_operation_error("begin observation authority audit", error)
         })?;
-        validate_observation_authority_connection(&transaction).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error("finish observation authority audit", error))
+        validate_observation_authority_connection(&snapshot).await
     }
 }
 
@@ -286,19 +292,26 @@ pub(crate) async fn finish_observation_authority_canonical_repair(
 }
 
 pub(super) async fn ensure_composed_context(db: &GlobalDb) -> crate::errors::Result<()> {
-    crate::sessions::lcm::schema::ensure_lcm_schema(&db.conn)
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .map_err(|error| global_db_operation_error("begin composed context schema", error))?;
+    crate::sessions::lcm::schema::ensure_lcm_schema(&transaction)
         .await
         .map_err(|error| global_db_operation_error("initialize LCM schema", error))?;
-    crate::sessions::git_correlation::ensure_git_correlation_schema(&db.conn)
+    crate::sessions::git_correlation::ensure_git_correlation_schema(&transaction)
         .await
         .map_err(|error| global_db_operation_error("initialize git correlation schema", error))?;
-    crate::sessions::workflow_index::ensure_workflow_index_schema(&db.conn)
+    crate::sessions::workflow_index::ensure_workflow_index_schema(&transaction)
         .await
         .map_err(|error| global_db_operation_error("initialize workflow index schema", error))?;
     // One-off self-heal: re-derive timestamps and token-usage counters
     // for legacy messages ingested before extraction existed.
     // Marker-guarded (runs once per store) and fail-open, like the LCM
     // schema migrations above.
-    let _ = crate::sessions::transcript_backfill::backfill_transcript_facts(&db.conn).await;
-    Ok(())
+    let _ = crate::sessions::transcript_backfill::backfill_transcript_facts(&transaction).await;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| global_db_operation_error("commit composed context schema", error))
 }

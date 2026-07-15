@@ -581,10 +581,16 @@ impl TraceDecay {
 
     /// Increments the project-local token counter by the given amount.
     pub async fn add_local_counter(&self, delta: u64) -> Result<()> {
+        let transaction = self.db.begin_write_transaction("add local counter").await?;
         let current = self.get_local_counter().await?;
         self.db
-            .set_metadata("local_counter", &(current + delta).to_string())
-            .await
+            .set_metadata_unguarded(
+                &transaction,
+                "local_counter",
+                &(current + delta).to_string(),
+            )
+            .await?;
+        transaction.commit().await
     }
 
     /// Returns all nodes under a directory prefix filtered by kinds.

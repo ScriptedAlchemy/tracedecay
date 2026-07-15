@@ -1,8 +1,8 @@
 use std::error::Error;
 
-use libsql::{Connection, Transaction, params};
+use libsql::{Connection, params};
 
-use super::{GlobalDb, ParseOffset, TranscriptBatch};
+use super::{GlobalDb, GlobalDbWriteTransaction, ParseOffset, TranscriptBatch};
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 
 #[derive(Debug, Clone, Copy)]
@@ -134,8 +134,8 @@ pub(super) async fn set_parse_offset(
 impl GlobalDb {
     pub(super) async fn begin_transcript_transaction(
         &self,
-    ) -> Result<Transaction, TranscriptPersistenceError> {
-        self.begin_authoritative_transaction()
+    ) -> Result<GlobalDbWriteTransaction<'_>, TranscriptPersistenceError> {
+        self.begin_write_transaction()
             .await
             .map_err(|error| TranscriptPersistenceError::storage("begin transcript batch", error))
     }
@@ -193,7 +193,6 @@ impl GlobalDb {
         expected_offset: ParseOffset,
         parse_offset: ParseOffset,
     ) -> Result<(), TranscriptPersistenceError> {
-        let _transaction = self.transaction.lock().await;
         let transaction = self.begin_transcript_transaction().await?;
         require_expected_offset(&transaction, parse_offset_path, expected_offset).await?;
         set_parse_offset(&transaction, parse_offset_path, parse_offset).await?;
@@ -255,7 +254,6 @@ impl GlobalDb {
         parse_offset: ParseOffset,
         policy: TranscriptWritePolicy,
     ) -> Result<(), TranscriptPersistenceError> {
-        let _transaction = self.transaction.lock().await;
         let transaction = self.begin_transcript_transaction().await?;
         let mut payload_rollback =
             crate::sessions::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
@@ -355,14 +353,17 @@ impl GlobalDb {
         &self,
         path: &str,
     ) -> Result<Option<ParseOffset>, TranscriptPersistenceError> {
-        let _transaction = self.transaction.lock().await;
         get_parse_offset(&self.conn, path).await
     }
 
     /// Saves the parse cursor for a transcript path. Best-effort.
     pub async fn set_parse_offset(&self, path: &str, offset: ParseOffset) {
-        let _transaction = self.transaction.lock().await;
-        let _ = Self::set_parse_offset_in_existing_tx(&self.conn, path, offset).await;
+        let Ok(transaction) = self.begin_transcript_transaction().await else {
+            return;
+        };
+        if Self::set_parse_offset_in_existing_tx(&transaction, path, offset).await {
+            let _ = transaction.commit().await;
+        }
     }
 
     /// Advances a transcript cursor without allowing an older sweep to move it backwards.
@@ -375,8 +376,15 @@ impl GlobalDb {
         path: &str,
         offset: ParseOffset,
     ) -> Result<(), String> {
-        let _transaction = self.transaction.lock().await;
-        Self::set_parse_offset_monotonic_in_existing_tx(&self.conn, path, offset).await
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| format!("failed to begin transcript parse offset: {error}"))?;
+        Self::set_parse_offset_monotonic_in_existing_tx(&transaction, path, offset).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("failed to commit transcript parse offset: {error}"))
     }
 
     async fn set_parse_offset_monotonic_in_existing_tx(

@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use super::artifacts::{dir_size, file_size, record_branch_db_artifacts, record_optional_artifact};
+use super::artifacts::{
+    dir_size, file_size, record_branch_db_artifacts, record_optional_artifact,
+    record_sqlite_family_sidecars,
+};
 use super::model::{
     RegistryStatus, SkippedPath, StoreArtifact, StoreBrand, StoreInventory, StoreRole, StoreStatus,
 };
@@ -147,6 +150,7 @@ async fn inspect_project_store(
             size_bytes: file_size(&db_path),
             path: db_path.clone(),
         });
+        record_sqlite_family_sidecars(&db_path, "graph_db_wal", "graph_db_shm", &mut artifacts);
         if !sqlite_quick_check(&db_path).await {
             statuses.push(StoreStatus::Corrupt);
         }
@@ -158,6 +162,12 @@ async fn inspect_project_store(
         data_dir,
         "sessions_db",
         SESSIONS_DB_FILENAME,
+        &mut artifacts,
+    );
+    record_sqlite_family_sidecars(
+        &data_dir.join(SESSIONS_DB_FILENAME),
+        "sessions_db_wal",
+        "sessions_db_shm",
         &mut artifacts,
     );
     record_optional_artifact(

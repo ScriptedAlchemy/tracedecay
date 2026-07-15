@@ -138,8 +138,8 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
         let target_project_id = project_id(&target_cg);
         target_cg
             .db()
-            .conn()
-            .execute(
+            .execute_write(
+                "seed dashboard project fact fixture",
                 "INSERT INTO memory_facts
                     (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",

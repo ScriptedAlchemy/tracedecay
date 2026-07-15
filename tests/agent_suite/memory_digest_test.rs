@@ -492,7 +492,7 @@ async fn fact_proposal_apply_then_refresh_regenerates_recorded_overlays() {
     .unwrap();
     let applied = apply_fact_proposal(
         &dashboard_root,
-        db.conn(),
+        &db,
         &records[0].proposal_id,
         Some("test".to_string()),
     )

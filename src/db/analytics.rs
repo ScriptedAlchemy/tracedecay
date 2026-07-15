@@ -40,14 +40,16 @@ impl Database {
     /// `idx_nodes_qualified_name` index for cross-run lookups by name,
     /// independent of content-hash IDs that change on edits.
     pub async fn get_nodes_by_qualified_name(&self, qname: &str) -> Result<Vec<Node>> {
+        let snapshot = self
+            .begin_isolated_read_snapshot("get_nodes_by_qualified_name")
+            .await?;
         // Exact match first — preserves the precise-lookup contract.
         let exact_sql = "SELECT id, kind, name, qualified_name, file_path,
                           start_line, end_line, start_column, end_column,
                           docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
                    FROM nodes
                    WHERE qualified_name = ?1";
-        let mut rows = self
-            .conn()
+        let mut rows = snapshot
             .query(exact_sql, params![qname])
             .await
             .map_err(|e| TraceDecayError::Database {
@@ -57,7 +59,9 @@ impl Database {
 
         let exact: Vec<Node> =
             collect_rows(&mut rows, row_to_node, "get_nodes_by_qualified_name").await?;
+        drop(rows);
         if !exact.is_empty() {
+            super::tx::commit(snapshot, "get_nodes_by_qualified_name").await?;
             return Ok(exact);
         }
 
@@ -95,20 +99,22 @@ impl Database {
                 qname.to_string(),
             )
         };
-        let mut fallback_rows = self
-            .conn()
+        let mut fallback_rows = snapshot
             .query(sql, params![pattern.as_str()])
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query by qualified_name fallback: {e}"),
                 operation: "get_nodes_by_qualified_name".to_string(),
             })?;
-        collect_rows(
+        let fallback = collect_rows(
             &mut fallback_rows,
             row_to_node,
             "get_nodes_by_qualified_name",
         )
-        .await
+        .await?;
+        drop(fallback_rows);
+        super::tx::commit(snapshot, "get_nodes_by_qualified_name").await?;
+        Ok(fallback)
     }
 
     /// Returns nodes ranked by edge count for a given edge kind and direction,

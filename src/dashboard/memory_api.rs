@@ -98,7 +98,12 @@ async fn largest_bank_fact_count(state: &DashboardState) -> Result<i64, String> 
 pub(crate) async fn repair_derived_memory(
     state: &DashboardState,
 ) -> Result<MemoryRepairStats, String> {
-    let store = MemoryStore::new(&state.mem_conn);
+    let writer = state
+        .mem_db
+        .writer_connection("repair dashboard memory")
+        .await
+        .map_err(|error| error.to_string())?;
+    let store = writer.memory_store();
     let mut missing_vectors_repaired = 0;
     loop {
         let repaired = store
@@ -124,7 +129,7 @@ pub(crate) async fn repair_derived_memory(
 
 /// Fact-store adoption funnel (seen vs. rated) for the dashboard memory
 /// status payload — mirrors the funnel computed in
-/// [`crate::tracedecay::TraceDecay::memory_status_for_conn`] for the MCP
+/// [`crate::tracedecay::TraceDecay::memory_status_for_db`] for the MCP
 /// `tracedecay_memory_status` tool, kept as a separate query here since the
 /// dashboard builds `MemoryStatus` from ad-hoc `query_i64` calls rather than
 /// sharing that connection-taking helper.
@@ -497,7 +502,7 @@ pub(crate) async fn fact_proposal_apply(
     let reviewer = body.and_then(|body| body.0.reviewer);
     match crate::automation::fact_proposals::apply_fact_proposal(
         &state.dashboard_root,
-        &state.mem_conn,
+        &state.mem_db,
         &proposal_id,
         reviewer,
     )
@@ -556,14 +561,25 @@ fn parse_fact_proposal_state(
     let Some(state) = state else {
         return Ok(None);
     };
-    match state.trim().to_ascii_lowercase().as_str() {
-        "" => Ok(None),
-        "pending" | "pending_approval" => Ok(Some(FactProposalState::PendingApproval)),
-        "applied" => Ok(Some(FactProposalState::Applied)),
-        "rejected" => Ok(Some(FactProposalState::Rejected)),
-        _ => Err(format!(
-            "unknown fact proposal state '{state}' (expected pending_approval, applied, rejected)"
-        )),
+    let state = state.trim().to_ascii_lowercase();
+    if state.is_empty() {
+        return Ok(None);
+    }
+    FactProposalState::parse(&state)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fact_proposal_state_filter_accepts_applying() {
+        assert_eq!(
+            parse_fact_proposal_state(Some("applying")).unwrap(),
+            Some(crate::automation::fact_proposals::FactProposalState::Applying)
+        );
     }
 }
 

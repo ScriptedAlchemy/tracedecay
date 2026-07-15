@@ -237,8 +237,8 @@ async fn read_only_sqlite_snapshot_includes_committed_data() {
         .await
         .unwrap();
     writer
-        .conn()
-        .execute_batch(
+        .execute_write_batch(
+            "seed branch snapshot fixture",
             "CREATE TABLE snapshot_probe(value TEXT NOT NULL);
              INSERT INTO snapshot_probe(value) VALUES ('committed-in-wal');",
         )

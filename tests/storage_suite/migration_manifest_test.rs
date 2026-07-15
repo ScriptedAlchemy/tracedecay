@@ -49,6 +49,12 @@ fn canonical_temp_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn sqlite_sidecar(database: &Path, suffix: &str) -> PathBuf {
+    let mut path = database.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
 fn write_valid_branch_meta(path: &Path) {
     fs::write(
         path,
@@ -452,7 +458,7 @@ fn verify_manifest_validates_profile_store_manifest_registry_records() {
 }
 
 #[tokio::test]
-async fn verify_manifest_accepts_logically_equal_sqlite_artifacts_with_different_bytes() {
+async fn verify_manifest_rejects_sqlite_target_without_verified_snapshot() {
     let dir = TempDir::new().unwrap();
     let root = canonical_temp_path(dir.path());
     let project = root.join("repo");
@@ -479,14 +485,6 @@ async fn verify_manifest_accepts_logically_equal_sqlite_artifacts_with_different
         .unwrap();
     target
         .insert_node(&sample_node("node-extra", "deleted_later", "src/lib.rs"))
-        .await
-        .unwrap();
-    target
-        .conn()
-        .execute(
-            "DELETE FROM nodes WHERE id = ?1",
-            libsql::params!["node-extra"],
-        )
         .await
         .unwrap();
     target
@@ -561,12 +559,19 @@ async fn verify_manifest_accepts_logically_equal_sqlite_artifacts_with_different
 
     let report = verify_migration_manifest(&manifest);
 
-    assert!(report.apply_supported, "{:?}", report.issues);
-    assert!(report.issues.is_empty(), "{:?}", report.issues);
+    assert!(!report.apply_supported);
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.contains("verified SQLite migration backup is missing")),
+        "{:?}",
+        report.issues
+    );
 }
 
-#[test]
-fn apply_migration_manifest_stops_at_verified_before_cutover() {
+#[tokio::test]
+async fn apply_migration_manifest_stops_at_verified_before_cutover() {
     let dir = TempDir::new().unwrap();
     let root = canonical_temp_path(dir.path());
     let manifest_path = root.join("manifest.json");
@@ -625,7 +630,7 @@ fn apply_migration_manifest_stops_at_verified_before_cutover() {
     .unwrap();
     save_manifest(&manifest).unwrap();
 
-    apply_migration_manifest(&mut manifest).unwrap();
+    apply_migration_manifest(&mut manifest).await.unwrap();
 
     assert!(
         manifest
@@ -639,8 +644,8 @@ fn apply_migration_manifest_stops_at_verified_before_cutover() {
     assert!(!verify.apply_supported, "{:?}", verify.issues);
 }
 
-#[test]
-fn finalize_migration_apply_marks_cutover_complete() {
+#[tokio::test]
+async fn finalize_migration_apply_marks_cutover_complete() {
     let dir = TempDir::new().unwrap();
     let root = canonical_temp_path(dir.path());
     let manifest_path = root.join("manifest.json");
@@ -682,7 +687,7 @@ fn finalize_migration_apply_marks_cutover_complete() {
         },
     )
     .unwrap();
-    apply_migration_manifest(&mut manifest).unwrap();
+    apply_migration_manifest(&mut manifest).await.unwrap();
     tracedecay::storage::write_enrollment_marker(
         &project,
         &tracedecay::storage::EnrollmentMarker {
@@ -703,8 +708,8 @@ fn finalize_migration_apply_marks_cutover_complete() {
     assert!(verify_migration_manifest(&manifest).apply_supported);
 }
 
-#[test]
-fn apply_migration_manifest_rejects_target_parent_escape() {
+#[tokio::test]
+async fn apply_migration_manifest_rejects_target_parent_escape() {
     let dir = TempDir::new().unwrap();
     let root = canonical_temp_path(dir.path());
     let manifest_path = root.join("manifest.json");
@@ -749,7 +754,7 @@ fn apply_migration_manifest_rejects_target_parent_escape() {
     manifest.artifacts[0].target_path = Some(escaped_target.clone());
     save_manifest(&manifest).unwrap();
 
-    let err = apply_migration_manifest(&mut manifest).unwrap_err();
+    let err = apply_migration_manifest(&mut manifest).await.unwrap_err();
 
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert!(
@@ -886,6 +891,54 @@ fn export_profile_store_requires_exclusive_profile_lifecycle_cutover() {
     assert!(!target.exists());
 }
 
+#[tokio::test]
+async fn apply_migration_manifest_requires_exclusive_source_profile_lifecycle() {
+    let dir = TempDir::new().unwrap();
+    let root = canonical_temp_path(dir.path());
+    let project = root.join("repo");
+    let data_dir = project.join(".tracedecay");
+    let destination_profile = root.join("destination-profile");
+    let graph_db = data_dir.join("tracedecay.db");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(&graph_db, b"graph").unwrap();
+    let mut inventory = empty_inventory();
+    inventory.stores.push(StoreInventory {
+        project_root: project,
+        data_dir: data_dir.clone(),
+        db_path: graph_db.clone(),
+        brand: StoreBrand::TraceDecay,
+        role: StoreRole::CodeProjectStore,
+        registry_status: RegistryStatus::Unregistered,
+        size_bytes: 5,
+        statuses: vec![StoreStatus::Ok],
+        artifacts: vec![StoreArtifact {
+            kind: "graph_db".to_string(),
+            path: graph_db,
+            size_bytes: 5,
+        }],
+    });
+    let mut manifest = build_plan_manifest(
+        inventory,
+        MigrationPlanOptions {
+            manifest_path: root.join("manifest.json"),
+            migration_id: "mig_source_lock".to_string(),
+            tracedecay_version: "0.0.2".to_string(),
+            created_at_unix: 1_800_000_000,
+            confirmation_token: "confirm-mig_source_lock".to_string(),
+            target_profile_root: destination_profile.clone(),
+            project_id: "proj_123".to_string(),
+        },
+    )
+    .unwrap();
+    save_manifest(&manifest).unwrap();
+    let _lease = acquire_exclusive_for_profile(&data_dir, "source profile owner").unwrap();
+
+    let error = apply_migration_manifest(&mut manifest).await.unwrap_err();
+
+    assert!(error.to_string().contains("source profile owner"));
+    assert!(!destination_profile.join("projects/proj_123").exists());
+}
+
 #[test]
 fn cleanup_sources_requires_exclusive_profile_lifecycle_cutover() {
     let dir = TempDir::new().unwrap();
@@ -985,6 +1038,201 @@ fn rollback_rejects_cutover_incomplete_state() {
         err.to_string().contains("cutover") && err.to_string().contains("incomplete"),
         "unexpected error: {err}"
     );
+}
+
+#[tokio::test]
+async fn apply_and_backup_preserve_wal_only_rows_for_graph_and_sessions_families() {
+    let dir = TempDir::new().unwrap();
+    let root = canonical_temp_path(dir.path());
+    let project = root.join("repo");
+    let data_dir = project.join(".tracedecay");
+    let destination_profile = root.join("destination-profile");
+    let graph_db_path = data_dir.join("tracedecay.db");
+    let sessions_db_path = data_dir.join("sessions.db");
+    fs::create_dir_all(&data_dir).unwrap();
+
+    let graph_database = libsql::Builder::new_local(&graph_db_path)
+        .build()
+        .await
+        .unwrap();
+    let graph_connection = graph_database.connect().unwrap();
+    graph_connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE wal_probe (value TEXT NOT NULL);
+             INSERT INTO wal_probe VALUES ('graph-wal-row');
+             CREATE TABLE scale_probe (value INTEGER NOT NULL);
+             WITH RECURSIVE values_to_insert(value) AS (
+                 SELECT 1 UNION ALL SELECT value + 1 FROM values_to_insert WHERE value < 50000
+             ) INSERT INTO scale_probe SELECT value FROM values_to_insert;",
+        )
+        .await
+        .unwrap();
+    let sessions_database = libsql::Builder::new_local(&sessions_db_path)
+        .build()
+        .await
+        .unwrap();
+    let sessions_connection = sessions_database.connect().unwrap();
+    sessions_connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE wal_probe (value TEXT NOT NULL);
+             INSERT INTO wal_probe VALUES ('sessions-wal-row');",
+        )
+        .await
+        .unwrap();
+    assert!(sqlite_sidecar(&graph_db_path, "-wal").is_file());
+    assert!(sqlite_sidecar(&graph_db_path, "-shm").is_file());
+    assert!(sqlite_sidecar(&sessions_db_path, "-wal").is_file());
+    assert!(sqlite_sidecar(&sessions_db_path, "-shm").is_file());
+
+    let mut artifacts = Vec::new();
+    for (kind, path) in [
+        ("graph_db", &graph_db_path),
+        ("sessions_db", &sessions_db_path),
+    ] {
+        artifacts.push(StoreArtifact {
+            kind: kind.to_string(),
+            path: path.clone(),
+            size_bytes: fs::metadata(path).unwrap().len(),
+        });
+        for (suffix, sidecar_kind) in [
+            ("-wal", format!("{kind}_wal")),
+            ("-shm", format!("{kind}_shm")),
+        ] {
+            let sidecar = sqlite_sidecar(path, suffix);
+            artifacts.push(StoreArtifact {
+                kind: sidecar_kind,
+                size_bytes: fs::metadata(&sidecar).unwrap().len(),
+                path: sidecar,
+            });
+        }
+    }
+    let inventory = MigrationInventory {
+        stores: vec![StoreInventory {
+            project_root: project.clone(),
+            data_dir: data_dir.clone(),
+            db_path: graph_db_path.clone(),
+            brand: StoreBrand::TraceDecay,
+            role: StoreRole::CodeProjectStore,
+            registry_status: RegistryStatus::Unregistered,
+            size_bytes: 0,
+            statuses: vec![StoreStatus::Ok],
+            artifacts,
+        }],
+        skipped: Vec::new(),
+        global_db: None,
+    };
+    let manifest_path = root.join("manifest.json");
+    let mut manifest = build_plan_manifest(
+        inventory,
+        MigrationPlanOptions {
+            manifest_path: manifest_path.clone(),
+            migration_id: "mig_wal_family".to_string(),
+            tracedecay_version: "0.0.2".to_string(),
+            created_at_unix: 1_800_000_000,
+            confirmation_token: "confirm-mig_wal_family".to_string(),
+            target_profile_root: destination_profile.clone(),
+            project_id: "proj_123".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(manifest.artifacts.len(), 2);
+    assert!(
+        manifest
+            .artifacts
+            .iter()
+            .all(|artifact| !artifact.kind.ends_with("_wal") && !artifact.kind.ends_with("_shm"))
+    );
+    save_manifest(&manifest).unwrap();
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        apply_migration_manifest(&mut manifest),
+    )
+    .await
+    .expect("SQLite migration regressed beyond the bounded snapshot/hash path")
+    .unwrap();
+
+    let target_root = destination_profile.join("projects/proj_123");
+    let backup_root = destination_profile.join("migration-backups/mig_wal_family");
+    for root in [&target_root, &backup_root] {
+        for database in ["tracedecay.db", "sessions.db"] {
+            assert!(root.join(database).is_file());
+            assert!(!root.join(format!("{database}-wal")).exists());
+            assert!(!root.join(format!("{database}-shm")).exists());
+        }
+    }
+    let target_graph = libsql::Builder::new_local(target_root.join("tracedecay.db"))
+        .build()
+        .await
+        .unwrap();
+    let target_graph = target_graph.connect().unwrap();
+    let mut rows = target_graph
+        .query("SELECT COUNT(*) FROM scale_probe", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        50_000
+    );
+    for root in [&target_root, &backup_root] {
+        for (database, expected) in [
+            ("tracedecay.db", "graph-wal-row"),
+            ("sessions.db", "sessions-wal-row"),
+        ] {
+            let database = libsql::Builder::new_local(root.join(database))
+                .build()
+                .await
+                .unwrap();
+            let connection = database.connect().unwrap();
+            let mut rows = connection.query("PRAGMA quick_check", ()).await.unwrap();
+            let row = rows.next().await.unwrap().unwrap();
+            assert_eq!(row.get::<String>(0).unwrap(), "ok");
+            let mut rows = connection
+                .query("SELECT value FROM wal_probe", ())
+                .await
+                .unwrap();
+            let row = rows.next().await.unwrap().unwrap();
+            assert_eq!(row.get::<String>(0).unwrap(), expected);
+        }
+    }
+
+    // A crash can publish a durable file before persisting the next state. The
+    // next apply must verify and advance those files instead of overwriting or
+    // rejecting them.
+    for artifact in &mut manifest.artifacts {
+        if is_sqlite_test_artifact(&artifact.kind) {
+            artifact.state = ArtifactState::Locked;
+        }
+    }
+    for artifact in &mut manifest.backup_artifacts {
+        if is_sqlite_test_artifact(&artifact.kind) {
+            artifact.state = ArtifactState::Locked;
+        }
+    }
+    save_manifest(&manifest).unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        apply_migration_manifest(&mut manifest),
+    )
+    .await
+    .expect("crash recovery regressed beyond the bounded verify/hash path")
+    .unwrap();
+    assert!(
+        manifest
+            .artifacts
+            .iter()
+            .chain(&manifest.backup_artifacts)
+            .all(|artifact| !is_sqlite_test_artifact(&artifact.kind)
+                || artifact.state == ArtifactState::Verified)
+    );
+}
+
+fn is_sqlite_test_artifact(kind: &str) -> bool {
+    matches!(kind, "graph_db" | "sessions_db" | "branch_graph_db")
 }
 
 #[test]

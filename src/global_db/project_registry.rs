@@ -180,7 +180,7 @@ fn native_project_path_alias_decode_error(error: String) -> String {
 pub(super) async fn migrate_project_rows_to_canonical_keys(
     db: &GlobalDb,
 ) -> Result<(), libsql::Error> {
-    let transaction = db.begin_authoritative_transaction().await?;
+    let transaction = db.begin_write_transaction().await?;
     let mut rows = transaction
         .query("SELECT path, tokens_saved FROM projects", ())
         .await?;
@@ -414,9 +414,11 @@ async fn legacy_code_project_path(
             format!("project '{project_id}' has ambiguous legacy current roots"),
         ));
     }
-    let _writer = db.transaction.lock().await;
-    let updated = db
-        .conn
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let updated = transaction
         .execute(
             "UPDATE code_projects
              SET primary_root_platform = ?1, primary_root_bytes = ?2,
@@ -439,6 +441,10 @@ async fn legacy_code_project_path(
             format!("project '{project_id}' changed while resolving its legacy root"),
         ));
     }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
     Ok(path)
 }
 

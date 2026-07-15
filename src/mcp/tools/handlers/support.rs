@@ -355,16 +355,9 @@ mod tests {
         db: &GlobalDb,
         projects: &[TestProjectSeed],
     ) -> std::result::Result<(), libsql::Error> {
-        let conn = db.dashboard_connection();
-        conn.execute("BEGIN IMMEDIATE", ()).await?;
-        if let Err(err) = seed_code_project_registry_rows_in_tx(&conn, projects).await {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(err);
-        }
-        if let Err(err) = conn.execute("COMMIT", ()).await {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(err);
-        }
+        let transaction = db.begin_write_transaction().await?;
+        seed_code_project_registry_rows_in_tx(&transaction, projects).await?;
+        transaction.commit().await?;
         Ok(())
     }
 

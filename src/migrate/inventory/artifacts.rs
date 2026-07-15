@@ -77,12 +77,26 @@ pub(super) async fn record_branch_db_artifacts(
             size_bytes: file_size(&path),
             path: path.clone(),
         });
-        record_sqlite_sidecar_artifact(&path, "-wal", "branch_graph_db_wal", artifacts);
-        record_sqlite_sidecar_artifact(&path, "-shm", "branch_graph_db_shm", artifacts);
+        record_sqlite_family_sidecars(
+            &path,
+            "branch_graph_db_wal",
+            "branch_graph_db_shm",
+            artifacts,
+        );
         if !sqlite_quick_check(&path).await && !statuses.contains(&StoreStatus::Corrupt) {
             statuses.push(StoreStatus::Corrupt);
         }
     }
+}
+
+pub(super) fn record_sqlite_family_sidecars(
+    db_path: &Path,
+    wal_kind: &str,
+    shm_kind: &str,
+    artifacts: &mut Vec<StoreArtifact>,
+) {
+    record_sqlite_sidecar_artifact(db_path, "-wal", wal_kind, artifacts);
+    record_sqlite_sidecar_artifact(db_path, "-shm", shm_kind, artifacts);
 }
 
 fn record_sqlite_sidecar_artifact(

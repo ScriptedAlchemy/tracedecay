@@ -77,54 +77,57 @@ impl Database {
         &self,
         pairs: &[RedundancyPairWrite<'_>],
     ) -> Result<usize> {
-        if pairs.is_empty() {
+        self.publish_redundancy_cache(&[], pairs).await
+    }
+
+    /// Atomically publishes every fingerprint used by a redundancy scan and
+    /// the pairs computed from that exact set. CPU parsing and pair scoring
+    /// happen before this method acquires the writer lane.
+    pub async fn publish_redundancy_cache(
+        &self,
+        fingerprints: &[(&str, &crate::redundancy::Fingerprint)],
+        pairs: &[RedundancyPairWrite<'_>],
+    ) -> Result<usize> {
+        self.publish_redundancy_cache_with_pause(fingerprints, pairs, std::future::ready(()))
+            .await
+    }
+
+    async fn publish_redundancy_cache_with_pause<F>(
+        &self,
+        fingerprints: &[(&str, &crate::redundancy::Fingerprint)],
+        pairs: &[RedundancyPairWrite<'_>],
+        before_pairs: F,
+    ) -> Result<usize>
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        if fingerprints.is_empty() && pairs.is_empty() {
             return Ok(0);
         }
 
-        let tx = self
-            .conn()
-            .transaction()
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to begin transaction: {e}"),
-                operation: "upsert_redundancy_pairs".to_string(),
-            })?;
-
-        let mut written = 0usize;
-        for pair in pairs {
-            tx.execute(
-                "INSERT OR REPLACE INTO redundancy_pairs
-                     (node_a_id, node_b_id, source_hash_a, source_hash_b,
-                      ranking_score, similarity, vector_cosine, overlap_kind,
-                      severity, generic_helper_downranked, computed_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![
-                    pair.node_a_id,
-                    pair.node_b_id,
-                    pair.source_hash_a,
-                    pair.source_hash_b,
-                    pair.ranking_score,
-                    pair.similarity,
-                    pair.vector_cosine,
-                    pair.overlap_kind,
-                    pair.severity,
-                    i64::from(pair.generic_helper_downranked),
-                    pair.computed_at,
-                ],
+        let transaction = self
+            .begin_write_transaction("publish_redundancy_cache")
+            .await?;
+        for (node_id, fingerprint) in fingerprints {
+            super::fingerprints::upsert_fingerprint_in_transaction(
+                &transaction,
+                node_id,
+                fingerprint,
             )
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to upsert redundancy pair: {e}"),
-                operation: "upsert_redundancy_pairs".to_string(),
-            })?;
-            written += 1;
+            .await?;
         }
-
-        tx.commit().await.map_err(|e| TraceDecayError::Database {
-            message: format!("failed to commit transaction: {e}"),
-            operation: "upsert_redundancy_pairs".to_string(),
-        })?;
-        Ok(written)
+        before_pairs.await;
+        for pair in pairs {
+            upsert_pair_in_transaction(&transaction, pair).await?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to commit redundancy cache publication: {error}"),
+                operation: "publish_redundancy_cache".to_string(),
+            })?;
+        Ok(pairs.len())
     }
 
     /// Return the cached duplicate pairs that mention `node_id`, filtered to
@@ -177,6 +180,39 @@ impl Database {
     }
 }
 
+async fn upsert_pair_in_transaction(
+    transaction: &libsql::Transaction,
+    pair: &RedundancyPairWrite<'_>,
+) -> Result<()> {
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO redundancy_pairs
+                 (node_a_id, node_b_id, source_hash_a, source_hash_b,
+                  ranking_score, similarity, vector_cosine, overlap_kind,
+                  severity, generic_helper_downranked, computed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                pair.node_a_id,
+                pair.node_b_id,
+                pair.source_hash_a,
+                pair.source_hash_b,
+                pair.ranking_score,
+                pair.similarity,
+                pair.vector_cosine,
+                pair.overlap_kind,
+                pair.severity,
+                i64::from(pair.generic_helper_downranked),
+                pair.computed_at,
+            ],
+        )
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to upsert redundancy pair: {error}"),
+            operation: "publish_redundancy_cache".to_string(),
+        })?;
+    Ok(())
+}
+
 fn row_to_pair(row: &libsql::Row) -> Result<RedundancyPairRow> {
     let get_err = |field: &str, e: libsql::Error| TraceDecayError::Database {
         message: format!("failed to read redundancy pair {field}: {e}"),
@@ -196,4 +232,117 @@ fn row_to_pair(row: &libsql::Row) -> Result<RedundancyPairRow> {
         generic_helper_downranked: downranked != 0,
         computed_at: row.get(8).map_err(|e| get_err("computed_at", e))?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::DatabaseAuthority;
+    use crate::redundancy::Fingerprint;
+
+    fn fingerprint(source_hash: &str) -> Fingerprint {
+        Fingerprint {
+            ast_hash: format!("ast-{source_hash}"),
+            cfg_hash: format!("cfg-{source_hash}"),
+            call_seq_hash: format!("calls-{source_hash}"),
+            shingles: vec![1, 2, 3],
+            body_tokens: 3,
+            source_hash: source_hash.to_string(),
+        }
+    }
+
+    fn pair<'a>(
+        source_hash_a: &'a str,
+        source_hash_b: &'a str,
+        score: f64,
+    ) -> RedundancyPairWrite<'a> {
+        RedundancyPairWrite {
+            node_a_id: "node-a",
+            node_b_id: "node-b",
+            source_hash_a,
+            source_hash_b,
+            ranking_score: score,
+            similarity: score,
+            vector_cosine: score,
+            overlap_kind: "structural",
+            severity: "likely",
+            generic_helper_downranked: false,
+            computed_at: score as i64,
+        }
+    }
+
+    async fn assert_generation(db: &Database, source_hash_a: &str, ranking_score: f64) {
+        let fingerprint = db.get_fingerprint("node-a").await.unwrap().unwrap();
+        assert_eq!(fingerprint.source_hash, source_hash_a);
+        let pairs = db.fresh_redundancy_pairs_for_node("node-a").await.unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].ranking_score, ranking_score);
+    }
+
+    #[tokio::test]
+    async fn cancelled_publication_never_exposes_a_mixed_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("graph.db");
+        let authority = DatabaseAuthority::acquire_test(&path, "redundancy publication").unwrap();
+        let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+        {
+            db.writer_connection("seed redundancy publication")
+                .await
+                .unwrap()
+                .execute_batch(
+                    "INSERT INTO nodes
+                         (id, kind, name, qualified_name, file_path, start_line, end_line,
+                          start_column, end_column, updated_at)
+                     VALUES
+                         ('node-a', 'function', 'a', 'a', 'a.rs', 1, 2, 0, 1, 0),
+                         ('node-b', 'function', 'b', 'b', 'b.rs', 1, 2, 0, 1, 0);",
+                )
+                .await
+                .unwrap();
+        }
+
+        let old_a = fingerprint("old-a");
+        let old_b = fingerprint("old-b");
+        db.publish_redundancy_cache(
+            &[("node-a", &old_a), ("node-b", &old_b)],
+            &[pair("old-a", "old-b", 1.0)],
+        )
+        .await
+        .unwrap();
+
+        let task_db = db.clone();
+        let (fingerprints_written, fingerprints_written_rx) = tokio::sync::oneshot::channel();
+        let (resume, resume_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let new_a = fingerprint("new-a");
+            let new_b = fingerprint("new-b");
+            task_db
+                .publish_redundancy_cache_with_pause(
+                    &[("node-a", &new_a), ("node-b", &new_b)],
+                    &[pair("new-a", "new-b", 2.0)],
+                    async move {
+                        let _ = fingerprints_written.send(());
+                        let _ = resume_rx.await;
+                    },
+                )
+                .await
+        });
+        fingerprints_written_rx.await.unwrap();
+
+        assert_generation(&db, "old-a", 1.0).await;
+        task.abort();
+        let _ = task.await;
+        drop(resume);
+        assert_generation(&db, "old-a", 1.0).await;
+
+        let new_a = fingerprint("new-a");
+        let new_b = fingerprint("new-b");
+        db.publish_redundancy_cache(
+            &[("node-a", &new_a), ("node-b", &new_b)],
+            &[pair("new-a", "new-b", 2.0)],
+        )
+        .await
+        .unwrap();
+        assert_generation(&db, "new-a", 2.0).await;
+    }
 }

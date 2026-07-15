@@ -276,6 +276,10 @@ async fn inventory_records_project_store_sidecar_artifacts() {
     fs::create_dir_all(&root).unwrap();
     make_project_store(&root);
     fs::write(data_dir.join("sessions.db"), b"sessions").unwrap();
+    fs::write(data_dir.join("tracedecay.db-wal"), b"").unwrap();
+    fs::write(data_dir.join("tracedecay.db-shm"), b"").unwrap();
+    fs::write(data_dir.join("sessions.db-wal"), b"session wal").unwrap();
+    fs::write(data_dir.join("sessions.db-shm"), b"session shm").unwrap();
     fs::write(data_dir.join("branch-meta.json"), b"{}").unwrap();
     fs::write(data_dir.join("config.json"), b"{}").unwrap();
     fs::write(data_dir.join("store_manifest.json"), b"{}").unwrap();
@@ -300,7 +304,11 @@ async fn inventory_records_project_store_sidecar_artifacts() {
 
     for kind in [
         "graph_db",
+        "graph_db_wal",
+        "graph_db_shm",
         "sessions_db",
+        "sessions_db_wal",
+        "sessions_db_shm",
         "branch_meta",
         "config",
         "store_manifest",

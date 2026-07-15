@@ -586,8 +586,14 @@ impl TraceDecay {
         if let Err(TraceDecayError::SyncLock { .. }) = sync_result {
             return Ok(branch::BranchAddOutcome::Deferred);
         } else if let Err(e) = sync_result {
-            branch::rollback_prepared_branch_tracking(tracedecay_dir, &prepared);
-            return Err(e);
+            return match branch::rollback_prepared_branch_tracking(tracedecay_dir, &prepared) {
+                Ok(()) => Err(e),
+                Err(rollback_error) => Err(TraceDecayError::Config {
+                    message: format!(
+                        "branch sync failed: {e}; published branch rollback also failed: {rollback_error}"
+                    ),
+                }),
+            };
         }
 
         branch::finalize_prepared_branch_tracking(tracedecay_dir, &prepared);
@@ -1115,12 +1121,12 @@ async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventor
     let (sessions, messages, lcm_rows) = if let Some(db) =
         crate::global_db::GlobalDb::open_read_only_at(&layout.sessions_db_path).await
     {
-        let conn = db.dashboard_connection();
+        let conn = db.read_connection();
         let counts = (
-            count_rows(&conn, "sessions").await,
-            count_rows(&conn, "session_messages").await,
-            count_rows(&conn, "lcm_raw_messages").await
-                + count_rows(&conn, "lcm_summary_nodes").await,
+            count_rows(conn, "sessions").await,
+            count_rows(conn, "session_messages").await,
+            count_rows(conn, "lcm_raw_messages").await
+                + count_rows(conn, "lcm_summary_nodes").await,
         );
         db.close();
         counts

@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 use libsql::params;
 
-use super::connection::Database;
+use super::connection::{Database, DatabaseWriteTransaction};
 use super::rows::row_to_node;
 use super::sql::{
     build_qmark_placeholders, collect_rows, opt_str, push_int, push_opt_quoted, push_quoted,
@@ -12,7 +12,17 @@ use crate::types::*;
 impl Database {
     /// Inserts or replaces a single node.
     pub async fn insert_node(&self, node: &Node) -> Result<()> {
-        self.conn()
+        let transaction = self.begin_write_transaction("insert_node").await?;
+        self.insert_node_unguarded(&transaction, node).await?;
+        transaction.commit().await
+    }
+
+    pub(crate) async fn insert_node_unguarded(
+        &self,
+        transaction: &DatabaseWriteTransaction<'_>,
+        node: &Node,
+    ) -> Result<()> {
+        transaction
             .execute(
                 "INSERT OR REPLACE INTO nodes
                 (id, kind, name, qualified_name, file_path,
@@ -108,8 +118,6 @@ impl Database {
         let mut sql = String::with_capacity(
             nodes_ref.len() * 400 + surviving_edges.len() * 120 + files.len() * 120,
         );
-        sql.push_str("BEGIN;\n");
-
         // Nodes
         for chunk in nodes_ref.chunks(200) {
             sql.push_str(
@@ -225,10 +233,18 @@ impl Database {
             sql.push_str(";\n");
         }
 
-        sql.push_str("COMMIT;\n");
+        let transaction = self.begin_write_transaction("insert_all").await?;
+        self.insert_all_sql_unguarded(&transaction, &sql).await?;
+        transaction.commit().await
+    }
 
-        self.conn()
-            .execute_batch(&sql)
+    async fn insert_all_sql_unguarded(
+        &self,
+        transaction: &DatabaseWriteTransaction<'_>,
+        sql: &str,
+    ) -> Result<()> {
+        transaction
+            .execute_batch(sql)
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to bulk insert: {e}"),
@@ -244,9 +260,22 @@ impl Database {
             return Ok(());
         }
 
-        self.with_batch_transaction("insert_nodes", async {
-            let stmt = self.conn()
-                .prepare(
+        let transaction = self.begin_write_transaction("insert_nodes").await?;
+        self.insert_nodes_unguarded(&transaction, nodes).await?;
+        transaction.commit().await
+    }
+
+    pub(crate) async fn insert_nodes_unguarded(
+        &self,
+        transaction: &DatabaseWriteTransaction<'_>,
+        nodes: &[Node],
+    ) -> Result<()> {
+        if nodes.is_empty() {
+            return Ok(());
+        }
+
+        let stmt = transaction
+            .prepare(
                     "INSERT OR REPLACE INTO nodes \
                      (id,kind,name,qualified_name,file_path,\
                      start_line,end_line,start_column,end_column,\
@@ -261,46 +290,45 @@ impl Database {
                     operation: "insert_nodes".to_string(),
                 })?;
 
-            for node in nodes {
-                let params = params![
-                    node.id.as_str(),
-                    node.kind.as_str(),
-                    node.name.as_str(),
-                    node.qualified_name.as_str(),
-                    node.file_path.as_str(),
-                    i64::from(node.start_line),
-                    i64::from(node.end_line),
-                    i64::from(node.start_column),
-                    i64::from(node.end_column),
-                    opt_str(node.docstring.as_deref()),
-                    opt_str(node.signature.as_deref()),
-                    node.visibility.as_str(),
-                    i64::from(node.is_async),
-                    i64::from(node.branches),
-                    i64::from(node.loops),
-                    i64::from(node.returns),
-                    i64::from(node.max_nesting),
-                    i64::from(node.unsafe_blocks),
-                    i64::from(node.unchecked_calls),
-                    i64::from(node.assertions),
-                    node.updated_at as i64,
-                    i64::from(node.attrs_start_line),
-                    opt_str(node.parent_id.as_deref()),
-                ];
-                let insert_result = stmt.execute(params).await;
-                if let Err(e) = insert_result {
-                    stmt.reset();
-                    return Err(TraceDecayError::Database {
-                        message: format!("failed to insert node: {e}"),
-                        operation: "insert_nodes".to_string(),
-                    });
-                }
+        for node in nodes {
+            let params = params![
+                node.id.as_str(),
+                node.kind.as_str(),
+                node.name.as_str(),
+                node.qualified_name.as_str(),
+                node.file_path.as_str(),
+                i64::from(node.start_line),
+                i64::from(node.end_line),
+                i64::from(node.start_column),
+                i64::from(node.end_column),
+                opt_str(node.docstring.as_deref()),
+                opt_str(node.signature.as_deref()),
+                node.visibility.as_str(),
+                i64::from(node.is_async),
+                i64::from(node.branches),
+                i64::from(node.loops),
+                i64::from(node.returns),
+                i64::from(node.max_nesting),
+                i64::from(node.unsafe_blocks),
+                i64::from(node.unchecked_calls),
+                i64::from(node.assertions),
+                node.updated_at as i64,
+                i64::from(node.attrs_start_line),
+                opt_str(node.parent_id.as_deref()),
+            ];
+            let insert_result = stmt.execute(params).await;
+            if let Err(e) = insert_result {
                 stmt.reset();
+                return Err(TraceDecayError::Database {
+                    message: format!("failed to insert node: {e}"),
+                    operation: "insert_nodes".to_string(),
+                });
             }
+            stmt.reset();
+        }
 
-            Ok(())
-        })
-        .await
+        drop(stmt);
+        Ok(())
     }
 
     /// Retrieves a node by its unique ID, returning `None` if not found.
@@ -453,6 +481,25 @@ impl Database {
 
     /// Deletes all nodes (and cascading edges, unresolved refs, vectors) for a file.
     pub async fn delete_nodes_by_file(&self, file_path: &str) -> Result<()> {
+        let transaction = self.begin_write_transaction("delete_nodes_by_file").await?;
+        self.delete_nodes_by_file_unguarded(&transaction, file_path)
+            .await?;
+        transaction.commit().await
+    }
+
+    pub(crate) async fn delete_nodes_by_file_unguarded(
+        &self,
+        transaction: &DatabaseWriteTransaction<'_>,
+        file_path: &str,
+    ) -> Result<()> {
+        Self::delete_nodes_by_file_in_transaction(transaction, file_path).await?;
+        Ok(())
+    }
+
+    pub(super) async fn delete_nodes_by_file_in_transaction(
+        transaction: &libsql::Transaction,
+        file_path: &str,
+    ) -> Result<()> {
         debug_assert!(
             !file_path.is_empty(),
             "delete_nodes_by_file called with empty file_path"
@@ -463,8 +510,7 @@ impl Database {
         );
         // Gather node IDs for the file first.
         let node_ids: Vec<String> = {
-            let mut rows = self
-                .conn()
+            let mut rows = transaction
                 .query(
                     "SELECT id FROM nodes WHERE file_path = ?1",
                     params![file_path],
@@ -495,57 +541,48 @@ impl Database {
             return Ok(());
         }
 
-        let tx = self
-            .conn()
-            .transaction()
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to begin transaction: {e}"),
-                operation: "delete_nodes_by_file".to_string(),
-            })?;
-
         for id in &node_ids {
-            tx.execute(
-                "DELETE FROM edges WHERE source = ?1 OR target = ?1",
-                params![id.as_str()],
-            )
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to delete edges: {e}"),
-                operation: "delete_nodes_by_file".to_string(),
-            })?;
+            transaction
+                .execute(
+                    "DELETE FROM edges WHERE source = ?1 OR target = ?1",
+                    params![id.as_str()],
+                )
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to delete edges: {e}"),
+                    operation: "delete_nodes_by_file".to_string(),
+                })?;
 
-            tx.execute(
-                "DELETE FROM unresolved_refs WHERE from_node_id = ?1",
-                params![id.as_str()],
-            )
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to delete unresolved refs: {e}"),
-                operation: "delete_nodes_by_file".to_string(),
-            })?;
+            transaction
+                .execute(
+                    "DELETE FROM unresolved_refs WHERE from_node_id = ?1",
+                    params![id.as_str()],
+                )
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to delete unresolved refs: {e}"),
+                    operation: "delete_nodes_by_file".to_string(),
+                })?;
 
-            tx.execute(
-                "DELETE FROM vectors WHERE node_id = ?1",
-                params![id.as_str()],
-            )
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to delete vectors: {e}"),
-                operation: "delete_nodes_by_file".to_string(),
-            })?;
+            transaction
+                .execute(
+                    "DELETE FROM vectors WHERE node_id = ?1",
+                    params![id.as_str()],
+                )
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to delete vectors: {e}"),
+                    operation: "delete_nodes_by_file".to_string(),
+                })?;
         }
 
-        tx.execute("DELETE FROM nodes WHERE file_path = ?1", params![file_path])
+        transaction
+            .execute("DELETE FROM nodes WHERE file_path = ?1", params![file_path])
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to delete nodes: {e}"),
                 operation: "delete_nodes_by_file".to_string(),
             })?;
-
-        tx.commit().await.map_err(|e| TraceDecayError::Database {
-            message: format!("failed to commit transaction: {e}"),
-            operation: "delete_nodes_by_file".to_string(),
-        })
+        Ok(())
     }
 }

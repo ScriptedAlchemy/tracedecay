@@ -271,9 +271,9 @@ async fn savings_overview(gdb: &GlobalDb, db_path: &str) -> Value {
 
     // Legacy lifetime counters (`projects.tokens_saved`) predate the ledger
     // and often carry history the event log does not — surface both.
-    let conn = gdb.dashboard_connection();
+    let conn = gdb.read_connection();
     let lifetime_projects = query_rows(
-        &conn,
+        conn,
         "SELECT path, tokens_saved FROM projects
          WHERE tokens_saved > 0 ORDER BY tokens_saved DESC LIMIT 25",
         (),
@@ -281,7 +281,7 @@ async fn savings_overview(gdb: &GlobalDb, db_path: &str) -> Value {
     .await
     .unwrap_or_default();
     let lifetime_total = query_i64(
-        &conn,
+        conn,
         "SELECT COALESCE(SUM(tokens_saved), 0) FROM projects",
         (),
     )
@@ -344,8 +344,7 @@ async fn sessions_overview(conn: &libsql::Connection, state: &DashboardState) ->
 }
 
 async fn turns_overview(gdb: &GlobalDb) -> Value {
-    let conn = gdb.dashboard_connection();
-    let turn_count = query_i64(&conn, "SELECT COUNT(*) FROM turns", ()).await;
+    let turn_count = query_i64(gdb.read_connection(), "SELECT COUNT(*) FROM turns", ()).await;
     let total_cost = gdb.total_cost_since(0).await.unwrap_or(0.0);
     let total_tokens = gdb.total_tokens_since(0).await.unwrap_or(0);
     json!({
@@ -373,9 +372,9 @@ pub(crate) async fn ledger(
 
     let total = gdb.sum_savings(None, since).await;
     let history = gdb.savings_history(None, since).await;
-    let conn = gdb.dashboard_connection();
+    let conn = gdb.read_connection();
     let by_tool = query_rows(
-        &conn,
+        conn,
         "SELECT tool_name,
                 COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0) AS saved_tokens,
                 COUNT(*) AS calls
@@ -386,7 +385,7 @@ pub(crate) async fn ledger(
     .await
     .unwrap_or_default();
     let by_project = query_rows(
-        &conn,
+        conn,
         "SELECT project_path,
                 COALESCE(SUM(CASE WHEN before_tokens > after_tokens THEN before_tokens - after_tokens ELSE 0 END), 0) AS saved_tokens,
                 COUNT(*) AS calls
@@ -699,9 +698,9 @@ pub(crate) async fn models(
                 })
                 .collect(),
         );
-        let conn = gdb.dashboard_connection();
+        let conn = gdb.read_connection();
         let by_day = query_rows(
-            &conn,
+            conn,
             "WITH daily AS (
                 SELECT (timestamp / 86400) * 86400 AS day,
                        SUM(cost_usd) AS cost_usd,

@@ -48,12 +48,19 @@ impl TraceDecay {
         let size = source.len() as u64;
         let mtime = sync::file_stat(&abs_path).map_or_else(current_timestamp, |(m, _)| m);
 
-        self.db.delete_nodes_by_file(file_path).await?;
-        self.db.insert_nodes(&result.nodes).await?;
-        self.db.insert_edges(&result.edges).await?;
+        let transaction = self.db.begin_write_transaction("reindex file").await?;
+        self.db
+            .delete_nodes_by_file_unguarded(&transaction, file_path)
+            .await?;
+        self.db
+            .insert_nodes_unguarded(&transaction, &result.nodes)
+            .await?;
+        self.db
+            .insert_edges_unguarded(&transaction, &result.edges)
+            .await?;
         if !result.unresolved_refs.is_empty() {
             self.db
-                .insert_unresolved_refs(&result.unresolved_refs)
+                .insert_unresolved_refs_unguarded(&transaction, &result.unresolved_refs)
                 .await?;
         }
 
@@ -65,7 +72,10 @@ impl TraceDecay {
             indexed_at: current_timestamp(),
             node_count: result.nodes.len() as u32,
         };
-        self.db.upsert_file(&file_record).await?;
+        self.db
+            .upsert_file_unguarded(&transaction, &file_record)
+            .await?;
+        transaction.commit().await?;
         let mut short = HashSet::new();
         let mut keys = HashSet::new();
         accumulate_symbol_scope(&result.nodes, &mut short, &mut keys);

@@ -1,9 +1,8 @@
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
-use libsql::{Connection, Value};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -148,18 +147,9 @@ pub struct MigrationCleanupSourcesReport {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct SqliteLogicalSummary {
-    user_version: i64,
-    schema: Vec<String>,
-    tables: Vec<SqliteTableSummary>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct SqliteTableSummary {
-    name: String,
-    columns: Vec<String>,
-    row_count: u64,
-    checksum: String,
+struct SqliteFileFingerprint {
+    size_bytes: u64,
+    sha256: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -314,6 +304,9 @@ pub fn build_plan_manifest(
     };
     for artifact in &store.artifacts {
         let relpath = artifact_relative_path(&artifact.path, &store.data_dir)?;
+        if is_sqlite_sidecar_artifact_entry(&artifact.kind, &artifact.path) {
+            continue;
+        }
         manifest.artifacts.push(MigrationArtifact::new(
             artifact.kind.clone(),
             artifact.path.clone(),
@@ -398,7 +391,7 @@ pub fn verify_migration_manifest(manifest: &MigrationManifest) -> MigrationVerif
             continue;
         }
         if let Some(target) = artifact.target_path.as_ref()
-            && let Err(err) = verify_artifact_contents(&artifact.source_path, target)
+            && let Err(err) = verify_manifest_artifact_contents(manifest, artifact)
         {
             issues.push(format!(
                 "artifact '{}' target '{}' does not match source '{}': {err}",
@@ -421,7 +414,13 @@ pub fn verify_migration_manifest(manifest: &MigrationManifest) -> MigrationVerif
             continue;
         }
         if let Some(target) = artifact.target_path.as_ref()
-            && let Err(err) = verify_artifact_contents(&artifact.source_path, target)
+            && let Err(err) = if is_sqlite_database_artifact(&artifact.kind)
+                && has_sqlite_database_header(target).unwrap_or(false)
+            {
+                verify_sqlite_snapshot_file(target)
+            } else {
+                verify_artifact_contents(&artifact.source_path, target)
+            }
         {
             issues.push(format!(
                 "backup artifact '{}' target '{}' does not match source '{}': {err}",
@@ -483,17 +482,109 @@ pub fn verify_migration_manifest(manifest: &MigrationManifest) -> MigrationVerif
     }
 }
 
-pub fn apply_migration_manifest(
+pub async fn apply_migration_manifest(
     manifest: &mut MigrationManifest,
 ) -> io::Result<MigrationApplyReport> {
     let (project_root, source_data_dir, profile_root, project_id) = manifest_destination(manifest)?;
+    let source_metadata = source_data_dir.symlink_metadata().map_err(|error| {
+        invalid_manifest(&format!(
+            "migration source data_dir '{}' is unavailable: {error}",
+            source_data_dir.display()
+        ))
+    })?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+        return Err(invalid_manifest(&format!(
+            "migration source data_dir '{}' must be a real directory",
+            source_data_dir.display()
+        )));
+    }
+    reject_sqlite_sidecar_artifacts(&manifest.artifacts)?;
+    reject_sqlite_sidecar_artifacts(&manifest.backup_artifacts)?;
+    for artifact in &manifest.artifacts {
+        validate_manifest_artifact_paths(manifest, artifact, false)?;
+    }
+    for artifact in &manifest.backup_artifacts {
+        validate_manifest_artifact_paths(manifest, artifact, true)?;
+    }
+    let backup_root = profile_root
+        .join("migration-backups")
+        .join(&manifest.migration_id);
+    let mut profile_roots =
+        migration_profile_roots(manifest, &source_data_dir, &profile_root, &backup_root);
+    for root in &profile_roots {
+        PrivateStoreIo::create_dir_all(root)?;
+    }
+    profile_roots = profile_roots
+        .into_iter()
+        .map(|root| root.canonicalize().unwrap_or(root))
+        .collect();
+    profile_roots.sort();
+    profile_roots.dedup();
+    let operation = format!("migration apply {}", manifest.migration_id);
+    let mut lifecycle_leases = Vec::with_capacity(profile_roots.len());
+    for root in &profile_roots {
+        lifecycle_leases.push(
+            crate::lifecycle_lease::acquire_exclusive_for_profile(root, &operation)
+                .map_err(|error| invalid_manifest(&error.to_string()))?,
+        );
+    }
+    let mut database_scopes = Vec::with_capacity(profile_roots.len());
+    for (lease, root) in lifecycle_leases.iter().zip(&profile_roots) {
+        database_scopes.push(
+            crate::db::enter_maintenance_database_scope(lease, root, &operation)
+                .map_err(|error| invalid_manifest(&error.to_string()))?,
+        );
+    }
+    let mut source_databases = manifest
+        .artifacts
+        .iter()
+        .filter(|artifact| is_sqlite_database_artifact(&artifact.kind))
+        .map(|artifact| artifact.source_path.clone())
+        .collect::<Vec<_>>();
+    source_databases.sort();
+    source_databases.dedup();
+    let mut source_authorities = Vec::with_capacity(source_databases.len());
+    for database in source_databases {
+        let authority = crate::db::DatabaseAuthority::for_runtime(&database, &operation)
+            .map_err(|error| invalid_manifest(&error.to_string()))?;
+        source_authorities.push((database, authority));
+    }
+    apply_migration_manifest_in_scope(
+        manifest,
+        project_root,
+        source_data_dir,
+        profile_root,
+        project_id,
+        &source_authorities,
+        &operation,
+    )
+    .await
+}
+
+async fn apply_migration_manifest_in_scope(
+    manifest: &mut MigrationManifest,
+    project_root: PathBuf,
+    source_data_dir: PathBuf,
+    profile_root: PathBuf,
+    project_id: String,
+    source_authorities: &[(PathBuf, crate::db::DatabaseAuthority)],
+    operation: &str,
+) -> io::Result<MigrationApplyReport> {
     let data_root = profile_sharded_data_root(&profile_root, &project_id);
     let backup_root = profile_root
         .join("migration-backups")
         .join(&manifest.migration_id);
     let original_backup_count = manifest.backup_artifacts.len();
     for index in 0..original_backup_count {
-        apply_backup_artifact(manifest, index, &source_data_dir, &backup_root)?;
+        apply_backup_artifact(
+            manifest,
+            index,
+            &source_data_dir,
+            &backup_root,
+            source_authorities,
+            operation,
+        )
+        .await?;
     }
     let original_artifact_count = manifest.artifacts.len();
     for index in 0..original_artifact_count {
@@ -810,6 +901,198 @@ fn manifest_destination(
     Ok((project_root, source_data_dir, profile_root, project_id))
 }
 
+fn migration_profile_roots(
+    manifest: &MigrationManifest,
+    source_data_dir: &Path,
+    destination: &Path,
+    backup_root: &Path,
+) -> Vec<PathBuf> {
+    let mut roots = [source_data_dir, destination, backup_root]
+        .into_iter()
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+    roots.extend(
+        manifest
+            .artifacts
+            .iter()
+            .filter(|artifact| is_sqlite_database_artifact(&artifact.kind))
+            .filter(|artifact| artifact.source_path.exists())
+            .filter_map(|artifact| artifact.source_path.parent().map(Path::to_path_buf)),
+    );
+    roots.extend(
+        manifest
+            .backup_artifacts
+            .iter()
+            .filter(|artifact| is_sqlite_database_artifact(&artifact.kind))
+            .filter_map(|artifact| {
+                artifact
+                    .target_path
+                    .as_deref()?
+                    .parent()
+                    .map(Path::to_path_buf)
+            }),
+    );
+    roots
+}
+
+fn is_sqlite_database_artifact(kind: &str) -> bool {
+    matches!(kind, "graph_db" | "sessions_db" | "branch_graph_db")
+}
+
+fn is_sqlite_sidecar_artifact(kind: &str) -> bool {
+    matches!(
+        kind,
+        "graph_db_wal"
+            | "graph_db_shm"
+            | "sessions_db_wal"
+            | "sessions_db_shm"
+            | "branch_graph_db_wal"
+            | "branch_graph_db_shm"
+    )
+}
+
+fn is_sqlite_sidecar_artifact_entry(kind: &str, path: &Path) -> bool {
+    is_sqlite_sidecar_artifact(kind)
+        || path.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy();
+            name.ends_with(".db-wal") || name.ends_with(".db-shm")
+        })
+}
+
+fn reject_sqlite_sidecar_artifacts(artifacts: &[MigrationArtifact]) -> io::Result<()> {
+    if let Some(artifact) = artifacts
+        .iter()
+        .find(|artifact| is_sqlite_sidecar_artifact_entry(&artifact.kind, &artifact.source_path))
+    {
+        return Err(invalid_manifest(&format!(
+            "migration manifest contains transient SQLite sidecar artifact '{}'; rebuild the plan so WAL contents are absorbed into a database snapshot",
+            artifact.kind
+        )));
+    }
+    Ok(())
+}
+
+async fn copy_sqlite_snapshot(
+    source: &Path,
+    target: &Path,
+    source_authority: &crate::db::DatabaseAuthority,
+    operation: &str,
+) -> io::Result<()> {
+    if let Some(parent) = target.parent() {
+        PrivateStoreIo::create_dir_all(parent)?;
+    }
+    let temporary = migration_snapshot_temp_path(target);
+    remove_stale_snapshot_temp(&temporary)?;
+    let (source_db, _) = crate::db::Database::open_read_only(source, source_authority)
+        .await
+        .map_err(io::Error::other)?;
+    let snapshot_result = source_db
+        .snapshot_to(&temporary)
+        .await
+        .map_err(io::Error::other);
+    source_db.close();
+    if let Err(error) = snapshot_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    set_snapshot_permissions(&temporary)?;
+    let temporary_authority = crate::db::DatabaseAuthority::for_runtime(
+        &temporary,
+        &format!("{operation} verify snapshot staging"),
+    )
+    .map_err(io::Error::other)?;
+    verify_sqlite_integrity(&temporary, &temporary_authority).await?;
+    drop(temporary_authority);
+    let temporary_fingerprint = fingerprint_file(&temporary)?;
+    sync_file(&temporary)?;
+    crate::db::DatabaseAuthority::replace_file_atomically(
+        &temporary,
+        target,
+        "migration SQLite snapshot",
+    )
+    .map_err(io::Error::other)?;
+    sync_parent_directory(target)?;
+    let target_fingerprint = fingerprint_file(target)?;
+    if target_fingerprint != temporary_fingerprint {
+        return Err(invalid_manifest(&format!(
+            "published SQLite snapshot '{}' differs from staged snapshot of '{}'",
+            target.display(),
+            source.display()
+        )));
+    }
+    Ok(())
+}
+
+fn migration_snapshot_temp_path(target: &Path) -> PathBuf {
+    let mut name = target.as_os_str().to_os_string();
+    name.push(format!(".migration-{}.tmp", std::process::id()));
+    PathBuf::from(name)
+}
+
+fn remove_stale_snapshot_temp(path: &Path) -> io::Result<()> {
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            fs::remove_file(path)
+        }
+        Ok(_) => Err(invalid_manifest(&format!(
+            "migration snapshot temp '{}' is not a regular file",
+            path.display()
+        ))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn set_snapshot_permissions(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_snapshot_permissions(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+fn sync_file(path: &Path) -> io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid_manifest("migration target has no parent directory"))?;
+    fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+fn copy_file_atomically(source: &Path, target: &Path, label: &str) -> io::Result<()> {
+    if let Some(parent) = target.parent() {
+        PrivateStoreIo::create_dir_all(parent)?;
+    }
+    let temporary = migration_snapshot_temp_path(target);
+    remove_stale_snapshot_temp(&temporary)?;
+    PrivateStoreIo::copy_artifact(source, &temporary)?;
+    sync_file(&temporary)?;
+    crate::db::DatabaseAuthority::replace_file_atomically(&temporary, target, label)
+        .map_err(io::Error::other)?;
+    sync_parent_directory(target)
+}
+
+async fn verify_sqlite_snapshot(path: &Path, operation: &str) -> io::Result<()> {
+    let authority = crate::db::DatabaseAuthority::for_runtime(
+        path,
+        &format!("{operation} verify SQLite snapshot"),
+    )
+    .map_err(io::Error::other)?;
+    verify_sqlite_integrity(path, &authority).await
+}
+
 fn apply_copy_artifact(
     manifest: &mut MigrationManifest,
     index: usize,
@@ -828,20 +1111,60 @@ fn apply_copy_artifact(
         "source store",
     )?;
     validate_manifest_path_under(&target_path, data_root, "migration target", "profile shard")?;
-    if manifest.artifacts[index].state == ArtifactState::Applied
-        || manifest.artifacts[index].state == ArtifactState::Verified
-    {
-        verify_artifact_contents(&source_path, &target_path)?;
+    let sqlite = is_sqlite_database_artifact(&manifest.artifacts[index].kind)
+        && has_sqlite_database_header(&source_path)?;
+    let snapshot = sqlite
+        .then(|| {
+            manifest
+                .backup_artifacts
+                .iter()
+                .find(|artifact| {
+                    artifact.kind == manifest.artifacts[index].kind
+                        && artifact.source_path == source_path
+                        && artifact.state == ArtifactState::Verified
+                })
+                .and_then(|artifact| artifact.target_path.clone())
+                .ok_or_else(|| {
+                    invalid_manifest(
+                        "verified SQLite migration backup is missing before target copy",
+                    )
+                })
+        })
+        .transpose()?;
+    if matches!(
+        manifest.artifacts[index].state,
+        ArtifactState::Applied | ArtifactState::Verified
+    ) {
+        verify_migration_target(&source_path, snapshot.as_deref(), &target_path)?;
         return Ok(());
     }
     if target_path.exists() {
+        if matches!(
+            manifest.artifacts[index].state,
+            ArtifactState::Locked | ArtifactState::Copied
+        ) {
+            verify_migration_target(&source_path, snapshot.as_deref(), &target_path)?;
+            if manifest.artifacts[index].state == ArtifactState::Locked {
+                transition_and_save(manifest, index, ArtifactState::Copied)?;
+            }
+            return transition_and_save(manifest, index, ArtifactState::Verified);
+        }
         return Err(invalid_manifest(&format!(
             "migration target '{}' already exists",
             target_path.display()
         )));
     }
-    transition_and_save(manifest, index, ArtifactState::Locked)?;
-    if let Err(err) = PrivateStoreIo::copy_artifact(&source_path, &target_path) {
+    if manifest.artifacts[index].state == ArtifactState::Planned {
+        transition_and_save(manifest, index, ArtifactState::Locked)?;
+    } else if manifest.artifacts[index].state != ArtifactState::Locked {
+        return Err(invalid_manifest("migration artifact is not resumable"));
+    }
+    let copy_result = if let Some(snapshot) = snapshot.as_deref() {
+        copy_file_atomically(snapshot, &target_path, "migration SQLite target")
+    } else {
+        PrivateStoreIo::copy_artifact(&source_path, &target_path).map(|_| ())
+    };
+    if let Err(err) = copy_result {
         mark_failed(manifest, index)?;
         return Err(io::Error::new(
             err.kind(),
@@ -853,8 +1176,20 @@ fn apply_copy_artifact(
         ));
     }
     transition_and_save(manifest, index, ArtifactState::Copied)?;
-    verify_artifact_contents(&source_path, &target_path)?;
+    verify_migration_target(&source_path, snapshot.as_deref(), &target_path)?;
     transition_and_save(manifest, index, ArtifactState::Verified)
+}
+
+fn verify_migration_target(
+    source: &Path,
+    snapshot: Option<&Path>,
+    target: &Path,
+) -> io::Result<()> {
+    if let Some(snapshot) = snapshot {
+        verify_sqlite_artifact_contents(snapshot, target)
+    } else {
+        verify_artifact_contents(source, target)
+    }
 }
 
 fn apply_store_manifest_artifact(
@@ -901,11 +1236,13 @@ fn apply_store_manifest_artifact(
     Ok(())
 }
 
-fn apply_backup_artifact(
+async fn apply_backup_artifact(
     manifest: &mut MigrationManifest,
     index: usize,
     source_data_dir: &Path,
     backup_root: &Path,
+    source_authorities: &[(PathBuf, crate::db::DatabaseAuthority)],
+    operation: &str,
 ) -> io::Result<()> {
     let source_path = manifest.backup_artifacts[index].source_path.clone();
     let target_path = manifest.backup_artifacts[index]
@@ -924,18 +1261,58 @@ fn apply_backup_artifact(
         "migration backup target",
         "backup root",
     )?;
+    let sqlite = is_sqlite_database_artifact(&manifest.backup_artifacts[index].kind)
+        && has_sqlite_database_header(&source_path)?;
+    let source_authority = sqlite
+        .then(|| {
+            source_authorities
+                .iter()
+                .find(|(path, _)| path == &source_path)
+                .map(|(_, authority)| authority)
+                .ok_or_else(|| invalid_manifest("SQLite migration source authority is missing"))
+        })
+        .transpose()?;
     if manifest.backup_artifacts[index].state == ArtifactState::Verified {
-        verify_artifact_contents(&source_path, &target_path)?;
+        if source_authority.is_some() {
+            verify_sqlite_snapshot(&target_path, operation).await?;
+        } else {
+            verify_artifact_contents(&source_path, &target_path)?;
+        }
         return Ok(());
     }
     if target_path.exists() {
+        if matches!(
+            manifest.backup_artifacts[index].state,
+            ArtifactState::Locked | ArtifactState::Copied
+        ) {
+            if source_authority.is_some() {
+                verify_sqlite_snapshot(&target_path, operation).await?;
+            } else {
+                verify_artifact_contents(&source_path, &target_path)?;
+            }
+            if manifest.backup_artifacts[index].state == ArtifactState::Locked {
+                transition_backup_and_save(manifest, index, ArtifactState::Copied)?;
+            }
+            return transition_backup_and_save(manifest, index, ArtifactState::Verified);
+        }
         return Err(invalid_manifest(&format!(
             "migration backup target '{}' already exists",
             target_path.display()
         )));
     }
-    transition_backup_and_save(manifest, index, ArtifactState::Locked)?;
-    if let Err(err) = PrivateStoreIo::copy_artifact(&source_path, &target_path) {
+    if manifest.backup_artifacts[index].state == ArtifactState::Planned {
+        transition_backup_and_save(manifest, index, ArtifactState::Locked)?;
+    } else if manifest.backup_artifacts[index].state != ArtifactState::Locked {
+        return Err(invalid_manifest(
+            "migration backup artifact is not resumable",
+        ));
+    }
+    let copy_result = if let Some(authority) = source_authority {
+        copy_sqlite_snapshot(&source_path, &target_path, authority, operation).await
+    } else {
+        PrivateStoreIo::copy_artifact(&source_path, &target_path).map(|_| ())
+    };
+    if let Err(err) = copy_result {
         mark_backup_failed(manifest, index)?;
         return Err(io::Error::new(
             err.kind(),
@@ -947,7 +1324,9 @@ fn apply_backup_artifact(
         ));
     }
     transition_backup_and_save(manifest, index, ArtifactState::Copied)?;
-    verify_artifact_contents(&source_path, &target_path)?;
+    if source_authority.is_none() {
+        verify_artifact_contents(&source_path, &target_path)?;
+    }
     transition_backup_and_save(manifest, index, ArtifactState::Verified)
 }
 
@@ -966,7 +1345,7 @@ fn detect_divergent_applied_targets(manifest: &MigrationManifest) -> Option<Stri
                 artifact.source_path.display()
             ));
         }
-        if verify_artifact_contents(&artifact.source_path, target_path).is_err() {
+        if verify_manifest_artifact_contents(manifest, artifact).is_err() {
             return Some(format!(
                 "migration target '{}' diverged from source '{}'",
                 target_path.display(),
@@ -1009,6 +1388,43 @@ fn mark_backup_failed(manifest: &mut MigrationManifest, index: usize) -> io::Res
     save_manifest(manifest)
 }
 
+fn verify_manifest_artifact_contents(
+    manifest: &MigrationManifest,
+    artifact: &MigrationArtifact,
+) -> io::Result<()> {
+    let target = artifact
+        .target_path
+        .as_deref()
+        .ok_or_else(|| invalid_manifest("migration artifact has no target_path"))?;
+    if is_sqlite_database_artifact(&artifact.kind)
+        && has_sqlite_database_header(&artifact.source_path)?
+    {
+        let snapshot = manifest
+            .backup_artifacts
+            .iter()
+            .find(|backup| {
+                backup.kind == artifact.kind
+                    && backup.source_path == artifact.source_path
+                    && backup.state == ArtifactState::Verified
+            })
+            .and_then(|backup| backup.target_path.as_deref())
+            .ok_or_else(|| invalid_manifest("verified SQLite migration backup is missing"))?;
+        return verify_sqlite_artifact_contents(snapshot, target);
+    }
+    verify_artifact_contents(&artifact.source_path, target)
+}
+
+fn verify_sqlite_snapshot_file(path: &Path) -> io::Result<()> {
+    require_regular_file(path, "SQLite snapshot")?;
+    if !has_sqlite_database_header(path)? {
+        return Err(invalid_manifest(&format!(
+            "SQLite snapshot '{}' has no database header",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn verify_artifact_contents(source: &Path, target: &Path) -> io::Result<()> {
     let source_meta = source.symlink_metadata()?;
     let target_meta = target.symlink_metadata()?;
@@ -1040,25 +1456,9 @@ fn verify_artifact_contents(source: &Path, target: &Path) -> io::Result<()> {
 }
 
 fn verify_sqlite_artifact_contents(source: &Path, target: &Path) -> io::Result<()> {
-    let source = source.to_path_buf();
-    let target = target.to_path_buf();
-    let worker = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(io::Error::other)?;
-        runtime.block_on(async {
-            let source_summary = summarize_sqlite_database(&source).await?;
-            let target_summary = summarize_sqlite_database(&target).await?;
-            Ok::<_, io::Error>((source, target, source_summary, target_summary))
-        })
-    });
-    let (source, target, source_summary, target_summary) = worker
-        .join()
-        .map_err(|_| invalid_manifest("SQLite logical verification thread panicked"))??;
-    if source_summary != target_summary {
+    if fingerprint_file(source)? != fingerprint_file(target)? {
         return Err(invalid_manifest(&format!(
-            "SQLite logical verification failed for target '{}' against source '{}'",
+            "SQLite target '{}' differs from snapshot '{}'",
             target.display(),
             source.display()
         )));
@@ -1066,305 +1466,46 @@ fn verify_sqlite_artifact_contents(source: &Path, target: &Path) -> io::Result<(
     Ok(())
 }
 
-async fn summarize_sqlite_database(path: &Path) -> io::Result<SqliteLogicalSummary> {
-    let snapshot = crate::sqlite_read_snapshot::open(path).await.map_err(|e| {
-        invalid_manifest(&format!(
-            "failed to snapshot SQLite DB '{}': {e}",
-            path.display()
-        ))
-    })?;
-    summarize_sqlite_connection(snapshot.connection(), path).await
+async fn verify_sqlite_integrity(
+    path: &Path,
+    authority: &crate::db::DatabaseAuthority,
+) -> io::Result<()> {
+    let (db, _) = crate::db::Database::open_read_only(path, authority)
+        .await
+        .map_err(io::Error::other)?;
+    db.close();
+    Ok(())
 }
 
-async fn summarize_sqlite_connection(
-    conn: &Connection,
-    path: &Path,
-) -> io::Result<SqliteLogicalSummary> {
-    if !sqlite_quick_check(conn, path).await? {
+fn fingerprint_file(path: &Path) -> io::Result<SqliteFileFingerprint> {
+    require_regular_file(path, "SQLite fingerprint source")?;
+    let mut file = fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 128 * 1024];
+    let mut size_bytes = 0_u64;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        size_bytes = size_bytes.saturating_add(read as u64);
+        digest.update(&buffer[..read]);
+    }
+    Ok(SqliteFileFingerprint {
+        size_bytes,
+        sha256: hex::encode(digest.finalize()),
+    })
+}
+
+fn require_regular_file(path: &Path, subject: &str) -> io::Result<()> {
+    let metadata = path.symlink_metadata()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(invalid_manifest(&format!(
-            "SQLite quick_check failed for '{}'",
+            "{subject} '{}' must be a regular non-symlink file",
             path.display()
         )));
     }
-    let user_version = sqlite_i64(conn, "PRAGMA user_version", path).await?;
-    let schema = sqlite_schema_summary(conn, path).await?;
-    let tables = sqlite_table_summaries(conn, path).await?;
-    Ok(SqliteLogicalSummary {
-        user_version,
-        schema,
-        tables,
-    })
-}
-
-async fn sqlite_quick_check(conn: &Connection, path: &Path) -> io::Result<bool> {
-    let mut rows = conn.query("PRAGMA quick_check", ()).await.map_err(|e| {
-        invalid_manifest(&format!(
-            "failed to run quick_check on '{}': {e}",
-            path.display()
-        ))
-    })?;
-    let Some(row) = rows.next().await.map_err(|e| {
-        invalid_manifest(&format!(
-            "failed to read quick_check result for '{}': {e}",
-            path.display()
-        ))
-    })?
-    else {
-        return Ok(false);
-    };
-    let result = row.get::<String>(0).map_err(|e| {
-        invalid_manifest(&format!(
-            "failed to decode quick_check result for '{}': {e}",
-            path.display()
-        ))
-    })?;
-    Ok(result == "ok")
-}
-
-async fn sqlite_i64(conn: &Connection, sql: &str, path: &Path) -> io::Result<i64> {
-    let mut rows = conn.query(sql, ()).await.map_err(|e| {
-        invalid_manifest(&format!(
-            "failed to query SQLite metadata for '{}': {e}",
-            path.display()
-        ))
-    })?;
-    let Some(row) = rows.next().await.map_err(|e| {
-        invalid_manifest(&format!(
-            "failed to read SQLite metadata for '{}': {e}",
-            path.display()
-        ))
-    })?
-    else {
-        return Err(invalid_manifest(&format!(
-            "SQLite metadata query returned no rows for '{}'",
-            path.display()
-        )));
-    };
-    row.get::<i64>(0).map_err(|e| {
-        invalid_manifest(&format!(
-            "failed to decode SQLite metadata for '{}': {e}",
-            path.display()
-        ))
-    })
-}
-
-async fn sqlite_schema_summary(conn: &Connection, path: &Path) -> io::Result<Vec<String>> {
-    let mut rows = conn
-        .query(
-            "SELECT type, name, tbl_name, COALESCE(sql, '')
-             FROM sqlite_schema
-             WHERE name NOT LIKE 'sqlite_%'
-             ORDER BY type, name, tbl_name, sql",
-            (),
-        )
-        .await
-        .map_err(|e| {
-            invalid_manifest(&format!(
-                "failed to read SQLite schema for '{}': {e}",
-                path.display()
-            ))
-        })?;
-    let mut schema = Vec::new();
-    while let Some(row) = rows.next().await.map_err(|e| {
-        invalid_manifest(&format!(
-            "failed to read SQLite schema row for '{}': {e}",
-            path.display()
-        ))
-    })? {
-        let name = row.get::<String>(1).map_err(|e| {
-            invalid_manifest(&format!(
-                "failed to decode SQLite schema name for '{}': {e}",
-                path.display()
-            ))
-        })?;
-        if is_fts_shadow_table(&name) {
-            continue;
-        }
-        let entry = format!(
-            "{}\x1f{}\x1f{}\x1f{}",
-            row.get::<String>(0).map_err(|e| invalid_manifest(&format!(
-                "failed to decode SQLite schema type for '{}': {e}",
-                path.display()
-            )))?,
-            name,
-            row.get::<String>(2).map_err(|e| invalid_manifest(&format!(
-                "failed to decode SQLite schema table for '{}': {e}",
-                path.display()
-            )))?,
-            row.get::<String>(3).map_err(|e| invalid_manifest(&format!(
-                "failed to decode SQLite schema SQL for '{}': {e}",
-                path.display()
-            )))?
-        );
-        schema.push(entry);
-    }
-    Ok(schema)
-}
-
-async fn sqlite_table_summaries(
-    conn: &Connection,
-    path: &Path,
-) -> io::Result<Vec<SqliteTableSummary>> {
-    let mut rows = conn
-        .query(
-            "SELECT name, COALESCE(sql, '')
-             FROM sqlite_schema
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-             ORDER BY name",
-            (),
-        )
-        .await
-        .map_err(|e| {
-            invalid_manifest(&format!(
-                "failed to list SQLite tables for '{}': {e}",
-                path.display()
-            ))
-        })?;
-    let mut tables = Vec::new();
-    while let Some(row) = rows.next().await.map_err(|e| {
-        invalid_manifest(&format!(
-            "failed to read SQLite table row for '{}': {e}",
-            path.display()
-        ))
-    })? {
-        let name = row.get::<String>(0).map_err(|e| {
-            invalid_manifest(&format!(
-                "failed to decode SQLite table name for '{}': {e}",
-                path.display()
-            ))
-        })?;
-        let sql = row.get::<String>(1).map_err(|e| {
-            invalid_manifest(&format!(
-                "failed to decode SQLite table SQL for '{}': {e}",
-                path.display()
-            ))
-        })?;
-        if is_fts_shadow_table(&name) || is_virtual_table_sql(&sql) {
-            continue;
-        }
-        tables.push(sqlite_table_summary(conn, path, &name).await?);
-    }
-    Ok(tables)
-}
-
-async fn sqlite_table_summary(
-    conn: &Connection,
-    path: &Path,
-    table: &str,
-) -> io::Result<SqliteTableSummary> {
-    let columns = sqlite_table_columns(conn, path, table).await?;
-    let mut checksum = Sha256::new();
-    checksum.update(table.as_bytes());
-    for column in &columns {
-        checksum.update(b"\x1f");
-        checksum.update(column.as_bytes());
-    }
-    let mut row_count = 0_u64;
-    if !columns.is_empty() {
-        let column_list = columns
-            .iter()
-            .map(|column| quote_sqlite_identifier(column))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "SELECT {column_list} FROM {} ORDER BY {column_list}",
-            quote_sqlite_identifier(table)
-        );
-        let mut rows = conn.query(&sql, ()).await.map_err(|e| {
-            invalid_manifest(&format!(
-                "failed to read SQLite table '{}' from '{}': {e}",
-                table,
-                path.display()
-            ))
-        })?;
-        while let Some(row) = rows.next().await.map_err(|e| {
-            invalid_manifest(&format!(
-                "failed to read SQLite row from table '{}' in '{}': {e}",
-                table,
-                path.display()
-            ))
-        })? {
-            row_count = row_count.saturating_add(1);
-            for index in 0..columns.len() {
-                let index = i32::try_from(index).map_err(|e| {
-                    invalid_manifest(&format!(
-                        "too many SQLite columns in table '{}' in '{}': {e}",
-                        table,
-                        path.display()
-                    ))
-                })?;
-                let value = row.get::<Value>(index).map_err(|e| {
-                    invalid_manifest(&format!(
-                        "failed to decode SQLite row from table '{}' in '{}': {e}",
-                        table,
-                        path.display()
-                    ))
-                })?;
-                checksum.update(sqlite_value_fingerprint(value).as_bytes());
-                checksum.update(b"\x1e");
-            }
-        }
-    }
-    Ok(SqliteTableSummary {
-        name: table.to_string(),
-        columns,
-        row_count,
-        checksum: hex::encode(checksum.finalize()),
-    })
-}
-
-async fn sqlite_table_columns(
-    conn: &Connection,
-    path: &Path,
-    table: &str,
-) -> io::Result<Vec<String>> {
-    let sql = format!("PRAGMA table_info({})", quote_sqlite_identifier(table));
-    let mut rows = conn.query(&sql, ()).await.map_err(|e| {
-        invalid_manifest(&format!(
-            "failed to inspect SQLite table '{}' in '{}': {e}",
-            table,
-            path.display()
-        ))
-    })?;
-    let mut columns = Vec::new();
-    while let Some(row) = rows.next().await.map_err(|e| {
-        invalid_manifest(&format!(
-            "failed to read SQLite table info for '{}' in '{}': {e}",
-            table,
-            path.display()
-        ))
-    })? {
-        columns.push(row.get::<String>(1).map_err(|e| {
-            invalid_manifest(&format!(
-                "failed to decode SQLite column name for '{}' in '{}': {e}",
-                table,
-                path.display()
-            ))
-        })?);
-    }
-    Ok(columns)
-}
-
-fn is_fts_shadow_table(name: &str) -> bool {
-    name.contains("_fts_")
-}
-
-fn is_virtual_table_sql(sql: &str) -> bool {
-    sql.to_ascii_uppercase().contains("VIRTUAL TABLE")
-}
-
-fn quote_sqlite_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
-}
-
-fn sqlite_value_fingerprint(value: Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Integer(value) => format!("integer:{value}"),
-        Value::Real(value) => format!("real:{:016x}", value.to_bits()),
-        Value::Text(value) => format!("text:{}:{value}", value.len()),
-        Value::Blob(value) => format!("blob:{}:{}", value.len(), hex::encode(value)),
-    }
+    Ok(())
 }
 
 fn verify_directory_contents(source: &Path, target: &Path) -> io::Result<()> {

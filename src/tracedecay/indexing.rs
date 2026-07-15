@@ -240,11 +240,7 @@ impl TraceDecay {
         let sync_lease = self.begin_active_sync()?;
         let start = Instant::now();
 
-        // 1. Clear existing data and enter bulk-load mode
-        self.db.clear().await?;
-        self.db.begin_bulk_load().await?;
-
-        // 2. Scan for source files
+        // 1. Scan for source files
         let phase_start = Instant::now();
         let files = self.scan_files();
         let total = files.len();
@@ -254,7 +250,7 @@ impl TraceDecay {
             phase_start.elapsed().as_secs_f64()
         ));
 
-        // 3. Parallel extraction: read + parse + hash on all cores
+        // 2. Parallel extraction: read + parse + hash on all cores
         let project_root = self.project_root.clone();
         let registry = &self.registry;
 
@@ -262,7 +258,7 @@ impl TraceDecay {
         let (extractions, _skipped) =
             extract_files_isolated(&project_root, registry, files.clone());
 
-        // 4. Collect all data
+        // 3. Collect all data
         let mut all_nodes = Vec::new();
         let mut all_edges = Vec::new();
         let mut all_unresolved = Vec::new();
@@ -293,7 +289,7 @@ impl TraceDecay {
             phase_start.elapsed().as_secs_f64()
         ));
 
-        // 5. Resolve references in-memory (parallel) before DB insert
+        // 4. Resolve references in-memory (parallel) before DB insert
         let phase_start = Instant::now();
         if !all_unresolved.is_empty() {
             let resolver = ReferenceResolver::from_nodes(&self.db, &all_nodes);
@@ -306,7 +302,7 @@ impl TraceDecay {
             phase_start.elapsed().as_secs_f64()
         ));
 
-        // 6. Sort by PK order + dedup edges
+        // 5. Sort by PK order + dedup edges
         all_nodes.sort_unstable_by(|a, b| a.id.cmp(&b.id));
         all_edges.sort_unstable_by(|a, b| {
             (&a.source, &a.target, a.kind.as_str(), &a.line).cmp(&(
@@ -322,22 +318,40 @@ impl TraceDecay {
         file_records.sort_unstable_by(|a, b| a.path.cmp(&b.path));
         let total_edges = all_edges.len();
 
+        // 6. Replace the index under one writer lane. CPU-heavy scanning,
+        // extraction, and reference resolution above do not block unrelated
+        // database mutations while the connection is still in normal mode.
+        let transaction = self
+            .db
+            .begin_write_transaction("replace full index")
+            .await?;
+        self.db.clear_unguarded(&transaction).await?;
+        self.db.begin_bulk_load_unguarded(&transaction).await?;
+
         // 7. Bulk-insert via prepared statements (zero SQL re-parsing)
         let phase_start = Instant::now();
-        self.db.insert_nodes(&all_nodes).await?;
+        self.db
+            .insert_nodes_unguarded(&transaction, &all_nodes)
+            .await?;
         // Persist the full extracted reference set (after nodes exist for the
         // FK). Later incremental syncs re-resolve from this set to rebuild
         // cross-file edges into files they re-index; without it, editing a
         // symbol deletes unchanged callers' edges (which cascade off the
         // target node) and they can never be resolved again (#1).
         if !all_unresolved.is_empty() {
-            self.db.insert_unresolved_refs(&all_unresolved).await?;
+            self.db
+                .insert_unresolved_refs_unguarded(&transaction, &all_unresolved)
+                .await?;
         }
-        self.db.insert_edges(&all_edges).await?;
-        self.db.upsert_files(&file_records).await?;
+        self.db
+            .insert_edges_unguarded(&transaction, &all_edges)
+            .await?;
+        self.db
+            .upsert_files_unguarded(&transaction, &file_records)
+            .await?;
 
         // 8. Restore indexes and normal durability
-        self.db.end_bulk_load().await?;
+        self.db.end_bulk_load_unguarded(&transaction).await?;
         on_verbose(&format!(
             "wrote to database in {:.1}s",
             phase_start.elapsed().as_secs_f64()
@@ -345,22 +359,32 @@ impl TraceDecay {
 
         let duration_ms = start.elapsed().as_millis() as u64;
         let now_str = current_timestamp().to_string();
-        self.db.set_metadata("last_full_sync_at", &now_str).await?;
-        self.db.set_metadata("last_sync_at", &now_str).await?;
+        self.db
+            .set_metadata_unguarded(&transaction, "last_full_sync_at", &now_str)
+            .await?;
+        self.db
+            .set_metadata_unguarded(&transaction, "last_sync_at", &now_str)
+            .await?;
         // Stamp HEAD so the watcher can diff-scope future syncs (best-effort).
         self.stamp_last_synced_commit().await;
         self.touch_branch_meta_synced();
         self.db
-            .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
+            .set_metadata_unguarded(
+                &transaction,
+                "last_sync_duration_ms",
+                &duration_ms.to_string(),
+            )
             .await?;
         // The unresolved_refs table now holds the complete extracted set, so
         // incremental syncs can self-heal without re-extracting everything.
         self.db
-            .set_metadata(
+            .set_metadata_unguarded(
+                &transaction,
                 UNRESOLVED_REFS_PERSISTED_KEY,
                 UNRESOLVED_REFS_PERSISTED_VALUE,
             )
             .await?;
+        transaction.commit().await?;
 
         let result = IndexResult {
             file_count: files.len(),
@@ -530,25 +554,33 @@ impl TraceDecay {
             }
         }
 
-        for path in &removed_file_paths {
-            self.db.delete_file(path).await?;
-        }
-
         // Extract graph data from the files in parallel (subprocess-isolated)
         let _ = stat_map; // worker re-stats internally; map kept for potential future use
         let (sync_extractions, _skipped_extractions) =
             extract_files_isolated(project_root, registry, existing_file_paths.clone());
+        let transaction = self
+            .db
+            .begin_write_transaction("sync selected files")
+            .await?;
+
+        for path in &removed_file_paths {
+            self.db.delete_file_unguarded(&transaction, path).await?;
+        }
 
         // Phase 1: insert all nodes (and metadata) so cross-file edges
         // can reference them. Edges are queued for phase 2 (#58).
         let mut queued_edges: Vec<&Edge> = Vec::new();
         for (file_path, result, hash, size, mtime) in &sync_extractions {
-            self.db.delete_nodes_by_file(file_path).await?;
-            self.db.insert_nodes(&result.nodes).await?;
+            self.db
+                .delete_nodes_by_file_unguarded(&transaction, file_path)
+                .await?;
+            self.db
+                .insert_nodes_unguarded(&transaction, &result.nodes)
+                .await?;
             queued_edges.extend(&result.edges);
             if !result.unresolved_refs.is_empty() {
                 self.db
-                    .insert_unresolved_refs(&result.unresolved_refs)
+                    .insert_unresolved_refs_unguarded(&transaction, &result.unresolved_refs)
                     .await?;
             }
 
@@ -560,7 +592,9 @@ impl TraceDecay {
                 indexed_at: current_timestamp(),
                 node_count: result.nodes.len() as u32,
             };
-            self.db.upsert_file(&file_record).await?;
+            self.db
+                .upsert_file_unguarded(&transaction, &file_record)
+                .await?;
         }
 
         // Phase 2: insert all queued edges now that every node is present.
@@ -568,8 +602,10 @@ impl TraceDecay {
         // whose endpoints are truly missing (e.g. unindexed files).
         if !queued_edges.is_empty() {
             let owned: Vec<Edge> = queued_edges.into_iter().cloned().collect();
-            self.db.insert_edges(&owned).await?;
+            self.db.insert_edges_unguarded(&transaction, &owned).await?;
         }
+
+        transaction.commit().await?;
 
         // Resolve references for any new/changed unresolved refs, scoped to the
         // re-indexed files so we don't re-resolve the whole repo on each call.
@@ -912,28 +948,10 @@ impl TraceDecay {
             mtime_only_changed.len()
         ));
 
-        // Update mtime for false-positive files so future syncs skip them
-        for path in &mtime_only_changed {
-            if let (Some(record), Some(&(mtime, size))) = (db_map.get(path), stat_map.get(path)) {
-                let updated = FileRecord {
-                    modified_at: mtime,
-                    size,
-                    ..record.clone()
-                };
-                self.db.upsert_file(&updated).await?;
-            }
-        }
-
-        // Remove deleted files
-        for path in &removed {
-            on_progress(0, 0, &format!("removing {path}"));
-            self.db.delete_file(path).await?;
-        }
-
-        // Re-index stale and new files — extract in parallel, insert sequentially
+        // Extract before entering the writer lane; no database state changes
+        // are needed to parse the stale/new files.
         let to_index: Vec<String> = stale.iter().chain(new_files.iter()).cloned().collect();
         let registry = &self.registry;
-
         let phase_start = Instant::now();
         let _ = stat_map; // worker re-stats internally
         let (sync_extractions, sync_skipped): (Vec<_>, Vec<_>) =
@@ -942,8 +960,31 @@ impl TraceDecay {
         // so the user can see them in `tracedecay sync --doctor`.
         skipped.extend(sync_skipped);
 
-        // Phase 1: insert all nodes (and metadata) so cross-file edges
-        // can reference them. Edges are queued for phase 2 (#58).
+        let transaction = self.db.begin_write_transaction("sync index").await?;
+
+        // Update mtime for false-positive files so future syncs skip them
+        for path in &mtime_only_changed {
+            if let (Some(record), Some(&(mtime, size))) = (db_map.get(path), stat_map.get(path)) {
+                let updated = FileRecord {
+                    modified_at: mtime,
+                    size,
+                    ..record.clone()
+                };
+                self.db
+                    .upsert_file_unguarded(&transaction, &updated)
+                    .await?;
+            }
+        }
+
+        // Remove deleted files
+        for path in &removed {
+            on_progress(0, 0, &format!("removing {path}"));
+            self.db.delete_file_unguarded(&transaction, path).await?;
+        }
+
+        // Re-index stale and new files. Phase 1 inserts all nodes (and
+        // metadata) so cross-file edges can reference them. Edges are queued
+        // for phase 2 (#58).
         let total = sync_extractions.len();
         let mut total_nodes = 0usize;
         let mut total_edges = 0usize;
@@ -954,12 +995,16 @@ impl TraceDecay {
             total_nodes += result.nodes.len();
             total_edges += result.edges.len();
 
-            self.db.delete_nodes_by_file(file_path).await?;
-            self.db.insert_nodes(&result.nodes).await?;
+            self.db
+                .delete_nodes_by_file_unguarded(&transaction, file_path)
+                .await?;
+            self.db
+                .insert_nodes_unguarded(&transaction, &result.nodes)
+                .await?;
             queued_edges.extend(&result.edges);
             if !result.unresolved_refs.is_empty() {
                 self.db
-                    .insert_unresolved_refs(&result.unresolved_refs)
+                    .insert_unresolved_refs_unguarded(&transaction, &result.unresolved_refs)
                     .await?;
             }
 
@@ -971,13 +1016,15 @@ impl TraceDecay {
                 indexed_at: current_timestamp(),
                 node_count: result.nodes.len() as u32,
             };
-            self.db.upsert_file(&file_record).await?;
+            self.db
+                .upsert_file_unguarded(&transaction, &file_record)
+                .await?;
         }
 
         // Phase 2: insert all queued edges now that every node is present.
         if !queued_edges.is_empty() {
             let owned: Vec<Edge> = queued_edges.into_iter().cloned().collect();
-            self.db.insert_edges(&owned).await?;
+            self.db.insert_edges_unguarded(&transaction, &owned).await?;
         }
 
         if !to_index.is_empty() {
@@ -995,12 +1042,15 @@ impl TraceDecay {
         // re-extract every file on this first sync (#1).
         if built_from_empty {
             self.db
-                .set_metadata(
+                .set_metadata_unguarded(
+                    &transaction,
                     UNRESOLVED_REFS_PERSISTED_KEY,
                     UNRESOLVED_REFS_PERSISTED_VALUE,
                 )
                 .await?;
         }
+
+        transaction.commit().await?;
 
         // Resolve references (call edges, uses, etc.) across all files.
         // This must run after all files are indexed so cross-file references

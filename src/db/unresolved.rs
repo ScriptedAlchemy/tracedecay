@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 use libsql::params;
 
-use super::connection::Database;
+use super::connection::{Database, DatabaseWriteTransaction};
 use super::rows::row_to_unresolved_ref;
 use super::sql::collect_rows;
 use crate::errors::{Result, TraceDecayError};
@@ -10,7 +10,20 @@ use crate::types::*;
 impl Database {
     /// Inserts a single unresolved reference.
     pub async fn insert_unresolved_ref(&self, uref: &UnresolvedRef) -> Result<()> {
-        self.conn()
+        let transaction = self
+            .begin_write_transaction("insert_unresolved_ref")
+            .await?;
+        self.insert_unresolved_ref_unguarded(&transaction, uref)
+            .await?;
+        transaction.commit().await
+    }
+
+    pub(crate) async fn insert_unresolved_ref_unguarded(
+        &self,
+        transaction: &DatabaseWriteTransaction<'_>,
+        uref: &UnresolvedRef,
+    ) -> Result<()> {
+        transaction
             .execute(
                 "INSERT INTO unresolved_refs
                 (from_node_id, reference_name, reference_kind, line, col, file_path)
@@ -38,39 +51,54 @@ impl Database {
             return Ok(());
         }
 
-        self.with_batch_transaction("insert_unresolved_refs", async {
-            let stmt = self.conn()
-                .prepare("INSERT INTO unresolved_refs (from_node_id,reference_name,reference_kind,line,col,file_path) VALUES (?1,?2,?3,?4,?5,?6)")
+        let transaction = self
+            .begin_write_transaction("insert_unresolved_refs")
+            .await?;
+        self.insert_unresolved_refs_unguarded(&transaction, refs)
+            .await?;
+        transaction.commit().await
+    }
+
+    pub(crate) async fn insert_unresolved_refs_unguarded(
+        &self,
+        transaction: &DatabaseWriteTransaction<'_>,
+        refs: &[UnresolvedRef],
+    ) -> Result<()> {
+        if refs.is_empty() {
+            return Ok(());
+        }
+
+        let stmt = transaction
+            .prepare("INSERT INTO unresolved_refs (from_node_id,reference_name,reference_kind,line,col,file_path) VALUES (?1,?2,?3,?4,?5,?6)")
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to prepare: {e}"),
+                operation: "insert_unresolved_refs".to_string(),
+            })?;
+
+        for uref in refs {
+            if let Err(e) = stmt
+                .execute(params![
+                    uref.from_node_id.as_str(),
+                    uref.reference_name.as_str(),
+                    uref.reference_kind.as_str(),
+                    i64::from(uref.line),
+                    i64::from(uref.column),
+                    uref.file_path.as_str(),
+                ])
                 .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to prepare: {e}"),
-                    operation: "insert_unresolved_refs".to_string(),
-                })?;
-
-            for uref in refs {
-                if let Err(e) = stmt
-                    .execute(params![
-                        uref.from_node_id.as_str(),
-                        uref.reference_name.as_str(),
-                        uref.reference_kind.as_str(),
-                        i64::from(uref.line),
-                        i64::from(uref.column),
-                        uref.file_path.as_str(),
-                    ])
-                    .await
-                {
-                    stmt.reset();
-                    return Err(TraceDecayError::Database {
-                        message: format!("failed to insert unresolved ref: {e}"),
-                        operation: "insert_unresolved_refs".to_string(),
-                    });
-                }
+            {
                 stmt.reset();
+                return Err(TraceDecayError::Database {
+                    message: format!("failed to insert unresolved ref: {e}"),
+                    operation: "insert_unresolved_refs".to_string(),
+                });
             }
+            stmt.reset();
+        }
 
-            Ok(())
-        })
-        .await
+        drop(stmt);
+        Ok(())
     }
 
     /// Returns all unresolved references.
@@ -93,7 +121,18 @@ impl Database {
 
     /// Removes all unresolved references.
     pub async fn clear_unresolved_refs(&self) -> Result<()> {
-        self.conn()
+        let transaction = self
+            .begin_write_transaction("clear_unresolved_refs")
+            .await?;
+        self.clear_unresolved_refs_unguarded(&transaction).await?;
+        transaction.commit().await
+    }
+
+    pub(crate) async fn clear_unresolved_refs_unguarded(
+        &self,
+        transaction: &DatabaseWriteTransaction<'_>,
+    ) -> Result<()> {
+        transaction
             .execute("DELETE FROM unresolved_refs", ())
             .await
             .map_err(|e| TraceDecayError::Database {

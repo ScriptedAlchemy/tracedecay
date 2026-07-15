@@ -1,9 +1,10 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use libsql::{Connection, params};
+use libsql::{Builder, Connection, OpenFlags, params};
 use serde_json::{Value, json};
 
 use super::LcmError;
@@ -30,26 +31,34 @@ impl BackupKind {
     }
 }
 
-pub(super) fn backup_database(
+static BACKUP_NONCE: AtomicU64 = AtomicU64::new(0);
+
+pub(super) async fn backup_database(
     db_path: &Path,
     storage_root: &Path,
     kind: BackupKind,
 ) -> Result<Value, LcmError> {
     let backup_dir = storage_root.join("lcm-clean-backups");
     fs::create_dir_all(&backup_dir).map_err(|err| LcmError::Io(err.to_string()))?;
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let stamp = match kind {
-        BackupKind::Clean => elapsed.as_millis(),
-        BackupKind::Gc => u128::from(elapsed.as_secs()),
+    let (staging_dir, published_dir) = allocate_backup_directory(&backup_dir, kind)?;
+    let staging_path = staging_dir.join("sessions.db");
+    let backup_path = published_dir.join("sessions.db");
+    let result = async {
+        let byte_count = copy_sqlite_file_set(db_path, &staging_path)?;
+        verify_sqlite_backup(&staging_path).await?;
+        sync_directory(&staging_dir)?;
+        fs::rename(&staging_dir, &published_dir).map_err(|err| LcmError::Io(err.to_string()))?;
+        sync_directory(&backup_dir)?;
+        Ok(byte_count)
+    }
+    .await;
+    let byte_count = match result {
+        Ok(byte_count) => byte_count,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging_dir);
+            return Err(error);
+        }
     };
-    let backup_path = backup_dir.join(format!(
-        "sessions-{}-{stamp}-{}.db",
-        kind.name(),
-        std::process::id()
-    ));
-    let byte_count = copy_sqlite_file_set(db_path, &backup_path)?;
     Ok(json!({
         "ok": true,
         "path": backup_path,
@@ -60,6 +69,7 @@ pub(super) fn backup_database(
 fn copy_sqlite_file_set(db_path: &Path, backup_path: &Path) -> Result<u64, LcmError> {
     let mut byte_count =
         fs::copy(db_path, backup_path).map_err(|err| LcmError::Io(err.to_string()))?;
+    sync_file(backup_path)?;
     // Copy only the WAL sidecar. The -shm file is rebuildable shared memory
     // that SQLite never reads from a backup, and its live byte-range locks
     // make plain file reads fail with ERROR_LOCK_VIOLATION (os error 33) on
@@ -68,8 +78,82 @@ fn copy_sqlite_file_set(db_path: &Path, backup_path: &Path) -> Result<u64, LcmEr
     if source.is_file() {
         let target = sqlite_sidecar_path(backup_path, "-wal");
         byte_count += fs::copy(&source, target).map_err(|err| LcmError::Io(err.to_string()))?;
+        sync_file(&sqlite_sidecar_path(backup_path, "-wal"))?;
     }
     Ok(byte_count)
+}
+
+fn allocate_backup_directory(
+    backup_root: &Path,
+    kind: BackupKind,
+) -> Result<(PathBuf, PathBuf), LcmError> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    loop {
+        let nonce = BACKUP_NONCE.fetch_add(1, Ordering::Relaxed);
+        let name = format!(
+            "sessions-{}-{timestamp}-{}-{nonce}",
+            kind.name(),
+            std::process::id()
+        );
+        let published = backup_root.join(&name);
+        if published.exists() {
+            continue;
+        }
+        let staging = backup_root.join(format!(".{name}.tmp"));
+        match fs::create_dir(&staging) {
+            Ok(()) => return Ok((staging, published)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(LcmError::Io(error.to_string())),
+        }
+    }
+}
+
+async fn verify_sqlite_backup(path: &Path) -> Result<(), LcmError> {
+    let db = Builder::new_local(path)
+        .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .build()
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let conn = db
+        .connect()
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let mut rows = conn
+        .query("PRAGMA quick_check", ())
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let result = rows
+        .next()
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?
+        .ok_or_else(|| LcmError::Db("backup quick_check returned no result".to_string()))?
+        .get::<String>(0)
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    if result != "ok" {
+        return Err(LcmError::Db(format!(
+            "backup quick_check failed for '{}': {result}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn sync_file(path: &Path) -> Result<(), LcmError> {
+    fs::File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| LcmError::Io(error.to_string()))
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), LcmError> {
+    sync_file(path)
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), LcmError> {
+    Ok(())
 }
 
 fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
@@ -131,4 +215,72 @@ pub(super) async fn payload_metadata_refs_for_scope(
         refs.insert(row.get(0)?);
     }
     Ok(refs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn gc_backups_are_unique_verified_and_non_destructive() {
+        let root = tempfile::tempdir().unwrap();
+        let source_path = root.path().join("sessions.db");
+        let db = Builder::new_local(&source_path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE TABLE messages(id INTEGER PRIMARY KEY, body TEXT NOT NULL);
+             INSERT INTO messages(body) VALUES ('retained');",
+        )
+        .await
+        .unwrap();
+        checkpoint_wal_for_backup(&conn, BackupKind::Gc)
+            .await
+            .unwrap();
+
+        let first = backup_database(&source_path, root.path(), BackupKind::Gc)
+            .await
+            .unwrap();
+        let second = backup_database(&source_path, root.path(), BackupKind::Gc)
+            .await
+            .unwrap();
+        let first_path = PathBuf::from(first["path"].as_str().unwrap());
+        let second_path = PathBuf::from(second["path"].as_str().unwrap());
+        assert_ne!(first_path, second_path);
+        assert!(first_path.is_file());
+        assert!(second_path.is_file());
+
+        let backup = Builder::new_local(&first_path)
+            .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .build()
+            .await
+            .unwrap();
+        let backup_conn = backup.connect().unwrap();
+        let count: i64 = backup_conn
+            .query("SELECT COUNT(*) FROM messages", ())
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_backup_is_never_published() {
+        let root = tempfile::tempdir().unwrap();
+        let source_path = root.path().join("sessions.db");
+        fs::write(&source_path, b"not sqlite").unwrap();
+
+        assert!(
+            backup_database(&source_path, root.path(), BackupKind::Gc)
+                .await
+                .is_err()
+        );
+        let backup_root = root.path().join("lcm-clean-backups");
+        assert_eq!(fs::read_dir(backup_root).unwrap().count(), 0);
+    }
 }

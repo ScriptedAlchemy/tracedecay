@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 use std::collections::HashSet;
 
-use super::connection::Database;
+use super::connection::{Database, DatabaseWriterConnection};
 use super::sql::build_qmark_placeholders;
 use crate::errors::{Result, TraceDecayError};
 
@@ -124,6 +124,13 @@ impl Database {
     /// JOIN+LIKE form times out at >25s on chromium. Both pathologies stem
     /// from re-running the wildcard scan per candidate row.
     pub async fn collect_test_marker_ids(&self) -> Result<Vec<String>> {
+        self.collect_test_marker_ids_on(self.conn()).await
+    }
+
+    pub(crate) async fn collect_test_marker_ids_on(
+        &self,
+        conn: &DatabaseWriterConnection<'_>,
+    ) -> Result<Vec<String>> {
         let op = "collect_test_marker_ids";
         let sql = "SELECT id FROM nodes
                    WHERE kind = 'annotation_usage'
@@ -133,8 +140,7 @@ impl Database {
                          OR name = 'wasm_bindgen_test'
                          OR name LIKE '%::wasm_bindgen_test'
                      )";
-        let mut rows = self
-            .conn()
+        let mut rows = conn
             .query(sql, ())
             .await
             .map_err(|e| TraceDecayError::Database {
@@ -166,20 +172,17 @@ impl Database {
     /// (e.g. consecutive `find_dead_code` from the same MCP client) does
     /// not collide. The caller should also drop the table when done — see
     /// `find_dead_code` for the wrapping pattern.
-    pub async fn populate_test_marker_temp_table(&self, ids: &[String]) -> Result<()> {
+    pub(crate) async fn populate_test_marker_temp_table_unlocked(
+        &self,
+        conn: &DatabaseWriterConnection<'_>,
+        ids: &[String],
+    ) -> Result<()> {
         // `SQLite`'s default parameter limit is 999. Chunk well under that.
         const CHUNK_SIZE: usize = 500;
 
         let op = "populate_test_marker_temp_table";
-        let conn = self.conn();
-
         // Drop + recreate so we always start from an empty table.
-        conn.execute("DROP TABLE IF EXISTS temp.test_markers", ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to drop temp.test_markers: {e}"),
-                operation: op.to_string(),
-            })?;
+        self.drop_test_marker_temp_table_unlocked(conn).await?;
         conn.execute("CREATE TEMP TABLE test_markers (id TEXT PRIMARY KEY)", ())
             .await
             .map_err(|e| TraceDecayError::Database {
@@ -218,9 +221,11 @@ impl Database {
     /// same connection.
     ///
     /// Safe to call even if the table doesn't exist (uses `IF EXISTS`).
-    pub async fn drop_test_marker_temp_table(&self) -> Result<()> {
-        self.conn()
-            .execute("DROP TABLE IF EXISTS temp.test_markers", ())
+    pub(crate) async fn drop_test_marker_temp_table_unlocked(
+        &self,
+        conn: &DatabaseWriterConnection<'_>,
+    ) -> Result<()> {
+        conn.execute("DROP TABLE IF EXISTS temp.test_markers", ())
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to drop temp.test_markers: {e}"),
@@ -250,18 +255,16 @@ impl Database {
     /// per-candidate probe becomes a single indexed lookup against a
     /// table with ~15 K rows. Real measurement on chromium 7.5 GB DB:
     /// 0.75 s end-to-end (vs. >60 s for the single-temp-table form).
-    pub async fn populate_test_annotated_targets_temp_table(&self) -> Result<()> {
+    pub(crate) async fn populate_test_annotated_targets_temp_table_unlocked(
+        &self,
+        conn: &DatabaseWriterConnection<'_>,
+    ) -> Result<()> {
         let op = "populate_test_annotated_targets_temp_table";
-        let conn = self.conn();
 
         // Drop + recreate so we always start from an empty table — same
         // hygiene as the test_markers temp table.
-        conn.execute("DROP TABLE IF EXISTS temp.test_annotated_targets", ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to drop temp.test_annotated_targets: {e}"),
-                operation: op.to_string(),
-            })?;
+        self.drop_test_annotated_targets_temp_table_unlocked(conn)
+            .await?;
         conn.execute(
             "CREATE TEMP TABLE test_annotated_targets (target TEXT PRIMARY KEY)",
             (),
@@ -292,14 +295,73 @@ impl Database {
 
     /// Drops `temp.test_annotated_targets` if it exists. Cleanup pair for
     /// `populate_test_annotated_targets_temp_table`.
-    pub async fn drop_test_annotated_targets_temp_table(&self) -> Result<()> {
-        self.conn()
-            .execute("DROP TABLE IF EXISTS temp.test_annotated_targets", ())
+    pub(crate) async fn drop_test_annotated_targets_temp_table_unlocked(
+        &self,
+        conn: &DatabaseWriterConnection<'_>,
+    ) -> Result<()> {
+        conn.execute("DROP TABLE IF EXISTS temp.test_annotated_targets", ())
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to drop temp.test_annotated_targets: {e}"),
                 operation: "drop_test_annotated_targets_temp_table".to_string(),
             })?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::time::Duration;
+
+    use super::super::access::DatabaseAuthority;
+    use super::*;
+    use crate::graph::queries::GraphQueryManager;
+
+    async fn assert_waits_for_writer<Operation, OperationFuture>(
+        db: &Database,
+        operation: Operation,
+    ) where
+        Operation: FnOnce(Database) -> OperationFuture + Send + 'static,
+        OperationFuture: Future<Output = Result<()>> + Send + 'static,
+    {
+        let writer = db.writer().await;
+        let other = db.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut task = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            operation(other).await
+        });
+        started_rx.await.unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut task)
+                .await
+                .is_err(),
+            "TEMP-table mutation bypassed the database writer"
+        );
+
+        drop(writer);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("TEMP-table mutation did not resume after releasing the writer")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn temp_table_lifecycle_uses_the_database_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("graph.db");
+        let authority = DatabaseAuthority::acquire_test(&path, "coverage writer").unwrap();
+        let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+
+        assert_waits_for_writer(&db, |db| async move {
+            GraphQueryManager::new(&db)
+                .find_dead_code(&[], true)
+                .await
+                .map(|_| ())
+        })
+        .await;
     }
 }

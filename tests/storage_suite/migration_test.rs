@@ -1795,7 +1795,7 @@ async fn test_v14_adds_access_tracking_and_oplog() {
 }
 
 #[tokio::test]
-async fn test_v15_compacts_legacy_f64_vectors_and_enables_incremental_vacuum() {
+async fn test_v15_compacts_legacy_f64_vectors_without_open_time_vacuum() {
     let (conn, _db, _dir) = create_schema_db().await;
     let legacy_vector = vec![0.0_f64; tracedecay::memory::encoding::HolographicEncoder::DIMENSIONS];
     let legacy_bytes = bincode::serialize(&legacy_vector).unwrap();
@@ -1811,6 +1811,9 @@ async fn test_v15_compacts_legacy_f64_vectors_and_enables_incremental_vacuum() {
     )
     .await
     .expect("failed to seed legacy f64 vector");
+    conn.execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;")
+        .await
+        .expect("failed to simulate a legacy database without incremental auto-vacuum");
     set_user_version(&conn, 14).await;
 
     let migrated = migrate(&conn)
@@ -1820,8 +1823,8 @@ async fn test_v15_compacts_legacy_f64_vectors_and_enables_incremental_vacuum() {
     assert_eq!(get_user_version(&conn).await, 18);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
-        2,
-        "migrated databases should be rebuilt into incremental auto_vacuum mode"
+        0,
+        "ordinary migration must defer whole-file auto_vacuum repair"
     );
     assert_eq!(
         scalar_i64(
@@ -1851,7 +1854,7 @@ async fn test_v15_compacts_legacy_f64_vectors_and_enables_incremental_vacuum() {
 }
 
 #[tokio::test]
-async fn test_v15_repairs_incremental_vacuum_when_version_already_latest() {
+async fn test_latest_open_defers_incremental_vacuum_repair() {
     let (conn, _db, _dir) = create_schema_db().await;
 
     conn.execute_batch(
@@ -1869,7 +1872,7 @@ async fn test_v15_repairs_incremental_vacuum_when_version_already_latest() {
 
     let migrated = migrate(&conn)
         .await
-        .expect("latest-version open should repair incremental auto_vacuum");
+        .expect("latest-version open should defer incremental auto_vacuum repair");
 
     assert!(
         !migrated,
@@ -1878,7 +1881,7 @@ async fn test_v15_repairs_incremental_vacuum_when_version_already_latest() {
     assert_eq!(get_user_version(&conn).await, 18);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
-        2,
-        "already-v15 databases should be repaired to incremental auto_vacuum on healthy open"
+        0,
+        "ordinary open must not run a whole-file VACUUM"
     );
 }

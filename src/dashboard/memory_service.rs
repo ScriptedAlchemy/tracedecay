@@ -10,7 +10,6 @@ use super::memory_analysis::{
     propose_dedup_actions, propose_hygiene_candidates, score_distribution, score_similar_pairs,
 };
 use super::memory_queries::{self, VectorStateFingerprint};
-use crate::memory::store::MemoryStore;
 
 const PROJECTION_POINT_CAP: i64 = 2000;
 
@@ -702,7 +701,12 @@ pub(crate) async fn build_delete_plan(
 }
 
 pub(crate) async fn delete_fact(state: &DashboardState, fact_id: i64) -> Result<bool, String> {
-    let store = MemoryStore::new(&state.mem_conn);
+    let writer = state
+        .mem_db
+        .writer_connection("delete dashboard memory fact")
+        .await
+        .map_err(|error| error.to_string())?;
+    let store = writer.memory_store();
     store.remove_fact(fact_id).await.map_err(|e| e.to_string())
 }
 
@@ -774,7 +778,25 @@ pub(crate) async fn apply_merge_op(state: &DashboardState, op: &Value) -> (Value
         parsed_loser_ids.push(loser_id);
     }
 
-    let store = MemoryStore::new(&state.mem_conn);
+    let writer = match state
+        .mem_db
+        .writer_connection("merge dashboard memory facts")
+        .await
+    {
+        Ok(writer) => writer,
+        Err(error) => {
+            return (
+                json!({
+                    "op": "merge",
+                    "winner_id": winner_id,
+                    "status": "error",
+                    "error": error.to_string(),
+                }),
+                false,
+            );
+        }
+    };
+    let store = writer.memory_store();
     let merged_content = op
         .get("merged_content")
         .and_then(Value::as_str)
@@ -877,13 +899,20 @@ pub(crate) async fn curate_apply_payload(state: &DashboardState, ops: &[Value]) 
         .await;
     }
     if deleted > 0 || merged > 0 {
-        let _ = MemoryStore::new(&state.mem_conn)
-            .record_oplog(
-                "curate_apply",
-                None,
-                &json!({ "mode": "ops", "deleted": deleted, "merged": merged, "errors": errors }),
-            )
-            .await;
+        if let Ok(writer) = state
+            .mem_db
+            .writer_connection("record dashboard curation operation")
+            .await
+        {
+            let _ = writer
+                .memory_store()
+                .record_oplog(
+                    "curate_apply",
+                    None,
+                    &json!({ "mode": "ops", "deleted": deleted, "merged": merged, "errors": errors }),
+                )
+                .await;
+        }
     }
     push_curation_activity(
         state,

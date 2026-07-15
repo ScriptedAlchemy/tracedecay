@@ -872,17 +872,17 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
         let (db, _) = crate::common::open_test_database(&db_path)
             .await
             .expect("open graph database");
-        db.conn()
-            .execute_batch(
-                "CREATE TABLE doctor_daemon_probe (payload BLOB);\
+        db.execute_write_batch(
+            "seed doctor daemon reclaimable pages fixture",
+            "CREATE TABLE doctor_daemon_probe (payload BLOB);\
                  WITH RECURSIVE count(x) AS (\
                      VALUES(1) UNION ALL SELECT x + 1 FROM count WHERE x < 128\
                  )\
                  INSERT INTO doctor_daemon_probe SELECT zeroblob(8192) FROM count;\
                  DELETE FROM doctor_daemon_probe;",
-            )
-            .await
-            .expect("seed reclaimable pages");
+        )
+        .await
+        .expect("seed reclaimable pages");
         db.checkpoint().await.expect("checkpoint fixture");
     });
 

@@ -458,11 +458,14 @@ pub(crate) async fn run_payload_gc_in_transaction(
     let all_metadata_refs = maintenance::all_payload_metadata_refs(conn).await?;
 
     if apply && cfg.backup_before_reap && (dir.is_some() || !all_metadata_refs.is_empty()) {
-        report.backup = Some(maintenance::backup_database(
-            &gc_database_path(storage_root),
-            storage_root,
-            maintenance::BackupKind::Gc,
-        )?);
+        report.backup = Some(
+            maintenance::backup_database(
+                &gc_database_path(storage_root),
+                storage_root,
+                maintenance::BackupKind::Gc,
+            )
+            .await?,
+        );
     }
 
     let scoped_metadata_refs = payload_metadata_refs_for_scope(conn, provider, session_id).await?;

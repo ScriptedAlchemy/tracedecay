@@ -24,7 +24,6 @@ struct MigrationMarker {
 pub(super) struct MergeSnapshotRequest<'a> {
     pub(super) source: Option<&'a Connection>,
     pub(super) source_path: &'a Path,
-    pub(super) target: &'a Connection,
     pub(super) target_path: &'a Path,
     pub(super) target_project: &'a Path,
     pub(super) target_project_id: &'a str,
@@ -34,71 +33,98 @@ pub(super) struct MergeSnapshotRequest<'a> {
     pub(super) fail_after_table: Option<&'a str>,
 }
 
+struct CreatedPayloads {
+    paths: Vec<PathBuf>,
+    armed: bool,
+}
+
+impl CreatedPayloads {
+    fn armed() -> Self {
+        Self {
+            paths: Vec::new(),
+            armed: true,
+        }
+    }
+
+    fn paths_mut(&mut self) -> &mut Vec<PathBuf> {
+        &mut self.paths
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CreatedPayloads {
+    fn drop(&mut self) {
+        if self.armed {
+            remove_created_payloads(&self.paths);
+        }
+    }
+}
+
 pub(super) async fn merge_snapshot(
+    db: &GlobalDb,
     request: MergeSnapshotRequest<'_>,
 ) -> Result<MergeOutcome, String> {
     let source_path = request.source_path;
-    let target = request.target;
     let target_path = request.target_path;
     let target_project = request.target_project;
     let target_project_id = request.target_project_id;
     let fingerprint = request.fingerprint;
     let source_schema_version = request.source_schema_version;
     let existing_marker = read_migration_marker(target_path, fingerprint, target_project_id)?;
-    target
-        .execute("BEGIN IMMEDIATE", ())
+    let mut created_payloads = CreatedPayloads::armed();
+    if let Some(source) = request.source {
+        copy_external_payload_files(
+            source,
+            source_path,
+            target_path,
+            created_payloads.paths_mut(),
+        )
+        .await?;
+    }
+    let repaired_payloads = !created_payloads.paths.is_empty();
+    let transaction = db
+        .begin_write_transaction()
         .await
         .map_err(|error| format!("could not begin target migration: {error}"))?;
-    let mut created_payloads = Vec::new();
-    let result = merge_snapshot_in_transaction(&request, &mut created_payloads).await;
-    match result {
-        Ok(mut outcome) => {
-            let repaired_payloads = !created_payloads.is_empty();
-            if let Err(error) = target.execute("COMMIT", ()).await {
-                let _ = target.execute("ROLLBACK", ()).await;
-                remove_created_payloads(&created_payloads);
-                return Err(format!("could not commit target migration: {error}"));
-            }
-            let prior_rows_copied = existing_marker
-                .as_ref()
-                .map_or(0, |marker| marker.rows_copied);
-            write_migration_marker(
-                target_path,
-                &MigrationMarker {
-                    schema_version: 2,
-                    source_fingerprint: fingerprint.to_string(),
-                    source_db_path: source_path.to_path_buf(),
-                    target_project_path: target_project.to_path_buf(),
-                    target_project_id: target_project_id.to_string(),
-                    target_db_path: canonical_marker_target_path(target_path)?,
-                    source_lcm_schema_version: source_schema_version,
-                    rows_copied: prior_rows_copied.saturating_add(outcome.rows_copied),
-                },
-            )?;
-            if let Some(marker) = existing_marker
-                && outcome.rows_copied == 0
-                && !repaired_payloads
-            {
-                outcome.already_migrated = true;
-                outcome.rows_copied = marker.rows_copied;
-            }
-            Ok(outcome)
-        }
-        Err(error) => {
-            let _ = target.execute("ROLLBACK", ()).await;
-            remove_created_payloads(&created_payloads);
-            Err(error)
-        }
+    let mut outcome = merge_snapshot_in_transaction(&request, &transaction).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| format!("could not commit target migration: {error}"))?;
+    created_payloads.disarm();
+    let prior_rows_copied = existing_marker
+        .as_ref()
+        .map_or(0, |marker| marker.rows_copied);
+    write_migration_marker(
+        target_path,
+        &MigrationMarker {
+            schema_version: 2,
+            source_fingerprint: fingerprint.to_string(),
+            source_db_path: source_path.to_path_buf(),
+            target_project_path: target_project.to_path_buf(),
+            target_project_id: target_project_id.to_string(),
+            target_db_path: canonical_marker_target_path(target_path)?,
+            source_lcm_schema_version: source_schema_version,
+            rows_copied: prior_rows_copied.saturating_add(outcome.rows_copied),
+        },
+    )?;
+    if let Some(marker) = existing_marker
+        && outcome.rows_copied == 0
+        && !repaired_payloads
+    {
+        outcome.already_migrated = true;
+        outcome.rows_copied = marker.rows_copied;
     }
+    Ok(outcome)
 }
 
 async fn merge_snapshot_in_transaction(
     request: &MergeSnapshotRequest<'_>,
-    created_payloads: &mut Vec<PathBuf>,
+    target: &Connection,
 ) -> Result<MergeOutcome, String> {
-    let source_path = request.source_path;
-    let target = request.target;
-    let target_path = request.target_path;
     let target_project = request.target_project;
     let fail_after_table = request.fail_after_table;
     let mut rows_copied = request.initial_rows_copied;
@@ -109,7 +135,6 @@ async fn merge_snapshot_in_transaction(
             rows_copied,
         });
     };
-    copy_external_payload_files(source, source_path, target_path, created_payloads).await?;
     let project = GlobalDb::canonical_project_key(target_project);
     rows_copied += copy_table(source, target, "sessions", &[], |columns, values| {
         for (column, value) in columns.iter().zip(values.iter_mut()) {
@@ -186,6 +211,32 @@ async fn merge_snapshot_in_transaction(
         already_migrated: false,
         rows_copied,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_removes_armed_payloads() {
+        let temp = tempfile::tempdir().unwrap();
+        let payload = temp.path().join("copied-payload");
+        fs::write(&payload, b"payload").unwrap();
+        let task_payload = payload.clone();
+        let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut created = CreatedPayloads::armed();
+            created.paths_mut().push(task_payload);
+            armed_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+            created.disarm();
+        });
+
+        armed_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(!payload.exists());
+    }
 }
 
 fn marker_path(target_db_path: &Path, fingerprint: &str) -> Result<PathBuf, String> {

@@ -6679,8 +6679,8 @@ pub fn unrelated(x: i32) -> i32 {
     // Changing compute_a's cached fingerprint source_hash makes every pair it
     // participates in stale — the reader's freshness join must drop them.
     cg.db()
-        .conn()
-        .execute(
+        .execute_write(
+            "stale redundancy fingerprint fixture",
             "UPDATE node_fingerprints SET source_hash = 'stale-hash' WHERE node_id = ?1",
             libsql::params![compute_a_id.clone()],
         )
@@ -8384,23 +8384,21 @@ async fn memory_fact_store_update_trust_delta_uses_direct_fact_lookup() {
     let first_id = first["fact"]["fact_id"].as_i64().unwrap();
 
     let db = cg.open_project_store_db().await.unwrap();
-    db.conn().execute("BEGIN IMMEDIATE", ()).await.unwrap();
     for i in 0..205i64 {
-        db.conn()
-            .execute(
-                "INSERT INTO memory_facts (
+        db.execute_write(
+            "seed later memory facts fixture",
+            "INSERT INTO memory_facts (
                     content, category, tags, trust_score, created_at, updated_at, source, metadata
                  )
                  VALUES (?1, 'general', '[]', 0.5, ?2, ?2, 'test', '{}')",
-                libsql::params![
-                    format!("Later fact {i} should not hide the first fact"),
-                    9_000_000_000i64 + i,
-                ],
-            )
-            .await
-            .unwrap();
+            libsql::params![
+                format!("Later fact {i} should not hide the first fact"),
+                9_000_000_000i64 + i,
+            ],
+        )
+        .await
+        .unwrap();
     }
-    db.conn().execute("COMMIT", ()).await.unwrap();
 
     let updated = handle_tool_call(
         &cg,
@@ -13275,15 +13273,15 @@ async fn memory_status_repairs_dirty_banks_before_reporting() {
     let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
     let db_path = project_graph_db(&cg);
     let (db, _) = crate::common::open_test_database(&db_path).await.unwrap();
-    db.conn()
-        .execute(
-            "UPDATE memory_facts
+    db.execute_write(
+        "clear memory vector fixture",
+        "UPDATE memory_facts
              SET hrr_vector = NULL, hrr_algebra = 'legacy', hrr_dim = 8
              WHERE fact_id = ?1",
-            libsql::params![fact_id],
-        )
-        .await
-        .unwrap();
+        libsql::params![fact_id],
+    )
+    .await
+    .unwrap();
     db.close();
 
     let status = handle_tool_call(&cg, "tracedecay_memory_status", json!({}), None, None)
@@ -15728,8 +15726,11 @@ async fn wait_for_startup_catch_up_waits_for_transcript_ingest_flag() {
 /// fails while node and file queries keep working.
 async fn break_edges_table(cg: &TraceDecay) {
     cg.db()
-        .conn()
-        .execute("ALTER TABLE edges RENAME TO edges_broken", ())
+        .execute_write(
+            "break edges table fixture",
+            "ALTER TABLE edges RENAME TO edges_broken",
+            (),
+        )
         .await
         .unwrap();
 }

@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
-use libsql::{Connection, Value, params};
+use libsql::{Connection, TransactionBehavior, Value, params};
 use serde::{Deserialize, Serialize};
 
 use super::SessionMessageRecord;
@@ -890,22 +890,13 @@ pub(crate) async fn record_span_observation(
     observation: &SpanObservation,
     merge_gap_secs: i64,
 ) -> Result<i64, GitCorrelationError> {
-    conn.execute("BEGIN IMMEDIATE", ()).await?;
-    let result = record_span_observation_in_transaction(conn, observation, merge_gap_secs).await;
-    match result {
-        Ok(span_id) => {
-            if let Err(err) = conn.execute("COMMIT", ()).await {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(err.into())
-            } else {
-                Ok(span_id)
-            }
-        }
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(err)
-        }
-    }
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await?;
+    let span_id =
+        record_span_observation_in_transaction(&transaction, observation, merge_gap_secs).await?;
+    transaction.commit().await?;
+    Ok(span_id)
 }
 
 pub(crate) async fn record_span_observation_in_transaction(

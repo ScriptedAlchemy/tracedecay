@@ -224,12 +224,12 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                 &target_profile_root,
                 "legacy store migration",
             )?;
-            let apply_report = tracedecay::migrate::manifest::apply_migration_manifest(
-                &mut manifest,
-            )
-            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
-                message: err.to_string(),
-            })?;
+            let apply_report =
+                tracedecay::migrate::manifest::apply_migration_manifest(&mut manifest)
+                    .await
+                    .map_err(|err| tracedecay::errors::TraceDecayError::Config {
+                        message: err.to_string(),
+                    })?;
             let verify_report = tracedecay::migrate::manifest::verify_migration_manifest(&manifest);
             if !verify_report.cutover_ready {
                 return Err(tracedecay::errors::TraceDecayError::Config {

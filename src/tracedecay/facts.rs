@@ -36,14 +36,15 @@ impl TraceDecay {
     /// stored (or pre-existing) fact plus a write-time diff report
     /// (near-duplicate / possible-conflict / secret rejection).
     pub async fn add_fact(&self, request: AddFactRequest) -> Result<AddFactOutcome> {
-        MemoryStore::new(self.db.conn())
-            .add_fact(request, DEFAULT_TRUST)
-            .await
+        let writer = self.db.writer_connection("add fact").await?;
+        writer.memory_store().add_fact(request, DEFAULT_TRUST).await
     }
 
     /// Search facts by lexical overlap, entity metadata, category, and trust.
     pub async fn search_facts(&self, request: SearchFactsRequest) -> Result<Vec<FactSearchResult>> {
-        let mut results = FactRetriever::new(self.db.conn())
+        let writer = self.db.writer_connection("search facts").await?;
+        let mut results = writer
+            .fact_retriever()
             .search(
                 &request.query,
                 request.category,
@@ -56,7 +57,8 @@ impl TraceDecay {
                 result.why = None;
             }
         }
-        MemoryStore::new(self.db.conn())
+        writer
+            .memory_store()
             .increment_retrieval_counts(&fact_result_ids(&results))
             .await?;
         Ok(results)
@@ -93,10 +95,13 @@ impl TraceDecay {
         min_trust: Option<f64>,
         limit: usize,
     ) -> Result<Vec<FactSearchResult>> {
-        let results = FactRetriever::new(self.db.conn())
+        let writer = self.db.writer_connection("probe facts").await?;
+        let results = writer
+            .fact_retriever()
             .probe(entity, category, min_trust, limit)
             .await?;
-        MemoryStore::new(self.db.conn())
+        writer
+            .memory_store()
             .increment_retrieval_counts(&fact_result_ids(&results))
             .await?;
         Ok(results)
@@ -109,7 +114,8 @@ impl TraceDecay {
         min_trust: Option<f64>,
         limit: usize,
     ) -> Result<Vec<FactSearchResult>> {
-        let retriever = FactRetriever::new(self.db.conn());
+        let writer = self.db.writer_connection("related facts").await?;
+        let retriever = writer.fact_retriever();
         let related_entities = retriever.related(entity, limit).await?;
         let mut seen = std::collections::HashSet::new();
         let mut results = Vec::new();
@@ -129,7 +135,8 @@ impl TraceDecay {
                 break;
             }
         }
-        MemoryStore::new(self.db.conn())
+        writer
+            .memory_store()
             .increment_retrieval_counts(&fact_result_ids(&results))
             .await?;
         Ok(results)
@@ -142,10 +149,13 @@ impl TraceDecay {
         min_trust: Option<f64>,
         limit: usize,
     ) -> Result<Vec<FactSearchResult>> {
-        let results = FactRetriever::new(self.db.conn())
+        let writer = self.db.writer_connection("reason facts").await?;
+        let results = writer
+            .fact_retriever()
             .reason(entities, category, min_trust, limit)
             .await?;
-        MemoryStore::new(self.db.conn())
+        writer
+            .memory_store()
             .increment_retrieval_counts(&fact_result_ids(&results))
             .await?;
         Ok(results)
@@ -181,11 +191,13 @@ impl TraceDecay {
     }
 
     pub async fn update_fact(&self, request: UpdateFactRequest) -> Result<FactRecord> {
-        MemoryStore::new(self.db.conn()).update_fact(request).await
+        let writer = self.db.writer_connection("update fact").await?;
+        writer.memory_store().update_fact(request).await
     }
 
     pub async fn remove_fact(&self, fact_id: i64) -> Result<bool> {
-        MemoryStore::new(self.db.conn()).remove_fact(fact_id).await
+        let writer = self.db.writer_connection("remove fact").await?;
+        writer.memory_store().remove_fact(fact_id).await
     }
 
     pub async fn list_facts(
@@ -194,10 +206,13 @@ impl TraceDecay {
         min_trust: Option<f64>,
         limit: usize,
     ) -> Result<Vec<FactRecord>> {
-        let facts = MemoryStore::new(self.db.conn())
+        let writer = self.db.writer_connection("list facts").await?;
+        let facts = writer
+            .memory_store()
             .list_facts(category, min_trust, limit)
             .await?;
-        MemoryStore::new(self.db.conn())
+        writer
+            .memory_store()
             .increment_retrieval_counts(&fact_ids(&facts))
             .await?;
         Ok(facts)
@@ -208,9 +223,8 @@ impl TraceDecay {
     }
 
     pub async fn record_fact_feedback(&self, request: FeedbackRequest) -> Result<FeedbackResult> {
-        MemoryStore::new(self.db.conn())
-            .record_feedback_event(request)
-            .await
+        let writer = self.db.writer_connection("record fact feedback").await?;
+        writer.memory_store().record_feedback_event(request).await
     }
 
     pub async fn fact_trust_history(&self, fact_id: i64) -> Result<Vec<TrustHistoryEntry>> {
@@ -219,10 +233,7 @@ impl TraceDecay {
             .await
     }
 
-    async fn repair_derived_memory_for_conn(
-        conn: &libsql::Connection,
-    ) -> Result<MemoryRepairStats> {
-        let store = MemoryStore::new(conn);
+    async fn repair_derived_memory(store: &MemoryStore<'_>) -> Result<MemoryRepairStats> {
         let mut missing_vectors_repaired = 0;
         loop {
             let repaired = store.compute_missing_vectors(500).await?;
@@ -240,11 +251,13 @@ impl TraceDecay {
         })
     }
 
-    pub(crate) async fn memory_status_for_conn(conn: &libsql::Connection) -> Result<MemoryStatus> {
+    pub(crate) async fn memory_status_for_db(db: &crate::db::Database) -> Result<MemoryStatus> {
+        let writer = db.writer_connection("memory status repair").await?;
         let operation = "memory_status";
-        let repair = Self::repair_derived_memory_for_conn(conn).await?;
+        let store = writer.memory_store();
+        let repair = Self::repair_derived_memory(&store).await?;
         let hrr_dim = HolographicEncoder::DIMENSIONS;
-        let mut fact_rows = conn
+        let mut fact_rows = writer
             .query("SELECT trust_score FROM memory_facts", ())
             .await
             .map_err(|e| memory_database_error(operation, e))?;
@@ -271,7 +284,7 @@ impl TraceDecay {
                 trust_075_100_count += 1;
             }
         }
-        let mut entity_rows = conn
+        let mut entity_rows = writer
             .query("SELECT COUNT(*) FROM memory_entities", ())
             .await
             .map_err(|e| memory_database_error(operation, e))?;
@@ -280,7 +293,7 @@ impl TraceDecay {
             .await
             .map_err(row_err)?
             .map_or(Ok(0_i64), |row| row.get(0).map_err(row_err))?;
-        let mut bank_rows = conn
+        let mut bank_rows = writer
             .query("SELECT COUNT(*) FROM memory_banks", ())
             .await
             .map_err(|e| memory_database_error(operation, e))?;
@@ -289,7 +302,7 @@ impl TraceDecay {
             .await
             .map_err(row_err)?
             .map_or(Ok(0_i64), |row| row.get(0).map_err(row_err))?;
-        let mut aggregate_rows = conn
+        let mut aggregate_rows = writer
             .query(
                 "SELECT COALESCE(SUM(helpful_count), 0),
                         COALESCE(SUM(unhelpful_count), 0),
@@ -335,7 +348,7 @@ impl TraceDecay {
             feedback_total,
             seen_to_feedback_ratio,
         };
-        let mut backfill_rows = conn
+        let mut backfill_rows = writer
             .query(
                 "SELECT COUNT(*) FROM memory_facts
                  WHERE json_extract(metadata, '$.holographic_memory_backfill_v1') = 1",
@@ -371,11 +384,65 @@ impl TraceDecay {
     }
 
     pub async fn memory_status(&self) -> Result<MemoryStatus> {
-        Self::memory_status_for_conn(self.db.conn()).await
+        Self::memory_status_for_db(&self.db).await
     }
 
     pub async fn project_memory_status(&self) -> Result<MemoryStatus> {
         let db = self.open_project_store_db().await?;
-        Self::memory_status_for_conn(db.conn()).await
+        Self::memory_status_for_db(&db).await
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::db::DatabaseAuthority;
+
+    #[tokio::test]
+    async fn separate_memory_handles_serialize_mutations() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("memory.db");
+        let authority = DatabaseAuthority::acquire_test(&path, "memory writer lane").unwrap();
+        let (first, _) = crate::db::Database::initialize(&path, &authority)
+            .await
+            .unwrap();
+        let (second, _) = crate::db::Database::open(&path, &authority).await.unwrap();
+        let first_writer = first
+            .writer_connection("hold first memory writer")
+            .await
+            .unwrap();
+        let mut second_write = Box::pin(async {
+            let writer = second.writer_connection("second memory mutation").await?;
+            writer
+                .memory_store()
+                .add_fact(
+                    AddFactRequest {
+                        content: "serialized memory mutation".to_string(),
+                        category: MemoryCategory::Project,
+                        source: None,
+                        tags: Vec::new(),
+                        entities: Vec::new(),
+                        trust: None,
+                        metadata: serde_json::Value::Null,
+                    },
+                    DEFAULT_TRUST,
+                )
+                .await
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut second_write)
+                .await
+                .is_err()
+        );
+        drop(first_writer);
+        let outcome = tokio::time::timeout(Duration::from_secs(10), second_write)
+            .await
+            .expect("second writer remained blocked")
+            .unwrap();
+        assert!(outcome.fact.is_some());
     }
 }

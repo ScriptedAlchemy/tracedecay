@@ -719,26 +719,39 @@ mod tests {
         global.checkpoint().await;
         global.close();
 
-        std::fs::write(
-            profile
-                .join("migration-inventory")
-                .join(".fail-registry-retirement-once"),
-            b"fail once",
-        )
-        .unwrap();
-        let mut interrupted = HealthPassReport::default();
-        retire_completed_consolidation_manifests(&profile, &mut interrupted).await;
-        assert_eq!(interrupted.warnings.len(), 1);
-        assert!(interrupted.warnings[0].contains("synthetic registry retirement failure"));
+        let pause = profile
+            .join("migration-inventory")
+            .join(".pause-registry-retirement");
+        let paused = profile
+            .join("migration-inventory")
+            .join(".registry-retirement-paused");
+        std::fs::write(&pause, b"pause").unwrap();
+        let profile_for_retirement = profile.clone();
+        let interrupted = tokio::spawn(async move {
+            let mut report = HealthPassReport::default();
+            retire_completed_consolidation_manifests(&profile_for_retirement, &mut report).await;
+            report
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !paused.is_file() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("registry retirement did not reach cancellation point");
+        interrupted.abort();
+        assert!(interrupted.await.unwrap_err().is_cancelled());
+        std::fs::remove_file(pause).unwrap();
+        std::fs::remove_file(paused).unwrap();
         for project_id in [source_id, target_id] {
             let root = profile.join("projects").join(project_id);
+            assert!(root.join(crate::storage::STORE_MANIFEST_FILENAME).is_file());
             assert!(
-                !root.join(crate::storage::STORE_MANIFEST_FILENAME).exists()
-                    && root
-                        .join(format!(
-                            "store_manifest.consolidated-into-{destination_id}.json"
-                        ))
-                        .is_file()
+                !root
+                    .join(format!(
+                        "store_manifest.consolidated-into-{destination_id}.json"
+                    ))
+                    .exists()
             );
         }
         let global = crate::global_db::GlobalDb::open_at(&profile.join("global.db"))
@@ -746,7 +759,9 @@ mod tests {
             .unwrap();
         assert_eq!(global.list_code_projects(usize::MAX).await.len(), 3);
         global
-            .conn()
+            .writer_connection()
+            .await
+            .unwrap()
             .execute(
                 "UPDATE code_projects SET canonical_root=?1 WHERE project_id=?2",
                 libsql::params!["/moved/elsewhere", source_id],
@@ -757,7 +772,7 @@ mod tests {
         let mut moved = HealthPassReport::default();
         retire_completed_consolidation_manifests(&profile, &mut moved).await;
         assert!(moved.warnings.is_empty(), "{:?}", moved.warnings);
-        assert!(moved.retired_consolidation_manifests.is_empty());
+        assert_eq!(moved.retired_consolidation_manifests.len(), 2);
         assert_eq!(moved.retired_consolidation_registry_projects, 1);
         for project_id in [source_id, target_id] {
             let root = profile.join("projects").join(project_id);

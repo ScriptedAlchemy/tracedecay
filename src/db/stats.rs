@@ -1,6 +1,8 @@
 // Rust guideline compliant 2025-10-17
 use std::collections::HashMap;
 
+use libsql::params;
+
 use super::connection::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
@@ -8,9 +10,9 @@ use crate::types::*;
 impl Database {
     /// Returns aggregate statistics about the code graph.
     pub async fn get_stats(&self) -> Result<GraphStats> {
+        let snapshot = self.begin_isolated_read_snapshot("get_stats").await?;
         // Single query for all scalar counts: nodes, edges, files, last_updated, total_source_bytes
-        let mut counts_rows = self
-            .conn()
+        let mut counts_rows = snapshot
             .query(
                 "SELECT \
                    (SELECT COUNT(*) FROM nodes), \
@@ -44,29 +46,29 @@ impl Database {
                 }
                 None => (0, 0, 0, 0, 0),
             };
+        drop(counts_rows);
 
         // Nodes grouped by kind
-        let nodes_by_kind = query_kind_counts(
-            self.conn(),
-            "SELECT kind, COUNT(*) FROM nodes GROUP BY kind",
-        )
-        .await?;
+        let nodes_by_kind =
+            query_kind_counts(&snapshot, "SELECT kind, COUNT(*) FROM nodes GROUP BY kind").await?;
 
         // Edges grouped by kind
-        let edges_by_kind = query_kind_counts(
-            self.conn(),
-            "SELECT kind, COUNT(*) FROM edges GROUP BY kind",
-        )
-        .await?;
+        let edges_by_kind =
+            query_kind_counts(&snapshot, "SELECT kind, COUNT(*) FROM edges GROUP BY kind").await?;
 
-        let db_size_bytes = self.size().await.unwrap_or(0);
+        let db_size_bytes = query_scalar_i64(
+            &snapshot,
+            "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
+            "get_stats",
+        )
+        .await
+        .unwrap_or(0) as u64;
 
         // Files grouped by language. Done in Rust (not SQL) so the label set
         // stays in sync with the extractor registry without an ever-growing
         // CASE expression. See `display_language_for_path`.
         let files_by_language = {
-            let mut rows = self
-                .conn()
+            let mut rows = snapshot
                 .query("SELECT path FROM files", ())
                 .await
                 .map_err(|e| TraceDecayError::Database {
@@ -88,23 +90,20 @@ impl Database {
             map
         };
 
-        let last_sync_at = self
-            .get_metadata("last_sync_at")
+        let last_sync_at = query_metadata(&snapshot, "last_sync_at")
             .await?
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
-        let last_full_sync_at = self
-            .get_metadata("last_full_sync_at")
+        let last_full_sync_at = query_metadata(&snapshot, "last_full_sync_at")
             .await?
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
-        let last_sync_duration_ms = self
-            .get_metadata("last_sync_duration_ms")
+        let last_sync_duration_ms = query_metadata(&snapshot, "last_sync_duration_ms")
             .await?
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        Ok(GraphStats {
+        let stats = GraphStats {
             node_count,
             edge_count,
             file_count,
@@ -117,7 +116,9 @@ impl Database {
             last_sync_at,
             last_full_sync_at,
             last_sync_duration_ms,
-        })
+        };
+        super::tx::commit(snapshot, "get_stats").await?;
+        Ok(stats)
     }
 
     /// Returns the most recent `indexed_at` timestamp across all files,
@@ -256,6 +257,32 @@ async fn query_scalar_i64(conn: &libsql::Connection, sql: &str, operation: &str)
         message: format!("failed to read scalar value: {e}"),
         operation: operation.to_string(),
     })
+}
+
+async fn query_metadata(conn: &libsql::Connection, key: &str) -> Result<Option<String>> {
+    let mut rows = conn
+        .query("SELECT value FROM metadata WHERE key = ?1", params![key])
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to query metadata: {error}"),
+            operation: "get_stats".to_string(),
+        })?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to read metadata: {error}"),
+            operation: "get_stats".to_string(),
+        })?
+    else {
+        return Ok(None);
+    };
+    row.get(0)
+        .map(Some)
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to decode metadata: {error}"),
+            operation: "get_stats".to_string(),
+        })
 }
 
 #[cfg(test)]

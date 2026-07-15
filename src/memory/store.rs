@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 
-use libsql::{Connection, params};
+use libsql::{Connection, TransactionBehavior, params};
 
 use super::diff::{
     NEAR_DUPLICATE_THRESHOLD, classify_add_diff, combined_similarity, normalized_equivalent,
@@ -42,29 +42,30 @@ impl<'a> MemoryStore<'a> {
         }
     }
 
-    /// Runs `work` inside a `BEGIN IMMEDIATE` transaction, committing on success
-    /// and rolling back on error. The inner future is built before the
-    /// transaction opens, which is safe because async fns do no work until
+    /// Runs `work` inside an immediate transaction, committing on success and
+    /// rolling back on error or cancellation. The inner future is built before
+    /// the transaction opens, which is safe because async fns do no work until
     /// polled — `work.await` is the first time any statement runs.
     async fn with_immediate_tx<T>(
         &self,
         operation: &str,
         work: impl std::future::Future<Output = Result<T>>,
     ) -> Result<T> {
-        self.conn
-            .execute("BEGIN IMMEDIATE", ())
+        let transaction = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|e| db_error(operation, e))?;
         match work.await {
             Ok(value) => {
-                if let Err(error) = self.conn.execute("COMMIT", ()).await {
-                    let _ = self.conn.execute("ROLLBACK", ()).await;
-                    return Err(db_error(operation, error));
-                }
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|error| db_error(operation, error))?;
                 Ok(value)
             }
             Err(error) => {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
+                let _ = transaction.rollback().await;
                 Err(error)
             }
         }
@@ -2538,5 +2539,36 @@ fn db_message(operation: &str, message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Database {
         message: message.into(),
         operation: operation.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use std::future::pending;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_immediate_transaction_rolls_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("memory.db");
+        let db = libsql::Builder::new_local(&path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        let retained = conn.clone();
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+
+        let task = tokio::spawn(async move {
+            MemoryStore::new(&conn)
+                .with_immediate_tx("cancelled memory write", async move {
+                    let _ = started.send(());
+                    pending::<Result<()>>().await
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        task.abort();
+        let _ = task.await;
+
+        assert!(retained.is_autocommit());
     }
 }

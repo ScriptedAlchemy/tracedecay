@@ -48,10 +48,9 @@ fn make_node(id: &str, name: &str, file_path: &str, visibility: Visibility) -> N
 }
 
 async fn seed_dead_code_marker_perf_fixture(db: &Database) {
-    db.conn()
-        .execute_batch(
-            "BEGIN;
-             WITH RECURSIVE seq(i) AS (
+    db.execute_write_batch(
+        "seed dead-code marker performance fixture",
+        "WITH RECURSIVE seq(i) AS (
                  SELECT 0 UNION ALL SELECT i + 1 FROM seq WHERE i < 49999
              )
              INSERT OR REPLACE INTO nodes (
@@ -145,11 +144,10 @@ async fn seed_dead_code_marker_perf_fixture(db: &Database) {
                  SELECT 0 UNION ALL SELECT i + 1 FROM seq WHERE i < 999
              )
              INSERT OR IGNORE INTO edges (source, target, kind, line)
-             SELECT printf('n-marker-%d', i), printf('n-fn-%d', i), 'annotates', 1 FROM seq;
-             COMMIT;",
-        )
-        .await
-        .expect("failed to seed dead-code marker perf fixture");
+             SELECT printf('n-marker-%d', i), printf('n-fn-%d', i), 'annotates', 1 FROM seq;",
+    )
+    .await
+    .expect("failed to seed dead-code marker perf fixture");
 }
 
 /// Sets up a call chain: main -> process -> validate -> check.

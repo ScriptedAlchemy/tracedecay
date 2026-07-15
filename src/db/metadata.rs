@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 use libsql::params;
 
-use super::connection::Database;
+use super::connection::{Database, DatabaseWriteTransaction};
 use crate::errors::{Result, TraceDecayError};
 
 impl Database {
@@ -33,7 +33,19 @@ impl Database {
 
     /// Sets a metadata value, creating or replacing the entry.
     pub async fn set_metadata(&self, key: &str, value: &str) -> Result<()> {
-        self.conn()
+        let transaction = self.begin_write_transaction("set_metadata").await?;
+        self.set_metadata_unguarded(&transaction, key, value)
+            .await?;
+        transaction.commit().await
+    }
+
+    pub(crate) async fn set_metadata_unguarded(
+        &self,
+        transaction: &DatabaseWriteTransaction<'_>,
+        key: &str,
+        value: &str,
+    ) -> Result<()> {
+        transaction
             .execute(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
                 params![key, value],

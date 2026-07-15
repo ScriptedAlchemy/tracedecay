@@ -234,33 +234,24 @@ pub async fn apply_registry_reconstruction_report(
     db: &GlobalDb,
     report: &RegistryReconstructionReport,
 ) -> std::result::Result<RegistryReconstructionApplyReport, Vec<String>> {
-    let conn = db.writer_connection().await;
-    let conn = &*conn;
-    conn.execute("BEGIN IMMEDIATE", ()).await.map_err(|error| {
+    let transaction = db.begin_write_transaction().await.map_err(|error| {
         vec![format!(
             "could not start atomic registry reconstruction: {error}"
         )]
     })?;
-    let issues = preflight_registry_reconstruction(conn, report).await;
+    let issues = preflight_registry_reconstruction(&transaction, report).await;
     if !issues.is_empty() {
-        let _ = conn.execute("ROLLBACK", ()).await;
         return Err(issues);
     }
-    match insert_missing_registry_rows(conn, report).await {
-        Ok(applied) => match conn.execute("COMMIT", ()).await {
-            Ok(_) => Ok(applied),
-            Err(error) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(vec![format!(
-                    "could not commit atomic registry reconstruction: {error}"
-                )])
-            }
-        },
-        Err(issue) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(vec![issue])
-        }
-    }
+    let applied = insert_missing_registry_rows(&transaction, report)
+        .await
+        .map_err(|issue| vec![issue])?;
+    transaction.commit().await.map_err(|error| {
+        vec![format!(
+            "could not commit atomic registry reconstruction: {error}"
+        )]
+    })?;
+    Ok(applied)
 }
 
 pub async fn apply_single_registry_reconstruction_report(

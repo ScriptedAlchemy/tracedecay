@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 use libsql::params;
 
-use super::connection::Database;
+use super::connection::{Database, DatabaseWriteTransaction};
 use super::rows::row_to_edge;
 use super::sql::collect_rows;
 use crate::errors::{Result, TraceDecayError};
@@ -10,10 +10,20 @@ use crate::types::*;
 impl Database {
     /// Inserts a single edge, skipping silently if either endpoint is missing.
     pub async fn insert_edge(&self, edge: &Edge) -> Result<()> {
+        let transaction = self.begin_write_transaction("insert_edge").await?;
+        self.insert_edge_unguarded(&transaction, edge).await?;
+        transaction.commit().await
+    }
+
+    pub(crate) async fn insert_edge_unguarded(
+        &self,
+        transaction: &DatabaseWriteTransaction<'_>,
+        edge: &Edge,
+    ) -> Result<()> {
         // Contains is denormalized to nodes.parent_id since v9. Fold the
         // edge into an UPDATE rather than writing a row to the edges table.
         if edge.kind == EdgeKind::Contains {
-            self.conn()
+            transaction
                 .execute(
                     "UPDATE nodes SET parent_id = ?1 WHERE id = ?2",
                     params![edge.source.as_str(), edge.target.as_str()],
@@ -25,7 +35,7 @@ impl Database {
                 })?;
             return Ok(());
         }
-        self.conn()
+        transaction
             .execute(
                 "INSERT OR IGNORE INTO edges (source, target, kind, line) \
                  SELECT ?1, ?2, ?3, ?4 \
@@ -57,69 +67,80 @@ impl Database {
             return Ok(());
         }
 
-        self.with_batch_transaction("insert_edges", async {
-            // Conditional INSERT: only insert when both endpoints exist in
-            // `nodes`. This avoids FK violations during incremental sync
-            // when an edge references a node from a not-yet-indexed file.
-            let stmt = self
-                .conn()
-                .prepare(
-                    "INSERT OR IGNORE INTO edges (source, target, kind, line) \
+        let transaction = self.begin_write_transaction("insert_edges").await?;
+        self.insert_edges_unguarded(&transaction, edges).await?;
+        transaction.commit().await
+    }
+
+    pub(crate) async fn insert_edges_unguarded(
+        &self,
+        transaction: &DatabaseWriteTransaction<'_>,
+        edges: &[Edge],
+    ) -> Result<()> {
+        if edges.is_empty() {
+            return Ok(());
+        }
+
+        // Conditional INSERT: only insert when both endpoints exist in
+        // `nodes`. This avoids FK violations during incremental sync
+        // when an edge references a node from a not-yet-indexed file.
+        let stmt = transaction
+            .prepare(
+                "INSERT OR IGNORE INTO edges (source, target, kind, line) \
                      SELECT ?1, ?2, ?3, ?4 \
                      WHERE EXISTS (SELECT 1 FROM nodes WHERE id = ?1) \
                        AND EXISTS (SELECT 1 FROM nodes WHERE id = ?2)",
-                )
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to prepare: {e}"),
-                    operation: "insert_edges".to_string(),
-                })?;
+            )
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to prepare: {e}"),
+                operation: "insert_edges".to_string(),
+            })?;
 
-            let parent_stmt = self
-                .conn()
-                .prepare("UPDATE nodes SET parent_id = ?1 WHERE id = ?2")
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to prepare parent update: {e}"),
-                    operation: "insert_edges".to_string(),
-                })?;
+        let parent_stmt = transaction
+            .prepare("UPDATE nodes SET parent_id = ?1 WHERE id = ?2")
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to prepare parent update: {e}"),
+                operation: "insert_edges".to_string(),
+            })?;
 
-            for edge in edges {
-                if edge.kind == EdgeKind::Contains {
-                    if let Err(e) = parent_stmt
-                        .execute(params![edge.source.as_str(), edge.target.as_str()])
-                        .await
-                    {
-                        parent_stmt.reset();
-                        return Err(TraceDecayError::Database {
-                            message: format!("failed to set parent_id: {e}"),
-                            operation: "insert_edges".to_string(),
-                        });
-                    }
-                    parent_stmt.reset();
-                    continue;
-                }
-                if let Err(e) = stmt
-                    .execute(params![
-                        edge.source.as_str(),
-                        edge.target.as_str(),
-                        edge.kind.as_str(),
-                        edge.line.map(i64::from),
-                    ])
+        for edge in edges {
+            if edge.kind == EdgeKind::Contains {
+                if let Err(e) = parent_stmt
+                    .execute(params![edge.source.as_str(), edge.target.as_str()])
                     .await
                 {
-                    stmt.reset();
+                    parent_stmt.reset();
                     return Err(TraceDecayError::Database {
-                        message: format!("failed to insert edge: {e}"),
+                        message: format!("failed to set parent_id: {e}"),
                         operation: "insert_edges".to_string(),
                     });
                 }
-                stmt.reset();
+                parent_stmt.reset();
+                continue;
             }
+            if let Err(e) = stmt
+                .execute(params![
+                    edge.source.as_str(),
+                    edge.target.as_str(),
+                    edge.kind.as_str(),
+                    edge.line.map(i64::from),
+                ])
+                .await
+            {
+                stmt.reset();
+                return Err(TraceDecayError::Database {
+                    message: format!("failed to insert edge: {e}"),
+                    operation: "insert_edges".to_string(),
+                });
+            }
+            stmt.reset();
+        }
 
-            Ok(())
-        })
-        .await
+        drop(parent_stmt);
+        drop(stmt);
+        Ok(())
     }
 
     /// Returns outgoing edges from a source node, optionally filtered by edge kinds.
@@ -298,7 +319,20 @@ impl Database {
 
     /// Deletes all edges originating from a given source node.
     pub async fn delete_edges_by_source(&self, source_id: &str) -> Result<()> {
-        self.conn()
+        let transaction = self
+            .begin_write_transaction("delete_edges_by_source")
+            .await?;
+        self.delete_edges_by_source_unguarded(&transaction, source_id)
+            .await?;
+        transaction.commit().await
+    }
+
+    pub(crate) async fn delete_edges_by_source_unguarded(
+        &self,
+        transaction: &DatabaseWriteTransaction<'_>,
+        source_id: &str,
+    ) -> Result<()> {
+        transaction
             .execute("DELETE FROM edges WHERE source = ?1", params![source_id])
             .await
             .map_err(|e| TraceDecayError::Database {

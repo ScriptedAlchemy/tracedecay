@@ -295,26 +295,26 @@ async fn seed_user_duplicate_facts(db: &Database) {
         HolographicEncoder::serialize(&[0.21, 0.34, 0.49]).unwrap(),
     ];
     for (index, fact_id) in [201_i64, 202_i64].into_iter().enumerate() {
-        db.conn()
-            .execute(
-                "INSERT INTO memory_facts
+        db.execute_write(
+            "seed user duplicate fact fixture",
+            "INSERT INTO memory_facts
                     (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count,
                      created_at, updated_at, hrr_vector, hrr_algebra, hrr_dim, access_count)
                  VALUES (?1, ?2, 'user_pref', '[\"memory\"]', 0.95, 0, 0, ?3, ?3, ?4,
                          'amari_fhrr', ?5, 0)",
-                libsql::params![
-                    fact_id,
-                    if index == 0 {
-                        "General conversations belong in user memory"
-                    } else {
-                        "General conversations should belong in user memory"
-                    },
-                    1_700_000_000_i64 + fact_id,
-                    libsql::Value::Blob(vectors[index].clone()),
-                    HolographicEncoder::DIMENSIONS as i64,
-                ],
-            )
-            .await
-            .unwrap();
+            libsql::params![
+                fact_id,
+                if index == 0 {
+                    "General conversations belong in user memory"
+                } else {
+                    "General conversations should belong in user memory"
+                },
+                1_700_000_000_i64 + fact_id,
+                libsql::Value::Blob(vectors[index].clone()),
+                HolographicEncoder::DIMENSIONS as i64,
+            ],
+        )
+        .await
+        .unwrap();
     }
 }

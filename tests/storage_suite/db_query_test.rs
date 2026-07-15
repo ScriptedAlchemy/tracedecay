@@ -222,14 +222,14 @@ async fn test_db_module_reexports_database_and_stored_fingerprint() {
 #[tokio::test]
 async fn test_insert_nodes_rolls_back_after_execute_failure() {
     let db = setup_db().await;
-    db.conn()
-        .execute_batch(
-            "CREATE TRIGGER fail_nodes_insert BEFORE INSERT ON nodes BEGIN
+    db.execute_write_batch(
+        "install failing node insert trigger fixture",
+        "CREATE TRIGGER fail_nodes_insert BEFORE INSERT ON nodes BEGIN
                  SELECT RAISE(FAIL, 'forced node insert failure');
              END;",
-        )
-        .await
-        .expect("failed to install node failure trigger");
+    )
+    .await
+    .expect("failed to install node failure trigger");
 
     let err = db
         .insert_nodes(&[sample_node("rb-node", "failing_node", "src/lib.rs")])
@@ -251,14 +251,14 @@ async fn test_insert_edges_rolls_back_after_execute_failure() {
         sample_node("rb-edge-b", "edge_b", "src/lib.rs"),
     ];
     db.insert_nodes(&nodes).await.expect("insert_nodes failed");
-    db.conn()
-        .execute_batch(
-            "CREATE TRIGGER fail_edges_insert BEFORE INSERT ON edges BEGIN
+    db.execute_write_batch(
+        "install failing edge insert trigger fixture",
+        "CREATE TRIGGER fail_edges_insert BEFORE INSERT ON edges BEGIN
                  SELECT RAISE(FAIL, 'forced edge insert failure');
              END;",
-        )
-        .await
-        .expect("failed to install edge failure trigger");
+    )
+    .await
+    .expect("failed to install edge failure trigger");
 
     let err = db
         .insert_edges(&[sample_edge("rb-edge-a", "rb-edge-b", EdgeKind::Calls)])
@@ -275,14 +275,14 @@ async fn test_insert_edges_rolls_back_after_execute_failure() {
 #[tokio::test]
 async fn test_upsert_files_rolls_back_after_execute_failure() {
     let db = setup_db().await;
-    db.conn()
-        .execute_batch(
-            "CREATE TRIGGER fail_files_insert BEFORE INSERT ON files BEGIN
+    db.execute_write_batch(
+        "install failing file insert trigger fixture",
+        "CREATE TRIGGER fail_files_insert BEFORE INSERT ON files BEGIN
                  SELECT RAISE(FAIL, 'forced file insert failure');
              END;",
-        )
-        .await
-        .expect("failed to install file failure trigger");
+    )
+    .await
+    .expect("failed to install file failure trigger");
 
     let err = db
         .upsert_files(&[sample_file("src/lib.rs")])
@@ -302,14 +302,14 @@ async fn test_insert_unresolved_refs_rolls_back_after_execute_failure() {
     db.insert_nodes(&[sample_node("rb-ref", "ref_source", "src/lib.rs")])
         .await
         .expect("insert_nodes failed");
-    db.conn()
-        .execute_batch(
-            "CREATE TRIGGER fail_unresolved_refs_insert BEFORE INSERT ON unresolved_refs BEGIN
+    db.execute_write_batch(
+        "install failing unresolved reference trigger fixture",
+        "CREATE TRIGGER fail_unresolved_refs_insert BEFORE INSERT ON unresolved_refs BEGIN
                  SELECT RAISE(FAIL, 'forced unresolved ref insert failure');
              END;",
-        )
-        .await
-        .expect("failed to install unresolved ref failure trigger");
+    )
+    .await
+    .expect("failed to install unresolved ref failure trigger");
 
     let err = db
         .insert_unresolved_refs(&[UnresolvedRef {
@@ -2595,43 +2595,43 @@ async fn test_non_utf8_signature_does_not_crash() {
 
     // Insert a node with a BLOB signature containing 0xFF (invalid UTF-8)
     // via raw SQL — the Rust insert_node API only accepts valid Strings.
-    db.conn()
-        .execute(
-            "INSERT INTO nodes (id, kind, name, qualified_name, file_path, \
+    db.execute_write(
+        "insert non-UTF-8 signature fixture",
+        "INSERT INTO nodes (id, kind, name, qualified_name, file_path, \
              start_line, end_line, start_column, end_column, \
              docstring, signature, visibility, is_async, \
              branches, loops, returns, max_nesting, \
              unsafe_blocks, unchecked_calls, assertions, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
                      ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
-            libsql::params![
-                "function:bad_utf8",
-                "function",
-                "render",
-                "src/view.cpp::render",
-                "src/view.cpp",
-                1i64,
-                10i64,
-                0i64,
-                50i64,
-                // docstring with a Latin-1 copyright symbol (0xA9) — invalid UTF-8
-                libsql::Value::Blob(b"Renders the sc\xe8ne with \xa9 effects".to_vec()),
-                // signature with 0xFF byte
-                libsql::Value::Blob(b"void render(const std::string& sc\xe8ne)".to_vec()),
-                "public",
-                0i64,
-                0i64,
-                0i64,
-                0i64,
-                0i64,
-                0i64,
-                0i64,
-                0i64,
-                0i64,
-            ],
-        )
-        .await
-        .unwrap();
+        libsql::params![
+            "function:bad_utf8",
+            "function",
+            "render",
+            "src/view.cpp::render",
+            "src/view.cpp",
+            1i64,
+            10i64,
+            0i64,
+            50i64,
+            // docstring with a Latin-1 copyright symbol (0xA9) — invalid UTF-8
+            libsql::Value::Blob(b"Renders the sc\xe8ne with \xa9 effects".to_vec()),
+            // signature with 0xFF byte
+            libsql::Value::Blob(b"void render(const std::string& sc\xe8ne)".to_vec()),
+            "public",
+            0i64,
+            0i64,
+            0i64,
+            0i64,
+            0i64,
+            0i64,
+            0i64,
+            0i64,
+            0i64,
+        ],
+    )
+    .await
+    .unwrap();
 
     // This used to fail with "invalid utf-8 sequence of 1 bytes from index N"
     let node = db.get_node_by_id("function:bad_utf8").await;

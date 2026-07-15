@@ -1156,6 +1156,12 @@ async fn finalize_applied_consolidation(
             &ledger.destination_project_id,
         )?,
     ];
+    // Registry retirement is the only awaited mutation in this finalization
+    // step. Complete it first so cancellation cannot leave durable retired
+    // manifests while the registry still advertises legacy owners. The file
+    // operations below contain no suspension point, making the transition
+    // cancellation-atomic from the caller's perspective.
+    let retired_registry_projects = retire_legacy_registry_owners(profile_root, ledger).await?;
     let mut retired = Vec::new();
     for plan in plans {
         let parent = plan
@@ -1176,7 +1182,6 @@ async fn finalize_applied_consolidation(
             ManifestRetirementAction::AlreadyRetired => {}
         }
     }
-    let retired_registry_projects = retire_legacy_registry_owners(profile_root, ledger).await?;
     Ok((retired, retired_registry_projects))
 }
 
@@ -1252,23 +1257,27 @@ async fn retire_legacy_registry_owners(
     let db = GlobalDb::open_at(&global_path)
         .await
         .ok_or_else(|| config_error("could not open global registry for consolidation cleanup"))?;
-    let conn = db.writer_connection().await;
-    let conn = &*conn;
-    conn.execute("BEGIN IMMEDIATE", ())
+    let transaction = db
+        .begin_write_transaction()
         .await
         .map_err(|error| config_error(format!("could not begin registry cleanup: {error}")))?;
+    let conn = &transaction;
 
     #[cfg(test)]
     {
-        let injected_failure = profile_root
-            .join(LEDGER_DIR)
-            .join(".fail-registry-retirement-once");
+        let ledger_root = profile_root.join(LEDGER_DIR);
+        let injected_failure = ledger_root.join(".fail-registry-retirement-once");
         if injected_failure.is_file() {
             let _ = fs::remove_file(injected_failure);
-            let _ = conn.execute("ROLLBACK", ()).await;
             return Err(config_error(
-                "synthetic registry retirement failure after manifest retirement",
+                "synthetic registry retirement failure before manifest retirement",
             ));
+        }
+        let pause = ledger_root.join(".pause-registry-retirement");
+        if pause.is_file() {
+            fs::write(ledger_root.join(".registry-retirement-paused"), b"paused")
+                .map_err(io_error)?;
+            std::future::pending::<()>().await;
         }
     }
 
@@ -1448,19 +1457,13 @@ async fn retire_legacy_registry_owners(
     .await;
 
     match result {
-        Ok(deleted) => match conn.execute("COMMIT", ()).await {
-            Ok(_) => Ok(deleted),
-            Err(error) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(config_error(format!(
-                    "could not commit legacy registry cleanup: {error}"
-                )))
-            }
-        },
-        Err(error) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(error)
+        Ok(deleted) => {
+            transaction.commit().await.map_err(|error| {
+                config_error(format!("could not commit legacy registry cleanup: {error}"))
+            })?;
+            Ok(deleted)
         }
+        Err(error) => Err(error),
     }
 }
 

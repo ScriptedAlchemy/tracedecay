@@ -214,7 +214,9 @@ async fn validate_fact_proposal(
             }),
         ));
     }
-    let matches = retriever.search(&content, Some(category), None, 1).await?;
+    let matches = retriever
+        .search_untracked(&content, Some(category), None, 1)
+        .await?;
     let nearest = matches.first().map(|existing| {
         json!({
             "fact_id": existing.fact.fact_id,

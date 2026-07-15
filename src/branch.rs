@@ -567,8 +567,14 @@ pub async fn prepare_branch_tracking_in_layout(
     let db_file = format!("branches/{stem}.db");
     meta.add_branch(branch_name, &db_file, &parent);
     if let Err(e) = branch_meta::save_branch_meta(tracedecay_dir, &meta) {
-        remove_branch_db_files(&new_db_path);
-        return Err(e.into());
+        return match admin::remove_branch_db_files_checked(&new_db_path) {
+            Ok(()) => Err(e.into()),
+            Err(cleanup_error) => Err(crate::errors::TraceDecayError::Config {
+                message: format!(
+                    "failed to publish branch metadata: {e}; unpublished snapshot cleanup also failed: {cleanup_error}"
+                ),
+            }),
+        };
     }
 
     Ok(BranchTrackingPreparation::Added(PreparedBranchTracking {
@@ -671,11 +677,82 @@ fn rollback_keeps_database_when_metadata_removal_cannot_be_saved() {
     crate::branch_meta::save_branch_meta(data_dir, &meta).unwrap();
     std::fs::create_dir(data_dir.join("branch-meta.json.tmp")).unwrap();
 
-    rollback_branch_tracking(data_dir, "feature", "branches/feature.db", &db_path);
+    let error = rollback_branch_tracking(data_dir, "feature", "branches/feature.db", &db_path)
+        .expect_err("blocked metadata publication must fail rollback");
 
     assert!(db_path.exists());
     let persisted = crate::branch_meta::load_branch_meta(data_dir).unwrap();
     assert!(persisted.is_tracked("feature"));
+    assert!(error.to_string().contains("branch metadata"));
+}
+
+#[cfg(test)]
+#[test]
+fn rollback_quarantines_complete_database_family_and_retires_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path();
+    let branches_dir = data_dir.join("branches");
+    std::fs::create_dir_all(&branches_dir).unwrap();
+    let db_path = branches_dir.join("feature.db");
+    for path in [
+        db_path.clone(),
+        db_path.with_extension("db-wal"),
+        db_path.with_extension("db-shm"),
+    ] {
+        std::fs::write(path, b"sqlite").unwrap();
+    }
+
+    let mut meta = crate::branch_meta::BranchMeta::new("main");
+    meta.add_branch("feature", "branches/feature.db", "main");
+    crate::branch_meta::save_branch_meta(data_dir, &meta).unwrap();
+
+    rollback_branch_tracking(data_dir, "feature", "branches/feature.db", &db_path).unwrap();
+
+    assert!(!db_path.exists());
+    assert!(!db_path.with_extension("db-wal").exists());
+    assert!(!db_path.with_extension("db-shm").exists());
+    assert!(
+        !crate::branch_meta::load_branch_meta(data_dir)
+            .unwrap()
+            .is_tracked("feature")
+    );
+    assert!(crate::db::database_path_is_tombstoned(&db_path).unwrap());
+    assert!(!data_dir.join(".branch-delete-transaction.json").exists());
+}
+
+#[cfg(test)]
+#[test]
+fn rollback_refuses_database_with_active_authority() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path();
+    let branches_dir = data_dir.join("branches");
+    std::fs::create_dir_all(&branches_dir).unwrap();
+    let db_path = branches_dir.join("feature.db");
+    std::fs::write(&db_path, b"sqlite").unwrap();
+
+    let mut meta = crate::branch_meta::BranchMeta::new("main");
+    meta.add_branch("feature", "branches/feature.db", "main");
+    crate::branch_meta::save_branch_meta(data_dir, &meta).unwrap();
+    let _authority = crate::db::DatabaseAuthority::for_runtime(
+        &db_path,
+        "test active branch database authority",
+    )
+    .unwrap();
+
+    let error = rollback_branch_tracking(data_dir, "feature", "branches/feature.db", &db_path)
+        .expect_err("active database authority must fence rollback");
+
+    assert!(
+        error
+            .to_string()
+            .contains("incompatible database authority")
+    );
+    assert!(db_path.exists());
+    assert!(
+        crate::branch_meta::load_branch_meta(data_dir)
+            .unwrap()
+            .is_tracked("feature")
+    );
 }
 
 pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {
@@ -685,13 +762,16 @@ pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &Prepa
     }
 }
 
-pub fn rollback_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {
+pub fn rollback_prepared_branch_tracking(
+    tracedecay_dir: &Path,
+    prepared: &PreparedBranchTracking,
+) -> crate::errors::Result<()> {
     rollback_branch_tracking(
         tracedecay_dir,
         &prepared.branch_name,
         &prepared.db_file,
         &prepared.new_db_path,
-    );
+    )
 }
 
 fn rollback_branch_tracking(
@@ -699,25 +779,8 @@ fn rollback_branch_tracking(
     branch_name: &str,
     db_file: &str,
     new_db_path: &Path,
-) {
-    let metadata_removed =
-        crate::branch_meta::load_branch_meta(tracedecay_dir).is_some_and(|mut meta| {
-            let should_remove = meta
-                .branches
-                .get(branch_name)
-                .is_some_and(|entry| entry.db_file == db_file);
-            if !should_remove {
-                return false;
-            }
-            meta.remove_branch(branch_name);
-            crate::branch_meta::save_branch_meta(tracedecay_dir, &meta).is_ok()
-        });
-    let removal_persisted = metadata_removed
-        && crate::branch_meta::load_branch_meta(tracedecay_dir)
-            .is_some_and(|meta| !meta.branches.contains_key(branch_name));
-    if removal_persisted {
-        remove_branch_db_files(new_db_path);
-    }
+) -> crate::errors::Result<()> {
+    admin::rollback_published_branch_tracking(tracedecay_dir, branch_name, db_file, new_db_path)
 }
 
 fn prune_missing_branch_dbs(
@@ -773,10 +836,6 @@ pub(crate) fn acquire_branch_lock_blocking(
     admin::acquire_branch_add_lock_blocking(tracedecay_dir)
 }
 
-fn remove_branch_db_files(db_path: &Path) {
-    let _ = admin::remove_branch_db_files_checked(db_path);
-}
-
 async fn create_consistent_branch_snapshot(src: &Path, dst: &Path) -> crate::errors::Result<()> {
     let parent_dir = dst
         .parent()
@@ -798,7 +857,7 @@ async fn create_consistent_branch_snapshot(src: &Path, dst: &Path) -> crate::err
     let result = async {
         let authority =
             crate::db::DatabaseAuthority::for_runtime(src, "create branch snapshot")?;
-        let (source, _) = crate::db::Database::open_read_only(src, &authority).await?;
+        let (source, _) = crate::db::Database::open(src, &authority).await?;
         source.snapshot_to(&temp).await?;
         std::fs::hard_link(&temp, dst).map_err(|error| {
             crate::errors::TraceDecayError::Config {

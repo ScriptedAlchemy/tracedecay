@@ -157,14 +157,14 @@ async fn entity_grooming_rewires_links_supports_alias_retrieval_and_repairs_vect
         .unwrap();
     let winner = entity_id(&db, "tracedecay").await;
     let loser = entity_id(&db, "memorygraph").await;
-    db.conn()
-        .execute(
-            "UPDATE memory_facts SET hrr_vector = X'00', hrr_algebra = 'wrong', hrr_dim = 1,
+    db.execute_write(
+        "corrupt fact vector fixture",
+        "UPDATE memory_facts SET hrr_vector = X'00', hrr_algebra = 'wrong', hrr_dim = 1,
                     hrr_precision = 'f64' WHERE fact_id = ?1",
-            libsql::params![first.fact_id],
-        )
-        .await
-        .unwrap();
+        libsql::params![first.fact_id],
+    )
+    .await
+    .unwrap();
 
     let report = store
         .apply_grooming_batch(
@@ -300,7 +300,6 @@ async fn seed_newer_unrelated_memory_facts(
     entity_prefix: &str,
     count: usize,
 ) {
-    db.conn().execute("BEGIN IMMEDIATE", ()).await.unwrap();
     for i in 0..count {
         let fact_id = 10_000 + i as i64;
         let entity_id = 20_000 + i as i64;
@@ -310,8 +309,8 @@ async fn seed_newer_unrelated_memory_facts(
         let updated_at = 1_900_000_000 + i as i64;
 
         if let Err(err) = db
-            .conn()
-            .execute(
+            .execute_write(
+                "seed unrelated memory fact fixture",
                 "INSERT INTO memory_facts
                     (fact_id, content, category, trust_score, created_at, updated_at, source, metadata)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
@@ -327,13 +326,12 @@ async fn seed_newer_unrelated_memory_facts(
             )
             .await
         {
-            db.conn().execute("ROLLBACK", ()).await.unwrap();
             panic!("failed to insert unrelated memory fact: {err}");
         }
 
         if let Err(err) = db
-            .conn()
-            .execute(
+            .execute_write(
+                "seed unrelated memory entity fixture",
                 "INSERT INTO memory_entities
                     (entity_id, name, normalized_name, entity_type, aliases, created_at)
                  VALUES (?1, ?2, ?3, 'unknown', '[]', ?4)",
@@ -341,23 +339,20 @@ async fn seed_newer_unrelated_memory_facts(
             )
             .await
         {
-            db.conn().execute("ROLLBACK", ()).await.unwrap();
             panic!("failed to insert unrelated memory entity: {err}");
         }
 
         if let Err(err) = db
-            .conn()
-            .execute(
+            .execute_write(
+                "link unrelated memory entity fixture",
                 "INSERT INTO memory_fact_entities (fact_id, entity_id) VALUES (?1, ?2)",
                 libsql::params![fact_id, entity_id],
             )
             .await
         {
-            db.conn().execute("ROLLBACK", ()).await.unwrap();
             panic!("failed to link unrelated memory entity: {err}");
         }
     }
-    db.conn().execute("COMMIT", ()).await.unwrap();
 }
 
 async fn dirty_bank_names(db: &Database) -> Vec<String> {
@@ -433,15 +428,15 @@ async fn clear_fact_vector(cg: &TraceDecay, fact_id: i64) {
     let (db, _) = crate::common::open_test_database(&cg.store_layout().graph_db_path)
         .await
         .unwrap();
-    db.conn()
-        .execute(
-            "UPDATE memory_facts
+    db.execute_write(
+        "clear fact vector fixture",
+        "UPDATE memory_facts
              SET hrr_vector = NULL, hrr_algebra = 'legacy', hrr_dim = 8
              WHERE fact_id = ?1",
-            libsql::params![fact_id],
-        )
-        .await
-        .unwrap();
+        libsql::params![fact_id],
+    )
+    .await
+    .unwrap();
     db.close();
 }
 
@@ -449,13 +444,13 @@ async fn set_fact_updated_at(cg: &TraceDecay, fact_id: i64, updated_at: i64) {
     let (db, _) = crate::common::open_test_database(&cg.store_layout().graph_db_path)
         .await
         .unwrap();
-    db.conn()
-        .execute(
-            "UPDATE memory_facts SET updated_at = ?2 WHERE fact_id = ?1",
-            libsql::params![fact_id, updated_at],
-        )
-        .await
-        .unwrap();
+    db.execute_write(
+        "set fact update time fixture",
+        "UPDATE memory_facts SET updated_at = ?2 WHERE fact_id = ?1",
+        libsql::params![fact_id, updated_at],
+    )
+    .await
+    .unwrap();
     db.close();
 }
 
@@ -842,9 +837,9 @@ async fn rebuild_dirty_banks_preserves_rows_updated_during_rebuild() {
         .unwrap();
     let before = dirty_bank_updated_at(&db, "project").await;
 
-    db.conn()
-        .execute_batch(
-            "CREATE TRIGGER mark_project_dirty_after_bank_insert
+    db.execute_write_batch(
+        "install dirty-bank trigger fixture",
+        "CREATE TRIGGER mark_project_dirty_after_bank_insert
                 AFTER INSERT ON memory_banks
                 WHEN NEW.bank_name = 'project'
                 BEGIN
@@ -852,9 +847,9 @@ async fn rebuild_dirty_banks_preserves_rows_updated_during_rebuild() {
                     SET updated_at = updated_at + 100
                     WHERE bank_name = 'project';
                 END;",
-        )
-        .await
-        .unwrap();
+    )
+    .await
+    .unwrap();
 
     assert_eq!(store.rebuild_dirty_banks().await.unwrap(), 2);
     assert_eq!(dirty_bank_names(&db).await, vec!["project"]);
@@ -1138,13 +1133,13 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
     let vector_len: i64 = row.get(0).unwrap();
     assert_eq!(vector_len, 8200);
 
-    db.conn()
-        .execute(
-            "UPDATE memory_facts SET hrr_vector = NULL, hrr_dim = 8 WHERE fact_id = ?1",
-            libsql::params![fact.fact_id],
-        )
-        .await
-        .unwrap();
+    db.execute_write(
+        "clear compact vector fixture",
+        "UPDATE memory_facts SET hrr_vector = NULL, hrr_dim = 8 WHERE fact_id = ?1",
+        libsql::params![fact.fact_id],
+    )
+    .await
+    .unwrap();
 
     assert_eq!(store.compute_missing_vectors(10).await.unwrap(), 1);
     assert_eq!(store.compute_missing_vectors(10).await.unwrap(), 0);
@@ -1168,13 +1163,13 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
         "fresh and recomputed vectors should be marked as f32 precision with compact blobs"
     );
 
-    db.conn()
-        .execute(
-            "UPDATE memory_facts SET hrr_vector = NULL WHERE fact_id = ?1",
-            libsql::params![fact_without_vector.fact_id],
-        )
-        .await
-        .unwrap();
+    db.execute_write(
+        "clear vector before bank rebuild fixture",
+        "UPDATE memory_facts SET hrr_vector = NULL WHERE fact_id = ?1",
+        libsql::params![fact_without_vector.fact_id],
+    )
+    .await
+    .unwrap();
     assert_eq!(
         store
             .rebuild_bank("project", Some(MemoryCategory::Project))
@@ -1218,15 +1213,15 @@ async fn compute_missing_vectors_backfills_legacy_f64_precision_to_f32() {
     let legacy_bytes = bincode::serialize(&baseline_vector).unwrap();
     assert_eq!(legacy_bytes.len(), 16_392);
 
-    db.conn()
-        .execute(
-            "UPDATE memory_facts
+    db.execute_write(
+        "install legacy vector fixture",
+        "UPDATE memory_facts
              SET hrr_vector = ?1, hrr_precision = 'f64'
              WHERE fact_id = ?2",
-            libsql::params![legacy_bytes, fact.fact_id],
-        )
-        .await
-        .unwrap();
+        libsql::params![legacy_bytes, fact.fact_id],
+    )
+    .await
+    .unwrap();
 
     assert_eq!(store.compute_missing_vectors(10).await.unwrap(), 1);
     assert_eq!(store.compute_missing_vectors(10).await.unwrap(), 0);
@@ -1318,48 +1313,40 @@ async fn remove_fact_defers_vacuum_while_peer_connections_are_live() {
         .expect("serialize compact HRR vector");
     assert_eq!(vector.len(), HolographicEncoder::SERIALIZED_F32_BYTES);
 
-    db.conn().execute("BEGIN IMMEDIATE", ()).await.unwrap();
     for idx in 0..48 {
         let fact_id = 50_000 + idx;
-        db.conn()
-            .execute(
-                "INSERT INTO memory_facts (
+        db.execute_write(
+            "seed vacuum reclamation fixture",
+            "INSERT INTO memory_facts (
                     fact_id, content, category, tags, trust_score, created_at,
                     updated_at, source, metadata, hrr_vector, hrr_algebra, hrr_dim, hrr_precision
                  )
                  VALUES (?1, ?2, ?3, '[]', ?4, ?5, ?5, ?6, '{}', ?7, ?8, ?9, ?10)",
-                libsql::params![
-                    fact_id,
-                    format!("incremental vacuum blob reclamation fixture {idx}"),
-                    MemoryCategory::Project.as_str(),
-                    0.8_f64,
-                    1_900_000_000_i64 + idx,
-                    "test",
-                    vector.clone(),
-                    "amari_fhrr",
-                    HolographicEncoder::DIMENSIONS as i64,
-                    HolographicEncoder::HRR_PRECISION,
-                ],
-            )
-            .await
-            .unwrap();
-        fact_ids.push(fact_id);
-    }
-    db.conn().execute("COMMIT", ()).await.unwrap();
-    db.conn()
-        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            libsql::params![
+                fact_id,
+                format!("incremental vacuum blob reclamation fixture {idx}"),
+                MemoryCategory::Project.as_str(),
+                0.8_f64,
+                1_900_000_000_i64 + idx,
+                "test",
+                vector.clone(),
+                "amari_fhrr",
+                HolographicEncoder::DIMENSIONS as i64,
+                HolographicEncoder::HRR_PRECISION,
+            ],
+        )
         .await
         .unwrap();
+        fact_ids.push(fact_id);
+    }
+    db.checkpoint().await.unwrap();
     let size_after_insert = std::fs::metadata(&db_path).unwrap().len();
     let (peer, _) = crate::common::open_test_database(&db_path).await.unwrap();
 
     for fact_id in fact_ids {
         assert!(store.remove_fact(fact_id).await.unwrap());
     }
-    db.conn()
-        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-        .await
-        .unwrap();
+    db.checkpoint().await.unwrap();
     let size_after_delete = std::fs::metadata(&db_path).unwrap().len();
 
     assert!(

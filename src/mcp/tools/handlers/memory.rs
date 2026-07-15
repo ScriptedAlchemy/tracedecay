@@ -41,11 +41,15 @@ pub(super) struct TargetMemoryDb<'a> {
 }
 
 impl TargetMemoryDb<'_> {
-    pub(super) fn conn(&self) -> &libsql::Connection {
+    fn db(&self) -> &Database {
         match &self.db {
-            TargetMemoryDbHandle::Active(db) => db.conn(),
-            TargetMemoryDbHandle::Owned(db) => db.conn(),
+            TargetMemoryDbHandle::Active(db) => db,
+            TargetMemoryDbHandle::Owned(db) => db,
         }
+    }
+
+    pub(super) fn conn(&self) -> &libsql::Connection {
+        self.db().conn()
     }
 }
 
@@ -257,36 +261,42 @@ fn action_mutates_memory(action: &str) -> bool {
 }
 
 async fn record_retrieval_counts(
-    store: &MemoryStore<'_>,
+    db: &Database,
     cross_project_selector: bool,
     ids: &[i64],
+    recall: bool,
 ) -> Result<()> {
-    if !cross_project_selector {
+    if !cross_project_selector && !ids.is_empty() {
+        let writer = db.writer_connection("record memory retrieval").await?;
+        let store = writer.memory_store();
+        if recall {
+            let _ = store.record_fact_recalls(ids).await;
+        }
         store.increment_retrieval_counts(ids).await?;
     }
     Ok(())
 }
 
 async fn search_results_envelope(
-    store: &MemoryStore<'_>,
+    db: &Database,
     cross_project_selector: bool,
     action: &str,
     facts: Vec<FactSearchResult>,
 ) -> Result<Value> {
     let ids = fact_result_ids(&facts);
-    record_retrieval_counts(store, cross_project_selector, &ids).await?;
+    record_retrieval_counts(db, cross_project_selector, &ids, action == "search").await?;
     let count = facts.len();
     Ok(results_envelope(action, &json!(facts), count))
 }
 
 async fn fact_records_envelope(
-    store: &MemoryStore<'_>,
+    db: &Database,
     cross_project_selector: bool,
     action: &str,
     facts: Vec<FactRecord>,
 ) -> Result<Value> {
     let ids = fact_ids(&facts);
-    record_retrieval_counts(store, cross_project_selector, &ids).await?;
+    record_retrieval_counts(db, cross_project_selector, &ids, false).await?;
     let count = facts.len();
     Ok(results_envelope(action, &json!(facts), count))
 }
@@ -329,27 +339,36 @@ async fn handle_fact_store_for_target(
     target_memory: TargetMemoryDb<'_>,
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
-    let conn = target_memory.conn();
+    let db = target_memory.db();
+    let reader = if action_mutates_memory(action) {
+        None
+    } else {
+        Some(
+            db.begin_isolated_read_snapshot("read memory tool facts")
+                .await?,
+        )
+    };
+    let conn = reader.as_ref().map_or_else(|| db.conn(), |reader| reader);
     let store = MemoryStore::new(conn);
     let mut refresh_digest = false;
     let out = match action {
         "add" => {
-            let outcome = store
-                .add_fact(
-                    AddFactRequest {
-                        content: required_str(&args, "content")?.to_string(),
-                        category: optional_category(&args)?.unwrap_or(MemoryCategory::General),
-                        source: args
-                            .get("source")
-                            .and_then(Value::as_str)
-                            .map(ToOwned::to_owned),
-                        tags: string_array_values(&args, "tags"),
-                        entities: request_entities(&args),
-                        trust: optional_f64(&args, "trust"),
-                        metadata: metadata_with_tags(&args),
-                    },
-                    DEFAULT_TRUST,
-                )
+            let request = AddFactRequest {
+                content: required_str(&args, "content")?.to_string(),
+                category: optional_category(&args)?.unwrap_or(MemoryCategory::General),
+                source: args
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                tags: string_array_values(&args, "tags"),
+                entities: request_entities(&args),
+                trust: optional_f64(&args, "trust"),
+                metadata: metadata_with_tags(&args),
+            };
+            let writer = db.writer_connection("add memory tool fact").await?;
+            let outcome = writer
+                .memory_store()
+                .add_fact(request, DEFAULT_TRUST)
                 .await?;
             // Additive write-time diff report fields, so writers SEE
             // near-duplicates, possible conflicts, and secret rejections.
@@ -374,14 +393,14 @@ async fn handle_fact_store_for_target(
                 include_why: true,
             };
             let facts = FactRetriever::new(conn)
-                .search(
+                .search_untracked(
                     &request.query,
                     request.category,
                     request.min_trust,
                     request.limit.unwrap_or(DEFAULT_FACT_LIMIT),
                 )
                 .await?;
-            search_results_envelope(&store, cross_project_selector, action, facts).await?
+            search_results_envelope(db, cross_project_selector, action, facts).await?
         }
         "probe" => {
             let facts = FactRetriever::new(conn)
@@ -392,7 +411,7 @@ async fn handle_fact_store_for_target(
                     limit(&args),
                 )
                 .await?;
-            search_results_envelope(&store, cross_project_selector, action, facts).await?
+            search_results_envelope(db, cross_project_selector, action, facts).await?
         }
         "related" => {
             let limit = limit(&args);
@@ -423,7 +442,7 @@ async fn handle_fact_store_for_target(
                     break;
                 }
             }
-            search_results_envelope(&store, cross_project_selector, action, facts).await?
+            search_results_envelope(db, cross_project_selector, action, facts).await?
         }
         "reason" => {
             let entities = request_entities(&args);
@@ -435,7 +454,7 @@ async fn handle_fact_store_for_target(
                     limit(&args),
                 )
                 .await?;
-            search_results_envelope(&store, cross_project_selector, action, facts).await?
+            search_results_envelope(db, cross_project_selector, action, facts).await?
         }
         "contradict" => {
             let threshold = optional_f64(&args, "threshold").unwrap_or(0.3);
@@ -480,23 +499,34 @@ async fn handle_fact_store_for_target(
         }
         "update" => {
             let id = fact_id(&args)?;
-            let update = UpdateFactRequest {
-                fact_id: id,
-                content: args
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
-                category: optional_category(&args)?,
-                tags: args.get("tags").map(|_| string_array_values(&args, "tags")),
-                entities: args.get("entities").map(|_| request_entities(&args)),
-                trust: update_trust(&args, &store, id).await?,
-                source: args
-                    .get("source")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
-                metadata: args.get("metadata").cloned(),
+            let content = args
+                .get("content")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            let category = optional_category(&args)?;
+            let tags = args.get("tags").map(|_| string_array_values(&args, "tags"));
+            let entities = args.get("entities").map(|_| request_entities(&args));
+            let source = args
+                .get("source")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            let metadata = args.get("metadata").cloned();
+            let result = {
+                let writer = db.writer_connection("update memory tool fact").await?;
+                let store = writer.memory_store();
+                let update = UpdateFactRequest {
+                    fact_id: id,
+                    content,
+                    category,
+                    tags,
+                    entities,
+                    trust: update_trust(&args, &store, id).await?,
+                    source,
+                    metadata,
+                };
+                store.update_fact(update).await
             };
-            match store.update_fact(update).await {
+            match result {
                 Ok(fact) => {
                     refresh_digest = true;
                     json!({ "action": action, "fact": fact, "count": 1 })
@@ -518,7 +548,9 @@ async fn handle_fact_store_for_target(
             }
         }
         "remove" => {
-            let removed = store.remove_fact(fact_id(&args)?).await?;
+            let id = fact_id(&args)?;
+            let writer = db.writer_connection("remove memory tool fact").await?;
+            let removed = writer.memory_store().remove_fact(id).await?;
             refresh_digest = removed;
             json!({ "action": action, "removed": removed, "count": usize::from(removed) })
         }
@@ -530,18 +562,31 @@ async fn handle_fact_store_for_target(
                     limit(&args),
                 )
                 .await?;
-            fact_records_envelope(&store, cross_project_selector, action, facts).await?
+            fact_records_envelope(db, cross_project_selector, action, facts).await?
         }
         other => return Err(config_error(format!("unknown fact_store action: {other}"))),
     };
     if refresh_digest && !target_memory.user_scope {
-        refresh_memory_digest_after_memory_change(conn, &target_memory.project_root).await;
+        refresh_target_memory_digest(&target_memory).await;
     }
     Ok(rendered_fact_store(
         (!target_memory.user_scope).then_some(target_memory.project_root.as_path()),
         &args,
         &out,
     ))
+}
+
+async fn refresh_target_memory_digest(target_memory: &TargetMemoryDb<'_>) {
+    match target_memory
+        .db()
+        .begin_isolated_read_snapshot("refresh memory tool digest")
+        .await
+    {
+        Ok(reader) => {
+            refresh_memory_digest_after_memory_change(&reader, &target_memory.project_root).await;
+        }
+        Err(error) => eprintln!("warning: memory digest refresh failed: {error}"),
+    }
 }
 
 pub(super) async fn handle_fact_feedback(
@@ -557,23 +602,22 @@ pub(super) async fn handle_fact_feedback(
         .map(ToOwned::to_owned);
     let target_memory =
         open_target_memory_db(cg, &args, global_db, allow_default_registry_fallback).await?;
-    let result = MemoryStore::new(target_memory.conn())
-        .record_feedback_event(FeedbackRequest {
-            fact_id: fact_id(&args)?,
-            action: feedback_action(&args)?,
-            source: args
-                .get("source")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            note,
-        })
+    let request = FeedbackRequest {
+        fact_id: fact_id(&args)?,
+        action: feedback_action(&args)?,
+        source: args
+            .get("source")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        note,
+    };
+    let writer = target_memory
+        .db()
+        .writer_connection("record memory tool feedback")
         .await?;
+    let result = writer.memory_store().record_feedback_event(request).await?;
     if !target_memory.user_scope {
-        refresh_memory_digest_after_memory_change(
-            target_memory.conn(),
-            &target_memory.project_root,
-        )
-        .await;
+        refresh_target_memory_digest(&target_memory).await;
     }
     let value = json!({ "status": "recorded", "feedback": result });
     Ok(rendered_tool_json(
@@ -591,7 +635,7 @@ pub(super) async fn handle_memory_status(
 ) -> Result<ToolResult> {
     let target_memory =
         open_target_memory_db(cg, &args, global_db, allow_default_registry_fallback).await?;
-    let status = TraceDecay::memory_status_for_conn(target_memory.conn()).await?;
+    let status = TraceDecay::memory_status_for_db(target_memory.db()).await?;
     let value = json!({ "status": "ok", "memory": status });
     Ok(rendered_tool_json(
         (!target_memory.user_scope).then_some(target_memory.project_root.as_path()),
@@ -627,17 +671,20 @@ pub async fn handle_user_memory_tool(
                 .or_else(|| args.get("reason"))
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
-            let result = MemoryStore::new(target_memory.conn())
-                .record_feedback_event(FeedbackRequest {
-                    fact_id: fact_id(&args)?,
-                    action: feedback_action(&args)?,
-                    source: args
-                        .get("source")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned),
-                    note,
-                })
+            let request = FeedbackRequest {
+                fact_id: fact_id(&args)?,
+                action: feedback_action(&args)?,
+                source: args
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                note,
+            };
+            let writer = target_memory
+                .db()
+                .writer_connection("record user memory feedback")
                 .await?;
+            let result = writer.memory_store().record_feedback_event(request).await?;
             Ok(rendered_tool_json(
                 None,
                 &args,
@@ -645,7 +692,7 @@ pub async fn handle_user_memory_tool(
             ))
         }
         "tracedecay_memory_status" => {
-            let status = TraceDecay::memory_status_for_conn(target_memory.conn()).await?;
+            let status = TraceDecay::memory_status_for_db(target_memory.db()).await?;
             Ok(rendered_tool_json(
                 None,
                 &args,
@@ -659,6 +706,49 @@ pub async fn handle_user_memory_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn seeded_memory() -> (tempfile::TempDir, TraceDecay, i64) {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().join("project");
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let cg = TraceDecay::init_with_options(
+            &project_root,
+            crate::tracedecay::TraceDecayOpenOptions {
+                global_db_path: Some(profile_root.join("global.db")),
+                profile_root: Some(profile_root),
+            },
+        )
+        .await
+        .unwrap();
+        let fact_id = {
+            let writer = cg
+                .db()
+                .writer_connection("seed memory tool test")
+                .await
+                .unwrap();
+            writer
+                .memory_store()
+                .add_fact(
+                    AddFactRequest {
+                        content: "existing fact".to_string(),
+                        category: MemoryCategory::General,
+                        source: None,
+                        tags: Vec::new(),
+                        entities: Vec::new(),
+                        trust: None,
+                        metadata: json!({}),
+                    },
+                    DEFAULT_TRUST,
+                )
+                .await
+                .unwrap()
+                .fact
+                .unwrap()
+                .fact_id
+        };
+        (tmp, cg, fact_id)
+    }
 
     #[tokio::test]
     async fn active_project_memory_uses_the_served_database_handle() {
@@ -682,5 +772,117 @@ mod tests {
 
         assert!(matches!(target.db, TargetMemoryDbHandle::Active(_)));
         assert!(std::ptr::eq(target.conn(), cg.db().conn()));
+    }
+
+    #[tokio::test]
+    async fn pure_fact_reads_do_not_wait_for_the_writer_lane() {
+        let (_tmp, cg, fact_id) = seeded_memory().await;
+        let transaction = cg
+            .db()
+            .begin_write_transaction("hold memory tool writer")
+            .await
+            .unwrap();
+        transaction
+            .execute(
+                "UPDATE memory_facts SET content = 'uncommitted fact' WHERE fact_id = ?1",
+                [fact_id],
+            )
+            .await
+            .unwrap();
+        let target = TargetMemoryDb {
+            db: TargetMemoryDbHandle::Active(cg.db()),
+            project_root: cg.project_root().to_path_buf(),
+            user_scope: true,
+        };
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle_fact_store_for_target(
+                json!({ "action": "get", "fact_id": fact_id }),
+                false,
+                target,
+            ),
+        )
+        .await
+        .expect("pure reads must not wait for writer authority")
+        .unwrap();
+        let rendered = result.value.to_string();
+        assert!(rendered.contains("existing fact"), "{rendered}");
+        assert!(!rendered.contains("uncommitted fact"), "{rendered}");
+        transaction.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fact_mutations_wait_for_the_writer_lane_before_starting_a_transaction() {
+        let (_tmp, cg, _) = seeded_memory().await;
+        let writer = cg
+            .db()
+            .writer_connection("hold memory mutation writer")
+            .await
+            .unwrap();
+        let target = TargetMemoryDb {
+            db: TargetMemoryDbHandle::Active(cg.db()),
+            project_root: cg.project_root().to_path_buf(),
+            user_scope: true,
+        };
+        let mut add = Box::pin(handle_fact_store_for_target(
+            json!({ "action": "add", "content": "concurrent fact" }),
+            false,
+            target,
+        ));
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut add)
+                .await
+                .is_err()
+        );
+        drop(writer);
+        add.await.unwrap();
+        assert_eq!(
+            MemoryStore::new(cg.db().conn())
+                .list_facts(None, None, 10)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieval_counter_writes_wait_for_the_writer_lane() {
+        let (_tmp, cg, fact_id) = seeded_memory().await;
+        let writer = cg
+            .db()
+            .writer_connection("hold memory retrieval writer")
+            .await
+            .unwrap();
+        let fact_ids = [fact_id];
+        let mut record = Box::pin(record_retrieval_counts(cg.db(), false, &fact_ids, true));
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut record)
+                .await
+                .is_err()
+        );
+        drop(writer);
+        record.await.unwrap();
+        assert_eq!(
+            MemoryStore::new(cg.db().conn())
+                .get_fact(fact_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .retrieval_count,
+            1
+        );
+        assert_eq!(
+            MemoryStore::new(cg.db().conn())
+                .get_fact(fact_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .access_count,
+            1
+        );
     }
 }

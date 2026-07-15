@@ -53,7 +53,8 @@ pub(super) async fn handle_redundancy(
     .await?;
     let total_candidates = nodes.len();
 
-    // 2. Ensure each has a fresh fingerprint (cache by source hash).
+    // 2. Ensure each has a fresh fingerprint in memory (cache by source hash).
+    // File I/O and tree-sitter parsing stay outside the database writer lane.
     let fingerprints = ensure_fingerprints(cg, &nodes).await?;
     let scanned = fingerprints.len();
 
@@ -70,7 +71,7 @@ pub(super) async fn handle_redundancy(
     // surfaces (diagnose near-duplicate enrichment, the dashboard, future
     // tools) can read the last-known duplicates without recomputing. Best
     // effort: a write failure never fails the query.
-    persist_redundancy_pairs(cg, &pairs).await;
+    persist_redundancy_cache(cg, &fingerprints, &pairs).await;
 
     // Connected components are the shared source of truth for the JSON `groups`
     // array and the markdown Groups section; compute them once and thread the
@@ -372,13 +373,7 @@ async fn ensure_fingerprints(
             let Some(ts_node) = find_node_at_lines(&tree, node.start_line, node.end_line) else {
                 continue;
             };
-            let fp = compute_fingerprint(&source, ts_node);
-            // Persist for next time. Errors are logged but not fatal —
-            // the redundancy query still returns results.
-            if let Err(e) = cg.db().upsert_fingerprint(&node.id, &fp).await {
-                eprintln!("[tracedecay] redundancy: upsert_fingerprint failed: {e}");
-            }
-            out.insert(node.id.clone(), fp);
+            out.insert(node.id.clone(), compute_fingerprint(&source, ts_node));
         }
     }
 
@@ -493,10 +488,16 @@ fn scoped_fingerprints<'a>(
 /// still returns results even if the cache write fails. Node-id orphan cleanup
 /// is handled by the table's `ON DELETE CASCADE`, so full-project runs need no
 /// explicit deletion pass here.
-async fn persist_redundancy_pairs(cg: &TraceDecay, pairs: &[RedundantPair<'_>]) {
-    if pairs.is_empty() {
-        return;
-    }
+async fn persist_redundancy_cache(
+    cg: &TraceDecay,
+    fingerprints: &HashMap<String, Fingerprint>,
+    pairs: &[RedundantPair<'_>],
+) {
+    let mut fingerprint_rows: Vec<_> = fingerprints
+        .iter()
+        .map(|(node_id, fingerprint)| (node_id.as_str(), fingerprint))
+        .collect();
+    fingerprint_rows.sort_unstable_by(|left, right| left.0.cmp(right.0));
     let computed_at = crate::tracedecay::current_timestamp();
     let rows: Vec<crate::db::RedundancyPairWrite<'_>> = pairs
         .iter()
@@ -514,8 +515,12 @@ async fn persist_redundancy_pairs(cg: &TraceDecay, pairs: &[RedundantPair<'_>]) 
             computed_at,
         })
         .collect();
-    if let Err(e) = cg.db().upsert_redundancy_pairs(&rows).await {
-        eprintln!("[tracedecay] redundancy: upsert_redundancy_pairs failed: {e}");
+    if let Err(e) = cg
+        .db()
+        .publish_redundancy_cache(&fingerprint_rows, &rows)
+        .await
+    {
+        eprintln!("[tracedecay] redundancy: atomic cache publication failed: {e}");
     }
 }
 

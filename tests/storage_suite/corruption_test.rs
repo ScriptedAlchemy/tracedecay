@@ -172,8 +172,7 @@ async fn rebuild_fts_restores_search_after_fts_damage() {
     // Damage the FTS index by clearing its internal data tables.
     // This simulates what happens when begin_bulk_load clears FTS but
     // end_bulk_load never runs (crash during indexing).
-    db.conn()
-        .execute_batch("DELETE FROM nodes_fts;")
+    db.execute_write_batch("clear FTS corruption fixture", "DELETE FROM nodes_fts;")
         .await
         .unwrap();
 
@@ -200,8 +199,7 @@ async fn search_nodes_falls_back_to_like_when_fts_empty() {
     db.insert_nodes(&nodes).await.unwrap();
 
     // Wipe FTS
-    db.conn()
-        .execute_batch("DELETE FROM nodes_fts;")
+    db.execute_write_batch("clear FTS fallback fixture", "DELETE FROM nodes_fts;")
         .await
         .unwrap();
 
@@ -534,8 +532,10 @@ async fn dirty_open_checks_integrity_before_writable_migration()
     let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
     let layout = ts.store_layout().clone();
     ts.db()
-        .conn()
-        .execute_batch("PRAGMA user_version = 17")
+        .execute_write_batch(
+            "set corrupt schema version fixture",
+            "PRAGMA user_version = 17",
+        )
         .await?;
     ts.checkpoint().await?;
     ts.close();

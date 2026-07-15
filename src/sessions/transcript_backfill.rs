@@ -75,8 +75,8 @@ pub(crate) async fn backfill_transcript_facts(conn: &Connection) -> Option<Backf
 
     let candidates = load_candidates(conn).await?;
 
-    // Re-derive per-line facts file by file *before* opening the write
-    // transaction; transcripts that no longer exist drop out here and their
+    // Re-derive per-line facts file by file before applying database updates;
+    // transcripts that no longer exist drop out here and their
     // rows simply stay as they are. The first run after an upgrade re-reads
     // every affected transcript from byte 0 — easily hundreds of MB of
     // JSONL — so the pure read+parse loop runs on the blocking pool instead
@@ -107,16 +107,9 @@ pub(crate) async fn backfill_transcript_facts(conn: &Connection) -> Option<Backf
     .await
     .ok()?;
 
-    conn.execute("BEGIN IMMEDIATE", ()).await.ok()?;
-    let applied = apply_updates(conn, &updates).await;
-    let Some(stats) = applied else {
-        let _ = conn.execute("ROLLBACK", ()).await;
-        return None;
-    };
-    if conn.execute("COMMIT", ()).await.is_err() {
-        let _ = conn.execute("ROLLBACK", ()).await;
-        return None;
-    }
+    // The schema-stage caller owns the authoritative RAII transaction, so
+    // cancellation or an update failure rolls this whole batch back.
+    let stats = apply_updates(conn, &updates).await?;
     if stats.dated > 0 || stats.usage_added > 0 {
         eprintln!(
             "Backfilled {} timestamp(s) and {} usage record(s) for legacy messages from transcripts.",
@@ -433,6 +426,10 @@ const STRUCTURED_BACKFILL_VERSIONS: &[(&str, i64)] = &[("codex", 4)];
 /// provider's re-sweep from a fresh (never-written) cursor instead of resuming
 /// past the last file the prior version already covered.
 const STRUCTURED_CURSOR_KEY_PREFIX: &str = "structured_backfill_cursor";
+const WRITE_BACKFILL_CURSOR_SQL: &str =
+    "INSERT INTO session_backfill_meta(key, value) VALUES (?1, ?2)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()
+        WHERE excluded.value > session_backfill_meta.value";
 const STRUCTURED_BACKFILL_BATCH: usize = 32;
 const STRUCTURED_BACKFILL_PARSE_BYTES: u64 = MAX_JSONL_RECORD_BYTES as u64 + 1;
 
@@ -515,12 +512,12 @@ pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<Structured
     let Some(_sweep_lock) = try_acquire_structured_backfill_lock(db.db_path()) else {
         return Some(StructuredBackfillStats::default());
     };
-    let writer = db.writer_connection().await;
-    ensure_backfill_meta_table(&writer).await?;
+    let transaction = db.begin_write_transaction().await.ok()?;
+    ensure_backfill_meta_table(&transaction).await?;
     // One-time migration from the single global marker to per-provider markers,
     // so a store that already completed the global sweep does not re-sweep.
-    migrate_legacy_global_marker(&writer).await?;
-    drop(writer);
+    migrate_legacy_global_marker(&transaction).await?;
+    transaction.commit().await.ok()?;
 
     // Sweep each provider independently against its own marker + cursor. A
     // provider already at its target version is skipped without touching its
@@ -634,8 +631,9 @@ async fn sweep_provider(
     let candidates =
         load_structured_candidates(conn, provider, &cursor, STRUCTURED_BACKFILL_BATCH).await?;
     if candidates.is_empty() {
-        let writer = db.writer_connection().await;
-        mark_structured_backfill_complete(&writer, provider, target_version).await?;
+        let transaction = db.begin_write_transaction().await.ok()?;
+        mark_structured_backfill_complete(&transaction, provider, target_version).await?;
+        transaction.commit().await.ok()?;
         return Some(());
     }
 
@@ -688,8 +686,14 @@ async fn sweep_provider(
             }
         }
         stats.files_scanned += 1;
-        let writer = db.writer_connection().await;
-        write_backfill_cursor(&writer, &cursor_key, &candidate.source_path).await?;
+        let writer = db.writer_connection().await.ok()?;
+        writer
+            .execute(
+                WRITE_BACKFILL_CURSOR_SQL,
+                params![cursor_key.as_str(), candidate.source_path.as_str()],
+            )
+            .await
+            .ok()?;
     }
 
     Some(())
@@ -839,14 +843,9 @@ async fn write_backfill_cursor(conn: &Connection, key: &str, value: &str) -> Opt
     // guard makes a slower concurrent sweep writing an earlier path a no-op
     // instead of regressing the cursor and re-queuing already-covered files.
     // Binary (default) TEXT collation matches the candidate query's ordering.
-    conn.execute(
-        "INSERT INTO session_backfill_meta(key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()
-            WHERE excluded.value > session_backfill_meta.value",
-        params![key, value],
-    )
-    .await
-    .ok()?;
+    conn.execute(WRITE_BACKFILL_CURSOR_SQL, params![key, value])
+        .await
+        .ok()?;
     Some(())
 }
 
@@ -855,10 +854,12 @@ async fn write_backfill_cursor(conn: &Connection, key: &str, value: &str) -> Opt
 /// monotonicity guard rejects backwards moves.
 #[doc(hidden)]
 pub async fn write_structured_backfill_cursor_for_test(db: &GlobalDb, value: &str) -> Option<()> {
-    let conn = db.writer_connection().await;
-    ensure_backfill_meta_table(&conn).await?;
+    let transaction = db.begin_write_transaction().await.ok()?;
+    ensure_backfill_meta_table(&transaction).await?;
     let key = structured_cursor_key("codex", structured_backfill_target_version("codex"));
-    write_backfill_cursor(&conn, &key, value).await
+    write_backfill_cursor(&transaction, &key, value).await?;
+    transaction.commit().await.ok()?;
+    Some(())
 }
 
 /// Test-only accessor: reads the Codex structured-backfill watermark for `db`.

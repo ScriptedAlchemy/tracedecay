@@ -43,12 +43,28 @@ impl Database {
             return Ok(Vec::new());
         }
 
+        let snapshot = self.begin_isolated_read_snapshot("search_nodes").await?;
+        let results = self
+            .search_nodes_in_snapshot(&snapshot, query, &fts_query, limit)
+            .await?;
+        super::tx::commit(snapshot, "search_nodes").await?;
+        Ok(results)
+    }
+
+    async fn search_nodes_in_snapshot(
+        &self,
+        conn: &libsql::Connection,
+        query: &str,
+        fts_query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
         // Try FTS search. Search is a read path: repairs must run offline.
-        let fts_result = self.search_nodes_fts(&fts_query, limit).await;
+        let fts_result = self.search_nodes_fts(conn, fts_query, limit).await;
         match fts_result {
             Ok(ref results) if !results.is_empty() => return fts_result,
             Ok(_) => {} // empty — fall through to LIKE
-            Err(e) if Self::is_corruption_error(&e) => match self.non_fts_schema_intact().await {
+            Err(e) if Self::is_corruption_error(&e) => match self.non_fts_schema_intact(conn).await
+            {
                 Ok(true) => {
                     if !FTS_REPAIR_WARNING_EMITTED.swap(true, Ordering::Relaxed) {
                         eprintln!(
@@ -63,8 +79,7 @@ impl Database {
 
         // Fallback: LIKE query
         let like_pattern = format!("%{query}%");
-        let mut rows = self
-            .conn()
+        let mut rows = conn
             .query(
                 "SELECT id, kind, name, qualified_name, file_path,
                     start_line, end_line, start_column, end_column,
@@ -96,9 +111,8 @@ impl Database {
 
     /// Validates every non-FTS table and its indexes without asking `SQLite`
     /// to inspect the known-corrupt FTS virtual table or shadow tables.
-    async fn non_fts_schema_intact(&self) -> Result<bool> {
-        let mut rows = self
-            .conn()
+    async fn non_fts_schema_intact(&self, conn: &libsql::Connection) -> Result<bool> {
+        let mut rows = conn
             .query(
                 "SELECT name FROM sqlite_schema
                  WHERE type = 'table'
@@ -134,14 +148,13 @@ impl Database {
 
         for table in tables {
             let sql = format!("PRAGMA quick_check({})", quote_sqlite_identifier(&table));
-            let mut rows =
-                self.conn()
-                    .query(&sql, ())
-                    .await
-                    .map_err(|e| TraceDecayError::Database {
-                        message: format!("failed to check non-FTS table '{table}': {e}"),
-                        operation: "search_nodes".to_string(),
-                    })?;
+            let mut rows = conn
+                .query(&sql, ())
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to check non-FTS table '{table}': {e}"),
+                    operation: "search_nodes".to_string(),
+                })?;
             let mut saw_result = false;
             while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
                 message: format!("failed to read non-FTS table check for '{table}': {e}"),
@@ -160,9 +173,13 @@ impl Database {
     }
 
     /// Executes the FTS5 query and returns ranked results.
-    async fn search_nodes_fts(&self, fts_query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        let mut rows = self
-            .conn()
+    async fn search_nodes_fts(
+        &self,
+        conn: &libsql::Connection,
+        fts_query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let mut rows = conn
             .query(
                 "SELECT n.id, n.kind, n.name, n.qualified_name, n.file_path,
                     n.start_line, n.end_line, n.start_column, n.end_column,

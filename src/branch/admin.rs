@@ -327,6 +327,98 @@ pub fn prepare_branch_admin_mutation(
     })
 }
 
+/// Removes a branch store that branch-add published but could not sync.
+/// The caller must still hold the branch-add lock.
+pub(super) fn rollback_published_branch_tracking(
+    tracedecay_dir: &Path,
+    branch_name: &str,
+    db_file: &str,
+    database_path: &Path,
+) -> crate::errors::Result<()> {
+    let (meta, metadata_before) = load_branch_meta_exact(tracedecay_dir)?;
+    let mut meta = meta.ok_or_else(|| crate::errors::TraceDecayError::Config {
+        message: format!("cannot roll back branch '{branch_name}': branch metadata is missing"),
+    })?;
+    if !meta
+        .branches
+        .get(branch_name)
+        .is_some_and(|entry| entry.db_file == db_file)
+    {
+        return Err(crate::errors::TraceDecayError::Config {
+            message: format!(
+                "cannot roll back branch '{branch_name}': published database path changed"
+            ),
+        });
+    }
+    meta.remove_branch(branch_name);
+    let metadata_after = Some(crate::branch_meta::serialize_branch_meta(&meta)?);
+    let database_paths = vec![database_path.to_path_buf()];
+    let fence = crate::db::DatabaseDeletionFence::acquire(
+        &database_paths,
+        "roll back published branch SQLite family",
+    )?;
+
+    let mut promote_deleted = Some(|| fence.promote_deleted());
+    transaction::commit_with_hook(
+        transaction::CommitRequest {
+            tracedecay_dir,
+            supplied_transaction_id: Some(fence.transaction_id()),
+            database_paths: &database_paths,
+            metadata_before,
+            metadata_after,
+        },
+        || fence.publish_deleting(),
+        ensure_no_open_store_holders,
+        || fence.rollback_deleting(),
+        |phase| {
+            if phase == transaction::TransactionPhase::AfterCommitBeforeCleanup
+                && let Some(promote_deleted) = promote_deleted.take()
+            {
+                promote_deleted()?;
+            }
+            Ok(())
+        },
+    )
+}
+
+fn ensure_no_open_store_holders(database_paths: &[PathBuf]) -> crate::errors::Result<()> {
+    let options = crate::open_store_holders::OpenStoreHolderScanOptions {
+        include_current_process: true,
+        excluded_current_process_fds: std::collections::BTreeSet::new(),
+    };
+    let scan = crate::open_store_holders::scan_with_options(database_paths, &options).map_err(
+        |error| crate::errors::TraceDecayError::Config {
+            message: format!("failed to inspect open branch stores: {error}"),
+        },
+    )?;
+    match scan {
+        crate::open_store_holders::OpenStoreHolderScan::Supported(holders)
+            if holders.is_empty() =>
+        {
+            Ok(())
+        }
+        crate::open_store_holders::OpenStoreHolderScan::Supported(holders) => {
+            let details = holders
+                .into_iter()
+                .map(|holder| format!("pid {} ({})", holder.pid, holder.command))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(crate::errors::TraceDecayError::Config {
+                message: format!(
+                    "cannot delete branch stores while processes still hold them: {details}"
+                ),
+            })
+        }
+        crate::open_store_holders::OpenStoreHolderScan::Unsupported { reason } => {
+            Err(crate::errors::TraceDecayError::Config {
+                message: format!(
+                    "cannot prove branch stores are closed: {reason}; destructive branch operation refused"
+                ),
+            })
+        }
+    }
+}
+
 /// Strict removal entry point used by daemon-owned administrative operations.
 pub fn remove_tracked_branch_store_checked(
     _tracedecay_dir: &Path,

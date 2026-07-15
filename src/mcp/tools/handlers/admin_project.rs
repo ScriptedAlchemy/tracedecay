@@ -184,7 +184,7 @@ pub(super) async fn handle_admin_project(
             let db = cg.open_project_store_db().await?;
             let proposal = crate::automation::fact_proposals::apply_fact_proposal(
                 &cg.store_layout().dashboard_root,
-                db.conn(),
+                &db,
                 &id,
                 Some("cli".to_string()),
             )

@@ -72,7 +72,7 @@ use crate::automation::config::{self, AutomationBackend, AutomationHostMode};
 use crate::db::Database;
 use crate::diagnostics::lsp;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::GlobalDb;
+use crate::global_db::{GlobalDb, GlobalDbReadConnection};
 use crate::storage::StorageMode;
 use crate::tracedecay::TraceDecay;
 
@@ -94,11 +94,13 @@ pub(crate) struct DashboardState {
     pub(crate) graph_db_path: String,
     /// Project memory database. This is shared across branches.
     pub(crate) mem_conn: libsql::Connection,
+    /// Authoritative project-memory handle and process-local writer lane.
+    pub(crate) mem_db: Arc<Database>,
     /// Display path of the project memory database.
     pub(crate) mem_db_path: String,
     /// LCM session store for the resolved active project store. Absent when
     /// project authority is unavailable; the accounting DB is never used.
-    pub(crate) lcm_conn: Option<libsql::Connection>,
+    pub(crate) lcm_conn: Option<GlobalDbReadConnection>,
     /// Authoritative LCM store for serialized dashboard mutations. Retaining
     /// this authority also keeps `lcm_conn` alive.
     pub(crate) lcm_db: Option<Arc<GlobalDb>>,
@@ -150,7 +152,7 @@ impl DashboardState {
 
 /// The LCM session store the dashboard will serve.
 pub(crate) struct LcmStoreSelection {
-    pub(crate) conn: Option<libsql::Connection>,
+    pub(crate) conn: Option<GlobalDbReadConnection>,
     pub(crate) lcm_db: Option<Arc<GlobalDb>>,
     pub(crate) path: String,
     pub(crate) scope: String,
@@ -171,8 +173,9 @@ pub(crate) async fn resolve_lcm_store(
 ) -> LcmStoreSelection {
     let project_root = cg.project_root();
     if let Some(db) = retained_project_session_db {
+        let conn = db.owned_read_connection().await;
         return LcmStoreSelection {
-            conn: Some(db.dashboard_connection()),
+            conn,
             path: db.db_path().display().to_string(),
             lcm_db: Some(db),
             scope: storage_mode_label(&cg.store_layout().storage_mode).to_string(),
@@ -190,10 +193,10 @@ pub(crate) async fn resolve_lcm_store(
         .await
         .unwrap_or_else(|| cg.store_layout().sessions_db_path.clone());
     if let Some(db) = GlobalDb::open_at(&project_db_path).await {
-        let conn = db.dashboard_connection();
+        let conn = db.owned_read_connection().await;
         let db = Arc::new(db);
         return LcmStoreSelection {
-            conn: Some(conn),
+            conn,
             lcm_db: Some(db),
             path: project_db_path.display().to_string(),
             scope: storage_mode_label(&cg.store_layout().storage_mode).to_string(),
@@ -240,9 +243,9 @@ async fn memory_fact_count(conn: &libsql::Connection) -> Option<i64> {
 
 pub(crate) async fn resolve_project_memory_store(
     cg: &TraceDecay,
-) -> (libsql::Connection, String, Option<Arc<Database>>) {
+) -> (libsql::Connection, String, Arc<Database>) {
     let graph_path = cg.dashboard_db_path();
-    let mut first_open: Option<(libsql::Connection, String, Option<Arc<Database>>)> = None;
+    let mut first_open: Option<(libsql::Connection, String, Arc<Database>)> = None;
     let mut seen = std::collections::BTreeSet::new();
 
     for path in [cg.store_layout().graph_db_path.clone()] {
@@ -250,11 +253,9 @@ pub(crate) async fn resolve_project_memory_store(
             continue;
         }
         let opened = if path == graph_path {
-            Some((cg.dashboard_connection(), None))
+            Some((cg.dashboard_connection(), cg.dashboard_database_guard()))
         } else {
-            open_dashboard_connection(&path)
-                .await
-                .map(|(conn, guard)| (conn, Some(guard)))
+            open_dashboard_connection(&path).await
         };
         let Some((conn, guard)) = opened else {
             continue;
@@ -272,7 +273,7 @@ pub(crate) async fn resolve_project_memory_store(
         (
             cg.dashboard_connection(),
             cg.dashboard_db_path().display().to_string(),
-            None,
+            cg.dashboard_database_guard(),
         )
     })
 }
@@ -286,7 +287,7 @@ async fn build_state_inner(
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
 ) -> DashboardState {
-    let (mem_conn, mem_db_path, mem_guard) = resolve_project_memory_store(cg).await;
+    let (mem_conn, mem_db_path, mem_db) = resolve_project_memory_store(cg).await;
     let lcm = resolve_lcm_store(cg, retained_project_session_db, allow_direct_session_open).await;
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let store_root = cg.store_layout().data_root.clone();
@@ -305,10 +306,11 @@ async fn build_state_inner(
         project_id: cg.store_layout().identity.project_id.clone(),
         graph_conn: cg.dashboard_connection(),
         _database_guards: std::iter::once(cg.dashboard_database_guard())
-            .chain(mem_guard)
+            .chain(std::iter::once(mem_db.clone()))
             .collect(),
         graph_db_path: cg.dashboard_db_path().display().to_string(),
         mem_conn,
+        mem_db,
         mem_db_path,
         lcm_conn: lcm.conn,
         lcm_db: lcm.lcm_db,

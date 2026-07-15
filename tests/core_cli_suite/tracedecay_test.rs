@@ -472,6 +472,22 @@ async fn test_tokens_saved_round_trip() {
     assert_eq!(saved2, 100_000);
 }
 
+#[tokio::test]
+async fn concurrent_local_counter_updates_are_not_lost() {
+    let (_dir, cg) = setup().await;
+    let cg = std::sync::Arc::new(cg);
+    let mut updates = Vec::new();
+    for _ in 0..32 {
+        let cg = std::sync::Arc::clone(&cg);
+        updates.push(tokio::spawn(async move { cg.add_local_counter(1).await }));
+    }
+    for update in updates {
+        update.await.unwrap().unwrap();
+    }
+
+    assert_eq!(cg.get_local_counter().await.unwrap(), 32);
+}
+
 // ---------------------------------------------------------------------------
 // get_complexity_ranked through TraceDecay
 // ---------------------------------------------------------------------------
@@ -986,8 +1002,11 @@ async fn last_sync_timestamp_uses_metadata_not_indexed_at() {
     // because `last_sync_timestamp` treats 0 as "no info available".
     let stale = 1_i64;
     cg.db()
-        .conn()
-        .execute("UPDATE files SET indexed_at = ?1", libsql::params![stale])
+        .execute_write(
+            "backdate indexed files fixture",
+            "UPDATE files SET indexed_at = ?1",
+            libsql::params![stale],
+        )
         .await
         .unwrap();
 
@@ -1016,8 +1035,8 @@ async fn last_sync_timestamp_uses_metadata_not_indexed_at() {
 async fn last_sync_timestamp_falls_back_to_indexed_at_without_metadata() {
     let (_dir, cg) = setup().await;
     cg.db()
-        .conn()
-        .execute(
+        .execute_write(
+            "remove last sync metadata fixture",
             "DELETE FROM metadata WHERE key = ?1",
             libsql::params!["last_sync_at"],
         )

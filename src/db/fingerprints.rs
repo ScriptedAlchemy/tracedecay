@@ -42,26 +42,7 @@ impl Database {
         node_id: &str,
         fp: &crate::redundancy::Fingerprint,
     ) -> Result<()> {
-        self.conn()
-            .execute(
-                "INSERT OR REPLACE INTO node_fingerprints
-                 (node_id, ast_hash, cfg_hash, call_seq_hash, shingles, body_tokens, source_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    node_id,
-                    fp.ast_hash.as_str(),
-                    fp.cfg_hash.as_str(),
-                    fp.call_seq_hash.as_str(),
-                    fp.shingles_to_string(),
-                    i64::try_from(fp.body_tokens).unwrap_or(i64::MAX),
-                    fp.source_hash.as_str(),
-                ],
-            )
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to upsert fingerprint: {e}"),
-                operation: "upsert_fingerprint".to_string(),
-            })?;
+        self.publish_redundancy_cache(&[(node_id, fp)], &[]).await?;
         Ok(())
     }
 
@@ -129,6 +110,34 @@ impl Database {
         }
         Ok(out)
     }
+}
+
+pub(super) async fn upsert_fingerprint_in_transaction(
+    transaction: &libsql::Transaction,
+    node_id: &str,
+    fp: &crate::redundancy::Fingerprint,
+) -> Result<()> {
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO node_fingerprints
+             (node_id, ast_hash, cfg_hash, call_seq_hash, shingles, body_tokens, source_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                node_id,
+                fp.ast_hash.as_str(),
+                fp.cfg_hash.as_str(),
+                fp.call_seq_hash.as_str(),
+                fp.shingles_to_string(),
+                i64::try_from(fp.body_tokens).unwrap_or(i64::MAX),
+                fp.source_hash.as_str(),
+            ],
+        )
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to upsert fingerprint: {e}"),
+            operation: "upsert_fingerprint".to_string(),
+        })?;
+    Ok(())
 }
 
 fn row_to_fingerprint(row: &libsql::Row) -> Result<StoredFingerprint> {

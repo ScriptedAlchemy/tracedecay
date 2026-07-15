@@ -57,36 +57,38 @@ async fn set_version(conn: &Connection, version: u32) -> Result<()> {
     Ok(())
 }
 
-async fn enable_incremental_auto_vacuum(
-    conn: &Connection,
-    operation: &str,
-    vacuum_existing_db: bool,
-) -> Result<()> {
-    let mode: i64 = {
-        let mut rows =
-            conn.query("PRAGMA auto_vacuum", ())
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("{operation}: failed to read auto_vacuum: {e}"),
-                    operation: operation.to_string(),
-                })?;
-        let row = rows
-            .next()
+async fn auto_vacuum_mode(conn: &Connection, operation: &str) -> Result<i64> {
+    let mut rows =
+        conn.query("PRAGMA auto_vacuum", ())
             .await
             .map_err(|e| TraceDecayError::Database {
-                message: format!("{operation}: failed to read auto_vacuum row: {e}"),
-                operation: operation.to_string(),
-            })?
-            .ok_or_else(|| TraceDecayError::Database {
-                message: format!("{operation}: auto_vacuum returned no rows"),
+                message: format!("{operation}: failed to read auto_vacuum: {e}"),
                 operation: operation.to_string(),
             })?;
-        row.get(0).map_err(|e| TraceDecayError::Database {
-            message: format!("{operation}: failed to read auto_vacuum value: {e}"),
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("{operation}: failed to read auto_vacuum row: {e}"),
             operation: operation.to_string(),
         })?
-    };
-    if mode == 2 {
+        .ok_or_else(|| TraceDecayError::Database {
+            message: format!("{operation}: auto_vacuum returned no rows"),
+            operation: operation.to_string(),
+        })?;
+    row.get(0).map_err(|e| TraceDecayError::Database {
+        message: format!("{operation}: failed to read auto_vacuum value: {e}"),
+        operation: operation.to_string(),
+    })
+}
+
+async fn repair_incremental_auto_vacuum(
+    conn: &Connection,
+    operation: &str,
+    exclusive_maintenance: bool,
+) -> Result<()> {
+    let mode = auto_vacuum_mode(conn, operation).await?;
+    if mode == 2 || !exclusive_maintenance {
         return Ok(());
     }
 
@@ -96,13 +98,17 @@ async fn enable_incremental_auto_vacuum(
             message: format!("{operation}: failed to enable incremental auto_vacuum: {e}"),
             operation: operation.to_string(),
         })?;
-    if vacuum_existing_db {
-        conn.execute_batch("VACUUM;")
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("{operation}: failed to rebuild database for auto_vacuum: {e}"),
-                operation: operation.to_string(),
-            })?;
+    conn.execute_batch("VACUUM;")
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("{operation}: failed to rebuild database for auto_vacuum: {e}"),
+            operation: operation.to_string(),
+        })?;
+    if auto_vacuum_mode(conn, operation).await? != 2 {
+        return Err(TraceDecayError::Database {
+            message: format!("{operation}: auto_vacuum repair did not enable incremental mode"),
+            operation: operation.to_string(),
+        });
     }
     Ok(())
 }
@@ -122,9 +128,8 @@ pub(crate) async fn configure_fresh_auto_vacuum(conn: &Connection, operation: &s
 /// Creates the complete latest schema from scratch for a brand-new database.
 /// This avoids running v0→v1→…→v6 migrations sequentially.
 pub async fn create_schema(conn: &Connection) -> Result<()> {
-    // Fresh databases only need the pragma before tables are created. Existing
-    // databases still get rebuilt through migrate's vacuuming repair path.
-    enable_incremental_auto_vacuum(conn, "create_schema", false).await?;
+    // Fresh databases only need the pragma before tables are created.
+    configure_fresh_auto_vacuum(conn, "create_schema").await?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS nodes (
             id TEXT PRIMARY KEY,
@@ -297,13 +302,25 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
 /// is bumped inside the same transaction.
 /// Returns `true` if any migrations were applied, `false` if already up-to-date.
 pub async fn migrate(conn: &Connection) -> Result<bool> {
+    migrate_inner(conn, false).await
+}
+
+/// Runs schema migrations and completes any whole-file auto-vacuum repair.
+///
+/// Callers must hold exclusive maintenance authority. Ordinary opens use
+/// [`migrate`] so startup latency never grows with the database file size.
+pub(crate) async fn migrate_with_exclusive_maintenance(conn: &Connection) -> Result<bool> {
+    migrate_inner(conn, true).await
+}
+
+async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result<bool> {
     let current = get_version(conn).await?;
     debug_assert!(
         current <= LATEST_VERSION,
         "database version {current} is ahead of code version {LATEST_VERSION}"
     );
     if current >= LATEST_VERSION {
-        enable_incremental_auto_vacuum(conn, "migrate", true).await?;
+        repair_incremental_auto_vacuum(conn, "migrate", exclusive_maintenance).await?;
         return Ok(false);
     }
 
@@ -333,7 +350,7 @@ pub async fn migrate(conn: &Connection) -> Result<bool> {
                     message: format!("failed to commit migrations: {e}"),
                     operation: "migrate".to_string(),
                 })?;
-            enable_incremental_auto_vacuum(conn, "migrate", true).await?;
+            repair_incremental_auto_vacuum(conn, "migrate", exclusive_maintenance).await?;
             Ok(true)
         }
         Err(e) => {
@@ -1697,4 +1714,29 @@ async fn backfill_legacy_memory_as_facts(conn: &Connection) -> Result<()> {
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn exclusive_maintenance_completes_deferred_auto_vacuum_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("graph.db");
+        let db = libsql::Builder::new_local(&path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        create_schema(&conn).await.unwrap();
+        conn.execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;")
+            .await
+            .unwrap();
+        assert_eq!(auto_vacuum_mode(&conn, "test").await.unwrap(), 0);
+
+        assert!(!migrate(&conn).await.unwrap());
+        assert_eq!(auto_vacuum_mode(&conn, "test").await.unwrap(), 0);
+
+        assert!(!migrate_with_exclusive_maintenance(&conn).await.unwrap());
+        assert_eq!(auto_vacuum_mode(&conn, "test").await.unwrap(), 2);
+    }
 }

@@ -175,7 +175,8 @@ async fn plan_and_apply_repairs(
         .unwrap_or(false);
     if mode == "repair" && apply && (raw_rebuild_needed || summary_rebuild_needed) {
         backup =
-            maintenance::backup_database(db_path, storage_root, maintenance::BackupKind::Clean)?;
+            maintenance::backup_database(db_path, storage_root, maintenance::BackupKind::Clean)
+                .await?;
     }
 
     if mode == "repair" && raw_rebuild_needed {
@@ -992,6 +993,7 @@ async fn backup_and_delete_clean_candidates_in_transaction(
         clean_config,
         || async {
             maintenance::backup_database(db_path, storage_root, maintenance::BackupKind::Clean)
+                .await
         },
     )
     .await

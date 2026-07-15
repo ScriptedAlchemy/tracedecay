@@ -516,7 +516,7 @@ async fn staged_migration_resumes_cutover_after_registry_and_marker() {
     )
     .unwrap();
 
-    apply_migration_manifest(&mut manifest).unwrap();
+    apply_migration_manifest(&mut manifest).await.unwrap();
     let staged = verify_migration_manifest(&manifest);
     assert!(staged.cutover_ready);
     assert!(!staged.apply_supported);
@@ -705,6 +705,23 @@ async fn conflicting_alias_is_rejected_without_stealing_or_partial_writes() {
             .project
             .project_id,
         "proj_owner"
+    );
+
+    let second_project_root = dir.path().join("repo-2");
+    let second_manifest = write_profile_store_manifest(&profile_root, &second_project_root);
+    let second_report =
+        reconstruct_registry_from_store_manifest(&second_manifest, &profile_root, 2);
+    let applied = apply_registry_reconstruction_report(&db, &second_report)
+        .await
+        .unwrap();
+    assert_eq!(applied.projects, 1);
+    assert_eq!(
+        db.project_registry_context_by_alias(&second_project_root)
+            .await
+            .unwrap()
+            .project
+            .project_id,
+        "proj_123"
     );
 }
 

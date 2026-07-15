@@ -44,11 +44,11 @@ struct HintCounts {
 /// `GET /api/plugins/analytics/overview`
 pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
-    let hints = hint_summary(state.lcm_conn.as_ref(), durable_events.as_deref()).await;
-    let usage = usage_summary(state.lcm_conn.as_ref(), durable_events.as_deref()).await;
-    let agents = agent_usage_summary(state.lcm_conn.as_ref()).await;
+    let hints = hint_summary(state.lcm_conn.as_deref(), durable_events.as_deref()).await;
+    let usage = usage_summary(state.lcm_conn.as_deref(), durable_events.as_deref()).await;
+    let agents = agent_usage_summary(state.lcm_conn.as_deref()).await;
     let diagnostics = diagnostics_summary(&state, durable_events.as_deref()).await;
-    let underused = underused_tool_families(state.lcm_conn.as_ref()).await;
+    let underused = underused_tool_families(state.lcm_conn.as_deref()).await;
 
     Json(json!({
         "available": state.lcm_conn.is_some() || durable_events.is_some(),
@@ -120,13 +120,13 @@ fn managed_agent_label_for_session(agent_id: &str, metadata_json: &str) -> Optio
 /// `GET /api/plugins/analytics/hints`
 pub(crate) async fn hints(State(state): State<DashboardState>) -> Json<Value> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
-    Json(hint_summary(state.lcm_conn.as_ref(), durable_events.as_deref()).await)
+    Json(hint_summary(state.lcm_conn.as_deref(), durable_events.as_deref()).await)
 }
 
 /// `GET /api/plugins/analytics/usage`
 pub(crate) async fn usage(State(state): State<DashboardState>) -> Json<Value> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
-    Json(usage_summary(state.lcm_conn.as_ref(), durable_events.as_deref()).await)
+    Json(usage_summary(state.lcm_conn.as_deref(), durable_events.as_deref()).await)
 }
 
 /// `GET /api/plugins/analytics/diagnostics`
@@ -140,7 +140,7 @@ pub(crate) async fn underused(State(state): State<DashboardState>) -> Json<Value
     Json(json!({
         "available": state.lcm_conn.is_some(),
         "db": state.lcm_db_path,
-        "families": underused_tool_families(state.lcm_conn.as_ref()).await,
+        "families": underused_tool_families(state.lcm_conn.as_deref()).await,
     }))
 }
 
@@ -162,7 +162,7 @@ fn empty_hint_rows() -> Vec<Value> {
 async fn durable_analytics_rows_for_state(state: &DashboardState) -> Option<Vec<Value>> {
     durable_analytics_rows(
         state.savings_db.as_deref(),
-        state.lcm_conn.as_ref(),
+        state.lcm_conn.as_deref(),
         &GlobalDb::canonical_project_key(&state.project_root),
     )
     .await
@@ -594,7 +594,7 @@ fn usage_count_rows(counts: BTreeMap<(String, String), i64>) -> Vec<Value> {
 }
 
 async fn diagnostics_summary(state: &DashboardState, durable_events: Option<&[Value]>) -> Value {
-    let message_count = session_message_rows(state.lcm_conn.as_ref())
+    let message_count = session_message_rows(state.lcm_conn.as_deref())
         .await
         .map_or(0, |rows| rows.len() as i64);
     let hook_analytics = read_hook_analytics_rows(state);

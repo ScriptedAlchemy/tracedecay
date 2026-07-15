@@ -184,7 +184,9 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
         crate::migrate::registry::RegistryReconstructionApplyReport::default()
     );
 
-    db.conn()
+    db.writer_connection()
+        .await
+        .unwrap()
         .execute(
             "DELETE FROM store_artifacts WHERE store_id=?1",
             libsql::params![eligible.plans[0].store.store_id.as_str()],
@@ -196,7 +198,9 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
         .await
         .unwrap();
 
-    db.conn()
+    db.writer_connection()
+        .await
+        .unwrap()
         .execute(
             "DELETE FROM store_instances WHERE store_id=?1",
             libsql::params![eligible.plans[0].store.store_id.as_str()],
@@ -309,8 +313,8 @@ async fn database_check_is_read_only_while_a_writer_is_live()
     let authority = crate::db::DatabaseAuthority::acquire_test(&db_path, "doctor test")?;
     let (writer, _) = crate::db::Database::open(&db_path, &authority).await?;
     writer
-        .conn()
-        .execute_batch(
+        .execute_write_batch(
+            "seed doctor freelist fixture",
             "CREATE TABLE doctor_probe (payload BLOB);\
              WITH RECURSIVE count(x) AS (\
                  VALUES(1) UNION ALL SELECT x + 1 FROM count WHERE x < 256\
@@ -357,8 +361,8 @@ async fn database_check_is_read_only_while_a_writer_is_live()
         "doctor must not run VACUUM or otherwise compact a live database"
     );
     writer
-        .conn()
-        .execute(
+        .execute_write(
+            "verify doctor writer remains usable",
             "INSERT INTO doctor_probe(payload) VALUES (zeroblob(64))",
             (),
         )
