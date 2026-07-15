@@ -793,7 +793,6 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
 
         drop(raw_conn);
         drop(raw_db);
-        drop(store);
         drop(db);
 
         let reopened_db = open_lcm_db(&tmp).await;

@@ -205,7 +205,6 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
             matches!(error, ObservationStoreError::Storage { .. }),
             "{stage} fault returned the wrong error: {error:?}"
         );
-        drop(store);
         db.close();
 
         let restarted = open_lcm_db(&tmp).await;
@@ -246,7 +245,6 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
             other => panic!("{stage} retry must commit once, got {other:?}"),
         };
         assert_eq!(committed.sequence(), 1);
-        drop(restarted_store);
         restarted.close();
 
         let replayed = open_lcm_db(&tmp).await;
