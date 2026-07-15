@@ -57,6 +57,7 @@ pub(in crate::migrate::consolidate) async fn verify_session_union_sql(
     .await?;
     build_consolidation_message_map(conn, "source_input", "target_input", source_project_id)
         .await?;
+    projection::materialize(conn, "target_input", "source_input").await?;
     conn.execute_batch("PRAGMA query_only = ON;")
         .await
         .map_err(|error| db_error("verify_consolidation", error))?;

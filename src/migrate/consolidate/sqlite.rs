@@ -12,7 +12,7 @@ use crate::global_db::GlobalDb;
 use crate::memory::store::MemoryStore;
 
 mod inspect;
-mod projection;
+pub(super) mod projection;
 mod verify;
 
 #[cfg(test)]
@@ -22,6 +22,34 @@ pub(super) use inspect::{
     inspect_collisions, quick_check_connection, quick_check_in,
 };
 pub(super) use verify::verify_session_union_sql;
+
+#[cfg(test)]
+pub(super) async fn verify_projection_plan_for_test(
+    conn: &Connection,
+    source: &Path,
+    target_input: &Path,
+    source_project_id: &str,
+) -> Result<()> {
+    attach_as(conn, source, "source_input").await?;
+    attach_as(conn, target_input, "target_input").await?;
+    let result = match build_consolidation_message_map(
+        conn,
+        "source_input",
+        "target_input",
+        source_project_id,
+    )
+    .await
+    {
+        Ok(()) => match projection::materialize(conn, "target_input", "source_input").await {
+            Ok(()) => projection::verify(conn).await,
+            Err(error) => Err(error),
+        },
+        Err(error) => Err(error),
+    };
+    let _ = conn.execute("DETACH DATABASE source_input", ()).await;
+    let _ = conn.execute("DETACH DATABASE target_input", ()).await;
+    result
+}
 
 pub(super) const LCM_RAW_MESSAGE_DIVERGENCE_PREDICATE: &str =
     "t.session_id IS NOT s.session_id OR t.content_hash IS NOT s.content_hash
@@ -367,26 +395,6 @@ pub(super) async fn merge_sessions(
         .ok_or_else(|| db_message("merge_sessions", "could not open target sessions DB"))?;
     attach_as(target.conn(), source_path, "source").await?;
     attach_as(target.conn(), target_input_path, "target_input").await?;
-    reject_session_content_collisions(target.conn(), "source", "target_input").await?;
-    let preflight = match build_consolidation_message_map(
-        target.conn(),
-        "source",
-        "target_input",
-        source_project_id,
-    )
-    .await
-    {
-        Ok(()) => preflight_observation_merge(target.conn()).await,
-        Err(error) => Err(error),
-    };
-    if let Err(error) = preflight {
-        let _ = target.conn().execute("DETACH DATABASE source", ()).await;
-        let _ = target
-            .conn()
-            .execute("DETACH DATABASE target_input", ())
-            .await;
-        return Err(error);
-    }
     target
         .conn()
         .execute("PRAGMA foreign_keys = OFF", ())
@@ -397,6 +405,35 @@ pub(super) async fn merge_sessions(
         .execute("BEGIN IMMEDIATE", ())
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
+    let preflight =
+        match reject_session_content_collisions(target.conn(), "source", "target_input").await {
+            Ok(()) => match build_consolidation_message_map(
+                target.conn(),
+                "source",
+                "target_input",
+                source_project_id,
+            )
+            .await
+            {
+                Ok(()) => {
+                    match projection::materialize(target.conn(), "target_input", "source").await {
+                        Ok(()) => preflight_observation_merge(target.conn()).await,
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+    if let Err(error) = preflight {
+        let _ = target.conn().execute("ROLLBACK", ()).await;
+        let _ = target.conn().execute("DETACH DATABASE source", ()).await;
+        let _ = target
+            .conn()
+            .execute("DETACH DATABASE target_input", ())
+            .await;
+        return Err(error);
+    }
     let result = merge_sessions_tx(target.conn(), offsets).await;
     match result {
         Ok(()) => target

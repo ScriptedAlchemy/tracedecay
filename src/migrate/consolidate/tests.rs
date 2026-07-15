@@ -2735,14 +2735,25 @@ async fn shared_projection_owner_and_newer_source_owner_remain_lossless() {
     )
     .await
     .unwrap();
-    assert_no_projection_alias(&target_path, &shared_id).await;
-    assert_projection_alias(&target_path, &newer_id, remapped_message_id).await;
-    assert_message_text(&target_path, message_id, "older target body").await;
-    assert_message_absent(&target_path, remapped_message_id).await;
-
     let merged = GlobalDb::open_at_without_structured_backfill(&target_path)
         .await
         .unwrap();
+    sqlite::verify_projection_plan_for_test(
+        merged.conn(),
+        &source_path,
+        &target_input_path,
+        "proj_source",
+    )
+    .await
+    .unwrap();
+    assert_shared_projection_predrain(
+        &target_path,
+        &shared_id,
+        &newer_id,
+        message_id,
+        remapped_message_id,
+    )
+    .await;
     assert_eq!(project_all_migration_observations(&merged).await, 2);
     assert_message_text(&target_path, message_id, "older target body").await;
     assert_message_text(&target_path, remapped_message_id, "newer source body").await;
@@ -2757,6 +2768,22 @@ async fn shared_projection_owner_and_newer_source_owner_remain_lossless() {
     )
     .await
     .unwrap();
+    sqlite::verify_projection_plan_for_test(
+        merged.conn(),
+        &source_path,
+        &target_input_path,
+        "proj_source",
+    )
+    .await
+    .unwrap();
+    assert_shared_projection_predrain(
+        &target_path,
+        &shared_id,
+        &newer_id,
+        message_id,
+        remapped_message_id,
+    )
+    .await;
     assert_eq!(project_all_migration_observations(&merged).await, 2);
     assert_message_text(&target_path, message_id, "older target body").await;
     assert_message_text(&target_path, remapped_message_id, "newer source body").await;
@@ -2778,6 +2805,138 @@ async fn shared_projection_owner_and_newer_source_owner_remain_lossless() {
     merged.close();
     assert_message_text(&target_path, message_id, "older target body").await;
     assert_message_text(&target_path, remapped_message_id, "newer source body").await;
+    assert_no_orphaned_projection_provenance(&target_path).await;
+}
+
+#[tokio::test]
+async fn pending_target_observation_does_not_suppress_source_projection_claim() {
+    let temp = TempDir::new().unwrap();
+    let target_path = temp.path().join("target-sessions.db");
+    let source_path = temp.path().join("source-sessions.db");
+    let target_input_path = temp.path().join("target-input-sessions.db");
+    let observation = migration_observation_for(
+        "session.migration.pending-target",
+        "receipt.migration.pending-target",
+        "pending-target-message",
+        "pending target body",
+    );
+    let observation_id = observation.observation_id().as_str().to_owned();
+
+    let target = GlobalDb::open_at_without_structured_backfill(&target_path)
+        .await
+        .unwrap();
+    persist_migration_observation(&target, observation.clone(), None).await;
+    target.checkpoint().await;
+    target.close();
+
+    let source = GlobalDb::open_at_without_structured_backfill(&source_path)
+        .await
+        .unwrap();
+    persist_migration_observation(&source, observation, None).await;
+    assert_eq!(project_all_migration_observations(&source).await, 1);
+    insert_projection_alias(&source, &observation_id, "pending-source-output").await;
+    source.checkpoint().await;
+    source.close();
+
+    let offsets = sqlite::plan_session_offsets(&target_path, &source_path)
+        .await
+        .unwrap();
+    copy_sqlite_family_exact(&target_path, &target_input_path).unwrap();
+    sqlite::merge_sessions(
+        &target_path,
+        &source_path,
+        &target_input_path,
+        "proj_source",
+        &offsets,
+    )
+    .await
+    .unwrap();
+    assert_projection_alias(&target_path, &observation_id, "pending-source-output").await;
+    assert_message_absent(&target_path, "pending-target-message").await;
+    assert_message_absent(&target_path, "pending-source-output").await;
+
+    let merged = GlobalDb::open_at_without_structured_backfill(&target_path)
+        .await
+        .unwrap();
+    assert_eq!(project_all_migration_observations(&merged).await, 1);
+    merged.close();
+    assert_projection_output(&target_path, &observation_id, "pending-source-output").await;
+    assert_no_orphaned_projection_provenance(&target_path).await;
+}
+
+#[tokio::test]
+async fn another_projector_claim_does_not_suppress_source_projection_claim() {
+    let temp = TempDir::new().unwrap();
+    let target_path = temp.path().join("target-sessions.db");
+    let source_path = temp.path().join("source-sessions.db");
+    let target_input_path = temp.path().join("target-input-sessions.db");
+    let observation = migration_observation_for(
+        "session.migration.second-projector",
+        "receipt.migration.second-projector",
+        "second-projector-message",
+        "second projector body",
+    );
+    let observation_id = observation.observation_id().as_str().to_owned();
+
+    let target = GlobalDb::open_at_without_structured_backfill(&target_path)
+        .await
+        .unwrap();
+    persist_migration_observation(&target, observation.clone(), None).await;
+    assert_eq!(project_all_migration_observations(&target).await, 1);
+    target
+        .conn()
+        .execute(
+            "UPDATE observation_projection_provenance
+             SET projector_version='test-projector-v2'",
+            (),
+        )
+        .await
+        .unwrap();
+    target.checkpoint().await;
+    target.close();
+
+    let source = GlobalDb::open_at_without_structured_backfill(&source_path)
+        .await
+        .unwrap();
+    persist_migration_observation(&source, observation, None).await;
+    assert_eq!(project_all_migration_observations(&source).await, 1);
+    insert_projection_alias(&source, &observation_id, "second-projector-output").await;
+    source.checkpoint().await;
+    source.close();
+
+    let offsets = sqlite::plan_session_offsets(&target_path, &source_path)
+        .await
+        .unwrap();
+    copy_sqlite_family_exact(&target_path, &target_input_path).unwrap();
+    sqlite::merge_sessions(
+        &target_path,
+        &source_path,
+        &target_input_path,
+        "proj_source",
+        &offsets,
+    )
+    .await
+    .unwrap();
+    assert_projection_alias(&target_path, &observation_id, "second-projector-output").await;
+    assert_message_text(
+        &target_path,
+        "second-projector-message",
+        "second projector body",
+    )
+    .await;
+    assert_message_absent(&target_path, "second-projector-output").await;
+
+    let merged = GlobalDb::open_at_without_structured_backfill(&target_path)
+        .await
+        .unwrap();
+    assert_eq!(project_all_migration_observations(&merged).await, 1);
+    merged.close();
+    assert_message_text(
+        &target_path,
+        "second-projector-output",
+        "second projector body",
+    )
+    .await;
     assert_no_orphaned_projection_provenance(&target_path).await;
 }
 
@@ -3279,6 +3438,30 @@ async fn assert_projection_ownership(
     assert_eq!(row.get::<i64>(0).unwrap(), created);
     assert_eq!(row.get::<i64>(1).unwrap(), retained);
     db.close();
+}
+
+async fn assert_shared_projection_predrain(
+    path: &Path,
+    shared_observation_id: &str,
+    newer_observation_id: &str,
+    original_message_id: &str,
+    remapped_message_id: &str,
+) {
+    assert_no_projection_alias(path, shared_observation_id).await;
+    assert_projection_alias(path, newer_observation_id, remapped_message_id).await;
+    assert_message_text(path, original_message_id, "older target body").await;
+    assert_message_absent(path, remapped_message_id).await;
+    assert_eq!(
+        sqlite::count_rows(path, "observation_projection_provenance")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlite::count_rows(path, "projection_queue").await.unwrap(),
+        2
+    );
+    assert_no_orphaned_projection_provenance(path).await;
 }
 
 async fn assert_message_text(path: &Path, message_id: &str, expected: &str) {
