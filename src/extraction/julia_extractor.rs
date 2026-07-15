@@ -9,6 +9,20 @@ use crate::types::{
 
 pub struct JuliaExtractor;
 
+struct NodeText {
+    signature: Option<String>,
+    docstring: Option<String>,
+}
+
+impl NodeText {
+    fn new(signature: Option<String>, docstring: Option<String>) -> Self {
+        Self {
+            signature,
+            docstring,
+        }
+    }
+}
+
 struct ExtractionState {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
@@ -62,8 +76,7 @@ impl ExtractionState {
         name: String,
         qualified_name: String,
         node: TsNode<'_>,
-        signature: Option<String>,
-        docstring: Option<String>,
+        text: NodeText,
         metrics: ComplexityMetrics,
     ) -> String {
         let start_line = node.start_position().row as u32;
@@ -79,8 +92,8 @@ impl ExtractionState {
             end_line: node.end_position().row as u32,
             start_column: node.start_position().column as u32,
             end_column: node.end_position().column as u32,
-            signature,
-            docstring,
+            signature: text.signature,
+            docstring: text.docstring,
             visibility: Visibility::Pub,
             is_async: false,
             branches: metrics.branches,
@@ -212,8 +225,7 @@ impl JuliaExtractor {
             name.clone(),
             qualified_name,
             node,
-            sig,
-            docstring,
+            NodeText::new(sig, docstring),
             metrics,
         );
 
@@ -235,8 +247,7 @@ impl JuliaExtractor {
             name,
             qualified_name,
             node,
-            sig,
-            None,
+            NodeText::new(sig, None),
             ComplexityMetrics::default(),
         );
     }
@@ -262,8 +273,7 @@ impl JuliaExtractor {
             name,
             qualified_name,
             node,
-            sig,
-            docstring,
+            NodeText::new(sig, docstring),
             ComplexityMetrics::default(),
         );
         state.node_stack.pop();
@@ -282,8 +292,7 @@ impl JuliaExtractor {
             name,
             qualified_name,
             node,
-            sig,
-            None,
+            NodeText::new(sig, None),
             ComplexityMetrics::default(),
         );
     }
@@ -300,8 +309,7 @@ impl JuliaExtractor {
             name.clone(),
             qualified_name,
             node,
-            None,
-            None,
+            NodeText::new(None, None),
             ComplexityMetrics::default(),
         );
 
