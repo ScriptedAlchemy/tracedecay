@@ -48,33 +48,30 @@ the checked historical artifact but the finalization gate requires exactly one
 fully typed current acceptance artifact and rejects unindexed, duplicate, or
 unknown-field results.
 
+The current [acceptance result](result-2026-07-15-0c289212.json) was captured
+from clean commit `0c289212de5429e5d5abf309f6bb27e49f66a64e` with 3 warmups and
+30 independent measured repetitions of 64 records (1,920 records). The raw
+artifact records the Linux kernel, CPU, memory, Rust/Cargo toolchains, every
+repetition, and the nearest-rank/sample-standard-deviation method.
+
+- Pipeline batch latency: p50 323,175,923 ns; p95 336,411,433 ns; p99
+  341,652,217 ns; sample standard deviation 9,804,394 ns.
+- Pipeline throughput: 198.60320836792673 records/s.
+- Timed pipeline CPU: 6,480 ms; peak RSS: 24,704 KiB.
+- Timed process write I/O: 250,552,320 bytes; SQLite database/WAL/SHM growth:
+  112,230,320 bytes across the 30 independent databases.
+- Exact no-op retry plus bounded replay: p50 194,962 ns; p95 217,902 ns; p99
+  224,762 ns; 10 ms CPU total; zero process write bytes, database growth,
+  observation-count change, and coordinator work counters.
+
 The [historical result](result-2026-07-15-b05b4cd5.json) was captured from clean
-commit `b05b4cd570ab8e3385604c0fef31902fdc3f1e8b` with:
+commit `b05b4cd570ab8e3385604c0fef31902fdc3f1e8b`.
 
 > **Historical/stale evidence:** this result predates schema 2 provenance and
 > complete workload validation. Its JSON carries
 > `"evidence_status": "historical_stale"` and is rejected as acceptance
-> evidence by normal tests. Retain it only for provenance. A final clean-HEAD
-> run must add a schema 2 result and replace the summary before PR5 is complete.
+> evidence by normal tests. Retain it only for provenance.
 
 ```console
 scripts/run-pr5-observation-benchmark.sh
 ```
-
-The retained run used 3 warmups and 30 independent measured repetitions of 64
-records (1,920 records). The raw artifact records the Linux kernel, CPU, memory,
-Rust/Cargo toolchains, every repetition, and the nearest-rank/sample-standard-
-deviation method.
-
-- Pipeline batch latency: p50 231,468,087 ns; p95 3,370,435,094 ns; p99
-  4,614,566,543 ns; sample standard deviation 1,159,889,643 ns.
-- Pipeline throughput: 86.06239150940468 records/s.
-- Timed pipeline CPU: 4,570 ms; peak RSS: 22,672 KiB.
-- Timed process write I/O: 182,652,928 bytes; SQLite database/WAL/SHM growth:
-  109,871,520 bytes across the 30 independent databases.
-- Exact no-op retry plus bounded replay: p50 1,951,425 ns; p95 2,135,867 ns;
-  p99 2,577,411 ns; 50 ms CPU total; zero process write bytes, database growth,
-  observation-count change, and coordinator work counters.
-
-The historical run's high pipeline tail variance is retained rather than
-filtered. It is not an optimization claim.
