@@ -41,6 +41,8 @@ fn git_error_result(cg: &TraceDecay, args: &Value, operation: &str, message: &st
         }),
         vec![],
     )
+    .with_semantic_error(true)
+    .with_failure_message(message)
 }
 
 fn require_string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {

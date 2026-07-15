@@ -495,7 +495,8 @@ async fn test_tools_call_semantic_failure_sets_is_error() {
                 "arguments": {
                     "path": "src/main.rs",
                     "old_str": "fn missing() {}",
-                    "new_str": "fn replaced() {}"
+                    "new_str": "fn replaced() {}",
+                    "format": "json"
                 }
             }),
         )],
@@ -550,8 +551,8 @@ async fn test_tools_call_plain_text_failure_sets_is_error() {
         .as_str()
         .expect("tool result text");
     assert!(
-        text.contains("git diff failed"),
-        "expected changelog git failure text, got: {text}"
+        text.contains("## error") && text.contains("**kind:** git"),
+        "expected rendered changelog git failure, got: {text}"
     );
 }
 
@@ -1048,6 +1049,7 @@ async fn test_server_stats_initial() {
 
 #[tokio::test]
 async fn test_server_stats_include_response_handle_metrics() {
+    let (_env, _active_project) = crate::common::IsolatedEnv::acquire().await;
     let (server, _dir) = setup_server().await;
     let baseline = server.server_stats_json().await;
     let baseline_handles = &baseline["response_handles"];
@@ -1066,7 +1068,8 @@ async fn test_server_stats_include_response_handle_metrics() {
                     "response handle telemetry should survive truncation ".repeat(80)
                 ),
                 "category": "project",
-                "trust": 0.9
+                "trust": 0.9,
+                "format": "json"
             }),
             None,
             None,
@@ -1082,7 +1085,13 @@ async fn test_server_stats_include_response_handle_metrics() {
     let listed = handle_tool_call(
         &cg,
         "tracedecay_fact_store",
-        json!({"action": "list", "category": "project", "min_trust": 0.0, "limit": 200}),
+        json!({
+            "action": "list",
+            "category": "project",
+            "min_trust": 0.0,
+            "limit": 200,
+            "format": "json"
+        }),
         None,
         None,
     )
@@ -1314,7 +1323,7 @@ async fn test_error_tracking() {
                 "tools/call",
                 json!({
                     "name": "tracedecay_status",
-                    "arguments": {}
+                    "arguments": { "format": "json" }
                 }),
             ),
         ],
@@ -1351,22 +1360,11 @@ async fn test_error_tracking() {
         .filter_map(|c| c["text"].as_str())
         .collect::<Vec<_>>()
         .join("");
-    // Parse the server stats from the status text to verify errors > 0.
+    let payload: Value = serde_json::from_str(&text).expect("status result JSON");
     assert!(
-        text.contains("\"errors\"") || text.contains("errors"),
-        "status should contain errors field, got: {}",
-        text
+        payload["server"]["errors"].as_u64().unwrap_or(0) >= 1,
+        "errors should be at least 1 after sending unknown method: {payload}"
     );
-    // The error count should be at least 1 (from the unknown method).
-    // The server stats JSON is embedded in the text; try to find it.
-    if let Some(server_start) = text.find("\"server\"") {
-        let server_section = &text[server_start..];
-        assert!(
-            server_section.contains("\"errors\": 1") || server_section.contains("\"errors\":1"),
-            "errors should be at least 1 after sending unknown method, section: {}",
-            server_section
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1831,12 +1829,16 @@ async fn test_run_returns_transport_read_errors() {
 // the migration-running path) before the status reads.
 #[tokio::test]
 async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
+    let (_env, _active_project) = crate::common::IsolatedEnv::acquire().await;
     let (server, dir) = setup_server().await;
     let lcm_status_call = |id: i64| {
         jsonrpc_request(
             json!(id),
             "tools/call",
-            json!({ "name": "tracedecay_lcm_status", "arguments": {} }),
+            json!({
+                "name": "tracedecay_lcm_status",
+                "arguments": { "format": "json" }
+            }),
         )
     };
     // Write-path call: opens the session DB in write mode, creating it and
@@ -1849,7 +1851,10 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
             "tools/call",
             json!({
                 "name": "tracedecay_lcm_session_boundary",
-                "arguments": { "session_id": "migration-rerun-probe" }
+                "arguments": {
+                    "provider": "codex",
+                    "session_id": "migration-rerun-probe"
+                }
             }),
         )
     };
@@ -1872,7 +1877,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
             .expect("missing response for boundary call");
         assert!(
             resp["error"].is_null(),
-            "lcm_session_boundary should not error"
+            "lcm_session_boundary should not error: {resp}"
         );
     }
     for id in [2_i64, 3] {
