@@ -56,6 +56,30 @@ MCP tools and resources call the same explicit application methods as CLI. MCP t
 
 Multiple MCP clients may connect concurrently, but all business reads and writes are brokered through the one daemon authority established by PR 4.
 
+## Canonical dispatch and tool families
+
+One typed schema registry and dispatcher binds CLI, MCP, and HTTP names to
+cataloged application operations. Bindings may validate transport syntax and
+render results; aliases contain zero authorization, query, mutation, storage,
+availability, or fallback logic.
+
+- `search`, `find_exact`, qualified-name lookup, similar-symbol lookup, and
+  signature search are views over one symbol kernel.
+- `read`, `outline`, `module_api`, `signature`, and file views share one
+  source/outline kernel.
+- `callers`, `callees`, `callers_for`, call chains, file dependents, and impact
+  share one graph-traversal kernel; implementation and type-hierarchy names are
+  typed graph views, not separate engines.
+- `test_map` and `affected` share one test-attribution kernel.
+- Exact, symbol, insert, move, and structural rewrites use the one journaled
+  application `EditTransaction`; preview/dry-run never means a second edit path.
+
+Literal grep, AST structural match, body source, graph node records, and context
+composition remain distinct because their evidence and semantics differ.
+`diagnose` and `diagnostics` remain distinct effects. Project/runtime/storage,
+memory, LCM, and daemon health views remain distinct evidence domains even when
+their bindings share the dispatcher.
+
 ## Direct parity tests
 
 Parity is verified from public behavior, not from a generated inventory:
@@ -75,6 +99,7 @@ Parity is verified from public behavior, not from a generated inventory:
 - canonical JSON and cursor/anchor handling;
 - stable problem and exit mapping;
 - removal of handler-local database/query behavior, raw JSON renderers, double encoding, irreversible truncation, and writable fallback;
+- removal of the `admin_cli` registry and session/analytics handler copies;
 - focused CLI/MCP parity and concurrency tests.
 
 ## Done

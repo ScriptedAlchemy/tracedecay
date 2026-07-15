@@ -41,6 +41,10 @@ One daemon is the sole database authority. Thin clients and hooks communicate wi
 - Upgrades quiesce writes, preserve client reconnection, validate the replacement daemon, and recover to the last verified state on failure.
 - Delete archives and migration-only code when the recovery policy permits and verification remains valid; report exactly what was removed.
 - Do not keep compatibility fallbacks for stale clients. Return a clear upgrade/reconnect error instead.
+- Remove external `ast-grep` capability probing and subprocess outline/rewrite,
+  duplicate transport/admin handlers, handler-local query/render/database logic,
+  and semantic aliases whose compatibility window has closed. Surviving names
+  delegate to canonical application operations until their stated removal.
 - Remote/shared-brain support must still route through one authoritative daemon per live store; it never introduces extra database clients.
 
 ## Acceptance

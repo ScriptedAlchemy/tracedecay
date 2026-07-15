@@ -32,6 +32,15 @@ Every product surface can run the same bounded query use case and receive determ
 
 ## Required behavior
 
+- **PR8 — one temporal kernel:** message, Turn, session, thread, agent, summary,
+  LCM expansion, and compact context requests share one temporal retrieval and
+  hydration pipeline. `message_search`, `lcm_grep`, `lcm_load`, `lcm_describe`,
+  `lcm_expand`, and `lcm_expand_query` are temporary bindings to it, not query
+  implementations.
+- **PR8 — compatibility:** compatibility bindings translate inputs and results
+  only. They preserve the kernel's scope, temporal mode, watermarks, ordering,
+  cursors, coverage, authorization, and cancellation without private fallback.
+
 - **PR5 — minimal path:** implement one typed activity/session listing request end to end through a read port, with explicit scope, bounded page size, stable order, cursor, cancellation, and coverage.
 - **PR5 — scope:** accept only application-resolved Profile, Project, Repository, Checkout, Worktree, Ref, and Snapshot roots. Never infer CWD, current project, first project, current branch, or another client’s prior selection.
 - **PR5 — snapshots:** capture selected shard watermarks before reads. Frozen pages never observe later rows; unavailable or stale shards remain named in coverage.

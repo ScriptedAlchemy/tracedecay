@@ -52,6 +52,16 @@ Every operational and product metric states what was measured, over which popula
 - Usage, cost, and measured savings with declared pricing inputs, exclusions, and confidence.
 - Store, index, daemon, hook, and remote-coverage health derived from canonical facts rather than incidental row presence.
 
+### Doctor and health
+
+- Doctor, Observatory, CLI, MCP, API, and dashboard consume one typed health and
+  remediation kernel. An alias reports kernel availability; it cannot substitute
+  a private probe or claim health from binding presence.
+- Replace separate `session_start`/`session_end` baseline tools with one
+  health-delta operation over pinned before/after watermarks and coverage.
+- Analytics consume canonical versioned events only. Session or surface
+  handlers never maintain private counters, outcome rules, or database queries.
+
 ### Observatory and Costs
 
 - PR14 exposes shared typed read models through application queries and thin CLI, MCP, HTTP, SDK, and dashboard adapters.

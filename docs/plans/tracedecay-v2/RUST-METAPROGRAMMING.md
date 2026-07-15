@@ -61,10 +61,11 @@ PR registries, rewrite status, or implementation ownership maps are not.
 
 ## Dynamic workflows
 
-PR17 dynamic workflows are runtime product data. Immutable JavaScript/TypeScript
-definitions compile through a daemon-owned typed compiler into a deterministic
-replay/effect model and use the shared operation, scheduler, event, and store
-authorities.
+PR17 dynamic workflows are typed runtime product data submitted through the
+public application/SDK contracts. The daemon validates them and uses the shared
+operation, scheduler, history, lease, effect, artifact, event, and store
+authorities. JavaScript/TypeScript may call an SDK but is not a workflow
+definition language or execution runtime.
 
 They must not:
 

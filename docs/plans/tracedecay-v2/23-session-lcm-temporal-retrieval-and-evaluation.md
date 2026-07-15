@@ -32,6 +32,12 @@ Recency is bounded evidence, not a truth rule. A newer weak mention does not era
 
 ## Retrieval pipeline
 
+This is the sole temporal retrieval kernel. Legacy `message_search` and
+`lcm_grep`/load/describe/expand/query bindings translate into this request and
+delegate; they do not keep separate ranking, hydration, context, pagination, or
+freshness logic. Workflow recovery consumes session evidence through this
+kernel; the term workflow otherwise belongs to the PR17 product.
+
 1. Resolve the exact authorized profile/project/repository/worktree/ref/provider/session scope.
 2. Pin store, projection, graph, index, and configuration watermarks.
 3. Generate bounded lexical, phrase, fuzzy, entity, summary, graph, time, and configured semantic candidates.

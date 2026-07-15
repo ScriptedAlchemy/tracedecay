@@ -50,6 +50,8 @@ policy, lifecycle, or transport logic.
    - Storage, configuration, privacy, identity, query, and lifecycle behavior each have one owner.
    - Adapters call those operations rather than reimplementing them.
    - Extensions use typed capabilities and cannot reach around policy or daemon authority.
+   - A compatibility alias may translate wire shape only. Availability, errors,
+     authorization, effects, health, and cancellation come from its canonical operation.
 
 5. Typed workflows
    - PR17 represents dynamic workflows as typed, stored definitions.
@@ -60,6 +62,9 @@ policy, lifecycle, or transport logic.
    - Each replacement identifies its canonical owner and removes the superseded path.
    - Temporary adapters have an explicit deletion condition within the delivering PR sequence.
    - PR19 removes all satisfied shims, duplicate paths, dead feature flags, and obsolete dependencies.
+   - Delete external `ast-grep` probing, subprocess outline/rewrite, duplicate
+     parser acquisitions, surface-local handlers/query/render/database logic,
+     and superseded semantic aliases after their bounded compatibility window.
 
 ## Acceptance
 

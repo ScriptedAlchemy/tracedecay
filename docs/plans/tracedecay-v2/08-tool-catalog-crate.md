@@ -31,6 +31,13 @@ Every public surface resolves stable capability IDs to the same application use 
 ## Required behavior
 
 - **PR11 — definitions:** create compact immutable catalog records and stable IDs for application use cases implemented through PR11. Every entry points to a real typed application handler.
+- **PR11 — canonical operations:** structural search, source outline, source
+  rewrite, exact/symbol edit, temporal retrieval, configuration, health, and
+  every other tool bind stable typed application operations. A surface name or
+  alias has zero business logic.
+- **PR11 — configuration boundary:** code/config-file inspection is a scoped
+  source operation; product settings use the typed configuration authority.
+  Similar presentation does not merge their authorization or effects.
 - **PR11 — contributions:** register catalog records beside their owning application feature, then assemble one immutable snapshot at composition. No central file duplicates every request/response definition.
 - **PR11 — validation:** reject duplicate IDs/bindings, missing handlers, incompatible schema references, invalid scope/effect/privacy combinations, profile overflow, and dependency cycles.
 - **PR11 — policy:** expose read-only capability metadata to policy routing. Availability and effect metadata inform a decision but never execute it.

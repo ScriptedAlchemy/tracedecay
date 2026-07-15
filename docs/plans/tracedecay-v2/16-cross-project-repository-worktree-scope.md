@@ -61,6 +61,8 @@ choreography or storage knowledge.
     records and observed work locations. It displays repository, path, branch, head,
     dirty state, holders, related sessions/PRs, provenance, confidence, and ambiguity.
 11. TraceDecay never creates a worktree. Discovery or association never grants cleanup.
+    No product tool, workflow, or automation creates Git branches or worktrees
+    or deletes branches; PR15 owns scope resolution and safe worktree cleanup only.
 12. Cleanup begins with a read-only daemon inspection. Dirty/untracked files, active
     holders, unpushed or unmerged commits, open or uncertain PRs, shared references,
     ambiguous identity, stale evidence, or missing authorization block cleanup.

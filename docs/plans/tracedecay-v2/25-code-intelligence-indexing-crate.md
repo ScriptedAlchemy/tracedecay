@@ -11,6 +11,8 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 ## Owns
 
 - Versioned tree-sitter grammar registration and deterministic language extraction.
+- One versioned language descriptor per language, shared by extraction,
+  structural search, outline, and rewrite.
 - Canonical symbol, occurrence, relationship, diagnostic, and test-attribution records.
 - Content-addressed incremental reuse and bounded dirty overlays.
 - Logical generation planning, sealing, digests, and lineage evidence.
@@ -34,10 +36,19 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 
 ### Deterministic extraction
 
-- Select grammars through one versioned registry.
+- Select grammar, aliases, extensions, expando behavior, and extractor revision
+  through one versioned registry. Duplicate language tables and parser
+  acquisition paths are forbidden.
+- Acquire one Tree-sitter parser from that descriptor. Extraction and the
+  in-process `ast-grep-core` structural-match/outline/rewrite kernel share its
+  pinned grammar and source generation; no host `ast-grep` binary is authority.
 - Produce stable canonical rows and digests for identical input, registry, and extractor revisions on every supported host.
 - Preserve parse errors and unsupported constructs as evidence; never invent successful structure.
 - Keep language-specific logic behind a small extractor interface while sharing identity, lineage, and output contracts.
+- Structural results report deterministic file/span order, parse coverage,
+  unsupported regions, and bounded errors. Pagination cursors bind query,
+  descriptor, generation, and ordering; cancellation cannot publish partial
+  extraction or mutation state.
 
 ### Generations and incremental reuse
 

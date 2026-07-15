@@ -35,20 +35,20 @@ must cover prevention, visible state, retry or recovery, and restart behavior.
 | Owner | Required regression classes |
 |---|---|
 | PR5 | Partial, malformed, duplicated, truncated, reset, or replaced provider input never advances beyond a complete sanitized frame; restart resumes without gaps. |
-| PR6 | Projection failure or replay never corrupts source observations, duplicate entities, hide partial coverage, or produce order-dependent results. |
-| PR7 | Stable anchors never cross providers/owners, copied prompts never become authorship, and redaction/deletion never leaves an unsafe resolution path. |
-| PR8 | Query reads never repair or mutate storage; caps, pagination, stale data, unavailable shards, and no-result states remain truthful. |
-| PR9 | Exact identifiers and phrases are not displaced by echoes, copies, stale summaries, wrong projects, or uncalibrated shard scores. |
-| PR10 | Semantic search never silently substitutes models, crosses privacy domains, recomputes unchanged documents, or shortens results after model failure. |
-| PR11 | Policy and hints remain bounded, deduplicated, attributable, quiet when irrelevant, and consistent across supported hosts. |
-| PR12 | Hooks stay fast, sanitize before durable writes, respect lifecycle ownership, and preserve provider-specific event semantics without duplicated effects. |
-| PR13 | CLI, MCP, HTTP, and generated clients agree on schemas, defaults, errors, pagination, formats, capabilities, and nonzero failure status. |
-| PR14 | Application and UI paths use daemon authority, distinguish empty from stale/error/locked/partial, and expose recovery actions that can actually succeed. |
+| PR6 | Remaining providers preserve native identity/order; projection replay and backpressure never duplicate, skip, or corrupt observations. |
+| PR7 | Facts, memory, and stable anchors never cross owners; copied prompts never become authorship; correction, redaction, and deletion preserve safe lineage. |
+| PR8 | Temporal/LCM reads never repair storage; copies, summaries, supersession, cursors, stale shards, and no-result states remain truthful. |
+| PR9 | Code generations are deterministic; exact identifiers and phrases are not displaced by parse errors, echoes, wrong snapshots, or uncalibrated shard scores. |
+| PR10 | Semantic search never substitutes models, crosses privacy domains, recomputes unchanged documents, or shortens lexical results after model failure. |
+| PR11 | Policy, application, settings, and catalog operations remain authorized, deterministic, idempotent, and free of alias-local business logic. |
+| PR12 | CLI, MCP, HTTP, and output bindings agree on schemas, defaults, errors, pagination, cancellation, formats, capabilities, and nonzero failure status. |
+| PR13 | Hooks stay fast and thin; Scout and host bundles preserve address, privacy, lifecycle ownership, and effects without local query/model/storage work. |
+| PR14 | Dashboard, Doctor, observability, and configuration views use canonical daemon operations, distinguish empty/stale/error/locked/partial, and offer executable recovery. |
 | PR15 | Explicit repository/worktree/ref targets never fall back to CWD; cross-project results exact-load globally; dirty/stale graph coverage is explicit. |
-| PR16 | Secrets never reach observations, projections, indexes, analytics, logs, handles, exports, backups, or UI; remediation cannot resurrect removed bytes. |
-| PR17 | Doctor, repair, update, backup, consolidation, and migration never compete with a live writer, guess identity, discard recovery evidence, or claim an incomplete checkpoint. |
-| PR18 | Metrics conserve attempts and outcomes, state denominators/caps/horizons, and never turn missing or sampled evidence into zero or success. |
-| PR19 | Cutover leaves one writer authority and one canonical route, preserves rollback evidence, rejects stale clients explicitly, and survives crash/restart at every publication boundary. |
+| PR16 | Remote authority, offline replay, cache verification, backup, restore, and failover never admit two writers or hide incomplete coverage. |
+| PR17 | Workflow scheduling, history, leases, effects, artifacts, retries, and cancellation share daemon authority and never duplicate observable effects. |
+| PR18 | Rust, TypeScript, and Python SDKs preserve the public contract, cancellation, retries, privacy, and transport-neutral errors. |
+| PR19 | Migration and cutover leave one writer and one canonical route, preserve rollback evidence, reject stale clients, and remove every superseded path. |
 
 These tests must use synthetic or reviewed sanitized fixtures. A platform exclusion is a
 typed capability result, not silent coverage. Retrying a flaky test does not close the

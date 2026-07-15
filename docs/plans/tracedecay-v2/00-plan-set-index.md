@@ -35,6 +35,9 @@ work and must not be rebuilt.
 - Component plans define contracts and ownership. They do not force standalone
   crates, generators, registries, or PRs unless production boundaries justify
   them.
+- Each product mechanism has one typed kernel. Surface names and compatibility
+  aliases are bindings only; they never acquire their own query, edit, storage,
+  rendering, scheduling, or health logic.
 - The daemon remains the sole mutable SQLite authority. Producers send typed
   commands or observations; readers use daemon/application APIs.
 - Project facts and project sessions are project-wide. User activity is
@@ -59,12 +62,12 @@ work and must not be rebuilt.
 | PR9 | Code intelligence and lexical retrieval: deterministic extraction, generations, lineage, diagnostics/tests, exact/phrase/BM25 search, and V1 parity. |
 | PR10 | Native semantic retrieval and ranking: gated FastEmbed artifacts, immutable vector generations, hybrid ranking, redundancy augmentation, evaluation, and lexical fallback. |
 | PR11 | Policy, application, catalog, and configuration core: typed use cases, grants, routing, replay, operations, capabilities, settings, and one runtime configuration authority. |
-| PR12 | CLI, MCP, HTTP API, and output convergence: one binding taxonomy, stable errors/cursors, compact Markdown, canonical JSON, SSE, cancellation, and surface parity. |
+| PR12 | CLI, MCP, HTTP API, and output convergence: one schema registry, dispatcher, and binding taxonomy; stable errors/cursors, compact Markdown, canonical JSON, SSE, cancellation, and surface parity. |
 | PR13 | Hooks, Context Scout, and host bundles: bounded hook ingestion, asynchronous suggestions, Codex/Claude/Cursor/Hermes projections, install/repair, and stock-host conformance. |
-| PR14 | Dashboard, Doctor, observability, and configuration operations: Brain/Explorer/Loom foundations, truthful health/recovery, metrics/SLOs, Settings, and direct remediation. |
+| PR14 | Dashboard, Doctor, observability, and configuration operations: Brain/Explorer/Loom foundations, one truthful health/recovery kernel, metrics/SLOs, Settings, and direct remediation. |
 | PR15 | Cross-project, repository, and worktree behavior: canonical scope resolution, federation, globally routable evidence, graph/query coverage, and multi-repository workflows. |
 | PR16 | Remote shared Brain: enrolled nodes, one fenced authority per shard, offline sanitized capture, verified caches/replicas, Git correlation, backup, restore, and failover. |
-| PR17 | Real typed dynamic workflows and automations: daemon-owned definitions, deterministic replay, shared operations/scheduler/effects, Workflow Studio, and explicit task candidates. |
+| PR17 | Real typed dynamic workflows and automations: daemon-owned definitions, deterministic replay, and one shared scheduler/history/lease/effect/artifact kernel. |
 | PR18 | Official API stabilization and SDKs: frozen public contract, OpenAPI/schema publication, first-party Rust/TypeScript/Python SDKs, docs, and conformance. |
 | PR19 | Compatibility migration, defragmentation, cutover, and deletion: resumable backfill, shadow parity, bounded cutovers, rollback window, V2 default, and removal of every superseded V1 path. |
 
@@ -84,7 +87,8 @@ are stable.
   conformance behavior.
 - Plans 11, 14, 19, and 26: PR14 product UI, Doctor, observability, regression,
   convergence, and operational quality.
-- Plans 16 and 24: PR15 canonical scope and real multi-agent task product.
+- Plan 16: PR15 canonical scope. Plan 24 is a permanent tombstone for the
+  removed task-plan parser, tracker, and multi-agent executor product.
 - Plan 28: PR16 remote topology and authority.
 - Plan 32: PR17 typed dynamic-workflow product.
 - Plans 12, 13, 17, 19, and every component migration section: PR18–PR19

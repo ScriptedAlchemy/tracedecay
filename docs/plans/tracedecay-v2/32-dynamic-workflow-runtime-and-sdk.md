@@ -35,9 +35,10 @@ activate, or infer authority from CWD or nearest-directory precedence.
 
 ## Run and effect authority
 
-Runs reuse the existing daemon scheduler, generic operations/steps, leases,
-executor registrations, policy, event/outbox, idempotency, accounting, and
-subscription mechanisms where their contracts fit. There is no workflow
+Runs use one daemon scheduler/history/lease/effect/artifact kernel shared with
+automations. Typed workflow application operations invoke it directly; API,
+CLI, MCP, SDK, dashboard, and host bindings contain no private readiness,
+dispatch, retry, completion, effect, or artifact logic. There is no workflow
 database, journal, scheduler, lease family, retry loop, or worker authority.
 
 Canonical run history records admission, step readiness, attempt dispatch,

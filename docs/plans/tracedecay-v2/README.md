@@ -41,6 +41,9 @@ requirements and boundaries, not separate crate-first work queues.
 - Prefer one end-to-end vertical slice over broad scaffolding.
 - Component plans may contribute to the same PR. A plan name does not require a
   new crate, generator, registry, or standalone implementation phase.
+- One typed kernel owns each mechanism. Public names and compatibility aliases
+  are bindings, never alternate query, edit, storage, rendering, health, or
+  workflow implementations.
 - Preserve stock Cargo compatibility. Developer-local build wrappers and cache
   layouts are never repository or CI requirements.
 - Use explicit cancellation and typed progress for long operations. Do not add

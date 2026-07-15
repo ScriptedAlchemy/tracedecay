@@ -17,6 +17,10 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - Freshness, coverage, provenance, pagination, and partial-result semantics.
 - Stable progress and event contracts consumed by streaming adapters.
 - Direct product operations for capture, search, context, sessions, memory, code, delivery, automation, Doctor, configuration, and workflows.
+- Canonical structural-search, source-outline, and source-rewrite operations
+  backed by the PR9 in-process code-intelligence kernel.
+- One source-edit `EditTransaction` for preview and apply across exact, symbol,
+  insert, move, and structural rewrites.
 
 ## Does not own
 
@@ -35,6 +39,14 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - Preserve repository, worktree, branch, project, and user scope through every call.
 - Return structured freshness, coverage, provenance, warnings, and continuation data where relevant.
 - Make mutation retries safe through operation-specific idempotency keys and daemon-owned transactions.
+- Source edits preview one immutable file set and content digests, then apply by
+  idempotency key and compare-and-swap guards. Multi-file publication is atomic;
+  interruption rolls back or enters restart recovery before reindexing the
+  committed generation. CLI `--dry-run` and tool `dry_run` mean this same preview.
+- `str_replace` is a compatibility binding to one-operation
+  `multi_str_replace`; `insert_at_symbol` binds typed `insert_at`. Keep
+  `replace_symbol`, in-process structural rewrite, and `move_symbol` as typed
+  views over the same transaction; do not add split/import mutation tools.
 - Check cancellation and deadlines around expensive or multi-stage work.
 - Map domain and port failures into a small stable application error taxonomy without erasing actionable detail.
 - Keep streaming events bounded, ordered, resumable where the product contract requires it, and independent of SSE framing.
