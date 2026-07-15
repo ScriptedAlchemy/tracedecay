@@ -80,6 +80,45 @@ composition remain distinct because their evidence and semantics differ.
 memory, LCM, and daemon health views remain distinct evidence domains even when
 their bindings share the dispatcher.
 
+## Rejected-argument telemetry
+
+The versioned schema registry and dispatcher own one
+`interface_argument_rejected.v1` event for CLI, MCP, and HTTP. It is emitted
+at the authoritative schema/dispatch rejection boundary, after syntax has
+been separated into argument names and values and before the typed problem is
+rendered. Adapters do not keep private counters or infer rejection telemetry
+from stderr, protocol error text, or logs. A client-side rejection that cannot
+reach the daemon is represented in telemetry coverage as unreported rather
+than silently counted as zero.
+
+The event contains only:
+
+- the cataloged tool or command identity, or a bounded `unknown_operation`
+  class when dispatch could not resolve one;
+- normalized rejected argument names and the stable error class, such as
+  unknown, misspelled, removed, misplaced, duplicate, or invalid shape;
+- schema identifier and version, producer revision, transport, event time,
+  trace identifier, and an idempotency key;
+- normalized provider, model family, and agent-host kind when explicitly
+  available from trusted connection metadata, with absence kept distinct
+  from unknown.
+
+Names are extracted without their prefix/value separator and must pass the
+bounded argument-name grammar before recording. `--key=value` can record
+`key`, never `value`; positional tokens, raw request payloads, error messages,
+environment values, paths, hostnames, user identifiers, prompts, and provider
+content are never copied. A name that fails privacy or grammar checks becomes
+a stable rejection category plus a redacted-name count, not a raw token or a
+reversible digest. The event path applies the shared privacy policy before
+enqueue and is bounded, non-blocking, and explicit about dropped events.
+
+Aliases are resolved only after the attempted spelling has been safely
+classified, so future alias or schema decisions can compare a rejected name
+with the active canonical schema without changing dispatch behavior. Event
+emission cannot make an invalid request valid, alter its error, add a retry,
+or delay the response. Aggregation and product read models are owned by
+[26](26-observability-accounting-and-usage.md).
+
 ## Direct parity tests
 
 Parity is verified from public behavior, not from a generated inventory:
@@ -90,6 +129,9 @@ Parity is verified from public behavior, not from a generated inventory:
 4. test missing daemon, stale client, denied scope, empty, partial, redacted, paged, oversized, cancelled, and failed states;
 5. run concurrent-client tests proving clients never open writable databases;
 6. test stdout, stderr, exit codes, MCP lifecycle, framing, cancellation, and reconnect behavior directly.
+7. submit equivalent unknown, removed, misplaced, duplicate, and invalid-shape arguments through CLI, MCP, and HTTP and assert one schema-identical rejection event per attempt;
+8. prove values, payloads, paths, hostnames, identifiers, prompts, secrets, and unsafe names never enter events, logs, or typed problems, while redacted and dropped-event coverage remains visible;
+9. verify replay/retry idempotency, unavailable provider/model/host metadata, bounded name/cardinality limits, and daemon-unavailable client rejection behavior.
 
 ## PR 12 deliverables
 
@@ -98,6 +140,7 @@ Parity is verified from public behavior, not from a generated inventory:
 - compact Markdown/terminal presenters for shipped use cases;
 - canonical JSON and cursor/anchor handling;
 - stable problem and exit mapping;
+- canonical privacy-safe rejected-argument emission at the shared dispatcher;
 - removal of handler-local database/query behavior, raw JSON renderers, double encoding, irreversible truncation, and writable fallback;
 - removal of the `admin_cli` registry and session/analytics handler copies;
 - focused CLI/MCP parity and concurrency tests.
@@ -109,4 +152,5 @@ Parity is verified from public behavior, not from a generated inventory:
 - All business access goes through the daemon.
 - Compact Markdown and canonical JSON agree semantically.
 - Direct tests cover every shipped binding and failure class touched by PR 12.
+- Rejected arguments have CLI/MCP/HTTP parity without recording values or private payloads.
 - No generated surface inventory, plan parser, task editor, or executor is introduced.

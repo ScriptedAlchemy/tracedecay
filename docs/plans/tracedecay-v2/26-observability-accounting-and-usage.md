@@ -56,6 +56,33 @@ Every operational and product metric states what was measured, over which popula
 - Usage, cost, and measured savings with declared pricing inputs, exclusions, and confidence.
 - Store, index, daemon, hook, and remote-coverage health derived from canonical facts rather than incidental row presence.
 
+### Rejected-argument analytics
+
+Consume only the canonical dispatcher event defined by
+[PR12](21-cli-mcp-tool-surface-and-output-unification.md); projections never
+reparse CLI text, MCP errors, HTTP bodies, or logs. Provide frequency and rate
+read models grouped by tool/command, normalized rejected argument name, error
+class, schema/version, transport, and, when present, provider, model family,
+and agent-host kind. Preserve explicit unknown/unavailable dimensions rather
+than inventing attribution.
+
+Every result includes the eligible attempt denominator, horizon, watermark,
+schema and projector revision, sampling/capping state, redacted-name count,
+and emitted, delayed, dropped, and unreported-event coverage. Rankings and
+rates are unavailable when coverage or cardinality controls make them
+misleading. Low-frequency dimensions are suppressed or coarsened under the
+shared privacy policy; raw values, payloads, prompts, paths, hostnames, user
+identifiers, secrets, error text, and reversible token digests are neither
+stored nor exposed by drill-down.
+
+The views support evidence-based schema decisions: identify repeated safe
+misspellings, obsolete names, transport-specific incompatibilities, and
+provider/model/host biases; compare attempted names with the schema active at
+event time; and evaluate a proposed alias or help change against a pinned
+baseline. They recommend no automatic aliases and never change schemas,
+dispatch, or retry behavior. Alias adoption remains an explicit product
+decision with collision, ambiguity, maintenance, and privacy review.
+
 ### Doctor and health
 
 - Doctor, Observatory, CLI, MCP, API, and dashboard consume one typed health and
@@ -81,4 +108,18 @@ Every operational and product metric states what was measured, over which popula
 - Lag, SLO, adoption, hint, automation, usage, cost, and savings fixtures verify units, populations, horizons, and exclusions.
 - Observatory, CLI, MCP, HTTP, SDK, and exports pass value and coverage parity tests.
 - Privacy fixtures prove events and drill-down anchors contain no prohibited raw content.
+- Rejected-argument fixtures reconcile exact frequencies and eligible-attempt
+  rates by tool/command, safe rejected name, error class, schema/version,
+  transport, provider, model family, and agent-host kind for pinned watermarks.
+- Equivalent CLI, MCP, and HTTP rejections project to the same dimensions;
+  retry/replay does not double count, and late or out-of-order events rebuild
+  deterministically.
+- Secret-bearing `--name=value`, positional, malformed, oversized,
+  high-cardinality, non-UTF-8, and private-identifier fixtures prove that no
+  value or prohibited token reaches canonical events, aggregates, exports, or
+  drill-down while redacted-name counts remain truthful.
+- Drop, daemon-unavailable, sampling, cap, suppression, missing-attribution,
+  and schema-upgrade fixtures expose partial/unknown coverage and never render
+  absence as zero; removed-name and misspelling fixtures support reproducible
+  alias/schema analysis without changing dispatch behavior.
 - Repository checks reject alternate counter writers, UI-local formulas, and meta-plan instrumentation.
