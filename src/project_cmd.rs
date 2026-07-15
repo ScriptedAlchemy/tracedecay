@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use serde_json::{Value, json};
 use tracedecay::errors::{Result, TraceDecayError};
 #[cfg(test)]
@@ -73,21 +75,23 @@ fn print_registry_list(payload: &Value, label: &str, json_output: bool) -> Resul
 fn render_project_context_payload(payload: &Value) -> String {
     let mut out = String::new();
     let project = &payload["project"];
-    out.push_str(&format!(
-        "Project: {}\n",
+    let _ = writeln!(
+        out,
+        "Project: {}",
         project["project_id"].as_str().unwrap_or("-")
-    ));
-    out.push_str(&format!(
-        "root: {}\n",
+    );
+    let _ = writeln!(
+        out,
+        "root: {}",
         project["display_root"].as_str().unwrap_or("-")
-    ));
+    );
     if let Some(branch) = project["default_branch"].as_str() {
-        out.push_str(&format!("default branch: {branch}\n"));
+        let _ = writeln!(out, "default branch: {branch}");
     }
     if let Some(git_common_dir) = project["git_common_dir"].as_str() {
-        out.push_str(&format!("git common dir: {git_common_dir}\n"));
+        let _ = writeln!(out, "git common dir: {git_common_dir}");
     }
-    out.push_str(&format!("last seen: {}\n", project["last_seen_at"]));
+    let _ = writeln!(out, "last seen: {}", project["last_seen_at"]);
 
     if let Some(aliases) = payload["aliases"]
         .as_array()
@@ -95,10 +99,7 @@ fn render_project_context_payload(payload: &Value) -> String {
     {
         out.push_str("\nAliases:\n");
         for alias in aliases {
-            out.push_str(&format!(
-                "  {}\n",
-                alias["alias_path"].as_str().unwrap_or("-")
-            ));
+            let _ = writeln!(out, "  {}", alias["alias_path"].as_str().unwrap_or("-"));
         }
     }
 
@@ -109,37 +110,40 @@ fn render_project_context_payload(payload: &Value) -> String {
         out.push_str("\nStores:\n");
         for store_context in stores {
             let store = &store_context["store"];
-            out.push_str(&format!(
-                "  {} [{} / {}] {}\n",
+            let _ = writeln!(
+                out,
+                "  {} [{} / {}] {}",
                 store["store_id"].as_str().unwrap_or("-"),
                 store["store_kind"].as_str().unwrap_or("-"),
                 store["storage_mode"].as_str().unwrap_or("-"),
                 store["store_relpath"].as_str().unwrap_or("-")
-            ));
+            );
             for scope in store_context["graph_scopes"]
                 .as_array()
                 .into_iter()
                 .flatten()
             {
-                out.push_str(&format!(
-                    "    scope {} branch={} db={} writable={}\n",
+                let _ = writeln!(
+                    out,
+                    "    scope {} branch={} db={} writable={}",
                     scope["graph_scope_id"].as_str().unwrap_or("-"),
                     scope["branch_name"].as_str().unwrap_or("-"),
                     scope["db_relpath"].as_str().unwrap_or("-"),
                     scope["writable"].as_bool().unwrap_or(false)
-                ));
+                );
             }
             for artifact in store_context["artifacts"].as_array().into_iter().flatten() {
                 let size = artifact["size_bytes"]
                     .as_u64()
                     .map(|bytes| bytes.to_string())
                     .unwrap_or_else(|| "-".to_string());
-                out.push_str(&format!(
-                    "    artifact {} path={} size={}\n",
+                let _ = writeln!(
+                    out,
+                    "    artifact {} path={} size={}",
                     artifact["artifact_kind"].as_str().unwrap_or("-"),
                     artifact["relpath"].as_str().unwrap_or("-"),
                     size
-                ));
+                );
             }
         }
     }
@@ -165,21 +169,21 @@ async fn call_registry_admin(arguments: Value) -> Result<Value> {
 fn render_project_context_text(context: &ProjectRegistryContext) -> String {
     let mut out = String::new();
     let project = &context.project;
-    out.push_str(&format!("Project: {}\n", project.project_id));
-    out.push_str(&format!("root: {}\n", project.display_root));
+    let _ = writeln!(out, "Project: {}", project.project_id);
+    let _ = writeln!(out, "root: {}", project.display_root);
     if let Some(branch) = &project.default_branch {
-        out.push_str(&format!("default branch: {branch}\n"));
+        let _ = writeln!(out, "default branch: {branch}");
     }
     if let Some(git_common_dir) = &project.git_common_dir {
-        out.push_str(&format!("git common dir: {git_common_dir}\n"));
+        let _ = writeln!(out, "git common dir: {git_common_dir}");
     }
-    out.push_str(&format!("last seen: {}\n", project.last_seen_at));
+    let _ = writeln!(out, "last seen: {}", project.last_seen_at);
 
     if !context.aliases.is_empty() {
         out.push('\n');
         out.push_str("Aliases:\n");
         for alias in &context.aliases {
-            out.push_str(&format!("  {}\n", alias.alias_path));
+            let _ = writeln!(out, "  {}", alias.alias_path);
         }
     }
 
@@ -188,25 +192,28 @@ fn render_project_context_text(context: &ProjectRegistryContext) -> String {
         out.push_str("Stores:\n");
         for store_context in &context.stores {
             let store = &store_context.store;
-            out.push_str(&format!(
-                "  {} [{} / {}] {}\n",
+            let _ = writeln!(
+                out,
+                "  {} [{} / {}] {}",
                 store.store_id, store.store_kind, store.storage_mode, store.store_relpath
-            ));
+            );
             for scope in &store_context.graph_scopes {
-                out.push_str(&format!(
-                    "    scope {} branch={} db={} writable={}\n",
+                let _ = writeln!(
+                    out,
+                    "    scope {} branch={} db={} writable={}",
                     scope.graph_scope_id, scope.branch_name, scope.db_relpath, scope.writable
-                ));
+                );
             }
             for artifact in &store_context.artifacts {
                 let size = artifact
                     .size_bytes
                     .map(|bytes| bytes.to_string())
                     .unwrap_or_else(|| "-".to_string());
-                out.push_str(&format!(
-                    "    artifact {} path={} size={}\n",
+                let _ = writeln!(
+                    out,
+                    "    artifact {} path={} size={}",
                     artifact.artifact_kind, artifact.relpath, size
-                ));
+                );
             }
         }
     }

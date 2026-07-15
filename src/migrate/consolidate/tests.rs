@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1646,7 +1647,8 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
     let mut parent = "message-current-session".to_string();
     for depth in 0..DEPTH {
         let child = format!("family-depth-{depth}");
-        family_sql.push_str(&format!(
+        let _ = write!(
+            family_sql,
             "INSERT INTO session_messages(
                  provider, message_id, session_id, role, ordinal, text, kind, metadata_json
              ) VALUES(
@@ -1654,12 +1656,13 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
                  'depth {depth}', 'message', '{{\"parent_message_id\":\"{parent}\"}}'
              );",
             ordinal = depth + 2,
-        ));
+        );
         parent = child;
     }
     for width in 0..WIDTH {
         let child = format!("family-wide-{width}");
-        family_sql.push_str(&format!(
+        let _ = write!(
+            family_sql,
             "INSERT INTO session_messages(
                  provider, message_id, session_id, role, ordinal, text, kind, metadata_json
              ) VALUES(
@@ -1668,7 +1671,7 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
                  '{{\"parent_message_id\":\"message-current-session\"}}'
              );",
             ordinal = DEPTH + width + 2,
-        ));
+        );
     }
     execute_sql(&source.sessions_db_path, &family_sql).await;
     execute_sql(&target.sessions_db_path, &family_sql).await;

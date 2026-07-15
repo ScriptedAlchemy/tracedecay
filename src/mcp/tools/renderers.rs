@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use serde_json::Value;
 
 use super::render::{self, Md};
@@ -332,7 +334,7 @@ fn append_skill_item(md: &mut Md, skill: &Value) {
         format!("**{id}** - {title}")
     };
     if !state.is_empty() {
-        line.push_str(&format!(" ({state})"));
+        let _ = write!(line, " ({state})");
     }
     md.bullet(&line);
 

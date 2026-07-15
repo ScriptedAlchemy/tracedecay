@@ -7,6 +7,7 @@
 //! tolerance. No real Cursor data is touched.
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use tempfile::TempDir;
@@ -435,7 +436,7 @@ async fn write_store_db(path: &Path) {
 fn hex_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
+        let _ = write!(out, "{byte:02x}");
     }
     out
 }

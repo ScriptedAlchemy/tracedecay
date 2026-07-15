@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 
 use fs2::FileExt;
@@ -63,14 +64,15 @@ fn evaluate_holder_scan(scan: crate::open_store_holders::OpenStoreHolderScan) ->
                     .map(|path| path.display().to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                details.push_str(&format!(
+                let _ = write!(
+                    details,
                     "\n- pid {}: {} [{}; {}]; open: {}",
                     holder.pid,
                     truncate_command(&holder.command),
                     version,
                     executable,
                     paths
-                ));
+                );
             }
             Err(config_error(format!(
                 "profile shard consolidation requires every input store handle to be closed; restart the listed agent hosts and retry (TraceDecay never terminates them automatically):{details}"

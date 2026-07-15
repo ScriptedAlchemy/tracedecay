@@ -7,6 +7,7 @@ use crate::common;
 use crate::fixture;
 
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs;
 use std::ops::{Deref, DerefMut};
 #[cfg(unix)]
@@ -2853,9 +2854,10 @@ async fn search_large_response_uses_retrievable_truncation_handle() {
     let (cg, _env) = init_test_project(project).await;
     let mut source = String::new();
     for i in 0..LARGE_RESPONSE_MARKER_COUNT {
-        source.push_str(&format!(
+        let _ = write!(
+            source,
             "pub fn reversible_search_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}\n"
-        ));
+        );
     }
     fs::write(project.join("src/large_search.rs"), source).unwrap();
     index_all_retrying_sync_lock(&cg).await;
@@ -3803,9 +3805,10 @@ async fn diff_context_large_response_uses_retrievable_truncation_handle() {
     let (cg, _env) = init_test_project(project).await;
     let mut source = String::new();
     for i in 0..LARGE_RESPONSE_MARKER_COUNT {
-        source.push_str(&format!(
+        let _ = write!(
+            source,
             "pub fn reversible_diff_context_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}\n"
-        ));
+        );
     }
     fs::write(project.join("src/large_diff.rs"), source).unwrap();
     index_all_retrying_sync_lock(&cg).await;
@@ -14340,7 +14343,7 @@ async fn circular_emits_disjoint_sccs_under_load() {
     // to a_{k+1} that introduces a non-cyclic "shared tail" between the
     // SCCs. Tarjan must still emit each cycle as its own SCC.
     for k in 0..5 {
-        lib_rs.push_str(&format!("pub mod a{k};\npub mod b{k};\npub mod c{k};\n"));
+        let _ = write!(lib_rs, "pub mod a{k};\npub mod b{k};\npub mod c{k};\n");
     }
     fs::write(project.join("src/lib.rs"), lib_rs).unwrap();
     for k in 0..5 {
@@ -14519,7 +14522,7 @@ async fn pr_context_collapses_cargo_toml_keys() {
         "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
     );
     for i in 0..50 {
-        bloated.push_str(&format!("dep{i} = \"0.1.{i}\"\n"));
+        let _ = write!(bloated, "dep{i} = \"0.1.{i}\"\n");
     }
     fs::write(project.join("Cargo.toml"), &bloated).unwrap();
     git(project, &["add", "."]);

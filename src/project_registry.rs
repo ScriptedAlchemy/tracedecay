@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -159,20 +160,18 @@ pub fn render_project_registry_view(title: &str, view: &ProjectRegistryView) -> 
         return format!("No {title} found.");
     }
     let mut out = String::new();
-    out.push_str(&format!(
-        "Found {} {title} across {} repositories.\n\nRepositories:\n",
+    let _ = writeln!(
+        out,
+        "Found {} {title} across {} repositories.\n\nRepositories:",
         view.summary.project_count, view.summary.repo_count
-    ));
+    );
     for group in &view.project_tree {
         let group_branches = if group.branches.is_empty() {
             "-".to_string()
         } else {
             group.branches.join(", ")
         };
-        out.push_str(&format!(
-            "- {} (branches: {})\n",
-            group.label, group_branches
-        ));
+        let _ = writeln!(out, "- {} (branches: {})", group.label, group_branches);
         for project in &group.projects {
             let marker = if project.is_active == Some(true) {
                 " *"
@@ -184,15 +183,16 @@ pub fn render_project_registry_view(title: &str, view: &ProjectRegistryView) -> 
             } else {
                 project.branches.join(", ")
             };
-            out.push_str(&format!(
-                "  - `{}`{} [{}] branches: {}; stores: {}; path: {}\n",
+            let _ = writeln!(
+                out,
+                "  - `{}`{} [{}] branches: {}; stores: {}; path: {}",
                 project.project_id,
                 marker,
                 project.kind,
                 branches,
                 project.store_count,
                 project.project_root
-            ));
+            );
         }
     }
     if view.summary.truncated {

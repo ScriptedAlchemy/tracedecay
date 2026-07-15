@@ -12,6 +12,8 @@
 //! `git stash --include-untracked` at the end of the run reverts all
 //! scratch-file churn.
 
+use std::fmt::Write as _;
+
 use serde_json::{Value, json};
 
 use tracedecay::tracedecay::TraceDecay;
@@ -469,7 +471,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             let mut content = String::new();
             let mut replacements = Vec::with_capacity(n);
             for k in 0..n {
-                content.push_str(&format!("MARK_{k}\nfiller line {k}\n"));
+                let _ = write!(content, "MARK_{k}\nfiller line {k}\n");
                 replacements.push([format!("MARK_{k}"), format!("DONE_{k}")]);
             }
             Query::write(

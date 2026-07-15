@@ -5,6 +5,7 @@
 
 use crate::common::EnvVarGuard;
 use serde_json::{Value, json};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -2029,9 +2030,10 @@ async fn setup_savings_project() -> (Arc<McpServer>, TempDir) {
     fs::create_dir_all(project.join("src")).unwrap();
     let mut source = String::from("fn main() { let x = helper(); }\nfn helper() -> i32 { 42 }\n");
     for i in 0..80 {
-        source.push_str(&format!(
+        let _ = write!(
+            source,
             "/// Filler documentation line {i} to inflate the raw-file estimate.\nfn filler_{i}() -> i32 {{ {i} }}\n"
-        ));
+        );
     }
     fs::write(project.join("src/main.rs"), source).unwrap();
     let cg = crate::fixture::init_project_from_template(project)

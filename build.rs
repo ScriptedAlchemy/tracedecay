@@ -2,6 +2,7 @@ use std::hash::{Hash, Hasher};
 use std::process::{Command, Stdio};
 use std::{
     collections::hash_map::DefaultHasher,
+    fmt::Write as _,
     fs,
     path::{Path, PathBuf},
 };
@@ -358,10 +359,11 @@ fn append_plugin_files(
     deploy_prefix: &str,
 ) {
     println!("cargo::rerun-if-changed=plugin/{source_prefix}");
-    code.push_str(&format!(
+    let _ = write!(
+        code,
         "/// Every UTF-8 file under `plugin/{source_prefix}/`.\n\
          pub const {const_name}: &[PluginFile] = &[\n"
-    ));
+    );
     for relative in collect_files_relative(source_root) {
         println!("cargo::rerun-if-changed=plugin/{source_prefix}/{relative}");
         let abs = source_root.join(&relative);
@@ -372,9 +374,10 @@ fn append_plugin_files(
         }
         let deploy = format!("{deploy_prefix}/{relative}");
         let source = format!("{source_prefix}/{relative}");
-        code.push_str(&format!(
+        let _ = write!(
+            code,
             "    PluginFile {{ relative: {deploy:?}, contents: include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/plugin/{source}\")) }},\n"
-        ));
+        );
     }
     code.push_str("];\n");
 }
@@ -450,11 +453,12 @@ fn append_generated_plugin_files(
     const_name: &str,
     files: impl IntoIterator<Item = (String, String)>,
 ) {
-    code.push_str(&format!("pub const {const_name}: &[PluginFile] = &[\n"));
+    let _ = write!(code, "pub const {const_name}: &[PluginFile] = &[\n");
     for (relative, contents) in files {
-        code.push_str(&format!(
+        let _ = write!(
+            code,
             "    PluginFile {{ relative: {relative:?}, contents: {contents:?} }},\n"
-        ));
+        );
     }
     code.push_str("];\n");
 }

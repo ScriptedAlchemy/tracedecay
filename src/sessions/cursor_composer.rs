@@ -39,6 +39,7 @@
 //! message row is ever double-ingested.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use libsql::{Builder, OpenFlags};
@@ -1111,7 +1112,7 @@ fn decode_hex(hex: &str) -> Option<Vec<u8>> {
 fn encode_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
+        let _ = write!(out, "{byte:02x}");
     }
     out
 }

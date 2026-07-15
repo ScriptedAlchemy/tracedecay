@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::{Map, Value};
@@ -189,10 +190,10 @@ pub(super) fn compact_boundary_row(
 
     let mut text = String::from("Claude compaction boundary");
     if let Some(trigger) = trigger {
-        text.push_str(&format!(" (trigger: {trigger})"));
+        let _ = write!(text, " (trigger: {trigger})");
     }
     if let Some(pre_tokens) = pre_tokens {
-        text.push_str(&format!(", pre_tokens: {pre_tokens}"));
+        let _ = write!(text, ", pre_tokens: {pre_tokens}");
     }
 
     let mut metadata = Map::new();
@@ -264,12 +265,12 @@ pub(super) fn model_fallback_row(
 
     let mut text = String::from("Claude model fallback");
     if let (Some(original), Some(fallback)) = (original_model, fallback_model) {
-        text.push_str(&format!(": {original} -> {fallback}"));
+        let _ = write!(text, ": {original} -> {fallback}");
     } else if let Some(fallback) = fallback_model {
-        text.push_str(&format!(" -> {fallback}"));
+        let _ = write!(text, " -> {fallback}");
     }
     if let Some(category) = refusal_category {
-        text.push_str(&format!(" ({category})"));
+        let _ = write!(text, " ({category})");
     }
 
     let mut metadata = Map::new();
