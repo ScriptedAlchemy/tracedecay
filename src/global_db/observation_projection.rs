@@ -281,6 +281,7 @@ fn derive_projection(
         project_path,
         file_generation: observation.identity().generation().file_id(),
         offset: observation.identity().position().start(),
+        session_cwd: None,
     };
 
     match map_sanitized_claude_record(observation.payload(), &context) {
