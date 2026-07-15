@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
 use std::sync::OnceLock;
 
 use serde_json::Value;
@@ -212,10 +211,13 @@ fn structural_location(path: &[JsonPathSegment]) -> String {
     for segment in path {
         match segment {
             JsonPathSegment::Field(index) => {
-                write!(&mut location, "/field[{index}]").expect("writing to String cannot fail");
+                location.push_str("/field[");
+                location.push_str(&index.to_string());
+                location.push(']');
             }
             JsonPathSegment::Index(index) => {
-                write!(&mut location, "/{index}").expect("writing to String cannot fail");
+                location.push('/');
+                location.push_str(&index.to_string());
             }
         }
     }

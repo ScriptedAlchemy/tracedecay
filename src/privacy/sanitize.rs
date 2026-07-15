@@ -12,12 +12,11 @@ use super::detect::{
     DetectionConfidenceV1, DetectionError, PrivacyDetectorV1, SanitizationActionV1,
     SanitizationFindingV1, normalize_key, redact_sensitive_values,
 };
-use super::parse::{ParseFailureKind, ParseLimits, parse_claude_record};
+use super::parse::{
+    ClaudeRecordParseErrorV1, ParseLimits, ParsedClaudeRecordV1, parse_claude_record,
+};
 
 pub const PR5_CLAUDE_SANITIZER_VERSION: &str = "privacy.claude-record.v1";
-pub const PR5_MAX_CLAUDE_RECORD_BYTES: usize = 1024 * 1024;
-const DEFAULT_MAX_DEPTH: usize = 96;
-const DEFAULT_MAX_VALUES: usize = 50_000;
 
 #[derive(Debug, Error)]
 pub enum PrivacySanitizerError {
@@ -25,6 +24,8 @@ pub enum PrivacySanitizerError {
     InvalidPolicy,
     #[error("privacy detector is unavailable")]
     DetectorUnavailable,
+    #[error("parsed Claude record range does not match observation identity")]
+    SourceRangeMismatch,
     #[error("privacy domain contract rejected sanitizer output")]
     DomainContract(#[source] ObservationContractError),
 }
@@ -74,15 +75,17 @@ impl ClaudeSanitizerPolicyV1 {
         .into_iter()
         .map(normalize_key)
         .collect();
+        let limits = ParseLimits::pr5();
         Ok(Self {
             version,
-            max_record_bytes: PR5_MAX_CLAUDE_RECORD_BYTES,
-            max_depth: DEFAULT_MAX_DEPTH,
-            max_values: DEFAULT_MAX_VALUES,
+            max_record_bytes: limits.record_bytes,
+            max_depth: limits.depth,
+            max_values: limits.values,
             sensitive_keys,
         })
     }
 
+    #[must_use]
     pub fn with_sensitive_keys(mut self, keys: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
         self.sensitive_keys
             .extend(keys.into_iter().map(|key| normalize_key(key.as_ref())));
@@ -134,17 +137,29 @@ impl ClaudeRecordSanitizerV1 {
         identity: ClaudeObservationIdentityMaterialV1,
         retention_class: RetentionClass,
     ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
-        let limits = ParseLimits {
-            max_record_bytes: self.policy.max_record_bytes,
-            max_depth: self.policy.max_depth,
-            max_values: self.policy.max_values,
-        };
-        let parsed = match parse_claude_record(record, limits) {
+        let parsed = match parse_claude_record(record, identity.position(), self.parse_limits()) {
             Ok(parsed) => parsed,
             Err(kind) => return self.non_durable_outcome(kind, record, &identity),
         };
 
-        let detected = redact_sensitive_values(parsed, &self.policy.sensitive_keys)?;
+        self.sanitize_parsed(parsed, identity, retention_class)
+    }
+
+    /// Sanitizes a parser-issued token without decoding or parsing the record again.
+    pub fn sanitize_parsed(
+        &self,
+        parsed: ParsedClaudeRecordV1,
+        identity: ClaudeObservationIdentityMaterialV1,
+        retention_class: RetentionClass,
+    ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
+        if *parsed.source_range() != identity.position() {
+            return Err(PrivacySanitizerError::SourceRangeMismatch);
+        }
+        if let Err(kind) = parsed.verify_limits(self.parse_limits()) {
+            return self.non_durable_outcome_from_digest(kind, parsed.raw_digest(), &identity);
+        }
+
+        let detected = redact_sensitive_values(parsed.into_value(), &self.policy.sensitive_keys)?;
         let disposition = if detected.findings.is_empty() {
             SanitizerDispositionV1::Accepted
         } else {
@@ -179,35 +194,47 @@ impl ClaudeRecordSanitizerV1 {
 
     fn non_durable_outcome(
         &self,
-        kind: ParseFailureKind,
+        kind: ClaudeRecordParseErrorV1,
         record: &[u8],
         identity: &ClaudeObservationIdentityMaterialV1,
     ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
+        let raw_digest: [u8; 32] = Sha256::digest(record).into();
+        self.non_durable_outcome_from_digest(kind, &raw_digest, identity)
+    }
+
+    fn non_durable_outcome_from_digest(
+        &self,
+        kind: ClaudeRecordParseErrorV1,
+        raw_digest: &[u8; 32],
+        identity: &ClaudeObservationIdentityMaterialV1,
+    ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
         let (disposition, detector, action) = match kind {
-            ParseFailureKind::TooDeep | ParseFailureKind::TooManyValues => (
+            ClaudeRecordParseErrorV1::TooDeep | ClaudeRecordParseErrorV1::TooManyValues => (
                 SanitizerDispositionV1::Quarantined,
                 PrivacyDetectorV1::StructureLimit,
                 SanitizationActionV1::Quarantined,
             ),
-            ParseFailureKind::TooLarge => (
+            ClaudeRecordParseErrorV1::TooLarge => (
                 SanitizerDispositionV1::Rejected,
                 PrivacyDetectorV1::RecordSizeLimit,
                 SanitizationActionV1::Rejected,
             ),
-            ParseFailureKind::Empty | ParseFailureKind::Malformed | ParseFailureKind::NonObject => {
-                (
-                    SanitizerDispositionV1::Rejected,
-                    PrivacyDetectorV1::MalformedRecord,
-                    SanitizationActionV1::Rejected,
-                )
+            ClaudeRecordParseErrorV1::Empty
+            | ClaudeRecordParseErrorV1::Malformed
+            | ClaudeRecordParseErrorV1::NonObject => (
+                SanitizerDispositionV1::Rejected,
+                PrivacyDetectorV1::MalformedRecord,
+                SanitizationActionV1::Rejected,
+            ),
+            ClaudeRecordParseErrorV1::RangeLengthMismatch => {
+                return Err(PrivacySanitizerError::SourceRangeMismatch);
             }
         };
-        let raw_digest = Sha256::digest(record);
         let receipt_ref = CanonicalClaudeSanitizationReceiptMaterialV1::new(
             identity,
             self.policy.version.clone(),
             disposition,
-            &raw_digest,
+            raw_digest,
         )?
         .derive_receipt_ref()?;
         let receipt =
@@ -227,6 +254,13 @@ impl ClaudeRecordSanitizerV1 {
                 return Err(PrivacySanitizerError::InvalidPolicy);
             }
         })
+    }
+    fn parse_limits(&self) -> ParseLimits {
+        ParseLimits {
+            record_bytes: self.policy.max_record_bytes,
+            depth: self.policy.max_depth,
+            values: self.policy.max_values,
+        }
     }
 }
 

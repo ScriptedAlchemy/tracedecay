@@ -6,9 +6,10 @@ use tracedecay_domain::{
 };
 
 use super::{
-    ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1,
-    DetectionConfidenceV1, PR5_CLAUDE_SANITIZER_VERSION, PR5_MAX_CLAUDE_RECORD_BYTES,
-    PrivacyDetectorV1, SanitizationActionV1,
+    ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1,
+    ClaudeSanitizerPolicyV1, DetectionConfidenceV1, PR5_CLAUDE_SANITIZER_VERSION,
+    PR5_MAX_CLAUDE_RECORD_BYTES, PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1,
+    parse_claude_record_v1,
 };
 
 fn identity_for(record: &[u8]) -> ClaudeObservationIdentityMaterialV1 {
@@ -59,6 +60,82 @@ fn generated_high_entropy_token() -> String {
     (0..48)
         .map(|index| char::from(ALPHABET[(index * 17) % ALPHABET.len()]))
         .collect()
+}
+
+#[test]
+fn parsed_record_token_preserves_verified_source_evidence() {
+    let record = serde_json::to_vec(&json!({
+        "type": "assistant",
+        "message": {"content": "scope-readable"}
+    }))
+    .expect("serialize parsed-token fixture");
+    let start = 41;
+    let range = ClaudeByteRangeV1::new(start, start + record.len() as u64)
+        .expect("valid parsed-token range");
+
+    let parsed = parse_claude_record_v1(&record, range).expect("parse bounded Claude record");
+
+    assert_eq!(parsed.encoded_len(), record.len());
+    assert_eq!(*parsed.source_range(), range);
+    assert_eq!(parsed.value()["message"]["content"], "scope-readable");
+}
+
+#[test]
+fn parsed_record_rejects_mismatched_range_and_canonical_oversize() {
+    let record = br#"{"type":"assistant"}"#;
+    let mismatched =
+        ClaudeByteRangeV1::new(0, record.len() as u64 + 1).expect("non-empty mismatched range");
+    assert_eq!(
+        parse_claude_record_v1(record, mismatched).err(),
+        Some(ClaudeRecordParseErrorV1::RangeLengthMismatch)
+    );
+
+    let oversized = vec![b' '; PR5_MAX_CLAUDE_RECORD_BYTES + 1];
+    let oversized_range =
+        ClaudeByteRangeV1::new(0, oversized.len() as u64).expect("non-empty oversized range");
+    assert_eq!(
+        parse_claude_record_v1(&oversized, oversized_range).err(),
+        Some(ClaudeRecordParseErrorV1::TooLarge)
+    );
+}
+
+#[test]
+fn sanitize_parsed_consumes_token_without_reparsing_raw_bytes() {
+    let mut record = serde_json::to_vec(&json!({"message": "ordinary parsed fixture"}))
+        .expect("serialize parsed sanitizer fixture");
+    let identity = identity_for(&record);
+    let parsed =
+        parse_claude_record_v1(&record, identity.position()).expect("parse sanitizer fixture once");
+    record.fill(b'!');
+
+    let outcome = ClaudeRecordSanitizerV1::pr5()
+        .expect("valid PR5 sanitizer")
+        .sanitize_parsed(parsed, identity, retention_class())
+        .expect("sanitize parser-issued token");
+
+    assert_eq!(
+        outcome
+            .durable_observation()
+            .expect("parsed record remains durable")
+            .payload()["message"],
+        "ordinary parsed fixture"
+    );
+}
+
+#[test]
+fn sanitize_parsed_rejects_identity_range_mismatch() {
+    let record = serde_json::to_vec(&json!({"message": "ordinary range fixture"}))
+        .expect("serialize range fixture");
+    let shifted_range =
+        ClaudeByteRangeV1::new(1, record.len() as u64 + 1).expect("valid shifted range");
+    let parsed = parse_claude_record_v1(&record, shifted_range).expect("parse shifted fixture");
+
+    let error = ClaudeRecordSanitizerV1::pr5()
+        .expect("valid PR5 sanitizer")
+        .sanitize_parsed(parsed, identity_for(&record), retention_class())
+        .expect_err("mismatched identity range must fail");
+
+    assert!(matches!(error, PrivacySanitizerError::SourceRangeMismatch));
 }
 
 #[test]
@@ -398,7 +475,7 @@ fn receipt_ids_are_deterministic_and_use_the_fixed_sanitizer_version() {
     );
 
     let changed_record =
-        serde_json::to_vec(&json!({ "message": "different ordinary deterministic fixture" }))
+        serde_json::to_vec(&json!({ "message": "altered! deterministic fixture" }))
             .expect("serialize changed fixture");
     let changed = sanitizer
         .sanitize(&changed_record, identity, retention_class())

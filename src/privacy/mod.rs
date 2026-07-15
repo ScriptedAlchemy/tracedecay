@@ -12,9 +12,13 @@ mod sanitize;
 pub use detect::{
     DetectionConfidenceV1, PrivacyDetectorV1, SanitizationActionV1, SanitizationFindingV1,
 };
+pub use parse::{
+    ClaudeRecordParseErrorV1, PR5_MAX_CLAUDE_RECORD_BYTES, ParsedClaudeRecordV1,
+    parse_claude_record_v1,
+};
 pub use sanitize::{
     ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1,
-    PR5_CLAUDE_SANITIZER_VERSION, PR5_MAX_CLAUDE_RECORD_BYTES, PrivacySanitizerError,
+    PR5_CLAUDE_SANITIZER_VERSION, PrivacySanitizerError,
 };
 
 #[cfg(test)]
