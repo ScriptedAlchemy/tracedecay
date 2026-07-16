@@ -682,15 +682,37 @@ fn workspace_metadata_path(workspace_storage_dir: &Path, hash: &str) -> PathBuf 
 }
 
 fn folder_field_to_path(folder: &str) -> Option<PathBuf> {
-    let stripped = folder
-        .strip_prefix("file://")
-        .or_else(|| folder.strip_prefix("file:"))
-        .unwrap_or(folder);
-    let decoded = percent_decode_path(stripped);
-    if decoded.as_os_str().is_empty() {
+    let scheme_len = if folder
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"))
+    {
+        7
+    } else if folder
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file:"))
+    {
+        5
+    } else {
+        0
+    };
+    let stripped = &folder[scheme_len..];
+    let legacy_windows_drive = stripped
+        .as_bytes()
+        .get(..2)
+        .is_some_and(|drive| drive[0].is_ascii_alphabetic() && drive[1] == b':');
+    let path = if scheme_len > 0
+        && !legacy_windows_drive
+        && let Ok(uri) = url::Url::parse(folder)
+        && let Ok(path) = uri.to_file_path()
+    {
+        path
+    } else {
+        percent_decode_path(stripped)
+    };
+    if path.as_os_str().is_empty() {
         None
     } else {
-        Some(decoded)
+        Some(path)
     }
 }
 
@@ -1113,6 +1135,28 @@ fn message_metadata(entry: &Value, location_cwd: Option<&Path>) -> Value {
 #[cfg(test)]
 mod observation_tests {
     use super::*;
+
+    #[test]
+    fn workspace_folder_file_uri_round_trips_native_paths() {
+        let temp = tempfile::TempDir::new().expect("temporary Kiro workspace");
+        let path = temp.path().join("workspace with spaces");
+        let uri = url::Url::from_file_path(&path).expect("native path has a file URI");
+
+        assert_eq!(folder_field_to_path(uri.as_str()), Some(path));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn workspace_folder_file_uri_removes_windows_drive_separator() {
+        assert_eq!(
+            folder_field_to_path("file:///D:/Kiro%20Workspace"),
+            Some(PathBuf::from(r"D:\Kiro Workspace"))
+        );
+        assert_eq!(
+            folder_field_to_path(r"file://D:\Kiro%20Workspace"),
+            Some(PathBuf::from(r"D:\Kiro Workspace"))
+        );
+    }
 
     #[tokio::test]
     async fn byte_budget_charges_once_and_defers_second_before_parse() {

@@ -195,22 +195,20 @@ pub(super) fn replace_file_atomically(
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let replaced = unsafe {
-        MoveFileExW(
-            existing.as_ptr(),
-            replacement.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if replaced == 0 {
-        let error = std::io::Error::last_os_error();
-        return Err(access_io_error(
-            &format!("publish {record_name}"),
-            path,
-            &error,
-        ));
-    }
-    Ok(())
+    crate::storage::retry_transient_file_op(|| {
+        let replaced = unsafe {
+            MoveFileExW(
+                existing.as_ptr(),
+                replacement.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if replaced == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    })
+    .map_err(|error| access_io_error(&format!("publish {record_name}"), path, &error))
 }
 
 #[cfg(unix)]
