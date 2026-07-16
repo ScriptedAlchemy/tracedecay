@@ -950,3 +950,38 @@ fn daemon_runtime_parser_rejects_missing_database_telemetry() {
     .unwrap_err();
     assert!(error.to_string().contains("omitted database telemetry"));
 }
+
+#[test]
+fn doctor_result_fails_when_checks_report_issues() {
+    let mut counters = DoctorCounters::new();
+    counters.fail("broken integration");
+
+    let error = super::doctor_result(&counters, Ok(serde_json::json!({})), true).unwrap_err();
+    assert_eq!(error.to_string(), "config error: doctor found 1 issue(s)");
+}
+
+#[test]
+fn doctor_result_allows_warnings_without_issues() {
+    let mut counters = DoctorCounters::new();
+    counters.warn("optional check unavailable");
+
+    super::doctor_result(&counters, Ok(serde_json::json!({})), true).unwrap();
+}
+
+#[test]
+fn doctor_result_preserves_daemon_and_storage_errors() {
+    let mut counters = DoctorCounters::new();
+    counters.fail("broken integration");
+    let daemon_error = crate::errors::TraceDecayError::Config {
+        message: "daemon unavailable".to_string(),
+    };
+
+    let error = super::doctor_result(&counters, Err(daemon_error), false).unwrap_err();
+    assert_eq!(error.to_string(), "config error: daemon unavailable");
+
+    let error = super::doctor_result(&counters, Ok(serde_json::json!({})), false).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "config error: doctor storage health check failed"
+    );
+}

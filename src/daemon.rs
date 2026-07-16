@@ -249,11 +249,13 @@ mod scheduler;
 mod service;
 pub(crate) mod transport;
 pub use service::{
-    DaemonServiceSpec, DaemonServiceState, daemon_reachable, default_socket_path, install_service,
-    installed_service_socket_path, quiesce_installed_service_under_lease,
-    refresh_installed_service, refresh_installed_service_under_lease,
-    refresh_installed_service_under_lease_with_state, refresh_service, service_spec,
-    service_status, socket_path_or_default, uninstall_service,
+    DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
+    default_socket_path, install_service, installed_service_socket_path,
+    quiesce_installed_service_before_lease, refresh_installed_service,
+    refresh_installed_service_under_lease, refresh_installed_service_under_lease_with_state,
+    refresh_service, restore_installed_service_after_update, service_spec, service_status,
+    socket_path_or_default, uninstall_service, verify_installed_service_quiesced_under_lease,
+    wait_for_installed_service_state, with_quiesced_installed_service,
 };
 
 /// A domain-catalogued host whose lifecycle hooks notify the daemon.
@@ -1075,12 +1077,12 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
     let requested = transport::default_loopback_endpoint();
-    let mut authority =
-        authority::DaemonAuthority::acquire(&profile_root, &requested, binary_version())?;
     let _lifecycle_lease = crate::lifecycle_lease::acquire_shared_for_profile(
         &profile_root,
         "managed daemon database ownership",
     )?;
+    let mut authority =
+        authority::DaemonAuthority::acquire(&profile_root, &requested, binary_version())?;
     let _database_scope = crate::db::enter_daemon_database_scope(
         &profile_root,
         authority.record().epoch,
@@ -1647,12 +1649,12 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
     let endpoint = transport::DaemonEndpoint::Unix(socket_path);
-    let mut authority =
-        authority::DaemonAuthority::acquire(&profile_root, &endpoint, binary_version())?;
     let _lifecycle = crate::lifecycle_lease::acquire_shared_for_profile(
         &profile_root,
         "managed daemon database ownership",
     )?;
+    let mut authority =
+        authority::DaemonAuthority::acquire(&profile_root, &endpoint, binary_version())?;
     let _database_scope = crate::db::enter_daemon_database_scope(
         &profile_root,
         authority.record().epoch,
@@ -2398,6 +2400,7 @@ impl DaemonEngine {
             cg,
             handshake.scope_prefix.clone(),
             crate::mcp::server::McpServerDaemonAuthority {
+                profile_root: handshake.client_identity.profile_root.clone(),
                 databases: crate::mcp::server::McpServerDaemonDatabases {
                     accounting: accounting_db,
                     registry: registry_db,
@@ -3016,6 +3019,7 @@ async fn portable_project_server(
         cg,
         handshake.scope_prefix.clone(),
         crate::mcp::server::McpServerDaemonAuthority {
+            profile_root: handshake.client_identity.profile_root.clone(),
             databases: crate::mcp::server::McpServerDaemonDatabases {
                 accounting: accounting_db,
                 registry: registry_db,
@@ -3330,7 +3334,13 @@ async fn projectless_tools_call_response(
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
-        return match crate::mcp::tools::handle_projectless_admin_cli(arguments, &global_db).await {
+        return match crate::mcp::tools::handle_projectless_admin_cli(
+            arguments,
+            &global_db,
+            &client_identity.profile_root,
+        )
+        .await
+        {
             Ok(result) => JsonRpcResponse::success(id, result.value),
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         };

@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 
 use super::artifacts::file_size;
 use super::model::{
-    RegistryStatus, SkippedPath, StoreArtifact, StoreBrand, StoreInventory, StoreRole, StoreStatus,
+    InventoryIntegrityMode, RegistryStatus, SkippedPath, StoreArtifact, StoreBrand, StoreInventory,
+    StoreRole, StoreStatus,
 };
-use super::project::{canonicalize_lossy, inspect_data_dir_candidate};
+use super::project::{InventoryScanOptions, canonicalize_lossy, inspect_data_dir_candidate};
 use super::sqlite::sqlite_quick_check;
 use crate::config::TRACEDECAY_DIR;
 use crate::errors::Result;
@@ -13,7 +14,7 @@ use crate::yaml_scalar::decode_yaml_scalar;
 
 pub(super) async fn scan_hermes_sources(
     include_default_home: bool,
-    follow_symlinks: bool,
+    options: InventoryScanOptions,
     seen_data_dirs: &mut HashSet<PathBuf>,
     stores: &mut Vec<StoreInventory>,
     skipped: &mut Vec<SkippedPath>,
@@ -23,7 +24,7 @@ pub(super) async fn scan_hermes_sources(
     for hermes_home in hermes_home_candidates(include_default_home) {
         inspect_hermes_profile_dir(
             &hermes_home,
-            follow_symlinks,
+            options,
             seen_data_dirs,
             &mut seen_profiles,
             &mut seen_state_dbs,
@@ -42,7 +43,7 @@ pub(super) async fn scan_hermes_sources(
             };
             let mut profile_dir = entry.path();
             if file_type.is_symlink() {
-                if !follow_symlinks {
+                if !options.follow_symlinks {
                     skipped.push(SkippedPath {
                         path: profile_dir,
                         reason: "symlink".to_string(),
@@ -58,7 +59,7 @@ pub(super) async fn scan_hermes_sources(
             }
             inspect_hermes_profile_dir(
                 &profile_dir,
-                follow_symlinks,
+                options,
                 seen_data_dirs,
                 &mut seen_profiles,
                 &mut seen_state_dbs,
@@ -73,7 +74,7 @@ pub(super) async fn scan_hermes_sources(
 
 async fn inspect_hermes_profile_dir(
     profile_dir: &Path,
-    follow_symlinks: bool,
+    options: InventoryScanOptions,
     seen_data_dirs: &mut HashSet<PathBuf>,
     seen_profiles: &mut HashSet<PathBuf>,
     seen_state_dbs: &mut HashSet<PathBuf>,
@@ -91,20 +92,20 @@ async fn inspect_hermes_profile_dir(
     inspect_data_dir_candidate(
         profile_dir,
         TRACEDECAY_DIR,
-        follow_symlinks,
+        options,
         seen_data_dirs,
         stores,
         skipped,
         StoreRole::HermesProfileStore,
     )
     .await?;
-    inspect_hermes_state_db(profile_dir, seen_state_dbs, stores).await;
+    inspect_hermes_state_db(profile_dir, seen_state_dbs, stores, options.integrity).await;
 
     if let Some(project_root) = read_hermes_project_pin(&profile_dir.join("config.yaml")) {
         inspect_data_dir_candidate(
             &project_root,
             TRACEDECAY_DIR,
-            follow_symlinks,
+            options,
             seen_data_dirs,
             stores,
             skipped,
@@ -120,6 +121,7 @@ async fn inspect_hermes_state_db(
     profile_dir: &Path,
     seen_state_dbs: &mut HashSet<PathBuf>,
     stores: &mut Vec<StoreInventory>,
+    integrity: InventoryIntegrityMode,
 ) {
     let db_path = profile_dir.join("state.db");
     if !db_path.is_file() {
@@ -130,8 +132,12 @@ async fn inspect_hermes_state_db(
         return;
     }
     let mut statuses = Vec::new();
-    if !sqlite_quick_check(&db_path).await {
-        statuses.push(StoreStatus::Corrupt);
+    match integrity {
+        InventoryIntegrityMode::MetadataOnly => statuses.push(StoreStatus::IntegrityUnchecked),
+        InventoryIntegrityMode::Full if !sqlite_quick_check(&db_path).await => {
+            statuses.push(StoreStatus::Corrupt);
+        }
+        InventoryIntegrityMode::Full => {}
     }
     if statuses.is_empty() {
         statuses.push(StoreStatus::Ok);

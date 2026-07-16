@@ -341,6 +341,10 @@ pub enum Commands {
         /// Lifecycle lease token passed only by the parent updater.
         #[arg(long, hide = true)]
         lifecycle_lease_token: Option<String>,
+        /// Fail when any tracked integration cannot be refreshed and verify
+        /// that the managed daemon returns to its exact pre-update state.
+        #[arg(long, hide = true)]
+        strict: bool,
     },
     /// Show or switch the update channel (stable or beta)
     #[command(long_about = CHANNEL_LONG_ABOUT, after_help = CHANNEL_AFTER_HELP)]
@@ -788,6 +792,9 @@ pub enum MigrateAction {
         /// Follow symlinked directories while scanning.
         #[arg(long)]
         follow_symlinks: bool,
+        /// Run full SQLite integrity checks during a read-only inventory preview.
+        #[arg(long = "verify-integrity")]
+        verify_integrity: bool,
         /// Write a manifest plan to this path instead of only printing inventory.
         #[arg(long)]
         manifest: Option<String>,

@@ -257,6 +257,22 @@ fn failure_disposition_heals_stale_recorded_retryability() {
 }
 
 #[test]
+fn malformed_output_is_retryable_on_a_later_scheduled_run() {
+    let disposition = agent_task_failure_disposition(
+        Some(AgentTaskFailureClass::MalformedOutput),
+        Some(false),
+        Some("config error: automation backend output must include a ops array"),
+    );
+
+    assert_eq!(
+        disposition.classification,
+        Some(AgentTaskFailureClass::MalformedOutput)
+    );
+    assert_eq!(disposition.retryable, Some(true));
+    assert!(!disposition.is_non_retryable());
+}
+
+#[test]
 fn oversized_backend_input_is_retryable_after_request_bounding_changes() {
     let error = "codex app-server turn failed: input_too_large: Input exceeds the maximum length of 1048576 characters";
     let disposition = agent_task_failure_disposition(

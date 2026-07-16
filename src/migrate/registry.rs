@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -10,9 +10,9 @@ use crate::global_db::{
     CodeProjectRecord, GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert,
 };
 use crate::storage::{
-    STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind,
-    read_enrollment_marker, read_repository_identity_marker, read_store_manifest,
-    validate_project_id,
+    ProjectStorageStatus, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
+    StoreKind, read_enrollment_marker, read_repository_identity_marker, read_store_manifest,
+    try_classify_project_storage_with_registry, validate_project_id,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -65,6 +65,34 @@ pub struct RegistryReconstructionApplyReport {
     pub stores: usize,
     pub graph_scopes: usize,
     pub artifacts: usize,
+}
+
+/// Canonical read-only plan returned by the daemon and consumed by the
+/// `registry-gc` CLI. Apply fills only the deletion counters after executing
+/// the same plan under the active database mutation authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RegistryGcReport {
+    pub apply: bool,
+    pub prefix: Option<String>,
+    pub candidate_count: usize,
+    pub metadata_candidate_count: usize,
+    pub code_project_candidate_count: usize,
+    pub storage_project_candidate_count: usize,
+    pub deleted_count: usize,
+    pub deleted_code_project_count: usize,
+    pub deleted_storage_project_count: usize,
+    pub candidate_paths: Vec<String>,
+    pub candidates: Vec<CodeProjectRecord>,
+    pub storage_project_candidates: Vec<PathBuf>,
+}
+
+impl RegistryGcReport {
+    pub fn record_deletions(&mut self, code_projects: usize, storage_projects: usize) {
+        self.apply = true;
+        self.deleted_code_project_count = code_projects;
+        self.deleted_storage_project_count = storage_projects;
+        self.deleted_count = code_projects.saturating_add(storage_projects);
+    }
 }
 
 /// Read-only view of eligible reconstruction plans that would insert at least
@@ -707,6 +735,115 @@ pub fn stale_code_projects<'a>(
             StaleRootScope::AllRootsMissing => !code_project_root_exists(project),
         })
         .collect()
+}
+
+/// Builds the exact registry cleanup plan without mutating registry state.
+/// Both daemon-owned and offline maintenance paths must hold their mutation
+/// authority before applying this plan.
+pub async fn registry_gc_report(
+    db: &GlobalDb,
+    profile_root: &Path,
+    prefix: Option<String>,
+) -> crate::errors::Result<RegistryGcReport> {
+    let prefixes = prefix.iter().map(PathBuf::from).collect::<Vec<_>>();
+    let projects = db.try_list_code_projects(usize::MAX).await?;
+    let candidates =
+        stale_code_projects(&projects, &prefixes, StaleRootScope::CanonicalRootMissing)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+
+    let mut storage_project_candidates = Vec::new();
+    for project_path in db.try_list_project_paths().await? {
+        if !prefixes.is_empty()
+            && !prefixes
+                .iter()
+                .any(|prefix| project_path.starts_with(prefix))
+        {
+            continue;
+        }
+        if try_classify_project_storage_with_registry(&project_path, db, profile_root)
+            .await?
+            .status
+            == ProjectStorageStatus::Stale
+        {
+            storage_project_candidates.push(project_path);
+        }
+    }
+
+    let candidate_paths = candidates
+        .iter()
+        .map(|project| GlobalDb::canonical_project_key(Path::new(&project.canonical_root)))
+        .chain(
+            storage_project_candidates
+                .iter()
+                .map(|path| GlobalDb::canonical_project_key(path)),
+        )
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    Ok(RegistryGcReport {
+        apply: false,
+        prefix,
+        candidate_count: candidate_paths.len(),
+        metadata_candidate_count: candidates.len() + storage_project_candidates.len(),
+        code_project_candidate_count: candidates.len(),
+        storage_project_candidate_count: storage_project_candidates.len(),
+        deleted_count: 0,
+        deleted_code_project_count: 0,
+        deleted_storage_project_count: 0,
+        candidate_paths,
+        candidates,
+        storage_project_candidates,
+    })
+}
+
+pub async fn apply_registry_gc(
+    db: &GlobalDb,
+    profile_root: &Path,
+    prefix: Option<String>,
+) -> crate::errors::Result<RegistryGcReport> {
+    let transaction = db.begin_write_transaction().await?;
+    let mut report = registry_gc_report(db, profile_root, prefix).await?;
+    for project in &report.candidates {
+        if Path::new(&project.canonical_root).exists() {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: format!(
+                    "registry cleanup candidate '{}' became live while applying the plan",
+                    project.project_id
+                ),
+            });
+        }
+    }
+    for project_path in &report.storage_project_candidates {
+        if try_classify_project_storage_with_registry(project_path, db, profile_root)
+            .await?
+            .status
+            != ProjectStorageStatus::Stale
+        {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: format!(
+                    "registry cleanup candidate '{}' became live while applying the plan",
+                    project_path.display()
+                ),
+            });
+        }
+    }
+    let project_ids = report
+        .candidates
+        .iter()
+        .map(|project| project.project_id.clone())
+        .collect::<Vec<_>>();
+    let (deleted_code_projects, deleted_storage_projects) =
+        GlobalDb::delete_registry_gc_candidates_in_transaction(
+            &transaction,
+            &project_ids,
+            &report.storage_project_candidates,
+        )
+        .await?;
+    transaction.commit().await?;
+    report.record_deletions(deleted_code_projects, deleted_storage_projects);
+    Ok(report)
 }
 
 pub fn scan_profile_store_manifests(

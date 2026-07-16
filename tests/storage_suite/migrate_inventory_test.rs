@@ -1,14 +1,16 @@
 use std::fs;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use libsql::Builder;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::migrate::inventory::{
-    MigrationInventory, MigrationInventoryOptions, RegistryStatus, StoreArtifact, StoreBrand,
-    StoreInventory, StoreRole, StoreStatus, build_inventory,
+    InventoryIntegrityMode, MigrationInventory, MigrationInventoryOptions, RegistryStatus,
+    StoreArtifact, StoreBrand, StoreInventory, StoreRole, StoreStatus, build_inventory,
 };
 use tracedecay::migrate::manifest::{
     MigrationManifest, MigrationPlanOptions, MigrationProtocol, StoreArtifactPath,
@@ -159,6 +161,32 @@ fn manifest_save_generates_token_and_records_protocol_context() {
     );
     assert_eq!(manifest.destination.project_id.as_deref(), Some("proj_123"));
     assert!(manifest.validation_summaries.is_empty());
+}
+
+#[test]
+fn manifest_plan_rejects_metadata_only_inventory() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let data_dir = project.join(".tracedecay");
+    let graph_db = data_dir.join("tracedecay.db");
+    let mut inventory = single_ok_inventory(&project, &data_dir, &graph_db);
+    inventory.stores[0].statuses = vec![StoreStatus::IntegrityUnchecked];
+
+    let error = build_plan_manifest(
+        inventory,
+        MigrationPlanOptions {
+            manifest_path: dir.path().join("manifest.json"),
+            migration_id: "mig_unchecked".to_string(),
+            tracedecay_version: "0.0.2".to_string(),
+            created_at_unix: 1_800_000_000,
+            confirmation_token: String::new(),
+            target_profile_root: dir.path().join("profile"),
+            project_id: "proj_unchecked".to_string(),
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.contains("IntegrityUnchecked"));
 }
 
 #[test]
@@ -363,6 +391,85 @@ async fn inventory_records_branch_graph_db_and_marks_corrupt_when_quick_check_fa
     assert_eq!(store.statuses, vec![StoreStatus::Corrupt]);
 }
 
+#[tokio::test]
+async fn metadata_only_inventory_marks_existing_databases_unchecked() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("repo");
+    let branches_dir = root.join(".tracedecay/branches");
+    fs::create_dir_all(&branches_dir).unwrap();
+    fs::write(root.join(".tracedecay/tracedecay.db"), b"not sqlite").unwrap();
+    fs::write(branches_dir.join("feature.db"), b"not sqlite").unwrap();
+
+    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
+        roots: vec![dir.path().to_path_buf()],
+        integrity: InventoryIntegrityMode::MetadataOnly,
+        ..MigrationInventoryOptions::default()
+    })
+    .await
+    .unwrap();
+    let store = report
+        .stores
+        .iter()
+        .find(|store| store.project_root == root)
+        .unwrap();
+
+    assert_eq!(store.statuses, vec![StoreStatus::IntegrityUnchecked]);
+    assert!(
+        store
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "branch_graph_db")
+    );
+}
+
+#[tokio::test]
+async fn inventory_reports_only_actively_held_sync_locks_as_locked() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    make_healthy_project_store(&root).await;
+    let lock_path = root.join(".tracedecay/sync.lock");
+    fs::write(&lock_path, b"").unwrap();
+
+    let idle = build_inventory_with_env_lock(MigrationInventoryOptions {
+        roots: vec![dir.path().to_path_buf()],
+        ..MigrationInventoryOptions::default()
+    })
+    .await
+    .unwrap();
+    let idle_store = idle
+        .stores
+        .iter()
+        .find(|store| store.project_root == root)
+        .unwrap();
+    assert_eq!(idle_store.statuses, vec![StoreStatus::Ok]);
+    assert!(
+        idle_store
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "sync_lock")
+    );
+
+    let held = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    held.try_lock_exclusive().unwrap();
+    let locked = build_inventory_with_env_lock(MigrationInventoryOptions {
+        roots: vec![dir.path().to_path_buf()],
+        ..MigrationInventoryOptions::default()
+    })
+    .await
+    .unwrap();
+    let locked_store = locked
+        .stores
+        .iter()
+        .find(|store| store.project_root == root)
+        .unwrap();
+    assert_eq!(locked_store.statuses, vec![StoreStatus::Locked]);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn inventory_skips_symlinked_branches_dir_by_default() {
@@ -417,6 +524,7 @@ async fn inventory_reports_global_db_metadata() {
     let report = build_inventory_with_env_lock(MigrationInventoryOptions {
         roots: Vec::new(),
         global_db_path: Some(db_path.clone()),
+        integrity: InventoryIntegrityMode::MetadataOnly,
         ..MigrationInventoryOptions::default()
     })
     .await

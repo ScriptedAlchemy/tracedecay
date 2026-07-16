@@ -3,6 +3,7 @@ use super::{
     format_index_age_phrase, staleness_banner, tool_error_response,
 };
 use crate::config::PinnedUserDataDir;
+use crate::global_db::GlobalDb;
 use crate::tracedecay::TraceDecay;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -187,6 +188,28 @@ async fn startup_catch_up_spawned_once_per_server() {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err(),
         "startup catch-up flag must stay claimed (runs at most once)"
+    );
+}
+
+#[tokio::test]
+async fn direct_server_keeps_configured_profile_root_with_overridden_registry_db() {
+    let (cg, dir, _pin) = init_indexed_repo().await;
+    let profile_root = crate::config::user_data_dir().expect("configured profile root");
+    let override_root = dir.path().join("registry-override");
+    std::fs::create_dir_all(&override_root).expect("override root");
+    let registry = GlobalDb::open_at(&override_root.join("global.db"))
+        .await
+        .expect("override registry");
+
+    let server = McpServer::new_with_dbs(cg, None, None, Some(Arc::new(registry)), true).await;
+
+    assert_eq!(server.profile_root.as_deref(), Some(profile_root.as_path()));
+    assert_ne!(
+        server.profile_root.as_deref(),
+        server
+            .registry_db
+            .as_deref()
+            .and_then(|db| db.db_path().parent())
     );
 }
 

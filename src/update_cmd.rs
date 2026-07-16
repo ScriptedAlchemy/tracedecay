@@ -125,8 +125,33 @@ fn refresh_daemon_service_after_update(
 }
 
 pub(crate) fn restart_daemon_service() -> tracedecay::errors::Result<()> {
-    let _lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive("daemon restart")?;
-    match refresh_daemon_service(tracedecay::daemon::DaemonServiceState::RunningEnabled)? {
+    let guard = tracedecay::daemon::QuiescedDaemonLifecycle::acquire("daemon restart")?;
+    let (stopped_state, desired_state) = match guard.previous_state() {
+        tracedecay::daemon::DaemonServiceState::RunningEnabled
+        | tracedecay::daemon::DaemonServiceState::StoppedEnabled => (
+            tracedecay::daemon::DaemonServiceState::StoppedEnabled,
+            tracedecay::daemon::DaemonServiceState::RunningEnabled,
+        ),
+        tracedecay::daemon::DaemonServiceState::RunningDisabled
+        | tracedecay::daemon::DaemonServiceState::StoppedDisabled => (
+            tracedecay::daemon::DaemonServiceState::StoppedDisabled,
+            tracedecay::daemon::DaemonServiceState::RunningDisabled,
+        ),
+        tracedecay::daemon::DaemonServiceState::Missing => {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: "no TraceDecay daemon service is installed — restart your `tracedecay daemon run` process manually, or run `tracedecay daemon install-service` to manage it as a service".to_string(),
+            });
+        }
+        tracedecay::daemon::DaemonServiceState::Masked => {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: "TraceDecay daemon service is masked; unmask it before restarting"
+                    .to_string(),
+            });
+        }
+    };
+    let operation_result = refresh_daemon_service(stopped_state);
+    let restore_result = guard.finish_with_state(desired_state);
+    match combine_operation_and_restore("daemon restart", operation_result, restore_result)? {
         Some((service_path, socket_path)) => {
             eprintln!(
                 "\x1b[32m✔\x1b[0m Daemon service restarted at {}",
@@ -135,11 +160,7 @@ pub(crate) fn restart_daemon_service() -> tracedecay::errors::Result<()> {
             eprintln!("Daemon socket: {}", socket_path.display());
             Ok(())
         }
-        None => Err(tracedecay::errors::TraceDecayError::Config {
-            message: "no TraceDecay daemon service is installed — restart your `tracedecay daemon run` \
-                      process manually, or run `tracedecay daemon install-service` to manage it as a service"
-                .to_string(),
-        }),
+        None => unreachable!("installed service disappeared during daemon restart"),
     }
 }
 
@@ -242,58 +263,115 @@ pub(crate) fn run_update_command(
     no_heal: bool,
     no_reinstall: bool,
 ) -> tracedecay::errors::Result<()> {
-    let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive("update")?;
-    let lease_token = lifecycle_lease
-        .token()
-        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-            message: "update lifecycle lease did not provide an owner token".to_string(),
-        })?
-        .to_string();
-    let mut lifecycle_lease = Some(lifecycle_lease);
-    run_install_then_refresh(
-        RefreshPolicy::Always,
-        tracedecay::upgrade::run_upgrade,
-        move |binary| {
-            let held_lease =
-                prepare_post_update_lease(lifecycle_lease.take().ok_or_else(|| {
-                    tracedecay::errors::TraceDecayError::Config {
-                        message: "update lifecycle lease was already consumed".to_string(),
-                    }
-                })?);
-            let result = run_post_update_subcommand(no_heal, no_reinstall, binary, &lease_token);
-            drop(held_lease);
-            result
-        },
-    )
+    run_update_flow("update", RefreshPolicy::Always, no_heal, no_reinstall)
 }
 
 pub(crate) fn run_upgrade_command(
     no_heal: bool,
     no_reinstall: bool,
 ) -> tracedecay::errors::Result<()> {
-    let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive("upgrade")?;
-    let lease_token = lifecycle_lease
-        .token()
-        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-            message: "upgrade lifecycle lease did not provide an owner token".to_string(),
-        })?
-        .to_string();
-    let mut lifecycle_lease = Some(lifecycle_lease);
-    run_install_then_refresh(
+    run_update_flow(
+        "upgrade",
         RefreshPolicy::AfterInstall,
-        tracedecay::upgrade::run_upgrade,
-        move |binary| {
-            let held_lease =
-                prepare_post_update_lease(lifecycle_lease.take().ok_or_else(|| {
-                    tracedecay::errors::TraceDecayError::Config {
-                        message: "upgrade lifecycle lease was already consumed".to_string(),
-                    }
-                })?);
-            let result = run_post_update_subcommand(no_heal, no_reinstall, binary, &lease_token);
-            drop(held_lease);
-            result
-        },
+        no_heal,
+        no_reinstall,
     )
+}
+
+fn run_update_flow(
+    operation: &str,
+    refresh_policy: RefreshPolicy,
+    no_heal: bool,
+    no_reinstall: bool,
+) -> tracedecay::errors::Result<()> {
+    run_with_quiesced_daemon(operation, |lifecycle_lease| {
+        let lease_token = lifecycle_lease
+            .token()
+            .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                message: format!("{operation} lifecycle lease did not provide an owner token"),
+            })?
+            .to_string();
+        #[cfg(windows)]
+        let held_lease = prepare_post_update_lease(lifecycle_lease);
+        let result =
+            run_install_then_refresh(refresh_policy, tracedecay::upgrade::run_upgrade, |binary| {
+                run_post_update_subcommand(no_heal, no_reinstall, binary, &lease_token)
+            });
+        #[cfg(windows)]
+        drop(held_lease);
+        result
+    })
+}
+
+#[cfg(not(windows))]
+fn run_with_quiesced_daemon<T>(
+    operation: &str,
+    action: impl FnOnce(&tracedecay::lifecycle_lease::LifecycleLease) -> tracedecay::errors::Result<T>,
+) -> tracedecay::errors::Result<T> {
+    tracedecay::daemon::with_quiesced_installed_service(operation, action)
+}
+
+#[cfg(windows)]
+fn run_with_quiesced_daemon<T>(
+    operation: &str,
+    action: impl FnOnce(tracedecay::lifecycle_lease::LifecycleLease) -> tracedecay::errors::Result<T>,
+) -> tracedecay::errors::Result<T> {
+    action(tracedecay::lifecycle_lease::acquire_exclusive(operation)?)
+}
+
+fn combine_operation_and_restore<T>(
+    operation: &str,
+    operation_result: tracedecay::errors::Result<T>,
+    restore_result: tracedecay::errors::Result<()>,
+) -> tracedecay::errors::Result<T> {
+    match (operation_result, restore_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(operation_error), Err(restore_error)) => {
+            Err(tracedecay::errors::TraceDecayError::Config {
+                message: format!(
+                    "{operation} failed: {operation_error}; daemon state restoration also failed: {restore_error}"
+                ),
+            })
+        }
+    }
+}
+
+pub(crate) async fn run_post_update_command(
+    no_heal: bool,
+    no_reinstall: bool,
+    lifecycle_lease_token: Option<&str>,
+    strict: bool,
+) -> tracedecay::errors::Result<()> {
+    if let Some(token) = lifecycle_lease_token {
+        let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive_or_inherited(
+            "post-update",
+            Some(token),
+        )?;
+        return run_post_update_tasks(no_heal, no_reinstall, strict, &lifecycle_lease).await;
+    }
+
+    let guard = tracedecay::daemon::QuiescedDaemonLifecycle::acquire("post-update")?;
+    let previous_daemon_state = guard.previous_state();
+    let operation_result = match guard.lifecycle_lease() {
+        Ok(lifecycle_lease) => {
+            run_post_update_tasks(no_heal, no_reinstall, strict, lifecycle_lease).await
+        }
+        Err(error) => Err(error),
+    };
+    let restore_result = guard.finish();
+    let readiness_result = if strict {
+        tracedecay::daemon::wait_for_installed_service_state(previous_daemon_state)
+    } else {
+        Ok(())
+    };
+    let restoration_result = combine_operation_and_restore(
+        "post-update daemon restoration",
+        restore_result,
+        readiness_result,
+    );
+    combine_operation_and_restore("post-update", operation_result, restoration_result)
 }
 
 pub(crate) fn run_dogfood_command() -> tracedecay::errors::Result<()> {
@@ -320,6 +398,7 @@ pub(crate) fn run_dogfood_command() -> tracedecay::errors::Result<()> {
 
 // Windows must drop the lease before replacing a running executable, while
 // other platforms retain it through the child handoff.
+#[cfg(any(windows, test))]
 #[allow(clippy::unnecessary_wraps)]
 fn prepare_post_update_lease(
     lease: tracedecay::lifecycle_lease::LifecycleLease,
@@ -408,6 +487,33 @@ pub(crate) fn partition_reinstall_results(
     }
 }
 
+fn reinstall_failure_result(failed: &[String], strict: bool) -> tracedecay::errors::Result<()> {
+    if strict {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "dogfood agent integration refresh failed for: {}",
+                failed.join(", ")
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn health_pass_failure_result(
+    report: &tracedecay::doctor::heal::HealthPassReport,
+    strict: bool,
+) -> tracedecay::errors::Result<()> {
+    if strict && !report.warnings.is_empty() {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "dogfood post-update health pass failed: {}",
+                report.warnings.join("; ")
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Re-runs full `install()` + `post_install()` for every tracked agent so tool
 /// permissions, hooks, and MCP config stay in sync with the running binary — a
 /// superset of `refresh_generated_plugins`, which rewrites generated artifacts
@@ -418,6 +524,20 @@ pub(crate) fn partition_reinstall_results(
 /// resolved, no install runs and a descriptive failure is reported so the
 /// version markers stay put.
 pub(crate) async fn reinstall_tracked_agents(user_config: &UserConfig) -> ReinstallOutcome {
+    reinstall_tracked_agents_with_lease(user_config, None).await
+}
+
+async fn reinstall_tracked_agents_under_lease(
+    user_config: &UserConfig,
+    lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
+) -> ReinstallOutcome {
+    reinstall_tracked_agents_with_lease(user_config, Some(lifecycle_lease)).await
+}
+
+async fn reinstall_tracked_agents_with_lease(
+    user_config: &UserConfig,
+    lifecycle_lease: Option<&tracedecay::lifecycle_lease::LifecycleLease>,
+) -> ReinstallOutcome {
     let (Some(home), Some(bin)) = (
         tracedecay::agents::home_dir(),
         tracedecay::agents::which_tracedecay(),
@@ -429,37 +549,59 @@ pub(crate) async fn reinstall_tracked_agents(user_config: &UserConfig) -> Reinst
             ],
         };
     };
-    let results =
-        crate::agent_cmd::reinstall_agent_integrations(&user_config.installed_agents, &home, &bin)
-            .await;
+    let results = match lifecycle_lease {
+        Some(lifecycle_lease) => {
+            crate::agent_cmd::reinstall_agent_integrations_under_lease(
+                &user_config.installed_agents,
+                &home,
+                &bin,
+                lifecycle_lease,
+            )
+            .await
+        }
+        None => {
+            crate::agent_cmd::reinstall_agent_integrations(
+                &user_config.installed_agents,
+                &home,
+                &bin,
+            )
+            .await
+        }
+    };
     partition_reinstall_results(results)
 }
 
 pub(crate) async fn run_post_update_tasks(
     no_heal: bool,
     no_reinstall: bool,
+    strict: bool,
     lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
 ) -> tracedecay::errors::Result<()> {
     eprintln!("\nPreparing safe post-update maintenance.");
     eprintln!("  Waiting for TraceDecay writers to shut down cleanly — do not interrupt.");
-    let previous_daemon_state = tracedecay::daemon::quiesce_installed_service_under_lease()?;
+    let previous_daemon_state =
+        tracedecay::daemon::verify_installed_service_quiesced_under_lease()?;
     eprintln!("\x1b[32m✔\x1b[0m TraceDecay writers stopped; exclusive maintenance window active.");
-    let mutation_result = run_post_update_mutations(no_heal, no_reinstall, lifecycle_lease).await;
+    let mutation_result =
+        run_post_update_mutations(no_heal, no_reinstall, strict, lifecycle_lease).await;
     let restart_result = refresh_daemon_service_after_update(previous_daemon_state);
-    mutation_result?;
-    restart_result
+    combine_operation_and_restore("post-update maintenance", mutation_result, restart_result)
 }
 
 async fn run_post_update_mutations(
     no_heal: bool,
     no_reinstall: bool,
+    strict: bool,
     lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
 ) -> tracedecay::errors::Result<()> {
     refresh_generated_plugins().await?;
     if no_heal {
         eprintln!("Skipping post-update health pass (--no-heal).");
     } else {
-        tracedecay::doctor::heal::run_post_update_health_pass_under_lease(lifecycle_lease).await;
+        let report =
+            tracedecay::doctor::heal::run_post_update_health_pass_under_lease(lifecycle_lease)
+                .await;
+        health_pass_failure_result(&report, strict)?;
     }
 
     if no_reinstall {
@@ -515,24 +657,27 @@ async fn run_post_update_mutations(
             config.installed_agents.join(", ")
         );
     }
-    match reinstall_tracked_agents(&config).await {
-        ReinstallOutcome::AllOk => {
-            if config.mark_version_installed(env!("CARGO_PKG_VERSION"))
-                && let Err(err) = config.save()
-            {
-                eprintln!("warning: could not save tracedecay config: {err}");
+    let reinstall_result =
+        match reinstall_tracked_agents_under_lease(&config, lifecycle_lease).await {
+            ReinstallOutcome::AllOk => {
+                if config.mark_version_installed(env!("CARGO_PKG_VERSION"))
+                    && let Err(err) = config.save()
+                {
+                    eprintln!("warning: could not save tracedecay config: {err}");
+                }
+                Ok(())
             }
-        }
-        ReinstallOutcome::PartialFailure { failed } => {
-            eprintln!(
-                "  \x1b[33mwarning:\x1b[0m agent install failed for: {}; \
+            ReinstallOutcome::PartialFailure { failed } => {
+                eprintln!(
+                    "  \x1b[33mwarning:\x1b[0m agent install failed for: {}; \
                  it will be retried on the next tracedecay command.",
-                failed.join(", ")
-            );
-        }
-    }
+                    failed.join(", ")
+                );
+                reinstall_failure_result(&failed, strict)
+            }
+        };
     reconcile_materialized_managed_skills_after_update();
-    Ok(())
+    reinstall_result
 }
 
 /// Reconciles already-Active managed skills into every detected host skills
@@ -561,9 +706,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from, normalize_bin_path,
-        partition_reinstall_results, post_update_binary, post_update_binary_from,
-        prepare_post_update_lease, run_install_then_refresh,
+        RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from, health_pass_failure_result,
+        normalize_bin_path, partition_reinstall_results, post_update_binary,
+        post_update_binary_from, prepare_post_update_lease, reinstall_failure_result,
+        run_install_then_refresh,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
@@ -689,6 +835,36 @@ mod tests {
             }
             ReinstallOutcome::AllOk => panic!("a real install() failure must gate markers"),
         }
+    }
+
+    #[test]
+    fn only_strict_post_update_propagates_integration_failures() {
+        let failed = vec!["claude".to_string(), "hermes".to_string()];
+
+        assert!(reinstall_failure_result(&failed, false).is_ok());
+        let error = reinstall_failure_result(&failed, true)
+            .expect_err("strict dogfood must fail")
+            .to_string();
+        assert!(error.contains("claude, hermes"));
+    }
+
+    #[test]
+    fn strict_post_update_propagates_health_pass_failures_only() {
+        let failed = tracedecay::doctor::heal::HealthPassReport {
+            warnings: vec!["could not open the global DB".to_string()],
+            ..Default::default()
+        };
+        let advisory = tracedecay::doctor::heal::HealthPassReport {
+            remaining_findings: vec!["stale non-temp registry row".to_string()],
+            ..Default::default()
+        };
+
+        assert!(health_pass_failure_result(&failed, false).is_ok());
+        let error = health_pass_failure_result(&failed, true)
+            .expect_err("strict dogfood must fail on health-pass errors")
+            .to_string();
+        assert!(error.contains("could not open the global DB"));
+        assert!(health_pass_failure_result(&advisory, true).is_ok());
     }
 
     /// Markers advance only when every tracked agent reinstalled (AllOk).

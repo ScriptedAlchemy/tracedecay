@@ -369,14 +369,17 @@ fn is_cancellation_reason_code(reason_code: &str) -> bool {
     )
 }
 
-fn bounded_reason_code(value: &str) -> String {
+pub(crate) fn is_bounded_reason_code(value: &str) -> bool {
     const MAX_REASON_CODE_BYTES: usize = 64;
-    if !value.is_empty()
+    !value.is_empty()
         && value.len() <= MAX_REASON_CODE_BYTES
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
+}
+
+fn bounded_reason_code(value: &str) -> String {
+    if is_bounded_reason_code(value) {
         value.to_owned()
     } else {
         "unclassified".to_owned()

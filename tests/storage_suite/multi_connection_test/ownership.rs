@@ -146,6 +146,7 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_sqlite_owner() {
         .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
         .env_remove(SQLITE_UNSAFE_FAST_ENV)
         .arg("doctor")
+        .args(["--agent", "claude"])
         .current_dir(&project_path)
         .output()
         .expect("run doctor probe");

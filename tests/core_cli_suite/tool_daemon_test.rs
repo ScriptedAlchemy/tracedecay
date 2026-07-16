@@ -890,6 +890,7 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
     let first_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
     let output = tracedecay_command_with_home(&home_path)
         .arg("doctor")
+        .args(["--agent", "claude"])
         .current_dir(&project_path)
         .output()
         .expect("doctor should run");

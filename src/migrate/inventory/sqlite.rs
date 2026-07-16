@@ -2,16 +2,15 @@ use std::path::{Path, PathBuf};
 
 use libsql::{Builder, OpenFlags};
 
-use super::model::GlobalDbInventory;
+use super::model::{GlobalDbInventory, InventoryIntegrityMode};
 use crate::global_db;
 
-pub(super) async fn inspect_global_db(path: &Path, path_overridden: bool) -> GlobalDbInventory {
+pub(super) async fn inspect_global_db(
+    path: &Path,
+    path_overridden: bool,
+    integrity: InventoryIntegrityMode,
+) -> GlobalDbInventory {
     let exists = path.is_file();
-    let mut project_count = 0;
-    let mut session_count = 0;
-    let mut lcm_raw_message_count = 0;
-    let mut token_cache_present = false;
-    let mut registered_project_paths = Vec::new();
     let mut warnings = Vec::new();
 
     if exists {
@@ -31,15 +30,14 @@ pub(super) async fn inspect_global_db(path: &Path, path_overridden: bool) -> Glo
             match db_result {
                 Ok(db) => match db.connect() {
                     Ok(conn) => {
-                        if !sqlite_quick_check_connection(&conn).await {
-                            warnings
-                                .push(format!("global DB '{}' failed quick_check", path.display()));
-                        }
-                        project_count = table_count(&conn, "projects").await;
-                        session_count = table_count(&conn, "sessions").await;
-                        lcm_raw_message_count = table_count(&conn, "lcm_raw_messages").await;
-                        token_cache_present = table_exists(&conn, "dashboard_token_counts").await;
-                        registered_project_paths = project_paths(&conn).await;
+                        return inventory_from_connection(
+                            path,
+                            path_overridden,
+                            &conn,
+                            warnings,
+                            integrity,
+                        )
+                        .await;
                     }
                     Err(err) => warnings.push(format!(
                         "could not inspect global DB '{}': {err}",
@@ -60,13 +58,58 @@ pub(super) async fn inspect_global_db(path: &Path, path_overridden: bool) -> Glo
         path_overridden,
         accounting_mode: global_db::global_accounting_mode().as_str().to_string(),
         legacy_home_fallback: false,
-        project_count,
-        session_count,
-        lcm_raw_message_count,
-        token_cache_present,
-        registered_project_paths,
+        project_count: 0,
+        session_count: 0,
+        lcm_raw_message_count: 0,
+        token_cache_present: false,
+        registered_project_paths: Vec::new(),
         warnings,
     }
+}
+
+pub(super) async fn inspect_daemon_global_db(
+    global_db: &global_db::GlobalDb,
+    path_overridden: bool,
+    integrity: InventoryIntegrityMode,
+) -> GlobalDbInventory {
+    let path = global_db.db_path();
+    inventory_from_connection(
+        path,
+        path_overridden,
+        global_db.read_connection(),
+        Vec::new(),
+        integrity,
+    )
+    .await
+}
+
+async fn inventory_from_connection(
+    path: &Path,
+    path_overridden: bool,
+    conn: &libsql::Connection,
+    mut warnings: Vec<String>,
+    integrity: InventoryIntegrityMode,
+) -> GlobalDbInventory {
+    if should_verify_integrity(integrity) && !sqlite_quick_check_connection(conn).await {
+        warnings.push(format!("global DB '{}' failed quick_check", path.display()));
+    }
+    GlobalDbInventory {
+        path: path.to_path_buf(),
+        exists: path.is_file(),
+        path_overridden,
+        accounting_mode: global_db::global_accounting_mode().as_str().to_string(),
+        legacy_home_fallback: false,
+        project_count: table_count(conn, "projects").await,
+        session_count: table_count(conn, "sessions").await,
+        lcm_raw_message_count: table_count(conn, "lcm_raw_messages").await,
+        token_cache_present: table_exists(conn, "dashboard_token_counts").await,
+        registered_project_paths: project_paths(conn).await,
+        warnings,
+    }
+}
+
+fn should_verify_integrity(integrity: InventoryIntegrityMode) -> bool {
+    integrity == InventoryIntegrityMode::Full
 }
 
 pub(super) async fn sqlite_quick_check(path: &Path) -> bool {
@@ -139,4 +182,17 @@ async fn project_paths(conn: &libsql::Connection) -> Vec<PathBuf> {
         }
     }
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InventoryIntegrityMode, should_verify_integrity};
+
+    #[test]
+    fn metadata_only_inventory_skips_global_integrity_verification() {
+        assert!(!should_verify_integrity(
+            InventoryIntegrityMode::MetadataOnly
+        ));
+        assert!(should_verify_integrity(InventoryIntegrityMode::Full));
+    }
 }

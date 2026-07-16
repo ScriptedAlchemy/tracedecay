@@ -866,9 +866,12 @@ pub(crate) async fn execute_background_refresh_direct(
     request: BackgroundRefreshRequest,
 ) -> Result<Option<HashMap<String, u64>>> {
     let cg = TraceDecay::open_with_options(&request.project_root, request.open_options).await?;
-    let scoped = match cg.last_synced_commit().await {
-        Some(base) => cg.stale_files_since_commit(&base, request.full_sync_escalation_files),
-        None => None,
+    let scoped = match (
+        request.full_sync_escalation_files,
+        cg.last_synced_commit().await,
+    ) {
+        (0, _) | (_, None) => None,
+        (limit, Some(base)) => cg.stale_files_since_commit(&base, limit),
     };
     let result = if let Some(files) = scoped {
         if files.is_empty() {
@@ -884,9 +887,7 @@ pub(crate) async fn execute_background_refresh_direct(
             cg.sync_if_stale_silent(&stale).await
         }
     };
-    if let Err(error) = result {
-        eprintln!("[tracedecay] background read refresh failed: {error}");
-    }
+    result?;
     Ok(cg.get_file_token_map().await.ok())
 }
 
@@ -897,6 +898,7 @@ pub(crate) async fn execute_background_refresh_direct(
 pub(crate) struct McpServerConstructionContext {
     cg: TraceDecay,
     scope_prefix: Option<String>,
+    profile_root: Option<PathBuf>,
     global_db: Option<Arc<GlobalDb>>,
     registry_db: Option<Arc<GlobalDb>>,
     session_db: Option<Arc<GlobalDb>>,
@@ -927,6 +929,7 @@ pub(crate) struct McpServerDaemonDatabases {
 }
 
 pub(crate) struct McpServerDaemonAuthority {
+    pub(crate) profile_root: PathBuf,
     pub(crate) databases: McpServerDaemonDatabases,
     pub(crate) host_admission_broker:
         Option<crate::application::host_admission::SharedHostAdmissionBroker>,
@@ -953,6 +956,7 @@ impl McpServerConstructionContext {
         Self {
             cg,
             scope_prefix,
+            profile_root: None,
             global_db: None,
             registry_db: None,
             session_db: None,
@@ -990,6 +994,7 @@ impl McpServerConstructionContext {
         authority: McpServerDaemonAuthority,
     ) -> Self {
         let McpServerDaemonAuthority {
+            profile_root,
             databases,
             host_admission_broker,
             database_owner_reconciler,
@@ -998,6 +1003,7 @@ impl McpServerConstructionContext {
         Self {
             cg,
             scope_prefix,
+            profile_root: Some(profile_root),
             global_db: databases.accounting,
             registry_db: Some(databases.registry),
             session_db: Some(databases.project_sessions),
@@ -1090,6 +1096,7 @@ pub struct McpServer {
     /// `Arc` so spawned savings-recording tasks can hold a cheap clone of
     /// the handle instead of opening a new connection per call.
     global_db: Option<Arc<GlobalDb>>,
+    profile_root: Option<PathBuf>,
     /// Authoritative project session store retained for startup recovery.
     /// Recovery borrows this handle and never discovers or opens another DB.
     session_db: Option<Arc<GlobalDb>>,
@@ -1232,6 +1239,23 @@ pub struct McpServer {
 /// Runs the project and user transcript portions of startup recovery against
 /// daemon-retained authorities. Project recovery is independent: a missing
 /// user or registry authority skips only the user sweep.
+fn log_startup_transcript_ingest_failure(
+    scope: &str,
+    failure: &crate::sessions::TranscriptCatchUpFailure,
+) {
+    let locator = failure.source_locator.map_or_else(String::new, |range| {
+        format!(
+            " source_offset={} source_end_offset={}",
+            range.start(),
+            range.end()
+        )
+    });
+    eprintln!(
+        "[tracedecay] startup {scope} transcript ingest incomplete: provider={} source={} reason_code={} retryable={}{}",
+        failure.provider, failure.source, failure.reason_code, failure.retryable, locator,
+    );
+}
+
 async fn run_startup_session_catch_up(
     session_db: Option<Arc<GlobalDb>>,
     user_session_db: Option<Arc<GlobalDb>>,
@@ -1256,10 +1280,7 @@ async fn run_startup_session_catch_up(
     )
     .await;
     for failure in &project_outcome.failures {
-        eprintln!(
-            "[tracedecay] startup project transcript ingest incomplete: provider={} source={} reason_code={} retryable={}",
-            failure.provider, failure.source, failure.reason_code, failure.retryable
-        );
+        log_startup_transcript_ingest_failure("project", failure);
     }
     if let (Some(user_db), Some(registry_db)) = (user_session_db, registry_db) {
         if let Some(profile_root) = user_db.db_path().parent() {
@@ -1270,10 +1291,7 @@ async fn run_startup_session_catch_up(
             )
             .await;
             for failure in &outcome.failures {
-                eprintln!(
-                    "[tracedecay] startup user transcript ingest incomplete: provider={} source={} reason_code={} retryable={}",
-                    failure.provider, failure.source, failure.reason_code, failure.retryable
-                );
+                log_startup_transcript_ingest_failure("user", failure);
             }
         } else {
             eprintln!(
@@ -1325,9 +1343,13 @@ impl McpServer {
         registry_db: Option<Arc<GlobalDb>>,
         allow_default_registry_fallback: bool,
     ) -> Arc<Self> {
+        let profile_root = allow_default_registry_fallback
+            .then(crate::storage::default_profile_root)
+            .and_then(std::result::Result::ok);
         let context = Self::direct_context_with_dbs(
             cg,
             scope_prefix,
+            profile_root,
             global_db,
             registry_db,
             allow_default_registry_fallback,
@@ -1346,9 +1368,13 @@ impl McpServer {
         registry_db: Option<Arc<GlobalDb>>,
         allow_default_registry_fallback: bool,
     ) -> Arc<Self> {
+        let profile_root = allow_default_registry_fallback
+            .then(crate::storage::default_profile_root)
+            .and_then(std::result::Result::ok);
         let mut context = Self::direct_context_with_dbs(
             cg,
             scope_prefix,
+            profile_root,
             global_db,
             registry_db,
             allow_default_registry_fallback,
@@ -1379,22 +1405,13 @@ impl McpServer {
     async fn direct_context_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,
+        profile_root: Option<PathBuf>,
         global_db: Option<Arc<GlobalDb>>,
         registry_db: Option<Arc<GlobalDb>>,
         allow_default_registry_fallback: bool,
     ) -> McpServerConstructionContext {
-        let profile_root = registry_db
-            .as_ref()
-            .and_then(|db| db.db_path().parent().map(Path::to_path_buf))
-            .or_else(|| {
-                if allow_default_registry_fallback {
-                    crate::storage::default_profile_root().ok()
-                } else {
-                    None
-                }
-            });
-        let user_session_db = if let Some(profile_root) = profile_root {
-            GlobalDb::open_at(&crate::sessions::user_sessions_db_path(&profile_root))
+        let user_session_db = if let Some(profile_root) = profile_root.as_ref() {
+            GlobalDb::open_at(&crate::sessions::user_sessions_db_path(profile_root))
                 .await
                 .map(Arc::new)
         } else {
@@ -1403,19 +1420,23 @@ impl McpServer {
         let session_db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
             .await
             .map(Arc::new);
-        McpServerConstructionContext::direct(cg, scope_prefix).with_direct_databases(
-            global_db,
-            registry_db,
-            session_db,
-            user_session_db,
-            allow_default_registry_fallback,
-        )
+        let mut context = McpServerConstructionContext::direct(cg, scope_prefix)
+            .with_direct_databases(
+                global_db,
+                registry_db,
+                session_db,
+                user_session_db,
+                allow_default_registry_fallback,
+            );
+        context.profile_root = profile_root;
+        context
     }
 
     pub(crate) async fn new_with_context(context: McpServerConstructionContext) -> Arc<Self> {
         let McpServerConstructionContext {
             cg,
             scope_prefix,
+            profile_root,
             global_db,
             registry_db,
             session_db,
@@ -1478,6 +1499,7 @@ impl McpServer {
             last_flushed_tokens: AtomicU64::new(persisted),
             last_flush_at: AtomicI64::new(0),
             global_db,
+            profile_root,
             session_db,
             registry_db,
             user_session_db,
@@ -1890,16 +1912,26 @@ impl McpServer {
         self.transcript_ingest_done.store(false, Ordering::Release);
 
         let cg = self.cg_snapshot().await;
-        let stale = cg.find_stale_files().await;
-        if !stale.is_empty()
-            && let Err(e) = cg.sync_if_stale_silent(&stale).await
-        {
-            eprintln!("[tracedecay] startup catch-up sync failed: {e}");
-            self.startup_catch_up_done.store(true, Ordering::Release);
-            self.transcript_ingest_done.store(true, Ordering::Release);
-            return;
+        let refresh = Arc::clone(&self.background_refresh_writer);
+        let request = BackgroundRefreshRequest {
+            project_root: cg.project_root().to_path_buf(),
+            open_options: cg.open_options(),
+            full_sync_escalation_files: 0,
+        };
+        match refresh(request).await {
+            Ok(Some(fresh)) => {
+                if let Ok(mut guard) = self.file_token_map.lock() {
+                    *guard = fresh;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("[tracedecay] startup catch-up sync failed: {e}");
+                self.startup_catch_up_done.store(true, Ordering::Release);
+                self.transcript_ingest_done.store(true, Ordering::Release);
+                return;
+            }
         }
-        self.refresh_file_token_map().await;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -3599,6 +3631,7 @@ impl McpServer {
             self.scope_prefix(),
             ToolCallRegistryOptions {
                 global_db: self.registry_db.as_deref(),
+                profile_root: self.profile_root.as_deref(),
                 allow_default_registry_fallback: self.allow_default_registry_fallback,
                 implicit_project_path,
                 automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),

@@ -2029,6 +2029,65 @@ impl GlobalDb {
         self.resolve_project_store_for_project(&project).await
     }
 
+    /// Resolves the newest store for a project-path alias without hiding
+    /// query or row-decoding failures.
+    pub async fn try_resolve_project_store_record_by_alias(
+        &self,
+        alias_path: &Path,
+    ) -> crate::errors::Result<Option<StoreInstanceRecord>> {
+        async fn query(
+            db: &GlobalDb,
+            alias: &str,
+            canonical_root: Option<&str>,
+        ) -> crate::errors::Result<Option<StoreInstanceRecord>> {
+            let mut sql = String::from(
+                "SELECT si.store_id, si.project_id, si.store_kind, si.storage_mode,
+                        si.store_relpath, si.manifest_relpath, si.created_at,
+                        si.last_verified_at, si.last_write_at
+                 FROM project_aliases pa
+                 JOIN code_projects cp ON cp.project_id = pa.project_id
+                 JOIN store_instances si ON si.project_id = cp.project_id
+                 WHERE pa.alias_path = ?1",
+            );
+            let mut values = vec![libsql::Value::Text(alias.to_string())];
+            if let Some(canonical_root) = canonical_root {
+                sql.push_str(
+                    " AND cp.canonical_root = ?2
+                      AND NOT EXISTS (
+                          SELECT 1 FROM code_projects other
+                          WHERE other.canonical_root = ?2
+                            AND other.project_id != cp.project_id
+                      )",
+                );
+                values.push(libsql::Value::Text(canonical_root.to_string()));
+            }
+            sql.push_str(
+                " ORDER BY COALESCE(si.last_verified_at, si.created_at) DESC, si.store_id
+                  LIMIT 1",
+            );
+            let mut rows = db.conn.query(&sql, values).await?;
+            let Some(row) = rows.next().await? else {
+                return Ok(None);
+            };
+            row_to_store_instance(&row, 0).map(Some).ok_or_else(|| {
+                global_db_operation_message(
+                    "resolve project store by alias",
+                    "failed to decode store registry row",
+                )
+            })
+        }
+
+        let native_alias = project_path_alias_key(alias_path);
+        if let Some(store) = query(self, &native_alias, None).await? {
+            return Ok(Some(store));
+        }
+        let legacy_alias = Self::canonical_project_key(alias_path);
+        if native_alias == legacy_alias {
+            return Ok(None);
+        }
+        query(self, &legacy_alias, Some(&legacy_alias)).await
+    }
+
     pub async fn resolve_project_store_by_identity(
         &self,
         project_root: &Path,
@@ -2231,6 +2290,61 @@ impl GlobalDb {
         } else {
             0
         }
+    }
+
+    /// Atomically removes one registry-GC plan from both registry generations.
+    /// No filesystem artifacts are removed.
+    pub async fn delete_registry_gc_candidates(
+        &self,
+        project_ids: &[String],
+        project_paths: &[PathBuf],
+    ) -> crate::errors::Result<(usize, usize)> {
+        let transaction = self.begin_write_transaction().await?;
+        let deleted = Self::delete_registry_gc_candidates_in_transaction(
+            &transaction,
+            project_ids,
+            project_paths,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(deleted)
+    }
+
+    pub(crate) async fn delete_registry_gc_candidates_in_transaction(
+        transaction: &GlobalDbWriteTransaction<'_>,
+        project_ids: &[String],
+        project_paths: &[PathBuf],
+    ) -> crate::errors::Result<(usize, usize)> {
+        const CHUNK: usize = 256;
+        let mut code_projects = 0_usize;
+        for chunk in project_ids.chunks(CHUNK) {
+            let sql = format!(
+                "DELETE FROM code_projects WHERE project_id IN ({})",
+                vec!["?"; chunk.len()].join(",")
+            );
+            let values = chunk
+                .iter()
+                .cloned()
+                .map(libsql::Value::Text)
+                .collect::<Vec<_>>();
+            code_projects =
+                code_projects.saturating_add(transaction.execute(&sql, values).await? as usize);
+        }
+
+        let mut storage_projects = 0_usize;
+        for chunk in project_paths.chunks(CHUNK) {
+            let sql = format!(
+                "DELETE FROM projects WHERE path IN ({})",
+                vec!["?"; chunk.len()].join(",")
+            );
+            let values = chunk
+                .iter()
+                .map(|path| libsql::Value::Text(project_path_alias_key(path)))
+                .collect::<Vec<_>>();
+            storage_projects =
+                storage_projects.saturating_add(transaction.execute(&sql, values).await? as usize);
+        }
+        Ok((code_projects, storage_projects))
     }
 
     pub async fn search_code_projects(&self, query: &str, limit: usize) -> Vec<CodeProjectRecord> {

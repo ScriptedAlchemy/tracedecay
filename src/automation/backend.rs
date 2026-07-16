@@ -136,6 +136,10 @@ impl AgentTaskFailureClass {
     pub fn is_retryable(self) -> bool {
         matches!(self, Self::Retryable | Self::Timeout | Self::Unavailable)
     }
+
+    fn is_retryable_on_later_run(self) -> bool {
+        self.is_retryable() || self == Self::MalformedOutput
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,7 +172,7 @@ pub fn agent_task_failure_disposition(
         })
         .or(recorded_classification);
     let retryable = classification
-        .map(AgentTaskFailureClass::is_retryable)
+        .map(AgentTaskFailureClass::is_retryable_on_later_run)
         .or(recorded_retryable);
 
     AgentTaskFailureDisposition {

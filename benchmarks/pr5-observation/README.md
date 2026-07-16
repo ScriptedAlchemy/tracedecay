@@ -35,11 +35,10 @@ once, and proves each repeat is a durable no-op.
 
 Current acceptance artifacts must include the nested
 `provider_observation_performance` result and `hook_telemetry_readiness`
-evidence. [evidence-index.json](evidence-index.json) identifies
-[result-2026-07-16-72cf1f50.json](result-2026-07-16-72cf1f50.json) as the
-`current_acceptance`; the two earlier artifacts remain `historical_stale`, so
-the retired-evidence validator intentionally does not require fields introduced
-by the new workload.
+evidence. [evidence-index.json](evidence-index.json) keeps
+`current_acceptance` unset until a clean run against the final product commit;
+the two earlier artifacts remain `historical_stale`, so the retired-evidence
+validator intentionally does not require fields introduced by the new workload.
 
 The acceptance result embeds hook telemetry readiness as
 `hook-telemetry-baseline-readiness-v1`, not as a measured baseline. It reads the
@@ -104,22 +103,8 @@ the checked historical artifact but the finalization gate requires exactly one
 fully typed current acceptance artifact and rejects unindexed, duplicate, or
 unknown-field results.
 
-The current [acceptance result](result-2026-07-16-72cf1f50.json) was captured
-from clean commit `72cf1f504f77d9461b5bbd760b01cd47f22c36fa` with 3 warmups and
-30 independent measured repetitions of 64 records (30 × 64 = 1,920 records).
-The raw artifact records the Linux kernel, CPU, memory, Rust/Cargo toolchains,
-every repetition, and the nearest-rank/sample-standard-deviation method.
-
-- Pipeline batch latency: p50 633,282,298 ns; p95 656,043,184 ns; p99
-  658,018,841 ns.
-- Pipeline throughput: 100.98092266068652 records/s.
-- Timed pipeline CPU: 12,670 ms; peak RSS: 57,148 KiB.
-- Timed process write I/O: 335,474,688 bytes; SQLite database/WAL/SHM growth:
-  139,806,200 bytes across the 30 independent databases.
-- Exact no-op retry plus bounded replay: p50 211,993 ns; p95 239,203 ns; p99
-  241,013 ns; 10 ms CPU total; zero process write bytes, database growth,
-  observation-count delta, and coordinator work counters.
-- Round-robin fairness: maximum provider turn distance 8.
+No current acceptance result is checked in while the final product commit is
+being prepared. The clean attested run below creates it.
 
 The former [acceptance result](result-2026-07-15-0c289212.json) remains
 `historical_stale` because it predates workload schema 3.

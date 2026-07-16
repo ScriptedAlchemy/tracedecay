@@ -348,8 +348,8 @@ fn scheduler_does_not_retry_explicit_non_retryable_failures() {
         AutomationRunStatus::Failed,
         1_000,
     );
-    failed.error = Some("backend output must include a JSON object".to_string());
-    failed.error_classification = Some(AgentTaskFailureClass::MalformedOutput);
+    failed.error = Some("model refused the request because policy rejected the prompt".to_string());
+    failed.error_classification = Some(AgentTaskFailureClass::Permanent);
     failed.error_retryable = Some(false);
     let records = vec![failed];
 
@@ -363,6 +363,44 @@ fn scheduler_does_not_retry_explicit_non_retryable_failures() {
         )
         .skip_reason(),
         Some("scheduler_non_retryable_failure")
+    );
+}
+
+#[test]
+fn scheduler_retries_malformed_backend_output_after_cooldown() {
+    let config = automation_config(Some("daily"), None);
+    let mut failed = record(
+        "run-1",
+        AgentTaskKind::MemoryCurator,
+        AutomationRunStatus::Failed,
+        1_000,
+    );
+    failed.error =
+        Some("config error: automation backend output must include a ops array".to_string());
+    failed.error_classification = Some(AgentTaskFailureClass::MalformedOutput);
+    failed.error_retryable = Some(false);
+    let records = vec![failed];
+
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::MemoryCurator,
+            &records,
+            SessionActivity::none(),
+            1_100
+        )
+        .skip_reason(),
+        Some("scheduler_cooldown_active")
+    );
+    assert!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::MemoryCurator,
+            &records,
+            SessionActivity::none(),
+            1_400
+        )
+        .is_due()
     );
 }
 

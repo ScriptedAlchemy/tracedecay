@@ -11,7 +11,7 @@ use tracedecay::automation::run_ledger::{
 };
 use tracedecay::branch_meta::BranchMeta;
 use tracedecay::global_db::{GlobalDb, StoreInstanceUpsert};
-use tracedecay::migrate::inventory::MigrationInventory;
+use tracedecay::migrate::inventory::{MigrationInventory, StoreStatus};
 use tracedecay::migrate::manifest::{
     ArtifactState, MigrationArtifact, MigrationManifest, MigrationProtocol, load_manifest,
     save_manifest, verify_migration_manifest,
@@ -1790,9 +1790,15 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
     let live_project = home.path().join("live-project");
     std::fs::create_dir_all(&live_project).expect("live project dir");
     std::fs::write(live_project.join("lib.rs"), "pub fn live() {}\n").expect("live source");
+    let global_db_path = home.path().join("database-override/global.db");
+    std::fs::create_dir_all(global_db_path.parent().unwrap()).expect("global db parent");
 
-    let daemon = crate::common::spawn_tracedecay_daemon(home.path());
-    let init = tracedecay_command_without_daemon(home.path(), &live_project)
+    let daemon = crate::common::spawn_tracedecay_daemon_with(home.path(), |command| {
+        command.env("TRACEDECAY_GLOBAL_DB", &global_db_path);
+    });
+    let mut init = tracedecay_command_without_daemon(home.path(), &live_project);
+    let init = init
+        .env("TRACEDECAY_GLOBAL_DB", &global_db_path)
         .args(["init", "."])
         .output()
         .expect("init live project");
@@ -1805,7 +1811,6 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
     drop(daemon);
 
     let stale_project = canonical_temp_path(home.path()).join("gone-project");
-    let global_db_path = profile_root(home.path()).join("global.db");
     create_runtime().block_on(async {
         let db = GlobalDb::open_at(&global_db_path)
             .await
@@ -1825,7 +1830,12 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
     std::fs::write(&blocked_manifest, b"blocked-store-sentinel")
         .expect("blocked manifest sentinel");
 
-    let preview = tracedecay_command_without_daemon(home.path(), &live_project)
+    let daemon = crate::common::spawn_tracedecay_daemon_with(home.path(), |command| {
+        command.env("TRACEDECAY_GLOBAL_DB", &global_db_path);
+    });
+    let mut preview = tracedecay_command_without_daemon(home.path(), &live_project);
+    let preview = preview
+        .env("TRACEDECAY_GLOBAL_DB", &global_db_path)
         .args(["migrate", "registry-gc", "--json"])
         .output()
         .expect("registry-gc preview");
@@ -1845,8 +1855,9 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
         preview["storage_project_candidates"][0],
         stale_project.display().to_string()
     );
-
-    let apply = tracedecay_command_without_daemon(home.path(), &live_project)
+    let mut apply = tracedecay_command_without_daemon(home.path(), &live_project);
+    let apply = apply
+        .env("TRACEDECAY_GLOBAL_DB", &global_db_path)
         .args(["migrate", "registry-gc", "--apply", "--json"])
         .output()
         .expect("registry-gc apply");
@@ -1860,6 +1871,23 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
     assert_eq!(apply["deleted_code_project_count"], 1);
     assert_eq!(apply["deleted_storage_project_count"], 1);
     assert_eq!(apply["deleted_count"], 2);
+    drop(daemon);
+
+    let mut offline_apply = tracedecay_command_without_daemon(home.path(), &live_project);
+    let offline_apply = offline_apply
+        .env("TRACEDECAY_GLOBAL_DB", &global_db_path)
+        .args(["migrate", "registry-gc", "--apply", "--json"])
+        .output()
+        .expect("offline registry-gc apply");
+    assert!(
+        offline_apply.status.success(),
+        "offline apply failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&offline_apply.stdout),
+        String::from_utf8_lossy(&offline_apply.stderr)
+    );
+    let offline_apply: serde_json::Value =
+        serde_json::from_slice(&offline_apply.stdout).expect("offline apply json");
+    assert_eq!(offline_apply["deleted_count"], 0);
 
     let remaining = create_runtime().block_on(async {
         GlobalDb::open_at(&global_db_path)
@@ -1882,6 +1910,39 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
         std::fs::read(&blocked_manifest).expect("blocked manifest retained"),
         b"blocked-store-sentinel"
     );
+}
+
+#[test]
+fn migrate_plan_reads_inventory_through_running_daemon() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    init_project_in_process(home.path(), &project_root);
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+
+    let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
+    command.args(["migrate", "plan", "--root", ".", "--json"]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    assert!(
+        output.status.success(),
+        "migrate plan should use the running daemon\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let inventory: MigrationInventory = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(inventory.global_db.is_some());
+    let store = inventory
+        .stores
+        .iter()
+        .find(|store| store.project_root == project_root)
+        .unwrap_or_else(|| {
+            panic!("relative --root must be canonicalized before daemon brokering: {inventory:?}")
+        });
+    assert!(store.data_dir.starts_with(profile_root(home.path())));
+    assert!(!store.statuses.contains(&StoreStatus::MissingDb));
+    assert!(store.statuses.contains(&StoreStatus::IntegrityUnchecked));
+    assert_ne!(store.data_dir, project_root.join(".tracedecay"));
 }
 
 #[test]

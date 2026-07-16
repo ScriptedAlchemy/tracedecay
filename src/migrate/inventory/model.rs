@@ -8,6 +8,14 @@ pub struct MigrationInventoryOptions {
     pub global_db_path: Option<PathBuf>,
     pub follow_symlinks: bool,
     pub include_all_registered: bool,
+    pub integrity: InventoryIntegrityMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InventoryIntegrityMode {
+    MetadataOnly,
+    #[default]
+    Full,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +49,7 @@ pub enum StoreStatus {
     Dirty,
     Locked,
     Corrupt,
+    IntegrityUnchecked,
     NeedsManualReview,
 }
 

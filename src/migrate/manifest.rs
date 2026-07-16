@@ -304,7 +304,9 @@ pub fn build_plan_manifest(
     };
     for artifact in &store.artifacts {
         let relpath = artifact_relative_path(&artifact.path, &store.data_dir)?;
-        if is_sqlite_sidecar_artifact_entry(&artifact.kind, &artifact.path) {
+        if artifact.kind == "sync_lock"
+            || is_sqlite_sidecar_artifact_entry(&artifact.kind, &artifact.path)
+        {
             continue;
         }
         manifest.artifacts.push(MigrationArtifact::new(
@@ -757,8 +759,23 @@ pub fn export_profile_store(
             .map_err(|error| {
                 invalid_manifest(&format!("could not isolate profile store export: {error}"))
             })?;
+    export_profile_store_with_lease(profile_root, project_id, target_dir, &lifecycle)
+}
+
+/// Exports one profile store while reusing the caller's exclusive profile lease.
+pub fn export_profile_store_with_lease(
+    profile_root: &Path,
+    project_id: &str,
+    target_dir: &Path,
+    lifecycle: &crate::lifecycle_lease::LifecycleLease,
+) -> io::Result<MigrationExportReport> {
+    if !lifecycle.is_exclusive() || !lifecycle.guards_profile(profile_root) {
+        return Err(invalid_manifest(
+            "profile store export lease must exclusively guard the source profile",
+        ));
+    }
     let _database_scope = crate::db::enter_maintenance_database_scope(
-        &lifecycle,
+        lifecycle,
         profile_root,
         "profile store export",
     )

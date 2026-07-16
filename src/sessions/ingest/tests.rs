@@ -262,11 +262,30 @@ fn transcript_privacy_and_non_durable_failures_are_bounded_and_permanent() {
     let non_durable = classify_transcript_ingest_failure("claude", "hook", &non_durable);
     assert_eq!(non_durable.reason_code, "transcript_record_non_durable");
     assert!(!non_durable.retryable);
-    assert!(
-        !serde_json::to_string(&non_durable)
-            .unwrap()
-            .contains("private detail")
-    );
+    let serialized = serde_json::to_string(&non_durable).unwrap();
+    assert!(!serialized.contains("private detail"));
+    assert!(serialized.contains(r#""source_locator":{"start":7,"end":99}"#));
+
+    let controlled = source::TranscriptIngestError::NonDurableRecord {
+        provider: "claude",
+        offset: 11,
+        end_offset: 23,
+        reason: "malformed snapshot JSON",
+    };
+    let controlled = classify_transcript_ingest_failure("claude", "snapshot", &controlled);
+    assert_eq!(controlled.reason_code, "malformed_snapshot_json");
+    assert_eq!(controlled.source_locator.unwrap().start(), 11);
+    assert_eq!(controlled.source_locator.unwrap().end(), 23);
+
+    let bounded_code = source::TranscriptIngestError::NonDurableRecord {
+        provider: "claude",
+        offset: 0,
+        end_offset: 0,
+        reason: "authority_unavailable",
+    };
+    let bounded_code = classify_transcript_ingest_failure("claude", "hook", &bounded_code);
+    assert_eq!(bounded_code.reason_code, "authority_unavailable");
+    assert_eq!(bounded_code.source_locator, None);
 }
 
 #[test]

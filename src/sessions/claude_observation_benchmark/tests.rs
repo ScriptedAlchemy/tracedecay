@@ -44,17 +44,14 @@ fn workload_manifest_matches_executable_contract() {
 }
 
 #[test]
-fn providerless_checked_in_results_remain_valid_historical_evidence() {
+fn checked_in_evidence_preserves_providerless_historical_results() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("benchmarks/pr5-observation");
-    assert_eq!(
-        validate_evidence_directory(&directory, false).unwrap(),
-        None
-    );
+    let acceptance = validate_evidence_directory(&directory, false).unwrap();
     let index: serde_json::Value = serde_json::from_slice(
         &fs::read(directory.join("evidence-index.json")).expect("read evidence index"),
     )
     .expect("parse evidence index");
-    assert!(index["current_acceptance"].is_null());
+    assert_eq!(acceptance.as_deref(), index["current_acceptance"].as_str());
     for name in index["historical_stale"]
         .as_array()
         .expect("historical evidence list")

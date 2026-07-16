@@ -1,4 +1,6 @@
 use std::fmt::Write;
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Write as IoWrite};
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
@@ -28,6 +30,120 @@ pub enum DaemonServiceState {
     StoppedEnabled,
     StoppedDisabled,
     Masked,
+}
+
+/// Owns the exclusive maintenance lease after stopping the managed daemon and
+/// restores the captured daemon state only after releasing that lease.
+pub struct QuiescedDaemonLifecycle {
+    previous_state: DaemonServiceState,
+    lifecycle_lease: Option<crate::lifecycle_lease::LifecycleLease>,
+    restored: bool,
+}
+
+impl QuiescedDaemonLifecycle {
+    pub fn acquire(operation: &str) -> Result<Self> {
+        let previous_state = quiesce_installed_service_before_lease()?;
+        match crate::lifecycle_lease::acquire_exclusive(operation) {
+            Ok(lifecycle_lease) => {
+                let mut guard = Self {
+                    previous_state,
+                    lifecycle_lease: Some(lifecycle_lease),
+                    restored: false,
+                };
+                match verify_installed_service_quiesced_under_lease() {
+                    Ok(_) => Ok(guard),
+                    Err(operation_error) => {
+                        let restore_result = guard.restore();
+                        combine_operation_and_restore(
+                            operation,
+                            Err(operation_error),
+                            restore_result,
+                        )
+                    }
+                }
+            }
+            Err(operation_error) => {
+                let restore_result = restore_installed_service_after_failed_acquire(previous_state);
+                combine_operation_and_restore(operation, Err(operation_error), restore_result)
+            }
+        }
+    }
+
+    pub fn lifecycle_lease(&self) -> Result<&crate::lifecycle_lease::LifecycleLease> {
+        self.lifecycle_lease
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "quiesced daemon lifecycle lease already released".to_string(),
+            })
+    }
+
+    pub fn previous_state(&self) -> DaemonServiceState {
+        self.previous_state
+    }
+
+    pub fn finish(mut self) -> Result<()> {
+        self.restore()
+    }
+
+    pub fn finish_with_state(mut self, state: DaemonServiceState) -> Result<()> {
+        self.restore_state(state)
+    }
+
+    pub fn finish_without_restore(mut self) {
+        drop(self.lifecycle_lease.take());
+        self.restored = true;
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        if self.restored {
+            return Ok(());
+        }
+        self.restore_state(self.previous_state)
+    }
+
+    fn restore_state(&mut self, state: DaemonServiceState) -> Result<()> {
+        if state.is_running() {
+            self.downgrade_to_shared()?;
+            restore_installed_service_after_update(state)?;
+        } else {
+            drop(self.lifecycle_lease.take());
+        }
+        self.restored = true;
+        Ok(())
+    }
+
+    fn downgrade_to_shared(&mut self) -> Result<()> {
+        if self
+            .lifecycle_lease
+            .as_ref()
+            .is_some_and(|lease| !lease.is_exclusive())
+        {
+            return Ok(());
+        }
+        let lease = self
+            .lifecycle_lease
+            .as_mut()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "quiesced daemon lifecycle lease is missing".to_string(),
+            })?;
+        lease.downgrade_to_shared()
+    }
+}
+
+impl Drop for QuiescedDaemonLifecycle {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+pub fn with_quiesced_installed_service<T>(
+    operation: &str,
+    action: impl FnOnce(&crate::lifecycle_lease::LifecycleLease) -> Result<T>,
+) -> Result<T> {
+    let mut guard = QuiescedDaemonLifecycle::acquire(operation)?;
+    let operation_result = guard.lifecycle_lease().and_then(action);
+    let restore_result = guard.restore();
+    combine_operation_and_restore(operation, operation_result, restore_result)
 }
 
 impl DaemonServiceState {
@@ -284,8 +400,14 @@ pub fn service_spec(
 }
 
 pub fn install_service(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf> {
-    let _lifecycle_lease = crate::lifecycle_lease::acquire_exclusive("daemon service install")?;
-    install_service_under_lease(spec, start)
+    let guard = QuiescedDaemonLifecycle::acquire("daemon service install")?;
+    let operation_result = install_service_under_lease(spec, false);
+    let restore_result = if start {
+        guard.finish_with_state(DaemonServiceState::RunningEnabled)
+    } else {
+        guard.finish()
+    };
+    combine_operation_and_restore("daemon service install", operation_result, restore_result)
 }
 
 fn install_service_under_lease(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf> {
@@ -297,13 +419,20 @@ fn install_service_under_lease(spec: &DaemonServiceSpec, start: bool) -> Result<
 }
 
 pub fn refresh_service(spec: &DaemonServiceSpec) -> Result<PathBuf> {
-    let _lifecycle_lease = crate::lifecycle_lease::acquire_exclusive("daemon service refresh")?;
-    refresh_service_under_lease(spec)
-}
-
-fn refresh_service_under_lease(spec: &DaemonServiceSpec) -> Result<PathBuf> {
+    let guard = QuiescedDaemonLifecycle::acquire("daemon service refresh")?;
+    let desired_state = match guard.previous_state() {
+        DaemonServiceState::Missing => DaemonServiceState::RunningEnabled,
+        state => state,
+    };
+    let stopped_state = match desired_state {
+        DaemonServiceState::RunningEnabled => DaemonServiceState::StoppedEnabled,
+        DaemonServiceState::RunningDisabled => DaemonServiceState::StoppedDisabled,
+        state => state,
+    };
     let runner = ServiceRunner::current()?;
-    refresh_service_with_runner(&runner, spec, DaemonServiceState::RunningEnabled)
+    let operation_result = refresh_service_with_runner(&runner, spec, stopped_state);
+    let restore_result = guard.finish_with_state(desired_state);
+    combine_operation_and_restore("daemon service refresh", operation_result, restore_result)
 }
 
 fn refresh_service_with_runner(
@@ -328,8 +457,9 @@ fn refresh_service_with_runner(
 }
 
 pub fn refresh_installed_service(spec: &DaemonServiceSpec) -> Result<Option<PathBuf>> {
-    let _lifecycle_lease = crate::lifecycle_lease::acquire_exclusive("daemon service refresh")?;
-    refresh_installed_service_under_lease(spec)
+    with_quiesced_installed_service("daemon service refresh", |_| {
+        refresh_installed_service_under_lease(spec)
+    })
 }
 
 #[doc(hidden)]
@@ -373,16 +503,24 @@ fn refresh_installed_service_with_state(
     refresh_service_with_runner(&runner, &refreshed_spec, previous_state).map(Some)
 }
 
+/// Stops the managed daemon before an exclusive lifecycle lease is acquired.
+/// The daemon owns a shared lifecycle lease for its lifetime, so the order is
+/// intentionally stop-then-lock.
 #[doc(hidden)]
-pub fn quiesce_installed_service_under_lease() -> Result<DaemonServiceState> {
+pub fn quiesce_installed_service_before_lease() -> Result<DaemonServiceState> {
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
         return Ok(DaemonServiceState::Missing);
     }
     let service_path = service_unit_path()?;
     if !service_path.exists() {
-        if daemon_reachable() {
+        let socket_path = default_socket_path()?;
+        let socket_state = daemon_socket_state(&socket_path);
+        if !socket_state.is_proven_quiesced() {
             return Err(TraceDecayError::Config {
-                message: "refusing post-update mutations: a TraceDecay daemon is reachable but no managed service unit exists; stop the unmanaged daemon and retry".to_string(),
+                message: format!(
+                    "refusing post-update mutations: unmanaged daemon socket '{}' is {socket_state}; stop the daemon and retry",
+                    socket_path.display()
+                ),
             });
         }
         return Ok(DaemonServiceState::Missing);
@@ -392,14 +530,12 @@ pub fn quiesce_installed_service_under_lease() -> Result<DaemonServiceState> {
     let runner = ServiceRunner::current()?;
     let state = runner.service_state(&socket_path);
     if !state.is_running() {
-        if matches!(
-            daemon_socket_state(&socket_path),
-            DaemonSocketState::Connectable
-        ) {
+        let socket_state = daemon_socket_state(&socket_path);
+        if !socket_state.is_proven_quiesced() {
             return Err(TraceDecayError::Config {
                 message: format!(
-                    "refusing post-update mutations: an unmanaged TraceDecay daemon is reachable at '{}'; stop it and retry",
-                    socket_path.display()
+                    "refusing post-update mutations: unmanaged daemon socket '{}' is {socket_state}; stop the daemon and retry",
+                    socket_path.display(),
                 ),
             });
         }
@@ -407,6 +543,74 @@ pub fn quiesce_installed_service_under_lease() -> Result<DaemonServiceState> {
     }
     runner.stop_for_update()?;
     Ok(state)
+}
+
+/// Verifies that pre-lease quiescence still holds. This never stops or starts
+/// a service while the caller owns the exclusive lifecycle lease.
+#[doc(hidden)]
+pub fn verify_installed_service_quiesced_under_lease() -> Result<DaemonServiceState> {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return Ok(DaemonServiceState::Missing);
+    }
+    let service_path = service_unit_path()?;
+    if !service_path.exists() {
+        let socket_path = default_socket_path()?;
+        let socket_state = daemon_socket_state(&socket_path);
+        if !socket_state.is_proven_quiesced() {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "refusing post-update mutations: unmanaged daemon socket '{}' became {socket_state} after pre-lease quiescence",
+                    socket_path.display()
+                ),
+            });
+        }
+        return Ok(DaemonServiceState::Missing);
+    }
+    let unit = read_service_unit(&service_path)?;
+    let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
+    let runner = ServiceRunner::current()?;
+    let state = runner.service_state(&socket_path);
+    let socket_state = daemon_socket_state(&socket_path);
+    if state.is_running() || !socket_state.is_proven_quiesced() {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "refusing post-update mutations: TraceDecay daemon service is {state:?} and socket '{}' is {socket_state} after pre-lease quiescence",
+                socket_path.display()
+            ),
+        });
+    }
+    Ok(state)
+}
+
+/// Restores the exact running/disabled state captured before maintenance.
+/// Callers hold a shared lifecycle lease, never the exclusive mutation lease.
+#[doc(hidden)]
+pub fn restore_installed_service_after_update(previous_state: DaemonServiceState) -> Result<()> {
+    if !previous_state.is_running() || !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return Ok(());
+    }
+    let service_path = service_unit_path()?;
+    if !service_path.exists() {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "cannot restore TraceDecay daemon state: service unit '{}' is missing",
+                service_path.display()
+            ),
+        });
+    }
+    let unit = read_service_unit(&service_path)?;
+    let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
+    ServiceRunner::current()?.restore_after_update(&service_path, &socket_path, previous_state)
+}
+
+fn restore_installed_service_after_failed_acquire(
+    previous_state: DaemonServiceState,
+) -> Result<()> {
+    if !previous_state.is_running() {
+        return Ok(());
+    }
+    let _lifecycle_lease = crate::lifecycle_lease::acquire_shared_blocking("daemon state restore")?;
+    restore_installed_service_after_update(previous_state)
 }
 
 fn write_service_unit(spec: &DaemonServiceSpec) -> Result<PathBuf> {
@@ -522,8 +726,124 @@ fn socket_path_from_unit_text(unit: &str) -> Option<PathBuf> {
 }
 
 pub fn uninstall_service(stop: bool) -> Result<PathBuf> {
-    let _lifecycle_lease = crate::lifecycle_lease::acquire_exclusive("daemon service uninstall")?;
-    uninstall_service_under_lease(stop)
+    if !stop {
+        let state = installed_service_state()?;
+        if state.is_running() {
+            return Err(TraceDecayError::Config {
+                message: "cannot uninstall the daemon service with --no-stop while the managed daemon is running; stop it first or omit --no-stop".to_string(),
+            });
+        }
+        let _lifecycle_lease =
+            crate::lifecycle_lease::acquire_exclusive("daemon service uninstall --no-stop")?;
+        verify_installed_service_quiesced_under_lease()?;
+        return uninstall_service_under_lease(false);
+    }
+    let guard = QuiescedDaemonLifecycle::acquire("daemon service uninstall")?;
+    let operation_result = uninstall_service_under_lease(true);
+    guard.finish_without_restore();
+    operation_result
+}
+
+fn installed_service_state() -> Result<DaemonServiceState> {
+    let service_path = service_unit_path()?;
+    if !service_path.exists() {
+        return Ok(DaemonServiceState::Missing);
+    }
+    let unit = read_service_unit(&service_path)?;
+    let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
+    Ok(ServiceRunner::current()?.service_state(&socket_path))
+}
+
+/// Waits for a strict maintenance command to observe the exact managed-service
+/// state it captured before quiescence. Running services must also accept a
+/// `TraceDecay` protocol request from the socket configured in their installed
+/// unit and identify as the current installed version; stopped or missing
+/// services must remain quiescent.
+pub fn wait_for_installed_service_state(expected: DaemonServiceState) -> Result<()> {
+    const ATTEMPTS: usize = 50;
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+    let mut last = installed_service_status_snapshot()?;
+    for attempt in 0..ATTEMPTS {
+        let (actual, _, socket_state, protocol_state) = &last;
+        if restored_service_matches(expected, *actual, *socket_state, protocol_state) {
+            return Ok(());
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(POLL_INTERVAL);
+            last = installed_service_status_snapshot()?;
+        }
+    }
+
+    let (actual, socket_path, socket_state, protocol_state) = last;
+    Err(TraceDecayError::Config {
+        message: format!(
+            "TraceDecay daemon did not return to {expected:?}: service is {actual:?}, socket '{}' is {socket_state}, and protocol readiness is {protocol_state}",
+            socket_path.display()
+        ),
+    })
+}
+
+fn installed_service_status_snapshot() -> Result<(
+    DaemonServiceState,
+    PathBuf,
+    DaemonSocketState,
+    DaemonProtocolState,
+)> {
+    let service_path = service_unit_path()?;
+    if !service_path.exists() {
+        let socket_path = default_socket_path()?;
+        let socket_state = daemon_socket_state(&socket_path);
+        return Ok((
+            DaemonServiceState::Missing,
+            socket_path,
+            socket_state,
+            DaemonProtocolState::NotRequired,
+        ));
+    }
+    let unit = read_service_unit(&service_path)?;
+    let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
+    let actual = ServiceRunner::current()?.service_state(&socket_path);
+    let socket_state = daemon_socket_state(&socket_path);
+    let protocol_state = if actual.is_running() {
+        daemon_protocol_state(&socket_path)
+    } else {
+        DaemonProtocolState::NotRequired
+    };
+    Ok((actual, socket_path, socket_state, protocol_state))
+}
+
+fn restored_service_matches(
+    expected: DaemonServiceState,
+    actual: DaemonServiceState,
+    socket_state: DaemonSocketState,
+    protocol_state: &DaemonProtocolState,
+) -> bool {
+    if actual != expected {
+        return false;
+    }
+    if expected.is_running() {
+        matches!(socket_state, DaemonSocketState::Connectable)
+            && matches!(protocol_state, DaemonProtocolState::Ready)
+    } else {
+        socket_state.is_proven_quiesced()
+    }
+}
+
+fn combine_operation_and_restore<T>(
+    operation: &str,
+    operation_result: Result<T>,
+    restore_result: Result<()>,
+) -> Result<T> {
+    match (operation_result, restore_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(operation_error), Err(restore_error)) => Err(TraceDecayError::Config {
+            message: format!(
+                "{operation} failed: {operation_error}; daemon state restoration also failed: {restore_error}"
+            ),
+        }),
+    }
 }
 
 fn uninstall_service_under_lease(stop: bool) -> Result<PathBuf> {
@@ -594,6 +914,123 @@ enum DaemonSocketState {
     PresentUnreachable,
     #[cfg(not(unix))]
     Present,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DaemonProtocolState {
+    NotRequired,
+    Ready,
+    Unresponsive(String),
+    IdentityMismatch {
+        name: Option<String>,
+        version: Option<String>,
+    },
+}
+
+impl std::fmt::Display for DaemonProtocolState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotRequired => f.write_str("not required"),
+            Self::Ready => f.write_str("ready"),
+            Self::Unresponsive(error) => write!(f, "unresponsive ({error})"),
+            Self::IdentityMismatch { name, version } => write!(
+                f,
+                "identity mismatch (name={}, version={}, expected name=tracedecay, version={})",
+                name.as_deref().unwrap_or("missing"),
+                version.as_deref().unwrap_or("missing"),
+                env!("CARGO_PKG_VERSION")
+            ),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn daemon_protocol_state(socket_path: &Path) -> DaemonProtocolState {
+    match query_daemon_identity(socket_path) {
+        Ok((name, version))
+            if name.as_deref() == Some("tracedecay")
+                && version.as_deref() == Some(env!("CARGO_PKG_VERSION")) =>
+        {
+            DaemonProtocolState::Ready
+        }
+        Ok((name, version)) => DaemonProtocolState::IdentityMismatch { name, version },
+        Err(error) => DaemonProtocolState::Unresponsive(error.to_string()),
+    }
+}
+
+#[cfg(not(unix))]
+fn daemon_protocol_state(_socket_path: &Path) -> DaemonProtocolState {
+    DaemonProtocolState::Unresponsive("daemon protocol is unavailable on this platform".to_string())
+}
+
+#[cfg(unix)]
+fn query_daemon_identity(socket_path: &Path) -> Result<(Option<String>, Option<String>)> {
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+    const REQUEST_ID: i64 = 1;
+
+    let connection = super::client_connection(socket_path)?;
+    let mut stream = StdUnixStream::connect(socket_path)?;
+    stream.set_read_timeout(Some(PROBE_TIMEOUT))?;
+    stream.set_write_timeout(Some(PROBE_TIMEOUT))?;
+    let handshake = super::DaemonHandshake::for_current_client(None, None, false, false)?;
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": REQUEST_ID,
+        "method": "initialize"
+    });
+    let mut preamble = String::new();
+    if let Some(auth_token) = connection.auth_token.as_deref() {
+        preamble.push_str(&super::transport::DaemonAuthPreface::new(auth_token).to_line()?);
+        preamble.push('\n');
+    }
+    preamble.push_str(&handshake.to_line()?);
+    preamble.push('\n');
+    preamble.push_str(&request.to_string());
+    preamble.push('\n');
+    IoWrite::write_all(&mut stream, preamble.as_bytes())?;
+    IoWrite::flush(&mut stream)?;
+
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Err(TraceDecayError::Config {
+                message: "daemon closed the readiness probe before returning initialize"
+                    .to_string(),
+            });
+        }
+        let response: serde_json::Value = serde_json::from_str(line.trim())?;
+        if response.get("id") != Some(&serde_json::json!(REQUEST_ID)) {
+            continue;
+        }
+        if let Some(error) = response.get("error") {
+            return Err(TraceDecayError::Config {
+                message: format!("daemon rejected the readiness probe: {error}"),
+            });
+        }
+        let name = response
+            .pointer("/result/serverInfo/name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let version = response
+            .pointer("/result/serverInfo/version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        return Ok((name, version));
+    }
+}
+
+impl DaemonSocketState {
+    fn is_proven_quiesced(self) -> bool {
+        #[cfg(unix)]
+        {
+            matches!(self, Self::Missing | Self::Stale)
+        }
+        #[cfg(not(unix))]
+        {
+            matches!(self, Self::Missing)
+        }
+    }
 }
 
 impl std::fmt::Display for DaemonSocketState {
@@ -755,6 +1192,35 @@ impl ServiceRunner {
         match self {
             Self::Systemd => run_systemctl(&["stop", super::SERVICE_NAME]),
             Self::Launchd => launchd_before_uninstall(true),
+        }
+    }
+
+    fn restore_after_update(
+        &self,
+        service_path: &Path,
+        socket_path: &Path,
+        previous_state: DaemonServiceState,
+    ) -> Result<()> {
+        if !previous_state.is_running() {
+            return Ok(());
+        }
+        match self {
+            Self::Systemd => {
+                run_systemctl(&["daemon-reload"])?;
+                if previous_state.is_enabled() {
+                    run_systemctl(&["enable", super::SERVICE_NAME])?;
+                } else {
+                    run_systemctl(&["disable", super::SERVICE_NAME])?;
+                }
+                run_systemctl(&["start", super::SERVICE_NAME])
+            }
+            Self::Launchd => {
+                launchd_refresh(service_path, socket_path)?;
+                if !previous_state.is_enabled() {
+                    run_launchctl(&["disable", &launchd_service_target()?])?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1073,8 +1539,12 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
 
+    #[cfg(unix)]
+    use std::io::{BufRead, Write};
     #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixListener;
     #[cfg(unix)]
     use tempfile::TempDir;
 
@@ -1207,6 +1677,138 @@ mod tests {
             status.contains(&format!("socket: {} (connectable)", socket.display())),
             "status should report connectable socket, got:\n{status}"
         );
+    }
+
+    #[test]
+    fn strict_restoration_requires_readiness_only_for_running_state() {
+        assert!(super::restored_service_matches(
+            DaemonServiceState::RunningEnabled,
+            DaemonServiceState::RunningEnabled,
+            super::DaemonSocketState::Connectable,
+            &super::DaemonProtocolState::Ready,
+        ));
+        assert!(!super::restored_service_matches(
+            DaemonServiceState::RunningEnabled,
+            DaemonServiceState::RunningEnabled,
+            super::DaemonSocketState::Missing,
+            &super::DaemonProtocolState::NotRequired,
+        ));
+        assert!(super::restored_service_matches(
+            DaemonServiceState::StoppedEnabled,
+            DaemonServiceState::StoppedEnabled,
+            super::DaemonSocketState::Missing,
+            &super::DaemonProtocolState::NotRequired,
+        ));
+        assert!(!super::restored_service_matches(
+            DaemonServiceState::StoppedEnabled,
+            DaemonServiceState::RunningEnabled,
+            super::DaemonSocketState::Connectable,
+            &super::DaemonProtocolState::Ready,
+        ));
+        assert!(!super::restored_service_matches(
+            DaemonServiceState::RunningEnabled,
+            DaemonServiceState::RunningEnabled,
+            super::DaemonSocketState::Connectable,
+            &super::DaemonProtocolState::Unresponsive("not TraceDecay".to_string()),
+        ));
+    }
+
+    #[cfg(unix)]
+    fn serve_probe_response(
+        listener: UnixListener,
+        name: &'static str,
+        version: &'static str,
+        expected_auth_token: Option<String>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept readiness probe");
+            let mut reader =
+                std::io::BufReader::new(stream.try_clone().expect("clone readiness stream"));
+            let mut line = String::new();
+            if let Some(expected_auth_token) = expected_auth_token {
+                reader.read_line(&mut line).expect("read auth preface");
+                let preface = super::super::transport::DaemonAuthPreface::from_line(line.trim())
+                    .expect("parse auth preface");
+                assert!(preface.authenticate(&expected_auth_token));
+                line.clear();
+            }
+            reader.read_line(&mut line).expect("read handshake");
+            line.clear();
+            reader.read_line(&mut line).expect("read initialize");
+            let request: serde_json::Value =
+                serde_json::from_str(line.trim()).expect("initialize json");
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {
+                    "serverInfo": {"name": name, "version": version}
+                }
+            });
+            writeln!(stream, "{response}").expect("write initialize response");
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_protocol_probe_requires_current_tracedecay_identity() {
+        let _env_lock = lock_user_data_dir_test_env();
+        let profile = TempDir::new().expect("profile temp dir");
+        let _data_dir_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, profile.path());
+
+        let ready_socket = profile.path().join("ready.sock");
+        let ready_listener = UnixListener::bind(&ready_socket).expect("bind ready socket");
+        let ready_server = serve_probe_response(
+            ready_listener,
+            "tracedecay",
+            env!("CARGO_PKG_VERSION"),
+            None,
+        );
+        assert_eq!(
+            super::daemon_protocol_state(&ready_socket),
+            super::DaemonProtocolState::Ready
+        );
+        ready_server.join().expect("join ready server");
+
+        let stale_socket = profile.path().join("stale.sock");
+        let stale_listener = UnixListener::bind(&stale_socket).expect("bind stale socket");
+        let stale_server = serve_probe_response(stale_listener, "tracedecay", "0.0.0-stale", None);
+        assert_eq!(
+            super::daemon_protocol_state(&stale_socket),
+            super::DaemonProtocolState::IdentityMismatch {
+                name: Some("tracedecay".to_string()),
+                version: Some("0.0.0-stale".to_string()),
+            }
+        );
+        stale_server.join().expect("join stale server");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_protocol_probe_authenticates_to_managed_daemon() {
+        let _env_lock = lock_user_data_dir_test_env();
+        let profile = TempDir::new().expect("profile temp dir");
+        let _data_dir_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, profile.path());
+        let socket_path = profile.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind managed daemon socket");
+        let endpoint = super::super::transport::DaemonEndpoint::Unix(socket_path.clone());
+        let authority = super::super::authority::DaemonAuthority::acquire(
+            profile.path(),
+            &endpoint,
+            env!("CARGO_PKG_VERSION"),
+        )
+        .expect("publish daemon authority");
+        let server = serve_probe_response(
+            listener,
+            "tracedecay",
+            env!("CARGO_PKG_VERSION"),
+            Some(authority.auth_token().to_string()),
+        );
+
+        assert_eq!(
+            super::daemon_protocol_state(&socket_path),
+            super::DaemonProtocolState::Ready
+        );
+        server.join().expect("join authenticated probe server");
     }
 
     #[test]
@@ -1496,7 +2098,7 @@ mod tests {
         ));
         assert_eq!(
             std::fs::read_to_string(log).expect("systemctl log"),
-            "--user daemon-reload\n--user enable tracedecay.service\n--user restart tracedecay.service\n"
+            "--user daemon-reload\n--user enable tracedecay.service\n--user daemon-reload\n--user enable tracedecay.service\n--user start tracedecay.service\n"
         );
     }
 
@@ -1545,7 +2147,7 @@ mod tests {
         let socket_path = super::default_socket_path().expect("default socket");
         let _listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind socket");
 
-        let error = super::quiesce_installed_service_under_lease()
+        let error = super::quiesce_installed_service_before_lease()
             .expect_err("unmanaged daemon must block post-update mutations");
 
         assert!(error.to_string().contains("unmanaged daemon"));
@@ -1565,9 +2167,10 @@ mod tests {
 
         let systemctl = fake_bin.join("systemctl");
         let log = dir.path().join("systemctl.log");
+        let stopped = dir.path().join("systemctl.stopped");
         std::fs::write(
             &systemctl,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\n[ \"$2\" = is-active ] && [ -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\" ] && exit 3\n[ \"$2\" = stop ] && touch \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\n[ \"$2\" = start ] && rm -f \"$TRACEDECAY_SYSTEMCTL_STOPPED\"\nexit 0\n",
         )
         .expect("fake systemctl");
         std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
@@ -1579,6 +2182,7 @@ mod tests {
             EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
         let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
         let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+        let _stopped_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_STOPPED", &stopped);
 
         let service_path = config_home
             .join("systemd/user")
@@ -1602,10 +2206,14 @@ mod tests {
         };
 
         let previous_state =
-            super::quiesce_installed_service_under_lease().expect("quiesce installed service");
-        let outcome =
-            super::refresh_installed_service_under_lease_with_state(&spec, previous_state)
-                .expect("refresh service");
+            super::quiesce_installed_service_before_lease().expect("quiesce installed service");
+        let outcome = super::refresh_installed_service_under_lease_with_state(
+            &spec,
+            DaemonServiceState::StoppedEnabled,
+        )
+        .expect("refresh service");
+        super::restore_installed_service_after_update(previous_state)
+            .expect("restore service state");
 
         assert_eq!(outcome, Some(service_path.clone()));
         let unit = std::fs::read_to_string(service_path).expect("service unit");
@@ -1615,7 +2223,7 @@ mod tests {
         assert!(!unit.contains("/run/user/1000/tracedecay.sock"));
         assert_eq!(
             std::fs::read_to_string(log).expect("systemctl log"),
-            "--user is-active --quiet tracedecay.service\n--user is-enabled tracedecay.service\n--user stop tracedecay.service\n--user daemon-reload\n--user enable tracedecay.service\n--user restart tracedecay.service\n"
+            "--user is-active --quiet tracedecay.service\n--user is-enabled tracedecay.service\n--user stop tracedecay.service\n--user daemon-reload\n--user enable tracedecay.service\n--user daemon-reload\n--user enable tracedecay.service\n--user start tracedecay.service\n"
         );
     }
 

@@ -6,16 +6,23 @@ use super::artifacts::{
     record_sqlite_family_sidecars,
 };
 use super::model::{
-    RegistryStatus, SkippedPath, StoreArtifact, StoreBrand, StoreInventory, StoreRole, StoreStatus,
+    InventoryIntegrityMode, RegistryStatus, SkippedPath, StoreArtifact, StoreBrand, StoreInventory,
+    StoreRole, StoreStatus,
 };
 use super::sqlite::sqlite_quick_check;
 use crate::config::{self, TRACEDECAY_DIR, db_filename};
 use crate::errors::Result;
 use crate::storage::{BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME};
 
+#[derive(Clone, Copy)]
+pub(super) struct InventoryScanOptions {
+    pub follow_symlinks: bool,
+    pub integrity: InventoryIntegrityMode,
+}
+
 pub(super) async fn scan_root(
     root: &Path,
-    follow_symlinks: bool,
+    options: InventoryScanOptions,
     seen_data_dirs: &mut HashSet<PathBuf>,
     stores: &mut Vec<StoreInventory>,
     skipped: &mut Vec<SkippedPath>,
@@ -24,7 +31,7 @@ pub(super) async fn scan_root(
     let mut work = vec![root.to_path_buf()];
 
     while let Some(dir) = work.pop() {
-        let visit_key = if follow_symlinks {
+        let visit_key = if options.follow_symlinks {
             dir.canonicalize().unwrap_or_else(|_| dir.clone())
         } else {
             dir.clone()
@@ -36,7 +43,7 @@ pub(super) async fn scan_root(
         inspect_data_dir_candidate(
             &dir,
             TRACEDECAY_DIR,
-            follow_symlinks,
+            options,
             seen_data_dirs,
             stores,
             skipped,
@@ -52,7 +59,7 @@ pub(super) async fn scan_root(
                 continue;
             };
             let path = entry.path();
-            if file_type.is_symlink() && !follow_symlinks {
+            if file_type.is_symlink() && !options.follow_symlinks {
                 skipped.push(SkippedPath {
                     path,
                     reason: "symlink".to_string(),
@@ -87,7 +94,7 @@ pub(super) async fn scan_root(
 pub(super) async fn inspect_data_dir_candidate(
     project_root: &Path,
     dir_name: &str,
-    follow_symlinks: bool,
+    options: InventoryScanOptions,
     seen_data_dirs: &mut HashSet<PathBuf>,
     stores: &mut Vec<StoreInventory>,
     skipped: &mut Vec<SkippedPath>,
@@ -98,7 +105,7 @@ pub(super) async fn inspect_data_dir_candidate(
         return Ok(());
     };
     if meta.file_type().is_symlink() {
-        if !follow_symlinks {
+        if !options.follow_symlinks {
             skipped.push(SkippedPath {
                 path: data_dir,
                 reason: "symlink".to_string(),
@@ -112,19 +119,56 @@ pub(super) async fn inspect_data_dir_candidate(
     } else if !meta.is_dir() {
         return Ok(());
     }
-    let key = data_dir.canonicalize().unwrap_or_else(|_| data_dir.clone());
+
+    let db_path = data_dir.join(db_filename(&data_dir));
+    if role == StoreRole::CodeProjectStore
+        && dir_name == TRACEDECAY_DIR
+        && !db_path.is_file()
+        && crate::storage::read_enrollment_marker(project_root).is_ok_and(|marker| {
+            marker.is_some_and(|marker| {
+                marker.storage_mode == crate::storage::StorageMode::ProfileSharded
+            })
+        })
+    {
+        return Ok(());
+    }
+
+    inspect_data_dir(
+        project_root,
+        &data_dir,
+        options,
+        seen_data_dirs,
+        stores,
+        skipped,
+        role,
+    )
+    .await
+}
+
+pub(super) async fn inspect_data_dir(
+    project_root: &Path,
+    data_dir: &Path,
+    options: InventoryScanOptions,
+    seen_data_dirs: &mut HashSet<PathBuf>,
+    stores: &mut Vec<StoreInventory>,
+    skipped: &mut Vec<SkippedPath>,
+    role: StoreRole,
+) -> Result<()> {
+    let key = data_dir
+        .canonicalize()
+        .unwrap_or_else(|_| data_dir.to_path_buf());
     if !seen_data_dirs.insert(key) {
         return Ok(());
     }
     let brand = StoreBrand::TraceDecay;
-    let db_path = data_dir.join(db_filename(&data_dir));
+    let db_path = data_dir.join(db_filename(data_dir));
     let store = inspect_project_store(
         project_root,
-        &data_dir,
+        data_dir,
         db_path,
         brand,
         role,
-        follow_symlinks,
+        options,
         skipped,
     )
     .await?;
@@ -138,7 +182,7 @@ async fn inspect_project_store(
     db_path: PathBuf,
     brand: StoreBrand,
     role: StoreRole,
-    follow_symlinks: bool,
+    options: InventoryScanOptions,
     skipped: &mut Vec<SkippedPath>,
 ) -> Result<StoreInventory> {
     let mut statuses = Vec::new();
@@ -151,8 +195,14 @@ async fn inspect_project_store(
             path: db_path.clone(),
         });
         record_sqlite_family_sidecars(&db_path, "graph_db_wal", "graph_db_shm", &mut artifacts);
-        if !sqlite_quick_check(&db_path).await {
-            statuses.push(StoreStatus::Corrupt);
+        match options.integrity {
+            InventoryIntegrityMode::MetadataOnly => {
+                statuses.push(StoreStatus::IntegrityUnchecked);
+            }
+            InventoryIntegrityMode::Full if !sqlite_quick_check(&db_path).await => {
+                statuses.push(StoreStatus::Corrupt);
+            }
+            InventoryIntegrityMode::Full => {}
         }
     } else {
         statuses.push(StoreStatus::MissingDb);
@@ -178,10 +228,11 @@ async fn inspect_project_store(
     );
     record_branch_db_artifacts(
         data_dir,
-        follow_symlinks,
+        options.follow_symlinks,
         skipped,
         &mut statuses,
         &mut artifacts,
+        options.integrity,
     )
     .await;
     record_optional_artifact(data_dir, "config", "config.json", &mut artifacts);
@@ -211,8 +262,15 @@ async fn inspect_project_store(
     }
 
     let sync_lock = data_dir.join("sync.lock");
-    if sync_lock.exists() {
-        statuses.push(StoreStatus::Locked);
+    if sync_lock.is_file() {
+        match crate::storage::try_acquire_sidecar_lock(&sync_lock) {
+            Ok(Some(lock)) => drop(lock),
+            Ok(None) => statuses.push(StoreStatus::Locked),
+            Err(error) if crate::db::is_lock_contended(&error) => {
+                statuses.push(StoreStatus::Locked);
+            }
+            Err(_) => statuses.push(StoreStatus::NeedsManualReview),
+        }
         artifacts.push(StoreArtifact {
             kind: "sync_lock".to_string(),
             size_bytes: file_size(&sync_lock),
@@ -255,6 +313,13 @@ async fn inspect_project_store(
 
 pub(super) fn missing_registered_store(project_root: &Path) -> StoreInventory {
     let data_dir = project_root.join(TRACEDECAY_DIR);
+    missing_registered_store_at(project_root, data_dir)
+}
+
+pub(super) fn missing_registered_store_at(
+    project_root: &Path,
+    data_dir: PathBuf,
+) -> StoreInventory {
     StoreInventory {
         project_root: project_root.to_path_buf(),
         db_path: data_dir.join(config::DB_FILENAME),

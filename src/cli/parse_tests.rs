@@ -284,6 +284,8 @@ fn update_and_post_update_parse_no_heal_flag() {
         .expect("post-update --no-heal should parse");
     let post_update_default = Cli::try_parse_from(["tracedecay", "post-update"])
         .expect("post-update should parse without --no-heal");
+    let post_update_strict = Cli::try_parse_from(["tracedecay", "post-update", "--strict"])
+        .expect("post-update --strict should parse");
 
     assert!(matches!(
         update.command,
@@ -298,6 +300,7 @@ fn update_and_post_update_parse_no_heal_flag() {
             no_heal: true,
             no_reinstall: false,
             lifecycle_lease_token: None,
+            strict: false,
         })
     ));
     assert!(matches!(
@@ -306,7 +309,12 @@ fn update_and_post_update_parse_no_heal_flag() {
             no_heal: false,
             no_reinstall: false,
             lifecycle_lease_token: None,
+            strict: false,
         })
+    ));
+    assert!(matches!(
+        post_update_strict.command,
+        Some(Commands::PostUpdate { strict: true, .. })
     ));
 }
 
@@ -362,6 +370,7 @@ fn upgrade_update_and_post_update_parse_no_reinstall_flag() {
             no_heal: false,
             no_reinstall: true,
             lifecycle_lease_token: None,
+            strict: false,
         })
     ));
 

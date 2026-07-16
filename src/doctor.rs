@@ -87,10 +87,21 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
     check_network(&mut dc);
     print_summary(&dc);
 
+    doctor_result(&dc, daemon_status, storage_healthy)
+}
+
+fn doctor_result(
+    dc: &DoctorCounters,
+    daemon_status: crate::errors::Result<serde_json::Value>,
+    storage_healthy: bool,
+) -> crate::errors::Result<()> {
     match daemon_status {
         Err(error) => Err(error),
         Ok(_) if !storage_healthy => Err(crate::errors::TraceDecayError::Config {
             message: "doctor storage health check failed".to_string(),
+        }),
+        Ok(_) if dc.issues > 0 => Err(crate::errors::TraceDecayError::Config {
+            message: format!("doctor found {} issue(s)", dc.issues),
         }),
         Ok(_) => Ok(()),
     }

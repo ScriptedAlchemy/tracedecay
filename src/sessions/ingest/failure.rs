@@ -1,4 +1,5 @@
 use serde::Serialize;
+use tracedecay_domain::ObservationSourceRangeV1;
 
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::{claude_observation, source};
@@ -15,6 +16,8 @@ pub(crate) struct TranscriptCatchUpFailure {
     pub source: &'static str,
     pub reason_code: &'static str,
     pub retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_locator: Option<ObservationSourceRangeV1>,
 }
 
 impl TranscriptCatchUpFailure {
@@ -29,7 +32,16 @@ impl TranscriptCatchUpFailure {
             source,
             reason_code,
             retryable,
+            source_locator: None,
         }
+    }
+
+    const fn with_source_locator(
+        mut self,
+        source_locator: Option<ObservationSourceRangeV1>,
+    ) -> Self {
+        self.source_locator = source_locator;
+        self
     }
 
     /// Typed overload when the bounded multi-source pass cannot admit more work.
@@ -326,6 +338,22 @@ pub(crate) fn classify_transcript_ingest_failure(
 ) -> TranscriptCatchUpFailure {
     use tracedecay_store::TranscriptStoreError;
 
+    if let source::TranscriptIngestError::NonDurableRecord {
+        offset,
+        end_offset,
+        reason,
+        ..
+    } = error
+    {
+        return TranscriptCatchUpFailure::new(
+            provider,
+            source,
+            non_durable_reason_code(reason),
+            false,
+        )
+        .with_source_locator(ObservationSourceRangeV1::new(*offset, *end_offset).ok());
+    }
+
     let (reason_code, retryable) = match error {
         source::TranscriptIngestError::Store(TranscriptStoreError::Conflict { .. }) => {
             ("transcript_cursor_conflict", true)
@@ -353,9 +381,7 @@ pub(crate) fn classify_transcript_ingest_failure(
             ("transcript_source_generation_changed", true)
         }
         source::TranscriptIngestError::Privacy(_) => ("transcript_privacy_rejected", false),
-        source::TranscriptIngestError::NonDurableRecord { .. } => {
-            ("transcript_record_non_durable", false)
-        }
+        source::TranscriptIngestError::NonDurableRecord { .. } => unreachable!(),
         source::TranscriptIngestError::Domain(_)
         | source::TranscriptIngestError::ObservationContract(_)
         | source::TranscriptIngestError::InvalidFrameState { .. }
@@ -364,6 +390,26 @@ pub(crate) fn classify_transcript_ingest_failure(
         }
     };
     TranscriptCatchUpFailure::new(provider, source, reason_code, retryable)
+}
+
+fn non_durable_reason_code(reason: &'static str) -> &'static str {
+    match reason {
+        "normalized observation record is not durable" => "normalized_observation_not_durable",
+        "malformed snapshot JSON" => "malformed_snapshot_json",
+        "unsupported execution index snapshot" => "unsupported_execution_index_snapshot",
+        "snapshot contains no durable messages" => "snapshot_no_durable_messages",
+        "snapshot exceeds provider byte bound" => "snapshot_byte_bound_exceeded",
+        "snapshot message count exceeds provider bound" => "snapshot_message_bound_exceeded",
+        "unsupported snapshot message layout" => "unsupported_snapshot_message_layout",
+        "unsupported snapshot root" => "unsupported_snapshot_root",
+        "malformed usage snapshot JSON" => "malformed_usage_snapshot_json",
+        "unsupported usage snapshot root" => "unsupported_usage_snapshot_root",
+        "usage event count exceeds provider bound" => "usage_event_bound_exceeded",
+        "snapshot input exceeds provider byte bound" => "snapshot_input_byte_bound_exceeded",
+        "snapshot metadata exceeds provider byte bound" => "snapshot_metadata_byte_bound_exceeded",
+        reason if crate::application::host_admission::is_bounded_reason_code(reason) => reason,
+        _ => "transcript_record_non_durable",
+    }
 }
 
 pub(super) fn claude_catch_up_failure(

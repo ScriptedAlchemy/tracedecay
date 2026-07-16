@@ -74,8 +74,62 @@ pub async fn migrate_legacy_hermes_stores(user_home: &Path) -> LegacyHermesMigra
             ..LegacyHermesMigrationReport::default()
         };
     };
+    let lifecycle =
+        match crate::daemon::QuiescedDaemonLifecycle::acquire("legacy Hermes store migration") {
+            Ok(lifecycle) => lifecycle,
+            Err(error) => return migration_authority_failure(&profile_root, error.to_string()),
+        };
     let hermes_homes = [user_home.join(".hermes")];
-    migrate_legacy_hermes_stores_inner(user_home, &profile_root, &hermes_homes, None).await
+    let lifecycle_lease = match lifecycle.lifecycle_lease() {
+        Ok(lifecycle_lease) => lifecycle_lease,
+        Err(error) => return migration_authority_failure(&profile_root, error.to_string()),
+    };
+    let mut report = migrate_legacy_hermes_stores_with_lease(
+        user_home,
+        &profile_root,
+        &hermes_homes,
+        lifecycle_lease,
+        None,
+    )
+    .await;
+    if let Err(error) = lifecycle.finish() {
+        report.failed.push(LegacyHermesMigrationIssue {
+            source_db: user_home.join(".hermes/.tracedecay/sessions.db"),
+            reason: format!(
+                "failed to restore TraceDecay daemon state after legacy Hermes store migration: {error}"
+            ),
+        });
+    }
+    report
+}
+
+/// Migrates historical Hermes stores while the caller retains exclusive
+/// lifecycle authority for the destination profile.
+///
+/// Post-update already owns this lease while agents are refreshed. Reusing it
+/// avoids trying to acquire a second exclusive lock from the same process.
+pub async fn migrate_legacy_hermes_stores_under_lease(
+    user_home: &Path,
+    lifecycle: &crate::lifecycle_lease::LifecycleLease,
+) -> LegacyHermesMigrationReport {
+    let Ok(profile_root) = crate::storage::default_profile_root() else {
+        return LegacyHermesMigrationReport {
+            failed: vec![LegacyHermesMigrationIssue {
+                source_db: user_home.join(".hermes/.tracedecay/sessions.db"),
+                reason: "could not resolve the TraceDecay user-profile store".to_string(),
+            }],
+            ..LegacyHermesMigrationReport::default()
+        };
+    };
+    let hermes_homes = [user_home.join(".hermes")];
+    migrate_legacy_hermes_stores_with_lease(
+        user_home,
+        &profile_root,
+        &hermes_homes,
+        lifecycle,
+        None,
+    )
+    .await
 }
 
 /// Explicit `TraceDecay` profile-root seam used by migration tests. The source
@@ -109,8 +163,25 @@ async fn migrate_legacy_hermes_stores_inner(
             return migration_authority_failure(tracedecay_profile_root, error.to_string());
         }
     };
-    let _database_scope = match crate::db::enter_maintenance_database_scope(
+    migrate_legacy_hermes_stores_with_lease(
+        user_home,
+        tracedecay_profile_root,
+        hermes_homes,
         &lifecycle,
+        fail_after_table,
+    )
+    .await
+}
+
+async fn migrate_legacy_hermes_stores_with_lease(
+    user_home: &Path,
+    tracedecay_profile_root: &Path,
+    hermes_homes: &[PathBuf],
+    lifecycle: &crate::lifecycle_lease::LifecycleLease,
+    fail_after_table: Option<&str>,
+) -> LegacyHermesMigrationReport {
+    let _database_scope = match crate::db::enter_maintenance_database_scope(
+        lifecycle,
         tracedecay_profile_root,
         "legacy Hermes store migration",
     ) {
@@ -2278,6 +2349,64 @@ mod tests {
     fn mark_real_project(project: &Path) {
         fs::create_dir_all(project.join(".tracedecay")).unwrap();
         fs::write(project.join(".tracedecay/tracedecay.db"), []).unwrap();
+    }
+
+    #[tokio::test]
+    async fn caller_owned_lifecycle_lease_is_reused_without_self_conflict() {
+        let temp = tempfile::tempdir().unwrap();
+        let user_home = temp.path().join("home");
+        let profile_root = temp.path().join("profile");
+        let hermes_homes = [user_home.join(".hermes")];
+        let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+            &profile_root,
+            "post-update test",
+        )
+        .unwrap();
+
+        let report = migrate_legacy_hermes_stores_with_lease(
+            &user_home,
+            &profile_root,
+            &hermes_homes,
+            &lifecycle,
+            None,
+        )
+        .await;
+
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert!(report.unresolved.is_empty(), "{report:?}");
+    }
+
+    #[tokio::test]
+    async fn default_migration_releases_lifecycle_authority_after_restore() {
+        struct RestoreXdgConfig(Option<std::ffi::OsString>);
+        impl Drop for RestoreXdgConfig {
+            fn drop(&mut self) {
+                unsafe {
+                    match self.0.take() {
+                        Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                        None => std::env::remove_var("XDG_CONFIG_HOME"),
+                    }
+                }
+            }
+        }
+
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let user_home = tempfile::tempdir().unwrap();
+        let _xdg_config = RestoreXdgConfig(std::env::var_os("XDG_CONFIG_HOME"));
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", user_home.path().join("config"));
+        }
+
+        let report = migrate_legacy_hermes_stores(user_home.path()).await;
+
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert!(report.unresolved.is_empty(), "{report:?}");
+        let profile_root = crate::storage::default_profile_root().unwrap();
+        let reacquired = crate::lifecycle_lease::acquire_exclusive_for_profile(
+            &profile_root,
+            "post-migration test",
+        );
+        assert!(reacquired.is_ok(), "lifecycle lease was not released");
     }
 
     #[tokio::test]

@@ -357,6 +357,7 @@ pub async fn handle_tool_call_with_registry(
 #[derive(Clone)]
 pub struct ToolCallRegistryOptions<'a> {
     pub global_db: Option<&'a GlobalDb>,
+    pub profile_root: Option<&'a Path>,
     pub allow_default_registry_fallback: bool,
     pub implicit_project_path: Option<&'a Path>,
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
@@ -371,6 +372,7 @@ impl Default for ToolCallRegistryOptions<'_> {
     fn default() -> Self {
         Self {
             global_db: None,
+            profile_root: None,
             allow_default_registry_fallback: true,
             implicit_project_path: None,
             automation_scheduler_reconciler: None,
@@ -510,8 +512,14 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args).await,
         "tracedecay_admin_sync" => info::handle_admin_sync(cg, args).await,
         "tracedecay_admin_cli" => {
-            admin_cli::handle_admin_cli(cg, args, options.global_db, options.session_authorities)
-                .await
+            admin_cli::handle_admin_cli(
+                cg,
+                args,
+                options.global_db,
+                options.profile_root,
+                options.session_authorities,
+            )
+            .await
         }
         "tracedecay_admin_project" => {
             admin_project::handle_admin_project(cg, args, options.global_db).await

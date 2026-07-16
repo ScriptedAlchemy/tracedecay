@@ -92,6 +92,202 @@ pub struct StoreLayout {
     pub branch_add_lock_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectStorageStatus {
+    RepoLocal,
+    ProfileSharded,
+    ManifestReconstructable,
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectStorageLocation {
+    pub project_root: PathBuf,
+    pub data_root: PathBuf,
+    pub marker_root: Option<PathBuf>,
+    pub status: ProjectStorageStatus,
+}
+
+impl ProjectStorageStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RepoLocal => "repo-local",
+            Self::ProfileSharded => "profile-sharded",
+            Self::ManifestReconstructable => "manifest-reconstructable",
+            Self::Stale => "stale",
+        }
+    }
+
+    pub fn is_live(self) -> bool {
+        matches!(self, Self::RepoLocal | Self::ProfileSharded)
+    }
+}
+
+pub fn classify_project_storage(project_root: &Path) -> ProjectStorageLocation {
+    match resolve_layout_for_current_profile(project_root) {
+        Ok(layout) => classify_layout_storage(project_root, layout),
+        Err(_) => ProjectStorageLocation {
+            project_root: project_root.to_path_buf(),
+            data_root: config::get_tracedecay_dir(project_root),
+            marker_root: None,
+            status: ProjectStorageStatus::Stale,
+        },
+    }
+}
+
+pub async fn try_classify_project_storage_with_registry(
+    project_root: &Path,
+    global_db: &crate::global_db::GlobalDb,
+    profile_root: &Path,
+) -> Result<ProjectStorageLocation> {
+    let location = classify_project_storage(project_root);
+    if location.status != ProjectStorageStatus::Stale {
+        return Ok(location);
+    }
+    let Some(store) = global_db
+        .try_resolve_project_store_record_by_alias(project_root)
+        .await?
+    else {
+        return Ok(location);
+    };
+    Ok(classify_registry_storage(project_root, profile_root, &store).unwrap_or(location))
+}
+
+fn classify_layout_storage(project_root: &Path, layout: StoreLayout) -> ProjectStorageLocation {
+    let graph_exists = layout.graph_db_path.exists();
+    let manifest_exists = layout
+        .manifest_path
+        .as_ref()
+        .is_some_and(|path| path.is_file());
+    let status = match layout.storage_mode {
+        StorageMode::ProjectLocal if graph_exists => ProjectStorageStatus::RepoLocal,
+        StorageMode::ProfileSharded if graph_exists => ProjectStorageStatus::ProfileSharded,
+        StorageMode::ProfileSharded if manifest_exists => {
+            ProjectStorageStatus::ManifestReconstructable
+        }
+        _ => ProjectStorageStatus::Stale,
+    };
+    let marker_root = (layout.storage_mode == StorageMode::ProfileSharded)
+        .then(|| project_root.join(config::TRACEDECAY_DIR));
+    ProjectStorageLocation {
+        project_root: project_root.to_path_buf(),
+        data_root: layout.data_root,
+        marker_root,
+        status,
+    }
+}
+
+pub fn classify_registry_storage(
+    project_root: &Path,
+    profile_root: &Path,
+    store: &crate::global_db::StoreInstanceRecord,
+) -> Option<ProjectStorageLocation> {
+    classify_registry_storage_fields(
+        project_root,
+        profile_root,
+        &store.storage_mode,
+        &store.store_relpath,
+        store.manifest_relpath.as_deref(),
+    )
+}
+
+pub fn classify_registry_storage_value(
+    project_root: &Path,
+    profile_root: &Path,
+    store: &serde_json::Value,
+) -> Option<ProjectStorageLocation> {
+    classify_registry_storage_fields(
+        project_root,
+        profile_root,
+        store.get("storage_mode")?.as_str()?,
+        store.get("store_relpath")?.as_str()?,
+        store
+            .get("manifest_relpath")
+            .and_then(serde_json::Value::as_str),
+    )
+}
+
+fn classify_registry_storage_fields(
+    project_root: &Path,
+    profile_root: &Path,
+    storage_mode: &str,
+    store_relpath: &str,
+    manifest_relpath: Option<&str>,
+) -> Option<ProjectStorageLocation> {
+    if storage_mode != "profile_sharded" {
+        return None;
+    }
+    let store_relpath = registry_relpath(store_relpath);
+    let manifest_relpath = manifest_relpath.map(registry_relpath);
+    let mut stale_location = None;
+    let mut manifest_location = None;
+    for profile_root in registry_profile_roots(profile_root) {
+        let Ok(data_root) = StoreArtifactPath::resolve(&profile_root, &store_relpath) else {
+            continue;
+        };
+        let data_root = data_root.absolute_path();
+        let manifest_exists = manifest_relpath.as_ref().map_or_else(
+            || data_root.join(STORE_MANIFEST_FILENAME).is_file(),
+            |relpath| {
+                [&profile_root, &data_root].iter().any(|root| {
+                    StoreArtifactPath::resolve(root, relpath)
+                        .ok()
+                        .is_some_and(|path| path.absolute_path().is_file())
+                })
+            },
+        );
+        let status = if data_root.join(config::db_filename(&data_root)).exists() {
+            ProjectStorageStatus::ProfileSharded
+        } else if manifest_exists {
+            ProjectStorageStatus::ManifestReconstructable
+        } else {
+            ProjectStorageStatus::Stale
+        };
+        let location = ProjectStorageLocation {
+            project_root: project_root.to_path_buf(),
+            data_root,
+            marker_root: Some(project_root.join(config::TRACEDECAY_DIR)),
+            status,
+        };
+        match location.status {
+            ProjectStorageStatus::ProfileSharded => return Some(location),
+            ProjectStorageStatus::ManifestReconstructable if manifest_location.is_none() => {
+                manifest_location = Some(location);
+            }
+            ProjectStorageStatus::Stale if stale_location.is_none() => {
+                stale_location = Some(location);
+            }
+            _ => {}
+        }
+    }
+    manifest_location.or(stale_location)
+}
+
+fn registry_relpath(value: &str) -> PathBuf {
+    let path = Path::new(value);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return path.to_path_buf();
+    }
+    value
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn registry_profile_roots(profile_root: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![profile_root.to_path_buf()];
+    if let Ok(canonical) = profile_root.canonicalize()
+        && !roots.iter().any(|root| root == &canonical)
+    {
+        roots.push(canonical);
+    }
+    roots
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreManifest {
     pub schema_version: u32,

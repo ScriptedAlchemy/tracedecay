@@ -4,7 +4,7 @@ use super::{
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -86,4 +86,67 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
         "completion timestamp must be preserved"
     );
     server.shutdown().await;
+}
+
+#[tokio::test]
+async fn concurrent_startup_catchups_use_injected_writer_authority() {
+    let (first_cg, dir, _pin) = init_indexed_repo().await;
+    let root = dir.path().to_path_buf();
+    let mut config = crate::config::load_config(&root).expect("load config");
+    config.sync.session_start_sync = true;
+    crate::config::save_config(&root, &config).expect("enable startup sync");
+    let second_cg = crate::tracedecay::TraceDecay::open(&root)
+        .await
+        .expect("open second project handle");
+
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let refresh_writer: BackgroundRefreshWriter = {
+        let gate = Arc::clone(&gate);
+        let calls = Arc::clone(&calls);
+        let active = Arc::clone(&active);
+        let max_active = Arc::clone(&max_active);
+        Arc::new(move |_request: BackgroundRefreshRequest| {
+            let gate = Arc::clone(&gate);
+            let calls = Arc::clone(&calls);
+            let active = Arc::clone(&active);
+            let max_active = Arc::clone(&max_active);
+            Box::pin(async move {
+                let _authority = gate.lock().await;
+                calls.fetch_add(1, Ordering::AcqRel);
+                let concurrent = active.fetch_add(1, Ordering::AcqRel) + 1;
+                max_active.fetch_max(concurrent, Ordering::AcqRel);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                active.fetch_sub(1, Ordering::AcqRel);
+                Ok(Some(HashMap::new()))
+            })
+        })
+    };
+
+    let (first, second) = tokio::join!(
+        McpServer::new_with_context(
+            McpServerConstructionContext::direct(first_cg, Some("first".to_string()))
+                .with_background_refresh_writer(Arc::clone(&refresh_writer)),
+        ),
+        McpServer::new_with_context(
+            McpServerConstructionContext::direct(second_cg, Some("second".to_string()))
+                .with_background_refresh_writer(refresh_writer),
+        )
+    );
+    let (first_done, second_done) = tokio::join!(
+        first.wait_for_startup_catch_up(Duration::from_secs(5)),
+        second.wait_for_startup_catch_up(Duration::from_secs(5))
+    );
+
+    assert!(first_done && second_done, "startup catch-ups must settle");
+    assert_eq!(calls.load(Ordering::Acquire), 2);
+    assert_eq!(
+        max_active.load(Ordering::Acquire),
+        1,
+        "the injected writer authority must serialize concurrent startup catch-ups"
+    );
+    first.shutdown().await;
+    second.shutdown().await;
 }

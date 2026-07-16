@@ -2412,6 +2412,105 @@ async fn bulk_project_deletion_accepts_string_paths() {
     assert_eq!(db.get_project_tokens(&project).await, 0);
 }
 
+#[tokio::test]
+async fn registry_gc_deletes_both_registry_generations_in_one_commit() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .expect("open global db");
+    let project = dir.path().join("project");
+    db.upsert(&project, 11).await;
+    db.upsert_code_project("proj_gc", &project, None, None, None)
+        .await
+        .expect("register code project");
+
+    let deleted = db
+        .delete_registry_gc_candidates(&["proj_gc".to_string()], std::slice::from_ref(&project))
+        .await
+        .expect("delete registry cleanup plan");
+
+    assert_eq!(deleted, (1, 1));
+    assert!(db.get_code_project("proj_gc").await.is_none());
+    assert_eq!(db.get_project_tokens(&project).await, 0);
+}
+
+#[tokio::test]
+async fn registry_gc_rolls_back_both_generations_when_one_delete_fails() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .expect("open global db");
+    let project = dir.path().join("project");
+    db.upsert(&project, 11).await;
+    db.upsert_code_project("proj_gc", &project, None, None, None)
+        .await
+        .expect("register code project");
+    db.conn
+        .execute(
+            "CREATE TRIGGER reject_registry_gc
+             BEFORE DELETE ON projects
+             BEGIN SELECT RAISE(ABORT, 'forced registry cleanup failure'); END",
+            (),
+        )
+        .await
+        .expect("install failure trigger");
+
+    let result = db
+        .delete_registry_gc_candidates(&["proj_gc".to_string()], std::slice::from_ref(&project))
+        .await;
+
+    assert!(result.is_err());
+    assert!(db.get_code_project("proj_gc").await.is_some());
+    assert_eq!(db.get_project_tokens(&project).await, 11);
+}
+
+#[tokio::test]
+async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.expect("open global db");
+    let project = dir.path().join("project");
+    db.upsert(&project, 11).await;
+    db.upsert_code_project("proj_gc", &project, None, None, None)
+        .await
+        .expect("register code project");
+
+    let concurrent_db = GlobalDb::open_at(&db_path)
+        .await
+        .expect("open concurrent global db");
+    let transaction = db.begin_write_transaction().await.unwrap();
+    let concurrent_project = project.clone();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let refresh = tokio::spawn(async move {
+        let _ = started_tx.send(());
+        concurrent_db.upsert(&concurrent_project, 22).await;
+        concurrent_db
+            .upsert_code_project("proj_gc", &concurrent_project, None, None, None)
+            .await
+    });
+    started_rx.await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(!refresh.is_finished());
+
+    let deleted = GlobalDb::delete_registry_gc_candidates_in_transaction(
+        &transaction,
+        &["proj_gc".to_string()],
+        std::slice::from_ref(&project),
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(deleted, (1, 1));
+
+    let refreshed = tokio::time::timeout(std::time::Duration::from_secs(5), refresh)
+        .await
+        .expect("concurrent refresh should resume")
+        .expect("concurrent refresh task should complete");
+    assert!(refreshed.is_some());
+    assert!(db.get_code_project("proj_gc").await.is_some());
+    assert_eq!(db.get_project_tokens(&project).await, 22);
+}
+
 #[cfg(any(unix, windows))]
 #[tokio::test]
 async fn unique_legacy_non_unicode_git_common_alias_migrates_to_native_key() {

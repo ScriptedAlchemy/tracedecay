@@ -5,12 +5,14 @@ use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, ComponentVersion, DurableObservationV1, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadReferenceV1, RetentionClass, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    ObservationSourceRangeV1, PayloadReferenceV1, ProjectId, ProviderId, RetentionClass,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId,
 };
 use tracedecay_store::{
     ObservationProjectionStore, ObservationStore, ObservationWrite, ProjectionPersistOutcome,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V1, SESSION_MESSAGE_PROJECTOR_VERSION_V2,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V3,
 };
 
 use crate::global_db::GlobalDb;
@@ -232,6 +234,230 @@ fn composer_rollover_observation(
         record_id,
         receipt_id,
     )
+}
+
+const LEGACY_CLAUDE_SESSION_ID: &str = "11111111-1111-4111-8111-111111111111";
+const LEGACY_CLAUDE_MESSAGE_ID: &str = "22222222-2222-4222-8222-222222222222";
+const LEGACY_CLAUDE_SOURCE_KEY: &str = concat!(
+    "tracedecay-claude-observation-source-v1-sha256-",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+);
+
+fn legacy_claude_source_key_observation() -> DurableObservationV1 {
+    let payload = serde_json::json!({
+        "cwd": "/workspace/project",
+        "message": {
+            "content": "Synthetic legacy projection payload.",
+            "role": "user"
+        },
+        "sessionId": LEGACY_CLAUDE_SESSION_ID,
+        "timestamp": "2026-01-01T00:00:00.000Z",
+        "type": "user",
+        "uuid": LEGACY_CLAUDE_MESSAGE_ID
+    });
+    let source = ObservationSourceIdentityV1::for_provider_source(
+        ProviderId::new("claude").unwrap(),
+        SessionId::new(LEGACY_CLAUDE_SESSION_ID).unwrap(),
+        SessionId::new(LEGACY_CLAUDE_SOURCE_KEY).unwrap(),
+    )
+    .unwrap();
+    let identity = ObservationIdentityMaterialV1::new(
+        source,
+        ObservationScopeV1::Project {
+            project_id: ProjectId::new("project.synthetic-legacy-upgrade").unwrap(),
+        },
+        ObservationSourceGenerationV1::new(23).unwrap(),
+        ObservationSourceRangeV1::new(41, 42).unwrap(),
+    )
+    .unwrap();
+    let receipt = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new("receipt.synthetic-legacy-claude").unwrap(),
+            ComponentVersion::new("sanitizer.synthetic-legacy-claude.v1").unwrap(),
+        )
+        .unwrap(),
+        SanitizerDispositionV1::Accepted,
+        SensitivityV1::NonSensitive,
+        Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+    )
+    .unwrap();
+    DurableObservationV1::new(
+        identity,
+        receipt,
+        RetentionClass::new("retention.synthetic-legacy-claude").unwrap(),
+        payload,
+    )
+    .unwrap()
+}
+
+struct LegacyClaudeProjectionSeed {
+    observation_id: String,
+    output_digest: String,
+}
+
+async fn seed_v1_legacy_claude_projection(
+    db_path: &std::path::Path,
+    corrupted_text: Option<&str>,
+) -> LegacyClaudeProjectionSeed {
+    let observation = legacy_claude_source_key_observation();
+    let observation_id = observation.observation_id().as_str().to_owned();
+    let db = GlobalDb::open_at(db_path).await.unwrap();
+    let store = GlobalDbObservationStore::new(&db);
+    let previous_cursor = ObservationSourceCursorV1::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        observation.identity().generation(),
+        observation.identity().ordering_domain(),
+        observation.identity().position().start(),
+    )
+    .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO source_cursors (source_json, scope_json, cursor_json)
+             VALUES (?1, ?2, ?3)",
+            params![
+                serde_json::to_string(observation.source()).unwrap(),
+                serde_json::to_string(observation.scope()).unwrap(),
+                serde_json::to_string(&previous_cursor).unwrap()
+            ],
+        )
+        .await
+        .unwrap();
+    store
+        .persist_observation(write_after(observation, Some(previous_cursor)))
+        .await
+        .unwrap();
+    let queued = store.next_queued_observation().await.unwrap().unwrap();
+    assert!(matches!(
+        store.project_observation(&queued).await.unwrap(),
+        ProjectionPersistOutcome::Projected(_)
+    ));
+    let mut digest_rows = db
+        .conn
+        .query(
+            "SELECT output_digest FROM observation_projection_provenance
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                observation_id.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    let output_digest = digest_rows
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap();
+    drop(digest_rows);
+
+    // Recreate the V1 predecessor shape without retaining live session data.
+    db.conn
+        .execute(
+            "UPDATE session_messages SET source_path = ?2
+             WHERE provider = 'claude' AND message_id = ?1",
+            params![
+                LEGACY_CLAUDE_MESSAGE_ID,
+                format!("claude:{LEGACY_CLAUDE_SESSION_ID}")
+            ],
+        )
+        .await
+        .unwrap();
+    if let Some(text) = corrupted_text {
+        db.conn
+            .execute(
+                "UPDATE session_messages SET text = ?2
+                 WHERE provider = 'claude' AND message_id = ?1",
+                params![LEGACY_CLAUDE_MESSAGE_ID, text],
+            )
+            .await
+            .unwrap();
+    }
+    db.conn
+        .execute(
+            "UPDATE observation_projection_provenance
+             SET projector_version = ?1
+             WHERE projector_version = ?2 AND observation_id = ?3",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                observation_id.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE observation_projection_checkpoints SET projector_version = ?1
+             WHERE projector_version = ?2",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V3
+            ],
+        )
+        .await
+        .unwrap();
+    drop(db);
+    LegacyClaudeProjectionSeed {
+        observation_id,
+        output_digest,
+    }
+}
+
+#[tokio::test]
+async fn v1_upgrade_adopts_legacy_claude_source_path_and_preserves_ownership() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("global.db");
+    let seed = seed_v1_legacy_claude_projection(&db_path, None).await;
+    let reopened = GlobalDb::try_open_at(&db_path).await.unwrap().unwrap();
+    reopened.audit_observation_authority().await.unwrap();
+    let mut rows = reopened
+        .conn
+        .query(
+            "SELECT
+                (SELECT source_path FROM session_messages
+                 WHERE provider = 'claude' AND message_id = ?3),
+                (SELECT output_digest FROM observation_projection_provenance
+                 WHERE projector_version = ?1 AND observation_id = ?4),
+                (SELECT message_created FROM observation_projection_provenance
+                 WHERE projector_version = ?1 AND observation_id = ?4),
+                (SELECT message_created FROM observation_projection_provenance
+                 WHERE projector_version = ?2 AND observation_id = ?4),
+                (SELECT last_sequence FROM observation_projection_checkpoints
+                 WHERE projector_version = ?1),
+                (SELECT completed FROM observation_projection_migrations
+                 WHERE source_projector_version = ?2
+                   AND target_projector_version = ?1)",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+                LEGACY_CLAUDE_MESSAGE_ID,
+                seed.observation_id.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), LEGACY_CLAUDE_SOURCE_KEY);
+    assert_eq!(row.get::<String>(1).unwrap(), seed.output_digest);
+    assert_eq!(row.get::<i64>(2).unwrap(), 0);
+    assert_eq!(row.get::<i64>(3).unwrap(), 1);
+    assert_eq!(row.get::<i64>(4).unwrap(), 1);
+    assert_eq!(row.get::<i64>(5).unwrap(), 1);
+}
+
+#[tokio::test]
+async fn v1_upgrade_rejects_non_source_path_projection_differences() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("global.db");
+    seed_v1_legacy_claude_projection(&db_path, Some("Conflicting legacy text.")).await;
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("non-source-path mismatch must collide");
+    };
+    assert!(error.to_string().contains("projection output collided"));
 }
 
 #[tokio::test]

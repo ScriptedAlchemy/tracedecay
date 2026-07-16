@@ -17,8 +17,8 @@ use tracedecay::migrate::manifest::{
     ArtifactState, MIGRATION_MANIFEST_SCHEMA_VERSION, MigrationArtifact, MigrationManifest,
     MigrationPlanOptions, MigrationProtocol, MigrationRollbackState, apply_migration_manifest,
     assess_migration_rollback_state, build_plan_manifest, cleanup_migration_sources,
-    export_profile_store, finalize_migration_apply, load_manifest, rollback_migration_manifest,
-    save_manifest, verify_migration_manifest,
+    export_profile_store, export_profile_store_with_lease, finalize_migration_apply, load_manifest,
+    rollback_migration_manifest, save_manifest, verify_migration_manifest,
 };
 use tracedecay::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
@@ -260,6 +260,11 @@ fn plan_manifest_maps_inventory_artifacts_into_profile_shard_targets() {
                     path: data_dir.join("sessions.db"),
                     size_bytes: 64,
                 },
+                StoreArtifact {
+                    kind: "sync_lock".to_string(),
+                    path: data_dir.join("sync.lock"),
+                    size_bytes: 0,
+                },
             ],
         }],
         skipped: Vec::new(),
@@ -281,6 +286,13 @@ fn plan_manifest_maps_inventory_artifacts_into_profile_shard_targets() {
     .unwrap();
 
     assert_eq!(manifest.artifacts.len(), 2);
+    assert_eq!(manifest.backup_artifacts.len(), 2);
+    assert!(
+        manifest
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.kind != "sync_lock")
+    );
     assert_eq!(manifest.artifacts[0].source_path, graph_db);
     assert_eq!(
         manifest.artifacts[0].target_path.as_deref(),
@@ -889,6 +901,42 @@ fn export_profile_store_requires_exclusive_profile_lifecycle_cutover() {
 
     assert!(error.to_string().contains("test export owner"));
     assert!(!target.exists());
+}
+
+#[test]
+fn export_profile_store_reuses_caller_exclusive_profile_lifecycle() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = canonical_temp_path(&dir.path().join("profile"));
+    let project_id = "proj_123";
+    let data_root = profile_root.join("projects").join(project_id);
+    let project_root = dir.path().join("repo");
+    let target = dir.path().join("export");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    fs::write(data_root.join("tracedecay.db"), b"database").unwrap();
+    fs::write(
+        data_root.join(STORE_MANIFEST_FILENAME),
+        serde_json::to_vec_pretty(&StoreManifest {
+            schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+            project_id: Some(project_id.to_string()),
+            store_kind: StoreKind::CodeProject,
+            storage_mode: StorageMode::ProfileSharded,
+            project_root,
+            data_root: data_root.clone(),
+            graph_db_relpath: "tracedecay.db".into(),
+            sessions_db_relpath: "sessions.db".into(),
+            branch_meta_relpath: "branch-meta.json".into(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let lease = acquire_exclusive_for_profile(&profile_root, "test export owner").unwrap();
+
+    let report =
+        export_profile_store_with_lease(&profile_root, project_id, &target, &lease).unwrap();
+
+    assert_eq!(report.project_id, project_id);
+    assert_eq!(fs::read(target.join("tracedecay.db")).unwrap(), b"database");
 }
 
 #[tokio::test]

@@ -29,22 +29,49 @@ pub async fn build_inventory(options: MigrationInventoryOptions) -> Result<Migra
         &profile_root,
         "migration inventory",
     )?;
-    build_inventory_in_scope(options).await
+    build_inventory_in_scope(options, None).await
+}
+
+/// Builds a read-only inventory through the daemon's existing database
+/// authority instead of opening a second process-local database client.
+pub(crate) async fn build_inventory_for_daemon(
+    options: MigrationInventoryOptions,
+    global_db: &global_db::GlobalDb,
+) -> Result<MigrationInventory> {
+    if options
+        .global_db_path
+        .as_deref()
+        .is_some_and(|path| path != global_db.db_path())
+    {
+        return Err(crate::errors::TraceDecayError::Config {
+            message: "daemon migration inventory cannot inspect a different profile database"
+                .to_string(),
+        });
+    }
+    build_inventory_in_scope(options, Some(global_db)).await
 }
 
 async fn build_inventory_in_scope(
     options: MigrationInventoryOptions,
+    daemon_global_db: Option<&global_db::GlobalDb>,
 ) -> Result<MigrationInventory> {
     let mut stores = Vec::new();
     let mut skipped = Vec::new();
     let mut seen_data_dirs = HashSet::new();
     let explicit_global_db_path = options.global_db_path.is_some();
-    let global_db_path = options.global_db_path.or_else(global_db::global_db_path);
+    let global_db_path = options
+        .global_db_path
+        .clone()
+        .or_else(global_db::global_db_path);
+    let scan_options = project::InventoryScanOptions {
+        follow_symlinks: options.follow_symlinks,
+        integrity: options.integrity,
+    };
 
     for root in &options.roots {
         project::scan_root(
             root,
-            options.follow_symlinks,
+            scan_options,
             &mut seen_data_dirs,
             &mut stores,
             &mut skipped,
@@ -54,22 +81,31 @@ async fn build_inventory_in_scope(
     let include_default_hermes_home = options.roots.is_empty() && !explicit_global_db_path;
     hermes::scan_hermes_sources(
         include_default_hermes_home,
-        options.follow_symlinks,
+        scan_options,
         &mut seen_data_dirs,
         &mut stores,
         &mut skipped,
     )
     .await?;
 
-    let global_db = match global_db_path {
-        Some(path) => Some(
-            sqlite::inspect_global_db(
-                &path,
+    let global_db = match (global_db_path, daemon_global_db) {
+        (_, Some(global_db)) => Some(
+            sqlite::inspect_daemon_global_db(
+                global_db,
                 explicit_global_db_path || global_db::global_db_path_is_overridden(),
+                options.integrity,
             )
             .await,
         ),
-        None => None,
+        (Some(path), None) => Some(
+            sqlite::inspect_global_db(
+                &path,
+                explicit_global_db_path || global_db::global_db_path_is_overridden(),
+                options.integrity,
+            )
+            .await,
+        ),
+        (None, None) => None,
     };
     let registered_project_keys = global_db
         .as_ref()
@@ -77,21 +113,72 @@ async fn build_inventory_in_scope(
         .unwrap_or_default();
 
     let include_registered_roots = options.roots.is_empty() || options.include_all_registered;
+    let mut inventory_roots = options.roots.clone();
     if include_registered_roots && let Some(global) = &global_db {
-        for root in &global.registered_project_paths {
-            let before = stores.len();
+        inventory_roots.extend(global.registered_project_paths.iter().cloned());
+    }
+    let mut seen_roots = HashSet::new();
+    for root in inventory_roots {
+        let root_key = project::canonicalize_lossy(&root);
+        if !seen_roots.insert(root_key.clone()) {
+            continue;
+        }
+
+        if include_registered_roots {
             project::inspect_data_dir_candidate(
-                root,
+                &root,
                 TRACEDECAY_DIR,
-                options.follow_symlinks,
+                scan_options,
                 &mut seen_data_dirs,
                 &mut stores,
                 &mut skipped,
                 StoreRole::CodeProjectStore,
             )
             .await?;
-            if stores.len() == before {
-                stores.push(project::missing_registered_store(root));
+        }
+
+        let profile_root = global_db
+            .as_ref()
+            .and_then(|inventory| inventory.path.parent());
+        let profile_data_root =
+            if let (Some(db), Some(profile_root)) = (daemon_global_db, profile_root) {
+                db.try_resolve_project_store_record_by_alias(&root)
+                    .await?
+                    .and_then(|store| {
+                        crate::storage::classify_registry_storage(&root, profile_root, &store)
+                    })
+                    .map(|location| location.data_root)
+            } else if let Some(profile_root) = profile_root {
+                crate::storage::resolve_layout(&root, profile_root)
+                    .ok()
+                    .map(|layout| layout.data_root)
+            } else {
+                None
+            };
+        if let Some(data_root) = profile_data_root.as_ref()
+            && data_root.is_dir()
+        {
+            project::inspect_data_dir(
+                &root,
+                data_root,
+                scan_options,
+                &mut seen_data_dirs,
+                &mut stores,
+                &mut skipped,
+                StoreRole::CodeProjectStore,
+            )
+            .await?;
+        }
+
+        let registered = registered_project_keys.contains(&root_key);
+        let inventoried = stores
+            .iter()
+            .any(|store| project::canonicalize_lossy(&store.project_root) == root_key);
+        if registered && !inventoried {
+            if let Some(data_root) = profile_data_root {
+                stores.push(project::missing_registered_store_at(&root, data_root));
+            } else if include_registered_roots {
+                stores.push(project::missing_registered_store(&root));
             }
         }
     }

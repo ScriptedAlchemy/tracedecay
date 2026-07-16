@@ -147,45 +147,29 @@ fn codex_daemon_interval_task(interval_secs: u64) -> AutomationTaskPatch {
 }
 
 /// Moves provable historical Hermes-local session data before any install can
-/// remove its legacy project pin. Unresolved or failed sources block only the
-/// Hermes cutover; the source store and its provenance remain untouched.
+/// remove its legacy project pin. Unresolved sources remain untouched and are
+/// reported without blocking the projectless user-profile integration. Read,
+/// integrity, or copy failures still block the cutover.
 pub(crate) async fn migrate_legacy_hermes_data(home: &Path) -> tracedecay::errors::Result<()> {
     let report = tracedecay::migrate::hermes::migrate_legacy_hermes_stores(home).await;
-    for migration in report.migrated {
-        eprintln!(
-            "  \x1b[32m✔\x1b[0m Migrated legacy Hermes session store {} -> {} ({} rows)",
-            migration.source_db.display(),
-            migration.target_project.display(),
-            migration.rows_copied
-        );
-    }
-    if report.unresolved.is_empty() && report.failed.is_empty() {
-        return Ok(());
-    }
-    let issues = report
-        .unresolved
-        .into_iter()
-        .chain(report.failed)
-        .map(|issue| format!("{}: {}", issue.source_db.display(), issue.reason))
-        .collect::<Vec<_>>()
-        .join("; ");
-    Err(tracedecay::errors::TraceDecayError::Config {
-        message: format!(
-            "legacy Hermes session data could not be migrated; source data and project pins were preserved: {issues}"
-        ),
-    })
+    finish_legacy_hermes_migration(report)
 }
 
-/// Automated upgrade reinstalls must not remain wedged on preserved legacy
-/// stores whose project evidence no longer resolves. Genuine read, integrity,
-/// or copy failures still block the reinstall; an explicit Hermes install
-/// continues to use the strict cutover above.
-async fn migrate_legacy_hermes_data_for_reinstall(home: &Path) -> tracedecay::errors::Result<()> {
-    let report = tracedecay::migrate::hermes::migrate_legacy_hermes_stores(home).await;
-    finish_legacy_hermes_reinstall_migration(report)
+/// Upgrade reinstalls share the same preservation policy while reusing any
+/// lifecycle authority already held by post-update maintenance.
+async fn migrate_legacy_hermes_data_for_reinstall(
+    home: &Path,
+    lifecycle: Option<&tracedecay::lifecycle_lease::LifecycleLease>,
+) -> tracedecay::errors::Result<()> {
+    let report = if let Some(lifecycle) = lifecycle {
+        tracedecay::migrate::hermes::migrate_legacy_hermes_stores_under_lease(home, lifecycle).await
+    } else {
+        tracedecay::migrate::hermes::migrate_legacy_hermes_stores(home).await
+    };
+    finish_legacy_hermes_migration(report)
 }
 
-fn finish_legacy_hermes_reinstall_migration(
+fn finish_legacy_hermes_migration(
     report: tracedecay::migrate::hermes::LegacyHermesMigrationReport,
 ) -> tracedecay::errors::Result<()> {
     for migration in report.migrated {
@@ -456,10 +440,30 @@ pub(crate) async fn reinstall_agent_integrations(
     home: &Path,
     tracedecay_bin: &str,
 ) -> Vec<(String, tracedecay::errors::Result<()>)> {
+    reinstall_agent_integrations_with_lease(agent_ids, home, tracedecay_bin, None).await
+}
+
+/// Reinstalls tracked integrations while reusing lifecycle authority already
+/// held by post-update maintenance.
+pub(crate) async fn reinstall_agent_integrations_under_lease(
+    agent_ids: &[String],
+    home: &Path,
+    tracedecay_bin: &str,
+    lifecycle: &tracedecay::lifecycle_lease::LifecycleLease,
+) -> Vec<(String, tracedecay::errors::Result<()>)> {
+    reinstall_agent_integrations_with_lease(agent_ids, home, tracedecay_bin, Some(lifecycle)).await
+}
+
+async fn reinstall_agent_integrations_with_lease(
+    agent_ids: &[String],
+    home: &Path,
+    tracedecay_bin: &str,
+    lifecycle: Option<&tracedecay::lifecycle_lease::LifecycleLease>,
+) -> Vec<(String, tracedecay::errors::Result<()>)> {
     let project_path = std::env::current_dir().ok();
     let mut results = Vec::new();
     let hermes_migration_error = if agent_ids.iter().any(|id| id == "hermes") {
-        migrate_legacy_hermes_data_for_reinstall(home)
+        migrate_legacy_hermes_data_for_reinstall(home, lifecycle)
             .await
             .err()
             .map(|error| error.to_string())
@@ -574,7 +578,7 @@ mod tests {
 
     use tracedecay::migrate::hermes::{LegacyHermesMigrationIssue, LegacyHermesMigrationReport};
 
-    use super::{broker_codex_daemon_automation_project, finish_legacy_hermes_reinstall_migration};
+    use super::{broker_codex_daemon_automation_project, finish_legacy_hermes_migration};
 
     #[tokio::test]
     async fn codex_automation_project_initializes_through_daemon() {
@@ -626,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn automated_reinstall_preserves_unresolved_legacy_store_without_gating() {
+    fn unresolved_legacy_store_is_preserved_without_gating_cutover() {
         let report = LegacyHermesMigrationReport {
             unresolved: vec![LegacyHermesMigrationIssue {
                 source_db: PathBuf::from("legacy-sessions.db"),
@@ -635,11 +639,11 @@ mod tests {
             ..LegacyHermesMigrationReport::default()
         };
 
-        assert!(finish_legacy_hermes_reinstall_migration(report).is_ok());
+        assert!(finish_legacy_hermes_migration(report).is_ok());
     }
 
     #[test]
-    fn automated_reinstall_gates_legacy_store_failures() {
+    fn legacy_store_failures_gate_cutover() {
         let report = LegacyHermesMigrationReport {
             failed: vec![LegacyHermesMigrationIssue {
                 source_db: PathBuf::from("legacy-sessions.db"),
@@ -648,7 +652,7 @@ mod tests {
             ..LegacyHermesMigrationReport::default()
         };
 
-        let error = finish_legacy_hermes_reinstall_migration(report)
+        let error = finish_legacy_hermes_migration(report)
             .unwrap_err()
             .to_string();
         assert!(error.contains("integrity check failed"));

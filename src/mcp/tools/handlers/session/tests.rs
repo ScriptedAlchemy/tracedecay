@@ -43,6 +43,7 @@ async fn message_catch_up_waiter_receives_leader_failures() {
         source: "observation",
         reason_code: "observation_storage_failed",
         retryable: true,
+        source_locator: None,
     };
     let waiting = tokio::spawn(wait_for_message_catch_up(waiter));
     tokio::task::yield_now().await;

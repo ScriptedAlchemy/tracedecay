@@ -212,6 +212,7 @@ fn quarantine_corrupt_branch_meta(profile_root: &Path) -> (Vec<BranchMetaQuarant
     };
     let mut meta_paths: Vec<PathBuf> = entries
         .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
         .map(|entry| entry.path().join(BRANCH_META_FILENAME))
         .collect();
     meta_paths.sort();
@@ -462,6 +463,24 @@ mod tests {
             std::fs::read_to_string(&quarantines[0].quarantined).unwrap(),
             r#"{"default_branch": 5}"#,
             "quarantined file must preserve the corrupt content as evidence"
+        );
+    }
+
+    #[test]
+    fn quarantine_ignores_non_directory_project_entries() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let projects_root = dir.path().join("projects");
+        std::fs::create_dir_all(&projects_root).unwrap();
+        let shared_store = projects_root.join("sessions.db");
+        std::fs::write(&shared_store, b"not a project shard").unwrap();
+
+        let (quarantines, warnings) = quarantine_corrupt_branch_meta(dir.path());
+
+        assert!(quarantines.is_empty());
+        assert!(warnings.is_empty());
+        assert_eq!(
+            std::fs::read(&shared_store).unwrap(),
+            b"not a project shard"
         );
     }
 

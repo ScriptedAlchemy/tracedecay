@@ -1,8 +1,11 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
-use super::model::{SkippedPath, StoreArtifact, StoreStatus};
+use super::model::{InventoryIntegrityMode, SkippedPath, StoreArtifact, StoreStatus};
 use super::sqlite::sqlite_quick_check;
+
+const MAX_CONCURRENT_BRANCH_CHECKS: usize = 8;
 
 pub(super) fn record_optional_artifact(
     data_dir: &Path,
@@ -34,6 +37,7 @@ pub(super) async fn record_branch_db_artifacts(
     skipped: &mut Vec<SkippedPath>,
     statuses: &mut Vec<StoreStatus>,
     artifacts: &mut Vec<StoreArtifact>,
+    integrity: InventoryIntegrityMode,
 ) {
     let mut branches_dir = data_dir.join("branches");
     let Ok(meta) = std::fs::symlink_metadata(&branches_dir) else {
@@ -71,22 +75,63 @@ pub(super) async fn record_branch_db_artifacts(
         .collect::<Vec<_>>();
     db_paths.sort();
 
-    for path in db_paths {
+    for path in &db_paths {
         artifacts.push(StoreArtifact {
             kind: "branch_graph_db".to_string(),
-            size_bytes: file_size(&path),
+            size_bytes: file_size(path),
             path: path.clone(),
         });
         record_sqlite_family_sidecars(
-            &path,
+            path,
             "branch_graph_db_wal",
             "branch_graph_db_shm",
             artifacts,
         );
-        if !sqlite_quick_check(&path).await && !statuses.contains(&StoreStatus::Corrupt) {
-            statuses.push(StoreStatus::Corrupt);
+    }
+
+    match integrity {
+        InventoryIntegrityMode::MetadataOnly if !db_paths.is_empty() => {
+            if !statuses.contains(&StoreStatus::IntegrityUnchecked) {
+                statuses.push(StoreStatus::IntegrityUnchecked);
+            }
+        }
+        InventoryIntegrityMode::MetadataOnly => {}
+        InventoryIntegrityMode::Full => {
+            let healthy =
+                check_branch_databases(
+                    db_paths,
+                    |path| async move { sqlite_quick_check(&path).await },
+                )
+                .await;
+            if !healthy && !statuses.contains(&StoreStatus::Corrupt) {
+                statuses.push(StoreStatus::Corrupt);
+            }
         }
     }
+}
+
+async fn check_branch_databases<F, Fut>(db_paths: Vec<PathBuf>, mut check: F) -> bool
+where
+    F: FnMut(PathBuf) -> Fut,
+    Fut: Future<Output = bool> + Send + 'static,
+{
+    let mut pending = db_paths.into_iter();
+    let mut checks = tokio::task::JoinSet::new();
+    for _ in 0..MAX_CONCURRENT_BRANCH_CHECKS {
+        let Some(path) = pending.next() else {
+            break;
+        };
+        checks.spawn(check(path));
+    }
+
+    let mut healthy = true;
+    while let Some(result) = checks.join_next().await {
+        healthy &= matches!(result, Ok(true));
+        if let Some(path) = pending.next() {
+            checks.spawn(check(path));
+        }
+    }
+    healthy
 }
 
 pub(super) fn record_sqlite_family_sidecars(
@@ -152,4 +197,50 @@ pub(super) fn dir_size(dir: &Path) -> u64 {
     let mut visited_dirs = HashSet::new();
     walk(dir, &mut total, &mut visited_dirs);
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::sync::Barrier;
+
+    use super::{MAX_CONCURRENT_BRANCH_CHECKS, check_branch_databases};
+
+    #[tokio::test]
+    async fn branch_database_checks_are_bounded_and_complete() {
+        let paths = (0..512)
+            .map(|index| PathBuf::from(format!("branch-{index}.db")))
+            .collect();
+        let active = Arc::new(AtomicUsize::new(0));
+        let checked = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+        let first_batch = Arc::new(Barrier::new(MAX_CONCURRENT_BRANCH_CHECKS));
+
+        let healthy = check_branch_databases(paths, |_| {
+            let active = Arc::clone(&active);
+            let checked = Arc::clone(&checked);
+            let peak = Arc::clone(&peak);
+            let started = Arc::clone(&started);
+            let first_batch = Arc::clone(&first_batch);
+            async move {
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(current, Ordering::SeqCst);
+                if started.fetch_add(1, Ordering::SeqCst) < MAX_CONCURRENT_BRANCH_CHECKS {
+                    first_batch.wait().await;
+                }
+                checked.fetch_add(1, Ordering::SeqCst);
+                active.fetch_sub(1, Ordering::SeqCst);
+                true
+            }
+        })
+        .await;
+
+        assert!(healthy);
+        assert_eq!(checked.load(Ordering::SeqCst), 512);
+        assert_eq!(peak.load(Ordering::SeqCst), MAX_CONCURRENT_BRANCH_CHECKS);
+    }
 }

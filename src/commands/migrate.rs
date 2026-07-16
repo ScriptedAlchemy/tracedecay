@@ -1,7 +1,51 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::cli::MigrateAction;
-use crate::global;
+
+async fn build_migration_inventory(
+    options: tracedecay::migrate::inventory::MigrationInventoryOptions,
+) -> tracedecay::errors::Result<tracedecay::migrate::inventory::MigrationInventory> {
+    #[cfg(unix)]
+    let daemon_available = tracedecay::daemon::daemon_reachable();
+    #[cfg(not(unix))]
+    let daemon_available = true;
+
+    if daemon_available {
+        return brokered_migration_inventory(&options).await;
+    }
+
+    match tracedecay::migrate::inventory::build_inventory(options.clone()).await {
+        Ok(report) => Ok(report),
+        Err(offline_error) => {
+            #[cfg(unix)]
+            if tracedecay::daemon::daemon_reachable() {
+                return brokered_migration_inventory(&options).await;
+            }
+            Err(offline_error)
+        }
+    }
+}
+
+async fn brokered_migration_inventory(
+    options: &tracedecay::migrate::inventory::MigrationInventoryOptions,
+) -> tracedecay::errors::Result<tracedecay::migrate::inventory::MigrationInventory> {
+    let value = super::daemon::daemon_tool_json(
+        None,
+        "tracedecay_admin_cli",
+        serde_json::json!({
+            "action": "migration_inventory",
+            "roots": &options.roots,
+            "follow_symlinks": options.follow_symlinks,
+            "include_all_registered": options.include_all_registered,
+            "verify_integrity": matches!(
+                options.integrity,
+                tracedecay::migrate::inventory::InventoryIntegrityMode::Full
+            ),
+        }),
+    )
+    .await?;
+    serde_json::from_value(value).map_err(Into::into)
+}
 
 pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::errors::Result<()> {
     match action {
@@ -71,31 +115,51 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             roots,
             include_all_registered,
             follow_symlinks,
+            verify_integrity,
             manifest,
             save,
             profile_root,
             project_id,
             json,
         } => {
+            let cwd = std::env::current_dir().map_err(|error| {
+                tracedecay::errors::TraceDecayError::Config {
+                    message: format!("could not determine current directory: {error}"),
+                }
+            })?;
             let scan_roots = if roots.is_empty() {
-                vec![std::env::current_dir().map_err(|e| {
-                    tracedecay::errors::TraceDecayError::Config {
-                        message: format!("could not determine current directory: {e}"),
-                    }
-                })?]
+                vec![cwd]
             } else {
-                roots.into_iter().map(PathBuf::from).collect()
+                roots
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .map(|root| {
+                        let absolute = if root.is_absolute() {
+                            root
+                        } else {
+                            cwd.join(root)
+                        };
+                        absolute.canonicalize().unwrap_or(absolute)
+                    })
+                    .collect()
             };
-            let report = tracedecay::migrate::inventory::build_inventory(
+            let saves_manifest = manifest.is_some() || save;
+            let integrity = if verify_integrity || saves_manifest {
+                tracedecay::migrate::inventory::InventoryIntegrityMode::Full
+            } else {
+                tracedecay::migrate::inventory::InventoryIntegrityMode::MetadataOnly
+            };
+            let report = build_migration_inventory(
                 tracedecay::migrate::inventory::MigrationInventoryOptions {
                     roots: scan_roots,
                     follow_symlinks,
                     include_all_registered,
+                    integrity,
                     ..tracedecay::migrate::inventory::MigrationInventoryOptions::default()
                 },
             )
             .await?;
-            if manifest.is_some() || save {
+            if saves_manifest {
                 let migration_id = format!("mig_{}", tracedecay::tracedecay::current_timestamp());
                 let profile_root =
                     profile_root.ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
@@ -184,14 +248,23 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                 }
             };
             let profile_root = tracedecay::storage::default_profile_root()?;
-            let report = tracedecay::migrate::manifest::export_profile_store(
-                &profile_root,
-                &project_id,
-                &PathBuf::from(to),
-            )
-            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
-                message: err.to_string(),
-            })?;
+            let target_dir = PathBuf::from(to);
+            let report = tracedecay::daemon::with_quiesced_installed_service(
+                "profile store export",
+                |lifecycle| {
+                    tracedecay::migrate::manifest::export_profile_store_with_lease(
+                        &profile_root,
+                        &project_id,
+                        &target_dir,
+                        lifecycle,
+                    )
+                    .map_err(|err| {
+                        tracedecay::errors::TraceDecayError::Config {
+                            message: err.to_string(),
+                        }
+                    })
+                },
+            )?;
             println!(
                 "migration export: {} artifact(s) from {} to {}",
                 report.artifact_count,
@@ -442,116 +515,8 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             apply,
             json,
         } => {
-            let profile_root = tracedecay::storage::default_profile_root()?;
-            let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
-                &profile_root,
-                "registry cleanup",
-            )?;
-            let _database_scope = tracedecay::db::enter_maintenance_database_scope(
-                &lifecycle_lease,
-                &profile_root,
-                "registry cleanup",
-            )?;
-            let global_db =
-                tracedecay::global_db::GlobalDb::try_open_at(&profile_root.join("global.db"))
-                    .await?
-                    .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                        message: "could not open global DB for registry cleanup".to_string(),
-                    })?;
-            let projects = global_db.list_code_projects(usize::MAX).await;
-            let prefixes: Vec<PathBuf> = prefix.iter().map(PathBuf::from).collect();
-            let stale = tracedecay::migrate::registry::stale_code_projects(
-                &projects,
-                &prefixes,
-                tracedecay::migrate::registry::StaleRootScope::CanonicalRootMissing,
-            );
-            let mut stale_storage_projects = Vec::new();
-            for project_path in global_db.list_project_paths_compat().await {
-                let project_path = PathBuf::from(project_path);
-                if !prefixes.is_empty()
-                    && !prefixes
-                        .iter()
-                        .any(|prefix| project_path.starts_with(prefix))
-                {
-                    continue;
-                }
-                let location = global::classify_project_storage_with_registry(
-                    &project_path,
-                    Some(&global_db),
-                    Some(&profile_root),
-                )
-                .await;
-                if location.status == global::ProjectStorageStatus::Stale {
-                    stale_storage_projects.push(project_path);
-                }
-            }
-            let (deleted_code_projects, deleted_storage_projects) = if apply {
-                let project_ids: Vec<String> = stale
-                    .iter()
-                    .map(|project| project.project_id.clone())
-                    .collect();
-                (
-                    global_db.delete_code_projects(&project_ids).await,
-                    global_db
-                        .delete_project_paths(&stale_storage_projects)
-                        .await,
-                )
-            } else {
-                (0, 0)
-            };
-            let candidate_paths = stale
-                .iter()
-                .map(|project| {
-                    tracedecay::global_db::GlobalDb::canonical_project_key(Path::new(
-                        &project.canonical_root,
-                    ))
-                })
-                .chain(
-                    stale_storage_projects
-                        .iter()
-                        .map(|path| tracedecay::global_db::GlobalDb::canonical_project_key(path)),
-                )
-                .collect::<std::collections::BTreeSet<_>>();
-            let candidate_count = candidate_paths.len();
-            let metadata_candidate_count = stale.len() + stale_storage_projects.len();
-            let deleted_count = deleted_code_projects + deleted_storage_projects;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "apply": apply,
-                        "prefix": prefix,
-                        "candidate_count": candidate_count,
-                        "metadata_candidate_count": metadata_candidate_count,
-                        "code_project_candidate_count": stale.len(),
-                        "storage_project_candidate_count": stale_storage_projects.len(),
-                        "deleted_count": deleted_count,
-                        "deleted_code_project_count": deleted_code_projects,
-                        "deleted_storage_project_count": deleted_storage_projects,
-                        "candidates": stale,
-                        "storage_project_candidates": stale_storage_projects,
-                    }))?
-                );
-            } else {
-                println!(
-                    "registry-gc: {} stale project(s){}",
-                    candidate_count,
-                    if apply { " selected" } else { " found" }
-                );
-                if apply {
-                    println!(
-                        "metadata rows deleted: {deleted_count} ({deleted_code_projects} identity, {deleted_storage_projects} storage)"
-                    );
-                } else {
-                    println!("dry run: re-run with --apply to delete registry metadata");
-                }
-                for project_path in candidate_paths.iter().take(20) {
-                    println!("{project_path}");
-                }
-                if candidate_count > 20 {
-                    println!("... {} more", candidate_count - 20);
-                }
-            }
+            let report = registry_gc(prefix, apply).await?;
+            print_registry_gc_report(report, json)?;
         }
         MigrateAction::Rollback {
             manifest,
@@ -596,6 +561,118 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                 cleanup_report.removed_artifacts
             );
         }
+    }
+    Ok(())
+}
+
+async fn registry_gc(
+    prefix: Option<String>,
+    apply: bool,
+) -> tracedecay::errors::Result<serde_json::Value> {
+    #[cfg(unix)]
+    if tracedecay::daemon::daemon_reachable() {
+        return brokered_registry_gc(prefix, apply).await;
+    }
+
+    match offline_registry_gc(prefix.clone(), apply).await {
+        Ok(report) => Ok(report),
+        Err(offline_error) => {
+            #[cfg(unix)]
+            if tracedecay::daemon::daemon_reachable() {
+                return brokered_registry_gc(prefix, apply).await;
+            }
+            Err(offline_error)
+        }
+    }
+}
+
+async fn brokered_registry_gc(
+    prefix: Option<String>,
+    apply: bool,
+) -> tracedecay::errors::Result<serde_json::Value> {
+    let cwd =
+        std::env::current_dir().map_err(|error| tracedecay::errors::TraceDecayError::Config {
+            message: format!("failed to determine current directory for registry cleanup: {error}"),
+        })?;
+    let project_root = tracedecay::config::discover_project_root(&cwd);
+    super::daemon::daemon_tool_json(
+        project_root.as_deref(),
+        "tracedecay_admin_cli",
+        serde_json::json!({
+            "action": "registry_gc",
+            "prefix": prefix,
+            "apply": apply,
+        }),
+    )
+    .await
+}
+
+async fn offline_registry_gc(
+    prefix: Option<String>,
+    apply: bool,
+) -> tracedecay::errors::Result<serde_json::Value> {
+    let profile_root = tracedecay::storage::default_profile_root()?;
+    let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile_root,
+        "registry cleanup",
+    )?;
+    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle_lease,
+        &profile_root,
+        "registry cleanup",
+    )?;
+    let global_db = tracedecay::global_db::GlobalDb::try_open_at(&profile_root.join("global.db"))
+        .await?
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: "could not open global DB for registry cleanup".to_string(),
+        })?;
+    let report = if apply {
+        tracedecay::migrate::registry::apply_registry_gc(&global_db, &profile_root, prefix).await?
+    } else {
+        tracedecay::migrate::registry::registry_gc_report(&global_db, &profile_root, prefix).await?
+    };
+    serde_json::to_value(report).map_err(Into::into)
+}
+
+#[derive(serde::Deserialize)]
+struct RegistryGcDisplay {
+    apply: bool,
+    candidate_count: usize,
+    deleted_count: usize,
+    deleted_code_project_count: usize,
+    deleted_storage_project_count: usize,
+    candidate_paths: Vec<String>,
+}
+
+fn print_registry_gc_report(
+    report: serde_json::Value,
+    json: bool,
+) -> tracedecay::errors::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    let display: RegistryGcDisplay = serde_json::from_value(report)?;
+    println!(
+        "registry-gc: {} stale project(s){}",
+        display.candidate_count,
+        if display.apply { " selected" } else { " found" }
+    );
+    if display.apply {
+        println!(
+            "metadata rows deleted: {} ({} identity, {} storage)",
+            display.deleted_count,
+            display.deleted_code_project_count,
+            display.deleted_storage_project_count
+        );
+    } else {
+        println!("dry run: re-run with --apply to delete registry metadata");
+    }
+    for project_path in display.candidate_paths.iter().take(20) {
+        println!("{project_path}");
+    }
+    if display.candidate_count > 20 {
+        println!("... {} more", display.candidate_count - 20);
     }
     Ok(())
 }

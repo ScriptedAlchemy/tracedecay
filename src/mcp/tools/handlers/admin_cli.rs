@@ -48,6 +48,17 @@ enum AdminCliAction {
     RegistryProjectTokens {
         project_args: Vec<PathBuf>,
     },
+    RegistryGc {
+        prefix: Option<String>,
+        apply: bool,
+    },
+    MigrationInventory {
+        roots: Vec<PathBuf>,
+        follow_symlinks: bool,
+        include_all_registered: bool,
+        #[serde(default)]
+        verify_integrity: bool,
+    },
     GainQuery {
         project_arg: Option<PathBuf>,
         since: i64,
@@ -57,6 +68,7 @@ enum AdminCliAction {
 
 struct AdminCliContext<'a> {
     global_db: &'a GlobalDb,
+    profile_root: Option<&'a Path>,
     project: Option<&'a TraceDecay>,
     project_session_db: Option<&'a GlobalDb>,
     user_session_db: Option<&'a GlobalDb>,
@@ -66,19 +78,22 @@ impl<'a> AdminCliContext<'a> {
     fn with_project(
         cg: &'a TraceDecay,
         global_db: &'a GlobalDb,
+        profile_root: Option<&'a Path>,
         session_authorities: super::SessionAuthorities<'a>,
     ) -> Self {
         Self {
             global_db,
+            profile_root,
             project: Some(cg),
             project_session_db: session_authorities.project.map(AsRef::as_ref),
             user_session_db: session_authorities.user.map(AsRef::as_ref),
         }
     }
 
-    fn projectless(global_db: &'a GlobalDb) -> Self {
+    fn projectless(global_db: &'a GlobalDb, profile_root: &'a Path) -> Self {
         Self {
             global_db,
+            profile_root: Some(profile_root),
             project: None,
             project_session_db: None,
             user_session_db: None,
@@ -88,6 +103,12 @@ impl<'a> AdminCliContext<'a> {
     fn require_project(&self) -> Result<&'a TraceDecay> {
         self.project.ok_or_else(|| TraceDecayError::Config {
             message: "requested admin action requires an initialized project".to_string(),
+        })
+    }
+
+    fn require_profile_root(&self) -> Result<&'a Path> {
+        self.profile_root.ok_or_else(|| TraceDecayError::Config {
+            message: "daemon TraceDecay profile root is unavailable".to_string(),
         })
     }
 
@@ -113,6 +134,7 @@ pub(super) async fn handle_admin_cli(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&GlobalDb>,
+    profile_root: Option<&Path>,
     session_authorities: super::SessionAuthorities<'_>,
 ) -> Result<ToolResult> {
     let action = parse_admin_cli_action(args)?;
@@ -120,7 +142,7 @@ pub(super) async fn handle_admin_cli(
         message: "daemon global database is unavailable".to_string(),
     })?;
     dispatch_admin_cli(
-        AdminCliContext::with_project(cg, global_db, session_authorities),
+        AdminCliContext::with_project(cg, global_db, profile_root, session_authorities),
         action,
     )
     .await
@@ -129,9 +151,14 @@ pub(super) async fn handle_admin_cli(
 pub(crate) async fn handle_projectless_admin_cli(
     args: Value,
     global_db: &GlobalDb,
+    profile_root: &Path,
 ) -> Result<ToolResult> {
     let action = parse_admin_cli_action(args)?;
-    dispatch_admin_cli(AdminCliContext::projectless(global_db), action).await
+    dispatch_admin_cli(
+        AdminCliContext::projectless(global_db, profile_root),
+        action,
+    )
+    .await
 }
 
 fn parse_admin_cli_action(args: Value) -> Result<AdminCliAction> {
@@ -202,6 +229,38 @@ async fn dispatch_admin_cli(
         AdminCliAction::RegistryProjectTokens { project_args } => {
             registry_project_tokens(global_db, &project_args).await
         }
+        AdminCliAction::RegistryGc { prefix, apply } => {
+            let profile_root = context.require_profile_root()?;
+            let report = if apply {
+                crate::migrate::registry::apply_registry_gc(global_db, profile_root, prefix).await?
+            } else {
+                crate::migrate::registry::registry_gc_report(global_db, profile_root, prefix)
+                    .await?
+            };
+            serde_json::to_value(report)?
+        }
+        AdminCliAction::MigrationInventory {
+            roots,
+            follow_symlinks,
+            include_all_registered,
+            verify_integrity,
+        } => serde_json::to_value(
+            crate::migrate::inventory::build_inventory_for_daemon(
+                crate::migrate::inventory::MigrationInventoryOptions {
+                    roots,
+                    global_db_path: None,
+                    follow_symlinks,
+                    include_all_registered,
+                    integrity: if verify_integrity {
+                        crate::migrate::inventory::InventoryIntegrityMode::Full
+                    } else {
+                        crate::migrate::inventory::InventoryIntegrityMode::MetadataOnly
+                    },
+                },
+                global_db,
+            )
+            .await?,
+        )?,
         AdminCliAction::GainQuery {
             project_arg,
             since,
@@ -516,5 +575,52 @@ mod tests {
     #[test]
     fn rejects_unknown_admin_action() {
         assert!(serde_json::from_value::<AdminCliAction>(json!({ "action": "vacuum" })).is_err());
+    }
+
+    #[tokio::test]
+    async fn registry_gc_preview_uses_profile_root_when_global_db_is_overridden() {
+        let fixture = tempfile::tempdir().expect("tempdir");
+        let profile_root = fixture.path().join("profile");
+        let override_root = fixture.path().join("database-override");
+        let project_root = fixture.path().join("missing-project");
+        let store_root = profile_root.join("projects/project-override");
+        std::fs::create_dir_all(&store_root).expect("profile store");
+        std::fs::write(store_root.join("tracedecay.db"), b"store").expect("profile store database");
+        std::fs::create_dir_all(&override_root).expect("override root");
+        let db = GlobalDb::open_at(&override_root.join("global.db"))
+            .await
+            .expect("global database");
+        db.upsert(&project_root, 1).await;
+        db.upsert_code_project("project-override", &project_root, None, None, Some("main"))
+            .await
+            .expect("project registry entry");
+        db.upsert_store_instance(crate::global_db::StoreInstanceUpsert {
+            store_id: "store:project-override:profile_sharded".to_string(),
+            project_id: "project-override".to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: "projects/project-override".to_string(),
+            manifest_relpath: None,
+            last_verified_at: Some(1),
+            last_write_at: Some(1),
+        })
+        .await
+        .expect("store registry entry");
+
+        let report = handle_projectless_admin_cli(
+            json!({ "action": "registry_gc", "prefix": null, "apply": false }),
+            &db,
+            &profile_root,
+        )
+        .await
+        .expect("registry GC preview");
+        let report: Value = serde_json::from_str(
+            report.value["content"][0]["text"]
+                .as_str()
+                .expect("JSON result text"),
+        )
+        .expect("registry GC report");
+
+        assert_eq!(report["storage_project_candidate_count"], 0);
     }
 }

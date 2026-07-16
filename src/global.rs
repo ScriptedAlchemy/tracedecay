@@ -2,47 +2,10 @@ use std::path::Path;
 
 use crate::current_unix_timestamp;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProjectStorageStatus {
-    RepoLocal,
-    ProfileSharded,
-    ManifestReconstructable,
-    Stale,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProjectStorageLocation {
-    pub project_root: std::path::PathBuf,
-    pub data_root: std::path::PathBuf,
-    pub marker_root: Option<std::path::PathBuf>,
-    pub status: ProjectStorageStatus,
-}
-
-impl ProjectStorageStatus {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::RepoLocal => "repo-local",
-            Self::ProfileSharded => "profile-sharded",
-            Self::ManifestReconstructable => "manifest-reconstructable",
-            Self::Stale => "stale",
-        }
-    }
-
-    pub(crate) fn is_live(self) -> bool {
-        matches!(self, Self::RepoLocal | Self::ProfileSharded)
-    }
-}
+pub(crate) use tracedecay::storage::{ProjectStorageLocation, ProjectStorageStatus};
 
 pub(crate) fn classify_project_storage(project_root: &Path) -> ProjectStorageLocation {
-    match tracedecay::storage::resolve_layout_for_current_profile(project_root) {
-        Ok(layout) => classify_layout_storage(project_root, layout),
-        Err(_) => ProjectStorageLocation {
-            project_root: project_root.to_path_buf(),
-            data_root: tracedecay::config::get_tracedecay_dir(project_root),
-            marker_root: None,
-            status: ProjectStorageStatus::Stale,
-        },
-    }
+    tracedecay::storage::classify_project_storage(project_root)
 }
 
 pub(crate) async fn classify_project_storage_with_registry(
@@ -51,64 +14,25 @@ pub(crate) async fn classify_project_storage_with_registry(
     profile_root: Option<&Path>,
 ) -> ProjectStorageLocation {
     let location = classify_project_storage(project_root);
-    if location.status != ProjectStorageStatus::Stale {
-        return location;
-    }
-    let Some(db) = global_db else {
+    let (Some(global_db), Some(profile_root)) = (global_db, profile_root) else {
         return location;
     };
-    let Some(profile_root) = profile_root else {
-        return location;
-    };
-    let Some(resolution) = db.resolve_project_store_by_alias(project_root).await else {
-        return location;
-    };
-    classify_registry_storage(project_root, profile_root, &resolution.store).unwrap_or(location)
+    tracedecay::storage::try_classify_project_storage_with_registry(
+        project_root,
+        global_db,
+        profile_root,
+    )
+    .await
+    .unwrap_or(location)
 }
 
-fn classify_layout_storage(
-    project_root: &Path,
-    layout: tracedecay::storage::StoreLayout,
-) -> ProjectStorageLocation {
-    let graph_exists = layout.graph_db_path.exists();
-    let manifest_exists = layout
-        .manifest_path
-        .as_ref()
-        .is_some_and(|path| path.is_file());
-    let status = match layout.storage_mode {
-        tracedecay::storage::StorageMode::ProjectLocal if graph_exists => {
-            ProjectStorageStatus::RepoLocal
-        }
-        tracedecay::storage::StorageMode::ProfileSharded if graph_exists => {
-            ProjectStorageStatus::ProfileSharded
-        }
-        tracedecay::storage::StorageMode::ProfileSharded if manifest_exists => {
-            ProjectStorageStatus::ManifestReconstructable
-        }
-        _ => ProjectStorageStatus::Stale,
-    };
-    let marker_root = (layout.storage_mode == tracedecay::storage::StorageMode::ProfileSharded)
-        .then(|| project_root.join(tracedecay::config::TRACEDECAY_DIR));
-    ProjectStorageLocation {
-        project_root: project_root.to_path_buf(),
-        data_root: layout.data_root,
-        marker_root,
-        status,
-    }
-}
-
+#[cfg(test)]
 fn classify_registry_storage(
     project_root: &Path,
     profile_root: &Path,
     store: &tracedecay::global_db::StoreInstanceRecord,
 ) -> Option<ProjectStorageLocation> {
-    classify_registry_storage_fields(
-        project_root,
-        profile_root,
-        &store.storage_mode,
-        &store.store_relpath,
-        store.manifest_relpath.as_deref(),
-    )
+    tracedecay::storage::classify_registry_storage(project_root, profile_root, store)
 }
 
 pub(crate) fn classify_registry_storage_value(
@@ -116,105 +40,7 @@ pub(crate) fn classify_registry_storage_value(
     profile_root: &Path,
     store: &serde_json::Value,
 ) -> Option<ProjectStorageLocation> {
-    classify_registry_storage_fields(
-        project_root,
-        profile_root,
-        store.get("storage_mode")?.as_str()?,
-        store.get("store_relpath")?.as_str()?,
-        store
-            .get("manifest_relpath")
-            .and_then(serde_json::Value::as_str),
-    )
-}
-
-fn classify_registry_storage_fields(
-    project_root: &Path,
-    profile_root: &Path,
-    storage_mode: &str,
-    store_relpath: &str,
-    manifest_relpath: Option<&str>,
-) -> Option<ProjectStorageLocation> {
-    if storage_mode != "profile_sharded" {
-        return None;
-    }
-    let store_relpath = registry_relpath(store_relpath);
-    let manifest_relpath = manifest_relpath.map(registry_relpath);
-    let mut stale_location = None;
-    let mut manifest_location = None;
-    for profile_root in registry_profile_roots(profile_root) {
-        let Ok(data_root) =
-            tracedecay::storage::StoreArtifactPath::resolve(&profile_root, &store_relpath)
-        else {
-            continue;
-        };
-        let data_root = data_root.absolute_path();
-        let manifest_exists = manifest_relpath.as_ref().map_or_else(
-            || {
-                data_root
-                    .join(tracedecay::storage::STORE_MANIFEST_FILENAME)
-                    .is_file()
-            },
-            |relpath| {
-                [&profile_root, &data_root].iter().any(|root| {
-                    tracedecay::storage::StoreArtifactPath::resolve(root, relpath)
-                        .ok()
-                        .is_some_and(|path| path.absolute_path().is_file())
-                })
-            },
-        );
-        let status = if data_root
-            .join(tracedecay::config::db_filename(&data_root))
-            .exists()
-        {
-            ProjectStorageStatus::ProfileSharded
-        } else if manifest_exists {
-            ProjectStorageStatus::ManifestReconstructable
-        } else {
-            ProjectStorageStatus::Stale
-        };
-        let location = ProjectStorageLocation {
-            project_root: project_root.to_path_buf(),
-            data_root,
-            marker_root: Some(project_root.join(tracedecay::config::TRACEDECAY_DIR)),
-            status,
-        };
-        match location.status {
-            ProjectStorageStatus::ProfileSharded => return Some(location),
-            ProjectStorageStatus::ManifestReconstructable if manifest_location.is_none() => {
-                manifest_location = Some(location);
-            }
-            ProjectStorageStatus::Stale if stale_location.is_none() => {
-                stale_location = Some(location);
-            }
-            _ => {}
-        }
-    }
-    manifest_location.or(stale_location)
-}
-
-fn registry_relpath(value: &str) -> std::path::PathBuf {
-    let path = std::path::Path::new(value);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return path.to_path_buf();
-    }
-    value
-        .split(['/', '\\'])
-        .filter(|part| !part.is_empty())
-        .collect()
-}
-
-fn registry_profile_roots(profile_root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut roots = vec![profile_root.to_path_buf()];
-    if let Ok(canonical) = profile_root.canonicalize()
-        && !roots.iter().any(|root| root == &canonical)
-    {
-        roots.push(canonical);
-    }
-    roots
+    tracedecay::storage::classify_registry_storage_value(project_root, profile_root, store)
 }
 
 /// Returns how many seconds have elapsed since a persisted timestamp.

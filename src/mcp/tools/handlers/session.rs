@@ -105,6 +105,7 @@ const fn message_catch_up_interrupted(provider: &'static str) -> TranscriptCatch
         source: "message_search",
         reason_code: "message_catch_up_interrupted",
         retryable: true,
+        source_locator: None,
     }
 }
 

@@ -9,8 +9,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     ObservationProjection, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection, WorkflowFactProjection,
-    WorkflowFactRecord,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+    SessionMessageProjection, WorkflowFactProjection, WorkflowFactRecord,
 };
 
 use crate::sessions::claude::{
@@ -1980,12 +1980,29 @@ pub(super) async fn seed_predecessor_message_lineage(
         if !inherited {
             continue;
         }
-        let actual = read_message(conn, &message.provider, &message.message_id)
+        let mut actual = read_message(conn, &message.provider, &message.message_id)
             .await?
             .ok_or_else(|| ProjectionStoreError::OutputCollision {
                 provider: message.provider.clone(),
                 message_id: message.message_id.clone(),
             })?;
+        if !message_rows_compatible(&actual, message)
+            && upgrade_v1_claude_source_path(
+                conn,
+                observation,
+                predecessor_version,
+                &actual,
+                message,
+            )
+            .await?
+        {
+            actual = read_message(conn, &message.provider, &message.message_id)
+                .await?
+                .ok_or_else(|| ProjectionStoreError::OutputCollision {
+                    provider: message.provider.clone(),
+                    message_id: message.message_id.clone(),
+                })?;
+        }
         if !message_rows_compatible(&actual, message) {
             return Err(ProjectionStoreError::OutputCollision {
                 provider: message.provider.clone(),
@@ -1995,6 +2012,54 @@ pub(super) async fn seed_predecessor_message_lineage(
         apply_provenance(conn, sequence, projection, false).await?;
     }
     Ok(())
+}
+
+async fn upgrade_v1_claude_source_path(
+    conn: &Connection,
+    observation: &DurableObservationV1,
+    predecessor_version: &str,
+    actual: &SessionMessageRecord,
+    expected: &SessionMessageRecord,
+) -> ProjectionStoreResult<bool> {
+    const PROTECTED_SOURCE_PREFIX: &str = "tracedecay-claude-observation-source-v1-sha256-";
+
+    let Some(expected_source_path) = expected.source_path.as_deref() else {
+        return Ok(false);
+    };
+    if predecessor_version != SESSION_MESSAGE_PROJECTOR_VERSION_V1
+        || observation.source().provider().as_str() != "claude"
+        || expected.provider != "claude"
+        || expected_source_path != observation.source().source_key().as_str()
+        || !expected_source_path.starts_with(PROTECTED_SOURCE_PREFIX)
+    {
+        return Ok(false);
+    }
+    let legacy_source_path = format!("claude:{}", expected.session_id);
+    let mut legacy = expected.clone();
+    legacy.source_path = Some(legacy_source_path.clone());
+    if actual != &legacy {
+        return Ok(false);
+    }
+    let updated = conn
+        .execute(
+            "UPDATE session_messages SET source_path = ?3
+             WHERE provider = ?1 AND message_id = ?2 AND source_path = ?4",
+            params![
+                expected.provider.as_str(),
+                expected.message_id.as_str(),
+                expected_source_path,
+                legacy_source_path
+            ],
+        )
+        .await
+        .map_err(|error| storage("upgrade legacy Claude projection source path", error))?;
+    if updated != 1 {
+        return Err(ProjectionStoreError::OutputCollision {
+            provider: expected.provider.clone(),
+            message_id: expected.message_id.clone(),
+        });
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
