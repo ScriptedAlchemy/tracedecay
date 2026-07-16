@@ -14,6 +14,7 @@
 //! `workspace-sessions`, by base64-decoding the directory name. The source uses
 //! the shared **`ContentHash`** reader because Kiro writes full snapshot files.
 
+use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::ffi::OsString;
 #[cfg(unix)]
@@ -56,6 +57,7 @@ use tracedecay_domain::{
 
 const PROVIDER: &str = "kiro";
 const DELIMITED_NATIVE_MESSAGE_ID_DOMAIN: &[u8] = b"tracedecay.kiro-delimited-native-message.v2";
+const DERIVED_MESSAGE_ID_DOMAIN: &[u8] = b"tracedecay.kiro-derived-message.v3";
 const KIRO_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMetadataKeys::new(
     "kiro_workspace_cwd",
     "kiro_workspace_worktree",
@@ -878,6 +880,7 @@ fn legacy_chat_messages(
         .and_then(|meta| meta.get("startTime"))
         .and_then(parse_timestamp_secs);
     let mut out = Vec::new();
+    let mut fallback_occurrences = BTreeMap::new();
     for (index, entry) in chat.iter().enumerate() {
         let role = match entry.get("role").and_then(Value::as_str) {
             Some("human" | "user") => "user",
@@ -889,9 +892,20 @@ fn legacy_chat_messages(
         if text.trim().is_empty() {
             continue;
         }
+        let occurrence =
+            if string_field(entry, &["id", "messageId", "message_id", "eventId"]).is_none() {
+                let next = fallback_occurrences
+                    .entry((role.to_string(), None::<i64>, text.clone()))
+                    .or_insert(0);
+                let occurrence = *next;
+                *next += 1;
+                occurrence
+            } else {
+                0
+            };
         out.push(SessionMessageRecord {
             provider: PROVIDER.to_string(),
-            message_id: stable_message_id(session_id, entry, index, &text),
+            message_id: stable_message_id(session_id, entry, role, None, occurrence, &text),
             session_id: session_id.to_string(),
             role: role.to_string(),
             timestamp: base_ts.map(|ts| ts + index as i64),
@@ -916,6 +930,7 @@ fn modern_messages(
     location_cwd: &Path,
 ) -> Vec<SessionMessageRecord> {
     let mut out = Vec::new();
+    let mut fallback_occurrences = BTreeMap::new();
     for (index, entry) in messages.iter().enumerate() {
         let Some(role) = normalized_role(entry) else {
             continue;
@@ -934,9 +949,20 @@ fn modern_messages(
             .or_else(|| entry.get("createdAt"))
             .or_else(|| entry.get("startTime"))
             .and_then(parse_timestamp_secs);
+        let occurrence =
+            if string_field(entry, &["id", "messageId", "message_id", "eventId"]).is_none() {
+                let next = fallback_occurrences
+                    .entry((role.to_string(), timestamp, text.clone()))
+                    .or_insert(0);
+                let occurrence = *next;
+                *next += 1;
+                occurrence
+            } else {
+                0
+            };
         out.push(SessionMessageRecord {
             provider: PROVIDER.to_string(),
-            message_id: stable_message_id(session_id, entry, index, &text),
+            message_id: stable_message_id(session_id, entry, role, timestamp, occurrence, &text),
             session_id: session_id.to_string(),
             role: role.to_string(),
             timestamp,
@@ -1063,7 +1089,14 @@ fn snapshot_capture_request(
     .map_err(|_| TranscriptIngestError::InvalidFrameState { provider })
 }
 
-fn stable_message_id(session_id: &str, entry: &Value, index: usize, text: &str) -> String {
+fn stable_message_id(
+    session_id: &str,
+    entry: &Value,
+    role: &str,
+    timestamp: Option<i64>,
+    occurrence: usize,
+    text: &str,
+) -> String {
     if let Some(native_id) = string_field(entry, &["id", "messageId", "message_id", "eventId"]) {
         if !session_id.contains(':') && !native_id.contains(':') {
             return format!("{session_id}:{native_id}");
@@ -1074,17 +1107,22 @@ fn stable_message_id(session_id: &str, entry: &Value, index: usize, text: &str) 
         );
         return format!("kiro.message-id.v2.{digest}");
     }
-    let native_order = entry
-        .get("timestamp")
-        .or_else(|| entry.get("createdAt"))
-        .or_else(|| entry.get("startTime"))
-        .and_then(parse_timestamp_secs)
-        .map_or_else(
-            || format!("ordinal-{index}"),
-            |timestamp| timestamp.to_string(),
-        );
-    let digest = crate::sessions::source::content_hash64(text);
-    format!("{session_id}:message:{native_order}:{digest:016x}")
+    let timestamp_bytes = timestamp.map(i64::to_be_bytes);
+    let timestamp_bytes = timestamp_bytes
+        .as_ref()
+        .map_or(&[][..], |bytes| bytes.as_slice());
+    let occurrence_bytes = u64::try_from(occurrence).unwrap_or(u64::MAX).to_be_bytes();
+    let digest = canonical_framed_sha256(
+        DERIVED_MESSAGE_ID_DOMAIN,
+        &[
+            session_id.as_bytes(),
+            role.as_bytes(),
+            timestamp_bytes,
+            text.as_bytes(),
+            &occurrence_bytes,
+        ],
+    );
+    format!("kiro.derived-message.v3.{digest}")
 }
 
 fn session_metadata(location_cwd: Option<&Path>, transcript: Option<&Value>) -> Value {
@@ -1706,8 +1744,8 @@ mod observation_tests {
         let text = message.text.clone();
         let message_id = message.message_id.clone();
         assert!(
-            message_id.contains("message:1800000010:"),
-            "fallback identity must use fixture timestamp seconds, got {message_id}"
+            message_id.starts_with("kiro.derived-message.v3."),
+            "fallback identity must use the framed v3 domain, got {message_id}"
         );
 
         let records = normalize_kiro_snapshot_observations(&[message]).unwrap();
@@ -1764,15 +1802,36 @@ mod observation_tests {
     #[test]
     fn native_message_ids_distinguish_delimiter_ambiguous_structural_tuples() {
         assert_eq!(format!("{}:{}", "a:b", "c"), format!("{}:{}", "a", "b:c"));
-        let left = stable_message_id("a:b", &serde_json::json!({"messageId": "c"}), 7, "ignored");
-        let right = stable_message_id("a", &serde_json::json!({"messageId": "b:c"}), 7, "ignored");
+        let left = stable_message_id(
+            "a:b",
+            &serde_json::json!({"messageId": "c"}),
+            "assistant",
+            None,
+            0,
+            "ignored",
+        );
+        let right = stable_message_id(
+            "a",
+            &serde_json::json!({"messageId": "b:c"}),
+            "assistant",
+            None,
+            0,
+            "ignored",
+        );
         assert_ne!(left, right);
         assert!(
             left.starts_with("kiro.message-id.v2.") && right.starts_with("kiro.message-id.v2.")
         );
         assert_eq!(
             left,
-            stable_message_id("a:b", &serde_json::json!({"messageId": "c"}), 7, "ignored",),
+            stable_message_id(
+                "a:b",
+                &serde_json::json!({"messageId": "c"}),
+                "assistant",
+                None,
+                0,
+                "ignored",
+            ),
             "framed IDs must be deterministic for replay"
         );
     }
@@ -1782,19 +1841,56 @@ mod observation_tests {
         let id = stable_message_id(
             "sess-1",
             &serde_json::json!({"messageId": "native-xyz", "content": "ignored"}),
-            9,
+            "assistant",
+            None,
+            0,
             "ignored-for-native",
         );
         assert_eq!(id, "sess-1:native-xyz");
     }
 
     #[test]
-    fn derived_message_ids_preserve_the_v1_public_identity_shape() {
-        let entry = serde_json::json!({"timestamp": 1_800_000_000_i64});
-        let digest = crate::sessions::source::content_hash64("stable body");
-        assert_eq!(
-            stable_message_id("sess-1", &entry, 3, "stable body"),
-            format!("sess-1:message:1800000000:{digest:016x}")
+    fn derived_message_ids_encode_role_timestamp_and_semantic_occurrence() {
+        let entry = serde_json::json!({"role": "assistant", "content": "stable body"});
+        let first = stable_message_id(
+            "sess-1",
+            &entry,
+            "assistant",
+            Some(1_800_000_000),
+            0,
+            "stable body",
+        );
+        let reordered = stable_message_id(
+            "sess-1",
+            &entry,
+            "assistant",
+            Some(1_800_000_000),
+            0,
+            "stable body",
+        );
+        assert_eq!(first, reordered);
+        assert!(first.starts_with("kiro.derived-message.v3."));
+        assert_ne!(
+            first,
+            stable_message_id(
+                "sess-1",
+                &entry,
+                "user",
+                Some(1_800_000_000),
+                0,
+                "stable body",
+            )
+        );
+        assert_ne!(
+            first,
+            stable_message_id(
+                "sess-1",
+                &entry,
+                "assistant",
+                Some(1_800_000_000),
+                1,
+                "stable body",
+            )
         );
     }
 }

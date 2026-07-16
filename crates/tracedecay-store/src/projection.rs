@@ -396,6 +396,7 @@ pub struct ProjectionRebuildOutcome {
     checkpoint: ProjectionCheckpoint,
     projected_rows: usize,
     skipped_observations: usize,
+    complete: bool,
 }
 
 impl ProjectionRebuildOutcome {
@@ -408,6 +409,20 @@ impl ProjectionRebuildOutcome {
             checkpoint,
             projected_rows,
             skipped_observations,
+            complete: true,
+        }
+    }
+
+    pub fn in_progress(
+        checkpoint: ProjectionCheckpoint,
+        projected_rows: usize,
+        skipped_observations: usize,
+    ) -> Self {
+        Self {
+            checkpoint,
+            projected_rows,
+            skipped_observations,
+            complete: false,
         }
     }
 
@@ -421,6 +436,10 @@ impl ProjectionRebuildOutcome {
 
     pub fn skipped_observations(&self) -> usize {
         self.skipped_observations
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.complete
     }
 }
 

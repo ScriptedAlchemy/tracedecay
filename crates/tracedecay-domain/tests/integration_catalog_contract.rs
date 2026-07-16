@@ -202,7 +202,7 @@ fn catalog_validation_requires_the_exact_fixture_backed_state_set() {
 }
 
 #[test]
-fn stable_host_integration_ids_match_provider_ids() {
+fn stable_direct_host_integration_ids_match_provider_ids() {
     let encoded: Vec<_> = HostIntegrationIdV1::ALL
         .iter()
         .map(|id| serde_json::to_value(id).unwrap())

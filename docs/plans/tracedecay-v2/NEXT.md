@@ -52,8 +52,10 @@ provider source or daemon-admitted host event
 - Derive public source and observation identity without absolute paths, CWD,
   hostnames, mutable display labels, or database row IDs.
 - Detect append, truncation, replacement, rotation, incomplete tails, malformed
-  records, unknown versions, and duplicate delivery. Advance only through the
-  last completely framed and dispositioned record.
+  records, duplicate delivery, and unknown versions whenever the native format
+  carries an authoritative version discriminator. Unversioned native formats
+  record that limitation explicitly; adapters never invent a version field.
+  Advance only through the last completely framed and dispositioned record.
 - Parse structured fields before scanning values. All providers use the PR5
   classification, sanitizer, receipt, safe error, and sink-firewall path.
 - Commit observation, receipt, durable source cursor, projection enqueue, and
@@ -103,7 +105,8 @@ provider source or daemon-admitted host event
 - stable identity and canonical encoding across restart, path relocation, and
   scan order;
 - append, partial tail, malformed frame, oversized frame, truncation,
-  replacement, rotation, unknown version, and unsupported native fact;
+  replacement, rotation, authoritative unknown-version rejection, explicit
+  unversioned-format coverage, and unsupported native fact;
 - exact duplicate, conflicting duplicate, reordered input, late input, and
   repeated daemon admission;
 - sanitizer redaction/rejection/quarantine before every durable or visible sink;

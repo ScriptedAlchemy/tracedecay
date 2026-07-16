@@ -15,6 +15,7 @@
 //! is ingested only when its metadata contains a project/workspace/cwd path that
 //! resolves to the current tracedecay project root.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -59,6 +60,7 @@ const MAX_USAGE_EVENTS_PER_TASK: usize = 4_096;
 const TASK_METADATA_FILES: [&str; 3] = ["task_metadata.json", "history_item.json", "history.json"];
 const DELIMITED_NATIVE_MESSAGE_ID_DOMAIN: &[u8] =
     b"tracedecay.cline-like-delimited-native-message.v2";
+const DERIVED_MESSAGE_ID_DOMAIN: &[u8] = b"tracedecay.cline-like-derived-message.v3";
 const CLINE_LIKE_LOCATION_KEYS: TranscriptLocationMetadataKeys =
     TranscriptLocationMetadataKeys::new(
         "cline_like_task_cwd",
@@ -341,10 +343,17 @@ impl ClineLikeSource {
             .unwrap_or("unknown");
 
         let mut messages = Vec::with_capacity(entries.len());
+        let mut fallback_occurrences = BTreeMap::new();
         for (index, entry) in entries.iter().enumerate() {
-            if let Some(message) =
-                message_from_entry(self.provider, entry, task_id, path, index, &location_cwd)
-            {
+            if let Some(message) = message_from_entry(
+                self.provider,
+                entry,
+                task_id,
+                path,
+                index,
+                &location_cwd,
+                &mut fallback_occurrences,
+            ) {
                 messages.push(message);
             }
         }
@@ -612,6 +621,7 @@ fn usage_records(
     }
 
     let mut records = Vec::new();
+    let mut fallback_occurrences = BTreeMap::new();
     for (index, event) in events.iter().enumerate() {
         if event.get("type").and_then(Value::as_str) != Some("say")
             || event.get("say").and_then(Value::as_str) != Some("api_req_started")
@@ -626,13 +636,25 @@ fn usage_records(
         };
         let timestamp = entry_timestamp(event);
         let native_id = native_record_id(event);
+        let content = usage.to_string();
+        let occurrence = if native_id.is_none() {
+            let next = fallback_occurrences
+                .entry((timestamp, content.clone()))
+                .or_insert(0);
+            let occurrence = *next;
+            *next += 1;
+            occurrence
+        } else {
+            0
+        };
         let message_id = stable_message_id(
             task_id,
             "ui-usage",
             native_id,
             timestamp,
-            index,
-            &usage.to_string(),
+            "assistant",
+            occurrence,
+            &content,
         );
         let mut metadata = serde_json::Map::new();
         metadata.insert(
@@ -659,7 +681,7 @@ fn usage_records(
             role: "assistant".to_string(),
             timestamp,
             ordinal: (ordinal_base + index) as i64,
-            text: usage.to_string(),
+            text: content,
             kind: Some("usage".to_string()),
             model: None,
             tool_names: None,
@@ -729,6 +751,7 @@ fn message_from_entry(
     path: &Path,
     index: usize,
     location_cwd: &Path,
+    fallback_occurrences: &mut BTreeMap<(String, Option<i64>, String), usize>,
 ) -> Option<SessionMessageRecord> {
     let role = match entry.get("role").and_then(Value::as_str)? {
         "user" => "user",
@@ -745,12 +768,24 @@ fn message_from_entry(
         .get("model")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let native_id = native_record_id(entry);
+    let occurrence = if native_id.is_none() {
+        let next = fallback_occurrences
+            .entry((role.to_string(), timestamp, text.clone()))
+            .or_insert(0);
+        let occurrence = *next;
+        *next += 1;
+        occurrence
+    } else {
+        0
+    };
     let message_id = stable_message_id(
         task_id,
         "api-message",
-        native_record_id(entry),
+        native_id,
         timestamp,
-        index,
+        role,
+        occurrence,
         &text,
     );
 
@@ -899,7 +934,8 @@ fn stable_message_id(
     kind: &str,
     native_id: Option<&str>,
     timestamp: Option<i64>,
-    ordinal: usize,
+    role: &str,
+    occurrence: usize,
     content: &str,
 ) -> String {
     if let Some(native_id) = native_id {
@@ -912,9 +948,23 @@ fn stable_message_id(
         );
         return format!("cline-like.message-id.v2.{digest}");
     }
-    let native_order = timestamp.map_or_else(|| format!("ordinal-{ordinal}"), |ts| ts.to_string());
-    let digest = crate::sessions::source::content_hash64(content);
-    format!("{task_id}:{kind}:{native_order}:{digest:016x}")
+    let timestamp_bytes = timestamp.map(i64::to_be_bytes);
+    let timestamp_bytes = timestamp_bytes
+        .as_ref()
+        .map_or(&[][..], |bytes| bytes.as_slice());
+    let occurrence_bytes = u64::try_from(occurrence).unwrap_or(u64::MAX).to_be_bytes();
+    let digest = canonical_framed_sha256(
+        DERIVED_MESSAGE_ID_DOMAIN,
+        &[
+            task_id.as_bytes(),
+            kind.as_bytes(),
+            role.as_bytes(),
+            timestamp_bytes,
+            content.as_bytes(),
+            &occurrence_bytes,
+        ],
+    );
+    format!("cline-like.derived-message.v3.{digest}")
 }
 
 fn session_metadata(provider: &str, location_cwd: Option<&Path>) -> Value {
@@ -1369,6 +1419,7 @@ mod observation_tests {
                 Path::new(api_name),
                 1,
                 Path::new("/tmp/project"),
+                &mut BTreeMap::new(),
             )
             .expect("fixture-backed assistant message");
             assert_eq!(
@@ -1582,8 +1633,24 @@ mod observation_tests {
     #[test]
     fn native_message_ids_distinguish_delimiter_ambiguous_structural_tuples() {
         assert_eq!(format!("{}:{}", "a:b", "c"), format!("{}:{}", "a", "b:c"));
-        let left = stable_message_id("a:b", "api-message", Some("c"), Some(1), 0, "ignored");
-        let right = stable_message_id("a", "api-message", Some("b:c"), Some(1), 0, "ignored");
+        let left = stable_message_id(
+            "a:b",
+            "api-message",
+            Some("c"),
+            Some(1),
+            "assistant",
+            0,
+            "ignored",
+        );
+        let right = stable_message_id(
+            "a",
+            "api-message",
+            Some("b:c"),
+            Some(1),
+            "assistant",
+            0,
+            "ignored",
+        );
         assert_ne!(left, right);
         assert!(
             left.starts_with("cline-like.message-id.v2.")
@@ -1591,7 +1658,15 @@ mod observation_tests {
         );
         assert_eq!(
             left,
-            stable_message_id("a:b", "api-message", Some("c"), Some(1), 0, "ignored"),
+            stable_message_id(
+                "a:b",
+                "api-message",
+                Some("c"),
+                Some(1),
+                "assistant",
+                0,
+                "ignored",
+            ),
             "framed IDs must be deterministic for replay"
         );
     }
@@ -1603,25 +1678,46 @@ mod observation_tests {
             "api-message",
             Some("native-xyz"),
             Some(1_800_000_000),
-            3,
+            "assistant",
+            0,
             "ignored-for-native",
         );
         assert_eq!(id, "task-1:native-xyz");
     }
 
     #[test]
-    fn derived_message_ids_preserve_the_v1_public_identity_shape() {
-        let digest = crate::sessions::source::content_hash64("stable body");
-        assert_eq!(
+    fn derived_message_ids_encode_timestamp_and_semantic_occurrence() {
+        let first = stable_message_id(
+            "task-1",
+            "api-message",
+            None,
+            Some(1_800_000_000),
+            "assistant",
+            0,
+            "stable body",
+        );
+        let reordered = stable_message_id(
+            "task-1",
+            "api-message",
+            None,
+            Some(1_800_000_000),
+            "assistant",
+            0,
+            "stable body",
+        );
+        assert_eq!(first, reordered);
+        assert!(first.starts_with("cline-like.derived-message.v3."));
+        assert_ne!(
+            first,
             stable_message_id(
                 "task-1",
                 "api-message",
                 None,
                 Some(1_800_000_000),
-                3,
+                "assistant",
+                1,
                 "stable body",
-            ),
-            format!("task-1:api-message:1800000000:{digest:016x}")
+            )
         );
     }
 }

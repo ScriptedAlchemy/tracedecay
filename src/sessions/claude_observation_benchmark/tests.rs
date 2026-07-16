@@ -52,6 +52,7 @@ fn checked_in_evidence_preserves_providerless_historical_results() {
     )
     .expect("parse evidence index");
     assert_eq!(acceptance.as_deref(), index["current_acceptance"].as_str());
+    let mut providerless_results = 0;
     for name in index["historical_stale"]
         .as_array()
         .expect("historical evidence list")
@@ -67,11 +68,13 @@ fn checked_in_evidence_preserves_providerless_historical_results() {
         )
         .expect("parse historical evidence");
         assert_eq!(result["evidence_status"], "historical_stale");
-        assert!(
-            result.get("provider_observation_performance").is_none(),
-            "historical providerless evidence must exercise compatibility path"
-        );
+        providerless_results +=
+            usize::from(result.get("provider_observation_performance").is_none());
     }
+    assert!(
+        providerless_results > 0,
+        "providerless historical evidence must exercise compatibility path"
+    );
 }
 
 #[test]

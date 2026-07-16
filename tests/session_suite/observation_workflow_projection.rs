@@ -649,6 +649,7 @@ async fn workflow_projection_rolls_back_rebuilds_restarts_and_audits() {
     let reopened = open_lcm_db(&tmp).await;
     let reopened_store = GlobalDbObservationStore::new(&reopened);
     let rebuilt = reopened_store.rebuild_projection(1).await.unwrap();
+    assert!(rebuilt.is_complete());
     assert_eq!(rebuilt.projected_rows(), 1);
     assert_eq!(workflow_rows(&tmp).await, before);
     assert_eq!(

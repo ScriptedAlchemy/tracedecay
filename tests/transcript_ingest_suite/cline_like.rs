@@ -15,7 +15,8 @@ use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 #[cfg(not(windows))]
 use crate::restart_atomicity::durable_table_count;
 use crate::restart_atomicity::{
-    mark_test_project, observation_source_cursor, set_projection_failure,
+    assert_secret_absent_from_observation_sinks, mark_test_project, observation_source_cursor,
+    set_projection_failure,
 };
 use crate::support::{
     assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo, setup,
@@ -466,7 +467,7 @@ async fn cline_usage_index_skips_unemitted_assistant_entries() {
 }
 
 #[tokio::test]
-async fn cline_fallback_identity_survives_snapshot_insertion() {
+async fn cline_unversioned_timestamp_free_identity_survives_insertion_and_reorder() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let api = write_task(
@@ -474,6 +475,30 @@ async fn cline_fallback_identity_survives_snapshot_insertion() {
         &project,
         "cline-stable-identity",
     );
+    std::fs::write(
+        &api,
+        serde_json::json!([
+            {"role": "user", "content": "Investigate the billing pipeline regression"},
+            {
+                "role": "assistant",
+                "model": "claude-sonnet-4.6",
+                "content": [
+                    {"type": "text", "text": "The billing pipeline regression is fixed."},
+                    {"type": "tool_use", "name": "read_file"}
+                ]
+            },
+            {
+                "role": "assistant",
+                "model": "claude-sonnet-4.6",
+                "content": [
+                    {"type": "text", "text": "The billing pipeline regression is fixed."},
+                    {"type": "tool_use", "name": "read_file"}
+                ]
+            }
+        ])
+        .to_string(),
+    )
+    .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClineLikeSource::cline_with_home(&home);
@@ -481,27 +506,39 @@ async fn cline_fallback_identity_survives_snapshot_insertion() {
     let before = db
         .search_session_messages("cline", None, "regression is fixed", 10)
         .await;
-    let assistant_id = before
+    let mut assistant_ids = before
         .iter()
-        .find(|hit| hit.message.tool_names.as_deref() == Some("read_file"))
-        .expect("assistant before insertion")
-        .message
-        .message_id
-        .clone();
+        .filter(|hit| hit.message.tool_names.as_deref() == Some("read_file"))
+        .map(|hit| hit.message.message_id.clone())
+        .collect::<Vec<_>>();
+    assistant_ids.sort();
+    assistant_ids.dedup();
+    assert_eq!(
+        assistant_ids.len(),
+        2,
+        "identical messages need distinct IDs"
+    );
 
     std::fs::write(
         &api,
         serde_json::json!([
-            {"role": "user", "content": "New earlier context", "ts": 1_799_999_999_i64},
-            {"role": "user", "content": "Investigate the billing pipeline regression", "ts": 1_800_000_000_i64},
             {
                 "role": "assistant",
                 "model": "claude-sonnet-4.6",
                 "content": [
                     {"type": "text", "text": "The billing pipeline regression is fixed."},
                     {"type": "tool_use", "name": "read_file"}
-                ],
-                "ts": 1_800_000_010_i64
+                ]
+            },
+            {"role": "user", "content": "New earlier context"},
+            {"role": "user", "content": "Investigate the billing pipeline regression"},
+            {
+                "role": "assistant",
+                "model": "claude-sonnet-4.6",
+                "content": [
+                    {"type": "text", "text": "The billing pipeline regression is fixed."},
+                    {"type": "tool_use", "name": "read_file"}
+                ]
             }
         ])
         .to_string(),
@@ -512,11 +549,14 @@ async fn cline_fallback_identity_survives_snapshot_insertion() {
     let after = db
         .search_session_messages("cline", None, "regression is fixed", 10)
         .await;
-    let assistant = after
+    let mut reordered_ids = after
         .iter()
-        .find(|hit| hit.message.tool_names.as_deref() == Some("read_file"))
-        .expect("assistant after insertion");
-    assert_eq!(assistant.message.message_id, assistant_id);
+        .filter(|hit| hit.message.tool_names.as_deref() == Some("read_file"))
+        .map(|hit| hit.message.message_id.clone())
+        .collect::<Vec<_>>();
+    reordered_ids.sort();
+    reordered_ids.dedup();
+    assert_eq!(reordered_ids, assistant_ids);
 }
 
 #[test]
@@ -685,6 +725,62 @@ async fn cline_like_user_scope_includes_only_unregistered_tasks() {
     let session = db.get_session("cline", "user-task").await.unwrap();
     assert_eq!(session.project_key, "user");
     assert_eq!(session.project_path, "user");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cline_family_secrets_are_sanitized_before_observation_and_projection() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (provider, extension_id, selected_provider) in [
+        ("cline", "saoudrizwan.claude-dev", SessionProvider::Cline),
+        (
+            "roo-code",
+            "rooveterinaryinc.roo-cline",
+            SessionProvider::RooCode,
+        ),
+        ("kilo", "kilocode.kilo-code", SessionProvider::Kilo),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let (home, project) = setup(&tmp);
+        let _home = EnvVarGuard::set("HOME", &home);
+        init_git_repo(&project);
+        mark_test_project(&project);
+        let history = write_task(
+            &vscode_storage_root(&home, extension_id),
+            &project,
+            &format!("{provider}-secret"),
+        );
+        let secret = format!("sk-proj-{provider}-canary-1234567890");
+        std::fs::write(
+            history,
+            serde_json::json!([{
+                "role": "user",
+                "content": format!("{provider} sanitizer safe text: {secret}"),
+                "ts": 1_800_000_000_i64
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        let db = open_project_session_db(&project).await.unwrap();
+
+        assert!(
+            ingest_global_sources_for_provider(&db, &project, Some(selected_provider))
+                .await
+                .messages_upserted
+                > 0,
+            "{provider}: sanitized input should project"
+        );
+        assert_eq!(
+            db.search_session_messages(provider, None, "sanitizer safe text", 10)
+                .await
+                .len(),
+            1,
+            "{provider}: safe text remains searchable"
+        );
+        assert_secret_absent_from_observation_sinks(&db, provider, &secret).await;
+    }
 }
 
 #[tokio::test]
@@ -888,10 +984,17 @@ async fn cline_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
         0
     );
     let committed = durable_table_count(&project, "observations").await;
-    GlobalDbObservationStore::new(&reopened)
-        .rebuild_projection(committed)
-        .await
-        .unwrap();
+    let store = GlobalDbObservationStore::new(&reopened);
+    loop {
+        if store
+            .rebuild_projection(committed)
+            .await
+            .unwrap()
+            .is_complete()
+        {
+            break;
+        }
+    }
     let rebuilt = reopened
         .search_session_messages("cline", None, "delimiter collision fixture", 10)
         .await;

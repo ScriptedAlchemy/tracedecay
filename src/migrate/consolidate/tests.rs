@@ -2636,10 +2636,11 @@ async fn observation_projection_remap_survives_drain_and_rebuild_to_zero() {
         .await
         .unwrap();
     assert_eq!(project_all_migration_observations(&merged).await, 2);
-    GlobalDbObservationStore::new(&merged)
+    let rebuilt = GlobalDbObservationStore::new(&merged)
         .rebuild_projection(0)
         .await
         .unwrap();
+    assert!(rebuilt.is_complete());
     assert_eq!(
         sqlite::count_rows(&target_path, "observation_projection_provenance")
             .await
@@ -2785,10 +2786,11 @@ async fn shared_projection_owner_and_newer_source_owner_remain_lossless() {
     assert_message_text(&target_path, remapped_message_id, "newer source body").await;
     assert_no_orphaned_projection_provenance(&target_path).await;
 
-    GlobalDbObservationStore::new(&merged)
+    let rebuilt = GlobalDbObservationStore::new(&merged)
         .rebuild_projection(0)
         .await
         .unwrap();
+    assert!(rebuilt.is_complete());
     assert_message_absent(&target_path, message_id).await;
     assert_message_absent(&target_path, remapped_message_id).await;
     assert_eq!(
@@ -4113,10 +4115,11 @@ async fn insert_projection_alias(db: &GlobalDb, observation_id: &str, output_mes
         )
         .await
         .unwrap();
-    GlobalDbObservationStore::new(db)
+    let rebuilt = GlobalDbObservationStore::new(db)
         .rebuild_projection(0)
         .await
         .unwrap();
+    assert!(rebuilt.is_complete());
 }
 
 async fn unknown_tables(path: &Path, classify: fn(&str) -> Option<&'static str>) -> Vec<String> {

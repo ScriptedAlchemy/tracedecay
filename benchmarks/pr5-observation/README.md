@@ -36,10 +36,10 @@ once, and proves each repeat is a durable no-op.
 Current acceptance artifacts must include the nested
 `provider_observation_performance` result and `hook_telemetry_readiness`
 evidence. [evidence-index.json](evidence-index.json) identifies
-[result-2026-07-16-8d53b4a9.json](result-2026-07-16-8d53b4a9.json) as the
-`current_acceptance`; the two earlier artifacts remain `historical_stale`, so
-the retired-evidence validator intentionally does not require fields introduced
-by the new workload.
+no `current_acceptance` while the changed implementation awaits a clean-commit
+evidence run. All three earlier artifacts remain `historical_stale`, so the
+retired-evidence validator intentionally does not require fields introduced by
+the new workload.
 
 The acceptance result embeds hook telemetry readiness as
 `hook-telemetry-baseline-readiness-v1`, not as a measured baseline. It reads the
@@ -104,7 +104,7 @@ the checked historical artifact but the finalization gate requires exactly one
 fully typed current acceptance artifact and rejects unindexed, duplicate, or
 unknown-field results.
 
-The current [acceptance result](result-2026-07-16-8d53b4a9.json) was captured
+The former [acceptance result](result-2026-07-16-8d53b4a9.json) was captured
 from clean commit `8d53b4a93d67b3e4264e18f353b941ea4d3ea548` with 3 warmups and
 30 independent measured repetitions of 64 records (30 × 64 = 1,920 records).
 The raw artifact records the Linux kernel, CPU, memory, Rust/Cargo toolchains,

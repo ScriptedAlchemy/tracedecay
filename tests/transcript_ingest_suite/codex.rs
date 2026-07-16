@@ -2960,10 +2960,17 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
     assert_eq!(meta["status"], "paused");
 
     let observations = durable_table_count(&project, "observations").await;
-    GlobalDbObservationStore::new(&db)
-        .rebuild_projection(observations)
-        .await
-        .unwrap();
+    let store = GlobalDbObservationStore::new(&db);
+    loop {
+        if store
+            .rebuild_projection(observations)
+            .await
+            .unwrap()
+            .is_complete()
+        {
+            break;
+        }
+    }
     drop(db);
 
     let goal_rows_rebuilt: Vec<_> = codex_workflow_fact_rows(&project)

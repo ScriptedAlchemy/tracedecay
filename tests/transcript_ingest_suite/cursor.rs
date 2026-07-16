@@ -22,7 +22,7 @@ use tracedecay::sessions::{SessionSearchFilters, SessionSearchScope, SessionSear
 #[cfg(unix)]
 use crate::common::spawn_tracedecay_daemon;
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
-use crate::restart_atomicity::fixture_project_id;
+use crate::restart_atomicity::{assert_secret_absent_from_observation_sinks, fixture_project_id};
 use crate::support::{assert_metadata_path_eq, init_git_repo, init_project, init_project_at};
 
 async fn ingest_cursor_transcript_event(
@@ -1512,6 +1512,37 @@ async fn cursor_task_tool_dispatch_prompt_becomes_searchable() {
         serde_json::from_str(results[0].message.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["source"], "cursor_transcript");
     assert_eq!(metadata["tool_use_id"], "toolu-task-1");
+}
+
+#[tokio::test]
+async fn cursor_jsonl_secret_is_sanitized_before_observation_and_projection() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let transcript = tmp.path().join("cursor-secret.jsonl");
+    let secret = "sk-proj-cursor-jsonl-canary-1234567890";
+    std::fs::write(
+        &transcript,
+        format!(
+            "{{\"role\":\"user\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Cursor sanitizer safe text: {secret}\"}}]}}}}\n"
+        ),
+    )
+    .unwrap();
+    let event = cursor_event(&project, &transcript);
+    let db = open_project_session_db(&project).await.unwrap();
+
+    assert_eq!(
+        ingest_cursor_transcript_event(&event.to_string(), &db)
+            .await
+            .messages_upserted,
+        1
+    );
+    assert_eq!(
+        db.search_session_messages("cursor", None, "Cursor sanitizer safe text", 10)
+            .await
+            .len(),
+        1
+    );
+    assert_secret_absent_from_observation_sinks(&db, "cursor", secret).await;
 }
 
 #[tokio::test]

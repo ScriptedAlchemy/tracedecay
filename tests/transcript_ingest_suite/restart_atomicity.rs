@@ -15,10 +15,12 @@ use tracedecay::sessions::cursor::{
 use tracedecay::sessions::source::{TranscriptIngestError, TranscriptSource, ingest_source};
 use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
 use tracedecay::storage::{read_repository_identity_marker, write_repository_identity_marker};
+use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectId,
     ProviderId, SessionId,
 };
+use tracedecay_store::{ObservationReplayRequest, ObservationStore};
 
 use crate::claude::write_claude_transcript;
 use crate::cline_like::{parse_offset_for_task_history, vscode_storage_root, write_task};
@@ -128,6 +130,31 @@ pub(super) async fn durable_table_count(project: &Path, table: &str) -> u64 {
     drop(conn);
     drop(db);
     count
+}
+
+pub(super) async fn assert_secret_absent_from_observation_sinks(
+    db: &GlobalDb,
+    provider: &str,
+    secret: &str,
+) {
+    let stored = GlobalDbObservationStore::new(db)
+        .replay_observations(ObservationReplayRequest::new(0, 100).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        !stored.is_empty(),
+        "{provider}: expected durable observations"
+    );
+    assert!(
+        !format!("{stored:?}").contains(secret),
+        "{provider}: secret leaked into durable observation state"
+    );
+    assert!(
+        db.search_session_messages(provider, None, secret, 10)
+            .await
+            .is_empty(),
+        "{provider}: secret leaked into the visible V1 projection"
+    );
 }
 
 fn write_codex_rollout_fixture(home: &Path, project: &Path, session: &str) -> PathBuf {

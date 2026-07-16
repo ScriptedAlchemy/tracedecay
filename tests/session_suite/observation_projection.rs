@@ -17,7 +17,7 @@ use tracedecay_domain::{
 use tracedecay_store::{
     CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationPersistOutcome,
     ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    ProjectionPersistOutcome, ProjectionSkipReason, ProjectionStoreError,
+    ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
     SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V3,
 };
 
@@ -206,6 +206,19 @@ async fn drain_projection_queue(store: &GlobalDbObservationStore<'_>) {
     while let Some(observation_id) = store.next_queued_observation().await.unwrap() {
         store.project_observation(&observation_id).await.unwrap();
     }
+}
+
+async fn rebuild_projection_to_completion(
+    store: &GlobalDbObservationStore<'_>,
+    frontier: u64,
+) -> ProjectionRebuildOutcome {
+    for _ in 0..32 {
+        let outcome = store.rebuild_projection(frontier).await.unwrap();
+        if outcome.is_complete() {
+            return outcome;
+        }
+    }
+    panic!("projection rebuild did not complete within the bounded test budget");
 }
 
 #[tokio::test]
@@ -821,7 +834,7 @@ async fn non_conversational_observation_is_skipped_without_blocking_the_checkpoi
             .unwrap(),
         ProjectionPersistOutcome::ExactDuplicate(_)
     ));
-    let rebuilt = store.rebuild_projection(2).await.unwrap();
+    let rebuilt = rebuild_projection_to_completion(&store, 2).await;
     assert_eq!(rebuilt.projected_rows(), 1);
     assert_eq!(rebuilt.skipped_observations(), 1);
     assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 1, 0));
@@ -1020,9 +1033,9 @@ async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
     assert_eq!(projection_ownership_rows(&tmp).await, vec![0]);
     assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0, 0));
 
-    store.rebuild_projection(0).await.unwrap();
+    rebuild_projection_to_completion(&store, 0).await;
     assert_eq!(projection_counts(&tmp).await, (1, 1, 0, 1, 0, 1));
-    store.rebuild_projection(1).await.unwrap();
+    rebuild_projection_to_completion(&store, 1).await;
     assert_eq!(projection_ownership_rows(&tmp).await, vec![0]);
     assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0, 0));
     let mut rows = conn
@@ -1133,7 +1146,7 @@ async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
         ProjectionPersistOutcome::ExactDuplicate(_)
     ));
 
-    store.rebuild_projection(0).await.unwrap();
+    rebuild_projection_to_completion(&store, 0).await;
     assert_eq!(projection_counts(&tmp).await, (1, 1, 0, 1, 0, 2));
     drain_projection_queue(&store).await;
     assert_eq!(projection_counts(&tmp).await, (1, 1, 2, 1, 0, 0));
@@ -1537,7 +1550,7 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     drop(raw_conn);
     drop(raw_db);
 
-    let rebuilt = store.rebuild_projection(2).await.unwrap();
+    let rebuilt = rebuild_projection_to_completion(&store, 2).await;
     assert_eq!(rebuilt.checkpoint().last_sequence(), 2);
     assert_eq!(rebuilt.projected_rows(), 2);
     let mut rows_after = db
@@ -1613,7 +1626,7 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     let incremental_ownership = projection_ownership_rows(&tmp).await;
     let incremental_output_ids = projection_output_ids(&incremental_provenance);
 
-    let rebuilt_empty = store.rebuild_projection(0).await.unwrap();
+    let rebuilt_empty = rebuild_projection_to_completion(&store, 0).await;
     assert_eq!(rebuilt_empty.projected_rows(), 0);
     assert_eq!(rebuilt_empty.skipped_observations(), 0);
     assert_eq!(projection_counts(&tmp).await, (1, 0, 0, 1, 0, 3));
@@ -1621,7 +1634,7 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     assert_eq!(table_count(&tmp, "lcm_raw_messages_fts").await, 0);
     assert_eq!(table_count(&tmp, "session_messages_fts").await, 0);
 
-    let rebuilt_full = store.rebuild_projection(3).await.unwrap();
+    let rebuilt_full = rebuild_projection_to_completion(&store, 3).await;
     assert_eq!(rebuilt_full.projected_rows(), 3);
     assert_eq!(rebuilt_full.skipped_observations(), 0);
     assert_eq!(projection_counts(&tmp).await, (1, 3, 3, 1, 0, 0));
@@ -1683,12 +1696,9 @@ async fn canonical_provider_incremental_and_rebuild_projection_converge() {
     let incremental_ownership = projection_ownership_rows(&tmp).await;
     let incremental_output_ids = projection_output_ids(&incremental_provenance);
 
-    let cleared = store.rebuild_projection(0).await.unwrap();
+    let cleared = rebuild_projection_to_completion(&store, 0).await;
     assert_eq!(cleared.projected_rows(), 0);
-    let rebuilt = store
-        .rebuild_projection(PROVIDERS.len() as u64)
-        .await
-        .unwrap();
+    let rebuilt = rebuild_projection_to_completion(&store, PROVIDERS.len() as u64).await;
     assert_eq!(rebuilt.projected_rows(), PROVIDERS.len());
     assert_eq!(rebuilt.skipped_observations(), 0);
     assert_eq!(all_projected_message_texts(&tmp).await, incremental_texts);
@@ -1786,7 +1796,7 @@ async fn generation_rollover_coalesces_same_and_changed_native_output() {
             ProjectionPersistOutcome::ExactDuplicate(_)
         ));
     }
-    store.rebuild_projection(0).await.unwrap();
+    rebuild_projection_to_completion(&store, 0).await;
     assert_eq!(projection_counts(&tmp).await, (1, 0, 0, 1, 0, 3));
     drain_projection_queue(&store).await;
     assert_eq!(projection_counts(&tmp).await, (1, 1, 3, 1, 0, 0));
@@ -1844,7 +1854,7 @@ async fn durable_projection_alias_survives_rebuild_without_rewriting_observation
         "message-alias"
     );
 
-    store.rebuild_projection(0).await.unwrap();
+    rebuild_projection_to_completion(&store, 0).await;
     assert_eq!(table_count(&tmp, "observation_projection_aliases").await, 1);
     drain_projection_queue(&store).await;
     let provenance = projection_provenance_rows(&tmp).await;
@@ -1868,14 +1878,14 @@ async fn rebuild_preserves_output_referenced_by_another_projector_version() {
     drain_projection_queue(&store).await;
     add_other_projector_owner(&tmp, candidate.observation_id()).await;
 
-    store.rebuild_projection(0).await.unwrap();
+    rebuild_projection_to_completion(&store, 0).await;
     assert_eq!(table_count(&tmp, "session_messages").await, 1);
     assert_eq!(
         table_count(&tmp, "observation_projection_provenance").await,
         2
     );
 
-    store.rebuild_projection(1).await.unwrap();
+    rebuild_projection_to_completion(&store, 1).await;
     assert_eq!(table_count(&tmp, "session_messages").await, 1);
     assert_eq!(
         table_count(&tmp, "observation_projection_provenance").await,
@@ -2119,7 +2129,7 @@ async fn rebuild_freezes_cross_projector_multi_generation_ownership() {
 
     add_other_projector_owner(&tmp, replacement.observation_id()).await;
 
-    let rebuilt = store.rebuild_projection(1).await.unwrap();
+    let rebuilt = rebuild_projection_to_completion(&store, 1).await;
     assert_eq!(rebuilt.projected_rows(), 1);
     assert!(projected_message_texts(&tmp).await[0].contains("retained generation replacement"));
     assert_eq!(
@@ -2205,7 +2215,13 @@ async fn rebuild_processes_more_than_two_pages_at_one_frozen_frontier() {
         expected_cursor = Some(cursor("session-paged-rebuild", end));
     }
 
-    let rebuilt = store.rebuild_projection(257).await.unwrap();
+    drain_projection_queue(&store).await;
+    let visible_before = projection_counts(&tmp).await;
+    let pending = store.rebuild_projection(257).await.unwrap();
+    assert!(!pending.is_complete());
+    assert_eq!(projection_counts(&tmp).await, visible_before);
+
+    let rebuilt = rebuild_projection_to_completion(&store, 257).await;
     assert_eq!(rebuilt.projected_rows(), 257);
     assert_eq!(rebuilt.skipped_observations(), 0);
     assert_eq!(projection_counts(&tmp).await, (1, 257, 257, 1, 0, 0));
@@ -2258,7 +2274,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
         )
         .await
         .unwrap();
-    store.rebuild_projection(257).await.unwrap();
+    rebuild_projection_to_completion(&store, 257).await;
 
     raw_conn
         .execute_batch(
@@ -2270,6 +2286,8 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
         )
         .await
         .unwrap();
+    let pending = store.rebuild_projection(257).await.unwrap();
+    assert!(!pending.is_complete());
     let error = store
         .rebuild_projection(257)
         .await
@@ -2391,10 +2409,10 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
     let reopened = open_lcm_db(&tmp).await;
     let reopened_store = GlobalDbObservationStore::new(&reopened);
     let activation_started = std::time::Instant::now();
-    let rebuilt = reopened_store.rebuild_projection(257).await.unwrap();
+    let rebuilt = rebuild_projection_to_completion(&reopened_store, 257).await;
     assert!(
         activation_started.elapsed() < std::time::Duration::from_secs(5),
-        "set-based activation of 257 outputs exceeded the bounded lock-time budget"
+        "bounded activation of 257 outputs exceeded the test budget"
     );
     assert_eq!(rebuilt.projected_rows(), 257);
     assert_eq!(
@@ -2954,7 +2972,7 @@ async fn cross_provider_projection_duplicate_reorder_conflict_and_restart_are_id
         );
         assert_eq!(projection_counts(&tmp).await, counts_before, "{provider}");
 
-        let rebuilt = store.rebuild_projection(3).await.unwrap();
+        let rebuilt = rebuild_projection_to_completion(&store, 3).await;
         assert_eq!(rebuilt.projected_rows(), 3, "{provider}");
         assert_eq!(rebuilt.skipped_observations(), 0, "{provider}");
         assert_eq!(

@@ -44,7 +44,7 @@ const MAX_META_BYTES: u64 = 4096;
 /// worthwhile, while still amortizing rewrites to linear in live bytes.
 const COMPACT_WASTE_MULTIPLIER: u64 = 2;
 #[cfg(test)]
-static FAIL_META_WRITE_FOR: Mutex<Option<PathBuf>> = Mutex::new(None);
+static FAIL_META_WRITE_FOR: Mutex<Option<(PathBuf, usize)>> = Mutex::new(None);
 #[cfg(test)]
 static FAIL_TERMINAL_MOVE_AT: Mutex<Option<(PathBuf, TerminalMoveFailure)>> = Mutex::new(None);
 
@@ -253,6 +253,17 @@ struct SpoolMetaV1 {
     committed_through: u64,
     next_seq: u64,
     integrity: SpoolIntegrity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    append_intent: Option<AppendIntentV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct AppendIntentV1 {
+    seq: u64,
+    file_offset: u64,
+    framed_len: u64,
+    header: [u8; FRAME_HEADER_BYTES],
+    checksum: [u8; CHECKSUM_BYTES],
 }
 
 impl SpoolMetaV1 {
@@ -262,7 +273,33 @@ impl SpoolMetaV1 {
             committed_through: 0,
             next_seq: 1,
             integrity: SpoolIntegrity::Healthy,
+            append_intent: None,
         }
+    }
+}
+
+impl AppendIntentV1 {
+    fn new(seq: u64, file_offset: u64, frame: &[u8]) -> Self {
+        let mut header = [0u8; FRAME_HEADER_BYTES];
+        header.copy_from_slice(&frame[..FRAME_HEADER_BYTES]);
+        let mut checksum = [0u8; CHECKSUM_BYTES];
+        checksum.copy_from_slice(&frame[frame.len() - CHECKSUM_BYTES..]);
+        Self {
+            seq,
+            file_offset,
+            framed_len: frame.len() as u64,
+            header,
+            checksum,
+        }
+    }
+
+    fn matches_record(&self, record: &SpoolRecord) -> Result<bool, SpoolError> {
+        let frame = encode_frame(record.seq, record.source.as_bytes(), &record.payload)?;
+        Ok(self.seq == record.seq
+            && self.file_offset == record.file_offset
+            && self.framed_len == record.framed_len as u64
+            && self.header.as_slice() == &frame[..FRAME_HEADER_BYTES]
+            && self.checksum.as_slice() == &frame[frame.len() - CHECKSUM_BYTES..])
     }
 }
 
@@ -304,6 +341,7 @@ impl HostAdmissionSpool {
             return Err(SpoolError::UnsupportedVersion(meta.version));
         }
         validate_meta_watermarks(&meta)?;
+        validate_append_intent(&meta, bounds)?;
 
         let (mut quarantine, mut quarantine_report) =
             TerminalQuarantine::open(quarantine_path, bounds)?;
@@ -337,11 +375,19 @@ impl HostAdmissionSpool {
             write_meta_atomic(&meta_path, &meta)?;
         }
 
+        let clear_append_intent =
+            append_intent_is_reconciled(&scan, &meta, truncated_partial_tail_bytes)?;
         let recovery = recover_pending(scan.records, &quarantine, &meta, bounds)?;
+        let mut meta_changed = false;
         if let Some(next_seq) = recovery.recovered_next_seq {
             meta.next_seq = next_seq;
-            write_meta_atomic(&meta_path, &meta)?;
-        } else if !meta_existed {
+            meta_changed = true;
+        }
+        if clear_append_intent {
+            meta.append_intent = None;
+            meta_changed = true;
+        }
+        if meta_changed || !meta_existed {
             write_meta_atomic(&meta_path, &meta)?;
         }
 
@@ -425,7 +471,7 @@ impl HostAdmissionSpool {
             .map(|entry| (entry.reason, entry.active_frame.as_slice()))
     }
 
-    /// Durably append a frame before publishing the next-sequence metadata.
+    /// Durably publish append intent, then the frame, then the next sequence.
     ///
     /// If metadata publication fails after frame sync, this process refuses more
     /// appends. Reopen performs the exact append-crash recovery and advances the
@@ -491,6 +537,15 @@ impl HostAdmissionSpool {
             return Err(SpoolError::Overflow(SpoolOverflowDisposition::MaxBytes));
         }
 
+        let intent = AppendIntentV1::new(seq, physical_len, &frame);
+        let mut intent_meta = self.meta.clone();
+        intent_meta.append_intent = Some(intent);
+        if let Err(error) = write_meta_atomic(&self.meta_path, &intent_meta) {
+            self.append_recovery_required = true;
+            return Err(error);
+        }
+        self.meta = intent_meta;
+
         let file_offset = match append_frame_durable(&self.records_path, &frame) {
             Ok(offset) => offset,
             Err(error) => {
@@ -500,6 +555,12 @@ impl HostAdmissionSpool {
                 return Err(error);
             }
         };
+        if file_offset != physical_len {
+            self.append_recovery_required = true;
+            return Err(SpoolError::Corrupted {
+                at_offset: physical_len,
+            });
+        }
         let record = SpoolRecord {
             seq,
             source: source.to_owned(),
@@ -509,6 +570,7 @@ impl HostAdmissionSpool {
         };
         let mut next_meta = self.meta.clone();
         next_meta.next_seq = seq + 1;
+        next_meta.append_intent = None;
         if let Err(error) = write_meta_atomic(&self.meta_path, &next_meta) {
             self.append_recovery_required = true;
             return Err(error);
@@ -781,6 +843,53 @@ fn validate_meta_watermarks(meta: &SpoolMetaV1) -> Result<(), SpoolError> {
     Ok(())
 }
 
+fn validate_append_intent(meta: &SpoolMetaV1, bounds: SpoolBounds) -> Result<(), SpoolError> {
+    let Some(intent) = &meta.append_intent else {
+        return Ok(());
+    };
+    let parsed = parse_header(&intent.header, bounds).map_err(|_| SpoolError::MetadataCorrupted)?;
+    if intent.seq != meta.next_seq
+        || parsed.seq != intent.seq
+        || parsed.framed_len as u64 != intent.framed_len
+        || intent
+            .file_offset
+            .checked_add(intent.framed_len)
+            .is_none_or(|end| end > bounds.max_spool_bytes as u64)
+    {
+        return Err(SpoolError::MetadataCorrupted);
+    }
+    Ok(())
+}
+
+fn append_intent_is_reconciled(
+    scan: &ScanResult,
+    meta: &SpoolMetaV1,
+    truncated_partial_tail_bytes: u64,
+) -> Result<bool, SpoolError> {
+    let Some(intent) = &meta.append_intent else {
+        return Ok(false);
+    };
+    if !matches!(scan.integrity, SpoolIntegrity::Healthy) {
+        return Ok(false);
+    }
+    if truncated_partial_tail_bytes > 0 {
+        return Ok(intent.file_offset == scan.truncate_to);
+    }
+    if scan.file_len == intent.file_offset {
+        return Ok(true);
+    }
+    let Some(record) = scan.records.iter().find(|record| record.seq == intent.seq) else {
+        return Err(SpoolError::MetadataCorrupted);
+    };
+    if scan.records.last().map(|record| record.seq) != Some(intent.seq)
+        || intent.file_offset.checked_add(intent.framed_len) != Some(scan.file_len)
+        || !intent.matches_record(record)?
+    {
+        return Err(SpoolError::MetadataCorrupted);
+    }
+    Ok(true)
+}
+
 struct ScanResult {
     records: Vec<SpoolRecord>,
     truncate_to: u64,
@@ -934,18 +1043,23 @@ fn is_proven_unpublished_active_tail(
         }
     }
 
+    let Some(intent) = &meta.append_intent else {
+        return Ok(false);
+    };
     let tail_len = scan.file_len - scan.truncate_to;
-    if tail_len < FRAME_HEADER_BYTES as u64 {
+    if intent.file_offset != scan.truncate_to || intent.framed_len <= tail_len {
         return Ok(false);
     }
-    let mut header = [0u8; FRAME_HEADER_BYTES];
     let mut input = File::open(path).map_err(io_error)?;
     input
         .seek(SeekFrom::Start(scan.truncate_to))
         .map_err(io_error)?;
-    input.read_exact(&mut header).map_err(io_error)?;
-    let parsed = parse_header(&header, bounds)?;
-    if parsed.seq != meta.next_seq || parsed.framed_len as u64 <= tail_len {
+    let prefix_len = (tail_len as usize).min(FRAME_HEADER_BYTES);
+    let mut header_prefix = [0u8; FRAME_HEADER_BYTES];
+    input
+        .read_exact(&mut header_prefix[..prefix_len])
+        .map_err(io_error)?;
+    if header_prefix[..prefix_len] != intent.header[..prefix_len] {
         return Ok(false);
     }
     Ok(true)
@@ -1224,7 +1338,18 @@ fn write_meta_atomic(path: &Path, meta: &SpoolMetaV1) -> Result<(), SpoolError> 
     #[cfg(test)]
     {
         let mut failure = FAIL_META_WRITE_FOR.lock().map_err(|_| SpoolError::Io)?;
-        if failure.as_deref() == Some(path) {
+        let should_fail = match failure.as_mut() {
+            Some((failure_path, writes_before_failure)) if failure_path == path => {
+                if *writes_before_failure == 0 {
+                    true
+                } else {
+                    *writes_before_failure -= 1;
+                    false
+                }
+            }
+            _ => false,
+        };
+        if should_fail {
             *failure = None;
             return Err(SpoolError::Io);
         }
@@ -1472,10 +1597,17 @@ mod tests {
     fn partial_tail_is_truncated_but_mid_file_checksum_failure_is_corruption() {
         let (temp, mut spool) = open_temp();
         let first = spool.append("a", b"one").unwrap();
-        drop(spool);
         let records = temp.path().join(RECORDS_FILE);
-        let mut bytes = fs::read(&records).unwrap();
         let unpublished = encode_frame(2, b"a", b"partial").unwrap();
+        let mut crash_meta = spool.meta.clone();
+        crash_meta.append_intent = Some(AppendIntentV1::new(
+            2,
+            first.framed_len as u64,
+            &unpublished,
+        ));
+        write_meta_atomic(&spool.meta_path, &crash_meta).unwrap();
+        drop(spool);
+        let mut bytes = fs::read(&records).unwrap();
         bytes.extend_from_slice(&unpublished[..=FRAME_HEADER_BYTES]);
         fs::write(&records, bytes).unwrap();
         let (spool, report) = HostAdmissionSpool::open(temp.path(), bounds()).unwrap();
@@ -1503,7 +1635,63 @@ mod tests {
     }
 
     #[test]
-    fn unproven_active_tail_is_preserved_as_forensic_corruption() {
+    fn torn_active_header_recovers_and_retry_remains_gap_free_across_restart() {
+        let (temp, mut spool) = open_temp();
+        let first = spool.append("a", b"one").unwrap();
+        let records = temp.path().join(RECORDS_FILE);
+        let unpublished = encode_frame(2, b"a", b"torn").unwrap();
+        let mut crash_meta = spool.meta.clone();
+        crash_meta.append_intent = Some(AppendIntentV1::new(
+            2,
+            first.framed_len as u64,
+            &unpublished,
+        ));
+        write_meta_atomic(&spool.meta_path, &crash_meta).unwrap();
+        drop(spool);
+        let mut output = OpenOptions::new().append(true).open(&records).unwrap();
+        output.write_all(&unpublished[..3]).unwrap();
+        output.sync_all().unwrap();
+        drop(output);
+        sync_parent_directory(&records).unwrap();
+
+        let (mut spool, report) = HostAdmissionSpool::open(temp.path(), bounds()).unwrap();
+        assert_eq!(report.integrity, SpoolIntegrity::Healthy);
+        assert_eq!(report.truncated_partial_tail_bytes, 3);
+        assert_eq!(file_len(&records).unwrap(), first.framed_len as u64);
+        let retried = spool.append("a", b"torn").unwrap();
+        assert_eq!(retried.seq, 2);
+        drop(spool);
+
+        let (spool, report) = HostAdmissionSpool::open(temp.path(), bounds()).unwrap();
+        assert_eq!(report.next_seq, 3);
+        assert!(spool.meta.append_intent.is_none());
+        assert_eq!(
+            spool
+                .pending_records()
+                .iter()
+                .map(|record| record.seq)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+    }
+
+    #[test]
+    fn append_intent_without_frame_is_cleared_and_sequence_is_reused() {
+        let (temp, spool) = open_temp();
+        let frame = encode_frame(1, b"a", b"retry").unwrap();
+        let mut crash_meta = spool.meta.clone();
+        crash_meta.append_intent = Some(AppendIntentV1::new(1, 0, &frame));
+        write_meta_atomic(&spool.meta_path, &crash_meta).unwrap();
+        drop(spool);
+
+        let (mut spool, report) = HostAdmissionSpool::open(temp.path(), bounds()).unwrap();
+        assert_eq!(report.next_seq, 1);
+        assert!(spool.meta.append_intent.is_none());
+        assert_eq!(spool.append("a", b"retry").unwrap().seq, 1);
+    }
+
+    #[test]
+    fn ambiguous_short_magic_prefix_without_intent_is_forensic_corruption() {
         let (temp, mut spool) = open_temp();
         let first = spool.append("a", b"one").unwrap();
         drop(spool);
@@ -1681,6 +1869,7 @@ mod tests {
                 committed_through: 0,
                 next_seq: 9,
                 integrity: SpoolIntegrity::Healthy,
+                append_intent: None,
             },
         )
         .unwrap();
@@ -1789,6 +1978,7 @@ mod tests {
                 committed_through: 0,
                 next_seq: 4,
                 integrity: SpoolIntegrity::Healthy,
+                append_intent: None,
             },
         )
         .unwrap();
@@ -1802,11 +1992,15 @@ mod tests {
     #[test]
     fn frame_sync_before_metadata_write_recovers_append_once() {
         let (temp, spool) = open_temp();
-        drop(spool);
         let frame = encode_frame(1, b"a", b"crash-window").unwrap();
+        let mut crash_meta = spool.meta.clone();
+        crash_meta.append_intent = Some(AppendIntentV1::new(1, 0, &frame));
+        write_meta_atomic(&spool.meta_path, &crash_meta).unwrap();
+        drop(spool);
         append_frame_durable(&temp.path().join(RECORDS_FILE), &frame).unwrap();
         let (spool, report) = HostAdmissionSpool::open(temp.path(), bounds()).unwrap();
         assert_eq!(report.next_seq, 2);
+        assert!(spool.meta.append_intent.is_none());
         assert_eq!(spool.pending_count(), 1);
         assert_eq!(spool.pending_records()[0].payload, b"crash-window");
     }
@@ -1908,15 +2102,19 @@ mod tests {
         spool.append("a", b"one").unwrap();
         let records_path = temp.path().join(RECORDS_FILE);
         let meta_path = temp.path().join(META_FILE);
-        let old_meta = fs::read(&meta_path).unwrap();
         let before_second = fs::read(&records_path).unwrap();
-        *FAIL_META_WRITE_FOR.lock().unwrap() = Some(meta_path.clone());
+        *FAIL_META_WRITE_FOR.lock().unwrap() = Some((meta_path.clone(), 1));
 
         assert_eq!(spool.append("b", b"two"), Err(SpoolError::Io));
         assert!(spool.recovery_required());
         let ambiguous_bytes = fs::read(&records_path).unwrap();
         assert!(ambiguous_bytes.len() > before_second.len());
-        assert_eq!(fs::read(&meta_path).unwrap(), old_meta);
+        let persisted: SpoolMetaV1 =
+            serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+        assert_eq!(
+            persisted.append_intent.as_ref().map(|intent| intent.seq),
+            Some(2)
+        );
         assert_eq!(spool.ack(1), Err(SpoolError::AppendRecoveryRequired));
         assert_eq!(
             spool.ack_through(1),

@@ -69,6 +69,10 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
     std::fs::create_dir_all(&home).unwrap();
     let _home = EnvVarGuard::set("HOME", &home);
     let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
+    let _data_dir = EnvVarGuard::set(
+        tracedecay::config::USER_DATA_DIR_ENV,
+        home.join(".tracedecay"),
+    );
     let boundary_project = initialize_boundary_project(&home);
     let _daemon = spawn_tracedecay_daemon(&home);
     let init = tracedecay_command_with_home(&home)
@@ -146,8 +150,18 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
                 &boundary_project,
                 &transcript_path,
             );
+            let completed_before = hook_completed_rows(&boundary_project, &home, provider).len();
             let output = execute_host_boundary(provider, &home, &boundary_project, &request);
             assert_legal_host_response(provider, state, &case["response"], output);
+            let completed = hook_completed_rows(&boundary_project, &home, provider);
+            assert!(
+                completed.len() > completed_before,
+                "{provider}/{state} did not emit hook_completed analytics"
+            );
+            let row = completed
+                .last()
+                .expect("new hook_completed row should exist");
+            assert_hook_completed_analytics(provider, state, &boundary_project, row);
         }
 
         states.sort_unstable();
@@ -156,6 +170,140 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
             ["degraded", "supported", "unavailable", "unknown"],
             "{provider}"
         );
+    }
+}
+
+fn hook_completed_rows(project: &Path, home: &Path, provider: &str) -> Vec<Value> {
+    let mut paths = vec![
+        tracedecay::storage::resolve_layout_for_current_profile(project)
+            .expect("resolve host fixture storage")
+            .data_root
+            .join("hook_analytics.jsonl"),
+        home.join(".tracedecay/hook_analytics.jsonl"),
+    ];
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .flat_map(|path| {
+            std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|row| row["event"] == "hook_completed" && row["agent"] == provider)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn assert_hook_completed_analytics(provider: &str, state: &str, project: &Path, row: &Value) {
+    let label = format!("{provider}/{state}");
+    assert_eq!(row["schema_version"], 1, "{label}");
+    assert_eq!(row["coverage"], "host_measured", "{label}");
+    assert_eq!(row["agent"], provider, "{label}");
+    for field in [
+        "duration_us",
+        "duration_ms",
+        "hook_wall_time_us",
+        "hook_wall_time_ms",
+        "payload_bytes",
+        "daemon_ipc_payload_bytes",
+        "daemon_call_count",
+    ] {
+        assert!(row[field].as_u64().is_some(), "{label}/{field}: {row}");
+    }
+    assert!(
+        row["payload_bytes"].as_u64().is_some_and(|bytes| bytes > 0),
+        "{label}"
+    );
+    assert!(
+        row["daemon_ipc_payload_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0),
+        "{label}"
+    );
+    if row["daemon_call_count"]
+        .as_u64()
+        .is_some_and(|calls| calls > 0)
+    {
+        assert!(row["daemon_rtt_us"].as_u64().is_some(), "{label}");
+    } else {
+        assert!(row["daemon_rtt_us"].is_null(), "{label}");
+    }
+
+    let timeout = &row["timeout"];
+    assert!(timeout.is_object(), "{label}");
+    assert!(
+        timeout["budget_ms"].is_null() || timeout["budget_ms"].as_u64().is_some(),
+        "{label}"
+    );
+    assert!(
+        timeout["timed_out"].is_null() || timeout["timed_out"].as_bool().is_some(),
+        "{label}"
+    );
+
+    let disposition = &row["disposition"];
+    assert!(
+        matches!(
+            disposition["status"].as_str(),
+            Some(
+                "supported"
+                    | "degraded"
+                    | "unavailable"
+                    | "unknown"
+                    | "backpressured"
+                    | "accepted_for_replay"
+                    | "committed"
+                    | "exact_duplicate"
+            )
+        ),
+        "{label}: {disposition}"
+    );
+    assert!(disposition["retryable"].as_bool().is_some(), "{label}");
+    assert!(
+        matches!(
+            disposition["class"].as_str(),
+            Some("application" | "transport" | "timeout" | "cancellation" | "unknown")
+        ),
+        "{label}: {disposition}"
+    );
+    if let Some(reason) = disposition["reason_code"].as_str() {
+        assert!(reason.len() <= 64, "{label}");
+        assert!(
+            reason
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+            "{label}"
+        );
+    }
+
+    let project_path = project.to_string_lossy();
+    let session_id = format!("{provider}-host-fixture");
+    for private in [
+        project_path.as_ref(),
+        session_id.as_str(),
+        "Inspect the fixture.",
+    ] {
+        assert_json_strings_omit(row, private, &label);
+    }
+}
+
+fn assert_json_strings_omit(value: &Value, private: &str, label: &str) {
+    match value {
+        Value::String(value) => {
+            assert!(!value.contains(private), "{label} leaked {private}");
+        }
+        Value::Array(values) => {
+            for value in values {
+                assert_json_strings_omit(value, private, label);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                assert_json_strings_omit(value, private, label);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 

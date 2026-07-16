@@ -23,6 +23,7 @@ use super::transition::{
 };
 
 const REBUILD_PAGE_SIZE: i64 = 128;
+const REBUILD_MAX_STEPS_PER_INVOCATION: usize = 4;
 
 impl GlobalDb {
     pub(crate) async fn next_queued_observation_result(
@@ -32,8 +33,12 @@ impl GlobalDb {
             .conn
             .query(
                 "SELECT observation_id FROM projection_queue
+                 WHERE NOT EXISTS (
+                   SELECT 1 FROM observation_projection_rebuilds
+                   WHERE projector_version = ?1
+                 )
                  ORDER BY observation_sequence ASC LIMIT 1",
-                (),
+                params![SESSION_MESSAGE_PROJECTOR_VERSION],
             )
             .await
             .map_err(|error| storage("read next projection queue item", error))?;
@@ -120,8 +125,13 @@ impl GlobalDb {
     ) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
         self.start_or_resume_projection_rebuild(frontier_sequence)
             .await?;
-        while self.stage_projection_rebuild_batch().await? {}
-        self.activate_projection_rebuild(frontier_sequence).await
+        for _ in 0..REBUILD_MAX_STEPS_PER_INVOCATION {
+            match self.advance_projection_rebuild(frontier_sequence).await? {
+                RebuildAdvance::Pending => {}
+                RebuildAdvance::Complete(outcome) => return Ok(outcome),
+            }
+        }
+        self.projection_rebuild_progress().await
     }
 
     async fn start_or_resume_projection_rebuild(
@@ -162,50 +172,118 @@ impl GlobalDb {
                 .await
                 .map_err(|error| storage("create projection rebuild generation", error))?;
         }
-        let job = read_rebuild_job(&transaction).await?;
-        if job.state == RebuildState::Aliasing {
-            transaction
-                .execute(
-                    "DELETE FROM observation_projection_rebuild_aliases
-                     WHERE projector_version = ?1 AND generation = ?2",
-                    params![SESSION_MESSAGE_PROJECTOR_VERSION, job.generation.as_str()],
-                )
-                .await
-                .map_err(|error| storage("reset projection alias snapshot", error))?;
-            transaction
-                .execute(
-                    "INSERT INTO observation_projection_rebuild_aliases (
-                        projector_version, generation, observation_id,
-                        output_provider, output_message_id
-                     )
-                     SELECT alias.projector_version, ?2, alias.observation_id,
-                            alias.output_provider, alias.output_message_id
-                     FROM observation_projection_aliases AS alias
-                     JOIN observations AS observation
-                       ON observation.observation_id = alias.observation_id
-                     WHERE alias.projector_version = ?1 AND observation.sequence <= ?3",
-                    params![
-                        SESSION_MESSAGE_PROJECTOR_VERSION,
-                        job.generation.as_str(),
-                        job.frontier,
-                    ],
-                )
-                .await
-                .map_err(|error| storage("capture projection alias snapshot", error))?;
-            transaction
-                .execute(
-                    "UPDATE observation_projection_rebuilds
-                     SET aliases_staged_through = frontier_sequence, state = 'building'
-                     WHERE projector_version = ?1 AND generation = ?2",
-                    params![SESSION_MESSAGE_PROJECTOR_VERSION, job.generation.as_str()],
-                )
-                .await
-                .map_err(|error| storage("complete projection alias snapshot", error))?;
-        }
         transaction
             .commit()
             .await
             .map_err(|error| storage("commit projection rebuild staging", error))
+    }
+
+    async fn advance_projection_rebuild(
+        &self,
+        frontier_sequence: u64,
+    ) -> ProjectionStoreResult<RebuildAdvance> {
+        let job = read_rebuild_job(&self.conn).await?;
+        match job.state {
+            RebuildState::Aliasing => {
+                self.stage_projection_alias_batch().await?;
+                Ok(RebuildAdvance::Pending)
+            }
+            RebuildState::Building => {
+                self.stage_projection_rebuild_batch().await?;
+                Ok(RebuildAdvance::Pending)
+            }
+            RebuildState::Ready => self
+                .activate_projection_rebuild(frontier_sequence)
+                .await
+                .map(RebuildAdvance::Complete),
+        }
+    }
+
+    async fn stage_projection_alias_batch(&self) -> ProjectionStoreResult<()> {
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| storage("begin projection alias staging", error))?;
+        let job = read_rebuild_job(&transaction).await?;
+        if job.state != RebuildState::Aliasing {
+            return Err(storage_message(
+                "stage projection alias batch",
+                "projection rebuild is not aliasing",
+            ));
+        }
+        let mut rows = transaction
+            .query(
+                "SELECT sequence FROM observations
+                 WHERE sequence > ?1 AND sequence <= ?2
+                 ORDER BY sequence ASC LIMIT ?3",
+                params![job.aliases_staged_through, job.frontier, REBUILD_PAGE_SIZE],
+            )
+            .await
+            .map_err(|error| storage("read projection alias batch", error))?;
+        let mut aliases_staged_through = job.aliases_staged_through;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage("read projection alias batch", error))?
+        {
+            aliases_staged_through = row
+                .get(0)
+                .map_err(|error| storage("read projection alias batch", error))?;
+        }
+        drop(rows);
+        if aliases_staged_through < job.frontier
+            && aliases_staged_through == job.aliases_staged_through
+        {
+            return Err(storage_message(
+                "stage projection alias batch",
+                "observation sequence gap before alias frontier",
+            ));
+        }
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO observation_projection_rebuild_aliases (
+                    projector_version, generation, observation_id,
+                    output_provider, output_message_id
+                 )
+                 SELECT alias.projector_version, ?2, alias.observation_id,
+                        alias.output_provider, alias.output_message_id
+                 FROM observation_projection_aliases AS alias
+                 JOIN observations AS observation
+                   ON observation.observation_id = alias.observation_id
+                 WHERE alias.projector_version = ?1
+                   AND observation.sequence > ?3 AND observation.sequence <= ?4",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    job.generation.as_str(),
+                    job.aliases_staged_through,
+                    aliases_staged_through,
+                ],
+            )
+            .await
+            .map_err(|error| storage("capture projection alias batch", error))?;
+        let state = if aliases_staged_through == job.frontier {
+            RebuildState::Building
+        } else {
+            RebuildState::Aliasing
+        };
+        transaction
+            .execute(
+                "UPDATE observation_projection_rebuilds
+                 SET aliases_staged_through = ?3, state = ?4
+                 WHERE projector_version = ?1 AND generation = ?2",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    job.generation.as_str(),
+                    aliases_staged_through,
+                    state.as_str(),
+                ],
+            )
+            .await
+            .map_err(|error| storage("advance projection alias batch", error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| storage("commit projection alias batch", error))
     }
 
     async fn stage_projection_rebuild_batch(&self) -> ProjectionStoreResult<bool> {
@@ -369,6 +447,21 @@ impl GlobalDb {
             job.skipped_observations,
         ))
     }
+
+    async fn projection_rebuild_progress(&self) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
+        let job = read_rebuild_job(&self.conn).await?;
+        let checkpoint = read_checkpoint(&self.conn).await?;
+        Ok(ProjectionRebuildOutcome::in_progress(
+            checkpoint,
+            job.projected_rows,
+            job.skipped_observations,
+        ))
+    }
+}
+
+enum RebuildAdvance {
+    Pending,
+    Complete(ProjectionRebuildOutcome),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

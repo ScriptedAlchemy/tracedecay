@@ -21,8 +21,8 @@ use tracedecay_domain::{MAX_OBSERVATION_RECORD_BYTES, ProjectId};
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
-    durable_table_count, fixture_project_id, mark_test_project, observation_source_cursor,
-    set_projection_failure,
+    assert_secret_absent_from_observation_sinks, durable_table_count, fixture_project_id,
+    mark_test_project, observation_source_cursor, set_projection_failure,
 };
 use crate::support::{
     assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo,
@@ -372,6 +372,37 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
                 .is_none()
         );
     }
+}
+
+#[tokio::test]
+async fn hermes_secret_is_sanitized_before_observation_and_projection() {
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, project) = setup(&tmp);
+    let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
+    let secret = "sk-proj-hermes-canary-1234567890";
+    open_state_db(&state_db)
+        .await
+        .execute(
+            "UPDATE messages SET content = ?1 WHERE role = 'user'",
+            libsql::params![format!("Hermes sanitizer safe text: {secret}")],
+        )
+        .await
+        .unwrap();
+    let db = open_project_session_db(&project).await.unwrap();
+
+    assert_eq!(
+        ingest_homes(&db, std::slice::from_ref(&hermes_home), &project)
+            .await
+            .messages_upserted,
+        4
+    );
+    assert_eq!(
+        db.search_session_messages("hermes", None, "Hermes sanitizer safe text", 10)
+            .await
+            .len(),
+        1
+    );
+    assert_secret_absent_from_observation_sinks(&db, "hermes", secret).await;
 }
 
 #[tokio::test]

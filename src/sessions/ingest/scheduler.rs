@@ -1,5 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+use tracedecay_domain::ProjectId;
 
 use crate::application::host_admission::DEFAULT_MAX_RECORDS;
 use crate::application::observation::ObservationCancellation;
@@ -27,6 +30,57 @@ pub(super) const TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY: &str =
 /// Durable fair-rotation cursor for profile-wide provider catch-up passes.
 pub(super) const USER_INGEST_PROVIDER_FRONTIER_KEY: &str =
     "tracedecay-internal:user-ingest-provider-frontier:v1";
+
+const MAX_TRANSIENT_INGEST_FRONTIERS: usize = 256;
+
+#[derive(Clone, PartialEq, Eq)]
+struct TransientIngestAuthority {
+    project_id: ProjectId,
+    providers: Vec<&'static str>,
+}
+
+impl TransientIngestAuthority {
+    fn new(project_id: &ProjectId, sources: &[Box<dyn TranscriptSource>]) -> Self {
+        Self {
+            project_id: project_id.clone(),
+            providers: sources.iter().map(|source| source.provider()).collect(),
+        }
+    }
+}
+
+static TRANSIENT_INGEST_FRONTIERS: OnceLock<Mutex<VecDeque<(TransientIngestAuthority, u64)>>> =
+    OnceLock::new();
+
+fn transient_ingest_frontier(authority: &TransientIngestAuthority) -> u64 {
+    let frontiers = TRANSIENT_INGEST_FRONTIERS.get_or_init(|| Mutex::new(VecDeque::new()));
+    let frontiers = frontiers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    frontiers
+        .iter()
+        .find_map(|(candidate, frontier)| (candidate == authority).then_some(*frontier))
+        .unwrap_or(0)
+}
+
+fn set_transient_ingest_frontier(authority: &TransientIngestAuthority, frontier: u64) {
+    let frontiers = TRANSIENT_INGEST_FRONTIERS.get_or_init(|| Mutex::new(VecDeque::new()));
+    let mut frontiers = frontiers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(index) = frontiers
+        .iter()
+        .position(|(candidate, _)| candidate == authority)
+    {
+        frontiers.remove(index);
+    }
+    if frontier == 0 {
+        return;
+    }
+    if frontiers.len() >= MAX_TRANSIENT_INGEST_FRONTIERS {
+        frontiers.pop_front();
+    }
+    frontiers.push_back((authority.clone(), frontier));
+}
 
 /// Production bounds for transcript multi-source passes (discovery/queue/work).
 pub(crate) fn default_ingest_pass_bounds() -> IngestPassBounds {
@@ -279,43 +333,40 @@ fn discover_ingest_page_at(
         .map(|(_, _, paths)| paths.len())
         .max()
         .unwrap_or(0);
-    let canonical = || {
-        (0..max_depth).flat_map(|path_index| {
-            per_source
-                .iter()
-                .filter_map(move |(source_index, source_id, paths)| {
-                    paths
-                        .get(path_index)
-                        .map(|path| (*source_index, source_id, path))
-                })
-        })
-    };
+    let provider_order: Vec<usize> = (remainder..per_source.len()).chain(0..remainder).collect();
     let mut units = Vec::with_capacity(bounds.discovered_units.min(total_paths));
     let mut unit_discovery_bytes = 0u64;
-    for (source_index, source_id, path) in canonical() {
-        if units.len() >= bounds.discovered_units {
-            discovery_truncated = true;
-            break;
+    'discovery: for path_index in 0..max_depth {
+        for &provider_index in &provider_order {
+            let (source_index, source_id, paths) = &per_source[provider_index];
+            let Some(path) = paths.get(path_index) else {
+                continue;
+            };
+            if units.len() >= bounds.discovered_units {
+                discovery_truncated = true;
+                break 'discovery;
+            }
+            let path_bytes = path_byte_len(path);
+            if path_bytes > discovery_bounds.max_path_bytes {
+                source_omitted = source_omitted.saturating_add(1);
+                continue;
+            }
+            let path_charge = u64::try_from(path_bytes).unwrap_or(u64::MAX);
+            let source_charge = u64::try_from(source_id.len()).unwrap_or(u64::MAX);
+            let entry_charge = path_charge.saturating_add(source_charge);
+            if unit_discovery_bytes.saturating_add(entry_charge)
+                > discovery_bounds.max_discovery_bytes
+            {
+                discovery_truncated = true;
+                break 'discovery;
+            }
+            unit_discovery_bytes = unit_discovery_bytes.saturating_add(entry_charge);
+            units.push(DiscoveredIngestUnit {
+                source_id: source_id.clone(),
+                path: path.clone(),
+                source_index: *source_index,
+            });
         }
-        let path_bytes = path_byte_len(path);
-        if path_bytes > discovery_bounds.max_path_bytes {
-            source_omitted = source_omitted.saturating_add(1);
-            continue;
-        }
-        let path_charge = u64::try_from(path_bytes).unwrap_or(u64::MAX);
-        let source_charge = u64::try_from(source_id.len()).unwrap_or(u64::MAX);
-        let entry_charge = path_charge.saturating_add(source_charge);
-        if unit_discovery_bytes.saturating_add(entry_charge) > discovery_bounds.max_discovery_bytes
-        {
-            discovery_truncated = true;
-            break;
-        }
-        unit_discovery_bytes = unit_discovery_bytes.saturating_add(entry_charge);
-        units.push(DiscoveredIngestUnit {
-            source_id: source_id.clone(),
-            path: path.clone(),
-            source_index,
-        });
     }
     let mut deferred = source_omitted.saturating_add(total_paths.saturating_sub(units.len()));
     if discovery_truncated {
@@ -414,11 +465,13 @@ pub(super) async fn write_ingest_frontier(
 pub(crate) async fn ingest_sources(
     db: &GlobalDb,
     project_root: &Path,
+    project_id: &ProjectId,
     sources: &[Box<dyn TranscriptSource>],
 ) -> TranscriptIngestOutcome {
     ingest_sources_bounded(
         db,
         project_root,
+        project_id,
         sources,
         default_ingest_pass_bounds(),
         &ObservationCancellation::default(),
@@ -431,15 +484,19 @@ pub(crate) async fn ingest_sources(
 pub(crate) async fn ingest_sources_bounded(
     db: &GlobalDb,
     project_root: &Path,
+    project_id: &ProjectId,
     sources: &[Box<dyn TranscriptSource>],
     bounds: IngestPassBounds,
     cancellation: &ObservationCancellation,
 ) -> IngestPassOutcome {
     let store = GlobalDbTranscriptStore::new(db);
-    let Some(frontier) = read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await
+    let Some(durable_frontier) =
+        read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await
     else {
         return IngestPassOutcome::failed(TranscriptCatchUpFailure::pass_frontier_unavailable());
     };
+    let transient_authority = TransientIngestAuthority::new(project_id, sources);
+    let frontier = durable_frontier.saturating_add(transient_ingest_frontier(&transient_authority));
     let discovery = discover_ingest_page(sources, project_root, bounds, frontier);
     let units = discovery.units;
     let deferred_discovery_units = discovery.deferred;
@@ -463,6 +520,9 @@ pub(crate) async fn ingest_sources_bounded(
     let mut units_failed = 0u64;
     let mut attempted = 0usize;
     let mut cancelled = false;
+    // Cursor/stat progress and terminal failure dispositions rotate the pass;
+    // a successful no-op does not create scheduling state.
+    let mut scheduling_progress = false;
     let budget_slots = admitted
         .len()
         .saturating_mul(bounds.retries.saturating_add(1));
@@ -489,6 +549,11 @@ pub(crate) async fn ingest_sources_bounded(
         };
         attempted = attempted.saturating_add(1);
         let single = SinglePathSource::new(source, unit.path.clone());
+        let cursor_key = source.cursor_key(&unit.path).durable_text();
+        let cursor_before = db
+            .get_parse_offset_result(&cursor_key)
+            .await
+            .map(|offset| offset.map(|offset| (offset.byte_offset, offset.mtime, offset.file_id)));
         let mut attempts = 0usize;
         loop {
             let grant = remaining_bytes.min(bounds.bytes_per_unit);
@@ -498,6 +563,17 @@ pub(crate) async fn ingest_sources_bounded(
             remaining_bytes = remaining_bytes.saturating_sub(grant);
             match try_ingest_source_with_store(&store, &single, project_root, Some(grant)).await {
                 Ok(source_stats) => {
+                    let cursor_after =
+                        db.get_parse_offset_result(&cursor_key).await.map(|offset| {
+                            offset.map(|offset| (offset.byte_offset, offset.mtime, offset.file_id))
+                        });
+                    let cursor_progress = match (&cursor_before, &cursor_after) {
+                        (Ok(before), Ok(after)) => before != after,
+                        _ => true,
+                    };
+                    scheduling_progress |= cursor_progress
+                        || source_stats.sessions_upserted > 0
+                        || source_stats.messages_upserted > 0;
                     stats = stats.merge(source_stats);
                     units_completed = units_completed.saturating_add(1);
                     break;
@@ -517,6 +593,7 @@ pub(crate) async fn ingest_sources_bounded(
                     );
                     failures.push(failure);
                     units_failed = units_failed.saturating_add(1);
+                    scheduling_progress = true;
                     // Failed source cursors/frontiers are not advanced by the
                     // store path; fair rotation still consumed this slot so
                     // later sources are not starved.
@@ -551,7 +628,7 @@ pub(crate) async fn ingest_sources_bounded(
         failures.push(TranscriptCatchUpFailure::pass_backpressured());
     }
 
-    let write = scheduling_write_required(coverage, attempted, cancelled);
+    let write = scheduling_progress && scheduling_write_required(coverage, attempted, cancelled);
     let scheduling_state_written = if write {
         write_ingest_frontier(
             db,
@@ -565,6 +642,17 @@ pub(crate) async fn ingest_sources_bounded(
     };
     if write && !scheduling_state_written {
         failures.push(TranscriptCatchUpFailure::pass_frontier_unavailable());
+    }
+    if !cancelled {
+        if scheduling_state_written {
+            set_transient_ingest_frontier(&transient_authority, 0);
+        } else if attempted > 0 {
+            let transient_frontier = discovery
+                .frontier_base
+                .saturating_add(u64::try_from(attempted).unwrap_or(u64::MAX))
+                .saturating_sub(durable_frontier);
+            set_transient_ingest_frontier(&transient_authority, transient_frontier);
+        }
     }
 
     IngestPassOutcome {

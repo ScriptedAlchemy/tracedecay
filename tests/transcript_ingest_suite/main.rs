@@ -17,5 +17,6 @@ mod cursor;
 mod cursor_composer;
 mod hermes;
 mod kiro;
+mod provider_contract;
 mod restart_atomicity;
 mod vibe;

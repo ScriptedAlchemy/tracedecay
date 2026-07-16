@@ -10,7 +10,8 @@ use tracedecay_store::ObservationProjectionStore;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
-    durable_table_count, mark_test_project, observation_source_cursor, set_projection_failure,
+    assert_secret_absent_from_observation_sinks, durable_table_count, mark_test_project,
+    observation_source_cursor, set_projection_failure,
 };
 use crate::support::{
     assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo, setup,
@@ -281,10 +282,66 @@ async fn kiro_workspace_sessions_json_is_ingested() {
 }
 
 #[tokio::test]
-async fn kiro_fallback_identity_survives_snapshot_insertion() {
+#[allow(clippy::await_holding_lock)]
+async fn kiro_secret_is_sanitized_before_observation_and_projection() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+    let path = write_workspace_session_json(&home, &project, "kiro-secret");
+    let secret = "sk-proj-kiro-canary-1234567890";
+    std::fs::write(
+        path,
+        serde_json::json!({
+            "sessionId": "kiro-secret",
+            "messages": [{
+                "role": "user",
+                "content": format!("Kiro sanitizer safe text: {secret}"),
+                "timestamp": 1_800_000_000_000_i64
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let db = open_project_session_db(&project).await.unwrap();
+
+    assert_eq!(
+        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Kiro))
+            .await
+            .messages_upserted,
+        1
+    );
+    assert_eq!(
+        db.search_session_messages("kiro", None, "Kiro sanitizer safe text", 10)
+            .await
+            .len(),
+        1
+    );
+    assert_secret_absent_from_observation_sinks(&db, "kiro", secret).await;
+}
+
+#[tokio::test]
+async fn kiro_unversioned_timestamp_free_identity_survives_insertion_and_reorder() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let path = write_workspace_session_json(&home, &project, "sess-stable");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "sessionId": "sess-stable",
+            "messages": [
+                {"role": "user", "content": "Investigate the billing pipeline regression"},
+                {"role": "assistant", "content": "The billing pipeline regression is fixed."},
+                {"role": "assistant", "content": "The billing pipeline regression is fixed."}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = KiroSource::with_home(&home);
@@ -292,23 +349,28 @@ async fn kiro_fallback_identity_survives_snapshot_insertion() {
     let before = db
         .search_session_messages("kiro", None, "regression is fixed", 10)
         .await;
-    let assistant_id = before
+    let mut assistant_ids = before
         .iter()
-        .find(|hit| hit.message.role == "assistant")
-        .expect("assistant before insertion")
-        .message
-        .message_id
-        .clone();
+        .filter(|hit| hit.message.role == "assistant")
+        .map(|hit| hit.message.message_id.clone())
+        .collect::<Vec<_>>();
+    assistant_ids.sort();
+    assistant_ids.dedup();
+    assert_eq!(
+        assistant_ids.len(),
+        2,
+        "identical messages need distinct IDs"
+    );
 
     std::fs::write(
         &path,
         serde_json::json!({
             "sessionId": "sess-stable",
-            "modelId": "claude-sonnet-4.6",
             "messages": [
-                {"role": "user", "content": "New earlier context", "timestamp": 1_799_999_999_000_i64},
-                {"role": "user", "content": "Investigate the billing pipeline regression", "timestamp": 1_800_000_000_000_i64},
-                {"role": "assistant", "content": "The billing pipeline regression is fixed.", "timestamp": 1_800_000_010_000_i64}
+                {"role": "assistant", "content": "The billing pipeline regression is fixed."},
+                {"role": "user", "content": "New earlier context"},
+                {"role": "user", "content": "Investigate the billing pipeline regression"},
+                {"role": "assistant", "content": "The billing pipeline regression is fixed."}
             ]
         })
         .to_string(),
@@ -319,11 +381,14 @@ async fn kiro_fallback_identity_survives_snapshot_insertion() {
     let after = db
         .search_session_messages("kiro", None, "regression is fixed", 10)
         .await;
-    let assistant = after
+    let mut reordered_ids = after
         .iter()
-        .find(|hit| hit.message.role == "assistant")
-        .expect("assistant after insertion");
-    assert_eq!(assistant.message.message_id, assistant_id);
+        .filter(|hit| hit.message.role == "assistant")
+        .map(|hit| hit.message.message_id.clone())
+        .collect::<Vec<_>>();
+    reordered_ids.sort();
+    reordered_ids.dedup();
+    assert_eq!(reordered_ids, assistant_ids);
 }
 
 #[test]
@@ -571,10 +636,17 @@ async fn kiro_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
         0
     );
     let committed = durable_table_count(&project, "observations").await;
-    GlobalDbObservationStore::new(&reopened)
-        .rebuild_projection(committed)
-        .await
-        .unwrap();
+    let store = GlobalDbObservationStore::new(&reopened);
+    loop {
+        if store
+            .rebuild_projection(committed)
+            .await
+            .unwrap()
+            .is_complete()
+        {
+            break;
+        }
+    }
     let rebuilt = reopened
         .search_session_messages("kiro", None, "delimiter collision fixture", 10)
         .await;

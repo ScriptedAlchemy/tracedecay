@@ -1,7 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+use tracedecay_domain::ProjectId;
 
 use crate::application::observation::ObservationCancellation;
 use crate::global_db::GlobalDb;
@@ -38,6 +41,15 @@ const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
     bytes_per_pass: 4096,
     retries: 0,
 };
+
+fn scheduler_test_project_id() -> ProjectId {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    ProjectId::new(format!(
+        "scheduler-test-{}",
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    ))
+    .unwrap()
+}
 
 #[tokio::test]
 async fn missing_project_identity_fails_before_ingest_writes() {
@@ -782,6 +794,44 @@ impl TranscriptSource for PageOrderedSource {
     }
 }
 
+struct NoOpSource {
+    provider: &'static str,
+    path: PathBuf,
+    attempts: Arc<Mutex<usize>>,
+}
+
+impl TranscriptSource for NoOpSource {
+    fn provider(&self) -> &'static str {
+        self.provider
+    }
+
+    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
+        vec![self.path.clone()]
+    }
+
+    fn try_parse_new(
+        &self,
+        _path: &Path,
+        _prev: StoredCursor,
+        _project_root: &Path,
+        _max_new_bytes: Option<u64>,
+    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
+        let mut attempts = self.attempts.lock().unwrap();
+        *attempts = attempts.saturating_add(1);
+        Ok(None)
+    }
+
+    fn parse_new(
+        &self,
+        _path: &Path,
+        _prev: StoredCursor,
+        _project_root: &Path,
+        _max_new_bytes: Option<u64>,
+    ) -> Option<ParsedTranscript> {
+        None
+    }
+}
+
 struct CancellingSource {
     inner: FakeSource,
     cancellation: ObservationCancellation,
@@ -826,6 +876,7 @@ async fn source_failure_is_isolated_and_does_not_block_siblings() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
+    let project_id = scheduler_test_project_id();
     let ok_path = temp.path().join("ok.jsonl");
     let bad_path = temp.path().join("bad.jsonl");
     std::fs::write(&ok_path, b"{}\n").unwrap();
@@ -861,6 +912,7 @@ async fn source_failure_is_isolated_and_does_not_block_siblings() {
     let outcome = ingest_sources_bounded(
         &db,
         &project,
+        &project_id,
         &sources,
         bounds,
         &ObservationCancellation::default(),
@@ -900,6 +952,7 @@ async fn retryable_source_respects_retry_and_pass_byte_bounds() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
+    let project_id = scheduler_test_project_id();
     let path = temp.path().join("retryable.jsonl");
     std::fs::write(&path, b"{}\n").unwrap();
     let db = GlobalDb::open_at(&temp.path().join("global.db"))
@@ -922,6 +975,7 @@ async fn retryable_source_respects_retry_and_pass_byte_bounds() {
     let outcome = ingest_sources_bounded(
         &db,
         &project,
+        &project_id,
         &sources,
         bounds,
         &ObservationCancellation::default(),
@@ -938,6 +992,7 @@ async fn aggregate_byte_budget_is_granted_once_across_the_pass() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
+    let project_id = scheduler_test_project_id();
     let db = GlobalDb::open_at(&temp.path().join("global.db"))
         .await
         .unwrap();
@@ -961,6 +1016,7 @@ async fn aggregate_byte_budget_is_granted_once_across_the_pass() {
     let outcome = ingest_sources_bounded(
         &db,
         &project,
+        &project_id,
         &sources,
         bounds,
         &ObservationCancellation::default(),
@@ -980,6 +1036,7 @@ async fn zero_byte_pass_defers_work_without_frontier_advance() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
+    let project_id = scheduler_test_project_id();
     let path = temp.path().join("a.jsonl");
     std::fs::write(&path, b"{}\n").unwrap();
     let db = GlobalDb::open_at(&temp.path().join("global.db"))
@@ -1000,6 +1057,7 @@ async fn zero_byte_pass_defers_work_without_frontier_advance() {
     let outcome = ingest_sources_bounded(
         &db,
         &project,
+        &project_id,
         &sources,
         bounds,
         &ObservationCancellation::default(),
@@ -1027,6 +1085,7 @@ async fn cancellation_during_unit_keeps_committed_work_without_frontier_write() 
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
+    let project_id = scheduler_test_project_id();
     let first_path = temp.path().join("a.jsonl");
     let second_path = temp.path().join("b.jsonl");
     std::fs::write(&first_path, b"{}\n").unwrap();
@@ -1057,7 +1116,8 @@ async fn cancellation_during_unit_keeps_committed_work_without_frontier_write() 
         queue_depth: 1,
         ..TEST_INGEST_BOUNDS
     };
-    let outcome = ingest_sources_bounded(&db, &project, &sources, bounds, &cancellation).await;
+    let outcome =
+        ingest_sources_bounded(&db, &project, &project_id, &sources, bounds, &cancellation).await;
 
     assert_eq!(outcome.units_completed, 1);
     assert!(cancellation.is_cancelled());
@@ -1079,6 +1139,7 @@ async fn partial_pass_writes_frontier_cancellation_does_not() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
+    let project_id = scheduler_test_project_id();
     let db = GlobalDb::open_at(&temp.path().join("global.db"))
         .await
         .unwrap();
@@ -1101,6 +1162,7 @@ async fn partial_pass_writes_frontier_cancellation_does_not() {
     let first = ingest_sources_bounded(
         &db,
         &project,
+        &project_id,
         &sources,
         bounds,
         &ObservationCancellation::default(),
@@ -1118,7 +1180,8 @@ async fn partial_pass_writes_frontier_cancellation_does_not() {
 
     let cancellation = ObservationCancellation::default();
     cancellation.cancel();
-    let cancelled = ingest_sources_bounded(&db, &project, &sources, bounds, &cancellation).await;
+    let cancelled =
+        ingest_sources_bounded(&db, &project, &project_id, &sources, bounds, &cancellation).await;
     assert!(
         cancelled
             .failures
@@ -1137,6 +1200,7 @@ async fn partial_pass_writes_frontier_cancellation_does_not() {
     let second = ingest_sources_bounded(
         &db,
         &project,
+        &project_id,
         &sources,
         bounds,
         &ObservationCancellation::default(),
@@ -1148,6 +1212,188 @@ async fn partial_pass_writes_frontier_cancellation_does_not() {
     assert_eq!(
         read_ingest_frontier(&db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
         Some(2)
+    );
+}
+
+#[tokio::test]
+async fn production_frontier_rotates_before_a_continuously_busy_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project_id = scheduler_test_project_id();
+    let db = GlobalDb::open_at(&temp.path().join("global.db"))
+        .await
+        .unwrap();
+    let first_log = Arc::new(Mutex::new(Vec::new()));
+    let second_log = Arc::new(Mutex::new(Vec::new()));
+    let sources = vec![
+        boxed_source(FakeSource {
+            provider: "busy",
+            paths: vec!["a1", "a2", "a3"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+            fail: false,
+            budget_log: Some(Arc::clone(&first_log)),
+        }),
+        boxed_source(FakeSource {
+            provider: "peer",
+            paths: vec![PathBuf::from("b1")],
+            fail: false,
+            budget_log: Some(Arc::clone(&second_log)),
+        }),
+    ];
+    let bounds = IngestPassBounds {
+        discovered_units: 2,
+        units_per_pass: 1,
+        units_per_source: 1,
+        queue_depth: 1,
+        ..TEST_INGEST_BOUNDS
+    };
+
+    let first = ingest_sources_bounded(
+        &db,
+        &project,
+        &project_id,
+        &sources,
+        bounds,
+        &ObservationCancellation::default(),
+    )
+    .await;
+    let second = ingest_sources_bounded(
+        &db,
+        &project,
+        &project_id,
+        &sources,
+        bounds,
+        &ObservationCancellation::default(),
+    )
+    .await;
+
+    assert!(first.scheduling_state_written);
+    assert!(second.scheduling_state_written);
+    assert_eq!(first_log.lock().unwrap().len(), 1);
+    assert_eq!(second_log.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn terminal_source_failure_rotates_to_a_healthy_peer() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project_id = scheduler_test_project_id();
+    let db = GlobalDb::open_at(&temp.path().join("global.db"))
+        .await
+        .unwrap();
+    let healthy_log = Arc::new(Mutex::new(Vec::new()));
+    let sources = vec![
+        boxed_source(FakeSource {
+            provider: "failed",
+            paths: vec![PathBuf::from("failed")],
+            fail: true,
+            budget_log: None,
+        }),
+        boxed_source(FakeSource {
+            provider: "healthy",
+            paths: vec![PathBuf::from("healthy")],
+            fail: false,
+            budget_log: Some(Arc::clone(&healthy_log)),
+        }),
+    ];
+    let bounds = IngestPassBounds {
+        discovered_units: 2,
+        units_per_pass: 1,
+        units_per_source: 1,
+        queue_depth: 1,
+        ..TEST_INGEST_BOUNDS
+    };
+
+    let failed = ingest_sources_bounded(
+        &db,
+        &project,
+        &project_id,
+        &sources,
+        bounds,
+        &ObservationCancellation::default(),
+    )
+    .await;
+    let healthy = ingest_sources_bounded(
+        &db,
+        &project,
+        &project_id,
+        &sources,
+        bounds,
+        &ObservationCancellation::default(),
+    )
+    .await;
+
+    assert_eq!(failed.units_failed, 1);
+    assert!(failed.scheduling_state_written);
+    assert_eq!(healthy.units_completed, 1);
+    assert_eq!(healthy_log.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn attempted_no_op_does_not_write_partial_scheduling_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project_id = scheduler_test_project_id();
+    let db = GlobalDb::open_at(&temp.path().join("global.db"))
+        .await
+        .unwrap();
+    let first_attempts = Arc::new(Mutex::new(0usize));
+    let second_attempts = Arc::new(Mutex::new(0usize));
+    let sources: Vec<Box<dyn TranscriptSource>> = vec![
+        Box::new(NoOpSource {
+            provider: "first",
+            path: PathBuf::from("first"),
+            attempts: Arc::clone(&first_attempts),
+        }),
+        Box::new(NoOpSource {
+            provider: "second",
+            path: PathBuf::from("second"),
+            attempts: Arc::clone(&second_attempts),
+        }),
+    ];
+    let bounds = IngestPassBounds {
+        discovered_units: 2,
+        units_per_pass: 1,
+        units_per_source: 1,
+        queue_depth: 1,
+        ..TEST_INGEST_BOUNDS
+    };
+
+    let first = ingest_sources_bounded(
+        &db,
+        &project,
+        &project_id,
+        &sources,
+        bounds,
+        &ObservationCancellation::default(),
+    )
+    .await;
+    let second = ingest_sources_bounded(
+        &db,
+        &project,
+        &project_id,
+        &sources,
+        bounds,
+        &ObservationCancellation::default(),
+    )
+    .await;
+
+    assert_eq!(first.units_admitted, 1);
+    assert_eq!(second.units_admitted, 1);
+    assert!(!first.coverage.is_complete());
+    assert!(!second.coverage.is_complete());
+    assert!(!first.scheduling_state_written);
+    assert!(!second.scheduling_state_written);
+    assert_eq!(*first_attempts.lock().unwrap(), 1);
+    assert_eq!(*second_attempts.lock().unwrap(), 1);
+    assert_eq!(
+        read_ingest_frontier(&db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
+        Some(0)
     );
 }
 
