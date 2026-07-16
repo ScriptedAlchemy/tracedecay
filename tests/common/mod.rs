@@ -456,7 +456,6 @@ pub fn http_agent_with_timeout(timeout: Duration) -> ureq::Agent {
 
 pub struct DaemonProcess {
     child: Child,
-    stderr_reader: Option<std::thread::JoinHandle<()>>,
 }
 
 impl DaemonProcess {
@@ -469,31 +468,22 @@ impl DaemonProcess {
     /// `Child::kill` maps to `SIGKILL` on Unix and the platform termination
     /// primitive elsewhere, keeping fault-injection tests portable.
     pub fn kill_and_wait(&mut self) -> std::io::Result<ExitStatus> {
-        let status = terminate_and_reap(&mut self.child)?;
-        self.join_stderr_reader();
-        Ok(status)
+        terminate_and_reap(&mut self.child)
     }
 
     fn drain_stderr(&mut self) {
         let Some(mut stderr) = self.child.stderr.take() else {
             return;
         };
-        self.stderr_reader = Some(std::thread::spawn(move || {
+        std::thread::spawn(move || {
             let _ = std::io::copy(&mut stderr, &mut std::io::sink());
-        }));
-    }
-
-    fn join_stderr_reader(&mut self) {
-        if let Some(reader) = self.stderr_reader.take() {
-            let _ = reader.join();
-        }
+        });
     }
 }
 
 impl Drop for DaemonProcess {
     fn drop(&mut self) {
         let _ = terminate_and_reap(&mut self.child);
-        self.join_stderr_reader();
     }
 }
 
@@ -638,10 +628,7 @@ pub fn spawn_tracedecay_daemon_with(
         .stderr(Stdio::piped());
     configure(&mut command);
     let child = command.spawn().expect("tracedecay daemon should start");
-    let mut daemon = DaemonProcess {
-        child,
-        stderr_reader: None,
-    };
+    let mut daemon = DaemonProcess { child };
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
