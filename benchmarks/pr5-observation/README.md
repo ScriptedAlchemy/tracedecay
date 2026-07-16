@@ -36,10 +36,10 @@ once, and proves each repeat is a durable no-op.
 Current acceptance artifacts must include the nested
 `provider_observation_performance` result and `hook_telemetry_readiness`
 evidence. [evidence-index.json](evidence-index.json) identifies
-no `current_acceptance` while the changed implementation awaits a clean-commit
-evidence run. All three earlier artifacts remain `historical_stale`, so the
-retired-evidence validator intentionally does not require fields introduced by
-the new workload.
+[result-2026-07-16-00d3d73a.json](result-2026-07-16-00d3d73a.json) as the
+`current_acceptance`. All three earlier artifacts remain `historical_stale`, so
+the retired-evidence validator intentionally does not require fields introduced
+by the new workload.
 
 The acceptance result embeds hook telemetry readiness as
 `hook-telemetry-baseline-readiness-v1`, not as a measured baseline. It reads the
@@ -104,22 +104,25 @@ the checked historical artifact but the finalization gate requires exactly one
 fully typed current acceptance artifact and rejects unindexed, duplicate, or
 unknown-field results.
 
-The former [acceptance result](result-2026-07-16-8d53b4a9.json) was captured
-from clean commit `8d53b4a93d67b3e4264e18f353b941ea4d3ea548` with 3 warmups and
+The current [acceptance result](result-2026-07-16-00d3d73a.json) was captured
+from clean commit `00d3d73a06403480487207986506f9b3c4d1df43` with 3 warmups and
 30 independent measured repetitions of 64 records (30 × 64 = 1,920 records).
 The raw artifact records the Linux kernel, CPU, memory, Rust/Cargo toolchains,
 every repetition, and the nearest-rank/sample-standard-deviation method.
 
-- Pipeline batch latency: p50 610,344,510 ns; p95 634,643,768 ns; p99
-  641,790,844 ns.
-- Pipeline throughput: 104.3113869391352 records/s.
-- Timed pipeline CPU: 12,560 ms; peak RSS: 58,092 KiB.
-- Timed process write I/O: 335,486,976 bytes; SQLite database/WAL/SHM growth:
-  139,769,168 bytes across the 30 independent databases.
-- Exact no-op retry plus bounded replay: p50 211,083 ns; p95 235,212 ns; p99
-  246,762 ns; 10 ms CPU total; zero process write bytes, database growth,
+- Pipeline batch latency: p50 623,357,379 ns; p95 644,226,286 ns; p99
+  646,779,174 ns.
+- Pipeline throughput: 102.78610566152383 records/s.
+- Timed pipeline CPU: 12,570 ms; peak RSS: 57,244 KiB.
+- Timed process write I/O: 335,515,648 bytes; SQLite database/WAL/SHM growth:
+  139,818,560 bytes across the 30 independent databases.
+- Exact no-op retry plus bounded replay: p50 204,611 ns; p95 223,992 ns; p99
+  228,572 ns; 0 ms CPU total; zero process write bytes, database growth,
   observation-count delta, and coordinator work counters.
 - Round-robin fairness: maximum provider turn distance 8.
+
+The former [acceptance result](result-2026-07-16-8d53b4a9.json) remains
+`historical_stale` after the PR6 provider-ingestion correctness changes.
 
 The former [acceptance result](result-2026-07-15-0c289212.json) remains
 `historical_stale` because it predates workload schema 3.
