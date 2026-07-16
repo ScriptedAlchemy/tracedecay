@@ -35,10 +35,11 @@ once, and proves each repeat is a durable no-op.
 
 Current acceptance artifacts must include the nested
 `provider_observation_performance` result and `hook_telemetry_readiness`
-evidence. [evidence-index.json](evidence-index.json) keeps
-`current_acceptance` unset until a clean run against the final product commit;
-the two earlier artifacts remain `historical_stale`, so the retired-evidence
-validator intentionally does not require fields introduced by the new workload.
+evidence. [evidence-index.json](evidence-index.json) identifies
+[result-2026-07-16-8d53b4a9.json](result-2026-07-16-8d53b4a9.json) as the
+`current_acceptance`; the two earlier artifacts remain `historical_stale`, so
+the retired-evidence validator intentionally does not require fields introduced
+by the new workload.
 
 The acceptance result embeds hook telemetry readiness as
 `hook-telemetry-baseline-readiness-v1`, not as a measured baseline. It reads the
@@ -103,8 +104,22 @@ the checked historical artifact but the finalization gate requires exactly one
 fully typed current acceptance artifact and rejects unindexed, duplicate, or
 unknown-field results.
 
-No current acceptance result is checked in while the final product commit is
-being prepared. The clean attested run below creates it.
+The current [acceptance result](result-2026-07-16-8d53b4a9.json) was captured
+from clean commit `8d53b4a93d67b3e4264e18f353b941ea4d3ea548` with 3 warmups and
+30 independent measured repetitions of 64 records (30 × 64 = 1,920 records).
+The raw artifact records the Linux kernel, CPU, memory, Rust/Cargo toolchains,
+every repetition, and the nearest-rank/sample-standard-deviation method.
+
+- Pipeline batch latency: p50 610,344,510 ns; p95 634,643,768 ns; p99
+  641,790,844 ns.
+- Pipeline throughput: 104.3113869391352 records/s.
+- Timed pipeline CPU: 12,560 ms; peak RSS: 58,092 KiB.
+- Timed process write I/O: 335,486,976 bytes; SQLite database/WAL/SHM growth:
+  139,769,168 bytes across the 30 independent databases.
+- Exact no-op retry plus bounded replay: p50 211,083 ns; p95 235,212 ns; p99
+  246,762 ns; 10 ms CPU total; zero process write bytes, database growth,
+  observation-count delta, and coordinator work counters.
+- Round-robin fairness: maximum provider turn distance 8.
 
 The former [acceptance result](result-2026-07-15-0c289212.json) remains
 `historical_stale` because it predates workload schema 3.
