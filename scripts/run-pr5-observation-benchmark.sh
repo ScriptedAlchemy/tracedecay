@@ -32,18 +32,42 @@ fi
 scratch_root="$repo_root/target/pr6-observation-source"
 mkdir -p "$scratch_root"
 build_root=$(mktemp -d "$scratch_root/archive.XXXXXXXX")
+capture=$(mktemp)
+index_backup=$(mktemp)
+cp "$index_path" "$index_backup"
+complete=false
+cleanup() {
+  cd "$repo_root"
+  rm -f "$capture"
+  if [[ $complete != true ]]; then
+    rm -f "$result_path"
+    cp "$index_backup" "$index_path"
+  fi
+  rm -f "$index_backup"
+  if [[ -d ${build_root:-} ]]; then
+    chmod -R u+w "$build_root" || true
+    rm -rf "$build_root"
+  fi
+}
+trap cleanup EXIT
 git archive "$commit" | tar -x -C "$build_root"
 
+write_source_manifest() {
+  local destination=$1
+  : >"$destination"
+  while IFS= read -r -d '' relative; do
+    mode=$(git ls-files -s -- "$relative" | awk '{print $1}')
+    if [[ $mode == 160000 ]]; then
+      digest=$(git rev-parse "$commit:$relative")
+    else
+      digest=$(sha256sum "$build_root/$relative" | awk '{print $1}')
+    fi
+    printf '%s\t%s\t%s\n' "$mode" "$digest" "$relative" >>"$destination"
+  done < <(git ls-files -z)
+}
+
 source_manifest="$build_root/.tracedecay-benchmark-source-manifest"
-while IFS= read -r -d '' relative; do
-  mode=$(git ls-files -s -- "$relative" | awk '{print $1}')
-  if [[ $mode == 160000 ]]; then
-    digest=$(git rev-parse "$commit:$relative")
-  else
-    digest=$(sha256sum "$build_root/$relative" | awk '{print $1}')
-  fi
-  printf '%s\t%s\t%s\n' "$mode" "$digest" "$relative" >>"$source_manifest"
-done < <(git ls-files -z)
+write_source_manifest "$source_manifest"
 source_manifest_sha256=$(sha256sum "$source_manifest" | awk '{print $1}')
 
 host_target=$(rustc -Vv | sed -n 's/^host: //p')
@@ -89,28 +113,25 @@ export TRACEDECAY_BENCHMARK_BUILD_RUSTC_WRAPPER="$(wrapper_identity "${RUSTC_WRA
 export TRACEDECAY_BENCHMARK_BUILD_RUSTC_WORKSPACE_WRAPPER="$(wrapper_identity "${RUSTC_WORKSPACE_WRAPPER:-}")"
 export TRACEDECAY_BENCHMARK_BUILD_CARGO_CONFIG_IDENTITY=$config_identity
 
+# A fresh Git archive intentionally contains no generated dashboard assets.
+# Generate them before freezing the source tree, then prove npm did not mutate
+# any tracked input. The measured Cargo build can remain fully read-only.
+(
+  cd "$build_root/dashboard"
+  npm ci
+  npm run build
+)
+post_dashboard_manifest="$build_root/.tracedecay-benchmark-source-manifest.post-dashboard"
+write_source_manifest "$post_dashboard_manifest"
+if ! cmp -s "$source_manifest" "$post_dashboard_manifest"; then
+  echo "dashboard build modified tracked benchmark source" >&2
+  exit 1
+fi
+rm -f "$post_dashboard_manifest"
+
 mkdir -p "$build_root/target"
 chmod -R a-w "$build_root"
 chmod u+rwx "$build_root/target"
-
-capture=$(mktemp)
-index_backup=$(mktemp)
-cp "$index_path" "$index_backup"
-complete=false
-cleanup() {
-  cd "$repo_root"
-  rm -f "$capture"
-  if [[ $complete != true ]]; then
-    rm -f "$result_path"
-    cp "$index_backup" "$index_path"
-  fi
-  rm -f "$index_backup"
-  if [[ -d ${build_root:-} ]]; then
-    chmod -R u+w "$build_root" || true
-    rm -rf "$build_root"
-  fi
-}
-trap cleanup EXIT
 
 (
   cd "$build_root"
