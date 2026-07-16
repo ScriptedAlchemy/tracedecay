@@ -613,9 +613,9 @@ impl TraceDecay {
         self.db.close();
     }
 
-    /// Run `SQLite`'s non-mutating quick integrity check on the active database.
-    pub(crate) async fn quick_check(&self) -> Result<bool> {
-        self.db.quick_check().await
+    /// Run the quick integrity check and return the first problem row, if any.
+    pub(crate) async fn quick_check_report(&self) -> Result<Option<String>> {
+        self.db.quick_check_report().await
     }
 
     /// Returns a reference to the current configuration.

@@ -289,8 +289,9 @@ pub(crate) async fn collect_database(
         .await
         .ok()
         .and_then(|value| u64::try_from(value).ok());
-    let (quick_check_ok, quick_check_error) = match cg.quick_check().await {
-        Ok(ok) => (Some(ok), None),
+    let (quick_check_ok, quick_check_error) = match cg.quick_check_report().await {
+        Ok(None) => (Some(true), None),
+        Ok(Some(problem)) => (Some(false), Some(problem)),
         Err(error) => (None, Some(error.to_string())),
     };
     let dirty_marker = read_dirty_marker(&with_suffix(&db_path, ".dirty"));

@@ -594,13 +594,25 @@ impl Database {
     /// This is faster than `integrity_check` — it verifies B-tree structure
     /// without cross-checking index contents against table data.
     pub async fn quick_check(&self) -> Result<bool> {
-        Ok(integrity::quick_check_result(
+        Ok(self.quick_check_report().await?.is_none())
+    }
+
+    /// Runs `PRAGMA quick_check` and returns the first problem row, if any.
+    ///
+    /// `None` means the database is intact. A pragma that returns no rows is
+    /// reported as a problem rather than silently treated as healthy.
+    pub async fn quick_check_report(&self) -> Result<Option<String>> {
+        let row = integrity::quick_check_result(
             &self.inner.conn,
             "quick_check",
             "failed to run quick_check",
         )
-        .await?
-        .is_some_and(|result| result == "ok"))
+        .await?;
+        Ok(match row {
+            Some(row) if row == "ok" => None,
+            Some(row) => Some(row),
+            None => Some("PRAGMA quick_check returned no rows".to_string()),
+        })
     }
 
     /// Maintenance-only: rebuilds the FTS5 index from the content table.

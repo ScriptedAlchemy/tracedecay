@@ -332,7 +332,13 @@ fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
             true
         }
         Some(false) => {
-            dc.fail("Database integrity check failed; offline recovery is required");
+            let detail = storage
+                .get("quick_check_error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("no problem detail reported");
+            dc.fail(&format!(
+                "Database integrity check failed ({detail}); offline recovery is required"
+            ));
             if let Some(path) = db_path.as_deref() {
                 print_database_recovery_guidance(dc, path);
             }
