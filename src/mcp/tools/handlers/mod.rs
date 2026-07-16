@@ -319,14 +319,14 @@ pub async fn handle_tool_call(
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    handle_tool_call_with_registry_and_implicit_project(
+    Box::pin(handle_tool_call_with_registry_and_implicit_project(
         cg,
         tool_name,
         args,
         server_stats,
         scope_prefix,
         ToolCallRegistryOptions::default(),
-    )
+    ))
     .await
 }
 
@@ -339,7 +339,7 @@ pub async fn handle_tool_call_with_registry(
     global_db: Option<&GlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
-    handle_tool_call_with_registry_and_implicit_project(
+    Box::pin(handle_tool_call_with_registry_and_implicit_project(
         cg,
         tool_name,
         args,
@@ -350,7 +350,7 @@ pub async fn handle_tool_call_with_registry(
             allow_default_registry_fallback,
             ..Default::default()
         },
-    )
+    ))
     .await
 }
 
@@ -708,14 +708,14 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
             .await
         }
         "tracedecay_message_search" => {
-            session::handle_message_search(
+            Box::pin(session::handle_message_search(
                 cg,
                 args,
                 options.global_db,
                 options.allow_default_registry_fallback,
                 active_project_session_db,
                 options.session_authorities.user,
-            )
+            ))
             .await
         }
         "tracedecay_sessions_for" => session::handle_sessions_for(cg, args).await,

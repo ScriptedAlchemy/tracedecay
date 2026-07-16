@@ -365,6 +365,7 @@ fn sync_directory(dir: &Path) -> Result<(), String> {
 // Windows does not support opening a directory with ordinary `File::open`,
 // so the durable file sync above is the strongest portable guarantee there.
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
 fn sync_directory(_dir: &Path) -> Result<(), String> {
     Ok(())
 }

@@ -452,8 +452,7 @@ fn is_pid_alive(pid: u32) -> bool {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .output()
-            .map(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
-            .unwrap_or(false)
+            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -549,9 +548,11 @@ mod tests {
         assert!(exited.wait().unwrap().success());
         assert!(!is_pid_alive(dead_pid));
         std::fs::write(&path, dead_pid.to_string()).unwrap();
+        #[cfg(unix)]
         let before = std::fs::metadata(&path).unwrap();
 
         let guard = try_acquire_sync_lock_at(&path).unwrap();
+        #[cfg(unix)]
         let after = std::fs::metadata(&path).unwrap();
         #[cfg(unix)]
         {

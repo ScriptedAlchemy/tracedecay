@@ -1482,8 +1482,7 @@ fn transient_file_backoff(attempt: u32) -> std::time::Duration {
     let base = 10u64 << (attempt - 1);
     let jitter = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| u64::from(d.subsec_nanos()) % u64::from(attempt + 1))
-        .unwrap_or(0);
+        .map_or(0, |d| u64::from(d.subsec_nanos()) % u64::from(attempt + 1));
     std::time::Duration::from_millis(base + jitter)
 }
 
@@ -1609,6 +1608,7 @@ pub(crate) fn set_private_dir_permissions(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
 pub(crate) fn set_private_dir_permissions(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
@@ -1631,6 +1631,7 @@ fn apply_private_create_mode(options: &mut fs::OpenOptions) {
 fn apply_private_create_mode(_options: &mut fs::OpenOptions) {}
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
 fn set_private_file_permissions(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }

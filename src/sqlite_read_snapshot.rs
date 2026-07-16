@@ -160,6 +160,7 @@ struct PreparedSnapshot {
 
 #[derive(Clone, Copy)]
 enum SnapshotMode {
+    #[cfg_attr(windows, allow(dead_code))]
     DirectImmutable,
     Reflink,
     Copy,
@@ -438,6 +439,7 @@ fn create_scratch_directory(
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))] // Preserve the fallible Unix contract.
 fn default_scratch_root(paths: &[PathBuf]) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
@@ -453,6 +455,7 @@ fn default_scratch_root(paths: &[PathBuf]) -> io::Result<PathBuf> {
     }
 }
 
+#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))] // Preserve the fallible Unix contract.
 fn expected_owner(paths: &[PathBuf]) -> io::Result<Option<u32>> {
     #[cfg(unix)]
     {
@@ -503,11 +506,15 @@ fn ensure_private_root(root: &Path, expected_uid: Option<u32>) -> io::Result<()>
             fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
         }
     }
+    #[cfg(not(unix))]
+    let _ = expected_uid;
     Ok(())
 }
 
 fn create_private_directory(path: &Path) -> io::Result<()> {
-    let mut builder = fs::DirBuilder::new();
+    let builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    let mut builder = builder;
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;

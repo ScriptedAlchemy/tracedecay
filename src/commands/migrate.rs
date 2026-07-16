@@ -586,6 +586,7 @@ async fn registry_gc(
     }
 }
 
+#[cfg(unix)]
 async fn brokered_registry_gc(
     prefix: Option<String>,
     apply: bool,

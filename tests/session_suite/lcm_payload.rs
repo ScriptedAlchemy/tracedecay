@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use serde_json::{Value, json};
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::sessions::lcm::payload::{DeleteOpts, delete_external_payload};
@@ -83,12 +84,14 @@ async fn raw_metadata_json(
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
+#[cfg(unix)]
 fn sha256_hex(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
     hex::encode(hasher.finalize())
 }
 
+#[cfg(unix)]
 fn expected_payload_ref(
     provider: &str,
     session_id: &str,

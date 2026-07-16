@@ -1750,7 +1750,10 @@ fn migration_scratch_root(profile_root: &Path) -> Result<MigrationScratchRoot> {
     for _ in 0..100 {
         let sequence = NEXT_MIGRATION_SCRATCH.fetch_add(1, Ordering::Relaxed);
         let path = parent.join(format!("{prefix}-{sequence}"));
+        #[cfg(unix)]
         let mut builder = fs::DirBuilder::new();
+        #[cfg(not(unix))]
+        let builder = fs::DirBuilder::new();
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;

@@ -250,6 +250,13 @@ pub fn acquire_exclusive_or_inherited(
     )
 }
 
+#[cfg_attr(
+    windows,
+    allow(
+        clippy::needless_pass_by_value,
+        reason = "non-Windows inheritance validation consumes the token"
+    )
+)]
 fn acquire_exclusive_or_inherited_at(
     path: &Path,
     operation: &str,
@@ -376,26 +383,30 @@ fn own_exclusive(mut file: File, path: &Path, operation: &str) -> Result<Lifecyc
     })
 }
 
-fn write_owner_metadata(file: &mut File, _path: &Path, owner: &str) -> std::io::Result<()> {
+fn write_owner_metadata(file: &mut File, path: &Path, owner: &str) -> std::io::Result<()> {
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
     file.write_all(owner.as_bytes())?;
     file.flush()?;
     #[cfg(windows)]
-    std::fs::write(owner_sidecar_path(_path), owner)?;
+    std::fs::write(owner_sidecar_path(path), owner)?;
+    #[cfg(not(windows))]
+    let _ = path;
     Ok(())
 }
 
-fn clear_owner_metadata(file: &mut File, _path: &Path) -> std::io::Result<()> {
+fn clear_owner_metadata(file: &mut File, path: &Path) -> std::io::Result<()> {
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
     file.flush()?;
     #[cfg(windows)]
-    match std::fs::remove_file(owner_sidecar_path(_path)) {
+    match std::fs::remove_file(owner_sidecar_path(path)) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
+    #[cfg(not(windows))]
+    let _ = path;
     Ok(())
 }
 
@@ -484,20 +495,22 @@ fn is_lock_contended(error: &std::io::Error) -> bool {
     {
         // LockFileEx reports lock contention as ERROR_LOCK_VIOLATION, which
         // std currently classifies as Uncategorized rather than WouldBlock.
-        return error.raw_os_error() == Some(33);
+        error.raw_os_error() == Some(33)
     }
     #[cfg(not(windows))]
     false
 }
 
-fn read_owner(file: &mut File, _path: &Path) -> Option<String> {
+fn read_owner(file: &mut File, path: &Path) -> Option<String> {
     #[cfg(windows)]
-    if let Ok(owner) = std::fs::read_to_string(owner_sidecar_path(_path)) {
+    if let Ok(owner) = std::fs::read_to_string(owner_sidecar_path(path)) {
         let owner = owner.trim();
         if !owner.is_empty() {
             return Some(owner.to_string());
         }
     }
+    #[cfg(not(windows))]
+    let _ = path;
     let mut owner = String::new();
     file.seek(SeekFrom::Start(0)).ok()?;
     file.read_to_string(&mut owner).ok()?;

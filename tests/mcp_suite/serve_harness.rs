@@ -10,6 +10,7 @@ use std::process::{Output, Stdio};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
+#[cfg(unix)]
 use tracedecay::global_db::GlobalDb;
 use tracedecay::tracedecay::TraceDecayOpenOptions;
 
@@ -27,6 +28,7 @@ pub async fn init_project_with_file(home: &Path, contents: &str) -> TempDir {
     dir
 }
 
+#[cfg(unix)]
 pub async fn init_project_under(home: &Path, parent: &Path, name: &str, contents: &str) -> PathBuf {
     let path = parent.join(name);
     fs::create_dir_all(path.join("src")).unwrap();
@@ -46,6 +48,7 @@ pub async fn init_project_direct(home: &Path, project: &Path) {
         .expect("tracedecay project should initialize");
 }
 
+#[cfg(unix)]
 pub async fn register_global_project(home: &Path, project: &Path) {
     use std::hash::{Hash, Hasher};
 
@@ -120,6 +123,7 @@ pub fn run_serve_runtime(
         .expect("tracedecay serve should exit after stdin closes")
 }
 
+#[cfg(unix)]
 pub fn canonical_path_string(path: &Path) -> String {
     path.canonicalize()
         .unwrap_or_else(|_| path.to_path_buf())
@@ -129,6 +133,7 @@ pub fn canonical_path_string(path: &Path) -> String {
 
 /// Extracts `database.project_root` from the `tracedecay_runtime` tools/call
 /// response with the given JSON-RPC id.
+#[cfg(unix)]
 pub fn runtime_project_root(stdout: &[u8], id: i64) -> String {
     let stdout = String::from_utf8(stdout.to_vec()).unwrap();
     let runtime_response: Value = stdout

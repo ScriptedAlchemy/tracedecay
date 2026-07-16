@@ -10,13 +10,10 @@ use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 #[cfg(unix)]
 use super::AutomationSchedulerHandle;
+#[cfg(any(unix, test))]
+use super::ProjectServerKey;
 use super::profile_host_admission_replay::ProfileHostAdmissionReplayRegistry;
-use super::{
-    DaemonHandshake, DatabaseOwnerRegistry, ProjectServerKey, authority, write_json_rpc_response,
-};
-
-#[cfg(not(unix))]
-type AutomationSchedulerHandle = ();
+use super::{DaemonHandshake, DatabaseOwnerRegistry, authority, write_json_rpc_response};
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
 
@@ -65,6 +62,7 @@ pub(super) struct StoreAdministration {
     >,
     host_admission_broker_gate: Arc<tokio::sync::Mutex<()>>,
     profile_host_admission_replay: Arc<ProfileHostAdmissionReplayRegistry>,
+    #[cfg(unix)]
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
     #[cfg(test)]
@@ -80,6 +78,7 @@ impl Default for StoreAdministration {
             host_admission_brokers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             host_admission_broker_gate: Arc::new(tokio::sync::Mutex::new(())),
             profile_host_admission_replay: Arc::new(ProfileHostAdmissionReplayRegistry::default()),
+            #[cfg(unix)]
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             #[cfg(test)]
             external_holder_verifier: None,
@@ -88,7 +87,7 @@ impl Default for StoreAdministration {
 }
 
 impl StoreAdministration {
-    #[cfg(any(not(unix), test))]
+    #[cfg(test)]
     pub(super) fn with_project_servers(
         project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
     ) -> Self {
@@ -98,7 +97,7 @@ impl StoreAdministration {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn with_external_holder_verifier(
         external_holder_verifier: ExternalHolderVerifier,
     ) -> Self {
@@ -259,6 +258,7 @@ impl StoreAdministration {
         &self.profile_host_admission_replay
     }
 
+    #[cfg(unix)]
     pub(super) fn automation_schedulers(
         &self,
     ) -> &Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>> {
@@ -334,10 +334,16 @@ impl StoreAdministration {
                     canonical_branch_database_paths(recovery.database_paths())?;
                 {
                     let project_servers = self.project_servers.lock().await;
-                    let automation_schedulers = self.automation_schedulers.lock().await;
+                    #[cfg(unix)]
+                    let scheduler_busy = cached_scheduler_owns_selected(
+                        &*self.automation_schedulers.lock().await,
+                        &database_paths,
+                    );
+                    #[cfg(not(unix))]
+                    let scheduler_busy = false;
                     ensure_no_cached_store_owners(
                         &project_servers,
-                        &automation_schedulers,
+                        scheduler_busy,
                         &database_paths,
                     )?;
                 }
@@ -388,10 +394,16 @@ impl StoreAdministration {
 
             {
                 let project_servers = self.project_servers.lock().await;
-                let automation_schedulers = self.automation_schedulers.lock().await;
+                #[cfg(unix)]
+                let scheduler_busy = cached_scheduler_owns_selected(
+                    &*self.automation_schedulers.lock().await,
+                    &database_paths,
+                );
+                #[cfg(not(unix))]
+                let scheduler_busy = false;
                 ensure_no_cached_store_owners(
                     &project_servers,
-                    &automation_schedulers,
+                    scheduler_busy,
                     &database_paths,
                 )?;
             }
@@ -457,16 +469,23 @@ fn canonical_branch_database_paths(paths: &[PathBuf]) -> Result<HashSet<PathBuf>
         .collect()
 }
 
-fn ensure_no_cached_store_owners<Server, Scheduler>(
-    project_servers: &DatabaseOwnerRegistry<Server>,
+#[cfg(any(unix, test))]
+fn cached_scheduler_owns_selected<Scheduler>(
     automation_schedulers: &HashMap<ProjectServerKey, Scheduler>,
+    database_paths: &HashSet<PathBuf>,
+) -> bool {
+    automation_schedulers
+        .keys()
+        .any(|key| database_paths.contains(&key.owner.graph_db_path))
+}
+
+fn ensure_no_cached_store_owners<Server>(
+    project_servers: &DatabaseOwnerRegistry<Server>,
+    scheduler_busy: bool,
     database_paths: &HashSet<PathBuf>,
 ) -> Result<()> {
     let server_busy = project_servers
         .servers
-        .keys()
-        .any(|key| database_paths.contains(&key.owner.graph_db_path));
-    let scheduler_busy = automation_schedulers
         .keys()
         .any(|key| database_paths.contains(&key.owner.graph_db_path));
     if !server_busy && !scheduler_busy {
@@ -751,8 +770,12 @@ mod tests {
             "/profile/projects/project/branches/feature.db",
         )]);
 
-        let error = ensure_no_cached_store_owners(&registry, &schedulers, &selected)
-            .expect_err("matching daemon owners must fail closed");
+        let error = ensure_no_cached_store_owners(
+            &registry,
+            cached_scheduler_owns_selected(&schedulers, &selected),
+            &selected,
+        )
+        .expect_err("matching daemon owners must fail closed");
 
         let message = error.to_string();
         assert!(message.contains("busy"), "{message}");
@@ -760,12 +783,15 @@ mod tests {
             message.contains("restart the TraceDecay daemon"),
             "{message}"
         );
-        let no_schedulers: HashMap<ProjectServerKey, Arc<&str>> = HashMap::new();
-        ensure_no_cached_store_owners(&registry, &no_schedulers, &selected)
+        ensure_no_cached_store_owners(&registry, false, &selected)
             .expect_err("a matching project server alone must fail closed");
         let no_servers: DatabaseOwnerRegistry<Arc<&str>> = DatabaseOwnerRegistry::default();
-        ensure_no_cached_store_owners(&no_servers, &schedulers, &selected)
-            .expect_err("a matching scheduler alone must fail closed");
+        ensure_no_cached_store_owners(
+            &no_servers,
+            cached_scheduler_owns_selected(&schedulers, &selected),
+            &selected,
+        )
+        .expect_err("a matching scheduler alone must fail closed");
         assert!(Arc::ptr_eq(
             registry
                 .get_route(&target_route_a)
@@ -817,8 +843,12 @@ mod tests {
             "/profile/projects/project/branches/feature.db",
         )]);
 
-        ensure_no_cached_store_owners(&registry, &schedulers, &selected)
-            .expect("unmatched owners must proceed to holder proof and commit");
+        ensure_no_cached_store_owners(
+            &registry,
+            cached_scheduler_owns_selected(&schedulers, &selected),
+            &selected,
+        )
+        .expect("unmatched owners must proceed to holder proof and commit");
 
         assert!(Arc::ptr_eq(
             registry

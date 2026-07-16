@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 
 use crate::Spinner;
@@ -384,10 +385,12 @@ async fn handle_branch_autotrack_action(
     Ok(())
 }
 
+#[cfg(unix)]
 async fn resolve_branch_data_root(project_path: &Path) -> PathBuf {
     fallback_branch_data_root(project_path)
 }
 
+#[cfg(unix)]
 fn fallback_branch_data_root(project_path: &Path) -> PathBuf {
     tracedecay::storage::resolve_layout_for_current_profile(project_path).map_or_else(
         |_| tracedecay::config::get_tracedecay_dir(project_path),

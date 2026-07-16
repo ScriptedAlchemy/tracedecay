@@ -183,11 +183,13 @@ impl DaemonAuthority {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn mark_endpoint_bound(&mut self) {
         self.endpoint_bound = true;
     }
 
+    // Preserve the fallible cross-platform cleanup contract; Unix removal can fail.
+    #[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
     pub(super) fn cleanup_owned_endpoint(&mut self) -> Result<()> {
         if !self.endpoint_bound || self.ensure_current().is_err() {
             return Ok(());
@@ -328,6 +330,7 @@ fn restrict_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Preserve parity with Unix permission enforcement.
 fn restrict_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
@@ -341,6 +344,7 @@ fn restrict_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Preserve parity with Unix permission enforcement.
 fn restrict_file(_path: &Path) -> Result<()> {
     Ok(())
 }
@@ -351,7 +355,7 @@ fn is_lock_contended(error: &std::io::Error) -> bool {
     }
     #[cfg(windows)]
     {
-        return error.raw_os_error() == Some(33);
+        error.raw_os_error() == Some(33)
     }
     #[cfg(not(windows))]
     false
@@ -384,15 +388,14 @@ fn config_io(operation: &str, path: &Path, error: &std::io::Error) -> TraceDecay
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn test_endpoint(profile: &Path) -> DaemonEndpoint {
-        #[cfg(unix)]
-        {
-            DaemonEndpoint::Unix(profile.join("daemon.sock"))
-        }
-        #[cfg(not(unix))]
-        {
-            super::super::transport::default_loopback_endpoint()
-        }
+        DaemonEndpoint::Unix(profile.join("daemon.sock"))
+    }
+
+    #[cfg(not(unix))]
+    fn test_endpoint(_profile: &Path) -> DaemonEndpoint {
+        super::super::transport::default_loopback_endpoint()
     }
 
     #[test]

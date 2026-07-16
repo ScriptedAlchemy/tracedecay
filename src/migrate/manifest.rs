@@ -1100,6 +1100,7 @@ fn set_snapshot_permissions(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
 fn set_snapshot_permissions(_path: &Path) -> io::Result<()> {
     Ok(())
 }
@@ -1121,6 +1122,7 @@ fn sync_parent_directory(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
 fn sync_parent_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }

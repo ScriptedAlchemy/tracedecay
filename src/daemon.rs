@@ -1060,8 +1060,9 @@ fn proxy_required_by_platform(transport_supported: bool, endpoint_exists: bool) 
 }
 
 /// Non-Unix clients always use the authenticated loopback broker. There is no
-/// in-process SQLite fallback.
+/// in-process `SQLite` fallback.
 #[cfg(not(unix))]
+#[allow(clippy::unused_async)] // Preserve parity with the Unix async routing probe.
 pub async fn should_proxy_serve_to_daemon(socket_path: &Path) -> bool {
     proxy_required_by_platform(false, socket_path.exists())
 }
@@ -1121,7 +1122,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         let project_open_gates = Arc::clone(&project_open_gates);
         clients.spawn(async move {
             let _permit = permit;
-            serve_windows_broker_client(
+            Box::pin(serve_windows_broker_client(
                 stream,
                 &auth_token,
                 &client_lifecycle,
@@ -1129,7 +1130,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
                 project_open_gates,
                 #[cfg(test)]
                 None,
-            )
+            ))
             .await
         });
     }
@@ -2926,12 +2927,12 @@ async fn serve_windows_broker_client(
         drop(setup_activity);
         let mut transport = ReplayTransport::new(transport);
         transport.push_replay(first_request_line)?;
-        serve_projectless_client(
+        Box::pin(serve_projectless_client(
             &mut transport,
             &handshake.client_identity,
             lifecycle,
             &store_administration,
-        )
+        ))
         .await?;
     }
     Ok(())

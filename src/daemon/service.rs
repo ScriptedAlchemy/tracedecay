@@ -919,8 +919,10 @@ enum DaemonSocketState {
 #[derive(Debug, PartialEq, Eq)]
 enum DaemonProtocolState {
     NotRequired,
+    #[cfg_attr(not(unix), allow(dead_code))]
     Ready,
     Unresponsive(String),
+    #[cfg_attr(not(unix), allow(dead_code))]
     IdentityMismatch {
         name: Option<String>,
         version: Option<String>,
@@ -1548,9 +1550,9 @@ mod tests {
     #[cfg(unix)]
     use tempfile::TempDir;
 
-    use super::{
-        DaemonServiceSpec, DaemonServiceState, LaunchctlFailureMode, LaunchdCommand, ServiceRunner,
-    };
+    #[cfg(target_os = "linux")]
+    use super::ServiceRunner;
+    use super::{DaemonServiceSpec, DaemonServiceState, LaunchctlFailureMode, LaunchdCommand};
     use crate::config::lock_user_data_dir_test_env;
 
     struct EnvVarGuard {

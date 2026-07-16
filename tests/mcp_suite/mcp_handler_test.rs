@@ -228,11 +228,6 @@ impl TestTempDir {
             dir: Some(TempDir::new().unwrap()),
         }
     }
-
-    #[cfg(windows)]
-    fn keep(mut self) -> PathBuf {
-        self.dir.take().expect("test temp dir already kept").keep()
-    }
 }
 
 impl std::ops::Deref for TestTempDir {
@@ -764,6 +759,7 @@ pub(crate) fn extract_json(value: &Value) -> Value {
     serde_json::from_str(extract_text(value)).unwrap()
 }
 
+#[cfg(unix)]
 fn extract_first_json_content(value: &Value) -> Value {
     value["content"]
         .as_array()

@@ -124,6 +124,7 @@ pub(super) fn same_payload_file_identity(
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
 fn same_file_identity(_opened: &fs::Metadata, _lstat: &fs::Metadata) -> Result<(), LcmError> {
     Ok(())
 }
@@ -134,6 +135,7 @@ fn payload_file_identity(_metadata: &fs::Metadata) -> PayloadFileIdentity {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::trivially_copy_pass_by_ref, clippy::unnecessary_wraps)] // Keep the identity API uniform even where the platform identity is opaque.
 pub(super) fn same_payload_file_identity(
     _actual: &PayloadFileIdentity,
     _expected: &PayloadFileIdentity,

@@ -982,31 +982,29 @@ fn collect_files_enforces_file_count_before_materializing_all_entries() {
 }
 
 #[test]
+#[cfg(unix)]
 fn collect_files_skips_directory_symlink_trees() {
     let dir = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     let link = dir.path().join("link");
     std::fs::write(outside.path().join("hidden.jsonl"), "{}\n").unwrap();
     std::fs::write(dir.path().join("visible.jsonl"), "{}\n").unwrap();
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
-        let report = collect_files_with_ext_bounded(
-            dir.path(),
-            "jsonl",
-            2,
-            TranscriptDiscoveryBounds::default_walk(),
-        );
-        assert_eq!(report.paths, vec![dir.path().join("visible.jsonl")]);
-        assert!(
-            !report
-                .paths
-                .iter()
-                .any(|path| path.ends_with("hidden.jsonl")),
-            "directory symlink escape must not be followed"
-        );
-        assert!(report.truncated.is_none());
-    }
+    std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+    let report = collect_files_with_ext_bounded(
+        dir.path(),
+        "jsonl",
+        2,
+        TranscriptDiscoveryBounds::default_walk(),
+    );
+    assert_eq!(report.paths, vec![dir.path().join("visible.jsonl")]);
+    assert!(
+        !report
+            .paths
+            .iter()
+            .any(|path| path.ends_with("hidden.jsonl")),
+        "directory symlink escape must not be followed"
+    );
+    assert!(report.truncated.is_none());
 }
 
 #[test]

@@ -22,6 +22,13 @@ pub(super) fn platform_identity_key(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+#[cfg_attr(
+    any(windows, target_os = "macos"),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "all platforms share the optional case-folded bootstrap-key contract"
+    )
+)]
 pub(super) fn bootstrap_database_key(parent: &Path, file_name: &OsStr) -> Option<PathBuf> {
     #[cfg(any(windows, target_os = "macos"))]
     {

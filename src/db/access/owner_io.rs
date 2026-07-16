@@ -228,6 +228,10 @@ pub(super) fn sync_parent_directory(path: &Path, record_name: &str) -> Result<()
 }
 
 #[cfg(not(unix))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "directory fsync is unavailable here, but record callers share one contract"
+)]
 pub(super) fn sync_parent_directory(_path: &Path, _record_name: &str) -> Result<()> {
     Ok(())
 }
@@ -259,16 +263,14 @@ pub(super) fn read_owner(path: &Path) -> Option<WriterOwner> {
     })
 }
 
+#[cfg(windows)]
 pub(crate) fn is_lock_contended(error: &std::io::Error) -> bool {
-    if error.kind() == std::io::ErrorKind::WouldBlock {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        return error.raw_os_error() == Some(33);
-    }
-    #[cfg(not(windows))]
-    false
+    error.kind() == std::io::ErrorKind::WouldBlock || error.raw_os_error() == Some(33)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn is_lock_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
 }
 
 pub(super) fn authority_token() -> String {

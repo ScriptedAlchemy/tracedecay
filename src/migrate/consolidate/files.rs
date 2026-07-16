@@ -148,6 +148,7 @@ pub(super) fn sync_parent_directory(parent: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
 pub(super) fn sync_parent_directory(_parent: &Path) -> Result<()> {
     // Windows directory handles commonly reject sync_all with AccessDenied.
     // File data is still flushed before the atomic rename.

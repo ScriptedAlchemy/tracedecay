@@ -890,18 +890,15 @@ fn stable_jsonl_file_id(
     {
         use std::os::windows::fs::MetadataExt;
 
-        match crate::windows_file::information(file) {
-            Ok(information) => {
-                hasher.update(information.volume_serial_number.to_le_bytes());
-                hasher.update(information.file_index.to_le_bytes());
-            }
-            Err(_) => {
-                // Some virtual file systems do not expose native handle
-                // identity. Keep creation time plus the head fingerprint as
-                // the deterministic fallback used before native IDs existed.
-                hasher.update(0_u32.to_le_bytes());
-                hasher.update(0_u64.to_le_bytes());
-            }
+        if let Ok(information) = crate::windows_file::information(file) {
+            hasher.update(information.volume_serial_number.to_le_bytes());
+            hasher.update(information.file_index.to_le_bytes());
+        } else {
+            // Some virtual file systems do not expose native handle
+            // identity. Keep creation time plus the head fingerprint as
+            // the deterministic fallback used before native IDs existed.
+            hasher.update(0_u32.to_le_bytes());
+            hasher.update(0_u64.to_le_bytes());
         }
         hasher.update(meta.creation_time().to_le_bytes());
     }

@@ -1336,6 +1336,10 @@ fn set_private_file_permissions(path: &Path) -> Result<(), SpoolError> {
 }
 
 #[cfg(not(unix))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the cross-platform permission hook shares a fallible call contract"
+)]
 fn set_private_file_permissions(_path: &Path) -> Result<(), SpoolError> {
     // This matches the repository's current private-store convention on
     // non-Unix hosts; no ad-hoc ACL implementation is introduced here.

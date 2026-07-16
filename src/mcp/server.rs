@@ -1019,6 +1019,7 @@ impl McpServerConstructionContext {
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn with_automation_scheduler_reconciler(
         mut self,
         reconciler: crate::dashboard::AutomationSchedulerReconciler,
@@ -2780,13 +2781,13 @@ impl McpServer {
             McpMethod::InitializedAck | McpMethod::HookEvent => None,
             McpMethod::ToolsList => Some(self.handle_tools_list(id).await),
             McpMethod::ToolsCall => Some(
-                self.handle_tools_call(
+                Box::pin(self.handle_tools_call(
                     id,
                     request.params.as_ref(),
                     timings_enabled,
                     route_cache,
                     implicit_project_path,
-                )
+                ))
                 .await,
             ),
             McpMethod::ResourcesList => Some(Self::handle_resources_list(id)),
@@ -3623,7 +3624,7 @@ impl McpServer {
             map.insert("__mcp_request_id".to_string(), json!(request_id));
         }
 
-        let dispatch_outcome = handle_tool_call_with_registry_and_implicit_project(
+        let dispatch_outcome = Box::pin(handle_tool_call_with_registry_and_implicit_project(
             &cg,
             tool_name,
             handler_arguments,
@@ -3643,7 +3644,7 @@ impl McpServer {
                     self.user_session_db.as_ref(),
                 ),
             },
-        )
+        ))
         .await;
         let handler_elapsed_us = handler_start.map(|t| t.elapsed().as_micros() as u64);
         let request_id = id.clone();

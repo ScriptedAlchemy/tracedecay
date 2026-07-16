@@ -176,14 +176,16 @@ fn realpath(p: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 fn git_command() -> std::process::Command {
     let mut command = std::process::Command::new("git");
-    let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+    let paths: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect())
         .unwrap_or_default();
     #[cfg(not(windows))]
-    {
+    let paths = {
+        let mut paths = paths;
         paths.push(PathBuf::from("/usr/bin"));
         paths.push(PathBuf::from("/bin"));
-    }
+        paths
+    };
     if let Ok(path) = std::env::join_paths(paths) {
         command.env("PATH", path);
     }

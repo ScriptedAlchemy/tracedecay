@@ -122,6 +122,13 @@ fn clean_staged_entries(entries: &[SkillTransactionEntry]) {
     }
 }
 
+#[cfg_attr(
+    not(unix),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "directory fsync is unavailable here, but transaction callers share one contract"
+    )
+)]
 fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {

@@ -472,6 +472,7 @@ fn rewrite_homebrew_install_receipt(
     Ok(())
 }
 
+#[cfg(unix)]
 fn warn_best_effort(step: &str, error: &TraceDecayError) {
     eprintln!("\n  \x1b[33mwarning:\x1b[0m {step}: {error}");
 }
@@ -640,7 +641,7 @@ fn update_scoop_metadata(new_version: &str) {
     match std::fs::read_dir(&version_dir) {
         Ok(entries) => {
             for entry in entries.flatten() {
-                if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                if !entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
                     continue;
                 }
                 let name = entry.file_name();
@@ -718,7 +719,7 @@ fn update_scoop_metadata(new_version: &str) {
             &current.to_string_lossy(),
             &new_version_dir.to_string_lossy(),
         ])
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
         .status()
     {
         Ok(status) if status.success() => {}
@@ -752,10 +753,10 @@ fn find_scoop_version_dir(path: &Path) -> Option<std::path::PathBuf> {
             if depth_after_apps == 2 {
                 return Some(result);
             }
-        } else if let std::path::Component::Normal(name) = comp {
-            if name.to_string_lossy().eq_ignore_ascii_case("apps") {
-                found_apps = true;
-            }
+        } else if let std::path::Component::Normal(name) = comp
+            && name.to_string_lossy().eq_ignore_ascii_case("apps")
+        {
+            found_apps = true;
         }
     }
     None

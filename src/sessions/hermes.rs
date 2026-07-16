@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 use serde_json::{Value, json};
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
@@ -1022,21 +1023,15 @@ fn prepare_observation_row(
     })
 }
 
+#[cfg(unix)]
 fn sqlite_incarnation(path: &Path) -> Result<(ObservationSourceGenerationV1, u64, u64), String> {
+    use std::os::unix::fs::MetadataExt;
+
     let metadata = std::fs::metadata(path)
         .map_err(|_| "could not inspect Hermes SQLite authority".to_string())?;
-    #[cfg(unix)]
-    let physical = {
-        use std::os::unix::fs::MetadataExt;
-        (metadata.dev(), metadata.ino())
-    };
-    #[cfg(not(unix))]
-    let physical = {
-        return Err("Hermes SQLite physical identity is unavailable".to_string());
-    };
     let mut identity_hasher = Sha256::new();
-    identity_hasher.update(physical.0.to_le_bytes());
-    identity_hasher.update(physical.1.to_le_bytes());
+    identity_hasher.update(metadata.dev().to_le_bytes());
+    identity_hasher.update(metadata.ino().to_le_bytes());
     let identity_digest = identity_hasher.finalize();
     let mut identity_bytes = [0_u8; 8];
     identity_bytes.copy_from_slice(&identity_digest[..8]);
@@ -1053,6 +1048,12 @@ fn sqlite_incarnation(path: &Path) -> Result<(ObservationSourceGenerationV1, u64
     let generation = ObservationSourceGenerationV1::new(file_identity)
         .map_err(|_| "invalid Hermes SQLite generation".to_string())?;
     Ok((generation, file_identity, resume_fingerprint))
+}
+
+#[cfg(not(unix))]
+fn sqlite_incarnation(path: &Path) -> Result<(ObservationSourceGenerationV1, u64, u64), String> {
+    std::fs::metadata(path).map_err(|_| "could not inspect Hermes SQLite authority".to_string())?;
+    Err("Hermes SQLite physical identity is unavailable".to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2119,6 +2120,7 @@ fn session_is_candidate_for_project(
         })
 }
 
+#[cfg(unix)]
 fn file_mtime_secs(path: &Path) -> u64 {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())

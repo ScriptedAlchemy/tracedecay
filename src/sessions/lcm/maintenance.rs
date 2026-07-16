@@ -157,6 +157,7 @@ fn sync_directory(path: &Path) -> Result<(), LcmError> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
 fn sync_directory(_path: &Path) -> Result<(), LcmError> {
     Ok(())
 }

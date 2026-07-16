@@ -677,9 +677,10 @@ fn command_candidates(command: &str) -> Vec<String> {
         return vec![command.to_string()];
     }
 
-    let pathext = std::env::var_os("PATHEXT")
-        .map(|value| value.to_string_lossy().into_owned())
-        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string());
+    let pathext = std::env::var_os("PATHEXT").map_or_else(
+        || ".COM;.EXE;.BAT;.CMD".to_string(),
+        |value| value.to_string_lossy().into_owned(),
+    );
 
     let mut candidates = vec![command.to_string()];
     candidates.extend(pathext.split(';').filter_map(|extension| {

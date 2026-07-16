@@ -104,6 +104,10 @@ pub(super) fn decode_native_project_path(
 }
 
 #[cfg(windows)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "all platform implementations share the owned database-value contract"
+)]
 pub(super) fn decode_native_project_path(
     platform: &str,
     bytes: Vec<u8>,
@@ -116,7 +120,7 @@ pub(super) fn decode_native_project_path(
             "native project path belongs to platform '{platform}'"
         ));
     }
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err("native Windows project path has odd byte length".to_string());
     }
     let wide = bytes

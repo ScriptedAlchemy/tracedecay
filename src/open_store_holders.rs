@@ -42,6 +42,10 @@ pub(crate) fn scan(database_paths: &[PathBuf]) -> io::Result<OpenStoreHolderScan
 
 /// Finds processes holding `database_paths` with explicit holder inclusion
 /// controls. Inspection errors are returned so destructive callers fail closed.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos")),
+    allow(clippy::unnecessary_wraps)
+)] // Keep unsupported-platform scans fallible for caller fail-closed parity.
 pub(crate) fn scan_with_options(
     database_paths: &[PathBuf],
     options: &OpenStoreHolderScanOptions,

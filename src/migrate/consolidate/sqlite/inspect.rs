@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use libsql::{Builder, Connection, Database as LibsqlDatabase, Transaction, TransactionBehavior};
+#[cfg(not(all(test, windows)))]
+use libsql::{Builder, TransactionBehavior};
+use libsql::{Connection, Database as LibsqlDatabase, Transaction};
 
 use super::{
     LCM_RAW_MESSAGE_DIVERGENCE_PREDICATE, attach, db_error, db_message, query_i64,

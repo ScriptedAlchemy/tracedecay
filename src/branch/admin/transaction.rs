@@ -877,6 +877,10 @@ fn sync_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "Windows publication already flushes through MoveFileExW; callers share one contract"
+)]
 fn sync_file(_path: &Path) -> Result<()> {
     // PrivateStoreIo publishes these records with MoveFileExW's
     // MOVEFILE_WRITE_THROUGH. Reopening the replaced path for a second flush
@@ -884,6 +888,13 @@ fn sync_file(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(
+    not(unix),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "directory fsync is unavailable here, but transaction callers share one contract"
+    )
+)]
 fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {

@@ -722,6 +722,10 @@ fn pathbuf_from_decoded_bytes(bytes: Vec<u8>) -> PathBuf {
 }
 
 #[cfg(not(unix))]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "all platform implementations share the owned decoded-byte contract"
+)]
 fn pathbuf_from_decoded_bytes(bytes: Vec<u8>) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
 }

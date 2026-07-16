@@ -35,8 +35,22 @@ fn active_codex_children() -> &'static Mutex<ActiveCodexChildren> {
     ACTIVE_CODEX_CHILDREN.get_or_init(|| Mutex::new(ActiveCodexChildren::default()))
 }
 
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "Windows daemon shutdown does not use this guard yet"
+    )
+)]
 pub(crate) struct CodexAppServerShutdownGuard;
 
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "Windows daemon shutdown does not use this guard yet"
+    )
+)]
 pub(crate) fn begin_codex_app_server_shutdown() -> CodexAppServerShutdownGuard {
     let process_groups = {
         let mut active = active_codex_children()

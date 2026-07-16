@@ -1,18 +1,25 @@
 use crate::common;
 
+#[cfg(unix)]
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+#[cfg(unix)]
+use std::process::Output;
+use std::process::Stdio;
 
-use crate::common::{canonical_existing_path, tracedecay_command_with_home};
+#[cfg(unix)]
+use crate::common::canonical_existing_path;
+use crate::common::tracedecay_command_with_home;
 #[cfg(unix)]
 use crate::serve_harness::runtime_project_root;
 #[cfg(unix)]
 use crate::serve_harness::{canonical_path_string, run_serve_runtime};
-use crate::serve_harness::{
-    init_project_under, init_project_with_file, profile_root, register_global_project,
-};
+#[cfg(unix)]
+use crate::serve_harness::{init_project_under, register_global_project};
+use crate::serve_harness::{init_project_with_file, profile_root};
+#[cfg(unix)]
 use libsql::Builder;
 use serde_json::{Value, json};
 #[cfg(unix)]
@@ -28,12 +35,15 @@ use tracedecay::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
     append_run_record, write_run_artifact,
 };
+#[cfg(unix)]
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::serve;
-use tracedecay::storage::{
-    EnrollmentMarker, StorageMode, default_profile_sharded_layout, write_enrollment_marker,
-};
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay::storage::default_profile_sharded_layout;
+#[cfg(unix)]
+use tracedecay::storage::{EnrollmentMarker, StorageMode, write_enrollment_marker};
+#[cfg(unix)]
+use tracedecay::tracedecay::TraceDecay;
+use tracedecay::tracedecay::TraceDecayOpenOptions;
 
 #[cfg(unix)]
 static READ_ONLY_SERVE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
@@ -117,6 +127,7 @@ fn run_serve_runtime_with_initialize_root(
     output
 }
 
+#[cfg(unix)]
 async fn set_user_version(db_path: &Path, version: u32) {
     let db = Builder::new_local(db_path).build().await.unwrap();
     let conn = db.connect().unwrap();
@@ -125,6 +136,7 @@ async fn set_user_version(db_path: &Path, version: u32) {
         .unwrap();
 }
 
+#[cfg(unix)]
 fn extract_tool_text(value: &Value) -> &str {
     value["content"][0]["text"]
         .as_str()
@@ -175,6 +187,7 @@ fn file_uri_localhost_percent_encoded(path: &Path) -> String {
 
 /// Builds a portable `file://` URI: `/tmp/x` → `file:///tmp/x` on Unix,
 /// `C:\Users\x` → `file:///C:/Users/x` on Windows.
+#[cfg(unix)]
 fn file_uri(path: &Path) -> String {
     let normalized = path.to_string_lossy().replace('\\', "/");
     if normalized.starts_with('/') {
