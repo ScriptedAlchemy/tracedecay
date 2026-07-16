@@ -672,7 +672,11 @@ fn reject_ambiguous_shards(
         options.target_project_id.clone(),
     ]);
     let actual = matches.iter().cloned().collect::<BTreeSet<_>>();
-    if actual != expected {
+    // A repository split across more than two shards is consolidated pairwise:
+    // the named source and target must both claim this identity, while any
+    // additional claimants stay untouched (and keep failing resolution closed)
+    // until their own explicit pass.
+    if !actual.is_superset(&expected) {
         return Err(config_error(format!(
             "ambiguous split-store identity: expected exactly {expected:?}, found {actual:?}; no files changed"
         )));
