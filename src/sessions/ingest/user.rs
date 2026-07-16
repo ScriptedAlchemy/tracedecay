@@ -11,7 +11,7 @@ use tracedecay_domain::ObservationScopeV1;
 use super::failure::{
     IngestPassBounds, IngestPassCoverage, IngestPassOutcome, ProviderRunFold,
     TranscriptCatchUpFailure, allocate_pass_byte_budgets, classify_transcript_ingest_failure,
-    scheduling_write_required,
+    observation_catch_up_failure, scheduling_write_required,
 };
 use super::scheduler::{
     USER_CATCH_UP_PROVIDERS, USER_INGEST_PROVIDER_FRONTIER_KEY, default_ingest_pass_bounds,
@@ -431,20 +431,18 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
     }
 
     if !cancelled {
-        match drain_observation_projections(
+        match claude_observation::drain_projection_queue(
             &facade,
             &ObservationScopeV1::Profile,
-            provider.map_or("observation", SessionProvider::id),
             cancellation,
         )
         .await
         {
             Ok(projection_stats) => {
-                provider_runs.stats = provider_runs.stats.merge(projection_stats);
+                provider_runs.stats = provider_runs.stats.merge(projection_stats.transcript);
             }
             Err(error) => {
-                let failure =
-                    classify_transcript_ingest_failure("observation", "projection", &error);
+                let failure = observation_catch_up_failure("observation", "projection", &error);
                 tracing::warn!(
                     reason_code = failure.reason_code,
                     retryable = failure.retryable,

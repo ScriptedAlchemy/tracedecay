@@ -34,7 +34,7 @@ impl LegacyPathAliasKind {
 }
 
 pub(super) fn canonical_project_path(project_path: &Path) -> PathBuf {
-    std::fs::canonicalize(project_path).unwrap_or_else(|_| project_path.to_path_buf())
+    crate::lifecycle_lease::canonical_or_original(project_path)
 }
 
 pub(super) fn project_path_alias_key(project_path: &Path) -> String {
@@ -67,24 +67,8 @@ pub(super) fn native_project_path_platform() -> &'static str {
     "rust-os-str"
 }
 
-#[cfg(unix)]
 pub(super) fn encode_native_project_path(path: &Path) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt as _;
-    path.as_os_str().as_bytes().to_vec()
-}
-
-#[cfg(windows)]
-pub(super) fn encode_native_project_path(path: &Path) -> Vec<u8> {
-    use std::os::windows::ffi::OsStrExt as _;
-    path.as_os_str()
-        .encode_wide()
-        .flat_map(u16::to_le_bytes)
-        .collect()
-}
-
-#[cfg(not(any(unix, windows)))]
-pub(super) fn encode_native_project_path(path: &Path) -> Vec<u8> {
-    path.as_os_str().as_encoded_bytes().to_vec()
+    crate::os_str_bytes::native_os_str_bytes(path.as_os_str())
 }
 
 #[cfg(unix)]

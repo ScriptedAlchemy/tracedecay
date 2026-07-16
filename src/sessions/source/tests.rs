@@ -189,14 +189,7 @@ impl TranscriptIngestStore for CountingStore {
 }
 
 #[tokio::test]
-async fn compatibility_ingest_keeps_successes_around_one_bad_path() {
-    let store = CountingStore::default();
-    let stats =
-        ingest_source_with_store(&store, &MixedPathSource, Path::new("mixed-project"), None).await;
-
-    assert_eq!(stats, TranscriptIngestStats::default());
-    assert_eq!(store.0.load(Ordering::Relaxed), 2);
-
+async fn fail_fast_ingest_stops_at_first_bad_path_after_persisting_earlier_paths() {
     let fail_fast_store = CountingStore::default();
     assert!(
         try_ingest_source_with_store(

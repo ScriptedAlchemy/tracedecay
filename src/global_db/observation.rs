@@ -590,21 +590,24 @@ async fn apply_cursor_advance(
         .sanitization_receipt()
         .map(|receipt| receipt.receipt().receipt_id().as_str());
     let coverage_json = encode(&advance.coverage(), "encode observation coverage")?;
-    conn.execute(
-        "INSERT OR IGNORE INTO source_cursor_advances(
-            source_json, scope_json, coverage_json, reason, receipt_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            source_json.as_str(),
-            scope_json.as_str(),
-            coverage_json.as_str(),
-            advance.reason().as_str(),
-            receipt_id,
-        ],
-    )
-    .await
-    .map_err(|error| storage("persist cursor coverage receipt", error))?;
-    if !cursor_advance_receipt_matches(conn, &source_json, &scope_json, advance).await? {
+    let inserted = conn
+        .execute(
+            "INSERT OR IGNORE INTO source_cursor_advances(
+                source_json, scope_json, coverage_json, reason, receipt_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                source_json.as_str(),
+                scope_json.as_str(),
+                coverage_json.as_str(),
+                advance.reason().as_str(),
+                receipt_id,
+            ],
+        )
+        .await
+        .map_err(|error| storage("persist cursor coverage receipt", error))?;
+    if inserted == 0
+        && !cursor_advance_receipt_matches(conn, &source_json, &scope_json, advance).await?
+    {
         return Err(ObservationStoreError::CursorAdvanceCollision);
     }
     let cursor_json = encode(advance.next_cursor(), "encode committed observation cursor")?;
@@ -763,14 +766,12 @@ impl GlobalDb {
             )
             .await
             .map_err(|error| storage("insert immutable observation", error))?;
-        let committed = read_by_observation_id(&transaction, candidate.observation_id())
-            .await?
-            .ok_or_else(|| {
-                storage_message(
-                    "read committed observation",
-                    "observation insert disappeared",
-                )
-            })?;
+        let sequence = decode_sequence(
+            transaction.last_insert_rowid(),
+            "insert immutable observation",
+        )?;
+        let committed =
+            ObservationCommitReceipt::new(sequence, candidate.clone(), write.next_cursor().clone());
 
         write_cursor(&transaction, &source_json, &scope_json, &cursor_json).await?;
         transaction

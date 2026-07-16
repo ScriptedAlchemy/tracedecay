@@ -284,39 +284,11 @@ fn run_update_flow(
     no_heal: bool,
     no_reinstall: bool,
 ) -> tracedecay::errors::Result<()> {
-    run_with_quiesced_daemon(operation, |lifecycle_lease| {
-        let lease_token = lifecycle_lease
-            .token()
-            .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                message: format!("{operation} lifecycle lease did not provide an owner token"),
-            })?
-            .to_string();
-        #[cfg(windows)]
-        let held_lease = prepare_post_update_lease(lifecycle_lease);
-        let result =
-            run_install_then_refresh(refresh_policy, tracedecay::upgrade::run_upgrade, |binary| {
-                run_post_update_subcommand(no_heal, no_reinstall, binary, &lease_token)
-            });
-        #[cfg(windows)]
-        drop(held_lease);
-        result
+    tracedecay::daemon::with_exclusive_maintenance_window(operation, |lease_token| {
+        run_install_then_refresh(refresh_policy, tracedecay::upgrade::run_upgrade, |binary| {
+            run_post_update_subcommand(no_heal, no_reinstall, binary, lease_token)
+        })
     })
-}
-
-#[cfg(not(windows))]
-fn run_with_quiesced_daemon<T>(
-    operation: &str,
-    action: impl FnOnce(&tracedecay::lifecycle_lease::LifecycleLease) -> tracedecay::errors::Result<T>,
-) -> tracedecay::errors::Result<T> {
-    tracedecay::daemon::with_quiesced_installed_service(operation, action)
-}
-
-#[cfg(windows)]
-fn run_with_quiesced_daemon<T>(
-    operation: &str,
-    action: impl FnOnce(tracedecay::lifecycle_lease::LifecycleLease) -> tracedecay::errors::Result<T>,
-) -> tracedecay::errors::Result<T> {
-    action(tracedecay::lifecycle_lease::acquire_exclusive(operation)?)
 }
 
 fn combine_operation_and_restore<T>(
@@ -397,8 +369,10 @@ pub(crate) fn run_dogfood_command() -> tracedecay::errors::Result<()> {
 }
 
 // Windows must drop the lease before replacing a running executable, while
-// other platforms retain it through the child handoff.
-#[cfg(any(windows, test))]
+// other platforms retain it through the child handoff. Production drives this
+// contract through `daemon::with_exclusive_maintenance_window`; this mirror
+// keeps the platform contract under test.
+#[cfg(test)]
 #[allow(clippy::unnecessary_wraps)]
 fn prepare_post_update_lease(
     lease: tracedecay::lifecycle_lease::LifecycleLease,

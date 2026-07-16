@@ -5,7 +5,7 @@ use tempfile::TempDir;
 use tracedecay::sessions::SessionMessageRecord;
 use tracedecay::sessions::lcm::LcmPreflightRequest;
 use tracedecay::sessions::source::{
-    ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource, ingest_source,
+    ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource, try_ingest_source,
 };
 
 use crate::common::{
@@ -152,7 +152,9 @@ async fn transcript_ingest_preserves_lossless_raw_content() {
         content: content.clone(),
     };
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.sessions_upserted, 1);
     assert_eq!(stats.messages_upserted, 1);
 

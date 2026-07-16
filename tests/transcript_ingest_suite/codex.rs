@@ -9,7 +9,7 @@ use tracedecay::sessions::cursor::{open_project_session_db, resolved_project_ses
 use tracedecay::sessions::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
-use tracedecay::sessions::source::{StoredCursor, TranscriptSource, ingest_source};
+use tracedecay::sessions::source::{StoredCursor, TranscriptSource, try_ingest_source};
 use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
 use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_store::ObservationProjectionStore;
@@ -47,7 +47,9 @@ async fn user_scope_ingests_only_codex_sessions_outside_registered_projects() {
         .unwrap();
     let source = CodexSource::with_home(&home).for_user_scope(None, vec![registered]);
 
-    let stats = ingest_source(&db, &source, tmp.path(), None).await;
+    let stats = try_ingest_source(&db, &source, tmp.path(), None)
+        .await
+        .unwrap();
 
     assert_eq!(stats.sessions_upserted, 1);
     assert!(db.get_session("codex", "user-session").await.is_some());
@@ -89,7 +91,9 @@ async fn user_scope_excludes_codex_turns_after_switching_to_registered_project()
         .unwrap();
     let source = CodexSource::with_home(&home).for_user_scope(None, vec![registered]);
 
-    let stats = ingest_source(&db, &source, tmp.path(), None).await;
+    let stats = try_ingest_source(&db, &source, tmp.path(), None)
+        .await
+        .unwrap();
 
     assert!(stats.messages_upserted > 0);
     assert!(
@@ -137,8 +141,12 @@ async fn project_scopes_split_codex_turns_when_cwd_changes() {
         .await
         .unwrap();
     let source = CodexSource::with_home(&home);
-    ingest_source(&db_a, &source, &project_a, None).await;
-    ingest_source(&db_b, &source, &project_b, None).await;
+    try_ingest_source(&db_a, &source, &project_a, None)
+        .await
+        .unwrap();
+    try_ingest_source(&db_b, &source, &project_b, None)
+        .await
+        .unwrap();
 
     assert!(
         !db_a
@@ -199,7 +207,9 @@ async fn user_scope_ingests_codex_turns_after_leaving_a_registered_project() {
         .unwrap();
     let source = CodexSource::with_home(&home).for_user_scope(None, vec![registered]);
 
-    ingest_source(&db, &source, tmp.path(), None).await;
+    try_ingest_source(&db, &source, tmp.path(), None)
+        .await
+        .unwrap();
 
     assert!(
         db.search_session_messages("codex", None, "billing pipeline", 10)
@@ -543,7 +553,9 @@ async fn codex_goal_response_item_is_cataloged_as_context() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
 
     let results = db
@@ -575,7 +587,9 @@ async fn codex_regular_response_item_goal_words_are_not_cataloged() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 1);
 
     let results = db
@@ -598,7 +612,9 @@ async fn codex_response_item_tool_events_are_cataloged_compactly() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // user_message + one joined exec_command tool_call (call+output collapse into
     // a single row) + custom_tool_call + tool_search_call + web_search_call.
     assert_eq!(stats.messages_upserted, 5);
@@ -758,7 +774,9 @@ async fn codex_custom_tool_call_exec_is_joined_into_searchable_tool_call() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // user_message + one joined exec tool_call (call+output collapse into a
     // single row) + apply_patch generic tool_event.
     assert_eq!(stats.messages_upserted, 3);
@@ -827,7 +845,9 @@ async fn codex_custom_tool_call_exec_is_joined_into_searchable_tool_call() {
         },
     )
     .await;
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     let after = db
         .search_session_messages(
             "codex",
@@ -892,7 +912,9 @@ async fn codex_response_item_skips_developer_messages_and_keeps_reasoning_summar
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 1);
 
     let developer_results = db
@@ -940,7 +962,9 @@ async fn codex_rollout_populates_user_and_agent_messages_only() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // user_message + agent_message; the response_item duplicate is skipped.
     assert_eq!(stats.messages_upserted, 2);
     assert_eq!(stats.sessions_upserted, 1);
@@ -1058,7 +1082,9 @@ Completion audit:
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
 
     let hits = db
@@ -1172,7 +1198,9 @@ Budget:
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
 
     let hits = db
@@ -1218,7 +1246,9 @@ async fn codex_context_compaction_creates_lcm_summary_node() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 4);
 
     let status = db.lcm_status("codex", Some("codex-compact")).await.unwrap();
@@ -1338,7 +1368,9 @@ async fn repeated_codex_compactions_only_source_messages_since_previous_boundary
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 6);
 
     let description = db
@@ -1410,7 +1442,9 @@ async fn incremental_codex_compaction_depth_continues_from_prior_history() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 3);
 
     let second = [
@@ -1434,7 +1468,9 @@ async fn incremental_codex_compaction_depth_continues_from_prior_history() {
         writeln!(file, "{line}").unwrap();
     }
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 3);
 
     let description = db
@@ -1523,7 +1559,9 @@ async fn codex_compaction_depth_resets_when_rollout_replays_from_start() {
     )
     .await;
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 6);
 
     let description = db
@@ -1550,7 +1588,9 @@ async fn codex_compaction_summary_can_be_replaced_with_auxiliary_summary() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
 
     let pending = db
         .pending_codex_compaction_summary_requests(Some("codex-compact"), 10)
@@ -1606,7 +1646,9 @@ async fn codex_compaction_summary_replacement_rolls_back_and_reuses_writer_after
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     let pending = db
         .pending_codex_compaction_summary_requests(Some("codex-compact-rollback"), 10)
         .await
@@ -1733,7 +1775,9 @@ async fn codex_usage_preserves_cache_only_total_only_and_reasoning_counters() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
 
     let hits = db
         .search_session_messages("codex", None, "Usage edge reply", 10)
@@ -1771,14 +1815,16 @@ async fn codex_rollout_ingest_is_incremental() {
     let source = CodexSource::with_home(&home);
 
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         2
     );
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         0
     );
@@ -1800,8 +1846,9 @@ async fn codex_rollout_ingest_is_incremental() {
     drop(f);
 
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         1
     );
@@ -1837,7 +1884,9 @@ async fn codex_archived_rollout_is_ingested() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.sessions_upserted, 1);
     assert_eq!(stats.messages_upserted, 1);
     let session = db
@@ -1922,7 +1971,9 @@ async fn codex_tool_loop_usage_sums_per_turn_and_skips_duplicates() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
 
     let usage_of = |hits: &[tracedecay::sessions::SessionMessageSearchResult], needle: &str| {
         let hit = hits
@@ -2005,7 +2056,9 @@ async fn codex_model_tracks_turn_context_not_model_provider() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
 
     let hits = db.search_session_messages("codex", None, "model", 10).await;
     assert_eq!(hits.len(), 3);
@@ -2101,7 +2154,9 @@ async fn codex_messages_keep_turn_cwd_and_session_git_updates() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
 
     let hits = db
         .search_session_messages("codex", None, "attribution", 10)
@@ -2257,7 +2312,9 @@ async fn codex_subagent_rollout_uses_parent_link_from_session_meta() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.sessions_upserted, 2);
     assert_eq!(stats.messages_upserted, 3);
 
@@ -2326,7 +2383,9 @@ async fn codex_thread_goal_events_ingested_as_goal_rows_with_dedupe() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // user_message + agent_message + three goal transitions. The drift-only
     // active repeat is deduped; objective and status transitions remain.
     assert_eq!(stats.messages_upserted, 5);
@@ -2391,7 +2450,9 @@ async fn recent_session_goals_surfaces_latest_status_per_session() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
 
     let goals = db
         .recent_session_goals(Some(project.to_string_lossy().as_ref()), 10)
@@ -2411,7 +2472,9 @@ async fn recent_session_goals_surfaces_latest_status_per_session() {
     assert_eq!(meta["updated_at"], 1_782_880_661i64);
 
     // Re-ingest must be idempotent (upsert keyed by message_id): still one goal.
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     let goals_again = db
         .recent_session_goals(Some(project.to_string_lossy().as_ref()), 10)
         .await;
@@ -2571,7 +2634,9 @@ async fn codex_structured_events_produce_full_row_mix() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // user + task_started + exec tool_call(joined) + plan + file_edit + mcp
     // tool_call + web_search + sub_agent_activity + inter_agent(edge) +
     // task_complete + agent_message.
@@ -2644,7 +2709,9 @@ async fn codex_structured_events_produce_full_row_mix() {
     assert_eq!(sm["codex_rate_limits"]["plan_type"], "pro");
 
     // Re-ingest is idempotent: every structured row is keyed by message_id.
-    let again = ingest_source(&db, &source, &project, None).await;
+    let again = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(again.messages_upserted, 0);
 }
 

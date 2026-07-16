@@ -3,7 +3,7 @@ use std::io::Write;
 use tempfile::TempDir;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::source::{
-    FileDiscoveryLimit, TranscriptDiscoveryBounds, TranscriptSource, ingest_source,
+    FileDiscoveryLimit, TranscriptDiscoveryBounds, TranscriptSource, try_ingest_source,
 };
 use tracedecay::sessions::vibe::VibeSource;
 
@@ -62,7 +62,9 @@ async fn vibe_messages_populate_searchable_session_messages() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = VibeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
 
     let results = db
@@ -129,14 +131,16 @@ async fn vibe_messages_are_incremental() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = VibeSource::with_home(&home);
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         2
     );
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         0
     );
@@ -158,8 +162,9 @@ async fn vibe_messages_are_incremental() {
     drop(file);
 
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         1
     );
@@ -176,8 +181,9 @@ async fn vibe_session_for_other_project_is_skipped() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = VibeSource::with_home(&home);
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         0
     );
@@ -194,7 +200,9 @@ async fn vibe_user_scope_includes_only_unregistered_sessions() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = VibeSource::with_home(&home).for_user_scope(vec![project.clone()]);
-    let stats = ingest_source(&db, &source, tmp.path(), None).await;
+    let stats = try_ingest_source(&db, &source, tmp.path(), None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
     assert!(db.get_session("vibe", "registered-vibe").await.is_none());
     let session = db.get_session("vibe", "user-vibe").await.unwrap();

@@ -255,7 +255,7 @@ pub(crate) async fn load_transcript_cursor<S: TranscriptIngestStore>(
 /// A pluggable transcript provider.
 ///
 /// Implementors locate their transcript files for a project and parse only the
-/// content appended/changed since the last run. The shared [`ingest_source`]
+/// content appended/changed since the last run. The shared [`try_ingest_source`]
 /// driver handles offset persistence and idempotent session/message upserts.
 ///
 /// `Send + Sync` is required so boxed sources can be driven from detached
@@ -339,24 +339,14 @@ pub trait TranscriptSource: Send + Sync {
     }
 }
 
-/// Drive a single source to completion against `db`, ingesting every transcript
-/// it locates for `project_root`. Source parse misses are skipped; authoritative
-/// store failures abort the pass.
+/// Fallible production boundary that drives a single source to completion
+/// against `db`, ingesting every transcript it locates for `project_root`.
+/// Source parse misses are skipped; authoritative store failures abort the
+/// pass.
 ///
 /// `max_new_bytes` bounds how much newly-appended content a byte-offset source
 /// will read in one call (used to keep per-prompt hot paths inside budget);
 /// pass `None` for an unbounded catch-up.
-pub async fn ingest_source(
-    db: &GlobalDb,
-    source: &dyn TranscriptSource,
-    project_root: &Path,
-    max_new_bytes: Option<u64>,
-) -> TranscriptIngestStats {
-    let store = GlobalDbTranscriptStore::new(db);
-    ingest_source_with_store(&store, source, project_root, max_new_bytes).await
-}
-
-/// Fallible production boundary for [`ingest_source`].
 pub async fn try_ingest_source(
     db: &GlobalDb,
     source: &dyn TranscriptSource,
@@ -365,34 +355,6 @@ pub async fn try_ingest_source(
 ) -> TranscriptIngestResult<TranscriptIngestStats> {
     let store = GlobalDbTranscriptStore::new(db);
     try_ingest_source_with_store(&store, source, project_root, max_new_bytes).await
-}
-
-/// Compatibility boundary for in-crate adapters that do not expose failures.
-#[allow(dead_code)]
-pub(crate) async fn ingest_source_with_store<S: TranscriptIngestStore>(
-    store: &S,
-    source: &dyn TranscriptSource,
-    project_root: &Path,
-    max_new_bytes: Option<u64>,
-) -> TranscriptIngestStats {
-    let mut stats = TranscriptIngestStats::default();
-    let discovery =
-        source.discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk());
-    for path in discovery.paths {
-        match ingest_one(store, source, &path, project_root, max_new_bytes).await {
-            Ok(path_stats) => stats = stats.merge(path_stats),
-            Err(error) => {
-                tracing::error!(
-                    provider = source.provider(),
-                    project_root = %project_root.display(),
-                    transcript_path = %path.display(),
-                    error = %error,
-                    "transcript ingest failed"
-                );
-            }
-        }
-    }
-    stats
 }
 
 pub(crate) async fn try_ingest_source_with_store<S: TranscriptIngestStore>(
@@ -917,6 +879,48 @@ fn stable_jsonl_file_id(
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
     Ok(u64::from_be_bytes(bytes))
+}
+
+/// Why a `SQLite` source could not yield a stable physical identity. Each
+/// variant maps to a provider-specific message at the call site; which variants
+/// are constructed depends on the target platform.
+#[allow(dead_code)]
+pub(crate) enum SqliteFileIdentityError {
+    Open,
+    Inspect,
+    Identify,
+    Unavailable,
+}
+
+/// Stable 64-bit physical identity for a SQLite-backed source, derived from the
+/// file's inode (Unix) or volume/file-index handle identity (Windows). Callers
+/// layer their own generation/resume fingerprints on top; the hashed inputs must
+/// stay byte-identical across providers that persist this identity.
+pub(crate) fn sqlite_generation_identity(path: &Path) -> Result<u64, SqliteFileIdentityError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::metadata(path).map_err(|_| SqliteFileIdentityError::Inspect)?;
+        let mut hasher = Sha256::new();
+        hasher.update(metadata.dev().to_le_bytes());
+        hasher.update(metadata.ino().to_le_bytes());
+        let digest = hasher.finalize();
+        let mut bytes = [0_u8; 8];
+        bytes.copy_from_slice(&digest[..8]);
+        Ok(u64::from_le_bytes(bytes).max(1))
+    }
+    #[cfg(windows)]
+    {
+        let file = std::fs::File::open(path).map_err(|_| SqliteFileIdentityError::Open)?;
+        crate::windows_file::stable_file_identity(&file, path)
+            .map_err(|_| SqliteFileIdentityError::Identify)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(SqliteFileIdentityError::Unavailable)
+    }
 }
 
 fn jsonl_head_fingerprint(file: &mut std::fs::File) -> std::io::Result<u64> {

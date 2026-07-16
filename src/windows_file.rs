@@ -1,7 +1,6 @@
 use std::fs::File;
 use std::io;
 use std::mem::MaybeUninit;
-use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
@@ -46,9 +45,9 @@ pub(crate) fn stable_file_identity(file: &File, path: &Path) -> io::Result<u64> 
         hasher.update(b"windows-file-id-fallback");
         hasher.update(metadata.creation_time().to_le_bytes());
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        for unit in canonical.as_os_str().encode_wide() {
-            hasher.update(unit.to_le_bytes());
-        }
+        hasher.update(crate::os_str_bytes::native_os_str_bytes(
+            canonical.as_os_str(),
+        ));
     }
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];

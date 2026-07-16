@@ -1,5 +1,7 @@
-use std::io::BufReader;
+use std::collections::{HashMap, VecDeque};
+use std::io::{BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 
@@ -23,6 +25,7 @@ const CODEX_TURN_LOCATION_KEYS: TranscriptLocationMetadataKeys =
         "codex_turn_location_provenance",
     );
 
+#[derive(Clone)]
 pub(super) struct CodexContextState {
     pub(super) model: Option<String>,
     pub(super) cwd: Option<PathBuf>,
@@ -41,15 +44,27 @@ impl CodexContextState {
     }
 
     pub(super) fn scan_prior(path: &Path, before_offset: u64, meta: &CodexMeta) -> Self {
-        let mut state = Self::from_meta(meta);
         if before_offset == 0 {
-            return state;
+            return Self::from_meta(meta);
         }
-        let Ok(file) = std::fs::File::open(path) else {
-            return state;
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return Self::from_meta(meta);
         };
+        let generation = prior_context_generation(&file);
+        let (mut state, mut offset) = match generation
+            .and_then(|generation| cached_prior_context(path, generation, before_offset))
+        {
+            Some(resumed) => resumed,
+            None => (Self::from_meta(meta), 0),
+        };
+        if offset > 0 && file.seek(SeekFrom::Start(offset)).is_err() {
+            state = Self::from_meta(meta);
+            offset = 0;
+            if file.seek(SeekFrom::Start(0)).is_err() {
+                return state;
+            }
+        }
         let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
-        let mut offset = 0_u64;
         while let Ok(frame) = frames.next_frame() {
             if matches!(frame, RawJsonlFrame::Eof) || offset >= before_offset {
                 break;
@@ -73,6 +88,9 @@ impl CodexContextState {
                 continue;
             };
             state.observe_prior_record(&value, path, meta);
+        }
+        if let Some(generation) = generation {
+            store_prior_context(path, generation, before_offset, state.clone());
         }
         state
     }
@@ -114,6 +132,88 @@ impl CodexContextState {
         }
         self.observe_context_record(record, path, meta);
     }
+}
+
+/// Bounded cache of resumed prior-context state keyed by rollout path so an
+/// incremental scan of an active session only parses the delta beyond its last
+/// resume offset instead of the whole prefix.
+const PRIOR_CONTEXT_CACHE_CAPACITY: usize = 512;
+
+struct CachedPriorContext {
+    generation: u64,
+    offset: u64,
+    state: CodexContextState,
+}
+
+#[derive(Default)]
+struct PriorContextCache {
+    entries: HashMap<PathBuf, CachedPriorContext>,
+    order: VecDeque<PathBuf>,
+}
+
+static PRIOR_CONTEXT_CACHE: OnceLock<Mutex<PriorContextCache>> = OnceLock::new();
+
+fn prior_context_generation(file: &std::fs::File) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let meta = file.metadata().ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.dev().hash(&mut hasher);
+        meta.ino().hash(&mut hasher);
+    }
+    #[cfg(not(unix))]
+    {
+        meta.created()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos()
+            .hash(&mut hasher);
+    }
+    Some(hasher.finish())
+}
+
+fn cached_prior_context(
+    path: &Path,
+    generation: u64,
+    before_offset: u64,
+) -> Option<(CodexContextState, u64)> {
+    let cache = PRIOR_CONTEXT_CACHE.get()?;
+    let cache = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let entry = cache.entries.get(path)?;
+    (entry.generation == generation && entry.offset <= before_offset)
+        .then(|| (entry.state.clone(), entry.offset))
+}
+
+fn store_prior_context(path: &Path, generation: u64, offset: u64, state: CodexContextState) {
+    let cache = PRIOR_CONTEXT_CACHE.get_or_init(|| Mutex::new(PriorContextCache::default()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(entry) = cache.entries.get_mut(path) {
+        entry.generation = generation;
+        entry.offset = offset;
+        entry.state = state;
+        return;
+    }
+    if cache.entries.len() >= PRIOR_CONTEXT_CACHE_CAPACITY
+        && let Some(evicted) = cache.order.pop_front()
+    {
+        cache.entries.remove(&evicted);
+    }
+    cache.order.push_back(path.to_path_buf());
+    cache.entries.insert(
+        path.to_path_buf(),
+        CachedPriorContext {
+            generation,
+            offset,
+            state,
+        },
+    );
 }
 
 pub(super) fn session_metadata_json(

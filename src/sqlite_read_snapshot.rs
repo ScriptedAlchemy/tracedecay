@@ -611,7 +611,7 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-fn immutable_uri(path: &Path) -> io::Result<String> {
+pub(crate) fn immutable_uri(path: &Path) -> io::Result<String> {
     let raw = path.to_str().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,

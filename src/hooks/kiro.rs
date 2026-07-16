@@ -178,15 +178,7 @@ async fn reset_counter_for_kiro_event(
     let Some(project_root) = kiro_project_root(event_json) else {
         return;
     };
-    if let Err(error) = super::daemon_hook_action(
-        Some(&project_root),
-        serde_json::json!({ "action": "reset_counter" }),
-        telemetry,
-    )
-    .await
-    {
-        eprintln!("[tracedecay] local counter reset daemon call failed: {error}");
-    }
+    super::reset_counter_for_project(&project_root, telemetry).await;
 }
 
 /// Incrementally ingests Kiro IDE transcripts for the workspace referenced by

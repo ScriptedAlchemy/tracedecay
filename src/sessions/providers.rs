@@ -58,6 +58,12 @@ impl SessionProvider {
     pub const fn supports_host_admission(self) -> bool {
         !matches!(self, Self::Vibe)
     }
+
+    /// Whether this provider's driver scans every destination store in one pass,
+    /// so a per-destination catch-up loop must skip it once user ingestion ran.
+    pub const fn scans_all_destinations(self) -> bool {
+        matches!(self, Self::Hermes)
+    }
 }
 
 pub const MESSAGE_SEARCH_PROVIDER_IDS: &[&str] = &[

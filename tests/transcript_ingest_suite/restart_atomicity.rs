@@ -12,7 +12,7 @@ use tracedecay::sessions::cursor::{
     ingest_cursor_transcript_event, open_project_session_db, project_session_db_path,
     try_ingest_cursor_transcript_event,
 };
-use tracedecay::sessions::source::{TranscriptIngestError, TranscriptSource, ingest_source};
+use tracedecay::sessions::source::{TranscriptIngestError, TranscriptSource, try_ingest_source};
 use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
 use tracedecay::storage::{read_repository_identity_marker, write_repository_identity_marker};
 use tracedecay::store::GlobalDbObservationStore;
@@ -217,7 +217,9 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
     let path_key = claude_cursor_key(&source, &project);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let first = ingest_source(&db, &source, &project, None).await;
+    let first = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(first.messages_upserted, 2);
     let first_offset = db.get_parse_offset(&path_key).await.unwrap();
     let first_session = db.get_session("claude", "claude-restart").await.unwrap();
@@ -245,8 +247,11 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
     set_projection_failure(&project, true).await;
 
     let rejected = open_project_session_db(&project).await.unwrap();
-    let failed = ingest_source(&rejected, &source, &project, None).await;
-    assert_eq!(failed.messages_upserted, 0);
+    let failed = try_ingest_source(&rejected, &source, &project, None).await;
+    assert!(
+        failed.is_err(),
+        "projection failure must surface as an ingest error"
+    );
     assert_eq!(
         rejected.get_parse_offset(&path_key).await,
         Some(first_offset)
@@ -268,7 +273,9 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
     set_projection_failure(&project, false).await;
 
     let reopened = open_project_session_db(&project).await.unwrap();
-    let suffix = ingest_source(&reopened, &source, &project, None).await;
+    let suffix = try_ingest_source(&reopened, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(suffix.messages_upserted, 1);
     let final_offset = reopened.get_parse_offset(&path_key).await.unwrap();
     assert!(final_offset.byte_offset > first_offset.byte_offset);
@@ -279,7 +286,9 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
     drop(reopened);
 
     let replay = open_project_session_db(&project).await.unwrap();
-    let unchanged = ingest_source(&replay, &source, &project, None).await;
+    let unchanged = try_ingest_source(&replay, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(unchanged.sessions_upserted, 0);
     assert_eq!(unchanged.messages_upserted, 0);
     assert_eq!(replay.get_parse_offset(&path_key).await, Some(final_offset));
@@ -296,7 +305,9 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     let valid_prefix = std::fs::read_to_string(&path).unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let initial = ingest_source(&db, &source, &project, None).await;
+    let initial = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(initial.messages_upserted, 2);
     let prefix_offset = db.get_parse_offset(&path_key).await.unwrap();
     assert_eq!(prefix_offset.byte_offset, valid_prefix.len() as u64);
@@ -317,8 +328,17 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     .unwrap();
 
     let rejected = open_project_session_db(&project).await.unwrap();
-    let malformed = ingest_source(&rejected, &source, &project, None).await;
-    assert_eq!(malformed.messages_upserted, 0);
+    let malformed = try_ingest_source(&rejected, &source, &project, None).await;
+    assert!(
+        matches!(
+            malformed,
+            Err(TranscriptIngestError::NonDurableRecord {
+                provider: "claude",
+                ..
+            })
+        ),
+        "malformed complete frame must surface as a non-durable scanner error, got {malformed:?}"
+    );
     assert_eq!(
         rejected
             .get_parse_offset(&path_key)
@@ -342,7 +362,9 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     std::fs::write(&path, format!("{valid_prefix}{repaired}\n{suffix}\n")).unwrap();
 
     let retry = open_project_session_db(&project).await.unwrap();
-    let recovered = ingest_source(&retry, &source, &project, None).await;
+    let recovered = try_ingest_source(&retry, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(recovered.messages_upserted, 2);
     assert_eq!(retry.session_message_count().await.unwrap(), 4);
     assert!(retry.get_session_message("claude", "u3").await.is_some());
@@ -355,7 +377,9 @@ async fn claude_malformed_complete_frame_retries_suffix_without_gap_or_duplicate
     drop(retry);
 
     let replay = open_project_session_db(&project).await.unwrap();
-    let unchanged = ingest_source(&replay, &source, &project, None).await;
+    let unchanged = try_ingest_source(&replay, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(unchanged.sessions_upserted, 0);
     assert_eq!(unchanged.messages_upserted, 0);
     assert_eq!(replay.get_parse_offset(&path_key).await, Some(final_offset));
@@ -388,14 +412,18 @@ async fn claude_restart_defers_a_partial_final_line() {
         .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let first = ingest_source(&db, &source, &project, None).await;
+    let first = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(first.messages_upserted, 2);
     let committed_offset = db.get_parse_offset(&path_key).await.unwrap();
     assert_eq!(committed_offset.byte_offset, complete_len);
     drop(db);
 
     let reopened = open_project_session_db(&project).await.unwrap();
-    let still_partial = ingest_source(&reopened, &source, &project, None).await;
+    let still_partial = try_ingest_source(&reopened, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(still_partial.messages_upserted, 0);
     assert_eq!(
         reopened.get_parse_offset(&path_key).await,
@@ -408,7 +436,9 @@ async fn claude_restart_defers_a_partial_final_line() {
         .unwrap()
         .write_all(b"\n")
         .unwrap();
-    let completed = ingest_source(&reopened, &source, &project, None).await;
+    let completed = try_ingest_source(&reopened, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(completed.messages_upserted, 1);
     assert_eq!(reopened.session_message_count().await.unwrap(), 3);
     let final_offset = reopened.get_parse_offset(&path_key).await.unwrap();
@@ -419,7 +449,9 @@ async fn claude_restart_defers_a_partial_final_line() {
     drop(reopened);
 
     let replay = open_project_session_db(&project).await.unwrap();
-    let unchanged = ingest_source(&replay, &source, &project, None).await;
+    let unchanged = try_ingest_source(&replay, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(unchanged.sessions_upserted, 0);
     assert_eq!(unchanged.messages_upserted, 0);
     assert_eq!(replay.get_parse_offset(&path_key).await, Some(final_offset));
@@ -439,7 +471,9 @@ async fn cline_content_hash_cursor_survives_restart_and_incomplete_rewrite() {
     let source = ClineLikeSource::cline_with_home(&home);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let first = ingest_source(&db, &source, &project, None).await;
+    let first = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // user + assistant + usage companion rows
     assert_eq!(first.messages_upserted, 3);
     let offset = parse_offset_for_task_history(&db, &project, &history_path)
@@ -449,7 +483,9 @@ async fn cline_content_hash_cursor_survives_restart_and_incomplete_rewrite() {
     drop(db);
 
     let reopened = open_project_session_db(&project).await.unwrap();
-    let replay = ingest_source(&reopened, &source, &project, None).await;
+    let replay = try_ingest_source(&reopened, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(replay.sessions_upserted, 0);
     assert_eq!(replay.messages_upserted, 0);
     assert_eq!(
@@ -471,7 +507,9 @@ async fn cline_content_hash_cursor_survives_restart_and_incomplete_rewrite() {
     )
     .unwrap();
     let incomplete = open_project_session_db(&project).await.unwrap();
-    let deferred = ingest_source(&incomplete, &source, &project, None).await;
+    let deferred = try_ingest_source(&incomplete, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(deferred.messages_upserted, 0);
     assert_eq!(
         incomplete.session_message_count().await.unwrap(),
@@ -513,7 +551,9 @@ async fn cline_content_hash_cursor_survives_restart_and_incomplete_rewrite() {
     )
     .unwrap();
     let completed = open_project_session_db(&project).await.unwrap();
-    let completed_stats = ingest_source(&completed, &source, &project, None).await;
+    let completed_stats = try_ingest_source(&completed, &source, &project, None)
+        .await
+        .unwrap();
     assert!(completed_stats.messages_upserted > 0);
     assert_eq!(
         completed
@@ -666,13 +706,14 @@ async fn claude_incremental_ingest_converges_with_clean_rebuild() {
     let incremental_source = ClaudeSource::with_home(&incremental_home);
     let incremental_db = open_project_session_db(&incremental_project).await.unwrap();
     assert_eq!(
-        ingest_source(
+        try_ingest_source(
             &incremental_db,
             &incremental_source,
             &incremental_project,
             None,
         )
         .await
+        .unwrap()
         .messages_upserted,
         2
     );
@@ -693,13 +734,14 @@ async fn claude_incremental_ingest_converges_with_clean_rebuild() {
     )
     .unwrap();
     assert_eq!(
-        ingest_source(
+        try_ingest_source(
             &incremental_db,
             &incremental_source,
             &incremental_project,
             None,
         )
         .await
+        .unwrap()
         .messages_upserted,
         1
     );
@@ -727,8 +769,9 @@ async fn claude_incremental_ingest_converges_with_clean_rebuild() {
     let rebuild_source = ClaudeSource::with_home(&rebuild_home);
     let rebuild_db = open_project_session_db(&rebuild_project).await.unwrap();
     assert_eq!(
-        ingest_source(&rebuild_db, &rebuild_source, &rebuild_project, None)
+        try_ingest_source(&rebuild_db, &rebuild_source, &rebuild_project, None)
             .await
+            .unwrap()
             .messages_upserted,
         3
     );
@@ -1074,7 +1117,9 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
     let source = CodexSource::with_home(&home);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let first = ingest_source(&db, &source, &project, None).await;
+    let first = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(first.messages_upserted, 2);
     assert_eq!(db.session_message_count().await.unwrap(), 2);
     let path_key = db
@@ -1098,8 +1143,9 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
     .unwrap();
     let partial = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_source(&partial, &source, &project, None)
+        try_ingest_source(&partial, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         0
     );
@@ -1122,8 +1168,11 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
     std::fs::write(&path, format!("{prefix}{suffix}\n")).unwrap();
     set_projection_failure(&project, true).await;
     let rejected = open_project_session_db(&project).await.unwrap();
-    let failed = ingest_source(&rejected, &source, &project, None).await;
-    assert_eq!(failed.messages_upserted, 0);
+    let failed = try_ingest_source(&rejected, &source, &project, None).await;
+    assert!(
+        failed.is_err(),
+        "projection failure must surface as an ingest error"
+    );
     assert_eq!(
         rejected
             .get_parse_offset(&path_key)
@@ -1143,8 +1192,9 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
     set_projection_failure(&project, false).await;
     let recovered = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_source(&recovered, &source, &project, None)
+        try_ingest_source(&recovered, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         1
     );
@@ -1171,8 +1221,9 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
     )
     .unwrap();
     assert_eq!(
-        ingest_source(&recovered, &source, &project, None)
+        try_ingest_source(&recovered, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         1
     );
@@ -1184,8 +1235,9 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
         1
     );
     assert_eq!(
-        ingest_source(&recovered, &source, &project, None)
+        try_ingest_source(&recovered, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         0
     );
@@ -1204,8 +1256,9 @@ async fn legacy_cline_crash_before_commit_keeps_content_hash_frontier() {
 
     let db = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         3
     );
@@ -1239,11 +1292,11 @@ async fn legacy_cline_crash_before_commit_keeps_content_hash_frontier() {
 
     set_projection_failure(&project, true).await;
     let rejected = open_project_session_db(&project).await.unwrap();
-    assert_eq!(
-        ingest_source(&rejected, &source, &project, None)
+    assert!(
+        try_ingest_source(&rejected, &source, &project, None)
             .await
-            .messages_upserted,
-        0
+            .is_err(),
+        "projection failure must surface as an ingest error"
     );
     assert!(
         rejected
@@ -1261,8 +1314,9 @@ async fn legacy_cline_crash_before_commit_keeps_content_hash_frontier() {
     set_projection_failure(&project, false).await;
     let recovered = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_source(&recovered, &source, &project, None)
+        try_ingest_source(&recovered, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         4
     );
@@ -1274,8 +1328,9 @@ async fn legacy_cline_crash_before_commit_keeps_content_hash_frontier() {
         1
     );
     assert_eq!(
-        ingest_source(&recovered, &source, &project, None)
+        try_ingest_source(&recovered, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         0
     );
@@ -1299,7 +1354,9 @@ async fn claude_and_codex_jsonl_truncation_replacement_preserves_prior_and_new_f
         };
 
         let db = open_project_session_db(&project).await.unwrap();
-        let first = ingest_source(&db, source.as_ref(), &project, None).await;
+        let first = try_ingest_source(&db, source.as_ref(), &project, None)
+            .await
+            .unwrap();
         assert!(
             first.messages_upserted >= 2,
             "{provider}: initial ingest must commit provider frames"
@@ -1391,7 +1448,9 @@ async fn claude_and_codex_jsonl_truncation_replacement_preserves_prior_and_new_f
         }
 
         let replaced = open_project_session_db(&project).await.unwrap();
-        let stats = ingest_source(&replaced, source.as_ref(), &project, None).await;
+        let stats = try_ingest_source(&replaced, source.as_ref(), &project, None)
+            .await
+            .unwrap();
         assert_eq!(stats.messages_upserted, 2, "{provider}");
         assert_eq!(
             replaced.session_message_count().await.unwrap(),
@@ -1428,8 +1487,9 @@ async fn claude_and_codex_jsonl_truncation_replacement_preserves_prior_and_new_f
             "{provider}"
         );
         assert_eq!(
-            ingest_source(&replaced, source.as_ref(), &project, None)
+            try_ingest_source(&replaced, source.as_ref(), &project, None)
                 .await
+                .unwrap()
                 .messages_upserted,
             0,
             "{provider}: exact replay must be a durable no-op"
@@ -1446,8 +1506,9 @@ async fn codex_incomplete_tail_retained_across_append_then_completes() {
 
     let db = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         2
     );
@@ -1475,8 +1536,9 @@ async fn codex_incomplete_tail_retained_across_append_then_completes() {
 
     let still_open = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_source(&still_open, &source, &project, None)
+        try_ingest_source(&still_open, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         0
     );
@@ -1499,8 +1561,9 @@ async fn codex_incomplete_tail_retained_across_append_then_completes() {
 
     let completed = open_project_session_db(&project).await.unwrap();
     assert_eq!(
-        ingest_source(&completed, &source, &project, None)
+        try_ingest_source(&completed, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         1
     );
@@ -1517,8 +1580,9 @@ async fn codex_incomplete_tail_retained_across_append_then_completes() {
         std::fs::metadata(&path).unwrap().len()
     );
     assert_eq!(
-        ingest_source(&completed, &source, &project, None)
+        try_ingest_source(&completed, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         0
     );

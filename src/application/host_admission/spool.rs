@@ -311,6 +311,8 @@ pub(crate) struct HostAdmissionSpool {
     meta: SpoolMetaV1,
     pending: Vec<SpoolRecord>,
     pending_bytes: usize,
+    physical_len: u64,
+    pending_by_source: BTreeMap<String, (usize, usize)>,
     cleanup_pending: bool,
     append_recovery_required: bool,
     quarantine_recovery_required: bool,
@@ -393,6 +395,7 @@ impl HostAdmissionSpool {
 
         let cleanup_pending = matches!(scan.integrity, SpoolIntegrity::Healthy)
             && scan.truncate_to > recovery.pending_bytes as u64;
+        let physical_len = file_len(&records_path)?;
         let report = SpoolOpenReport {
             pending_records: recovery.pending.len(),
             truncated_partial_tail_bytes,
@@ -411,6 +414,8 @@ impl HostAdmissionSpool {
                 meta,
                 pending: recovery.pending,
                 pending_bytes: recovery.pending_bytes,
+                physical_len,
+                pending_by_source: recovery.pending_by_source,
                 cleanup_pending,
                 append_recovery_required: false,
                 quarantine_recovery_required: false,
@@ -489,13 +494,12 @@ impl HostAdmissionSpool {
         if self.pending.len() >= self.bounds.max_records {
             return Err(SpoolError::Overflow(SpoolOverflowDisposition::MaxRecords));
         }
-        if self
-            .pending
-            .iter()
-            .filter(|record| record.source == source)
-            .count()
-            >= self.bounds.max_records_per_source
-        {
+        let (source_pending_count, source_pending_bytes) = self
+            .pending_by_source
+            .get(source)
+            .copied()
+            .unwrap_or((0, 0));
+        if source_pending_count >= self.bounds.max_records_per_source {
             return Err(SpoolError::Overflow(
                 SpoolOverflowDisposition::MaxRecordsPerSource,
             ));
@@ -506,14 +510,6 @@ impl HostAdmissionSpool {
 
         let seq = self.meta.next_seq;
         let frame = encode_frame(seq, source.as_bytes(), payload)?;
-        let source_pending_bytes = self
-            .pending
-            .iter()
-            .filter(|record| record.source == source)
-            .try_fold(0usize, |bytes, record| bytes.checked_add(record.framed_len))
-            .ok_or(SpoolError::Overflow(
-                SpoolOverflowDisposition::MaxBytesPerSource,
-            ))?;
         let source_next_bytes =
             source_pending_bytes
                 .checked_add(frame.len())
@@ -528,14 +524,15 @@ impl HostAdmissionSpool {
         if self.pending_bytes.saturating_add(frame.len()) > self.bounds.max_spool_bytes {
             return Err(SpoolError::Overflow(SpoolOverflowDisposition::MaxBytes));
         }
-        let physical_len = file_len(&self.records_path)?;
-        if physical_len.saturating_add(frame.len() as u64) > self.bounds.max_spool_bytes as u64 {
+        if self.physical_len.saturating_add(frame.len() as u64) > self.bounds.max_spool_bytes as u64
+        {
             self.compact_pending()?;
         }
-        let physical_len = file_len(&self.records_path)?;
-        if physical_len.saturating_add(frame.len() as u64) > self.bounds.max_spool_bytes as u64 {
+        if self.physical_len.saturating_add(frame.len() as u64) > self.bounds.max_spool_bytes as u64
+        {
             return Err(SpoolError::Overflow(SpoolOverflowDisposition::MaxBytes));
         }
+        let physical_len = self.physical_len;
 
         let intent = AppendIntentV1::new(seq, physical_len, &frame);
         let mut intent_meta = self.meta.clone();
@@ -577,6 +574,10 @@ impl HostAdmissionSpool {
         }
         self.meta = next_meta;
         self.pending_bytes += record.framed_len;
+        self.physical_len += record.framed_len as u64;
+        let source_usage = self.pending_by_source.entry(source.to_owned()).or_default();
+        source_usage.0 += 1;
+        source_usage.1 += record.framed_len;
         self.pending.push(record.clone());
         Ok(record)
     }
@@ -625,6 +626,7 @@ impl HostAdmissionSpool {
 
         self.pending.remove(index);
         self.pending_bytes = self.pending_bytes.saturating_sub(record.framed_len);
+        self.source_usage_release(&record.source, record.framed_len);
         let compacted = self.publish_logical_deletion_cleanup(true)?;
 
         #[cfg(not(test))]
@@ -665,6 +667,7 @@ impl HostAdmissionSpool {
         self.meta = next_meta;
         self.pending.remove(0);
         self.pending_bytes = self.pending_bytes.saturating_sub(committed.framed_len);
+        self.source_usage_release(&committed.source, committed.framed_len);
         let _compacted = self.publish_logical_deletion_cleanup(false)?;
         Ok(committed)
     }
@@ -693,6 +696,10 @@ impl HostAdmissionSpool {
             .iter()
             .map(|record| record.framed_len)
             .sum::<usize>();
+        let released = self.pending[..count]
+            .iter()
+            .map(|record| (record.source.clone(), record.framed_len))
+            .collect::<Vec<_>>();
         let mut next_meta = self.meta.clone();
         next_meta.committed_through = through;
         write_meta_atomic(&self.meta_path, &next_meta)?;
@@ -700,6 +707,9 @@ impl HostAdmissionSpool {
         self.meta = next_meta;
         self.pending.drain(..count);
         self.pending_bytes = self.pending_bytes.saturating_sub(removed_bytes);
+        for (source, framed_len) in released {
+            self.source_usage_release(&source, framed_len);
+        }
         let _compacted = self.publish_logical_deletion_cleanup(false)?;
         Ok(count)
     }
@@ -715,14 +725,7 @@ impl HostAdmissionSpool {
         fence_compact_failure: bool,
     ) -> Result<bool, SpoolError> {
         self.cleanup_pending = true;
-        let should_compact = match self.should_compact_retained_prefix() {
-            Ok(should_compact) => should_compact,
-            Err(_) if !fence_compact_failure => return Ok(false),
-            Err(_) => {
-                self.quarantine_recovery_required = true;
-                return Err(SpoolError::QuarantineRecoveryRequired);
-            }
-        };
+        let should_compact = self.should_compact_retained_prefix();
         if !should_compact {
             return Ok(false);
         }
@@ -737,16 +740,25 @@ impl HostAdmissionSpool {
         Ok(false)
     }
 
-    fn should_compact_retained_prefix(&self) -> Result<bool, SpoolError> {
+    fn should_compact_retained_prefix(&self) -> bool {
         if !self.cleanup_pending {
-            return Ok(false);
+            return false;
         }
         if self.pending.is_empty() {
-            return Ok(true);
+            return true;
         }
-        let physical = file_len(&self.records_path)?;
         let pending = self.pending_bytes as u64;
-        Ok(physical > pending.saturating_mul(COMPACT_WASTE_MULTIPLIER))
+        self.physical_len > pending.saturating_mul(COMPACT_WASTE_MULTIPLIER)
+    }
+
+    fn source_usage_release(&mut self, source: &str, framed_len: usize) {
+        if let Some(entry) = self.pending_by_source.get_mut(source) {
+            entry.0 = entry.0.saturating_sub(1);
+            entry.1 = entry.1.saturating_sub(framed_len);
+            if entry.0 == 0 {
+                self.pending_by_source.remove(source);
+            }
+        }
     }
 
     fn compact_pending(&mut self) -> Result<(), SpoolError> {
@@ -776,6 +788,7 @@ impl HostAdmissionSpool {
         )?;
         self.pending = rebuilt;
         self.pending_bytes = self.pending.iter().map(|record| record.framed_len).sum();
+        self.physical_len = self.pending_bytes as u64;
         self.cleanup_pending = false;
         Ok(())
     }
@@ -1124,6 +1137,7 @@ fn validate_quarantined_active_frame(seq: u64, frame: &[u8], bounds: SpoolBounds
 struct PendingRecovery {
     pending: Vec<SpoolRecord>,
     pending_bytes: usize,
+    pending_by_source: BTreeMap<String, (usize, usize)>,
     recovered_next_seq: Option<u64>,
 }
 
@@ -1262,6 +1276,7 @@ fn recover_pending(
     Ok(PendingRecovery {
         pending,
         pending_bytes,
+        pending_by_source,
         recovered_next_seq,
     })
 }
@@ -1307,7 +1322,6 @@ fn append_frame_durable(path: &Path, frame: &[u8]) -> Result<u64, SpoolError> {
         options.mode(0o600);
     }
     let mut output = options.open(path).map_err(io_error)?;
-    tighten_existing_file(path)?;
     let offset = output.seek(SeekFrom::End(0)).map_err(io_error)?;
     output.write_all(frame).map_err(io_error)?;
     output.sync_all().map_err(io_error)?;
@@ -1502,11 +1516,7 @@ fn sync_parent_directory(path: &Path) -> Result<(), SpoolError> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
-    match File::open(parent).and_then(|directory| directory.sync_all()) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::InvalidInput || cfg!(windows) => Ok(()),
-        Err(error) => Err(io_error(error)),
-    }
+    super::sync_directory(parent, super::DirectorySyncPolicy::TolerateUnsupported).map_err(io_error)
 }
 
 fn io_error(_error: impl ToString) -> SpoolError {

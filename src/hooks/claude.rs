@@ -509,30 +509,7 @@ async fn ingest_user_claude_session_with_telemetry(
     session_id: Option<String>,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) -> bool {
-    if session_id.is_none() {
-        return false;
-    }
-    match super::daemon_hook_action(
-        None,
-        serde_json::json!({
-            "action": "ingest_transcript",
-            "provider": "claude",
-            "user_scope": true,
-            "session_id": session_id,
-        }),
-        telemetry,
-    )
-    .await
-    {
-        Ok(result) => result
-            .get("messages_upserted")
-            .and_then(Value::as_u64)
-            .is_some_and(|count| count > 0),
-        Err(error) => {
-            eprintln!("[tracedecay] user Claude ingest daemon call failed: {error}");
-            false
-        }
-    }
+    super::ingest_user_session("Claude", session_id, telemetry).await
 }
 
 #[cfg(test)]

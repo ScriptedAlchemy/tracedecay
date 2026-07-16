@@ -352,7 +352,7 @@ pub(super) fn canonical_path_set(paths: &[PathBuf]) -> HashSet<PathBuf> {
 }
 
 pub(super) fn canonicalize_lossy(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    crate::lifecycle_lease::canonical_or_original(path)
 }
 
 /// Authoritative prune during migration inventory scans (unlike the

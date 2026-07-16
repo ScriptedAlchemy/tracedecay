@@ -4,7 +4,7 @@ use tempfile::TempDir;
 use tracedecay::sessions::claude::ClaudeSource;
 use tracedecay::sessions::codex::CodexSource;
 use tracedecay::sessions::cursor::{open_project_session_db, project_session_db_path};
-use tracedecay::sessions::source::ingest_source;
+use tracedecay::sessions::source::try_ingest_source;
 
 fn init_project(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
     let home = tmp.path().join("home");
@@ -204,7 +204,9 @@ async fn structured_backfill_never_replays_claude_transcripts() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // Live ingest emits the reasoning row. The structured backfill only sets
     // up its Codex state and must not claim a Claude marker.
     db.run_structured_backfill().await;
@@ -244,7 +246,9 @@ async fn structured_backfill_inserts_codex_goal_rows_once() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // Drive one sweep so the backfill meta table exists (production creates it
     // via the detached sweep `open_at` schedules); the goal row from live
     // ingest is already present, so this inserts nothing.
@@ -288,7 +292,9 @@ async fn structured_backfill_preserves_existing_rows() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // Create the backfill meta table up front (see the note in the goal test).
     db.run_structured_backfill().await;
 
@@ -322,7 +328,9 @@ async fn structured_backfill_version_bump_reparses_from_start() {
     // Live ingest, then run the sweep to completion for the current version.
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     db.run_structured_backfill().await; // parses the file, advances the cursor
     db.run_structured_backfill().await; // no candidates: marks complete, clears cursors
     assert_eq!(
@@ -411,7 +419,9 @@ async fn structured_backfill_migrates_legacy_global_marker() {
     write_codex_rollout_with_goal(&home, &project, "codex-migrate");
 
     let db = open_project_session_db(&project).await.unwrap();
-    ingest_source(&db, &CodexSource::with_home(&home), &project, None).await;
+    try_ingest_source(&db, &CodexSource::with_home(&home), &project, None)
+        .await
+        .unwrap();
     // Ensure the meta table exists (production creates it via the sweep).
     db.run_structured_backfill().await;
     drop(db);
@@ -573,7 +583,9 @@ async fn structured_backfill_concurrent_sweeps_run_once() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CodexSource::with_home(&home);
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     db.run_structured_backfill().await;
     drop(db);
 

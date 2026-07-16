@@ -24,7 +24,8 @@ use crate::application::host_admission::HostAdmissionFacade;
 use crate::application::host_admission::{
     HostAdmissionAuthorities, HostAdmissionOutcome, HostAdmissionStatus,
 };
-use crate::application::observation::{CaptureObservationRequest, ObservationCancellation};
+use crate::application::observation::ObservationCancellation;
+#[cfg(test)]
 use crate::privacy::parse_normalized_observation_record_v1;
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
@@ -32,24 +33,26 @@ use crate::sessions::shared::{
     append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
     path_belongs_to_project, title_from_messages,
 };
-#[cfg(test)]
-use crate::sessions::snapshot_observation::host_admission_error;
 use crate::sessions::snapshot_observation::{
     MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionRecord,
-    SnapshotAdmissionRunner, SnapshotCaptureOutcome, bounded_snapshot_input_len,
-    canonical_snapshot_envelope, read_snapshot_text_bounded, snapshot_message_fields,
-    snapshot_source_identity,
+    SnapshotAdmissionRunner, SnapshotCaptureOutcome, StableMessageIdDomains,
+    bounded_snapshot_input_len, non_durable_snapshot_record, read_snapshot_text_bounded,
+    snapshot_message_fields, stable_snapshot_message_id,
+};
+#[cfg(test)]
+use crate::sessions::snapshot_observation::{
+    canonical_snapshot_envelope, host_admission_error, snapshot_cursor_after,
 };
 use crate::sessions::source::{
     ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds, TranscriptIngestError,
-    TranscriptIngestResult, TranscriptSource, canonical_framed_sha256, read_changed_with_companion,
+    TranscriptIngestResult, TranscriptSource, read_changed_with_companion,
 };
 use serde_json::{Map, Value};
+#[cfg(test)]
 use tracedecay_domain::{
-    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceRangeV1,
-    RetentionClass,
+    ObservationOrderingDomainV1, ObservationSourceCursorV1, ObservationSourceRangeV1,
 };
+use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 
 /// Cap task-directory scans so a long VS Code globalStorage history cannot
 /// block dashboard startup.
@@ -85,45 +88,6 @@ pub(crate) struct ClineLikeSnapshotObservationRecord {
     payload: Vec<u8>,
 }
 
-#[allow(dead_code)]
-impl ClineLikeSnapshotObservationRecord {
-    pub(crate) fn provider(&self) -> &'static str {
-        self.provider
-    }
-
-    pub(crate) fn native_record_id(&self) -> &str {
-        &self.native_record_id
-    }
-
-    pub(crate) fn order(&self) -> u64 {
-        self.order
-    }
-
-    pub(crate) fn capture_request(
-        &self,
-        scope: ObservationScopeV1,
-        generation: ObservationSourceGenerationV1,
-        expected_cursor: Option<ObservationSourceCursorV1>,
-        cancellation: ObservationCancellation,
-    ) -> TranscriptIngestResult<CaptureObservationRequest> {
-        snapshot_capture_request(self, scope, generation, expected_cursor, cancellation)
-    }
-
-    pub(crate) fn cursor_after(
-        &self,
-        scope: ObservationScopeV1,
-        generation: ObservationSourceGenerationV1,
-    ) -> TranscriptIngestResult<ObservationSourceCursorV1> {
-        Ok(ObservationSourceCursorV1::for_ordering(
-            snapshot_source_identity(self.provider, &self.session_id)?,
-            scope,
-            generation,
-            ObservationOrderingDomainV1::SnapshotOrder,
-            self.order + 1,
-        )?)
-    }
-}
-
 impl SnapshotAdmissionRecord for ClineLikeSnapshotObservationRecord {
     fn provider(&self) -> &'static str {
         self.provider
@@ -133,23 +97,32 @@ impl SnapshotAdmissionRecord for ClineLikeSnapshotObservationRecord {
         &self.session_id
     }
 
+    fn native_record_id(&self) -> &str {
+        &self.native_record_id
+    }
+
     fn order(&self) -> u64 {
         self.order
     }
 
-    fn capture_request(
+    fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
+#[cfg(test)]
+impl ClineLikeSnapshotObservationRecord {
+    fn cursor_after(
         &self,
         scope: ObservationScopeV1,
         generation: ObservationSourceGenerationV1,
-        expected_cursor: Option<ObservationSourceCursorV1>,
-        cancellation: ObservationCancellation,
-    ) -> TranscriptIngestResult<CaptureObservationRequest> {
-        ClineLikeSnapshotObservationRecord::capture_request(
-            self,
+    ) -> TranscriptIngestResult<ObservationSourceCursorV1> {
+        snapshot_cursor_after(
+            self.provider,
+            &self.session_id,
+            self.order,
             scope,
             generation,
-            expected_cursor,
-            cancellation,
         )
     }
 }
@@ -444,17 +417,9 @@ fn ensure_bounded_file(
     path: &Path,
     byte_cap: u64,
 ) -> TranscriptIngestResult<()> {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return Ok(());
-    };
-    if metadata.len() > byte_cap {
-        return Err(non_durable(
-            provider,
-            path,
-            "snapshot exceeds provider byte bound",
-        ));
-    }
-    Ok(())
+    bounded_snapshot_input_len(provider, path, byte_cap)
+        .map(|_| ())
+        .map_err(|_| non_durable(provider, path, "snapshot exceeds provider byte bound"))
 }
 
 fn snapshot_input_bytes(provider: &'static str, path: &Path) -> TranscriptIngestResult<u64> {
@@ -479,13 +444,7 @@ fn snapshot_input_bytes(provider: &'static str, path: &Path) -> TranscriptIngest
 }
 
 fn non_durable(provider: &'static str, path: &Path, reason: &'static str) -> TranscriptIngestError {
-    let end_offset = std::fs::metadata(path).map_or(0, |metadata| metadata.len());
-    TranscriptIngestError::NonDurableRecord {
-        provider,
-        offset: 0,
-        end_offset,
-        reason,
-    }
+    non_durable_snapshot_record(provider, path, reason)
 }
 
 fn collect_task_api_paths(root: &Path) -> Vec<PathBuf> {
@@ -825,7 +784,6 @@ fn native_record_id(entry: &Value) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
-#[allow(dead_code)]
 pub(crate) fn normalize_cline_like_snapshot_observations(
     provider: &'static str,
     messages: &[SessionMessageRecord],
@@ -880,55 +838,6 @@ fn snapshot_native_payload(
     Value::Object(payload)
 }
 
-fn snapshot_capture_request(
-    record: &ClineLikeSnapshotObservationRecord,
-    scope: ObservationScopeV1,
-    generation: ObservationSourceGenerationV1,
-    expected_cursor: Option<ObservationSourceCursorV1>,
-    cancellation: ObservationCancellation,
-) -> TranscriptIngestResult<CaptureObservationRequest> {
-    let range = ObservationSourceRangeV1::new(record.order, record.order + 1)?;
-    let parsed = parse_normalized_observation_record_v1(
-        &record.payload,
-        range,
-        ObservationOrderingDomainV1::SnapshotOrder,
-        |native| {
-            canonical_snapshot_envelope(
-                &native,
-                record.provider,
-                &record.session_id,
-                &record.native_record_id,
-                range,
-            )
-        },
-    )
-    .map_err(|_| TranscriptIngestError::NonDurableRecord {
-        provider: record.provider,
-        offset: range.start(),
-        end_offset: range.end(),
-        reason: "normalized observation record is not durable",
-    })?;
-    let source = snapshot_source_identity(record.provider, &record.session_id)?;
-    let identity = ObservationIdentityMaterialV1::for_native_record(
-        source,
-        scope,
-        generation,
-        range,
-        ObservationOrderingDomainV1::SnapshotOrder,
-        ObservationId::new(record.native_record_id.clone())?,
-    )?;
-    CaptureObservationRequest::new(
-        parsed,
-        identity,
-        expected_cursor,
-        RetentionClass::new(format!("transcript.{}.v1", record.provider))?,
-        cancellation,
-    )
-    .map_err(|_| TranscriptIngestError::InvalidFrameState {
-        provider: record.provider,
-    })
-}
-
 fn stable_message_id(
     task_id: &str,
     kind: &str,
@@ -938,23 +847,20 @@ fn stable_message_id(
     occurrence: usize,
     content: &str,
 ) -> String {
-    if let Some(native_id) = native_id {
-        if !task_id.contains(':') && !native_id.contains(':') {
-            return format!("{task_id}:{native_id}");
-        }
-        let digest = canonical_framed_sha256(
-            DELIMITED_NATIVE_MESSAGE_ID_DOMAIN,
-            &[task_id.as_bytes(), native_id.as_bytes()],
-        );
-        return format!("cline-like.message-id.v2.{digest}");
-    }
     let timestamp_bytes = timestamp.map(i64::to_be_bytes);
     let timestamp_bytes = timestamp_bytes
         .as_ref()
         .map_or(&[][..], |bytes| bytes.as_slice());
     let occurrence_bytes = u64::try_from(occurrence).unwrap_or(u64::MAX).to_be_bytes();
-    let digest = canonical_framed_sha256(
-        DERIVED_MESSAGE_ID_DOMAIN,
+    stable_snapshot_message_id(
+        StableMessageIdDomains {
+            delimited_domain: DELIMITED_NATIVE_MESSAGE_ID_DOMAIN,
+            delimited_prefix: "cline-like.message-id.v2.",
+            derived_domain: DERIVED_MESSAGE_ID_DOMAIN,
+            derived_prefix: "cline-like.derived-message.v3.",
+        },
+        task_id,
+        native_id,
         &[
             task_id.as_bytes(),
             kind.as_bytes(),
@@ -963,8 +869,7 @@ fn stable_message_id(
             content.as_bytes(),
             &occurrence_bytes,
         ],
-    );
-    format!("cline-like.derived-message.v3.{digest}")
+    )
 }
 
 fn session_metadata(provider: &str, location_cwd: Option<&Path>) -> Value {

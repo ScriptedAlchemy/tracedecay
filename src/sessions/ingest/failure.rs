@@ -412,12 +412,38 @@ fn non_durable_reason_code(reason: &'static str) -> &'static str {
     }
 }
 
-pub(super) fn claude_catch_up_failure(
+/// Classify an observation drain error under any provider label.
+pub(super) fn observation_catch_up_failure(
+    provider: &'static str,
     source: &'static str,
     error: &claude_observation::ClaudeObservationIngestError,
 ) -> TranscriptCatchUpFailure {
     let failure = classify_claude_observation_failure(error);
-    TranscriptCatchUpFailure::new("claude", source, failure.reason_code, failure.retryable)
+    TranscriptCatchUpFailure::new(provider, source, failure.reason_code, failure.retryable)
+}
+
+pub(super) fn claude_catch_up_failure(
+    source: &'static str,
+    error: &claude_observation::ClaudeObservationIngestError,
+) -> TranscriptCatchUpFailure {
+    observation_catch_up_failure("claude", source, error)
+}
+
+/// Classify a transcript catch-up error, warn its bounded reason code, and
+/// return the typed failure.
+pub(super) fn warn_transcript_catch_up_failure(
+    provider: &'static str,
+    source: &'static str,
+    error: &source::TranscriptIngestError,
+    message: &'static str,
+) -> TranscriptCatchUpFailure {
+    let failure = classify_transcript_ingest_failure(provider, source, error);
+    tracing::warn!(
+        reason_code = failure.reason_code,
+        retryable = failure.retryable,
+        "{message}"
+    );
+    failure
 }
 
 pub(crate) fn classify_claude_observation_failure(

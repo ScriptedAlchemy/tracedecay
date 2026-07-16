@@ -16,7 +16,7 @@ use tracedecay::sessions::cursor::{
 };
 #[cfg(unix)]
 use tracedecay::sessions::lcm::{LcmDescribeRequest, LcmDescribeTarget};
-use tracedecay::sessions::source::{TranscriptIngestResult, ingest_source};
+use tracedecay::sessions::source::{TranscriptIngestResult, try_ingest_source};
 use tracedecay::sessions::{SessionSearchFilters, SessionSearchScope, SessionSearchTimeRange};
 
 #[cfg(unix)]
@@ -1299,7 +1299,9 @@ async fn cursor_hook_after_sweep_is_noop() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let sweep = CursorSweepSource::with_home(&home);
-    let swept = ingest_source(&db, &sweep, &project, None).await;
+    let swept = try_ingest_source(&db, &sweep, &project, None)
+        .await
+        .unwrap();
     assert_eq!(swept.messages_upserted, 2);
 
     // A live hook firing on a transcript the sweep already ingested resumes
@@ -1403,7 +1405,9 @@ async fn cursor_sweep_prefers_subagent_copy_over_toplevel_duplicate() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let sweep = CursorSweepSource::with_home(&home);
-    let stats = ingest_source(&db, &sweep, &project, None).await;
+    let stats = try_ingest_source(&db, &sweep, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.sessions_upserted, 2);
     assert_eq!(stats.messages_upserted, 2);
 
@@ -1446,7 +1450,9 @@ async fn cursor_sweep_skips_ambiguous_project_slug() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let sweep = CursorSweepSource::with_home(&home);
-    let stats = ingest_source(&db, &sweep, &project, None).await;
+    let stats = try_ingest_source(&db, &sweep, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.sessions_upserted, 0);
     assert_eq!(stats.messages_upserted, 0);
     assert!(db.get_session("cursor", "sweep-session").await.is_none());
@@ -1475,7 +1481,9 @@ async fn cursor_sweep_ingests_profile_stored_project_without_local_marker() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let sweep = CursorSweepSource::with_home(&home);
-    let indexed = ingest_source(&db, &sweep, &project, None).await;
+    let indexed = try_ingest_source(&db, &sweep, &project, None)
+        .await
+        .unwrap();
     assert_eq!(indexed.sessions_upserted, 2);
     assert_eq!(indexed.messages_upserted, 2);
     assert!(!project.join(".tracedecay").exists());

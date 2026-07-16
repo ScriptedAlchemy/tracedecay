@@ -1,5 +1,4 @@
 #[cfg(not(windows))]
-use std::fs::File;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -888,30 +887,17 @@ fn sync_file(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(
-    not(unix),
-    allow(
-        clippy::unnecessary_wraps,
-        reason = "directory fsync is unavailable here, but transaction callers share one contract"
-    )
-)]
 fn sync_directory(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        File::open(path)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| {
-                config_error(format!(
-                    "failed to sync directory '{}': {error}",
-                    path.display()
-                ))
-            })
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Ok(())
-    }
+    crate::application::host_admission::sync_directory(
+        path,
+        crate::application::host_admission::DirectorySyncPolicy::Strict,
+    )
+    .map_err(|error| {
+        config_error(format!(
+            "failed to sync directory '{}': {error}",
+            path.display()
+        ))
+    })
 }
 
 fn journal_path(tracedecay_dir: &Path) -> PathBuf {

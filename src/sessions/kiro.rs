@@ -27,7 +27,8 @@ use crate::application::host_admission::HostAdmissionFacade;
 use crate::application::host_admission::{
     HostAdmissionAuthorities, HostAdmissionOutcome, HostAdmissionStatus,
 };
-use crate::application::observation::{CaptureObservationRequest, ObservationCancellation};
+use crate::application::observation::ObservationCancellation;
+#[cfg(test)]
 use crate::privacy::parse_normalized_observation_record_v1;
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
@@ -35,25 +36,26 @@ use crate::sessions::shared::{
     append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
     path_belongs_to_project, title_from_messages,
 };
-#[cfg(test)]
-use crate::sessions::snapshot_observation::host_admission_error;
 use crate::sessions::snapshot_observation::{
     MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionRecord,
-    SnapshotAdmissionRunner, SnapshotCaptureOutcome, bounded_snapshot_input_len,
-    canonical_snapshot_envelope, read_snapshot_text_bounded, snapshot_message_fields,
-    snapshot_source_identity,
+    SnapshotAdmissionRunner, SnapshotCaptureOutcome, StableMessageIdDomains,
+    bounded_snapshot_input_len, non_durable_snapshot_record, read_snapshot_text_bounded,
+    snapshot_message_fields, stable_snapshot_message_id,
+};
+#[cfg(test)]
+use crate::sessions::snapshot_observation::{
+    canonical_snapshot_envelope, host_admission_error, snapshot_cursor_after,
 };
 use crate::sessions::source::{
     ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds, TranscriptIngestError,
-    TranscriptIngestResult, TranscriptSource, canonical_framed_sha256,
-    collect_files_with_ext_bounded, read_changed_file,
+    TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded, read_changed_file,
 };
 use serde_json::{Map, Value};
+#[cfg(test)]
 use tracedecay_domain::{
-    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceRangeV1,
-    RetentionClass,
+    ObservationOrderingDomainV1, ObservationSourceCursorV1, ObservationSourceRangeV1,
 };
+use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 
 const PROVIDER: &str = "kiro";
 const DELIMITED_NATIVE_MESSAGE_ID_DOMAIN: &[u8] = b"tracedecay.kiro-delimited-native-message.v2";
@@ -86,48 +88,6 @@ pub(crate) struct KiroSnapshotObservationRecord {
     payload: Vec<u8>,
 }
 
-#[allow(dead_code)]
-impl KiroSnapshotObservationRecord {
-    pub(crate) fn native_record_id(&self) -> &str {
-        &self.native_record_id
-    }
-
-    pub(crate) fn order(&self) -> u64 {
-        self.order
-    }
-
-    pub(crate) fn capture_request(
-        &self,
-        scope: ObservationScopeV1,
-        generation: ObservationSourceGenerationV1,
-        expected_cursor: Option<ObservationSourceCursorV1>,
-        cancellation: ObservationCancellation,
-    ) -> TranscriptIngestResult<CaptureObservationRequest> {
-        snapshot_capture_request(
-            PROVIDER,
-            self,
-            scope,
-            generation,
-            expected_cursor,
-            cancellation,
-        )
-    }
-
-    pub(crate) fn cursor_after(
-        &self,
-        scope: ObservationScopeV1,
-        generation: ObservationSourceGenerationV1,
-    ) -> TranscriptIngestResult<ObservationSourceCursorV1> {
-        Ok(ObservationSourceCursorV1::for_ordering(
-            snapshot_source_identity(PROVIDER, &self.session_id)?,
-            scope,
-            generation,
-            ObservationOrderingDomainV1::SnapshotOrder,
-            self.order + 1,
-        )?)
-    }
-}
-
 impl SnapshotAdmissionRecord for KiroSnapshotObservationRecord {
     fn provider(&self) -> &'static str {
         PROVIDER
@@ -137,24 +97,27 @@ impl SnapshotAdmissionRecord for KiroSnapshotObservationRecord {
         &self.session_id
     }
 
+    fn native_record_id(&self) -> &str {
+        &self.native_record_id
+    }
+
     fn order(&self) -> u64 {
         self.order
     }
 
-    fn capture_request(
+    fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
+#[cfg(test)]
+impl KiroSnapshotObservationRecord {
+    fn cursor_after(
         &self,
         scope: ObservationScopeV1,
         generation: ObservationSourceGenerationV1,
-        expected_cursor: Option<ObservationSourceCursorV1>,
-        cancellation: ObservationCancellation,
-    ) -> TranscriptIngestResult<CaptureObservationRequest> {
-        KiroSnapshotObservationRecord::capture_request(
-            self,
-            scope,
-            generation,
-            expected_cursor,
-            cancellation,
-        )
+    ) -> TranscriptIngestResult<ObservationSourceCursorV1> {
+        snapshot_cursor_after(PROVIDER, &self.session_id, self.order, scope, generation)
     }
 }
 
@@ -322,51 +285,45 @@ fn collect_user_workspace_session_files(
     let Ok(entries) = std::fs::read_dir(sessions_root) else {
         return Vec::new();
     };
-    let mut workspace_dirs = Vec::new();
-    for candidate in entries.flatten().filter_map(|entry| {
-        let path = entry.path();
-        if !path.is_dir() {
-            return None;
-        }
-        let workspace =
-            decode_workspace_sessions_dir(entry.file_name().to_string_lossy().as_ref())?;
-        if registered_roots
-            .iter()
-            .any(|root| path_belongs_to_project(&workspace, root))
-        {
-            return None;
-        }
-        let mtime = entry
-            .metadata()
-            .ok()
-            .and_then(|meta| meta.modified().ok())
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |duration| duration.as_secs());
-        Some((mtime, path))
-    }) {
-        workspace_dirs.push(candidate);
-        workspace_dirs
-            .sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-        workspace_dirs.truncate(MAX_WORKSPACE_DIRS);
-    }
+    let mut workspace_dirs: Vec<(u64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return None;
+            }
+            let workspace =
+                decode_workspace_sessions_dir(entry.file_name().to_string_lossy().as_ref())?;
+            if registered_roots
+                .iter()
+                .any(|root| path_belongs_to_project(&workspace, root))
+            {
+                return None;
+            }
+            let mtime = entry
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_secs());
+            Some((mtime, path))
+        })
+        .collect();
     workspace_dirs.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    workspace_dirs.truncate(MAX_WORKSPACE_DIRS);
 
     let mut out = Vec::new();
     for (_, workspace_dir) in workspace_dirs {
         let Ok(entries) = std::fs::read_dir(workspace_dir) else {
             continue;
         };
-        let mut paths = Vec::new();
-        for path in entries
+        let mut paths: Vec<PathBuf> = entries
             .flatten()
             .map(|entry| entry.path())
             .filter(|path| path.is_file() && path.extension().is_none_or(|ext| ext == "json"))
-        {
-            paths.push(path);
-            paths.sort();
-            paths.truncate(MAX_TRANSCRIPTS_PER_WORKSPACE);
-        }
+            .collect();
         paths.sort();
+        paths.truncate(MAX_TRANSCRIPTS_PER_WORKSPACE);
         out.extend(paths);
     }
     out
@@ -413,13 +370,9 @@ pub(crate) async fn capture_kiro_snapshot_observations(
 }
 
 fn ensure_bounded_snapshot(path: &Path, byte_cap: u64) -> TranscriptIngestResult<()> {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return Ok(());
-    };
-    if metadata.len() > byte_cap {
-        return Err(non_durable(path, "snapshot exceeds provider byte bound"));
-    }
-    Ok(())
+    bounded_snapshot_input_len(PROVIDER, path, byte_cap)
+        .map(|_| ())
+        .map_err(|_| non_durable(path, "snapshot exceeds provider byte bound"))
 }
 
 impl KiroSource {
@@ -437,13 +390,7 @@ impl KiroSource {
 }
 
 fn non_durable(path: &Path, reason: &'static str) -> TranscriptIngestError {
-    let end_offset = std::fs::metadata(path).map_or(0, |metadata| metadata.len());
-    TranscriptIngestError::NonDurableRecord {
-        provider: PROVIDER,
-        offset: 0,
-        end_offset,
-        reason,
-    }
+    non_durable_snapshot_record(PROVIDER, path, reason)
 }
 
 fn collect_workspace_session_files(sessions_root: &Path, project_root: &Path) -> Vec<PathBuf> {
@@ -472,17 +419,13 @@ fn collect_workspace_session_files(sessions_root: &Path, project_root: &Path) ->
         let Ok(session_entries) = std::fs::read_dir(&encoded_dir) else {
             continue;
         };
-        let mut paths = Vec::new();
-        for path in session_entries
+        let mut paths: Vec<PathBuf> = session_entries
             .flatten()
             .map(|entry| entry.path())
             .filter(|path| path.is_file() && path.extension().is_none_or(|ext| ext == "json"))
-        {
-            paths.push(path);
-            paths.sort();
-            paths.truncate(MAX_TRANSCRIPTS_PER_WORKSPACE);
-        }
+            .collect();
         paths.sort();
+        paths.truncate(MAX_TRANSCRIPTS_PER_WORKSPACE);
         out.extend(paths);
     }
     out
@@ -520,11 +463,9 @@ fn collect_agent_storage_files(
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map_or(0, |duration| duration.as_secs());
         workspace_dirs.push((mtime, path, workspace));
-        workspace_dirs
-            .sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-        workspace_dirs.truncate(MAX_WORKSPACE_DIRS);
     }
     workspace_dirs.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    workspace_dirs.truncate(MAX_WORKSPACE_DIRS);
 
     let mut out = Vec::new();
     for (_, workspace_dir, _) in workspace_dirs {
@@ -558,39 +499,37 @@ fn collect_user_agent_storage_files(
     let Ok(entries) = std::fs::read_dir(agent_dir) else {
         return Vec::new();
     };
-    let mut workspace_dirs = Vec::new();
-    for candidate in entries.flatten().filter_map(|entry| {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let path = entry.path();
-        if name == "workspace-sessions"
-            || name.starts_with('.')
-            || !path.is_dir()
-            || name.len() != 32
-        {
-            return None;
-        }
-        let workspace = workspace_path_from_hash(workspace_storage_dir, &name)?;
-        if registered_roots
-            .iter()
-            .any(|root| path_belongs_to_project(&workspace, root))
-        {
-            return None;
-        }
-        let mtime = entry
-            .metadata()
-            .ok()
-            .and_then(|meta| meta.modified().ok())
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |duration| duration.as_secs());
-        Some((mtime, path))
-    }) {
-        workspace_dirs.push(candidate);
-        workspace_dirs
-            .sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-        workspace_dirs.truncate(MAX_WORKSPACE_DIRS);
-    }
+    let mut workspace_dirs: Vec<(u64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let path = entry.path();
+            if name == "workspace-sessions"
+                || name.starts_with('.')
+                || !path.is_dir()
+                || name.len() != 32
+            {
+                return None;
+            }
+            let workspace = workspace_path_from_hash(workspace_storage_dir, &name)?;
+            if registered_roots
+                .iter()
+                .any(|root| path_belongs_to_project(&workspace, root))
+            {
+                return None;
+            }
+            let mtime = entry
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_secs());
+            Some((mtime, path))
+        })
+        .collect();
     workspace_dirs.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    workspace_dirs.truncate(MAX_WORKSPACE_DIRS);
 
     let mut out = Vec::new();
     for (_, workspace_dir) in workspace_dirs {
@@ -1014,7 +953,6 @@ fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
         .map(str::to_string)
 }
 
-#[allow(dead_code)]
 pub(crate) fn normalize_kiro_snapshot_observations(
     messages: &[SessionMessageRecord],
 ) -> TranscriptIngestResult<Vec<KiroSnapshotObservationRecord>> {
@@ -1041,54 +979,6 @@ fn snapshot_native_payload(message: &SessionMessageRecord) -> Value {
     Value::Object(snapshot_message_fields(PROVIDER, message))
 }
 
-fn snapshot_capture_request(
-    provider: &'static str,
-    record: &KiroSnapshotObservationRecord,
-    scope: ObservationScopeV1,
-    generation: ObservationSourceGenerationV1,
-    expected_cursor: Option<ObservationSourceCursorV1>,
-    cancellation: ObservationCancellation,
-) -> TranscriptIngestResult<CaptureObservationRequest> {
-    let range = ObservationSourceRangeV1::new(record.order, record.order + 1)?;
-    let parsed = parse_normalized_observation_record_v1(
-        &record.payload,
-        range,
-        ObservationOrderingDomainV1::SnapshotOrder,
-        |native| {
-            canonical_snapshot_envelope(
-                &native,
-                provider,
-                &record.session_id,
-                &record.native_record_id,
-                range,
-            )
-        },
-    )
-    .map_err(|_| TranscriptIngestError::NonDurableRecord {
-        provider,
-        offset: range.start(),
-        end_offset: range.end(),
-        reason: "normalized observation record is not durable",
-    })?;
-    let source = snapshot_source_identity(provider, &record.session_id)?;
-    let identity = ObservationIdentityMaterialV1::for_native_record(
-        source,
-        scope,
-        generation,
-        range,
-        ObservationOrderingDomainV1::SnapshotOrder,
-        ObservationId::new(record.native_record_id.clone())?,
-    )?;
-    CaptureObservationRequest::new(
-        parsed,
-        identity,
-        expected_cursor,
-        RetentionClass::new("transcript.kiro.v1")?,
-        cancellation,
-    )
-    .map_err(|_| TranscriptIngestError::InvalidFrameState { provider })
-}
-
 fn stable_message_id(
     session_id: &str,
     entry: &Value,
@@ -1097,23 +987,21 @@ fn stable_message_id(
     occurrence: usize,
     text: &str,
 ) -> String {
-    if let Some(native_id) = string_field(entry, &["id", "messageId", "message_id", "eventId"]) {
-        if !session_id.contains(':') && !native_id.contains(':') {
-            return format!("{session_id}:{native_id}");
-        }
-        let digest = canonical_framed_sha256(
-            DELIMITED_NATIVE_MESSAGE_ID_DOMAIN,
-            &[session_id.as_bytes(), native_id.as_bytes()],
-        );
-        return format!("kiro.message-id.v2.{digest}");
-    }
+    let native_id = string_field(entry, &["id", "messageId", "message_id", "eventId"]);
     let timestamp_bytes = timestamp.map(i64::to_be_bytes);
     let timestamp_bytes = timestamp_bytes
         .as_ref()
         .map_or(&[][..], |bytes| bytes.as_slice());
     let occurrence_bytes = u64::try_from(occurrence).unwrap_or(u64::MAX).to_be_bytes();
-    let digest = canonical_framed_sha256(
-        DERIVED_MESSAGE_ID_DOMAIN,
+    stable_snapshot_message_id(
+        StableMessageIdDomains {
+            delimited_domain: DELIMITED_NATIVE_MESSAGE_ID_DOMAIN,
+            delimited_prefix: "kiro.message-id.v2.",
+            derived_domain: DERIVED_MESSAGE_ID_DOMAIN,
+            derived_prefix: "kiro.derived-message.v3.",
+        },
+        session_id,
+        native_id.as_deref(),
         &[
             session_id.as_bytes(),
             role.as_bytes(),
@@ -1121,8 +1009,7 @@ fn stable_message_id(
             text.as_bytes(),
             &occurrence_bytes,
         ],
-    );
-    format!("kiro.derived-message.v3.{digest}")
+    )
 }
 
 fn session_metadata(location_cwd: Option<&Path>, transcript: Option<&Value>) -> Value {

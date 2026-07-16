@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
-    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
-    CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
-    ObservationId, ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1,
-    ProjectId, ProviderId, RetentionClass, SessionId,
+    CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1,
+    CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1, ObservationId,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1, ProjectId,
+    ProviderId, RetentionClass, SessionId,
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
@@ -23,7 +23,8 @@ use crate::sessions::SessionMessageRecord;
 use crate::sessions::ingest_byte_budget::IngestByteBudget;
 use crate::sessions::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
-    admit_jsonl_observations,
+    admit_jsonl_observations, canonical_message_role, canonical_native_observation_id,
+    canonical_u64, namespace_replacement_message_ids, preflight_and_parse_new,
 };
 use crate::sessions::shared::{
     StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
@@ -33,7 +34,7 @@ use crate::sessions::shared::{
 use crate::sessions::source::{
     MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlFrame, RawJsonlFrameReader, SessionDraft,
     TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
-    collect_files_with_ext_bounded, preflight_strict_jsonl, stream_new_jsonl,
+    collect_files_with_ext_bounded, stream_new_jsonl,
 };
 use crate::storage::{
     SESSIONS_DB_FILENAME, default_profile_project_id, default_profile_root,
@@ -236,8 +237,9 @@ impl TranscriptSource for CursorEventSource {
         project_root: &Path,
         max_new_bytes: Option<u64>,
     ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        preflight_strict_jsonl("cursor", path, prev, max_new_bytes)?;
-        Ok(self.parse_new(path, prev, project_root, max_new_bytes))
+        preflight_and_parse_new("cursor", path, prev, max_new_bytes, || {
+            self.parse_new(path, prev, project_root, max_new_bytes)
+        })
     }
 }
 
@@ -438,7 +440,7 @@ fn normalize_cursor_observation_with_message_id(
     if let Some(content) = content {
         if let Some(message_content) = canonical_cursor_message_content(content) {
             facts.push(CanonicalObservationFactV1::Message {
-                role: canonical_cursor_role(native.get("role").and_then(Value::as_str)),
+                role: canonical_message_role(native.get("role").and_then(Value::as_str)),
                 content: message_content,
                 model: cursor_record_message_model(native, message.unwrap_or(native)).or_else(
                     || {
@@ -557,7 +559,7 @@ fn append_cursor_content_facts(
     for item in items {
         match item.get("type").and_then(Value::as_str) {
             Some("tool_use") => {
-                let invocation_id = canonical_cursor_observation_id(
+                let invocation_id = canonical_native_observation_id(
                     item.get("id").and_then(Value::as_str),
                     stable_record_id,
                 );
@@ -590,7 +592,7 @@ fn append_cursor_content_facts(
                         .get("tool_use_id")
                         .or_else(|| item.get("id"))
                         .and_then(Value::as_str)
-                        .map(|id| canonical_cursor_observation_id(Some(id), stable_record_id)),
+                        .map(|id| canonical_native_observation_id(Some(id), stable_record_id)),
                     content: item
                         .get("content")
                         .or_else(|| item.get("result"))
@@ -640,7 +642,7 @@ fn append_cursor_tool_call_facts(
             .unwrap_or("tool")
             .to_string();
         facts.push(CanonicalObservationFactV1::ToolInvocation {
-            invocation_id: canonical_cursor_observation_id(
+            invocation_id: canonical_native_observation_id(
                 tool_call.get("id").and_then(Value::as_str),
                 stable_record_id,
             ),
@@ -667,27 +669,27 @@ fn append_cursor_usage_fact(
     let Some(usage) = usage else {
         return;
     };
-    let input_tokens = cursor_canonical_u64(
+    let input_tokens = canonical_u64(
         usage
             .get("input_tokens")
             .or_else(|| usage.get("inputTokens")),
     );
-    let output_tokens = cursor_canonical_u64(
+    let output_tokens = canonical_u64(
         usage
             .get("output_tokens")
             .or_else(|| usage.get("outputTokens")),
     );
-    let cache_read_tokens = cursor_canonical_u64(
+    let cache_read_tokens = canonical_u64(
         usage
             .get("cache_read_tokens")
             .or_else(|| usage.get("cacheReadTokens")),
     );
-    let cache_write_tokens = cursor_canonical_u64(
+    let cache_write_tokens = canonical_u64(
         usage
             .get("cache_write_tokens")
             .or_else(|| usage.get("cacheWriteTokens")),
     );
-    let reasoning_tokens = cursor_canonical_u64(
+    let reasoning_tokens = canonical_u64(
         usage
             .get("reasoning_tokens")
             .or_else(|| usage.get("reasoningTokens")),
@@ -765,33 +767,6 @@ fn append_cursor_git_facts(native: &Value, facts: &mut Vec<CanonicalObservationF
     }
 }
 
-fn canonical_cursor_role(role: Option<&str>) -> CanonicalMessageRoleV1 {
-    match role {
-        Some("user") => CanonicalMessageRoleV1::User,
-        Some("assistant") => CanonicalMessageRoleV1::Assistant,
-        Some("system" | "developer") => CanonicalMessageRoleV1::System,
-        Some("tool") => CanonicalMessageRoleV1::Tool,
-        _ => CanonicalMessageRoleV1::Unknown,
-    }
-}
-
-fn canonical_cursor_observation_id(
-    native_id: Option<&str>,
-    fallback: &ObservationId,
-) -> ObservationId {
-    native_id
-        .and_then(|native_id| ObservationId::new(native_id).ok())
-        .unwrap_or_else(|| fallback.clone())
-}
-
-fn cursor_canonical_u64(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
-    })
-}
-
 fn observation_native_record_id(
     provider: &str,
     session_id: &str,
@@ -839,15 +814,6 @@ fn cursor_projected_message_id(
         base
     };
     ObservationId::new(message_id).map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
-}
-
-fn namespace_cursor_replacement_message_ids(
-    messages: &mut [SessionMessageRecord],
-    generation: u64,
-) {
-    for message in messages {
-        message.message_id = format!("{}:generation:{generation}", message.message_id);
-    }
 }
 
 /// Parse the newly-appended portion of one Cursor transcript file into a
@@ -906,7 +872,7 @@ fn parse_cursor_jsonl(
         ));
     }
     if replayed_from_start {
-        namespace_cursor_replacement_message_ids(&mut messages, new.new_cursor.file_id);
+        namespace_replacement_message_ids(&mut messages, new.new_cursor.file_id);
     }
 
     // Defer the (filesystem-walking) project/title/metadata derivation until
@@ -1558,8 +1524,9 @@ impl TranscriptSource for CursorSweepSource {
         project_root: &Path,
         max_new_bytes: Option<u64>,
     ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        preflight_strict_jsonl("cursor", path, prev, max_new_bytes)?;
-        Ok(self.parse_new(path, prev, project_root, max_new_bytes))
+        preflight_and_parse_new("cursor", path, prev, max_new_bytes, || {
+            self.parse_new(path, prev, project_root, max_new_bytes)
+        })
     }
 }
 

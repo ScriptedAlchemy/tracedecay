@@ -548,58 +548,26 @@ pub(crate) async fn ingest_sources_bounded(
             continue;
         };
         attempted = attempted.saturating_add(1);
-        let single = SinglePathSource::new(source, unit.path.clone());
-        let cursor_key = source.cursor_key(&unit.path).durable_text();
-        let cursor_before = db
-            .get_parse_offset_result(&cursor_key)
-            .await
-            .map(|offset| offset.map(|offset| (offset.byte_offset, offset.mtime, offset.file_id)));
-        let mut attempts = 0usize;
-        loop {
-            let grant = remaining_bytes.min(bounds.bytes_per_unit);
-            if grant == 0 {
-                break;
-            }
-            remaining_bytes = remaining_bytes.saturating_sub(grant);
-            match try_ingest_source_with_store(&store, &single, project_root, Some(grant)).await {
-                Ok(source_stats) => {
-                    let cursor_after =
-                        db.get_parse_offset_result(&cursor_key).await.map(|offset| {
-                            offset.map(|offset| (offset.byte_offset, offset.mtime, offset.file_id))
-                        });
-                    let cursor_progress = match (&cursor_before, &cursor_after) {
-                        (Ok(before), Ok(after)) => before != after,
-                        _ => true,
-                    };
-                    scheduling_progress |= cursor_progress
-                        || source_stats.sessions_upserted > 0
-                        || source_stats.messages_upserted > 0;
-                    stats = stats.merge(source_stats);
-                    units_completed = units_completed.saturating_add(1);
-                    break;
-                }
-                Err(error) => {
-                    attempts = attempts.saturating_add(1);
-                    let failure =
-                        classify_transcript_ingest_failure(source.provider(), "transcript", &error);
-                    if failure.retryable && attempts <= bounds.retries && remaining_bytes > 0 {
-                        continue;
-                    }
-                    tracing::warn!(
-                        provider = source.provider(),
-                        reason_code = failure.reason_code,
-                        retryable = failure.retryable,
-                        "project transcript catch-up failed"
-                    );
-                    failures.push(failure);
-                    units_failed = units_failed.saturating_add(1);
-                    scheduling_progress = true;
-                    // Failed source cursors/frontiers are not advanced by the
-                    // store path; fair rotation still consumed this slot so
-                    // later sources are not starved.
-                    break;
-                }
-            }
+        let outcome = ingest_admitted_unit(
+            &store,
+            db,
+            source,
+            &unit.path,
+            project_root,
+            bounds,
+            &mut remaining_bytes,
+        )
+        .await;
+        scheduling_progress |= outcome.progressed;
+        stats = stats.merge(outcome.stats);
+        if let Some(failure) = outcome.failure {
+            // Failed source cursors/frontiers are not advanced by the store
+            // path; fair rotation still consumed this slot so later sources are
+            // not starved.
+            failures.push(failure);
+            units_failed = units_failed.saturating_add(1);
+        } else if outcome.completed {
+            units_completed = units_completed.saturating_add(1);
         }
         if cancellation.is_cancelled() {
             cancelled = true;
@@ -664,5 +632,85 @@ pub(crate) async fn ingest_sources_bounded(
         units_completed,
         units_failed,
         byte_bounds_enforced: true,
+    }
+}
+
+/// Disposition of one admitted work unit after its bounded retry loop.
+struct UnitIngestOutcome {
+    stats: TranscriptIngestStats,
+    failure: Option<TranscriptCatchUpFailure>,
+    progressed: bool,
+    completed: bool,
+}
+
+/// Ingest one admitted path unit under its byte grant, charging `remaining_bytes`
+/// and reporting whether the durable cursor or stats advanced.
+async fn ingest_admitted_unit(
+    store: &GlobalDbTranscriptStore<'_>,
+    db: &GlobalDb,
+    source: &dyn TranscriptSource,
+    path: &Path,
+    project_root: &Path,
+    bounds: IngestPassBounds,
+    remaining_bytes: &mut u64,
+) -> UnitIngestOutcome {
+    let single = SinglePathSource::new(source, path.to_path_buf());
+    let cursor_key = source.cursor_key(path).durable_text();
+    let cursor_before = db
+        .get_parse_offset_result(&cursor_key)
+        .await
+        .map(|offset| offset.map(|offset| (offset.byte_offset, offset.mtime, offset.file_id)));
+    let mut attempts = 0usize;
+    loop {
+        let grant = (*remaining_bytes).min(bounds.bytes_per_unit);
+        if grant == 0 {
+            return UnitIngestOutcome {
+                stats: TranscriptIngestStats::default(),
+                failure: None,
+                progressed: false,
+                completed: false,
+            };
+        }
+        *remaining_bytes = remaining_bytes.saturating_sub(grant);
+        match try_ingest_source_with_store(store, &single, project_root, Some(grant)).await {
+            Ok(source_stats) => {
+                let cursor_after = db.get_parse_offset_result(&cursor_key).await.map(|offset| {
+                    offset.map(|offset| (offset.byte_offset, offset.mtime, offset.file_id))
+                });
+                let cursor_progress = match (&cursor_before, &cursor_after) {
+                    (Ok(before), Ok(after)) => before != after,
+                    _ => true,
+                };
+                let progressed = cursor_progress
+                    || source_stats.sessions_upserted > 0
+                    || source_stats.messages_upserted > 0;
+                return UnitIngestOutcome {
+                    stats: source_stats,
+                    failure: None,
+                    progressed,
+                    completed: true,
+                };
+            }
+            Err(error) => {
+                attempts = attempts.saturating_add(1);
+                let failure =
+                    classify_transcript_ingest_failure(source.provider(), "transcript", &error);
+                if failure.retryable && attempts <= bounds.retries && *remaining_bytes > 0 {
+                    continue;
+                }
+                tracing::warn!(
+                    provider = source.provider(),
+                    reason_code = failure.reason_code,
+                    retryable = failure.retryable,
+                    "project transcript catch-up failed"
+                );
+                return UnitIngestOutcome {
+                    stats: TranscriptIngestStats::default(),
+                    failure: Some(failure),
+                    progressed: true,
+                    completed: false,
+                };
+            }
+        }
     }
 }

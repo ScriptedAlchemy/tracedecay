@@ -211,7 +211,6 @@ pub(super) fn replace_file_atomically(
     .map_err(|error| access_io_error(&format!("publish {record_name}"), path, &error))
 }
 
-#[cfg(unix)]
 pub(super) fn sync_parent_directory(path: &Path, record_name: &str) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         access_error(
@@ -220,18 +219,11 @@ pub(super) fn sync_parent_directory(path: &Path, record_name: &str) -> Result<()
             &format!("{record_name} path has no parent directory"),
         )
     })?;
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| access_io_error(&format!("sync {record_name} directory"), parent, &error))
-}
-
-#[cfg(not(unix))]
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "directory fsync is unavailable here, but record callers share one contract"
-)]
-pub(super) fn sync_parent_directory(_path: &Path, _record_name: &str) -> Result<()> {
-    Ok(())
+    crate::application::host_admission::sync_directory(
+        parent,
+        crate::application::host_admission::DirectorySyncPolicy::Strict,
+    )
+    .map_err(|error| access_io_error(&format!("sync {record_name} directory"), parent, &error))
 }
 
 pub(super) fn writer_owner(token: &str, intent: &str) -> WriterOwner {

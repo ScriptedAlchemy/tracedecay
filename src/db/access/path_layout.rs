@@ -19,7 +19,7 @@ pub(super) fn canonical_profile_root(profile_root: &Path) -> Result<PathBuf> {
 }
 
 pub(super) fn platform_identity_key(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    crate::lifecycle_lease::canonical_or_original(path)
 }
 
 #[cfg_attr(
@@ -116,21 +116,9 @@ pub(super) fn stable_path_set_hash<'a>(paths: impl IntoIterator<Item = &'a Path>
     hash
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn native_path_bytes(path: &Path) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-
-    path.as_os_str().as_bytes().to_vec()
-}
-
-#[cfg(windows)]
-fn native_path_bytes(path: &Path) -> Vec<u8> {
-    use std::os::windows::ffi::OsStrExt;
-
-    path.as_os_str()
-        .encode_wide()
-        .flat_map(u16::to_le_bytes)
-        .collect()
+    crate::os_str_bytes::native_os_str_bytes(path.as_os_str())
 }
 
 #[cfg(not(any(unix, windows)))]

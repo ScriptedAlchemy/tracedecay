@@ -14,6 +14,7 @@ use crate::sessions::{
 
 use super::failure::{
     ProviderRunOutcome, classify_transcript_ingest_failure, claude_catch_up_failure,
+    warn_transcript_catch_up_failure,
 };
 
 pub(super) const PROJECT_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
@@ -78,16 +79,12 @@ impl ProjectProviderRun<'_> {
                     deferred |= progress.source_deferred || progress.bytes_consumed > remaining;
                     remaining = remaining.saturating_sub(progress.bytes_consumed);
                 }
-                Err(error) => {
-                    let failure =
-                        classify_transcript_ingest_failure("codex", "observation", &error);
-                    tracing::warn!(
-                        reason_code = failure.reason_code,
-                        retryable = failure.retryable,
-                        "project Codex observation catch-up failed"
-                    );
-                    outcome.add_failure(failure);
-                }
+                Err(error) => outcome.add_failure(warn_transcript_catch_up_failure(
+                    "codex",
+                    "observation",
+                    &error,
+                    "project Codex observation catch-up failed",
+                )),
             }
         }
         outcome.bytes_consumed = self.max_new_bytes.saturating_sub(remaining);
@@ -114,15 +111,15 @@ impl ProjectProviderRun<'_> {
                 outcome.bytes_consumed,
                 outcome.deferred_by_byte_cap || outcome.bytes_consumed > self.max_new_bytes,
             ),
-            Err(error) => {
-                let failure = classify_transcript_ingest_failure("kiro", "observation", &error);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "project Kiro observation catch-up failed"
-                );
-                ProviderRunOutcome::failed(failure, 0)
-            }
+            Err(error) => ProviderRunOutcome::failed(
+                warn_transcript_catch_up_failure(
+                    "kiro",
+                    "observation",
+                    &error,
+                    "project Kiro observation catch-up failed",
+                ),
+                0,
+            ),
         }
     }
 
@@ -242,15 +239,12 @@ impl ProjectProviderRun<'_> {
                     stats.source_deferred || stats.bytes_consumed > remaining,
                 ));
             }
-            Err(error) => {
-                let failure = classify_transcript_ingest_failure("cursor", "observation", &error);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "project Cursor observation catch-up failed"
-                );
-                outcome.add_failure(failure);
-            }
+            Err(error) => outcome.add_failure(warn_transcript_catch_up_failure(
+                "cursor",
+                "observation",
+                &error,
+                "project Cursor observation catch-up failed",
+            )),
         }
         outcome
     }

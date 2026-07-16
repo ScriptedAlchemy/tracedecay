@@ -183,6 +183,52 @@ pub(crate) async fn daemon_hook_action(
     result
 }
 
+pub(crate) async fn ingest_user_session(
+    provider: &str,
+    session_id: Option<String>,
+    telemetry: Option<&analytics::HookTimingSpan>,
+) -> bool {
+    if session_id.is_none() {
+        return false;
+    }
+    match daemon_hook_action(
+        None,
+        serde_json::json!({
+            "action": "ingest_transcript",
+            "provider": provider.to_lowercase(),
+            "user_scope": true,
+            "session_id": session_id,
+        }),
+        telemetry,
+    )
+    .await
+    {
+        Ok(result) => result
+            .get("messages_upserted")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0),
+        Err(error) => {
+            eprintln!("[tracedecay] user {provider} ingest daemon call failed: {error}");
+            false
+        }
+    }
+}
+
+pub(crate) async fn reset_counter_for_project(
+    project_root: &Path,
+    telemetry: Option<&analytics::HookTimingSpan>,
+) {
+    if let Err(error) = daemon_hook_action(
+        Some(project_root),
+        serde_json::json!({ "action": "reset_counter" }),
+        telemetry,
+    )
+    .await
+    {
+        eprintln!("[tracedecay] local counter reset daemon call failed: {error}");
+    }
+}
+
 pub(crate) async fn notify_hook_event_with_telemetry(
     project_root: &Path,
     event: crate::daemon::DaemonHookEvent,

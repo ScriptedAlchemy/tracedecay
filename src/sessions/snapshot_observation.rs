@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::Path;
 
@@ -7,9 +7,9 @@ use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CanonicalReasoningVisibilityV1, CanonicalWorkflowEvidenceKindV1, ObservationId,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    ProviderId, SessionId,
+    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
 };
 use tracedecay_store::ObservationPersistOutcome;
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
@@ -21,11 +21,13 @@ use crate::application::host_admission::{
 use crate::application::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use crate::privacy::ObservationRecordParseErrorV1;
+use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::ingest_byte_budget::IngestByteBudget;
 use crate::sessions::shared::TranscriptIngestStats;
-use crate::sessions::source::{TranscriptIngestError, TranscriptIngestResult};
+use crate::sessions::source::{
+    TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
+};
 
 pub(crate) const MAX_SNAPSHOT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const MAX_SNAPSHOT_METADATA_BYTES: u64 = 256 * 1024;
@@ -75,14 +77,119 @@ impl SnapshotByteBudget {
 pub(crate) trait SnapshotAdmissionRecord {
     fn provider(&self) -> &'static str;
     fn session_id(&self) -> &str;
+    fn native_record_id(&self) -> &str;
     fn order(&self) -> u64;
+    fn payload(&self) -> &[u8];
     fn capture_request(
         &self,
         scope: ObservationScopeV1,
         generation: ObservationSourceGenerationV1,
         expected_cursor: Option<ObservationSourceCursorV1>,
         cancellation: ObservationCancellation,
-    ) -> TranscriptIngestResult<CaptureObservationRequest>;
+    ) -> TranscriptIngestResult<CaptureObservationRequest> {
+        snapshot_capture_request(self, scope, generation, expected_cursor, cancellation)
+    }
+}
+
+/// Builds the canonical capture request shared by every snapshot provider.
+pub(crate) fn snapshot_capture_request<R>(
+    record: &R,
+    scope: ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    cancellation: ObservationCancellation,
+) -> TranscriptIngestResult<CaptureObservationRequest>
+where
+    R: SnapshotAdmissionRecord + ?Sized,
+{
+    let provider = record.provider();
+    let range = ObservationSourceRangeV1::new(record.order(), record.order() + 1)?;
+    let parsed = parse_normalized_observation_record_v1(
+        record.payload(),
+        range,
+        ObservationOrderingDomainV1::SnapshotOrder,
+        |native| {
+            canonical_snapshot_envelope(
+                &native,
+                provider,
+                record.session_id(),
+                record.native_record_id(),
+                range,
+            )
+        },
+    )
+    .map_err(|_| TranscriptIngestError::NonDurableRecord {
+        provider,
+        offset: range.start(),
+        end_offset: range.end(),
+        reason: "normalized observation record is not durable",
+    })?;
+    let source = snapshot_source_identity(provider, record.session_id())?;
+    let identity = ObservationIdentityMaterialV1::for_native_record(
+        source,
+        scope,
+        generation,
+        range,
+        ObservationOrderingDomainV1::SnapshotOrder,
+        ObservationId::new(record.native_record_id())?,
+    )?;
+    CaptureObservationRequest::new(
+        parsed,
+        identity,
+        expected_cursor,
+        RetentionClass::new(format!("transcript.{provider}.v1"))?,
+        cancellation,
+    )
+    .map_err(|_| TranscriptIngestError::InvalidFrameState { provider })
+}
+
+/// Provider-specific domain separators for [`stable_snapshot_message_id`].
+#[derive(Clone, Copy)]
+pub(crate) struct StableMessageIdDomains {
+    pub(crate) delimited_domain: &'static [u8],
+    pub(crate) delimited_prefix: &'static str,
+    pub(crate) derived_domain: &'static [u8],
+    pub(crate) derived_prefix: &'static str,
+}
+
+/// Two-tier snapshot message identity: native fast path with a collision-safe
+/// delimited fallback, otherwise a derived digest over the provider frames.
+pub(crate) fn stable_snapshot_message_id(
+    domains: StableMessageIdDomains,
+    id: &str,
+    native_id: Option<&str>,
+    derived_frames: &[&[u8]],
+) -> String {
+    if let Some(native_id) = native_id {
+        if !id.contains(':') && !native_id.contains(':') {
+            return format!("{id}:{native_id}");
+        }
+        let digest = canonical_framed_sha256(
+            domains.delimited_domain,
+            &[id.as_bytes(), native_id.as_bytes()],
+        );
+        return format!("{}{digest}", domains.delimited_prefix);
+    }
+    let digest = canonical_framed_sha256(domains.derived_domain, derived_frames);
+    format!("{}{digest}", domains.derived_prefix)
+}
+
+/// Post-record snapshot cursor shared by provider capture-request tests.
+#[cfg(test)]
+pub(crate) fn snapshot_cursor_after(
+    provider: &'static str,
+    session_id: &str,
+    order: u64,
+    scope: ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+) -> TranscriptIngestResult<ObservationSourceCursorV1> {
+    Ok(ObservationSourceCursorV1::for_ordering(
+        snapshot_source_identity(provider, session_id)?,
+        scope,
+        generation,
+        ObservationOrderingDomainV1::SnapshotOrder,
+        order + 1,
+    )?)
 }
 
 /// Owns byte accounting and durable admission state for one snapshot-provider sweep.
@@ -124,15 +231,21 @@ impl SnapshotAdmissionRunner {
             return Ok(());
         };
 
+        let mut cursors: BTreeMap<String, Option<ObservationSourceCursorV1>> = BTreeMap::new();
         let mut pending = Vec::new();
         for record in records {
             let provider = record.provider();
             let source_identity = snapshot_source_identity(provider, record.session_id())?;
             let range = ObservationSourceRangeV1::new(record.order(), record.order() + 1)?;
-            let expected_cursor = facade
-                .get_source_cursor(&source_identity, scope)
-                .await
-                .map_err(|outcome| host_admission_error(provider, outcome))?;
+            let expected_cursor = session_cursor(
+                facade,
+                &mut cursors,
+                provider,
+                record.session_id(),
+                &source_identity,
+                scope,
+            )
+            .await?;
             if snapshot_cursor_covers_range(expected_cursor.as_ref(), generation, range) {
                 continue;
             }
@@ -141,10 +254,15 @@ impl SnapshotAdmissionRunner {
 
         for (record, source_identity, range) in pending {
             let provider = record.provider();
-            let expected_cursor = facade
-                .get_source_cursor(&source_identity, scope)
-                .await
-                .map_err(|outcome| host_admission_error(provider, outcome))?;
+            let expected_cursor = session_cursor(
+                facade,
+                &mut cursors,
+                provider,
+                record.session_id(),
+                &source_identity,
+                scope,
+            )
+            .await?;
             if snapshot_cursor_covers_range(expected_cursor.as_ref(), generation, range) {
                 continue;
             }
@@ -166,6 +284,7 @@ impl SnapshotAdmissionRunner {
                     )
                     .await
                     {
+                        cursors.remove(record.session_id());
                         continue;
                     }
                     return Err(host_admission_error(provider, error));
@@ -173,9 +292,15 @@ impl SnapshotAdmissionRunner {
             };
             match outcome {
                 CaptureObservationOutcome::Persisted { outcome, .. } => {
-                    if matches!(outcome, ObservationPersistOutcome::Committed(_)) {
+                    if let ObservationPersistOutcome::Committed(receipt) = &outcome {
                         self.stats.messages_upserted =
                             self.stats.messages_upserted.saturating_add(1);
+                        cursors.insert(
+                            record.session_id().to_owned(),
+                            Some(receipt.committed_cursor().clone()),
+                        );
+                    } else {
+                        cursors.remove(record.session_id());
                     }
                     self.sessions.insert(record.session_id().to_owned());
                 }
@@ -193,6 +318,7 @@ impl SnapshotAdmissionRunner {
                         cancellation,
                     )
                     .await?;
+                    cursors.remove(record.session_id());
                 }
                 CaptureObservationOutcome::Quarantined { receipt, .. } => {
                     advance_snapshot_coverage(
@@ -208,6 +334,7 @@ impl SnapshotAdmissionRunner {
                         cancellation,
                     )
                     .await?;
+                    cursors.remove(record.session_id());
                 }
             }
         }
@@ -217,6 +344,41 @@ impl SnapshotAdmissionRunner {
     pub(crate) fn finish(mut self) -> SnapshotCaptureOutcome {
         self.stats.sessions_upserted = self.sessions.len() as u64;
         self.budget.finish(self.stats)
+    }
+}
+
+/// Reads a session's durable cursor once per sweep, reusing the committed cursor
+/// carried by each capture receipt instead of re-selecting it per record.
+async fn session_cursor(
+    facade: &HostAdmissionFacade<'_>,
+    cursors: &mut BTreeMap<String, Option<ObservationSourceCursorV1>>,
+    provider: &'static str,
+    session_id: &str,
+    source: &ObservationSourceIdentityV1,
+    scope: &ObservationScopeV1,
+) -> TranscriptIngestResult<Option<ObservationSourceCursorV1>> {
+    if let Some(cursor) = cursors.get(session_id) {
+        return Ok(cursor.clone());
+    }
+    let cursor = facade
+        .get_source_cursor(source, scope)
+        .await
+        .map_err(|outcome| host_admission_error(provider, outcome))?;
+    cursors.insert(session_id.to_owned(), cursor.clone());
+    Ok(cursor)
+}
+
+pub(crate) fn non_durable_snapshot_record(
+    provider: &'static str,
+    path: &Path,
+    reason: &'static str,
+) -> TranscriptIngestError {
+    let end_offset = std::fs::metadata(path).map_or(0, |metadata| metadata.len());
+    TranscriptIngestError::NonDurableRecord {
+        provider,
+        offset: 0,
+        end_offset,
+        reason,
     }
 }
 
@@ -318,22 +480,91 @@ pub(crate) async fn advance_snapshot_coverage(
     receipt: tracedecay_domain::SanitizationReceiptV1,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<()> {
-    let advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
+    advance_snapshot_coverage_maybe(
+        facade,
+        provider,
         source,
+        range,
+        expected_cursor,
         scope,
         generation,
-        ObservationOrderingDomainV1::SnapshotOrder,
-        expected_cursor,
-        range,
         reason,
-        receipt,
+        Some(receipt),
+        cancellation,
     )
+    .await
+}
+
+/// [`advance_snapshot_coverage`] for coverage transitions whose sanitization
+/// receipt is optional (structural covers carry no receipt; sanitizer covers do).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn advance_snapshot_coverage_maybe(
+    facade: &HostAdmissionFacade<'_>,
+    provider: &'static str,
+    source: ObservationSourceIdentityV1,
+    range: ObservationSourceRangeV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    scope: ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    reason: ObservationCoverageReason,
+    receipt: Option<tracedecay_domain::SanitizationReceiptV1>,
+    cancellation: &ObservationCancellation,
+) -> TranscriptIngestResult<()> {
+    let advance = match receipt {
+        Some(receipt) => ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
+            source,
+            scope,
+            generation,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            expected_cursor,
+            range,
+            reason,
+            receipt,
+        ),
+        None => ObservationCursorAdvance::for_ordering(
+            source,
+            scope,
+            generation,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            expected_cursor,
+            range,
+            reason,
+        ),
+    }
     .map_err(|_| TranscriptIngestError::InvalidFrameState { provider })?;
     facade
         .advance_non_durable_source_cursor(advance, cancellation.clone())
         .await
         .map(|_| ())
         .map_err(|outcome| host_admission_error(provider, outcome))
+}
+
+/// Human-readable host-admission failure message shared by the SQLite-backed
+/// snapshot providers, prefixed with the caller's provider label.
+pub(crate) fn host_admission_status_message(
+    provider_label: &str,
+    status: HostAdmissionStatus,
+) -> String {
+    match status {
+        HostAdmissionStatus::Backpressured => {
+            format!("{provider_label} observation admission was backpressured")
+        }
+        HostAdmissionStatus::Unavailable => {
+            format!("{provider_label} observation authority is unavailable")
+        }
+        HostAdmissionStatus::Unknown => {
+            format!("{provider_label} observation provider is unsupported")
+        }
+        HostAdmissionStatus::Degraded => {
+            format!("{provider_label} observation admission was degraded")
+        }
+        HostAdmissionStatus::Supported
+        | HostAdmissionStatus::AcceptedForReplay
+        | HostAdmissionStatus::Committed
+        | HostAdmissionStatus::ExactDuplicate => {
+            format!("{provider_label} observation admission was incomplete")
+        }
+    }
 }
 
 pub(crate) fn snapshot_message_fields(

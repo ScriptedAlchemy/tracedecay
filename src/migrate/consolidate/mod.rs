@@ -874,7 +874,7 @@ pub(crate) fn destination_project_id(git_common_dir: &Path, source: &str, target
     let mut hash = Sha256::new();
     hash.update(b"tracedecay-profile-consolidation-v1\0");
     hash.update(
-        canonical_or_original(git_common_dir)
+        crate::lifecycle_lease::canonical_or_original(git_common_dir)
             .to_string_lossy()
             .as_bytes(),
     );
@@ -1729,11 +1729,8 @@ fn confined_branch_graph_path(root: &Path, db_file: &str) -> Result<PathBuf> {
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
-    canonical_or_original(left) == canonical_or_original(right)
-}
-
-fn canonical_or_original(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    crate::lifecycle_lease::canonical_or_original(left)
+        == crate::lifecycle_lease::canonical_or_original(right)
 }
 
 fn migration_scratch_root(profile_root: &Path) -> Result<MigrationScratchRoot> {

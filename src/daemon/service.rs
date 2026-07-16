@@ -103,6 +103,14 @@ impl QuiescedDaemonLifecycle {
         self.restore_state(self.previous_state)
     }
 
+    /// Windows must release the exclusive lease before the running executable is
+    /// replaced; other platforms retain it through the maintenance action.
+    fn release_lease_for_executable_replacement(&mut self) {
+        if cfg!(windows) {
+            drop(self.lifecycle_lease.take());
+        }
+    }
+
     fn restore_state(&mut self, state: DaemonServiceState) -> Result<()> {
         if state.is_running() {
             self.downgrade_to_shared()?;
@@ -144,6 +152,28 @@ pub fn with_quiesced_installed_service<T>(
 ) -> Result<T> {
     let mut guard = QuiescedDaemonLifecycle::acquire(operation)?;
     let operation_result = guard.lifecycle_lease().and_then(action);
+    let restore_result = guard.restore();
+    combine_operation_and_restore(operation, operation_result, restore_result)
+}
+
+/// Runs `action` inside an exclusive daemon maintenance window, handing it the
+/// lifecycle lease owner token. On Windows the exclusive lease is released
+/// before `action` runs so the running executable can be replaced; other
+/// platforms retain it for the duration and restore the daemon afterward.
+pub fn with_exclusive_maintenance_window<T>(
+    operation: &str,
+    action: impl FnOnce(&str) -> Result<T>,
+) -> Result<T> {
+    let mut guard = QuiescedDaemonLifecycle::acquire(operation)?;
+    let token = guard
+        .lifecycle_lease()?
+        .token()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("{operation} lifecycle lease did not provide an owner token"),
+        })?
+        .to_string();
+    guard.release_lease_for_executable_replacement();
+    let operation_result = action(&token);
     let restore_result = guard.restore();
     combine_operation_and_restore(operation, operation_result, restore_result)
 }

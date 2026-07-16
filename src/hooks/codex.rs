@@ -695,30 +695,7 @@ async fn ingest_user_codex_session(
     session_id: Option<String>,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) -> bool {
-    if session_id.is_none() {
-        return false;
-    }
-    match super::daemon_hook_action(
-        None,
-        serde_json::json!({
-            "action": "ingest_transcript",
-            "provider": "codex",
-            "user_scope": true,
-            "session_id": session_id,
-        }),
-        telemetry,
-    )
-    .await
-    {
-        Ok(result) => result
-            .get("messages_upserted")
-            .and_then(Value::as_u64)
-            .is_some_and(|count| count > 0),
-        Err(error) => {
-            eprintln!("[tracedecay] user Codex ingest daemon call failed: {error}");
-            false
-        }
-    }
+    super::ingest_user_session("Codex", session_id, telemetry).await
 }
 
 async fn reset_counter_for_codex_event(
@@ -728,15 +705,7 @@ async fn reset_counter_for_codex_event(
     let Some(project_root) = codex_project_root_from_event_with_identity(event_json).await else {
         return;
     };
-    if let Err(error) = super::daemon_hook_action(
-        Some(&project_root),
-        serde_json::json!({ "action": "reset_counter" }),
-        telemetry,
-    )
-    .await
-    {
-        eprintln!("[tracedecay] local counter reset daemon call failed: {error}");
-    }
+    super::reset_counter_for_project(&project_root, telemetry).await;
 }
 
 fn deduped_codex_hint(

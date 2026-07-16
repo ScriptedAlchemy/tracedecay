@@ -71,7 +71,8 @@ use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionRequest, PersistedCursorUpdate,
-    admit_jsonl_observations,
+    admit_jsonl_observations, canonical_message_role, canonical_native_observation_id,
+    canonical_u64, namespace_replacement_message_ids, preflight_and_parse_new,
 };
 use crate::sessions::shared::{
     StoredCursor, append_tool_calls_metadata, content_storage_text_and_tools,
@@ -80,8 +81,7 @@ use crate::sessions::shared::{
 use crate::sessions::source::{
     FileDiscoveryReport, MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlFrame,
     RawJsonlFrameReader, SessionDraft, TranscriptDiscoveryBounds, TranscriptIngestError,
-    TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded,
-    preflight_strict_jsonl, stream_new_jsonl,
+    TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded, stream_new_jsonl,
 };
 use context::CodexContextState;
 
@@ -471,14 +471,9 @@ impl TranscriptSource for CodexSource {
         project_root: &Path,
         max_new_bytes: Option<u64>,
     ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        preflight_strict_jsonl(PROVIDER, path, prev, max_new_bytes)?;
-        Ok(self.parse_new(path, prev, project_root, max_new_bytes))
-    }
-}
-
-fn namespace_replacement_message_ids(messages: &mut [SessionMessageRecord], generation: u64) {
-    for message in messages {
-        message.message_id = format!("{}:generation:{generation}", message.message_id);
+        preflight_and_parse_new(PROVIDER, path, prev, max_new_bytes, || {
+            self.parse_new(path, prev, project_root, max_new_bytes)
+        })
     }
 }
 
@@ -1156,33 +1151,6 @@ fn append_codex_git_facts(payload: &Value, facts: &mut Vec<CanonicalObservationF
             content: None,
         });
     }
-}
-
-fn canonical_message_role(role: Option<&str>) -> CanonicalMessageRoleV1 {
-    match role {
-        Some("user") => CanonicalMessageRoleV1::User,
-        Some("assistant") => CanonicalMessageRoleV1::Assistant,
-        Some("system" | "developer") => CanonicalMessageRoleV1::System,
-        Some("tool") => CanonicalMessageRoleV1::Tool,
-        _ => CanonicalMessageRoleV1::Unknown,
-    }
-}
-
-fn canonical_native_observation_id(
-    native_id: Option<&str>,
-    fallback: &ObservationId,
-) -> ObservationId {
-    native_id
-        .and_then(|native_id| ObservationId::new(native_id).ok())
-        .unwrap_or_else(|| fallback.clone())
-}
-
-fn canonical_u64(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
-    })
 }
 
 fn codex_native_record_id(

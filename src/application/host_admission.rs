@@ -20,10 +20,15 @@ use crate::global_db::GlobalDb;
 use crate::privacy::RecordSanitizerV1;
 use crate::store::observation::GlobalDbObservationStore;
 
+mod durability;
+mod replay;
 mod runtime;
 mod schedule;
 mod spool;
 mod wire;
+
+pub(crate) use durability::{DirectorySyncPolicy, sync_directory};
+pub(crate) use replay::{ReplayPassDecision, classify_replay_pass, replay_backoff};
 
 pub(crate) use runtime::HostAdmissionRuntime;
 pub(crate) type SharedHostAdmissionBroker = Arc<HostAdmissionBroker>;

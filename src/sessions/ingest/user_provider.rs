@@ -13,6 +13,7 @@ use crate::sessions::{SessionProvider, claude_observation, cline_like, hermes, k
 
 use super::failure::{
     ProviderRunOutcome, classify_transcript_ingest_failure, claude_catch_up_failure,
+    warn_transcript_catch_up_failure,
 };
 use super::scheduler::SinglePathSource;
 use super::user::{
@@ -82,15 +83,15 @@ impl UserProviderUnit<'_> {
                 outcome.bytes_consumed,
                 outcome.deferred_by_byte_cap,
             ),
-            Err(error) => {
-                let failure = classify_transcript_ingest_failure("codex", "observation", &error);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "Codex transcript catch-up failed"
-                );
-                ProviderRunOutcome::failed(failure, self.max_new_bytes)
-            }
+            Err(error) => ProviderRunOutcome::failed(
+                warn_transcript_catch_up_failure(
+                    "codex",
+                    "observation",
+                    &error,
+                    "Codex transcript catch-up failed",
+                ),
+                self.max_new_bytes,
+            ),
         }
     }
 
@@ -107,15 +108,15 @@ impl UserProviderUnit<'_> {
                 outcome.bytes_consumed,
                 outcome.deferred_by_byte_cap,
             ),
-            Err(error) => {
-                let failure = classify_transcript_ingest_failure("cursor", "observation", &error);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "Cursor transcript catch-up failed"
-                );
-                ProviderRunOutcome::failed(failure, self.max_new_bytes)
-            }
+            Err(error) => ProviderRunOutcome::failed(
+                warn_transcript_catch_up_failure(
+                    "cursor",
+                    "observation",
+                    &error,
+                    "Cursor transcript catch-up failed",
+                ),
+                self.max_new_bytes,
+            ),
         }
     }
 
@@ -179,15 +180,15 @@ impl UserProviderUnit<'_> {
                 outcome.bytes_consumed,
                 outcome.deferred_by_byte_cap,
             ),
-            Err(error) => {
-                let failure = classify_transcript_ingest_failure("kiro", "observation", &error);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "user Kiro observation catch-up failed"
-                );
-                ProviderRunOutcome::failed(failure, self.max_new_bytes)
-            }
+            Err(error) => ProviderRunOutcome::failed(
+                warn_transcript_catch_up_failure(
+                    "kiro",
+                    "observation",
+                    &error,
+                    "user Kiro observation catch-up failed",
+                ),
+                self.max_new_bytes,
+            ),
         }
     }
 
@@ -247,15 +248,15 @@ impl UserProviderUnit<'_> {
             Ok(source_stats) => {
                 ProviderRunOutcome::bounded(source_stats, self.max_new_bytes, false)
             }
-            Err(error) => {
-                let failure = classify_transcript_ingest_failure("vibe", "transcript", &error);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "user Vibe transcript catch-up failed"
-                );
-                ProviderRunOutcome::failed(failure, self.max_new_bytes)
-            }
+            Err(error) => ProviderRunOutcome::failed(
+                warn_transcript_catch_up_failure(
+                    "vibe",
+                    "transcript",
+                    &error,
+                    "user Vibe transcript catch-up failed",
+                ),
+                self.max_new_bytes,
+            ),
         }
     }
 }

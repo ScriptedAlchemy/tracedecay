@@ -15,7 +15,7 @@ use tracedecay::sessions::cursor::{
     resolved_project_session_db_path,
 };
 use tracedecay::sessions::cursor_composer::CursorComposerSource;
-use tracedecay::sessions::source::ingest_source;
+use tracedecay::sessions::source::try_ingest_source;
 use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
@@ -280,7 +280,9 @@ async fn composer_owned_session_dedupes_jsonl_sweep() {
     // JSONL sweep with the composer-owned skip set does not touch comp-1.
     let owned: HashSet<String> = outcome.owned_session_ids.clone();
     let skipped_sweep = CursorSweepSource::with_home(&home).with_skip_session_ids(owned);
-    let skipped = ingest_source(&db, &skipped_sweep, &project, None).await;
+    let skipped = try_ingest_source(&db, &skipped_sweep, &project, None)
+        .await
+        .unwrap();
     assert_eq!(
         skipped.messages_upserted, 0,
         "owned session must be skipped"
@@ -292,7 +294,9 @@ async fn composer_owned_session_dedupes_jsonl_sweep() {
         .ingest(&db2, &project, fixture_project_id(), CAP)
         .await;
     let plain_sweep = CursorSweepSource::with_home(&home);
-    let plain = ingest_source(&db2, &plain_sweep, &project, None).await;
+    let plain = try_ingest_source(&db2, &plain_sweep, &project, None)
+        .await
+        .unwrap();
     assert_eq!(
         plain.messages_upserted, 1,
         "without the skip set the JSONL copy ingests"

@@ -11,7 +11,7 @@ use tracedecay::sessions::git_correlation::{
 };
 #[cfg(all(unix, not(target_os = "macos")))]
 use tracedecay::sessions::source::TranscriptSource;
-use tracedecay::sessions::source::ingest_source;
+use tracedecay::sessions::source::try_ingest_source;
 use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
@@ -106,7 +106,9 @@ async fn claude_non_utf8_cursor_key_survives_atomic_persistence() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 1);
 
     let cursor_key = source.cursor_key(&path).durable_text();
@@ -164,7 +166,9 @@ async fn claude_non_utf8_cursor_key_replays_unbound_legacy_offset() {
     .await;
 
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
     assert!(
         db.get_session_message("claude", "legacy-row")
@@ -233,7 +237,9 @@ async fn claude_user_scope_excludes_registered_project_rows() {
         .await
         .unwrap();
     let source = ClaudeSource::with_home(&home).for_user_scope(None, vec![registered.clone()]);
-    let stats = ingest_source(&db, &source, &profile, None).await;
+    let stats = try_ingest_source(&db, &source, &profile, None)
+        .await
+        .unwrap();
     assert_eq!(stats.sessions_upserted, 2);
     assert_eq!(stats.messages_upserted, 2);
     assert_eq!(
@@ -292,7 +298,9 @@ async fn claude_user_scope_live_filter_only_ingests_requested_session() {
         .await
         .unwrap();
     let source = ClaudeSource::with_home(&home).for_user_scope(Some("wanted".into()), vec![]);
-    let stats = ingest_source(&db, &source, &profile, None).await;
+    let stats = try_ingest_source(&db, &source, &profile, None)
+        .await
+        .unwrap();
     assert_eq!(stats.sessions_upserted, 1);
     assert_eq!(stats.messages_upserted, 1);
     assert!(db.get_session("claude", "wanted").await.is_some());
@@ -342,7 +350,9 @@ async fn claude_transcript_populates_searchable_messages() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
     assert_eq!(stats.sessions_upserted, 1);
 
@@ -485,7 +495,9 @@ async fn claude_thinking_blocks_do_not_project_as_ordinary_messages() {
 
     // Two provider-authored visible messages project as ordinary rows. The
     // plaintext thinking block remains a separately typed reasoning row.
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 3);
 
     let reasoning_results = db
@@ -544,7 +556,9 @@ async fn claude_thinking_blocks_do_not_project_as_ordinary_messages() {
 
     // Re-ingesting the unchanged transcript is a no-op: the reasoning row's
     // stable `:thinking` id keeps the insert idempotent.
-    let second = ingest_source(&db, &source, &project, None).await;
+    let second = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(second.messages_upserted, 0);
 }
 
@@ -557,10 +571,14 @@ async fn claude_transcript_ingest_is_incremental() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let first = ingest_source(&db, &source, &project, None).await;
+    let first = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(first.messages_upserted, 2);
     // Re-ingesting the unchanged file is a no-op.
-    let second = ingest_source(&db, &source, &project, None).await;
+    let second = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(second.messages_upserted, 0);
 
     // Appending one line ingests only that line.
@@ -583,7 +601,9 @@ async fn claude_transcript_ingest_is_incremental() {
     .unwrap();
     drop(f);
 
-    let third = ingest_source(&db, &source, &project, None).await;
+    let third = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(third.messages_upserted, 1);
 }
 
@@ -599,7 +619,9 @@ async fn claude_transcript_for_other_project_is_skipped() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(
         stats.messages_upserted, 0,
         "a transcript whose cwd is a different project must be skipped"
@@ -660,7 +682,9 @@ async fn claude_transcript_crossing_worktrees_is_split_by_record_cwd() {
 
     let source = ClaudeSource::with_home(&home);
     let db_a = open_project_session_db(&project_a).await.unwrap();
-    let stats_a = ingest_source(&db_a, &source, &project_a, None).await;
+    let stats_a = try_ingest_source(&db_a, &source, &project_a, None)
+        .await
+        .unwrap();
     assert_eq!(stats_a.messages_upserted, 1);
     let hits_a = db_a
         .search_session_messages("claude", None, "worktree marker", 10)
@@ -677,7 +701,9 @@ async fn claude_transcript_crossing_worktrees_is_split_by_record_cwd() {
     );
 
     let db_b = open_project_session_db(&project_b).await.unwrap();
-    let stats_b = ingest_source(&db_b, &source, &project_b, None).await;
+    let stats_b = try_ingest_source(&db_b, &source, &project_b, None)
+        .await
+        .unwrap();
     assert_eq!(stats_b.messages_upserted, 1);
     let hits_b = db_b
         .search_session_messages("claude", None, "worktree marker", 10)
@@ -707,7 +733,9 @@ async fn claude_missing_projects_dir_is_silent_noop() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.sessions_upserted, 0);
     assert_eq!(stats.messages_upserted, 0);
 }
@@ -766,7 +794,9 @@ async fn claude_tool_use_and_results_populate_tool_event_metadata() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // No new rows beyond the normal two message rows: tool events are metadata
     // on the existing assistant/user rows, not separate rows.
     assert_eq!(stats.messages_upserted, 2);
@@ -885,7 +915,9 @@ async fn claude_system_hook_errors_become_searchable_hook_events() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // The routine system record produces no row; only the user message and
     // one hook-event row are ingested.
     assert_eq!(stats.messages_upserted, 2);
@@ -931,7 +963,9 @@ async fn claude_subagent_layout_uses_parent_link_and_parent_cwd_fallback() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.sessions_upserted, 2);
     assert_eq!(stats.messages_upserted, 3);
 
@@ -1016,7 +1050,9 @@ async fn claude_pr_link_record_becomes_marker_row_and_session_summary() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // The user turn plus a dedicated pr_link marker row.
     assert_eq!(stats.messages_upserted, 2);
 
@@ -1098,7 +1134,9 @@ async fn claude_assistant_attribution_fields_land_in_metadata() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 1);
 
     let assistant = db
@@ -1165,7 +1203,9 @@ async fn claude_tool_use_result_edited_files_populate_metadata_and_summary() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
 
     let edit = db
@@ -1239,7 +1279,9 @@ async fn claude_compact_boundary_record_becomes_marker_row() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
 
     let marker = db
@@ -1290,7 +1332,9 @@ async fn claude_model_refusal_fallback_record_becomes_marker_row() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
 
     let marker = db
@@ -1369,7 +1413,9 @@ async fn claude_subagent_meta_json_enriches_draft() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.sessions_upserted, 2);
 
     let child = db
@@ -1403,7 +1449,9 @@ async fn claude_workflow_nested_subagent_links_to_parent_not_orphan() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     // Parent session plus the workflow-nested subagent (not an orphan third).
     assert_eq!(stats.sessions_upserted, 2);
 
@@ -1490,7 +1538,9 @@ async fn claude_git_operation_becomes_direct_producer_evidence_atomically() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 1);
 
     let message = db

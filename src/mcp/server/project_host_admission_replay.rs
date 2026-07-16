@@ -13,10 +13,12 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-use crate::application::host_admission::{HostAdmissionOutcome, SharedHostAdmissionBroker};
+use crate::application::host_admission::{
+    HostAdmissionOutcome, ReplayPassDecision, SharedHostAdmissionBroker, classify_replay_pass,
+    replay_backoff,
+};
 
-const MAX_BACKOFF: Duration = Duration::from_secs(2);
-const INITIAL_BACKOFF: Duration = Duration::from_millis(25);
+const REPLAY_BACKOFF_SHIFT_CAP: u32 = 6;
 
 type PassFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = HostAdmissionOutcome> + Send>> + Send + Sync>;
@@ -175,40 +177,39 @@ impl ProjectHostAdmissionReplayWorker {
                 if self.cancel.load(Ordering::Acquire) {
                     break;
                 }
-                let made_progress = pending_after < pending_before;
-                if made_progress {
-                    consecutive_retryable = 0;
-                    if pending_after > 0 {
+                match classify_replay_pass(pending_before, pending_after, &outcome) {
+                    ReplayPassDecision::ProgressPending => {
+                        consecutive_retryable = 0;
                         tokio::task::yield_now().await;
-                        continue;
                     }
-                } else if outcome.retryable
-                    || (pending_after > 0 && outcome.status.is_replay_progress())
-                {
-                    consecutive_retryable = consecutive_retryable.saturating_add(1);
-                    self.backoff_count.fetch_add(1, Ordering::AcqRel);
-                    self.dirty.store(true, Ordering::Release);
-                    let backoff = project_replay_backoff(consecutive_retryable);
-                    tokio::select! {
-                        () = self.cancel_notify.notified() => break,
-                        () = tokio::time::sleep(backoff) => {}
+                    ReplayPassDecision::Backoff => {
+                        consecutive_retryable = consecutive_retryable.saturating_add(1);
+                        self.backoff_count.fetch_add(1, Ordering::AcqRel);
+                        self.dirty.store(true, Ordering::Release);
+                        let backoff = project_replay_backoff(consecutive_retryable);
+                        tokio::select! {
+                            () = self.cancel_notify.notified() => break,
+                            () = tokio::time::sleep(backoff) => {}
+                        }
                     }
-                    continue;
+                    ReplayPassDecision::Stop => {
+                        consecutive_retryable = 0;
+                        eprintln!(
+                            "[tracedecay] project host admission disposition: {}",
+                            outcome.reason_code.unwrap_or("host_admission_unavailable")
+                        );
+                        break;
+                    }
+                    ReplayPassDecision::Requeue => {
+                        consecutive_retryable = 0;
+                        if self.dirty.load(Ordering::Acquire) || pending_after > 0 {
+                            continue;
+                        }
+                        self.busy.store(false, Ordering::Release);
+                        self.idle.notify_waiters();
+                        break;
+                    }
                 }
-                consecutive_retryable = 0;
-                if !outcome.status.is_replay_progress() {
-                    eprintln!(
-                        "[tracedecay] project host admission disposition: {}",
-                        outcome.reason_code.unwrap_or("host_admission_unavailable")
-                    );
-                    break;
-                }
-                if self.dirty.load(Ordering::Acquire) || pending_after > 0 {
-                    continue;
-                }
-                self.busy.store(false, Ordering::Release);
-                self.idle.notify_waiters();
-                break;
             }
             self.busy.store(false, Ordering::Release);
             self.idle.notify_waiters();
@@ -219,12 +220,7 @@ impl ProjectHostAdmissionReplayWorker {
 }
 
 pub(super) fn project_replay_backoff(attempt: u32) -> Duration {
-    let shift = attempt.saturating_sub(1).min(6);
-    let millis = INITIAL_BACKOFF
-        .as_millis()
-        .saturating_mul(1u128 << shift)
-        .min(MAX_BACKOFF.as_millis());
-    Duration::from_millis(millis as u64)
+    replay_backoff(attempt, REPLAY_BACKOFF_SHIFT_CAP)
 }
 
 #[cfg(test)]

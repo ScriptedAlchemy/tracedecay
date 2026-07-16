@@ -57,11 +57,9 @@ use tracedecay_domain::{
     ProjectId, ProviderId, RetentionClass, SessionId,
 };
 use tracedecay_store::ObservationPersistOutcome;
-use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
+use tracedecay_store::observation::ObservationCoverageReason;
 
-use crate::application::host_admission::{
-    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionStatus,
-};
+use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use crate::application::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
@@ -1272,30 +1270,8 @@ fn cursor_composer_source(composer_id: &str) -> Result<ObservationSourceIdentity
 }
 
 fn snapshot_generation(path: &Path) -> Option<ObservationSourceGenerationV1> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-
-        let metadata = std::fs::metadata(path).ok()?;
-        let mut hasher = Sha256::new();
-        hasher.update(metadata.dev().to_le_bytes());
-        hasher.update(metadata.ino().to_le_bytes());
-        let digest = hasher.finalize();
-        let mut bytes = [0_u8; 8];
-        bytes.copy_from_slice(&digest[..8]);
-        ObservationSourceGenerationV1::new(u64::from_le_bytes(bytes).max(1)).ok()
-    }
-    #[cfg(windows)]
-    {
-        let file = std::fs::File::open(path).ok()?;
-        let file_identity = crate::windows_file::stable_file_identity(&file, path).ok()?;
-        ObservationSourceGenerationV1::new(file_identity).ok()
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = path;
-        None
-    }
+    let identity = crate::sessions::source::sqlite_generation_identity(path).ok()?;
+    ObservationSourceGenerationV1::new(identity).ok()
 }
 
 struct ComposerCoverageContext<'facade, 'db> {
@@ -1315,48 +1291,20 @@ async fn advance_composer_coverage(
     let range =
         tracedecay_domain::ObservationSourceRangeV1::new(position, position.saturating_add(1))
             .map_err(|error| format!("invalid Cursor composer coverage range: {error}"))?;
-    let advance = match receipt {
-        Some(receipt) => ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
-            source,
-            context.scope.clone(),
-            context.generation,
-            ObservationOrderingDomainV1::SnapshotOrder,
-            expected_cursor,
-            range,
-            reason,
-            receipt,
-        ),
-        None => ObservationCursorAdvance::for_ordering(
-            source,
-            context.scope.clone(),
-            context.generation,
-            ObservationOrderingDomainV1::SnapshotOrder,
-            expected_cursor,
-            range,
-            reason,
-        ),
-    }
-    .map_err(|error| format!("invalid Cursor composer coverage transition: {error}"))?;
-    context
-        .facade
-        .advance_non_durable_source_cursor(advance, ObservationCancellation::default())
-        .await
-        .map(|_| ())
-        .map_err(host_admission_error)
-}
-
-fn host_admission_error(outcome: HostAdmissionOutcome) -> String {
-    match outcome.status {
-        HostAdmissionStatus::Backpressured => "Cursor observation admission was backpressured",
-        HostAdmissionStatus::Unavailable => "Cursor observation authority is unavailable",
-        HostAdmissionStatus::Unknown => "Cursor observation provider is unsupported",
-        HostAdmissionStatus::Degraded => "Cursor observation admission was degraded",
-        HostAdmissionStatus::Supported
-        | HostAdmissionStatus::AcceptedForReplay
-        | HostAdmissionStatus::Committed
-        | HostAdmissionStatus::ExactDuplicate => "Cursor observation admission was incomplete",
-    }
-    .to_string()
+    crate::sessions::snapshot_observation::advance_snapshot_coverage_maybe(
+        context.facade,
+        PROVIDER,
+        source,
+        range,
+        expected_cursor,
+        context.scope.clone(),
+        context.generation,
+        reason,
+        receipt,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 /// Resolved project for a composer envelope.
@@ -1374,30 +1322,13 @@ struct ReadOnlyDb {
 /// Open a `SQLite` file strictly read-only and immutable (no locking, no
 /// `-wal`/`-shm` writes) via a `file:…?immutable=1&mode=ro` URI.
 async fn open_readonly_immutable(db_path: &Path) -> Option<ReadOnlyDb> {
-    let uri = immutable_ro_uri(db_path)?;
+    let uri = crate::sqlite_read_snapshot::immutable_uri(db_path).ok()?;
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::from_bits_retain(SQLITE_OPEN_URI);
     let db = Builder::new_local(uri).flags(flags).build().await.ok()?;
     let conn = db.connect().ok()?;
     // Belt-and-suspenders against ever mutating the live store.
     let _ = conn.execute_batch("PRAGMA query_only = ON;").await;
     Some(ReadOnlyDb { _db: db, conn })
-}
-
-/// Build a `file:` URI whose path is percent-encoded for the characters `SQLite`
-/// treats specially in URI filenames (`?`, `#`, `%`). Returns `None` for
-/// non-UTF-8 paths.
-fn immutable_ro_uri(db_path: &Path) -> Option<String> {
-    let raw = db_path.to_str()?;
-    let mut encoded = String::with_capacity(raw.len() + 24);
-    for ch in raw.chars() {
-        match ch {
-            '?' => encoded.push_str("%3f"),
-            '#' => encoded.push_str("%23"),
-            '%' => encoded.push_str("%25"),
-            other => encoded.push(other),
-        }
-    }
-    Some(format!("file:{encoded}?immutable=1&mode=ro"))
 }
 
 async fn fetch_kv_text_bounded(

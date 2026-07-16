@@ -14,10 +14,12 @@ use tokio::task::JoinHandle;
 #[cfg(test)]
 use tokio::task::JoinSet;
 
-use crate::application::host_admission::{HostAdmissionOutcome, SharedHostAdmissionBroker};
+use crate::application::host_admission::{
+    HostAdmissionOutcome, ReplayPassDecision, SharedHostAdmissionBroker, classify_replay_pass,
+    replay_backoff,
+};
 
-const MAX_BACKOFF: Duration = Duration::from_secs(2);
-const INITIAL_BACKOFF: Duration = Duration::from_millis(25);
+const REPLAY_BACKOFF_SHIFT_CAP: u32 = 16;
 const IDLE_EVICTION_AFTER: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
@@ -291,33 +293,32 @@ impl ProfileHostAdmissionReplayWorker {
                     outcome = self.run_pass() => outcome,
                 };
                 let pending_after = self.broker.pending_replay_count().await.unwrap_or(0);
-                let made_progress = pending_after < pending_before;
-                if made_progress {
-                    consecutive_retryable = 0;
-                    if pending_after > 0 {
+                match classify_replay_pass(pending_before, pending_after, &outcome) {
+                    ReplayPassDecision::ProgressPending => {
+                        consecutive_retryable = 0;
                         tokio::task::yield_now().await;
-                        continue;
                     }
-                } else if outcome.retryable
-                    || (pending_after > 0 && outcome.status.is_replay_progress())
-                {
-                    consecutive_retryable = consecutive_retryable.saturating_add(1);
-                    self.backoff_count.fetch_add(1, Ordering::AcqRel);
-                    self.dirty.store(true, Ordering::Release);
-                    tokio::select! {
-                        () = self.wait_for_cancellation() => return,
-                        () = tokio::time::sleep(profile_replay_backoff(consecutive_retryable)) => {}
+                    ReplayPassDecision::Backoff => {
+                        consecutive_retryable = consecutive_retryable.saturating_add(1);
+                        self.backoff_count.fetch_add(1, Ordering::AcqRel);
+                        self.dirty.store(true, Ordering::Release);
+                        tokio::select! {
+                            () = self.wait_for_cancellation() => return,
+                            () = tokio::time::sleep(profile_replay_backoff(consecutive_retryable)) => {}
+                        }
                     }
-                    continue;
-                }
-                consecutive_retryable = 0;
-                if !outcome.status.is_replay_progress() {
-                    eprintln!(
-                        "[tracedecay] user-profile host admission disposition: {}",
-                        outcome.reason_code.unwrap_or("host_admission_unavailable")
-                    );
-                    // Non-retryable failure: stop until the next explicit kick.
-                    break;
+                    ReplayPassDecision::Stop => {
+                        consecutive_retryable = 0;
+                        eprintln!(
+                            "[tracedecay] user-profile host admission disposition: {}",
+                            outcome.reason_code.unwrap_or("host_admission_unavailable")
+                        );
+                        // Non-retryable failure: stop until the next explicit kick.
+                        break;
+                    }
+                    ReplayPassDecision::Requeue => {
+                        consecutive_retryable = 0;
+                    }
                 }
             }
             self.busy.store(false, Ordering::Release);
@@ -352,13 +353,7 @@ impl ProfileHostAdmissionReplayWorker {
 }
 
 pub(super) fn profile_replay_backoff(attempt: u32) -> Duration {
-    // attempt 1 => 25ms, then doubles until MAX_BACKOFF.
-    let shift = attempt.saturating_sub(1).min(16);
-    let millis = INITIAL_BACKOFF
-        .as_millis()
-        .saturating_mul(1u128 << shift)
-        .min(MAX_BACKOFF.as_millis());
-    Duration::from_millis(millis as u64)
+    replay_backoff(attempt, REPLAY_BACKOFF_SHIFT_CAP)
 }
 
 #[cfg(test)]
@@ -371,7 +366,7 @@ mod tests {
         assert_eq!(profile_replay_backoff(1), Duration::from_millis(25));
         assert_eq!(profile_replay_backoff(2), Duration::from_millis(50));
         assert_eq!(profile_replay_backoff(3), Duration::from_millis(100));
-        assert_eq!(profile_replay_backoff(20), MAX_BACKOFF);
+        assert_eq!(profile_replay_backoff(20), Duration::from_secs(2));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -97,7 +97,7 @@ pub(crate) async fn ingest_project_sources_for_provider(
     let mut provider_runs = ProviderRunFold::default();
     for &candidate in PROJECT_CATCH_UP_PROVIDERS {
         if !provider_selected(provider, candidate)
-            || (candidate == SessionProvider::Hermes && !include_hermes)
+            || (candidate.scans_all_destinations() && !include_hermes)
         {
             continue;
         }

@@ -3,7 +3,7 @@ use tracedecay::global_db::{GlobalDb, ParseOffset};
 use tracedecay::sessions::cline_like::ClineLikeSource;
 use tracedecay::sessions::cursor::{open_project_session_db, project_session_db_path};
 use tracedecay::sessions::source::{
-    StoredCursor, TranscriptIngestError, TranscriptSource, ingest_source,
+    StoredCursor, TranscriptIngestError, TranscriptSource, try_ingest_source,
 };
 use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
 #[cfg(not(windows))]
@@ -149,7 +149,9 @@ async fn assert_provider_ingests(
     ingest_project: &std::path::Path,
     transcript_project: &std::path::Path,
 ) {
-    let stats = ingest_source(db, &source, ingest_project, None).await;
+    let stats = try_ingest_source(db, &source, ingest_project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 3);
 
     let results = db
@@ -238,8 +240,9 @@ async fn assert_provider_ingests(
 
     // ContentHash: unchanged full-rewrite file is a no-op.
     assert_eq!(
-        ingest_source(db, &source, ingest_project, None)
+        try_ingest_source(db, &source, ingest_project, None)
             .await
+            .unwrap()
             .messages_upserted,
         0
     );
@@ -327,14 +330,16 @@ async fn cline_ui_messages_only_change_triggers_usage_refresh() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClineLikeSource::cline_with_home(&home);
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         3
     );
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         0
     );
@@ -345,8 +350,9 @@ async fn cline_ui_messages_only_change_triggers_usage_refresh() {
         .expect("initial task generation cursor");
     std::fs::write(&ui_path, r#"[{"type":"say","say":"api_req_started""#).unwrap();
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         0
     );
@@ -376,8 +382,9 @@ async fn cline_ui_messages_only_change_triggers_usage_refresh() {
     .unwrap();
 
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         3
     );
@@ -437,8 +444,9 @@ async fn cline_usage_index_skips_unemitted_assistant_entries() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClineLikeSource::cline_with_home(&home);
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         2
     );
@@ -502,7 +510,9 @@ async fn cline_unversioned_timestamp_free_identity_survives_insertion_and_reorde
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClineLikeSource::cline_with_home(&home);
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     let before = db
         .search_session_messages("cline", None, "regression is fixed", 10)
         .await;
@@ -544,7 +554,9 @@ async fn cline_unversioned_timestamp_free_identity_survives_insertion_and_reorde
         .to_string(),
     )
     .unwrap();
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
 
     let after = db
         .search_session_messages("cline", None, "regression is fixed", 10)
@@ -602,7 +614,9 @@ async fn cline_incomplete_snapshot_does_not_advance_content_hash_cursor() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClineLikeSource::cline_with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 0);
 
     assert!(
@@ -618,8 +632,9 @@ async fn cline_incomplete_snapshot_does_not_advance_content_hash_cursor() {
     )
     .unwrap();
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         1
     );
@@ -644,7 +659,9 @@ async fn cline_missing_metadata_waits_for_later_metadata_before_advancing_cursor
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClineLikeSource::cline_with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 0);
 
     assert!(
@@ -664,7 +681,9 @@ async fn cline_missing_metadata_waits_for_later_metadata_before_advancing_cursor
     )
     .unwrap();
 
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 1);
 
     let offset = parse_offset_for_task_history(&db, &project, &api)
@@ -686,13 +705,14 @@ async fn cline_like_task_for_other_project_is_skipped() {
     );
 
     let db = open_project_session_db(&project).await.unwrap();
-    let stats = ingest_source(
+    let stats = try_ingest_source(
         &db,
         &ClineLikeSource::cline_with_home(&home),
         &project,
         None,
     )
-    .await;
+    .await
+    .unwrap();
     assert_eq!(stats.messages_upserted, 0);
 }
 
@@ -718,7 +738,9 @@ async fn cline_like_user_scope_includes_only_unregistered_tasks() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClineLikeSource::cline_with_home(&home).for_user_scope(vec![project.clone()]);
-    let stats = ingest_source(&db, &source, tmp.path(), None).await;
+    let stats = try_ingest_source(&db, &source, tmp.path(), None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 3);
     assert!(db.get_session("cline", "registered-task").await.is_none());
     assert!(db.get_session("cline", "mixed-task").await.is_none());

@@ -252,12 +252,6 @@ impl StoreAdministration {
         self.profile_host_admission_replay.shutdown().await;
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(super) fn profile_host_admission_replay(&self) -> &Arc<ProfileHostAdmissionReplayRegistry> {
-        &self.profile_host_admission_replay
-    }
-
     #[cfg(unix)]
     pub(super) fn automation_schedulers(
         &self,

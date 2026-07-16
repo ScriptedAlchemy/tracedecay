@@ -37,7 +37,7 @@ use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursor
 
 use crate::agents::hermes::read_config_pinned_project_root;
 use crate::application::host_admission::{
-    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionStatus,
+    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome,
 };
 use crate::application::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
@@ -51,7 +51,7 @@ use crate::sessions::ingest_byte_budget::IngestByteBudget;
 use crate::sessions::shared::{
     ProjectRootMatcher, StoredCursor, TranscriptIngestStats, path_belongs_to_project,
 };
-use crate::sessions::source::STRICT_JSONL_BATCH_BYTES;
+use crate::sessions::source::{STRICT_JSONL_BATCH_BYTES, SqliteFileIdentityError};
 const PROVIDER: &str = "hermes";
 const OBSERVATION_RETENTION: &str = "transcript.hermes.v1";
 /// Maximum messages joined per `SQLite` page (row-count bound before collection).
@@ -212,20 +212,10 @@ pub async fn ingest_homes_capped(
     outcome
 }
 
-/// Ingests canonical historical Hermes observations into the profile scope.
-/// Project ingestion separately admits each turn to every registered project it
-/// touched using the same stable message IDs.
-pub async fn ingest_user_sessions(
-    db: &GlobalDb,
-    registered_roots: &[PathBuf],
-) -> TranscriptIngestStats {
-    ingest_user_sessions_capped(db, registered_roots, None)
-        .await
-        .stats
-}
-
-/// [`ingest_user_sessions`] with one aggregate logical source-byte budget
-/// shared across every discovered Hermes profile.
+/// Ingests canonical historical Hermes observations into the profile scope with
+/// one aggregate logical source-byte budget shared across every discovered
+/// Hermes profile. Project ingestion separately admits each turn to every
+/// registered project it touched using the same stable message IDs.
 pub async fn ingest_user_sessions_capped(
     db: &GlobalDb,
     registered_roots: &[PathBuf],
@@ -1023,20 +1013,29 @@ fn prepare_observation_row(
     })
 }
 
-#[cfg(unix)]
 fn sqlite_incarnation(path: &Path) -> Result<(ObservationSourceGenerationV1, u64, u64), String> {
-    use std::os::unix::fs::MetadataExt;
+    let file_identity =
+        crate::sessions::source::sqlite_generation_identity(path).map_err(|error| {
+            match error {
+                SqliteFileIdentityError::Open => "could not open Hermes SQLite authority",
+                SqliteFileIdentityError::Inspect => "could not inspect Hermes SQLite authority",
+                SqliteFileIdentityError::Identify => "could not identify Hermes SQLite authority",
+                SqliteFileIdentityError::Unavailable => {
+                    "Hermes SQLite physical identity is unavailable"
+                }
+            }
+            .to_string()
+        })?;
+    let resume_fingerprint = sqlite_resume_fingerprint(path, file_identity)?;
+    let generation = ObservationSourceGenerationV1::new(file_identity)
+        .map_err(|_| "invalid Hermes SQLite generation".to_string())?;
+    Ok((generation, file_identity, resume_fingerprint))
+}
 
+#[cfg(unix)]
+fn sqlite_resume_fingerprint(path: &Path, file_identity: u64) -> Result<u64, String> {
     let metadata = std::fs::metadata(path)
         .map_err(|_| "could not inspect Hermes SQLite authority".to_string())?;
-    let mut identity_hasher = Sha256::new();
-    identity_hasher.update(metadata.dev().to_le_bytes());
-    identity_hasher.update(metadata.ino().to_le_bytes());
-    let identity_digest = identity_hasher.finalize();
-    let mut identity_bytes = [0_u8; 8];
-    identity_bytes.copy_from_slice(&identity_digest[..8]);
-    let file_identity = u64::from_le_bytes(identity_bytes).max(1);
-
     let mut resume_hasher = Sha256::new();
     resume_hasher.update(file_identity.to_le_bytes());
     resume_hasher.update(metadata.len().to_le_bytes());
@@ -1044,24 +1043,15 @@ fn sqlite_incarnation(path: &Path) -> Result<(ObservationSourceGenerationV1, u64
     let resume_digest = resume_hasher.finalize();
     let mut resume_bytes = [0_u8; 8];
     resume_bytes.copy_from_slice(&resume_digest[..8]);
-    let resume_fingerprint = u64::from_le_bytes(resume_bytes);
-    let generation = ObservationSourceGenerationV1::new(file_identity)
-        .map_err(|_| "invalid Hermes SQLite generation".to_string())?;
-    Ok((generation, file_identity, resume_fingerprint))
+    Ok(u64::from_le_bytes(resume_bytes))
 }
 
 #[cfg(windows)]
-fn sqlite_incarnation(path: &Path) -> Result<(ObservationSourceGenerationV1, u64, u64), String> {
+fn sqlite_resume_fingerprint(path: &Path, file_identity: u64) -> Result<u64, String> {
     use std::os::windows::fs::MetadataExt;
 
-    let file = std::fs::File::open(path)
-        .map_err(|_| "could not open Hermes SQLite authority".to_string())?;
-    let metadata = file
-        .metadata()
+    let metadata = std::fs::metadata(path)
         .map_err(|_| "could not inspect Hermes SQLite authority".to_string())?;
-    let file_identity = crate::windows_file::stable_file_identity(&file, path)
-        .map_err(|_| "could not identify Hermes SQLite authority".to_string())?;
-
     let mut resume_hasher = Sha256::new();
     resume_hasher.update(file_identity.to_le_bytes());
     resume_hasher.update(metadata.len().to_le_bytes());
@@ -1069,15 +1059,12 @@ fn sqlite_incarnation(path: &Path) -> Result<(ObservationSourceGenerationV1, u64
     let resume_digest = resume_hasher.finalize();
     let mut resume_bytes = [0_u8; 8];
     resume_bytes.copy_from_slice(&resume_digest[..8]);
-    let resume_fingerprint = u64::from_le_bytes(resume_bytes);
-    let generation = ObservationSourceGenerationV1::new(file_identity)
-        .map_err(|_| "invalid Hermes SQLite generation".to_string())?;
-    Ok((generation, file_identity, resume_fingerprint))
+    Ok(u64::from_le_bytes(resume_bytes))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn sqlite_incarnation(path: &Path) -> Result<(ObservationSourceGenerationV1, u64, u64), String> {
-    std::fs::metadata(path).map_err(|_| "could not inspect Hermes SQLite authority".to_string())?;
+fn sqlite_resume_fingerprint(path: &Path, _file_identity: u64) -> Result<u64, String> {
+    let _ = path;
     Err("Hermes SQLite physical identity is unavailable".to_string())
 }
 
@@ -1125,17 +1112,7 @@ async fn advance_coverage(
 }
 
 fn host_admission_error(outcome: HostAdmissionOutcome) -> String {
-    match outcome.status {
-        HostAdmissionStatus::Backpressured => "Hermes observation admission was backpressured",
-        HostAdmissionStatus::Unavailable => "Hermes observation authority is unavailable",
-        HostAdmissionStatus::Unknown => "Hermes observation provider is unsupported",
-        HostAdmissionStatus::Degraded => "Hermes observation admission was degraded",
-        HostAdmissionStatus::Supported
-        | HostAdmissionStatus::AcceptedForReplay
-        | HostAdmissionStatus::Committed
-        | HostAdmissionStatus::ExactDuplicate => "Hermes observation admission was incomplete",
-    }
-    .to_string()
+    crate::sessions::snapshot_observation::host_admission_status_message("Hermes", outcome.status)
 }
 
 async fn drain_hermes_projections(db: &GlobalDb, scope: &ObservationScopeV1) -> Result<(), String> {
@@ -1498,25 +1475,60 @@ async fn try_ingest_state_db(
     try_ingest_state_db_bounded(db, source, project_root, project_id, &mut budget).await
 }
 
-async fn try_ingest_state_db_bounded(
-    db: &GlobalDb,
+/// Opens a Hermes `state.db` read-only and derives everything a page sweep
+/// needs before its first read: the physical incarnation and the column-probed
+/// bounded SELECT.
+async fn open_state_source(
     source: &HermesProfileSource,
-    project_root: &Path,
-    project_id: ProjectId,
-    budget: &mut IngestByteBudget,
-) -> Result<TranscriptIngestStats, String> {
+) -> Result<
+    (
+        libsql::Connection,
+        ObservationSourceGenerationV1,
+        u64,
+        u64,
+        String,
+    ),
+    String,
+> {
     let state_db = &source.state_db;
     let conn = open_read_only_strict(state_db).await?;
     let (generation, file_identity, resume_fingerprint) = sqlite_incarnation(state_db)?;
-    let scope = ObservationScopeV1::Project { project_id };
     let select_sql = select_new_messages_sql(
         &message_columns(&conn).await?,
         &table_columns(&conn, "sessions").await?,
     );
+    Ok((
+        conn,
+        generation,
+        file_identity,
+        resume_fingerprint,
+        select_sql,
+    ))
+}
+
+/// Drives one single-destination bounded page sweep. Each page is truncated to
+/// the shared byte budget, routed by `route_page`, and admitted against the
+/// destination's authoritative SQLite-row cursor.
+#[allow(clippy::too_many_arguments)]
+async fn ingest_bounded_pages<F, R>(
+    db: &GlobalDb,
+    conn: &libsql::Connection,
+    select_sql: &str,
+    scope: ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    file_identity: u64,
+    resume_fingerprint: u64,
+    budget: &mut IngestByteBudget,
+    mut route_page: F,
+) -> Result<TranscriptIngestStats, String>
+where
+    F: FnMut(&[HermesRow]) -> R,
+    R: Fn(&HermesRow) -> Option<HermesProjectionMetadata>,
+{
     let mut read_cursor = StoredCursor::default();
     let mut stats = TranscriptIngestStats::default();
     loop {
-        let new = read_new_rows_strict(&conn, &select_sql, read_cursor).await?;
+        let new = read_new_rows_strict(conn, select_sql, read_cursor).await?;
         let row_count = new.items.len();
         if row_count == 0 {
             return Ok(stats);
@@ -1530,7 +1542,7 @@ async fn try_ingest_state_db_bounded(
             return Ok(stats);
         }
         let bounded = &new.items[..bounded_count];
-        let locations = turn_project_locations(bounded, project_root, source);
+        let route = route_page(bounded);
         let admitted = admit_rows(
             db,
             bounded,
@@ -1538,11 +1550,7 @@ async fn try_ingest_state_db_bounded(
             generation,
             file_identity,
             resume_fingerprint,
-            |row| {
-                locations.get(&row.id).copied().map(|provenance| {
-                    project_projection_metadata(row, source, project_root, provenance)
-                })
-            },
+            route,
         )
         .await?;
         stats.messages_upserted = stats
@@ -1567,6 +1575,37 @@ async fn try_ingest_state_db_bounded(
     }
 }
 
+async fn try_ingest_state_db_bounded(
+    db: &GlobalDb,
+    source: &HermesProfileSource,
+    project_root: &Path,
+    project_id: ProjectId,
+    budget: &mut IngestByteBudget,
+) -> Result<TranscriptIngestStats, String> {
+    let (conn, generation, file_identity, resume_fingerprint, select_sql) =
+        open_state_source(source).await?;
+    let scope = ObservationScopeV1::Project { project_id };
+    ingest_bounded_pages(
+        db,
+        &conn,
+        &select_sql,
+        scope,
+        generation,
+        file_identity,
+        resume_fingerprint,
+        budget,
+        |bounded| {
+            let locations = turn_project_locations(bounded, project_root, source);
+            move |row: &HermesRow| {
+                locations.get(&row.id).copied().map(|provenance| {
+                    project_projection_metadata(row, source, project_root, provenance)
+                })
+            }
+        },
+    )
+    .await
+}
+
 /// Shared-source equivalent of [`try_ingest_state_db`]. The `SQLite` page is read
 /// once, then each destination independently admits routed rows against its own
 /// authoritative observation cursor.
@@ -1574,19 +1613,14 @@ async fn try_ingest_state_db_for_projects(
     source: &HermesProfileSource,
     destinations: &[ProjectIngestDestination<'_>],
 ) -> Result<TranscriptIngestStats, String> {
-    let state_db = &source.state_db;
-    let conn = open_read_only_strict(state_db).await?;
-    let (generation, file_identity, resume_fingerprint) = sqlite_incarnation(state_db)?;
+    let (conn, generation, file_identity, resume_fingerprint, select_sql) =
+        open_state_source(source).await?;
     let scopes = destinations
         .iter()
         .map(|destination| ObservationScopeV1::Project {
             project_id: destination.project_id.clone(),
         })
         .collect::<Vec<_>>();
-    let select_sql = select_new_messages_sql(
-        &message_columns(&conn).await?,
-        &table_columns(&conn, "sessions").await?,
-    );
     let destination_matchers = destinations
         .par_iter()
         .map(|destination| ProjectRootMatcher::new(destination.project_root))
@@ -1654,45 +1688,25 @@ async fn try_ingest_user_state_db_bounded(
     _registered_roots: &[PathBuf],
     budget: &mut IngestByteBudget,
 ) -> Result<TranscriptIngestStats, String> {
-    let state_db = &source.state_db;
-    let conn = open_read_only_strict(state_db).await?;
-    let (generation, file_identity, resume_fingerprint) = sqlite_incarnation(state_db)?;
-    let scope = ObservationScopeV1::Profile;
-    let select_sql = select_new_messages_sql(
-        &message_columns(&conn).await?,
-        &table_columns(&conn, "sessions").await?,
-    );
-    let mut read_cursor = StoredCursor::default();
-    let mut stats = TranscriptIngestStats::default();
-    loop {
-        let new = read_new_rows_strict(&conn, &select_sql, read_cursor).await?;
-        let row_count = new.items.len();
-        if row_count == 0 {
-            return Ok(stats);
-        }
-        let bounded_count = new
-            .items
-            .iter()
-            .take_while(|row| budget.try_consume(hermes_budget_bytes(row)))
-            .count();
-        if bounded_count == 0 {
-            return Ok(stats);
-        }
-        let bounded = &new.items[..bounded_count];
-        let locations = user_turn_locations(bounded, source);
-        let profile = source.profile.clone();
-        let fallback_provenance = source
-            .legacy_project_pin
-            .as_ref()
-            .map_or("session_cwd", |_| "profile_pin");
-        let admitted = admit_rows(
-            db,
-            bounded,
-            scope.clone(),
-            generation,
-            file_identity,
-            resume_fingerprint,
-            |row| {
+    let (conn, generation, file_identity, resume_fingerprint, select_sql) =
+        open_state_source(source).await?;
+    ingest_bounded_pages(
+        db,
+        &conn,
+        &select_sql,
+        ObservationScopeV1::Profile,
+        generation,
+        file_identity,
+        resume_fingerprint,
+        budget,
+        |bounded| {
+            let locations = user_turn_locations(bounded, source);
+            let profile = source.profile.clone();
+            let fallback_provenance = source
+                .legacy_project_pin
+                .as_ref()
+                .map_or("session_cwd", |_| "profile_pin");
+            move |row: &HermesRow| {
                 locations
                     .contains(&row.id)
                     .then(|| HermesProjectionMetadata {
@@ -1701,29 +1715,10 @@ async fn try_ingest_user_state_db_bounded(
                         profile: profile.clone(),
                         location_provenance: Some(fallback_provenance),
                     })
-            },
-        )
-        .await?;
-        stats.messages_upserted = stats
-            .messages_upserted
-            .saturating_add(admitted.messages_upserted);
-        stats.sessions_upserted = stats
-            .sessions_upserted
-            .saturating_add(admitted.sessions_upserted);
-        read_cursor.position = bounded
-            .last()
-            .and_then(|row| u64::try_from(row.id).ok())
-            .unwrap_or(read_cursor.position);
-        if bounded_count < row_count {
-            return Ok(stats);
-        }
-        if new.truncated_by_byte_budget {
-            continue;
-        }
-        if row_count < CHUNK_ROWS {
-            return Ok(stats);
-        }
-    }
+            }
+        },
+    )
+    .await
 }
 
 /// Opens a Hermes `state.db` strictly read-only so the sweep can never write

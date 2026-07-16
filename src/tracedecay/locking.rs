@@ -421,15 +421,14 @@ fn marker_identity(contents: &[u8]) -> MarkerIdentity {
     }
 }
 
-#[cfg(unix)]
 fn sync_parent_directory(path: &Path) {
     if let Some(parent) = path.parent() {
-        let _ = File::open(parent).and_then(|directory| directory.sync_all());
+        let _ = crate::application::host_admission::sync_directory(
+            parent,
+            crate::application::host_admission::DirectorySyncPolicy::BestEffort,
+        );
     }
 }
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_path: &Path) {}
 
 /// Returns `true` if a legacy process with the given PID is currently running.
 fn is_pid_alive(pid: u32) -> bool {

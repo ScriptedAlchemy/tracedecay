@@ -1,9 +1,11 @@
 use std::path::Path;
 
+use serde_json::Value;
 use tracedecay_domain::{
-    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    RetentionClass, SanitizationReceiptV1,
+    CanonicalMessageRoleV1, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, RetentionClass,
+    SanitizationReceiptV1,
 };
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
@@ -12,10 +14,12 @@ use crate::application::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
 use crate::privacy::ParsedObservationRecordV1;
+use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::StoredCursor;
 use crate::sessions::source::{
-    JsonlResumeState, MAX_JSONL_RECORD_BYTES, RawJsonlSkippedReason, TranscriptIngestError,
-    TranscriptIngestResult, try_stream_new_jsonl_raw_strict_with_resume,
+    JsonlResumeState, MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlSkippedReason,
+    TranscriptIngestError, TranscriptIngestResult, preflight_strict_jsonl,
+    try_stream_new_jsonl_raw_strict_with_resume,
 };
 
 #[derive(Clone, Copy)]
@@ -431,4 +435,51 @@ fn skipped_reason(reason: RawJsonlSkippedReason) -> ObservationCoverageReason {
         RawJsonlSkippedReason::Whitespace => ObservationCoverageReason::BlankFrame,
         RawJsonlSkippedReason::Oversized => ObservationCoverageReason::OversizedFrame,
     }
+}
+
+pub(crate) fn canonical_message_role(role: Option<&str>) -> CanonicalMessageRoleV1 {
+    match role {
+        Some("user") => CanonicalMessageRoleV1::User,
+        Some("assistant") => CanonicalMessageRoleV1::Assistant,
+        Some("system" | "developer") => CanonicalMessageRoleV1::System,
+        Some("tool") => CanonicalMessageRoleV1::Tool,
+        _ => CanonicalMessageRoleV1::Unknown,
+    }
+}
+
+pub(crate) fn canonical_native_observation_id(
+    native_id: Option<&str>,
+    fallback: &ObservationId,
+) -> ObservationId {
+    native_id
+        .and_then(|native_id| ObservationId::new(native_id).ok())
+        .unwrap_or_else(|| fallback.clone())
+}
+
+pub(crate) fn canonical_u64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+    })
+}
+
+pub(crate) fn namespace_replacement_message_ids(
+    messages: &mut [SessionMessageRecord],
+    generation: u64,
+) {
+    for message in messages {
+        message.message_id = format!("{}:generation:{generation}", message.message_id);
+    }
+}
+
+pub(crate) fn preflight_and_parse_new(
+    provider: &'static str,
+    path: &Path,
+    prev: StoredCursor,
+    max_new_bytes: Option<u64>,
+    parse_new: impl FnOnce() -> Option<ParsedTranscript>,
+) -> TranscriptIngestResult<Option<ParsedTranscript>> {
+    preflight_strict_jsonl(provider, path, prev, max_new_bytes)?;
+    Ok(parse_new())
 }

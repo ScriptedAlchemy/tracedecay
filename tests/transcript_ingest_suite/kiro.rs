@@ -2,7 +2,7 @@ use tempfile::TempDir;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::kiro::KiroSource;
 use tracedecay::sessions::source::{
-    StoredCursor, TranscriptIngestError, TranscriptSource, ingest_source,
+    StoredCursor, TranscriptIngestError, TranscriptSource, try_ingest_source,
 };
 use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
 use tracedecay::store::GlobalDbObservationStore;
@@ -168,7 +168,9 @@ async fn kiro_legacy_chat_populates_searchable_messages() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = KiroSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
 
     let results = db
@@ -218,8 +220,9 @@ async fn kiro_legacy_chat_populates_searchable_messages() {
     assert_eq!(second.message.timestamp, Some(1_800_000_001));
 
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         0
     );
@@ -235,7 +238,9 @@ async fn kiro_workspace_sessions_json_is_ingested() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = KiroSource::with_home(&home);
-    let stats = ingest_source(&db, &source, &project, None).await;
+    let stats = try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 2);
 
     let results = db
@@ -345,7 +350,9 @@ async fn kiro_unversioned_timestamp_free_identity_survives_insertion_and_reorder
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = KiroSource::with_home(&home);
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
     let before = db
         .search_session_messages("kiro", None, "regression is fixed", 10)
         .await;
@@ -376,7 +383,9 @@ async fn kiro_unversioned_timestamp_free_identity_survives_insertion_and_reorder
         .to_string(),
     )
     .unwrap();
-    ingest_source(&db, &source, &project, None).await;
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
 
     let after = db
         .search_session_messages("kiro", None, "regression is fixed", 10)
@@ -419,8 +428,9 @@ async fn kiro_incomplete_snapshot_does_not_advance_frontier() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = KiroSource::with_home(&home);
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         0
     );
@@ -432,8 +442,9 @@ async fn kiro_incomplete_snapshot_does_not_advance_frontier() {
 
     write_workspace_session_json(&home, &project, "sess-incomplete");
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         2
     );
@@ -455,8 +466,9 @@ async fn kiro_transcript_for_other_project_is_skipped() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = KiroSource::with_home(&home);
     assert_eq!(
-        ingest_source(&db, &source, &project, None)
+        try_ingest_source(&db, &source, &project, None)
             .await
+            .unwrap()
             .messages_upserted,
         0
     );
@@ -484,7 +496,9 @@ async fn kiro_user_scope_includes_only_unregistered_sessions() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = KiroSource::with_home(&home).for_user_scope(vec![project.clone()]);
-    let stats = ingest_source(&db, &source, tmp.path(), None).await;
+    let stats = try_ingest_source(&db, &source, tmp.path(), None)
+        .await
+        .unwrap();
     assert_eq!(stats.messages_upserted, 4);
     assert!(db.get_session("kiro", "kiro-workflow-1").await.is_none());
     let session = db.get_session("kiro", "user-kiro").await.unwrap();
