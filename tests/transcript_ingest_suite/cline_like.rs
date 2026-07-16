@@ -6,12 +6,16 @@ use tracedecay::sessions::source::{
     StoredCursor, TranscriptIngestError, TranscriptSource, ingest_source,
 };
 use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
+#[cfg(not(windows))]
 use tracedecay::store::GlobalDbObservationStore;
+#[cfg(not(windows))]
 use tracedecay_store::ObservationProjectionStore;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
+#[cfg(not(windows))]
+use crate::restart_atomicity::durable_table_count;
 use crate::restart_atomicity::{
-    durable_table_count, mark_test_project, observation_source_cursor, set_projection_failure,
+    mark_test_project, observation_source_cursor, set_projection_failure,
 };
 use crate::support::{
     assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo, setup,
@@ -107,10 +111,16 @@ pub(super) fn write_task_with_api_filename(
 ) -> std::path::PathBuf {
     let dir = root.join(task_id);
     std::fs::create_dir_all(&dir).unwrap();
-    let metadata =
-        include_str!("../fixtures/transcript_golden/cline_like/input/task_metadata.json")
-            .replace("<PROJECT_ROOT>", &project.to_string_lossy());
-    std::fs::write(dir.join("task_metadata.json"), metadata).unwrap();
+    let mut metadata: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/transcript_golden/cline_like/input/task_metadata.json"
+    ))
+    .unwrap();
+    metadata["workspacePath"] = serde_json::Value::String(project.to_string_lossy().into_owned());
+    std::fs::write(
+        dir.join("task_metadata.json"),
+        serde_json::to_vec_pretty(&metadata).unwrap(),
+    )
+    .unwrap();
     let api = dir.join(api_filename);
     let fixture_name = match api_filename {
         "api_messages.json" => api_filename,
@@ -814,6 +824,7 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
 }
 
 #[tokio::test]
+#[cfg(not(windows))]
 #[allow(clippy::await_holding_lock)]
 async fn cline_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
     let _env_lock = GLOBAL_DB_ENV_LOCK

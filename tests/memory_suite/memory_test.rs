@@ -1148,6 +1148,8 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
     let row = rows.next().await.unwrap().unwrap();
     let vector_len: i64 = row.get(0).unwrap();
     assert_eq!(vector_len, 8200);
+    drop(row);
+    drop(rows);
 
     drop(writer);
     db.execute_write(
@@ -1172,6 +1174,7 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
         .unwrap();
     let hrr_dim: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
     assert_eq!(hrr_dim, HolographicEncoder::DIMENSIONS as i64);
+    drop(rows);
     assert_eq!(
         scalar_i64(
             &db,

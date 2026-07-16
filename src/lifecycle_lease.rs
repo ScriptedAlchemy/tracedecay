@@ -60,15 +60,28 @@ impl LifecycleLease {
         };
 
         let owner = read_owner(file, &self.lock_path);
+        #[cfg(windows)]
+        fs2::FileExt::unlock(file)
+            .map_err(|error| lock_error(&self.lock_path, "downgrade", &error))?;
         if let Err(error) = fs2::FileExt::lock_shared(file) {
             let downgrade_error = lock_error(&self.lock_path, "downgrade", &error);
-            fs2::FileExt::lock_exclusive(file).map_err(|restore_error| {
-                failed_downgrade_restore_error(&downgrade_error, &restore_error)
-            })?;
+            fs2::FileExt::lock_exclusive(file)
+                .and_then(|()| {
+                    owner.as_deref().map_or(Ok(()), |owner| {
+                        write_owner_metadata(file, &self.lock_path, owner)
+                    })
+                })
+                .map_err(|restore_error| {
+                    failed_downgrade_restore_error(&downgrade_error, &restore_error)
+                })?;
             return Err(downgrade_error);
         }
         if let Err(error) = clear_owner_metadata(file, &self.lock_path) {
             let downgrade_error = owner_write_error(&error);
+            #[cfg(windows)]
+            fs2::FileExt::unlock(file).map_err(|restore_error| {
+                failed_downgrade_restore_error(&downgrade_error, &restore_error)
+            })?;
             fs2::FileExt::lock_exclusive(file)
                 .and_then(|()| {
                     owner.as_deref().map_or(Ok(()), |owner| {
@@ -625,6 +638,7 @@ mod tests {
         assert!(!held.is_exclusive());
         assert!(held.token().is_none());
         let reader = acquire_shared_at(&path, "daemon").unwrap();
+        assert!(!reader.is_exclusive());
         let error = acquire_exclusive_at(&path, "upgrade").unwrap_err();
 
         assert!(error.to_string().contains("another lifecycle operation"));

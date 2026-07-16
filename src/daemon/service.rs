@@ -1,6 +1,8 @@
 use std::fmt::Write;
 #[cfg(unix)]
 use std::io::{BufRead, BufReader, Write as IoWrite};
+#[cfg(not(unix))]
+use std::net::TcpStream as StdTcpStream;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
@@ -896,10 +898,23 @@ pub fn daemon_reachable() -> bool {
     default_socket_path().is_ok_and(|path| StdUnixStream::connect(path).is_ok())
 }
 
-/// The daemon (and its scheduler) is unix-only; see [`super::run_foreground`].
 #[cfg(not(unix))]
 pub fn daemon_reachable() -> bool {
-    false
+    let Some(profile_root) = crate::config::user_data_dir() else {
+        return false;
+    };
+    let Ok(profile_root) = super::authority::canonical_identity_path(&profile_root) else {
+        return false;
+    };
+    let Ok(Some(record)) = super::authority::current_record(&profile_root) else {
+        return false;
+    };
+    if record.profile_root != profile_root {
+        return false;
+    }
+    let super::transport::DaemonEndpoint::Loopback(address) = record.endpoint;
+    address.ip().is_loopback()
+        && StdTcpStream::connect_timeout(&address, std::time::Duration::from_millis(250)).is_ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

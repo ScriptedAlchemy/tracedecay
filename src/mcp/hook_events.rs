@@ -1466,6 +1466,7 @@ mod tests {
 
     #[test]
     fn durable_plan_round_trip_preserves_supported_variants() {
+        let worktree_root = std::env::temp_dir().join("worktree");
         let route = Some(crate::daemon::HookRouteMetadata {
             session_id: Some("session-1".to_string()),
             thread_id: None,
@@ -1484,7 +1485,7 @@ mod tests {
             HookEventPlan::SyncFiles(vec!["src/lib.rs".to_string()]),
             HookEventPlan::AddBranch("feature/test".to_string()),
             HookEventPlan::AddBranchAt {
-                root: PathBuf::from("/tmp/worktree"),
+                root: worktree_root,
                 branch: "feature/test".to_string(),
                 agent: HookAgent::Codex,
             },

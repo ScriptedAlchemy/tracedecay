@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 use serde_json::{Value, json};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
@@ -1050,7 +1050,32 @@ fn sqlite_incarnation(path: &Path) -> Result<(ObservationSourceGenerationV1, u64
     Ok((generation, file_identity, resume_fingerprint))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn sqlite_incarnation(path: &Path) -> Result<(ObservationSourceGenerationV1, u64, u64), String> {
+    use std::os::windows::fs::MetadataExt;
+
+    let file = std::fs::File::open(path)
+        .map_err(|_| "could not open Hermes SQLite authority".to_string())?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "could not inspect Hermes SQLite authority".to_string())?;
+    let file_identity = crate::windows_file::stable_file_identity(&file, path)
+        .map_err(|_| "could not identify Hermes SQLite authority".to_string())?;
+
+    let mut resume_hasher = Sha256::new();
+    resume_hasher.update(file_identity.to_le_bytes());
+    resume_hasher.update(metadata.len().to_le_bytes());
+    resume_hasher.update(metadata.last_write_time().to_le_bytes());
+    let resume_digest = resume_hasher.finalize();
+    let mut resume_bytes = [0_u8; 8];
+    resume_bytes.copy_from_slice(&resume_digest[..8]);
+    let resume_fingerprint = u64::from_le_bytes(resume_bytes);
+    let generation = ObservationSourceGenerationV1::new(file_identity)
+        .map_err(|_| "invalid Hermes SQLite generation".to_string())?;
+    Ok((generation, file_identity, resume_fingerprint))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn sqlite_incarnation(path: &Path) -> Result<(ObservationSourceGenerationV1, u64, u64), String> {
     std::fs::metadata(path).map_err(|_| "could not inspect Hermes SQLite authority".to_string())?;
     Err("Hermes SQLite physical identity is unavailable".to_string())
@@ -2132,6 +2157,30 @@ fn file_mtime_secs(path: &Path) -> u64 {
 #[cfg(test)]
 mod observation_tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_sqlite_incarnation_keeps_identity_and_refreshes_resume_fingerprint() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        std::fs::write(&path, b"before").unwrap();
+        let (before_generation, before_identity, before_resume) =
+            sqlite_incarnation(&path).expect("initial Windows SQLite identity");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"after")
+            .unwrap();
+
+        let (after_generation, after_identity, after_resume) =
+            sqlite_incarnation(&path).expect("updated Windows SQLite identity");
+        assert_eq!(after_generation, before_generation);
+        assert_eq!(after_identity, before_identity);
+        assert_ne!(after_resume, before_resume);
+    }
 
     fn fixture(row_id: i64) -> HermesRow {
         HermesRow {

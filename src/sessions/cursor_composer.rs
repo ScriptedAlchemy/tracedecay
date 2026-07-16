@@ -1285,7 +1285,13 @@ fn snapshot_generation(path: &Path) -> Option<ObservationSourceGenerationV1> {
         bytes.copy_from_slice(&digest[..8]);
         ObservationSourceGenerationV1::new(u64::from_le_bytes(bytes).max(1)).ok()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let file = std::fs::File::open(path).ok()?;
+        let file_identity = crate::windows_file::stable_file_identity(&file, path).ok()?;
+        ObservationSourceGenerationV1::new(file_identity).ok()
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         None
@@ -1897,6 +1903,25 @@ fn encode_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_snapshot_generation_is_stable_across_appends() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.vscdb");
+        std::fs::write(&path, b"before").unwrap();
+        let before = snapshot_generation(&path).expect("Windows file identity");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"after")
+            .unwrap();
+
+        assert_eq!(snapshot_generation(&path), Some(before));
+    }
 
     #[test]
     fn composer_capture_request_uses_snapshot_order_and_native_bubble_identity() {

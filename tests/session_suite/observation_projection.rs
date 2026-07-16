@@ -1572,6 +1572,7 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
         anchor_store_id.to_string()
     );
     assert_eq!(identity.get::<i64>(1).unwrap(), anchor_store_id);
+    drop(identity);
     drop(identity_rows);
     drop(raw_conn);
     drop(raw_db);
@@ -2345,6 +2346,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
     let generation = row.get::<String>(0).unwrap();
     assert_eq!(row.get::<i64>(1).unwrap(), 128);
     assert_eq!(row.get::<String>(2).unwrap(), "building");
+    drop(row);
     drop(rows);
     assert_eq!(projection_counts(&tmp).await, (1, 257, 257, 1, 0, 1));
     raw_conn
@@ -2363,9 +2365,10 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
         .expect_err("activation interruption must preserve the ready generation");
     assert!(matches!(error, ProjectionStoreError::Storage { .. }));
     assert_eq!(projection_counts(&tmp).await, (1, 257, 257, 1, 0, 1));
-    drop(db);
     drop(raw_conn);
     drop(raw_db);
+    db.checkpoint().await;
+    drop(db);
     let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
         .build()
         .await

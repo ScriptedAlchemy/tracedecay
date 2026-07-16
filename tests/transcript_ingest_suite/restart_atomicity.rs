@@ -1045,12 +1045,17 @@ async fn codex_restart_partial_malformed_and_crash_before_commit() {
     let (home, project) = setup(&tmp);
     let path = write_codex_rollout_fixture(&home, &project, "codex-restart");
     let source = CodexSource::with_home(&home);
-    let path_key = path.to_string_lossy().into_owned();
 
     let db = open_project_session_db(&project).await.unwrap();
     let first = ingest_source(&db, &source, &project, None).await;
     assert_eq!(first.messages_upserted, 2);
     assert_eq!(db.session_message_count().await.unwrap(), 2);
+    let path_key = db
+        .get_session("codex", "codex-restart")
+        .await
+        .expect("Codex session ingested")
+        .transcript_path
+        .expect("Codex durable transcript path");
     let first_offset = db.get_parse_offset(&path_key).await.unwrap();
     assert_no_transcript_adjacent_fallback_writer(&project, &path);
     drop(db);
@@ -1411,7 +1416,6 @@ async fn codex_incomplete_tail_retained_across_append_then_completes() {
     let (home, project) = setup(&tmp);
     let path = write_codex_rollout_fixture(&home, &project, "codex-partial-append");
     let source = CodexSource::with_home(&home);
-    let path_key = path.to_string_lossy().into_owned();
 
     let db = open_project_session_db(&project).await.unwrap();
     assert_eq!(
@@ -1420,6 +1424,12 @@ async fn codex_incomplete_tail_retained_across_append_then_completes() {
             .messages_upserted,
         2
     );
+    let path_key = db
+        .get_session("codex", "codex-partial-append")
+        .await
+        .expect("Codex session ingested")
+        .transcript_path
+        .expect("Codex durable transcript path");
     let committed = db.get_parse_offset(&path_key).await.unwrap();
     drop(db);
 

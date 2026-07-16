@@ -52,7 +52,9 @@ fn write_legacy_chat(
     std::fs::write(
         ws_storage.join("workspace.json"),
         serde_json::json!({
-            "folder": format!("file://{}", project.display())
+            "folder": url::Url::from_file_path(project)
+                .expect("project has a portable file URI")
+                .to_string()
         })
         .to_string(),
     )
@@ -122,7 +124,12 @@ fn write_extensionless_execution(
     std::fs::create_dir_all(&ws_storage).unwrap();
     std::fs::write(
         ws_storage.join("workspace.json"),
-        serde_json::json!({"folder": format!("file://{}", project.display())}).to_string(),
+        serde_json::json!({
+            "folder": url::Url::from_file_path(project)
+                .expect("project has a portable file URI")
+                .to_string()
+        })
+        .to_string(),
     )
     .unwrap();
     let path = data_dir
@@ -511,8 +518,8 @@ async fn kiro_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
     let _home = EnvVarGuard::set("HOME", &home);
     init_git_repo(&project);
     mark_test_project(&project);
-    let left_path = write_workspace_session_json(&home, &project, "a:b");
-    let right_path = write_workspace_session_json(&home, &project, "a");
+    let left_path = write_workspace_session_json(&home, &project, "delimiter-left");
+    let right_path = write_workspace_session_json(&home, &project, "delimiter-right");
     std::fs::write(
         left_path,
         serde_json::json!({

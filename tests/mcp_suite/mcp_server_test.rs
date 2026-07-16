@@ -215,7 +215,9 @@ async fn initialize_roots_route_registered_reader_tools_without_explicit_selecto
         .await
         .unwrap();
     let server = McpServer::new_with_dbs(active, None, None, Some(Arc::new(registry)), false).await;
-    let target_root_uri = format!("file://{}", target.project_root().display());
+    let target_root_uri = url::Url::from_file_path(target.project_root())
+        .expect("target project has a portable file URI")
+        .to_string();
 
     let responses = run_server_with_messages(
         server,
@@ -2132,7 +2134,11 @@ async fn call_tool(server: Arc<McpServer>, id: i64, tool_name: &str, arguments: 
 #[tokio::test]
 async fn hook_event_workspace_context_routes_followup_graph_reads() {
     let home = TempDir::new().unwrap();
-    let profile_root = home.path().join(".tracedecay");
+    let profile_root = home
+        .path()
+        .canonicalize()
+        .expect("temporary home canonicalizes")
+        .join(".tracedecay");
     let global_db_path = profile_root.join("global.db");
     let options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
@@ -2193,11 +2199,7 @@ async fn hook_event_workspace_context_routes_followup_graph_reads() {
                 json!({
                     "agent": "codex",
                     "event": "workspaceOpen",
-                    "cwd": target_project
-                        .join("src")
-                        .canonicalize()
-                        .expect("target source directory canonicalizes")
-                        .to_string_lossy()
+                    "cwd": target_project.join("src").to_string_lossy()
                 }),
             ),
             jsonrpc_request(
@@ -2216,7 +2218,7 @@ async fn hook_event_workspace_context_routes_followup_graph_reads() {
     let text = extract_tool_text(&response["result"]);
     assert!(
         text.contains("target_only.rs"),
-        "hook workspace context should route graph reads to target project, got: {text}"
+        "hook workspace context should route graph reads to target project, got: {text}; response: {response}"
     );
     assert!(
         !text.contains("active_only.rs"),

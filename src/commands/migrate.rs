@@ -5,10 +5,7 @@ use crate::cli::MigrateAction;
 async fn build_migration_inventory(
     options: tracedecay::migrate::inventory::MigrationInventoryOptions,
 ) -> tracedecay::errors::Result<tracedecay::migrate::inventory::MigrationInventory> {
-    #[cfg(unix)]
     let daemon_available = tracedecay::daemon::daemon_reachable();
-    #[cfg(not(unix))]
-    let daemon_available = true;
 
     if daemon_available {
         return brokered_migration_inventory(&options).await;
@@ -17,7 +14,6 @@ async fn build_migration_inventory(
     match tracedecay::migrate::inventory::build_inventory(options.clone()).await {
         Ok(report) => Ok(report),
         Err(offline_error) => {
-            #[cfg(unix)]
             if tracedecay::daemon::daemon_reachable() {
                 return brokered_migration_inventory(&options).await;
             }
@@ -569,15 +565,15 @@ async fn registry_gc(
     prefix: Option<String>,
     apply: bool,
 ) -> tracedecay::errors::Result<serde_json::Value> {
-    #[cfg(unix)]
-    if tracedecay::daemon::daemon_reachable() {
+    let daemon_available = tracedecay::daemon::daemon_reachable();
+
+    if daemon_available {
         return brokered_registry_gc(prefix, apply).await;
     }
 
     match offline_registry_gc(prefix.clone(), apply).await {
         Ok(report) => Ok(report),
         Err(offline_error) => {
-            #[cfg(unix)]
             if tracedecay::daemon::daemon_reachable() {
                 return brokered_registry_gc(prefix, apply).await;
             }
@@ -586,7 +582,6 @@ async fn registry_gc(
     }
 }
 
-#[cfg(unix)]
 async fn brokered_registry_gc(
     prefix: Option<String>,
     apply: bool,
