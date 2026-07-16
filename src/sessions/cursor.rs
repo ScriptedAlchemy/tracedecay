@@ -140,25 +140,29 @@ async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf
     // renamed/moved checkout keeps routing its session history to the store it
     // was originally registered under, instead of silently forking a fresh
     // session DB at a new default path.
-    let resolution = if let Some(resolution) = global
+    let resolution = match global
         .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
         .await
     {
-        resolution
-    } else {
-        let remote = crate::tracedecay::git_remote_url(project_root)?;
-        let resolution = global
-            .resolve_unique_project_store_by_git_remote(&remote)
-            .await?;
-        // Remote uniqueness alone cannot tell a renamed checkout (whose
-        // original registered location no longer exists on disk) apart from
-        // a second, still-present clone of the same remote. Only borrow the
-        // registered store when the original checkout is gone, so a live
-        // clone never inherits another checkout's session history.
-        if registered_checkout_present(&resolution.project) {
-            return None;
+        Ok(Some(resolution)) => resolution,
+        // Repository identity conflict: fail closed and route to the default
+        // session DB rather than borrowing a possibly-wrong registered store.
+        Err(_) => return None,
+        Ok(None) => {
+            let remote = crate::tracedecay::git_remote_url(project_root)?;
+            let resolution = global
+                .resolve_unique_project_store_by_git_remote(&remote)
+                .await?;
+            // Remote uniqueness alone cannot tell a renamed checkout (whose
+            // original registered location no longer exists on disk) apart from
+            // a second, still-present clone of the same remote. Only borrow the
+            // registered store when the original checkout is gone, so a live
+            // clone never inherits another checkout's session history.
+            if registered_checkout_present(&resolution.project) {
+                return None;
+            }
+            resolution
         }
-        resolution
     };
     if resolution.store.storage_mode != "profile_sharded" {
         return None;

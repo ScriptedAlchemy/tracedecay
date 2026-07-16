@@ -2088,16 +2088,26 @@ impl GlobalDb {
         query(self, &legacy_alias, Some(&legacy_alias)).await
     }
 
+    /// Resolve the persisted store for a project by its repository identity.
+    ///
+    /// Propagates an identity-conflict error (see [`Self::project_id_by_identity`])
+    /// so the store-layout resolver fails closed rather than minting a fresh
+    /// shard. `Ok(None)` means no identity/store was found (unchanged).
     pub async fn resolve_project_store_by_identity(
         &self,
         project_root: &Path,
         git_common_dir: Option<&Path>,
-    ) -> Option<ProjectStoreResolution> {
-        let project_id = self
+    ) -> Result<Option<ProjectStoreResolution>, TraceDecayError> {
+        let Some(project_id) = self
             .project_id_by_identity(project_root, git_common_dir)
-            .await?;
-        let project = self.get_code_project(&project_id).await?;
-        self.resolve_project_store_for_project(&project).await
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Some(project) = self.get_code_project(&project_id).await else {
+            return Ok(None);
+        };
+        Ok(self.resolve_project_store_for_project(&project).await)
     }
 
     pub async fn resolve_unique_project_store_by_git_remote(
@@ -2573,32 +2583,49 @@ impl GlobalDb {
         project_root: &Path,
         git_common_dir: Option<&Path>,
     ) -> Option<ProjectRegistryContext> {
+        // This registry-context lookup only routes/display-resolves an existing
+        // project; unlike the store-layout path it never mints a fresh shard, so
+        // an identity conflict is treated as "no registered identity" (None) —
+        // the same observable result as before the conflict was made typed.
         let project_id = self
             .project_id_by_identity(project_root, git_common_dir)
-            .await?;
+            .await
+            .ok()
+            .flatten()?;
         self.project_registry_context_by_id(&project_id).await
     }
 
+    /// Resolve a project id from the repository identity marker or registry
+    /// aliases.
+    ///
+    /// Returns `Ok(None)` when no identity is recorded (missing marker, no
+    /// matching alias). A marker read error — most importantly a genuine
+    /// repository identity conflict — is propagated as `Err` so callers fail
+    /// closed instead of swallowing it as "no identity" and minting a fresh
+    /// path-hash id (which would split the project's shard).
     async fn project_id_by_identity(
         &self,
         project_root: &Path,
         git_common_dir: Option<&Path>,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, TraceDecayError> {
         match crate::storage::read_repository_identity_marker(project_root) {
-            Ok(Some(marker)) => return Some(marker.project_id),
+            Ok(Some(marker)) => return Ok(Some(marker.project_id)),
             Ok(None) => {}
-            Err(_) => return None,
+            Err(e) => return Err(e),
         }
         if let Some(project_id) = self.project_id_by_path_alias(project_root).await {
-            return Some(project_id);
+            return Ok(Some(project_id));
         }
+        let Some(git_common_dir) = git_common_dir else {
+            return Ok(None);
+        };
         if let Some(project_id) = self
-            .project_id_by_git_common_dir_alias(git_common_dir?)
+            .project_id_by_git_common_dir_alias(git_common_dir)
             .await
         {
-            return Some(project_id);
+            return Ok(Some(project_id));
         }
-        None
+        Ok(None)
     }
 
     async fn project_id_by_path_alias(&self, path: &Path) -> Option<String> {

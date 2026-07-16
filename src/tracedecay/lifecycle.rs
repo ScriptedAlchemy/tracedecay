@@ -188,7 +188,7 @@ impl TraceDecay {
             && let Some(global_db) = open_options.open_global_db().await
             && let Some(resolution) = global_db
                 .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
-                .await
+                .await?
         {
             selected = Some(storage::profile_sharded_layout(
                 project_root,

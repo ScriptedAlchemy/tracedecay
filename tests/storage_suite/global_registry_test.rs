@@ -385,6 +385,7 @@ async fn registry_resolves_store_by_repo_identity_aliases() {
     let by_common_dir = db
         .resolve_project_store_by_identity(&renamed, Some(&common_dir))
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(by_common_dir.project.project_id, "proj_repo_identity");
 

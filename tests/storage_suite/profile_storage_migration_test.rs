@@ -672,6 +672,7 @@ async fn single_plan_reconstruction_rejects_noneligible_and_accepts_matching_exi
         db.resolve_project_store_by_identity(&project_root, None)
             .await
             .unwrap()
+            .unwrap()
             .project
             .project_id,
         "proj_123"

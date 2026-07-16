@@ -500,7 +500,17 @@ pub fn read_repository_identity_marker(
     let current_key = current_common_dir
         .canonicalize()
         .unwrap_or_else(|_| current_common_dir.to_path_buf());
-    if stored_key != current_key && stored_common_dir.exists() {
+    if stored_key != current_key
+        && stored_common_dir.exists()
+        && stored_dir_marker_names_project(stored_common_dir, &marker.project_id)
+    {
+        // The stored git common dir still exists, canonicalizes to a different
+        // live directory, and hosts a marker naming the SAME project: this is a
+        // genuine true copy (e.g. `cp -a`/rsync duplicated the marker) with two
+        // live checkouts claiming one project id. Fail closed. A move where the
+        // old path was reused by an UNRELATED repo (absent/unreadable/different
+        // marker there) is accepted below and self-heals on the next writable
+        // open, which rewrites git_common_dir to this checkout.
         return Err(TraceDecayError::Config {
             message: format!(
                 "repository identity conflict: marker '{}' names project '{}' but its original \
@@ -513,6 +523,24 @@ pub fn read_repository_identity_marker(
         });
     }
     Ok(Some(marker))
+}
+
+/// Probe the repository identity marker stored inside `stored_common_dir` and
+/// report whether it names `expected_project_id`.
+///
+/// This is a raw JSON read that deliberately does NOT recurse through
+/// [`read_repository_identity_marker`] (which would re-run conflict detection
+/// against the probed directory). An absent, unreadable, malformed, or
+/// differently-named marker returns `false`.
+fn stored_dir_marker_names_project(stored_common_dir: &Path, expected_project_id: &str) -> bool {
+    let marker_path = stored_common_dir.join(REPOSITORY_IDENTITY_FILENAME);
+    let Ok(text) = fs::read_to_string(&marker_path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    value.get("project_id").and_then(serde_json::Value::as_str) == Some(expected_project_id)
 }
 
 pub fn write_repository_identity_marker(project_root: &Path, project_id: &str) -> Result<bool> {
