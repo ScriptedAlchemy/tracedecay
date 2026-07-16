@@ -1,42 +1,41 @@
 //! Observation-first Claude transcript ingestion.
 //!
-//! The provider owns framing and scope. This coordinator owns the mandatory
-//! sanitizer/store boundary, then drains projection work in source order. The
-//! projector is the only writer of V1 session and message rows.
+//! The provider owns framing and scope. This coordinator routes framed records
+//! through the host admission authority, then drains projection work in source
+//! order. The projector is the only writer of V1 session and message rows.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, DomainError, ObservationContractError,
-    ObservationScopeV1, RetentionClass, SanitizationReceiptV1, SessionId,
+    ObservationId, ObservationScopeV1, RetentionClass, SanitizationReceiptV1, SessionId,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
 };
 use tracedecay_store::{
-    ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationStoreError,
-    ProjectionPersistOutcome, ProjectionStoreError, TranscriptStoreError,
+    ObservationPersistOutcome, ObservationStoreError, ProjectionStoreError, TranscriptStoreError,
 };
 
+use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use crate::application::observation::{
-    AdvanceNonDurableSourceCursorRequest, CaptureClaudeObservationOutcome,
-    CaptureClaudeObservationRequest, CaptureClaudeObservationRequestError, ObservationApplication,
-    ObservationApplicationError, ObservationCancellation,
+    CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest,
+    CaptureClaudeObservationRequestError, ObservationApplicationError, ObservationCancellation,
 };
-use crate::privacy::{ClaudeRecordSanitizerV1, PrivacySanitizerError};
+use crate::privacy::PrivacySanitizerError;
 use crate::sessions::claude::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSource,
     ClaudeSourceFrame, identify_claude_source, try_scan_claude_source_frames_with_resume,
 };
 use crate::sessions::shared::{StoredCursor, TranscriptIngestStats};
+use crate::sessions::snapshot_observation::host_admission_error;
 use crate::sessions::source::{
-    JsonlResumeState, STRICT_JSONL_BATCH_BYTES, TranscriptIngestError, TranscriptSource,
-    load_transcript_cursor,
+    JsonlResumeState, STRICT_JSONL_BATCH_BYTES, TranscriptDiscoveryBounds, TranscriptIngestError,
+    TranscriptSource, load_transcript_cursor,
 };
-use crate::store::{GlobalDbObservationStore, GlobalDbTranscriptStore};
+use crate::store::GlobalDbTranscriptStore;
 
 pub(crate) const CLAUDE_TRANSCRIPT_RETENTION_CLASS: &str = "transcript.claude.v1";
 /// Every pass, including startup recovery, bounds its raw and parsed backlog.
@@ -57,6 +56,7 @@ pub(crate) struct ClaudeObservationIngestStats {
     pub records_rejected: u64,
     pub records_quarantined: u64,
     pub projections_completed: u64,
+    pub projection_outputs: u64,
     pub projections_skipped: u64,
     pub projection_duplicates: u64,
     pub deferred_sources: u64,
@@ -84,6 +84,9 @@ impl ClaudeObservationIngestStats {
         self.projections_completed = self
             .projections_completed
             .saturating_add(other.projections_completed);
+        self.projection_outputs = self
+            .projection_outputs
+            .saturating_add(other.projection_outputs);
         self.projections_skipped = self
             .projections_skipped
             .saturating_add(other.projections_skipped);
@@ -256,23 +259,30 @@ fn cursor_after_receipt(
 }
 
 /// Sanitize and commit one already-framed record before any V1 sink.
-async fn capture_frame<S>(
-    application: &ObservationApplication<S>,
+async fn capture_frame(
+    admission: &HostAdmissionFacade<'_>,
     frame: &mut ClaudeSourceFrame,
     expected_cursor: Option<ClaudeSourceCursorV1>,
     context: &FrameCaptureContext,
-) -> Result<FrameCaptureOutcome, ClaudeObservationIngestError>
-where
-    S: ObservationStore,
-{
+) -> Result<FrameCaptureOutcome, ClaudeObservationIngestError> {
     let parsed_record = frame
         .take_parsed_record()
         .ok_or(ClaudeObservationIngestError::MissingParsedRecord)?;
-    let identity = ClaudeObservationIdentityMaterialV1::new(
+    let native_record_id = parsed_record
+        .value()
+        .get("stable_record_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ClaudeObservationIngestError::InvalidFrameState)
+        .and_then(|record_id| {
+            ObservationId::new(record_id.to_owned()).map_err(ClaudeObservationIngestError::from)
+        })?;
+    let identity = ClaudeObservationIdentityMaterialV1::for_native_record(
         context.source.clone(),
         context.scope.clone(),
         context.generation,
         *parsed_record.source_range(),
+        parsed_record.ordering_domain(),
+        native_record_id,
     )?;
     let request = CaptureClaudeObservationRequest::new(
         parsed_record,
@@ -282,7 +292,11 @@ where
         context.cancellation.clone(),
     )?
     .with_resume_checkpoint(context.file_identity, frame.resume_fingerprint);
-    match application.capture_claude_observation(request).await? {
+    match admission
+        .capture_observation(request)
+        .await
+        .map_err(|outcome| host_admission_error("claude", outcome))?
+    {
         CaptureClaudeObservationOutcome::Persisted {
             outcome,
             sanitized_record,
@@ -310,16 +324,13 @@ where
     }
 }
 
-async fn advance_non_durable_covered_range<S>(
-    application: &ObservationApplication<S>,
+async fn advance_non_durable_covered_range(
+    admission: &HostAdmissionFacade<'_>,
     context: &FrameCaptureContext,
     observation_cursor: &mut Option<ClaudeSourceCursorV1>,
     segment: NonDurableSegment,
     stats: &mut ClaudeObservationIngestStats,
-) -> Result<(), ClaudeObservationIngestError>
-where
-    S: ObservationStore,
-{
+) -> Result<(), ClaudeObservationIngestError> {
     let NonDurableSegment {
         covered,
         reason,
@@ -354,12 +365,10 @@ where
         )?,
     }
     .with_resume_checkpoint(context.file_identity, resume_fingerprint);
-    let outcome = application
-        .advance_non_durable_source_cursor(AdvanceNonDurableSourceCursorRequest::new(
-            advance,
-            context.cancellation.clone(),
-        ))
-        .await?;
+    let outcome = admission
+        .advance_non_durable_source_cursor(advance, context.cancellation.clone())
+        .await
+        .map_err(|outcome| host_admission_error("claude", outcome))?;
     *observation_cursor = Some(cursor_at(
         &context.source,
         &context.scope,
@@ -378,17 +387,16 @@ where
     Ok(())
 }
 
-struct PreparedSource<'a> {
-    application: ObservationApplication<GlobalDbObservationStore<'a>>,
+struct PreparedSource {
     capture_context: FrameCaptureContext,
     observation_cursor: Option<ClaudeSourceCursorV1>,
     segments: Vec<ScannedSegment>,
     stats: ClaudeObservationIngestStats,
 }
 
-enum SourcePreparation<'a> {
+enum SourcePreparation {
     Finished(ClaudeObservationIngestStats),
-    Ready(Box<PreparedSource<'a>>),
+    Ready(Box<PreparedSource>),
 }
 
 fn scan_stats(coverage: ClaudeFrameCoverage, read_through: u64) -> ClaudeObservationIngestStats {
@@ -428,16 +436,21 @@ fn scanned_segments(
     Ok(segments)
 }
 
-async fn prepare_source<'a>(
+struct SourceProcessingContext<'a, 'authority> {
     db: &'a crate::global_db::GlobalDb,
-    source_adapter: &ClaudeSource,
+    admission: &'a HostAdmissionFacade<'authority>,
+    source_adapter: &'a ClaudeSource,
+    project_root: &'a Path,
+    scope: &'a ObservationScopeV1,
+    cancellation: &'a ObservationCancellation,
+}
+
+async fn prepare_source(
+    context: &SourceProcessingContext<'_, '_>,
     path: &Path,
-    project_root: &Path,
-    scope: &ObservationScopeV1,
     max_new_bytes: Option<u64>,
-    cancellation: &ObservationCancellation,
-) -> Result<SourcePreparation<'a>, ClaudeObservationIngestError> {
-    if cancellation.is_cancelled() {
+) -> Result<SourcePreparation, ClaudeObservationIngestError> {
+    if context.cancellation.is_cancelled() {
         return Err(ObservationApplicationError::Cancelled.into());
     }
     let identity = identify_claude_source(path).ok_or_else(|| {
@@ -450,10 +463,13 @@ async fn prepare_source<'a>(
         SessionId::new(identity.session_id.clone())?,
         SessionId::new(identity.source_id.clone())?,
     )?;
-    let observation_store = GlobalDbObservationStore::new(db);
-    let transcript_store = GlobalDbTranscriptStore::new(db);
+    let transcript_store = GlobalDbTranscriptStore::new(context.db);
     let loaded = load_transcript_cursor(&transcript_store, identity.cursor_key.clone()).await?;
-    let observation_cursor = observation_store.get_source_cursor(&source, scope).await?;
+    let observation_cursor = context
+        .admission
+        .get_source_cursor(&source, context.scope)
+        .await
+        .map_err(|outcome| host_admission_error("claude", outcome))?;
     let previous =
         authoritative_scanner_cursor(loaded.checkpoint.state, observation_cursor.as_ref());
     let resume_state = observation_cursor.as_ref().and_then(|cursor| {
@@ -498,7 +514,9 @@ async fn prepare_source<'a>(
             end_offset: covered_through,
         };
     }
-    let retained = source_adapter.retain_scoped_frames(&mut scan, project_root);
+    let retained = context
+        .source_adapter
+        .retain_scoped_frames(&mut scan, context.project_root);
     scan.coverage = coverage;
     if retained.is_none() {
         return Ok(SourcePreparation::Finished(deferred_source_stats(
@@ -507,23 +525,20 @@ async fn prepare_source<'a>(
     }
 
     let generation = ClaudeFileGenerationV1::new(scan.file_generation)?;
-    let sanitizer = ClaudeRecordSanitizerV1::claude_v1()?;
-    let application = ObservationApplication::new(observation_store, sanitizer);
     let retention_class = RetentionClass::new(CLAUDE_TRANSCRIPT_RETENTION_CLASS)?;
     let capture_context = FrameCaptureContext {
         source,
-        scope: scope.clone(),
+        scope: context.scope.clone(),
         generation,
         file_identity: scan.file_identity,
         retention_class,
-        cancellation: cancellation.clone(),
+        cancellation: context.cancellation.clone(),
     };
     let segments = scanned_segments(
         std::mem::take(&mut scan.frames),
         std::mem::take(&mut scan.skipped_frames),
     )?;
     Ok(SourcePreparation::Ready(Box::new(PreparedSource {
-        application,
         capture_context,
         observation_cursor,
         segments,
@@ -532,7 +547,7 @@ async fn prepare_source<'a>(
 }
 
 async fn apply_scanned_segment(
-    application: &ObservationApplication<GlobalDbObservationStore<'_>>,
+    admission: &HostAdmissionFacade<'_>,
     capture_context: &FrameCaptureContext,
     observation_cursor: &mut Option<ClaudeSourceCursorV1>,
     segment: ScannedSegment,
@@ -549,7 +564,7 @@ async fn apply_scanned_segment(
                 ClaudeSkippedFrameReason::Oversized => NonDurableFrameReason::OversizedFrame,
             };
             advance_non_durable_covered_range(
-                application,
+                admission,
                 capture_context,
                 observation_cursor,
                 NonDurableSegment {
@@ -571,7 +586,7 @@ async fn apply_scanned_segment(
                 frame.offset,
             )?;
             let range = ClaudeByteRangeV1::new(frame.offset, frame.end_offset)?;
-            match capture_frame(application, &mut frame, expected, capture_context).await? {
+            match capture_frame(admission, &mut frame, expected, capture_context).await? {
                 FrameCaptureOutcome::Persisted(captured) => {
                     *observation_cursor = Some(cursor_after_receipt(
                         observation_cursor.take(),
@@ -588,7 +603,7 @@ async fn apply_scanned_segment(
                 FrameCaptureOutcome::Rejected(receipt) => {
                     stats.records_rejected = stats.records_rejected.saturating_add(1);
                     advance_non_durable_covered_range(
-                        application,
+                        admission,
                         capture_context,
                         observation_cursor,
                         NonDurableSegment {
@@ -604,7 +619,7 @@ async fn apply_scanned_segment(
                 FrameCaptureOutcome::Quarantined(receipt) => {
                     stats.records_quarantined = stats.records_quarantined.saturating_add(1);
                     advance_non_durable_covered_range(
-                        application,
+                        admission,
                         capture_context,
                         observation_cursor,
                         NonDurableSegment {
@@ -624,11 +639,11 @@ async fn apply_scanned_segment(
 }
 
 async fn apply_prepared_source(
-    prepared: PreparedSource<'_>,
+    prepared: PreparedSource,
+    admission: &HostAdmissionFacade<'_>,
     cancellation: &ObservationCancellation,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
     let PreparedSource {
-        application,
         capture_context,
         mut observation_cursor,
         segments,
@@ -639,7 +654,7 @@ async fn apply_prepared_source(
             return Err(ObservationApplicationError::Cancelled.into());
         }
         apply_scanned_segment(
-            &application,
+            admission,
             &capture_context,
             &mut observation_cursor,
             segment,
@@ -651,71 +666,38 @@ async fn apply_prepared_source(
 }
 
 async fn process_source(
-    db: &crate::global_db::GlobalDb,
-    source_adapter: &ClaudeSource,
+    context: &SourceProcessingContext<'_, '_>,
     path: &Path,
-    project_root: &Path,
-    scope: &ObservationScopeV1,
     max_new_bytes: Option<u64>,
-    cancellation: &ObservationCancellation,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
-    match prepare_source(
-        db,
-        source_adapter,
-        path,
-        project_root,
-        scope,
-        max_new_bytes,
-        cancellation,
-    )
-    .await?
-    {
+    match prepare_source(context, path, max_new_bytes).await? {
         SourcePreparation::Finished(stats) => Ok(stats),
-        SourcePreparation::Ready(prepared) => apply_prepared_source(*prepared, cancellation).await,
+        SourcePreparation::Ready(prepared) => {
+            apply_prepared_source(*prepared, context.admission, context.cancellation).await
+        }
     }
 }
 
 pub(crate) async fn drain_projection_queue(
-    db: &crate::global_db::GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
+    scope: &ObservationScopeV1,
     cancellation: &ObservationCancellation,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
-    let store = GlobalDbObservationStore::new(db);
-    let mut stats = ClaudeObservationIngestStats::default();
-    let mut projected_sessions = HashSet::new();
-    for _ in 0..MAX_PROJECTIONS_PER_PASS {
-        if cancellation.is_cancelled() {
-            return Err(ObservationApplicationError::Cancelled.into());
-        }
-        let Some(observation_id) = store.next_queued_observation().await? else {
-            break;
-        };
-        match store.project_observation(&observation_id).await? {
-            ProjectionPersistOutcome::Projected(_) => {
-                stats.projections_completed = stats.projections_completed.saturating_add(1);
-                stats.transcript.messages_upserted =
-                    stats.transcript.messages_upserted.saturating_add(1);
-                if let Some(observation) = store.get_observation(&observation_id).await? {
-                    projected_sessions.insert(
-                        observation
-                            .observation()
-                            .source()
-                            .session_id()
-                            .as_str()
-                            .to_owned(),
-                    );
-                }
-            }
-            ProjectionPersistOutcome::Skipped { .. } => {
-                stats.projections_skipped = stats.projections_skipped.saturating_add(1);
-            }
-            ProjectionPersistOutcome::ExactDuplicate(_) => {
-                stats.projection_duplicates = stats.projection_duplicates.saturating_add(1);
-            }
-        }
-    }
-    stats.transcript.sessions_upserted =
-        u64::try_from(projected_sessions.len()).unwrap_or(u64::MAX);
-    Ok(stats)
+    let outcome = admission
+        .drain_projection_queue("claude", scope, cancellation, MAX_PROJECTIONS_PER_PASS)
+        .await
+        .map_err(|outcome| host_admission_error("claude", outcome))?;
+    Ok(ClaudeObservationIngestStats {
+        transcript: TranscriptIngestStats {
+            sessions_upserted: u64::try_from(outcome.session_ids.len()).unwrap_or(u64::MAX),
+            messages_upserted: outcome.projected,
+        },
+        projections_completed: outcome.projected,
+        projection_outputs: outcome.projected_outputs,
+        projections_skipped: outcome.skipped,
+        projection_duplicates: outcome.exact_duplicates,
+        ..ClaudeObservationIngestStats::default()
+    })
 }
 
 fn frontier_store_error(
@@ -734,7 +716,10 @@ async fn scheduled_source_paths(
     source: &ClaudeSource,
     project_root: &Path,
 ) -> Result<(Vec<PathBuf>, usize), ClaudeObservationIngestError> {
-    let mut paths = source.transcript_paths(project_root);
+    let discovery =
+        source.discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk());
+    let discovery_truncated = discovery.is_truncated();
+    let mut paths = discovery.paths;
     paths.sort();
     paths.dedup();
     if paths.is_empty() {
@@ -747,7 +732,10 @@ async fn scheduled_source_paths(
         .unwrap_or_default();
     let start = usize::try_from(frontier.byte_offset).unwrap_or(usize::MAX) % paths.len();
     paths.rotate_left(start);
-    let deferred = paths.len().saturating_sub(MAX_CLAUDE_SOURCES_PER_PASS);
+    let mut deferred = paths.len().saturating_sub(MAX_CLAUDE_SOURCES_PER_PASS);
+    if discovery_truncated {
+        deferred = deferred.max(1);
+    }
     paths.truncate(MAX_CLAUDE_SOURCES_PER_PASS);
     Ok((paths, deferred))
 }
@@ -786,6 +774,24 @@ pub(crate) async fn ingest_source_with_observations(
     max_new_bytes: Option<u64>,
     cancellation: ObservationCancellation,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
+    if cancellation.is_cancelled() {
+        return Err(ObservationApplicationError::Cancelled.into());
+    }
+    let authorities = match &scope {
+        ObservationScopeV1::Profile => HostAdmissionAuthorities::for_profile(db),
+        ObservationScopeV1::Project { project_id } => {
+            HostAdmissionAuthorities::for_project(db, project_id.clone())
+        }
+    };
+    let admission = HostAdmissionFacade::new(authorities);
+    let processing_context = SourceProcessingContext {
+        db,
+        admission: &admission,
+        source_adapter: source,
+        project_root,
+        scope: &scope,
+        cancellation: &cancellation,
+    };
     let (paths, deferred) = scheduled_source_paths(db, source, project_root).await?;
     let scheduled_source_count = paths.len();
     let mut stats = ClaudeObservationIngestStats {
@@ -802,17 +808,7 @@ pub(crate) async fn ingest_source_with_observations(
         }
         attempted_sources = attempted_sources.saturating_add(1);
         let source_budget = remaining_bytes.min(STRICT_JSONL_BATCH_BYTES);
-        let outcome = match process_source(
-            db,
-            source,
-            &path,
-            project_root,
-            &scope,
-            Some(source_budget),
-            &cancellation,
-        )
-        .await
-        {
+        let outcome = match process_source(&processing_context, &path, Some(source_budget)).await {
             Ok(outcome) => outcome,
             Err(error) => {
                 let failure = crate::sessions::classify_claude_observation_failure(&error);
@@ -833,7 +829,7 @@ pub(crate) async fn ingest_source_with_observations(
     if deferred > 0 || attempted_sources < scheduled_source_count {
         advance_source_frontier(db, attempted_sources).await?;
     }
-    let projection_stats = drain_projection_queue(db, &cancellation).await?;
+    let projection_stats = drain_projection_queue(&admission, &scope, &cancellation).await?;
     if let Some((failed_sources, first_reason_code, first_retryable)) = source_failures {
         return Err(ClaudeObservationIngestError::SourceFailures {
             failed_sources,
@@ -875,11 +871,15 @@ mod tests {
 
     use serde_json::json;
     use tempfile::TempDir;
-    use tracedecay_store::{ObservationReplayRequest, ObservationStore};
+    use tracedecay_store::{
+        ObservationProjectionStore, ObservationReplayRequest, ObservationStore,
+    };
 
     use super::*;
-    use crate::application::observation::ReplayObservationsRequest;
+    use crate::application::observation::{ObservationApplication, ReplayObservationsRequest};
+    use crate::privacy::ClaudeRecordSanitizerV1;
     use crate::sessions::claude::{scan_claude_source_frames, try_scan_claude_source_frames};
+    use crate::store::GlobalDbObservationStore;
 
     const INGEST_STATE_TABLES: &[&str] = &[
         "sanitization_receipts",
@@ -895,6 +895,22 @@ mod tests {
     ];
 
     fn assert_stats_future(_future: impl std::future::Future<Output = TranscriptIngestStats>) {}
+
+    #[test]
+    fn production_ingest_borrows_host_admission_authority() {
+        let production = include_str!("claude_observation.rs")
+            .split_once("#[cfg(test)]")
+            .expect("test module boundary")
+            .0;
+
+        assert!(!production.contains("GlobalDb::open"));
+        assert!(!production.contains("GlobalDbObservationStore::new"));
+        assert!(!production.contains("ObservationApplication::new"));
+        assert!(!production.contains("ClaudeRecordSanitizerV1::"));
+        assert!(production.contains("HostAdmissionAuthorities::for_profile"));
+        assert!(production.contains("HostAdmissionAuthorities::for_project"));
+        assert!(production.contains(".drain_projection_queue("));
+    }
 
     struct Fixture {
         temp: TempDir,
@@ -1247,12 +1263,8 @@ mod tests {
             .unwrap();
         assert_eq!(observations.len(), 1);
         let payload = observations[0].observation().payload();
-        assert!(!payload.to_string().contains("never-persist-this-secret"));
-        assert!(
-            payload["message"]["secret_key"]
-                .as_str()
-                .is_some_and(|value| value.starts_with("[TraceDecay redacted:"))
-        );
+        let payload = payload.to_string();
+        assert!(!payload.contains("never-persist-this-secret"));
         assert_eq!(
             observations[0].projection_status(),
             tracedecay_store::ObservationProjectionStatus::NotQueued
@@ -1467,17 +1479,21 @@ mod tests {
         let fixture = Fixture::new("queued-before-bad-source").await;
         fixture.write_record("queued before bad source", "queued-secret");
         let seed_source = fixture.source("queued-before-bad-source");
-        let seeded = process_source(
-            &fixture.db,
-            &seed_source,
-            &fixture.transcript,
-            &fixture.profile,
-            &ObservationScopeV1::Profile,
-            None,
-            &ObservationCancellation::default(),
-        )
-        .await
-        .unwrap();
+        let authorities = HostAdmissionAuthorities::for_profile(&fixture.db);
+        let admission = HostAdmissionFacade::new(authorities);
+        let scope = ObservationScopeV1::Profile;
+        let cancellation = ObservationCancellation::default();
+        let processing_context = SourceProcessingContext {
+            db: &fixture.db,
+            admission: &admission,
+            source_adapter: &seed_source,
+            project_root: &fixture.profile,
+            scope: &scope,
+            cancellation: &cancellation,
+        };
+        let seeded = process_source(&processing_context, &fixture.transcript, None)
+            .await
+            .unwrap();
         assert_eq!(seeded.observations_committed, 1);
         assert_eq!(ingest_state_counts(&fixture).await[4], 1);
 
@@ -1597,8 +1613,10 @@ mod tests {
             store,
             ClaudeRecordSanitizerV1::claude_v1().expect("Claude V1 sanitizer"),
         );
+        let authorities = HostAdmissionAuthorities::for_profile(&fixture.db);
+        let admission = HostAdmissionFacade::new(authorities);
         let capture = capture_frame(
-            &application,
+            &admission,
             scan.frames.first_mut().expect("retry frame"),
             None,
             &FrameCaptureContext {
@@ -1632,6 +1650,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(observations.observations().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn protected_source_identity_reuses_cursor_after_restart() {
+        let raw_session_id = ["AKIA", "SYNTHETIC", "CANARY", "2"].concat();
+        let fixture = Fixture::new(&raw_session_id).await;
+        fixture.write_record("protected cursor restart", "restart-secret");
+        let source_adapter = fixture.source(&raw_session_id);
+        let identity = identify_claude_source(&fixture.transcript).unwrap();
+        assert!(identity.session_id.starts_with("privacy.structural-id.v1."));
+        assert!(!identity.session_id.contains(&raw_session_id));
+
+        let first = fixture
+            .ingest(&source_adapter, None, ObservationCancellation::default())
+            .await
+            .unwrap();
+        assert_eq!(first.observations_committed, 1);
+
+        let Fixture {
+            temp: _temp,
+            home,
+            profile,
+            transcript,
+            db,
+        } = fixture;
+        drop(db);
+        let reopened = crate::global_db::GlobalDb::open_at(&profile.join("sessions.db"))
+            .await
+            .unwrap();
+        let restarted_source =
+            ClaudeSource::with_home(&home).for_user_scope(Some(raw_session_id.clone()), Vec::new());
+        let second = ingest_source_with_observations(
+            &reopened,
+            &restarted_source,
+            &profile,
+            ObservationScopeV1::Profile,
+            None,
+            ObservationCancellation::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.observations_committed, 0);
+        assert_eq!(second.source_bytes_scanned, 0);
+
+        let source = observation_source(&transcript);
+        let cursor = GlobalDbObservationStore::new(&reopened)
+            .get_source_cursor(&source, &ObservationScopeV1::Profile)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(cursor.byte_offset() > 0);
+        let durable = serde_json::to_string(cursor.source()).unwrap();
+        assert!(!durable.contains(&raw_session_id));
     }
 
     #[tokio::test]

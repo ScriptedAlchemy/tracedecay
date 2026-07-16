@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, ErrorKind, Write as IoWrite};
+use std::io::{BufReader, ErrorKind, Write as IoWrite};
 #[cfg(windows)]
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -14,8 +14,10 @@ use std::os::unix::process::CommandExt;
 
 use serde_json::{Value, json};
 
+use crate::application::host_admission::{MAX_WIRE_MESSAGE_BYTES, wire_oversized_io_error};
 use crate::errors::{Result, TraceDecayError};
 use crate::sessions::lcm::LcmSummaryRequest;
+use crate::sessions::source::{RawJsonlFrame, RawJsonlFrameReader};
 
 pub const CODEX_SUMMARY_CHILD_ENV: &str = "TRACEDECAY_CODEX_SUMMARY_CHILD";
 const CODEX_APP_SERVER_SPAWN_RETRY_WINDOW: Duration = Duration::from_millis(250);
@@ -141,7 +143,20 @@ pub fn run_prompt_with_codex_app_server(
         })?;
     let (line_tx, line_rx) = mpsc::channel::<std::io::Result<String>>();
     std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
+        let mut frames = RawJsonlFrameReader::new(BufReader::new(stdout), MAX_WIRE_MESSAGE_BYTES);
+        loop {
+            let line = match frames.next_frame() {
+                Ok(RawJsonlFrame::Eof) => break,
+                Ok(RawJsonlFrame::Complete { .. } | RawJsonlFrame::Partial { .. }) => {
+                    String::from_utf8(frames.record().to_vec()).map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+                    })
+                }
+                Ok(RawJsonlFrame::Oversized { .. } | RawJsonlFrame::BudgetExhausted { .. }) => {
+                    Err(wire_oversized_io_error())
+                }
+                Err(error) => Err(error),
+            };
             if line_tx.send(line).is_err() {
                 break;
             }

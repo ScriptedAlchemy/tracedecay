@@ -1,8 +1,9 @@
 use libsql::{Connection, params};
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_store::{
-    ObservationProjection, ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V1, SessionMessageProjection,
+    ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V2, SessionMessageProjection,
 };
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
@@ -73,7 +74,7 @@ pub(super) async fn read_checkpoint(
         .query(
             "SELECT last_sequence FROM observation_projection_checkpoints
              WHERE projector_version = ?1",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .await
         .map_err(|error| storage("read projector checkpoint", error))?;
@@ -102,7 +103,7 @@ pub(super) async fn write_checkpoint(
         "INSERT INTO observation_projection_checkpoints (projector_version, last_sequence)
          VALUES (?1, ?2)
          ON CONFLICT(projector_version) DO UPDATE SET last_sequence = excluded.last_sequence",
-        params![SESSION_MESSAGE_PROJECTOR_VERSION_V1, sequence_i64],
+        params![SESSION_MESSAGE_PROJECTOR_VERSION, sequence_i64],
     )
     .await
     .map_err(|error| storage("write projector checkpoint", error))?;
@@ -331,6 +332,28 @@ pub(super) async fn ensure_projection_output_state_cache(
     .await
     .map_err(|error| storage("initialize projection output state cache", error))?;
     conn.execute(
+        "UPDATE temp.observation_projection_output_state
+         SET projector_owned = 1,
+             canonical_observation_id = latest_observation_id
+         WHERE projector_version = ?1
+           AND EXISTS (
+                SELECT 1 FROM observation_projection_provenance AS predecessor
+                WHERE predecessor.projector_version IN (?2, ?3)
+                  AND predecessor.output_provider =
+                      observation_projection_output_state.output_provider
+                  AND predecessor.output_message_id =
+                      observation_projection_output_state.output_message_id
+                  AND predecessor.message_created = 1
+           )",
+        params![
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+            SESSION_MESSAGE_PROJECTOR_VERSION_V2,
+            SESSION_MESSAGE_PROJECTOR_VERSION_V1
+        ],
+    )
+    .await
+    .map_err(|error| storage("inherit predecessor projection ownership", error))?;
+    conn.execute(
         "INSERT INTO temp.observation_projection_output_state_meta(initialized, data_version)
          VALUES (1, ?1)",
         params![data_version],
@@ -368,6 +391,41 @@ pub(super) async fn ensure_projection_output_state_cache(
     Ok(())
 }
 
+pub(super) async fn inherit_predecessor_output_state(
+    conn: &Connection,
+    observation_id: &str,
+    predecessor_version: &str,
+) -> ProjectionStoreResult<()> {
+    conn.execute(
+        "UPDATE temp.observation_projection_output_state AS state
+         SET projector_owned = 1,
+             canonical_observation_id = latest_observation_id
+         WHERE state.projector_version = ?1
+           AND EXISTS (
+                SELECT 1 FROM observation_projection_provenance AS current
+                WHERE current.projector_version = ?1
+                  AND current.observation_id = ?2
+                  AND current.output_provider = state.output_provider
+                  AND current.output_message_id = state.output_message_id
+           )
+           AND EXISTS (
+                SELECT 1 FROM observation_projection_provenance AS predecessor
+                WHERE predecessor.projector_version = ?3
+                  AND predecessor.output_provider = state.output_provider
+                  AND predecessor.output_message_id = state.output_message_id
+                  AND predecessor.message_created = 1
+           )",
+        params![
+            SESSION_MESSAGE_PROJECTOR_VERSION,
+            observation_id,
+            predecessor_version
+        ],
+    )
+    .await
+    .map_err(|error| storage("inherit predecessor projection output state", error))?;
+    Ok(())
+}
+
 pub(super) async fn read_output_state(
     conn: &Connection,
     projection: &SessionMessageProjection,
@@ -386,7 +444,7 @@ pub(super) async fn read_output_state(
                AND state.output_provider = ?2
                AND state.output_message_id = ?3",
             params![
-                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 message.provider.as_str(),
                 message.message_id.as_str()
             ],
@@ -451,11 +509,30 @@ pub(super) async fn has_other_projector_output_owner(
             "SELECT 1 FROM observation_projection_provenance
              WHERE output_provider = ?1 AND output_message_id = ?2
                AND projector_version <> ?3
+               AND NOT EXISTS (
+                    SELECT 1 FROM observation_projection_migrations AS migration
+                    WHERE migration.source_projector_version =
+                          observation_projection_provenance.projector_version
+                      AND migration.target_projector_version = ?3
+                      AND migration.completed = 1
+                      AND EXISTS (
+                        SELECT 1 FROM observation_projection_provenance AS inherited
+                        WHERE inherited.projector_version = ?3
+                          AND inherited.observation_id =
+                              observation_projection_provenance.observation_id
+                          AND inherited.receipt_id =
+                              observation_projection_provenance.receipt_id
+                          AND inherited.output_provider =
+                              observation_projection_provenance.output_provider
+                          AND inherited.output_message_id =
+                              observation_projection_provenance.output_message_id
+                      )
+               )
              LIMIT 1",
             params![
                 message.provider.as_str(),
                 message.message_id.as_str(),
-                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
             ],
         )
         .await
@@ -470,11 +547,18 @@ pub(super) async fn has_other_projector_output_owner(
 async fn message_projection(
     conn: &Connection,
     observation: &DurableObservationV1,
+    provider: &str,
+    message_id: &str,
 ) -> ProjectionStoreResult<SessionMessageProjection> {
-    match derive_projection_with_alias(conn, observation).await? {
-        ObservationProjection::Message(projection) => Ok(*projection),
-        ObservationProjection::Skipped(_) => Err(ProjectionStoreError::ProvenanceCollision),
-    }
+    derive_projection_with_alias(conn, observation)
+        .await?
+        .messages()
+        .find(|projection| {
+            projection.message().provider == provider
+                && projection.message().message_id == message_id
+        })
+        .cloned()
+        .ok_or(ProjectionStoreError::ProvenanceCollision)
 }
 
 async fn verify_rows(
@@ -516,11 +600,19 @@ pub(super) fn same_projection_lineage(
 pub(super) async fn verify_output_state(
     conn: &Connection,
     state: &ProjectionOutputState,
+    projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
     if state.owner_count == 0 {
         return Err(ProjectionStoreError::ProvenanceCollision);
     }
-    let owner_projection = message_projection(conn, &state.canonical).await?;
+    let message = projection.message();
+    let owner_projection = message_projection(
+        conn,
+        &state.canonical,
+        &message.provider,
+        &message.message_id,
+    )
+    .await?;
     verify_provenance(conn, &owner_projection).await?;
     verify_rows(conn, &owner_projection).await
 }
@@ -532,13 +624,29 @@ pub(in super::super) async fn verify_output_authority(
     let message = projection.message();
     let mut rows = conn
         .query(
-            "SELECT MAX(message_created), COUNT(*)
+            "SELECT MAX(message_created), COUNT(*), EXISTS (
+                SELECT 1
+                FROM observation_projection_migrations AS migration
+                JOIN observation_projection_provenance AS predecessor
+                  ON predecessor.projector_version = migration.source_projector_version
+                JOIN observation_projection_provenance AS current
+                  ON current.projector_version = migration.target_projector_version
+                 AND current.observation_id = predecessor.observation_id
+                 AND current.receipt_id = predecessor.receipt_id
+                 AND current.output_provider = predecessor.output_provider
+                 AND current.output_message_id = predecessor.output_message_id
+                WHERE migration.target_projector_version = ?1
+                  AND migration.completed = 1
+                  AND predecessor.output_provider = ?2
+                  AND predecessor.output_message_id = ?3
+                  AND predecessor.message_created = 1
+             )
              FROM observation_projection_provenance
                   INDEXED BY idx_observation_projection_provenance_global_output
              WHERE projector_version = ?1
                AND output_provider = ?2 AND output_message_id = ?3",
             params![
-                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 message.provider.as_str(),
                 message.message_id.as_str(),
             ],
@@ -554,7 +662,11 @@ pub(in super::super) async fn verify_output_authority(
         .get::<Option<i64>>(0)
         .map_err(|error| storage("read projection output authority", error))?
         .ok_or(ProjectionStoreError::ProvenanceCollision)?
-        != 0;
+        != 0
+        || row
+            .get::<i64>(2)
+            .map_err(|error| storage("read projection output authority", error))?
+            != 0;
     let owner_count = row
         .get::<i64>(1)
         .map_err(|error| storage("read projection output authority", error))?;
@@ -579,7 +691,7 @@ pub(in super::super) async fn verify_output_authority(
                  LIMIT 1"
             ),
             params![
-                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 message.provider.as_str(),
                 message.message_id.as_str(),
             ],
@@ -595,7 +707,8 @@ pub(in super::super) async fn verify_output_authority(
         .map_err(|error| storage("read canonical projection output authority", error))?;
     let observation = serde_json::from_str(&observation_json)
         .map_err(|error| storage("decode canonical projection output authority", error))?;
-    let owner_projection = message_projection(conn, &observation).await?;
+    let owner_projection =
+        message_projection(conn, &observation, &message.provider, &message.message_id).await?;
     verify_provenance(conn, &owner_projection).await?;
     verify_rows(conn, &owner_projection).await
 }
@@ -604,7 +717,154 @@ pub(super) fn session_rows_compatible(
     actual: &crate::sessions::SessionRecord,
     expected: &crate::sessions::SessionRecord,
 ) -> bool {
-    actual.provider == expected.provider && actual.session_id == expected.session_id
+    reconcile_session_rows(actual, expected).is_some()
+}
+
+pub(super) fn reconcile_session_rows(
+    actual: &crate::sessions::SessionRecord,
+    expected: &crate::sessions::SessionRecord,
+) -> Option<crate::sessions::SessionRecord> {
+    if actual.provider != expected.provider || actual.session_id != expected.session_id {
+        return None;
+    }
+    let project_key = if actual.project_key == expected.project_key {
+        actual.project_key.clone()
+    } else if actual.project_key == "user" {
+        expected.project_key.clone()
+    } else if expected.project_key == "user" {
+        actual.project_key.clone()
+    } else if actual.project_key == actual.project_path
+        && actual.project_path == expected.project_path
+    {
+        expected.project_key.clone()
+    } else if expected.project_key == expected.project_path
+        && expected.project_path == actual.project_path
+    {
+        actual.project_key.clone()
+    } else {
+        return None;
+    };
+    let project_path = if actual.project_path == expected.project_path {
+        actual.project_path.clone()
+    } else if actual.project_path == actual.project_key {
+        expected.project_path.clone()
+    } else if expected.project_path == expected.project_key {
+        actual.project_path.clone()
+    } else {
+        return None;
+    };
+    Some(crate::sessions::SessionRecord {
+        provider: actual.provider.clone(),
+        session_id: actual.session_id.clone(),
+        project_key,
+        project_path,
+        title: actual.title.clone().or_else(|| expected.title.clone()),
+        started_at: actual
+            .started_at
+            .into_iter()
+            .chain(expected.started_at)
+            .min(),
+        ended_at: actual.ended_at.into_iter().chain(expected.ended_at).max(),
+        transcript_path: reconcile_optional(
+            actual.transcript_path.as_ref(),
+            expected.transcript_path.as_ref(),
+        )
+        .ok()?,
+        metadata_json: reconcile_metadata(
+            actual.metadata_json.as_ref(),
+            expected.metadata_json.as_ref(),
+        )
+        .ok()?,
+        parent_session_id: reconcile_optional(
+            actual.parent_session_id.as_ref(),
+            expected.parent_session_id.as_ref(),
+        )
+        .ok()?,
+        is_subagent: actual.is_subagent || expected.is_subagent,
+        agent_id: reconcile_optional(actual.agent_id.as_ref(), expected.agent_id.as_ref()).ok()?,
+        parent_tool_use_id: reconcile_optional(
+            actual.parent_tool_use_id.as_ref(),
+            expected.parent_tool_use_id.as_ref(),
+        )
+        .ok()?,
+    })
+}
+
+#[derive(Debug)]
+struct ReconcileConflict;
+
+fn reconcile_optional<T: Clone + Eq>(
+    actual: Option<&T>,
+    expected: Option<&T>,
+) -> Result<Option<T>, ReconcileConflict> {
+    match (actual, expected) {
+        (Some(actual), Some(expected)) if actual != expected => Err(ReconcileConflict),
+        (Some(actual), _) => Ok(Some(actual.clone())),
+        (_, Some(expected)) => Ok(Some(expected.clone())),
+        (None, None) => Ok(None),
+    }
+}
+
+fn reconcile_metadata(
+    actual: Option<&String>,
+    expected: Option<&String>,
+) -> Result<Option<String>, ReconcileConflict> {
+    let (Some(actual), Some(expected)) = (actual, expected) else {
+        return reconcile_optional(actual, expected);
+    };
+    if actual == expected {
+        return Ok(Some(actual.clone()));
+    }
+    let mut actual: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(actual).map_err(|_| ReconcileConflict)?;
+    let expected: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(expected).map_err(|_| ReconcileConflict)?;
+    for (key, expected_value) in expected {
+        match actual.get_mut(&key) {
+            None => {
+                actual.insert(key, expected_value);
+            }
+            Some(actual_value) if *actual_value == expected_value => {}
+            Some(actual_value) if key == "usage" => {
+                *actual_value =
+                    reconcile_usage(actual_value, &expected_value).ok_or(ReconcileConflict)?;
+            }
+            Some(_) if key == "source" => {}
+            Some(_) => return Err(ReconcileConflict),
+        }
+    }
+    serde_json::to_string(&actual)
+        .map(Some)
+        .map_err(|_| ReconcileConflict)
+}
+
+fn reconcile_usage(
+    actual: &serde_json::Value,
+    expected: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    if actual == expected {
+        return Some(actual.clone());
+    }
+    match (actual, expected) {
+        (serde_json::Value::Number(actual), serde_json::Value::Number(expected)) => Some(
+            serde_json::Value::from(actual.as_u64()?.max(expected.as_u64()?)),
+        ),
+        (serde_json::Value::Object(actual), serde_json::Value::Object(expected)) => {
+            let mut merged = actual.clone();
+            for (key, expected_value) in expected {
+                match merged.get_mut(key) {
+                    None => {
+                        merged.insert(key.clone(), expected_value.clone());
+                    }
+                    Some(actual_value) => {
+                        *actual_value = reconcile_usage(actual_value, expected_value)?;
+                    }
+                }
+            }
+            Some(serde_json::Value::Object(merged))
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn message_rows_compatible(

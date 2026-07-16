@@ -3,21 +3,22 @@ use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
-    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationIdV1, CanonicalObservationRelationsV1,
-    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
-    ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
-    DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    PayloadDigestV1, PayloadReferenceV1, ProviderId, RetentionClass, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId,
+    CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
+    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationIdV1,
+    CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1, ClaudeByteRangeV1,
+    ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1,
+    ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1, DurableObservationV1,
+    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, PayloadDigestV1, PayloadReferenceV1, ProviderId, RetentionClass,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId,
 };
 use tracedecay_store::{
     CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationPersistOutcome,
     ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,
     ProjectionPersistOutcome, ProjectionSkipReason, ProjectionStoreError,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V3,
 };
 
 use crate::common::{isolated_lcm_db_path, open_lcm_db};
@@ -94,13 +95,29 @@ fn observation_in_generation(
 }
 
 fn canonical_observation(provider: &str, ordinal: u64) -> DurableObservationV1 {
+    canonical_observation_at(
+        provider,
+        ordinal,
+        0,
+        1,
+        &format!("{provider} convergence canary"),
+    )
+}
+
+fn canonical_observation_at(
+    provider: &str,
+    ordinal: u64,
+    start: u64,
+    end: u64,
+    text: &str,
+) -> DurableObservationV1 {
     let provider_id = ProviderId::new(provider).unwrap();
     let session_id = SessionId::new(format!("session.projection-{provider}")).unwrap();
     let source =
         ObservationSourceIdentityV1::for_provider(provider_id.clone(), session_id.clone()).unwrap();
     let generation = ObservationSourceGenerationV1::new(1).unwrap();
-    let range = ObservationSourceRangeV1::new(0, 1).unwrap();
-    let record_id = ObservationId::new(format!("record.projection-{provider}")).unwrap();
+    let range = ObservationSourceRangeV1::new(start, end).unwrap();
+    let record_id = ObservationId::new(format!("record.projection-{provider}.{ordinal}")).unwrap();
     let envelope = CanonicalObservationEnvelopeV1::new(
         provider_id,
         "message",
@@ -108,7 +125,7 @@ fn canonical_observation(provider: &str, ordinal: u64) -> DurableObservationV1 {
         CanonicalObservationRelationsV1::new(session_id),
         vec![CanonicalObservationFactV1::Message {
             role: CanonicalMessageRoleV1::Assistant,
-            content: json!({"text": format!("{provider} convergence canary")}),
+            content: json!({"text": text}),
             model: Some("model.fixture".to_owned()),
             timestamp: Some(1_750_000_000 + i64::try_from(ordinal).unwrap()),
         }],
@@ -128,7 +145,10 @@ fn canonical_observation(provider: &str, ordinal: u64) -> DurableObservationV1 {
 
     DurableObservationV1::new(
         identity,
-        receipt(&format!("receipt.projection-{provider}"), &payload),
+        receipt(
+            &format!("receipt.projection-{provider}.{ordinal}"),
+            &payload,
+        ),
         RetentionClass::new("retention.projection-test").unwrap(),
         payload,
     )
@@ -136,6 +156,13 @@ fn canonical_observation(provider: &str, ordinal: u64) -> DurableObservationV1 {
 }
 
 fn canonical_write(observation: DurableObservationV1) -> ObservationWrite {
+    canonical_write_with_cursor(observation, None)
+}
+
+fn canonical_write_with_cursor(
+    observation: DurableObservationV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+) -> ObservationWrite {
     let identity = observation.identity();
     let next_cursor = ObservationSourceCursorV1::for_ordering(
         observation.source().clone(),
@@ -145,7 +172,7 @@ fn canonical_write(observation: DurableObservationV1) -> ObservationWrite {
         identity.position().end(),
     )
     .unwrap();
-    ObservationWrite::new(observation, None, next_cursor).unwrap()
+    ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap()
 }
 
 fn write(
@@ -179,6 +206,119 @@ async fn drain_projection_queue(store: &GlobalDbObservationStore<'_>) {
     while let Some(observation_id) = store.next_queued_observation().await.unwrap() {
         store.project_observation(&observation_id).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn v3_projection_persists_stable_multi_output_ordinals() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let provider = ProviderId::new("cursor").unwrap();
+    let session_id = SessionId::new("session.multi-output").unwrap();
+    let source =
+        ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone()).unwrap();
+    let generation = ObservationSourceGenerationV1::new(1).unwrap();
+    let range = ObservationSourceRangeV1::new(0, 1).unwrap();
+    let record_id = ObservationId::new("record.multi-output").unwrap();
+    let message_id = ObservationId::new("message.multi-output").unwrap();
+    let envelope = CanonicalObservationEnvelopeV1::new(
+        provider,
+        "composer_bubble",
+        record_id.clone(),
+        CanonicalObservationRelationsV1::new(session_id).with_message_id(message_id.clone()),
+        vec![
+            CanonicalObservationFactV1::Session {
+                project_path: Some("/workspace/project".to_owned()),
+                location_path: None,
+                transcript_path: None,
+                title: None,
+                started_at: None,
+                ended_at: None,
+                source: Some("cursor_composer".to_owned()),
+                native_source: Some("cursor".to_owned()),
+                profile: None,
+                location_provenance: None,
+            },
+            CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!("authored"),
+                model: None,
+                timestamp: Some(42),
+            },
+            CanonicalObservationFactV1::Reasoning {
+                visibility: CanonicalReasoningVisibilityV1::Visible,
+                content: Some(json!("reasoning")),
+            },
+            CanonicalObservationFactV1::ToolInvocation {
+                invocation_id: ObservationId::new("tool.multi-output").unwrap(),
+                name: "edit_file".to_owned(),
+                arguments: json!({"path": "src/lib.rs"}),
+            },
+            CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::PullRequest,
+                reference: Some("https://example.invalid/pr/1".to_owned()),
+                content: None,
+            },
+        ],
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+    )
+    .unwrap();
+    let payload = serde_json::to_value(envelope).unwrap();
+    let observation = DurableObservationV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
+            source,
+            ObservationScopeV1::Profile,
+            generation,
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            record_id,
+        )
+        .unwrap(),
+        receipt("receipt.multi-output", &payload),
+        RetentionClass::new("retention.projection-test").unwrap(),
+        payload,
+    )
+    .unwrap();
+    store
+        .persist_observation(canonical_write(observation))
+        .await
+        .unwrap();
+    let queued = store.next_queued_observation().await.unwrap().unwrap();
+    let outcome = store.project_observation(&queued).await.unwrap();
+    let ProjectionPersistOutcome::Projected(projected) = outcome else {
+        panic!("observation should project");
+    };
+    assert_eq!(projected.output_count(), 4);
+    drop(db);
+
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let conn = raw_db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT output_ordinal, output_message_id
+             FROM observation_projection_provenance
+             WHERE projector_version = ?1
+             ORDER BY output_ordinal",
+            libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+        )
+        .await
+        .unwrap();
+    let mut actual = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        actual.push((row.get::<i64>(0).unwrap(), row.get::<String>(1).unwrap()));
+    }
+    assert_eq!(
+        actual,
+        vec![
+            (0, message_id.as_str().to_owned()),
+            (1, format!("{}:thinking", message_id.as_str())),
+            (2, format!("{}:tool", message_id.as_str())),
+            (3, format!("{}:pr:0", message_id.as_str())),
+        ]
+    );
 }
 
 fn conversational_payload(message_id: &str, text: &str) -> Value {
@@ -351,6 +491,27 @@ async fn projection_provenance_rows(
 
 async fn projected_message_texts(tmp: &TempDir) -> Vec<String> {
     projected_message_texts_where(tmp, "WHERE provider = 'claude'").await
+}
+
+async fn projected_raw_store_ids(tmp: &TempDir) -> Vec<(String, i64)> {
+    let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
+        .build()
+        .await
+        .unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT message_id, store_id FROM lcm_raw_messages
+             WHERE provider = 'claude' ORDER BY message_id",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        ids.push((row.get(0).unwrap(), row.get(1).unwrap()));
+    }
+    ids
 }
 
 async fn all_projected_message_texts(tmp: &TempDir) -> Vec<String> {
@@ -1335,7 +1496,46 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     rows_before.sort();
     let counts_before = projection_counts(&tmp).await;
     let provenance_before = projection_provenance_rows(&tmp).await;
+    let raw_store_ids_before = projected_raw_store_ids(&tmp).await;
     assert_eq!(counts_before, (1, 2, 2, 1, 0, 1));
+    let anchor_store_id = raw_store_ids_before[0].1;
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO lcm_summary_nodes (
+                node_id, provider, conversation_id, session_id, depth, summary_text,
+                summary_hash, summary_token_count, source_token_count
+             ) VALUES (
+                'summary.rebuild-store-id', 'claude', 'session-rebuild',
+                'session-rebuild', 0, 'stable raw identity summary', 'hash.fixture', 4, 8
+             )",
+            (),
+        )
+        .await
+        .unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
+             VALUES ('summary.rebuild-store-id', 'raw_message', ?1, 0)",
+            libsql::params![anchor_store_id.to_string()],
+        )
+        .await
+        .unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO lcm_lifecycle_state (
+                provider, conversation_id, current_session_id, current_frontier_store_id
+             ) VALUES ('claude', 'session-rebuild', 'session-rebuild', ?1)",
+            libsql::params![anchor_store_id],
+        )
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
 
     let rebuilt = store.rebuild_projection(2).await.unwrap();
     assert_eq!(rebuilt.checkpoint().last_sequence(), 2);
@@ -1348,6 +1548,33 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
         .collect::<Vec<_>>();
     rows_after.sort();
     assert_eq!(rows_after, rows_before);
+    assert_eq!(projected_raw_store_ids(&tmp).await, raw_store_ids_before);
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    let mut identity_rows = raw_conn
+        .query(
+            "SELECT source.source_id, lifecycle.current_frontier_store_id
+             FROM lcm_summary_sources AS source
+             JOIN lcm_lifecycle_state AS lifecycle
+               ON lifecycle.provider = 'claude'
+              AND lifecycle.conversation_id = 'session-rebuild'
+             WHERE source.node_id = 'summary.rebuild-store-id'",
+            (),
+        )
+        .await
+        .unwrap();
+    let identity = identity_rows.next().await.unwrap().unwrap();
+    assert_eq!(
+        identity.get::<String>(0).unwrap(),
+        anchor_store_id.to_string()
+    );
+    assert_eq!(identity.get::<i64>(1).unwrap(), anchor_store_id);
+    drop(identity_rows);
+    drop(raw_conn);
+    drop(raw_db);
     assert_eq!(projection_provenance_rows(&tmp).await, provenance_before);
     assert_eq!(projection_counts(&tmp).await, counts_before);
     assert!(
@@ -1389,11 +1616,17 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     assert_eq!(rebuilt_empty.projected_rows(), 0);
     assert_eq!(rebuilt_empty.skipped_observations(), 0);
     assert_eq!(projection_counts(&tmp).await, (1, 0, 0, 1, 0, 3));
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 0);
+    assert_eq!(table_count(&tmp, "lcm_raw_messages_fts").await, 0);
+    assert_eq!(table_count(&tmp, "session_messages_fts").await, 0);
 
     let rebuilt_full = store.rebuild_projection(3).await.unwrap();
     assert_eq!(rebuilt_full.projected_rows(), 3);
     assert_eq!(rebuilt_full.skipped_observations(), 0);
     assert_eq!(projection_counts(&tmp).await, (1, 3, 3, 1, 0, 0));
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 3);
+    assert_eq!(table_count(&tmp, "lcm_raw_messages_fts").await, 3);
+    assert_eq!(table_count(&tmp, "session_messages_fts").await, 3);
     assert_eq!(
         projected_message_texts(&tmp).await,
         incrementally_projected_texts
@@ -1651,6 +1884,152 @@ async fn rebuild_preserves_output_referenced_by_another_projector_version() {
 }
 
 #[tokio::test]
+async fn v2_projection_survives_restart_safe_v3_migration_and_rollback() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let first = observation(
+        "session-version-migration",
+        0,
+        100,
+        "receipt.version-migration-first",
+        conversational_payload("message-version-migration-first", "first versioned output"),
+    );
+    let second = observation(
+        "session-version-migration",
+        100,
+        200,
+        "receipt.version-migration-second",
+        conversational_payload(
+            "message-version-migration-second",
+            "second versioned output",
+        ),
+    );
+    persist(&store, first.clone(), None).await;
+    persist(
+        &store,
+        second.clone(),
+        Some(cursor("session-version-migration", 100)),
+    )
+    .await;
+    drain_projection_queue(&store).await;
+    drop(db);
+
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute(
+            "UPDATE observation_projection_provenance SET projector_version = ?1
+             WHERE projector_version = ?2",
+            libsql::params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V2,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V3
+            ],
+        )
+        .await
+        .unwrap();
+    raw_conn
+        .execute(
+            "UPDATE observation_projection_checkpoints SET projector_version = ?1
+             WHERE projector_version = ?2",
+            libsql::params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V2,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V3
+            ],
+        )
+        .await
+        .unwrap();
+    raw_conn
+        .execute("DELETE FROM projection_queue", ())
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    let reopened = GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
+        .await
+        .unwrap();
+    let store = GlobalDbObservationStore::new(&reopened);
+    assert_eq!(table_count(&tmp, "projection_queue").await, 0);
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        2
+    );
+    drop(reopened);
+
+    let restarted = GlobalDb::open_at(&isolated_lcm_db_path(&tmp))
+        .await
+        .unwrap();
+    let store = GlobalDbObservationStore::new(&restarted);
+    assert_eq!(table_count(&tmp, "projection_queue").await, 0);
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        2
+    );
+    drop(restarted);
+
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    for version in [
+        SESSION_MESSAGE_PROJECTOR_VERSION_V2,
+        SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+    ] {
+        let mut rows = raw_conn
+            .query(
+                "SELECT COUNT(*), COALESCE(SUM(message_created), 0)
+                 FROM observation_projection_provenance
+                 WHERE projector_version = ?1",
+                libsql::params![version],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 2);
+        let expected_created = if version == SESSION_MESSAGE_PROJECTOR_VERSION_V2 {
+            2
+        } else {
+            0
+        };
+        assert_eq!(row.get::<i64>(1).unwrap(), expected_created);
+    }
+    assert_eq!(table_count(&tmp, "session_messages").await, 2);
+
+    raw_conn
+        .execute(
+            "DELETE FROM observation_projection_provenance WHERE projector_version = ?1",
+            libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+        )
+        .await
+        .unwrap();
+    raw_conn
+        .execute(
+            "DELETE FROM observation_projection_checkpoints WHERE projector_version = ?1",
+            libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+        )
+        .await
+        .unwrap();
+    let mut rows = raw_conn
+        .query(
+            "SELECT COUNT(*) FROM observation_projection_provenance
+             WHERE projector_version = ?1",
+            libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION_V2],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        2
+    );
+    assert_eq!(table_count(&tmp, "session_messages").await, 2);
+}
+
+#[tokio::test]
 async fn cross_projector_owner_blocks_incompatible_generation_rollover() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
@@ -1829,6 +2208,227 @@ async fn rebuild_processes_more_than_two_pages_at_one_frozen_frontier() {
     assert_eq!(rebuilt.projected_rows(), 257);
     assert_eq!(rebuilt.skipped_observations(), 0);
     assert_eq!(projection_counts(&tmp).await, (1, 257, 257, 1, 0, 0));
+}
+
+#[tokio::test]
+async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let mut expected_cursor = None;
+    let mut aliased_observation = None;
+    for index in 0..257_u64 {
+        let start = index * 100;
+        let end = start + 100;
+        let candidate = observation(
+            "session-interrupted-rebuild",
+            start,
+            end,
+            &format!("receipt.interrupted-rebuild-{index}"),
+            conversational_payload(
+                &format!("message-interrupted-rebuild-{index}"),
+                &format!("interrupted rebuild canary {index}"),
+            ),
+        );
+        if index == 200 {
+            aliased_observation = Some(candidate.observation_id().clone());
+        }
+        persist(&store, candidate, expected_cursor.clone()).await;
+        expected_cursor = Some(cursor("session-interrupted-rebuild", end));
+    }
+    let aliased_observation = aliased_observation.unwrap();
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO observation_projection_aliases (
+                projector_version, observation_id, output_provider, output_message_id
+             ) VALUES (
+                ?1, ?2, 'claude',
+                'consolidated/pinned/message-interrupted-rebuild-200'
+             )",
+            libsql::params![
+                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                aliased_observation.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+    store.rebuild_projection(257).await.unwrap();
+
+    raw_conn
+        .execute_batch(
+            "CREATE TRIGGER interrupt_projection_rebuild_second_page
+             BEFORE UPDATE OF staged_through ON observation_projection_rebuilds
+             WHEN OLD.staged_through >= 128 BEGIN
+                SELECT RAISE(ABORT, 'injected rebuild page interruption');
+             END;",
+        )
+        .await
+        .unwrap();
+    let error = store
+        .rebuild_projection(257)
+        .await
+        .expect_err("the second staged page must fail");
+    assert!(matches!(error, ProjectionStoreError::Storage { .. }));
+    raw_conn
+        .execute(
+            "UPDATE observation_projection_aliases
+             SET output_message_id = 'consolidated/transient/message-interrupted-rebuild-200'
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            libsql::params![
+                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                aliased_observation.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+    let mut alias_rows = raw_conn
+        .query(
+            "SELECT output_message_id
+             FROM observation_projection_rebuild_aliases
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            libsql::params![
+                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                aliased_observation.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        alias_rows
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "consolidated/pinned/message-interrupted-rebuild-200"
+    );
+    drop(alias_rows);
+    raw_conn
+        .execute(
+            "UPDATE observation_projection_aliases
+             SET output_message_id = 'consolidated/pinned/message-interrupted-rebuild-200'
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            libsql::params![
+                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                aliased_observation.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+    let past_frontier = observation(
+        "session-interrupted-rebuild",
+        25_700,
+        25_800,
+        "receipt.interrupted-rebuild-past-frontier",
+        conversational_payload(
+            "message-interrupted-rebuild-past-frontier",
+            "ingest committed while rebuild generation was staged",
+        ),
+    );
+    persist(&store, past_frontier.clone(), expected_cursor).await;
+    let mut rows = raw_conn
+        .query(
+            "SELECT generation, staged_through, state
+             FROM observation_projection_rebuilds
+             WHERE projector_version = ?1",
+            libsql::params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let generation = row.get::<String>(0).unwrap();
+    assert_eq!(row.get::<i64>(1).unwrap(), 128);
+    assert_eq!(row.get::<String>(2).unwrap(), "building");
+    drop(rows);
+    assert_eq!(projection_counts(&tmp).await, (1, 257, 257, 1, 0, 1));
+    raw_conn
+        .execute_batch(
+            "DROP TRIGGER interrupt_projection_rebuild_second_page;
+             CREATE TRIGGER interrupt_projection_rebuild_activation
+             BEFORE INSERT ON observation_projection_checkpoints BEGIN
+                SELECT RAISE(ABORT, 'injected rebuild activation interruption');
+             END;",
+        )
+        .await
+        .unwrap();
+    let error = store
+        .rebuild_projection(257)
+        .await
+        .expect_err("activation interruption must preserve the ready generation");
+    assert!(matches!(error, ProjectionStoreError::Storage { .. }));
+    assert_eq!(projection_counts(&tmp).await, (1, 257, 257, 1, 0, 1));
+    drop(db);
+    drop(raw_conn);
+    drop(raw_db);
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute_batch(
+            "DROP TRIGGER interrupt_projection_rebuild_activation;
+             CREATE TRIGGER reject_projection_rebuild_replacement
+             BEFORE DELETE ON observation_projection_rebuilds
+             WHEN OLD.state <> 'ready' BEGIN
+                SELECT RAISE(ABORT, 'identical rebuild job was replaced');
+             END;",
+        )
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    let reopened = open_lcm_db(&tmp).await;
+    let reopened_store = GlobalDbObservationStore::new(&reopened);
+    let activation_started = std::time::Instant::now();
+    let rebuilt = reopened_store.rebuild_projection(257).await.unwrap();
+    assert!(
+        activation_started.elapsed() < std::time::Duration::from_secs(5),
+        "set-based activation of 257 outputs exceeded the bounded lock-time budget"
+    );
+    assert_eq!(rebuilt.projected_rows(), 257);
+    assert_eq!(
+        reopened_store
+            .projection_checkpoint()
+            .await
+            .unwrap()
+            .last_sequence(),
+        257
+    );
+    assert_eq!(
+        reopened_store
+            .next_queued_observation()
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(past_frontier.observation_id())
+    );
+    reopened_store
+        .project_observation(past_frontier.observation_id())
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened_store
+            .projection_checkpoint()
+            .await
+            .unwrap()
+            .last_sequence(),
+        258
+    );
+    assert_eq!(
+        table_count(&tmp, "observation_projection_rebuilds").await,
+        0
+    );
+    let output_ids = projection_output_ids(&projection_provenance_rows(&tmp).await);
+    assert!(output_ids.contains(&"consolidated/pinned/message-interrupted-rebuild-200".to_owned()));
+    assert!(!generation.is_empty());
 }
 
 #[tokio::test]
@@ -2123,4 +2723,247 @@ async fn unknown_legacy_provenance_trigger_is_rejected_before_drop() {
         .await
         .unwrap();
     assert!(triggers.next().await.unwrap().is_some());
+}
+
+// These projection-contract cases inject provider-tagged durable/canonical records directly.
+// They do not exercise provider transcript parsers or JSONL framing.
+#[tokio::test]
+async fn cross_provider_projection_duplicate_reorder_conflict_and_restart_are_idempotent() {
+    const PROVIDERS: [&str; 8] = [
+        "claude", "codex", "cursor", "hermes", "kiro", "cline", "roo-code", "kilo",
+    ];
+
+    for provider in PROVIDERS {
+        let tmp = TempDir::new().unwrap();
+        let db = open_lcm_db(&tmp).await;
+        let store = GlobalDbObservationStore::new(&db);
+
+        let (first, second, third, conflicting) = if provider == "claude" {
+            let session = format!("session.cross-projection-{provider}");
+            (
+                observation(
+                    &session,
+                    0,
+                    100,
+                    &format!("receipt.cross-proj.{provider}.1"),
+                    conversational_payload(
+                        &format!("message-{provider}-1"),
+                        &format!("{provider} frontier alpha"),
+                    ),
+                ),
+                observation(
+                    &session,
+                    100,
+                    200,
+                    &format!("receipt.cross-proj.{provider}.2"),
+                    conversational_payload(
+                        &format!("message-{provider}-2"),
+                        &format!("{provider} frontier beta"),
+                    ),
+                ),
+                observation(
+                    &session,
+                    200,
+                    300,
+                    &format!("receipt.cross-proj.{provider}.3"),
+                    conversational_payload(
+                        &format!("message-{provider}-3"),
+                        &format!("{provider} frontier gamma"),
+                    ),
+                ),
+                observation(
+                    &session,
+                    0,
+                    100,
+                    &format!("receipt.cross-proj.{provider}.conflict"),
+                    conversational_payload(
+                        &format!("message-{provider}-conflict"),
+                        &format!("{provider} conflicting payload"),
+                    ),
+                ),
+            )
+        } else {
+            let first =
+                canonical_observation_at(provider, 1, 0, 1, &format!("{provider} frontier alpha"));
+            let second =
+                canonical_observation_at(provider, 2, 1, 2, &format!("{provider} frontier beta"));
+            let third =
+                canonical_observation_at(provider, 3, 2, 3, &format!("{provider} frontier gamma"));
+            let conflict_payload = {
+                let provider_id = ProviderId::new(provider).unwrap();
+                let session_id = SessionId::new(format!("session.projection-{provider}")).unwrap();
+                let range = ObservationSourceRangeV1::new(0, 1).unwrap();
+                let record_id =
+                    ObservationId::new(format!("record.projection-{provider}.1")).unwrap();
+                let envelope = CanonicalObservationEnvelopeV1::new(
+                    provider_id,
+                    "message",
+                    record_id,
+                    CanonicalObservationRelationsV1::new(session_id),
+                    vec![CanonicalObservationFactV1::Message {
+                        role: CanonicalMessageRoleV1::Assistant,
+                        content: json!({"text": format!("{provider} conflicting payload")}),
+                        model: Some("model.fixture".to_owned()),
+                        timestamp: Some(1_750_000_000),
+                    }],
+                    CanonicalObservationEvidenceV1::new(
+                        ObservationOrderingDomainV1::SnapshotOrder,
+                        range,
+                    ),
+                )
+                .unwrap();
+                serde_json::to_value(envelope).unwrap()
+            };
+            let conflicting = DurableObservationV1::new(
+                first.identity().clone(),
+                receipt(
+                    &format!("receipt.projection-{provider}.conflict"),
+                    &conflict_payload,
+                ),
+                RetentionClass::new("retention.projection-test").unwrap(),
+                conflict_payload,
+            )
+            .unwrap();
+            (first, second, third, conflicting)
+        };
+
+        let mut expected = None;
+        for candidate in [&first, &second, &third] {
+            let write = if provider == "claude" {
+                write((*candidate).clone(), expected.clone())
+            } else {
+                canonical_write_with_cursor((*candidate).clone(), expected.clone())
+            };
+            let outcome = store.persist_observation(write).await.unwrap();
+            let committed = match outcome {
+                ObservationPersistOutcome::Committed(receipt) => receipt,
+                other => panic!("{provider}: persist must commit, got {other:?}"),
+            };
+            expected = Some(committed.committed_cursor().clone());
+        }
+
+        let conflict_write = if provider == "claude" {
+            write(conflicting, None)
+        } else {
+            canonical_write_with_cursor(conflicting, None)
+        };
+        let conflict = store
+            .persist_observation(conflict_write)
+            .await
+            .expect_err("{provider}: conflicting identity must fail");
+        assert!(
+            matches!(
+                conflict,
+                tracedecay_store::ObservationStoreError::ObservationCollision { .. }
+            ),
+            "{provider}: expected ObservationCollision, got {conflict:?}"
+        );
+
+        let reorder_error = store
+            .project_observation(second.observation_id())
+            .await
+            .expect_err("{provider}: out-of-order projection must gap");
+        assert!(
+            matches!(
+                reorder_error,
+                ProjectionStoreError::Gap {
+                    expected: 1,
+                    actual: 2
+                }
+            ),
+            "{provider}: expected Gap{{1,2}}, got {reorder_error:?}"
+        );
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            0,
+            "{provider}"
+        );
+
+        assert!(matches!(
+            store
+                .project_observation(first.observation_id())
+                .await
+                .unwrap(),
+            ProjectionPersistOutcome::Projected(_)
+        ));
+        let duplicate_project = store
+            .project_observation(first.observation_id())
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                duplicate_project,
+                ProjectionPersistOutcome::ExactDuplicate(_)
+            ),
+            "{provider}: reproject must be ExactDuplicate, got {duplicate_project:?}"
+        );
+        assert!(matches!(
+            store
+                .project_observation(second.observation_id())
+                .await
+                .unwrap(),
+            ProjectionPersistOutcome::Projected(_)
+        ));
+        assert!(matches!(
+            store
+                .project_observation(third.observation_id())
+                .await
+                .unwrap(),
+            ProjectionPersistOutcome::Projected(_)
+        ));
+
+        let texts_before = all_projected_message_texts(&tmp).await;
+        assert!(
+            texts_before
+                .iter()
+                .any(|text| text.contains(&format!("{provider} frontier alpha"))),
+            "{provider}"
+        );
+        assert!(
+            texts_before
+                .iter()
+                .any(|text| text.contains(&format!("{provider} frontier gamma"))),
+            "{provider}"
+        );
+        let provenance_before = projection_provenance_rows(&tmp).await;
+        let counts_before = projection_counts(&tmp).await;
+        drop(db);
+
+        let db = open_lcm_db(&tmp).await;
+        let store = GlobalDbObservationStore::new(&db);
+        let restarted = store
+            .project_observation(first.observation_id())
+            .await
+            .unwrap();
+        assert!(
+            matches!(restarted, ProjectionPersistOutcome::ExactDuplicate(_)),
+            "{provider}: restart reproject must be ExactDuplicate, got {restarted:?}"
+        );
+        assert_eq!(
+            all_projected_message_texts(&tmp).await,
+            texts_before,
+            "{provider}"
+        );
+        assert_eq!(
+            projection_provenance_rows(&tmp).await,
+            provenance_before,
+            "{provider}"
+        );
+        assert_eq!(projection_counts(&tmp).await, counts_before, "{provider}");
+
+        let rebuilt = store.rebuild_projection(3).await.unwrap();
+        assert_eq!(rebuilt.projected_rows(), 3, "{provider}");
+        assert_eq!(rebuilt.skipped_observations(), 0, "{provider}");
+        assert_eq!(
+            all_projected_message_texts(&tmp).await,
+            texts_before,
+            "{provider}"
+        );
+        assert_eq!(
+            projection_provenance_rows(&tmp).await,
+            provenance_before,
+            "{provider}"
+        );
+        assert_eq!(projection_counts(&tmp).await, counts_before, "{provider}");
+    }
 }

@@ -1,4 +1,4 @@
-use std::io::BufRead;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -8,6 +8,7 @@ use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
     TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
 };
+use crate::sessions::source::{MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader};
 
 const CODEX_SESSION_LOCATION_KEYS: TranscriptLocationMetadataKeys =
     TranscriptLocationMetadataKeys::new(
@@ -47,23 +48,28 @@ impl CodexContextState {
         let Ok(file) = std::fs::File::open(path) else {
             return state;
         };
-        let mut reader = std::io::BufReader::new(file);
-        let mut line = String::new();
+        let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
         let mut offset = 0_u64;
-        loop {
-            line.clear();
-            let Ok(n) = reader.read_line(&mut line) else {
-                break;
-            };
-            if n == 0 || offset >= before_offset {
+        while let Ok(frame) = frames.next_frame() {
+            if matches!(frame, RawJsonlFrame::Eof) || offset >= before_offset {
                 break;
             }
             let line_offset = offset;
-            offset = offset.saturating_add(n as u64);
+            let byte_len = match frame {
+                RawJsonlFrame::Complete { byte_len }
+                | RawJsonlFrame::Partial { byte_len }
+                | RawJsonlFrame::Oversized { byte_len, .. }
+                | RawJsonlFrame::BudgetExhausted { byte_len, .. } => byte_len,
+                RawJsonlFrame::Eof => 0,
+            };
+            offset = offset.saturating_add(byte_len);
             if line_offset >= before_offset {
                 break;
             }
-            let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+            if !matches!(frame, RawJsonlFrame::Complete { .. }) {
+                continue;
+            }
+            let Ok(value) = serde_json::from_slice::<Value>(frames.record()) else {
                 continue;
             };
             state.observe_prior_record(&value, path, meta);

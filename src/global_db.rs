@@ -70,6 +70,7 @@ pub struct WorkflowScopeFilter {
 ///
 /// The optional scoped filters are intentionally grouped with the common search
 /// fields so every search entry point feeds the same SQL builder.
+#[derive(Clone, Copy)]
 struct SessionMessageSearchQuery<'a> {
     provider: Option<&'a str>,
     project_key: Option<&'a str>,
@@ -748,6 +749,85 @@ fn row_to_message(row: &libsql::Row, offset: i32) -> Option<SessionMessageRecord
     })
 }
 
+fn row_to_workflow_message(row: &libsql::Row, offset: i32) -> Option<SessionMessageRecord> {
+    let provider: String = row.get(offset).ok()?;
+    let observation_id: String = row.get(offset + 1).ok()?;
+    let fact_ordinal: i64 = row.get(offset + 2).ok()?;
+    let session_id: String = row.get(offset + 3).ok()?;
+    let semantic_kind: String = row.get(offset + 4).ok()?;
+    let provider_reference: Option<String> = row.get(offset + 5).ok()?;
+    let item_id: Option<String> = row.get(offset + 6).ok()?;
+    let parent_reference: Option<String> = row.get(offset + 7).ok()?;
+    let list_reference: Option<String> = row.get(offset + 8).ok()?;
+    let state: Option<String> = row.get(offset + 9).ok()?;
+    let status: Option<String> = row.get(offset + 10).ok()?;
+    let item_order: Option<i64> = row.get(offset + 11).ok()?;
+    let revision: Option<String> = row.get(offset + 12).ok()?;
+    let event_sequence: Option<i64> = row.get(offset + 13).ok()?;
+    let source_sequence: Option<i64> = row.get(offset + 14).ok()?;
+    let native_timestamp: Option<i64> = row.get(offset + 15).ok()?;
+    let observation_sequence: i64 = row.get(offset + 16).ok()?;
+    let ordering_domain: String = row.get(offset + 17).ok()?;
+    let content_json: Option<String> = row.get(offset + 18).ok()?;
+    let content_text: String = row.get(offset + 19).ok()?;
+
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "observation_id".to_owned(),
+        JsonValue::String(observation_id.clone()),
+    );
+    metadata.insert("fact_ordinal".to_owned(), JsonValue::from(fact_ordinal));
+    metadata.insert(
+        "ordering_domain".to_owned(),
+        JsonValue::String(ordering_domain),
+    );
+    for (key, value) in [
+        ("provider_reference", provider_reference),
+        ("item_id", item_id),
+        ("parent_reference", parent_reference),
+        ("list_reference", list_reference),
+        ("state", state),
+        ("status", status),
+        ("revision", revision),
+    ] {
+        if let Some(value) = value {
+            metadata.insert(key.to_owned(), JsonValue::String(value));
+        }
+    }
+    for (key, value) in [
+        ("item_order", item_order),
+        ("event_sequence", event_sequence),
+        ("source_sequence", source_sequence),
+    ] {
+        if let Some(value) = value {
+            metadata.insert(key.to_owned(), JsonValue::from(value));
+        }
+    }
+    if let Some(content_json) = content_json
+        && let Ok(content) = serde_json::from_str(&content_json)
+    {
+        metadata.insert("content".to_owned(), content);
+    }
+
+    Some(SessionMessageRecord {
+        provider,
+        message_id: format!("workflow/{observation_id}/{fact_ordinal}"),
+        session_id,
+        role: "system".to_owned(),
+        timestamp: native_timestamp,
+        ordinal: event_sequence
+            .or(source_sequence)
+            .unwrap_or(observation_sequence),
+        text: content_text,
+        kind: Some(semantic_kind),
+        model: None,
+        tool_names: None,
+        source_path: None,
+        source_offset: None,
+        metadata_json: Some(JsonValue::Object(metadata).to_string()),
+    })
+}
+
 fn row_to_analytics_event(row: &libsql::Row) -> Option<AnalyticsEventRecord> {
     Some(AnalyticsEventRecord {
         id: row.get(0).ok()?,
@@ -877,6 +957,41 @@ fn downrank_inventory_messages(results: &mut Vec<SessionMessageSearchResult>) {
     }
     substantive.append(&mut inventory);
     *results = substantive;
+}
+
+/// Merge independently ranked transcript and canonical-workflow hits by rank
+/// tier. Workflow facts lead each tier because they are the authoritative
+/// structured representation; borrowing the paired transcript score keeps the
+/// merged page comparable when project shards are ranked again by the caller.
+fn interleave_workflow_search_results(
+    transcript_results: Vec<SessionMessageSearchResult>,
+    workflow_results: Vec<SessionMessageSearchResult>,
+) -> Vec<SessionMessageSearchResult> {
+    let capacity = transcript_results
+        .len()
+        .saturating_add(workflow_results.len());
+    let mut transcript_results = transcript_results.into_iter();
+    let mut workflow_results = workflow_results.into_iter();
+    let mut merged = Vec::with_capacity(capacity);
+
+    loop {
+        let transcript_result = transcript_results.next();
+        let workflow_result = workflow_results.next();
+        if transcript_result.is_none() && workflow_result.is_none() {
+            break;
+        }
+        if let Some(mut workflow_result) = workflow_result {
+            if let Some(transcript_result) = transcript_result.as_ref() {
+                workflow_result.score = transcript_result.score;
+            }
+            merged.push(workflow_result);
+        }
+        if let Some(transcript_result) = transcript_result {
+            merged.push(transcript_result);
+        }
+    }
+
+    merged
 }
 
 fn session_fts_query(query: &str) -> String {
@@ -4887,7 +5002,11 @@ impl GlobalDb {
         }
         if let Some(project_key) = project_key {
             query_params.push(Value::Text(project_key.to_string()));
-            let _ = write!(sql, " AND s.project_key = ?{}", query_params.len());
+            let _ = write!(
+                sql,
+                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
+                query_params.len()
+            );
         }
         if let Some(parent_session_id) = filters.parent_session_id {
             query_params.push(Value::Text(parent_session_id.to_string()));
@@ -5003,6 +5122,19 @@ impl GlobalDb {
                 score,
             });
         }
+        results = interleave_workflow_search_results(
+            results,
+            self.search_workflow_facts(SessionMessageSearchQuery {
+                provider,
+                project_key,
+                query,
+                limit: fetch_limit,
+                filters,
+                git_filter,
+                workflow_filter,
+            })
+            .await,
+        );
         results =
             crate::sessions::message_noise::dedupe_related_message_copies(results, |result| {
                 crate::sessions::message_noise::RelatedMessageCopyIdentity {
@@ -5022,21 +5154,255 @@ impl GlobalDb {
         results
     }
 
-    /// Lists each session's latest Codex goal state (`kind = 'goal'`), newest
-    /// first, for the `message_search` `goals` view. One row per session — the
-    /// goal row with the highest `ordinal` (byte offset), i.e. the last
-    /// lifecycle transition ingested — so the returned `metadata_json.status`
-    /// is the current status. `score` is always 0: this is a listing, not a
-    /// relevance search. Optionally scoped to one `project_key`.
+    async fn search_workflow_facts(
+        &self,
+        search: SessionMessageSearchQuery<'_>,
+    ) -> Vec<SessionMessageSearchResult> {
+        let SessionMessageSearchQuery {
+            provider,
+            project_key,
+            query,
+            limit,
+            filters,
+            git_filter,
+            workflow_filter,
+        } = search;
+        if limit == 0
+            || !matches!(
+                filters.message_type,
+                crate::sessions::SessionMessageType::All
+            )
+        {
+            return Vec::new();
+        }
+        let terms = query
+            .split_whitespace()
+            .map(|term| {
+                term.trim_matches(|character: char| {
+                    !character.is_alphanumeric() && character != '-' && character != '_'
+                })
+                .to_lowercase()
+            })
+            .filter(|term| !term.is_empty())
+            .collect::<Vec<_>>();
+        if terms.is_empty() {
+            return Vec::new();
+        }
+
+        let mut sql = "SELECT
+                s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
+                s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
+                s.is_subagent, s.agent_id, s.parent_tool_use_id,
+                w.provider, w.observation_id, w.fact_ordinal, w.session_id, w.semantic_kind,
+                w.provider_reference, w.item_id, w.parent_reference, w.list_reference,
+                w.state, w.status, w.item_order, w.native_revision, w.event_sequence,
+                w.source_sequence, w.native_timestamp, w.observation_sequence,
+                w.ordering_domain, w.content_json, w.content_text
+             FROM observation_workflow_facts w
+             JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
+             WHERE w.projector_version = 'claude-session-message-v3'"
+            .to_owned();
+        let mut query_params = Vec::new();
+        if let Some(provider) = provider {
+            query_params.push(Value::Text(provider.to_owned()));
+            let _ = write!(sql, " AND w.provider = ?{}", query_params.len());
+        }
+        if let Some(project_key) = project_key {
+            query_params.push(Value::Text(project_key.to_owned()));
+            let _ = write!(
+                sql,
+                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
+                query_params.len()
+            );
+        }
+        if let Some(parent_session_id) = filters.parent_session_id {
+            query_params.push(Value::Text(parent_session_id.to_owned()));
+            let _ = write!(sql, " AND s.parent_session_id = ?{}", query_params.len());
+        }
+        if let Some(start_time) = filters.time_range.start_time {
+            query_params.push(Value::Integer(start_time));
+            let _ = write!(
+                sql,
+                " AND w.native_timestamp IS NOT NULL AND w.native_timestamp >= ?{}",
+                query_params.len()
+            );
+        }
+        if let Some(end_time) = filters.time_range.end_time {
+            query_params.push(Value::Integer(end_time));
+            let _ = write!(
+                sql,
+                " AND w.native_timestamp IS NOT NULL AND w.native_timestamp <= ?{}",
+                query_params.len()
+            );
+        }
+        if matches!(
+            filters.scope,
+            crate::sessions::SessionSearchScope::ParentsOnly
+        ) {
+            sql.push_str(" AND s.is_subagent = 0");
+        }
+        if matches!(
+            filters.scope,
+            crate::sessions::SessionSearchScope::SubagentsOnly
+        ) {
+            sql.push_str(" AND s.is_subagent = 1");
+        }
+        if let Some(filter) = git_filter
+            && let Some((predicate, predicate_values)) =
+                crate::sessions::git_correlation::git_scope_exists_predicate(filter, "w.session_id")
+        {
+            let _ = write!(sql, " AND {predicate}");
+            query_params.extend(predicate_values);
+        }
+        if let Some(filter) = workflow_filter {
+            let (mut predicate, predicate_values) =
+                crate::sessions::workflow_index::workflow_scope_exists_predicate(
+                    filter,
+                    "NULL",
+                    "w.session_id",
+                );
+            let base = query_params.len();
+            for slot in (1..=predicate_values.len()).rev() {
+                predicate = predicate.replace(&format!("?{slot}"), &format!("?{}", base + slot));
+            }
+            let _ = write!(sql, " AND {predicate}");
+            query_params.extend(predicate_values);
+        }
+        let mut term_predicates = Vec::with_capacity(terms.len());
+        for term in terms {
+            query_params.push(Value::Text(term));
+            term_predicates.push(format!(
+                "instr(lower(w.content_text), ?{}) > 0",
+                query_params.len()
+            ));
+        }
+        let _ = write!(sql, " AND ({})", term_predicates.join(" AND "));
+        query_params.push(Value::Integer(limit as i64));
+        let _ = write!(
+            sql,
+            " ORDER BY CASE WHEN w.item_order IS NULL THEN 1 ELSE 0 END,
+                      w.item_order, COALESCE(w.native_timestamp, 0) DESC,
+                      w.observation_sequence DESC, w.fact_ordinal
+              LIMIT ?{}",
+            query_params.len()
+        );
+
+        let Ok(mut rows) = self.conn.query(&sql, query_params).await else {
+            return Vec::new();
+        };
+        let mut results = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            let Some(session) = row_to_session(&row) else {
+                continue;
+            };
+            let Some(message) = row_to_workflow_message(&row, 13) else {
+                continue;
+            };
+            results.push(SessionMessageSearchResult {
+                session,
+                message,
+                score: 0.0,
+            });
+        }
+        results
+    }
+
+    /// Lists each session's latest canonical goal state, newest first.
     pub async fn recent_session_goals(
         &self,
         project_key: Option<&str>,
         limit: usize,
     ) -> Vec<SessionMessageSearchResult> {
+        self.recent_session_goals_filtered(None, project_key, None, None, limit)
+            .await
+    }
+
+    /// Lists latest canonical goal states with optional provider, project,
+    /// session, and current-status filters.
+    pub async fn recent_session_goals_filtered(
+        &self,
+        provider: Option<&str>,
+        project_key: Option<&str>,
+        session_id: Option<&str>,
+        status: Option<&str>,
+        limit: usize,
+    ) -> Vec<SessionMessageSearchResult> {
         if limit == 0 {
             return Vec::new();
         }
-        let mut sql = "SELECT
+        let mut sql = "WITH ranked_goals AS (
+                SELECT w.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY w.provider, w.session_id
+                           ORDER BY w.observation_sequence DESC, w.fact_ordinal DESC
+                       ) AS goal_rank
+                FROM observation_workflow_facts w
+                WHERE w.projector_version = 'claude-session-message-v3'
+                  AND w.semantic_kind = 'goal'"
+            .to_owned();
+        let mut query_params = Vec::new();
+        if let Some(provider) = provider {
+            query_params.push(Value::Text(provider.to_owned()));
+            let _ = write!(sql, " AND w.provider = ?{}", query_params.len());
+        }
+        if let Some(session_id) = session_id {
+            query_params.push(Value::Text(session_id.to_owned()));
+            let _ = write!(sql, " AND w.session_id = ?{}", query_params.len());
+        }
+        sql.push_str(
+            ")
+             SELECT
+                s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
+                s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
+                s.is_subagent, s.agent_id, s.parent_tool_use_id,
+                w.provider, w.observation_id, w.fact_ordinal, w.session_id, w.semantic_kind,
+                w.provider_reference, w.item_id, w.parent_reference, w.list_reference,
+                w.state, w.status, w.item_order, w.native_revision, w.event_sequence,
+                w.source_sequence, w.native_timestamp, w.observation_sequence,
+                w.ordering_domain, w.content_json, w.content_text
+             FROM ranked_goals w
+             JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
+             WHERE w.goal_rank = 1",
+        );
+        if let Some(project_key) = project_key {
+            query_params.push(Value::Text(project_key.to_owned()));
+            let _ = write!(
+                sql,
+                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
+                query_params.len()
+            );
+        }
+        if let Some(status) = status {
+            query_params.push(Value::Text(status.to_owned()));
+            let _ = write!(sql, " AND w.status = ?{}", query_params.len());
+        }
+        query_params.push(Value::Integer(limit as i64));
+        let _ = write!(
+            sql,
+            " ORDER BY COALESCE(w.native_timestamp, 0) DESC,
+                       w.observation_sequence DESC, w.fact_ordinal DESC
+              LIMIT ?{}",
+            query_params.len()
+        );
+
+        let mut results = Vec::new();
+        if let Ok(mut rows) = self.conn.query(&sql, query_params).await {
+            while let Ok(Some(row)) = rows.next().await {
+                let Some(session) = row_to_session(&row) else {
+                    continue;
+                };
+                let Some(message) = row_to_workflow_message(&row, 13) else {
+                    continue;
+                };
+                results.push(SessionMessageSearchResult {
+                    session,
+                    message,
+                    score: 0.0,
+                });
+            }
+        }
+
+        let mut legacy_sql = "SELECT
                 s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
                 s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
                 s.is_subagent, s.agent_id, s.parent_tool_use_id,
@@ -5050,37 +5416,71 @@ impl GlobalDb {
                    WHERE m2.provider = m.provider
                      AND m2.session_id = m.session_id
                      AND m2.kind = 'goal'
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM observation_workflow_facts w
+                   WHERE w.projector_version = 'claude-session-message-v3'
+                     AND w.provider = m.provider
+                     AND w.session_id = m.session_id
+                     AND w.semantic_kind = 'goal'
                )"
-        .to_string();
-        let mut query_params: Vec<Value> = Vec::new();
+        .to_owned();
+        let mut legacy_params = Vec::new();
+        if let Some(provider) = provider {
+            legacy_params.push(Value::Text(provider.to_owned()));
+            let _ = write!(legacy_sql, " AND m.provider = ?{}", legacy_params.len());
+        }
         if let Some(project_key) = project_key {
-            query_params.push(Value::Text(project_key.to_string()));
-            let _ = write!(sql, " AND s.project_key = ?{}", query_params.len());
+            legacy_params.push(Value::Text(project_key.to_owned()));
+            let _ = write!(
+                legacy_sql,
+                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
+                legacy_params.len()
+            );
         }
-        query_params.push(Value::Integer(limit as i64));
+        if let Some(session_id) = session_id {
+            legacy_params.push(Value::Text(session_id.to_owned()));
+            let _ = write!(legacy_sql, " AND m.session_id = ?{}", legacy_params.len());
+        }
+        if let Some(status) = status {
+            legacy_params.push(Value::Text(status.to_owned()));
+            let _ = write!(
+                legacy_sql,
+                " AND json_extract(m.metadata_json, '$.status') = ?{}",
+                legacy_params.len()
+            );
+        }
+        legacy_params.push(Value::Integer(limit as i64));
         let _ = write!(
-            sql,
+            legacy_sql,
             " ORDER BY COALESCE(m.timestamp, 0) DESC, m.ordinal DESC LIMIT ?{}",
-            query_params.len()
+            legacy_params.len()
         );
-
-        let Ok(mut rows) = self.conn.query(&sql, query_params).await else {
-            return Vec::new();
-        };
-        let mut results = Vec::new();
-        while let Ok(Some(row)) = rows.next().await {
-            let Some(session) = row_to_session(&row) else {
-                continue;
-            };
-            let Some(message) = row_to_message(&row, 13) else {
-                continue;
-            };
-            results.push(SessionMessageSearchResult {
-                session,
-                message,
-                score: 0.0,
-            });
+        if let Ok(mut rows) = self.conn.query(&legacy_sql, legacy_params).await {
+            while let Ok(Some(row)) = rows.next().await {
+                let Some(session) = row_to_session(&row) else {
+                    continue;
+                };
+                let Some(message) = row_to_message(&row, 13) else {
+                    continue;
+                };
+                results.push(SessionMessageSearchResult {
+                    session,
+                    message,
+                    score: 0.0,
+                });
+            }
         }
+        results.sort_by(|left, right| {
+            right
+                .message
+                .timestamp
+                .unwrap_or_default()
+                .cmp(&left.message.timestamp.unwrap_or_default())
+                .then_with(|| right.message.ordinal.cmp(&left.message.ordinal))
+                .then_with(|| left.message.message_id.cmp(&right.message.message_id))
+        });
+        results.truncate(limit);
         results
     }
 

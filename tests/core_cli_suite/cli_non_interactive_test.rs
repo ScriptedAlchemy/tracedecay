@@ -1734,13 +1734,21 @@ fn migrate_verify_text_reports_actual_apply_supported_state() {
     manifest.destination.profile_root = Some(profile_root(home.path()));
     manifest.destination.project_id = Some("proj_cli".to_string());
 
-    let mut graph_artifact = MigrationArtifact::new(
-        "graph_db",
-        shard_root.join("tracedecay.db"),
-        Some(shard_root.join("tracedecay.db")),
-    );
+    let graph_db = shard_root.join("tracedecay.db");
+    let mut graph_artifact =
+        MigrationArtifact::new("graph_db", graph_db.clone(), Some(graph_db.clone()));
     graph_artifact.state = ArtifactState::Applied;
     manifest.artifacts.push(graph_artifact);
+
+    let graph_backup = profile_root(home.path())
+        .join("migration-backups/mig_cli_verify")
+        .join("tracedecay.db");
+    std::fs::create_dir_all(graph_backup.parent().unwrap()).unwrap();
+    std::fs::copy(&graph_db, &graph_backup).unwrap();
+    let mut graph_backup_artifact =
+        MigrationArtifact::new("graph_db", graph_db, Some(graph_backup));
+    graph_backup_artifact.state = ArtifactState::Verified;
+    manifest.backup_artifacts.push(graph_backup_artifact);
 
     let mut store_manifest_artifact = MigrationArtifact::new(
         "store_manifest",

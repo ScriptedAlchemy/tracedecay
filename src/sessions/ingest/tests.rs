@@ -1,15 +1,63 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
+use crate::application::observation::ObservationCancellation;
 use crate::global_db::GlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
+use crate::sessions::source::{
+    FileDiscoveryReport, ParsedTranscript, SessionDraft, StoredCursor, TranscriptDiscoveryBounds,
+    TranscriptIngestResult, TranscriptSource,
+};
 use crate::sessions::{SessionProvider, claude_observation, git_correlation, source};
 
-use super::failure::{classify_claude_observation_failure, classify_transcript_ingest_failure};
-use super::project::{parse_git_log_commits, push_file_source};
+use super::failure::{
+    IngestPassBounds, IngestPassCoverage, IngestPassOutcome, allocate_pass_byte_budgets,
+    classify_claude_observation_failure, classify_transcript_ingest_failure,
+    plan_round_robin_admission, scheduling_write_required,
+};
+use super::project::{
+    ingest_project_sources_for_provider, parse_git_log_commits, push_file_source,
+};
+use super::scheduler::{
+    DiscoveredIngestUnit, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY, admit_fair_ingest_units,
+    discover_ingest_units, finish_user_provider_coverage, ingest_sources_bounded,
+    merge_project_provider_backpressure, plan_user_provider_admission, read_ingest_frontier,
+};
 use super::startup::{StartupUserIngestGuard, TranscriptIngestOutcome};
 use super::user::{provider_selected, registered_project_roots_from};
+use super::user_provider::try_ingest_file_source_bounded;
+
+const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
+    discovered_units: 16,
+    units_per_pass: 8,
+    units_per_source: 8,
+    queue_depth: 8,
+    bytes_per_unit: 1024,
+    bytes_per_pass: 4096,
+    retries: 0,
+};
+
+#[tokio::test]
+async fn missing_project_identity_fails_before_ingest_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = GlobalDb::open_at(&temp.path().join("global.db"))
+        .await
+        .unwrap();
+
+    let outcome = ingest_project_sources_for_provider(&db, temp.path(), None, None, true).await;
+
+    assert_eq!(outcome.failures.len(), 1);
+    assert_eq!(outcome.failures[0].reason_code, "project_identity_missing");
+    assert_eq!(outcome.stats, TranscriptIngestStats::default());
+    assert!(
+        db.get_parse_offset_result(TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
 
 #[tokio::test]
 async fn registered_project_roots_include_modern_registry_aliases() {
@@ -118,10 +166,58 @@ fn transcript_failure_classification_is_bounded_and_drives_outcome_success() {
     assert_eq!(failure.reason_code, "transcript_storage_failed");
     assert!(failure.retryable);
     let outcome = TranscriptIngestOutcome::new(TranscriptIngestStats::default(), vec![failure]);
-    assert!(!outcome.is_success());
+    assert!(!outcome.coverage.is_complete() || !outcome.failures.is_empty());
     let rendered = serde_json::to_string(&outcome.failures).unwrap();
     assert!(!rendered.contains("private operation"));
     assert!(!rendered.contains("private source detail"));
+}
+
+#[test]
+fn bounded_pass_coverage_survives_transcript_outcome_boundary() {
+    let partial = IngestPassOutcome {
+        stats: TranscriptIngestStats {
+            sessions_upserted: 1,
+            messages_upserted: 2,
+        },
+        failures: Vec::new(),
+        coverage: IngestPassCoverage::Partial { deferred_units: 3 },
+        scheduling_state_written: true,
+        units_admitted: 2,
+        units_completed: 2,
+        units_failed: 0,
+        byte_bounds_enforced: true,
+    }
+    .into_transcript_outcome();
+
+    assert_eq!(
+        partial.coverage,
+        IngestPassCoverage::Partial { deferred_units: 3 }
+    );
+    assert!(!partial.is_success());
+
+    let backpressured = IngestPassOutcome {
+        stats: TranscriptIngestStats::default(),
+        failures: Vec::new(),
+        coverage: IngestPassCoverage::Backpressured {
+            admitted_units: 1,
+            rejected_units: 4,
+        },
+        scheduling_state_written: false,
+        units_admitted: 1,
+        units_completed: 0,
+        units_failed: 1,
+        byte_bounds_enforced: false,
+    }
+    .into_transcript_outcome();
+
+    assert_eq!(
+        backpressured.coverage,
+        IngestPassCoverage::Backpressured {
+            admitted_units: 1,
+            rejected_units: 4,
+        }
+    );
+    assert!(!backpressured.is_success());
 }
 
 #[test]
@@ -246,5 +342,964 @@ fn startup_user_ingest_claims_are_single_flight_and_cancellation_safe() {
     assert!(
         StartupUserIngestGuard::claim(profile).is_none(),
         "a completed sweep should suppress the startup herd during cooldown"
+    );
+}
+
+#[test]
+fn fair_round_robin_does_not_starve_later_sources() {
+    let first = plan_round_robin_admission(3, 0, 1);
+    assert_eq!(first.admitted_indices, vec![0]);
+    assert_eq!(
+        first.coverage,
+        IngestPassCoverage::Partial { deferred_units: 2 }
+    );
+
+    let second = plan_round_robin_admission(3, 1, 1);
+    assert_eq!(second.admitted_indices, vec![1]);
+
+    let third = plan_round_robin_admission(3, 2, 1);
+    assert_eq!(third.admitted_indices, vec![2]);
+
+    let wrap = plan_round_robin_admission(3, 3, 1);
+    assert_eq!(wrap.admitted_indices, vec![0]);
+}
+
+#[test]
+fn zero_unit_budget_is_typed_backpressure() {
+    let plan = plan_round_robin_admission(3, 0, 0);
+    assert!(plan.admitted_indices.is_empty());
+    assert_eq!(
+        plan.coverage,
+        IngestPassCoverage::Backpressured {
+            admitted_units: 0,
+            rejected_units: 3,
+        }
+    );
+}
+
+#[test]
+fn fully_covered_pass_never_requires_scheduling_write() {
+    let plan = plan_round_robin_admission(4, 7, 8);
+    assert_eq!(plan.admitted_indices, vec![3, 0, 1, 2]);
+    assert_eq!(plan.coverage, IngestPassCoverage::Complete);
+    assert!(!scheduling_write_required(
+        IngestPassCoverage::Complete,
+        plan.admitted_indices.len(),
+        false
+    ));
+}
+
+#[test]
+fn cancellation_and_empty_attempt_suppress_scheduling_writes() {
+    assert!(!scheduling_write_required(
+        IngestPassCoverage::Partial { deferred_units: 3 },
+        2,
+        true
+    ));
+    assert!(!scheduling_write_required(
+        IngestPassCoverage::Partial { deferred_units: 3 },
+        0,
+        false
+    ));
+    assert!(scheduling_write_required(
+        IngestPassCoverage::Partial { deferred_units: 3 },
+        2,
+        false
+    ));
+    assert!(scheduling_write_required(
+        IngestPassCoverage::Backpressured {
+            admitted_units: 2,
+            rejected_units: 1
+        },
+        2,
+        false
+    ));
+}
+
+#[test]
+fn fair_admission_interleaves_sources_without_starvation() {
+    let sources = vec![
+        boxed_source(FakeSource {
+            provider: "a",
+            paths: vec![PathBuf::from("a1"), PathBuf::from("a2")],
+            fail: false,
+            budget_log: None,
+        }),
+        boxed_source(FakeSource {
+            provider: "b",
+            paths: vec![PathBuf::from("b1"), PathBuf::from("b2")],
+            fail: false,
+            budget_log: None,
+        }),
+    ];
+    let bounds = IngestPassBounds {
+        units_per_pass: 4,
+        units_per_source: 2,
+        queue_depth: 4,
+        ..TEST_INGEST_BOUNDS
+    };
+    let (units, deferred) = discover_ingest_units(&sources, Path::new("project"), bounds, 0);
+    assert_eq!(deferred, 0);
+    assert_eq!(
+        units
+            .iter()
+            .map(|unit| unit.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+        vec!["a1", "b1", "a2", "b2"]
+    );
+    let (admitted, coverage) = admit_fair_ingest_units(&units, 0, bounds);
+    assert_eq!(coverage, IngestPassCoverage::Complete);
+    let sources: Vec<&str> = admitted
+        .iter()
+        .map(|&index| units[index].source_id.as_str())
+        .collect();
+    assert_eq!(sources, vec!["a", "b", "a", "b"]);
+}
+
+#[test]
+fn uneven_queues_make_progress_across_durable_passes() {
+    let units = vec![
+        unit("a", "a1", 0),
+        unit("b", "b1", 1),
+        unit("a", "a2", 0),
+        unit("a", "a3", 0),
+    ];
+    let bounds = IngestPassBounds {
+        units_per_pass: 2,
+        units_per_source: 4,
+        queue_depth: 2,
+        ..TEST_INGEST_BOUNDS
+    };
+    let mut frontier = 0_u64;
+    let mut attempted = Vec::new();
+    for _ in 0..2 {
+        let (admitted, coverage) = admit_fair_ingest_units(&units, frontier, bounds);
+        assert_eq!(coverage, IngestPassCoverage::Partial { deferred_units: 2 });
+        attempted.extend(
+            admitted
+                .iter()
+                .map(|&index| units[index].path.to_string_lossy().into_owned()),
+        );
+        frontier = frontier.saturating_add(u64::try_from(admitted.len()).unwrap());
+    }
+    assert_eq!(attempted, vec!["a1", "b1", "a2", "a3"]);
+}
+
+#[test]
+fn per_source_bound_advances_contiguously_without_starvation() {
+    let units = vec![
+        unit("a", "a1", 0),
+        unit("b", "b1", 1),
+        unit("a", "a2", 0),
+        unit("a", "a3", 0),
+    ];
+    let bounds = IngestPassBounds {
+        units_per_pass: 4,
+        units_per_source: 1,
+        queue_depth: 4,
+        ..TEST_INGEST_BOUNDS
+    };
+    let mut frontier = 0_u64;
+    let mut attempted = Vec::new();
+    for _ in 0..3 {
+        let (admitted, coverage) = admit_fair_ingest_units(&units, frontier, bounds);
+        assert!(matches!(coverage, IngestPassCoverage::Backpressured { .. }));
+        attempted.extend(
+            admitted
+                .iter()
+                .map(|&index| units[index].path.to_string_lossy().into_owned()),
+        );
+        frontier = frontier.saturating_add(u64::try_from(admitted.len()).unwrap());
+    }
+    assert_eq!(attempted, vec!["a1", "b1", "a2", "a3"]);
+}
+
+#[test]
+fn pass_byte_allocations_never_exceed_aggregate_cap() {
+    let bounds = IngestPassBounds {
+        bytes_per_unit: 4,
+        bytes_per_pass: 10,
+        ..TEST_INGEST_BOUNDS
+    };
+    let budgets = allocate_pass_byte_budgets(4, bounds);
+    assert_eq!(budgets, vec![4, 4, 2]);
+    assert_eq!(budgets.iter().copied().sum::<u64>(), 10);
+
+    let zero = IngestPassBounds {
+        bytes_per_unit: 4,
+        bytes_per_pass: 0,
+        ..TEST_INGEST_BOUNDS
+    };
+    assert!(allocate_pass_byte_budgets(4, zero).is_empty());
+}
+
+#[tokio::test]
+async fn file_provider_reserves_one_aggregate_byte_budget_across_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let paths = (0..3)
+        .map(|index| {
+            let path = temp.path().join(format!("{index}.jsonl"));
+            std::fs::write(&path, b"{}\n").unwrap();
+            path
+        })
+        .collect();
+    let budget_log = Arc::new(Mutex::new(Vec::new()));
+    let source = FakeSource {
+        provider: "bounded",
+        paths,
+        fail: false,
+        budget_log: Some(Arc::clone(&budget_log)),
+    };
+    let db = GlobalDb::open_at(&temp.path().join("global.db"))
+        .await
+        .unwrap();
+
+    try_ingest_file_source_bounded(&db, &source, &project, 10)
+        .await
+        .unwrap();
+
+    assert_eq!(*budget_log.lock().unwrap(), vec![3, 3, 4]);
+}
+
+#[test]
+fn user_provider_admission_applies_discovery_bound_to_actual_work() {
+    let bounds = IngestPassBounds {
+        discovered_units: 2,
+        bytes_per_unit: 4,
+        bytes_per_pass: 8,
+        ..TEST_INGEST_BOUNDS
+    };
+    let first = plan_user_provider_admission(5, 0, bounds);
+    assert_eq!(first.admitted_indices, vec![0, 1]);
+    assert_eq!(
+        first.coverage,
+        IngestPassCoverage::Partial { deferred_units: 3 }
+    );
+    let second = plan_user_provider_admission(5, 2, bounds);
+    assert_eq!(second.admitted_indices, vec![2, 3]);
+}
+
+#[test]
+fn provider_internal_deferral_is_typed_backpressure() {
+    let coverage = finish_user_provider_coverage(IngestPassCoverage::Complete, 1, 1, 1);
+    assert_eq!(
+        coverage,
+        IngestPassCoverage::Backpressured {
+            admitted_units: 1,
+            rejected_units: 1,
+        }
+    );
+}
+
+#[test]
+fn project_provider_deferral_preserves_existing_deferred_work() {
+    let coverage = merge_project_provider_backpressure(
+        IngestPassCoverage::Partial { deferred_units: 2 },
+        3,
+        1,
+    );
+    assert_eq!(
+        coverage,
+        IngestPassCoverage::Backpressured {
+            admitted_units: 3,
+            rejected_units: 3,
+        }
+    );
+}
+
+#[test]
+fn bounded_pass_work_backpressures_instead_of_growing() {
+    let units = vec![
+        unit("a", "a1", 0),
+        unit("b", "b1", 1),
+        unit("a", "a2", 0),
+        unit("a", "a3", 0),
+    ];
+    // Per-source cap 2 and queue depth 3 force an explicit overload disposition.
+    let bounds = IngestPassBounds {
+        units_per_source: 2,
+        queue_depth: 3,
+        ..TEST_INGEST_BOUNDS
+    };
+    let (admitted, coverage) = admit_fair_ingest_units(&units, 0, bounds);
+    assert_eq!(
+        coverage,
+        IngestPassCoverage::Backpressured {
+            admitted_units: 3,
+            rejected_units: 1,
+        }
+    );
+    assert_eq!(admitted.len(), 3);
+}
+
+#[derive(Clone)]
+struct FakeSource {
+    provider: &'static str,
+    paths: Vec<PathBuf>,
+    fail: bool,
+    budget_log: Option<Arc<Mutex<Vec<u64>>>>,
+}
+
+impl TranscriptSource for FakeSource {
+    fn provider(&self) -> &'static str {
+        self.provider
+    }
+
+    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
+        self.paths.clone()
+    }
+
+    fn try_parse_new(
+        &self,
+        path: &Path,
+        prev: StoredCursor,
+        project_root: &Path,
+        max_new_bytes: Option<u64>,
+    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
+        if let (Some(log), Some(max_new_bytes)) = (&self.budget_log, max_new_bytes) {
+            log.lock().unwrap().push(max_new_bytes);
+        }
+        if self.fail {
+            if self.provider == "retryable" {
+                return Err(source::TranscriptIngestError::ScanIo {
+                    operation: "test",
+                    path: path.to_path_buf(),
+                    source: std::io::Error::other("retryable test failure"),
+                });
+            }
+            return Err(source::TranscriptIngestError::InvalidFrameState {
+                provider: self.provider,
+            });
+        }
+        let _ = (path, project_root);
+        Ok(Some(ParsedTranscript {
+            draft: SessionDraft {
+                session_id: format!("{}-{}", self.provider, path.display()),
+                project_key: "project".into(),
+                project_path: project_root.display().to_string(),
+                title: Some("fake".into()),
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            },
+            messages: Vec::new(),
+            new_cursor: StoredCursor {
+                position: prev.position.saturating_add(1),
+                mtime: 1,
+                file_id: 1,
+            },
+        }))
+    }
+
+    fn parse_new(
+        &self,
+        path: &Path,
+        prev: StoredCursor,
+        project_root: &Path,
+        max_new_bytes: Option<u64>,
+    ) -> Option<ParsedTranscript> {
+        self.try_parse_new(path, prev, project_root, max_new_bytes)
+            .ok()
+            .flatten()
+    }
+}
+
+fn unit(source_id: &str, path: &str, source_index: usize) -> DiscoveredIngestUnit {
+    DiscoveredIngestUnit {
+        source_id: source_id.to_string(),
+        path: PathBuf::from(path),
+        source_index,
+    }
+}
+
+fn boxed_source(source: FakeSource) -> Box<dyn TranscriptSource> {
+    Box::new(source)
+}
+
+struct PageOrderedSource;
+
+impl TranscriptSource for PageOrderedSource {
+    fn provider(&self) -> &'static str {
+        "page-ordered"
+    }
+
+    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    fn discover_transcript_paths_page(
+        &self,
+        _project_root: &Path,
+        _bounds: TranscriptDiscoveryBounds,
+        _start_offset: usize,
+    ) -> (FileDiscoveryReport, usize) {
+        (
+            FileDiscoveryReport {
+                paths: vec![
+                    PathBuf::from("z-newest"),
+                    PathBuf::from("a-older"),
+                    PathBuf::from("z-newest"),
+                ],
+                truncated: None,
+                skipped_oversized_entries: 0,
+                bytes_charged: 0,
+            },
+            0,
+        )
+    }
+
+    fn parse_new(
+        &self,
+        _path: &Path,
+        _prev: StoredCursor,
+        _project_root: &Path,
+        _max_new_bytes: Option<u64>,
+    ) -> Option<ParsedTranscript> {
+        None
+    }
+}
+
+struct CancellingSource {
+    inner: FakeSource,
+    cancellation: ObservationCancellation,
+}
+
+impl TranscriptSource for CancellingSource {
+    fn provider(&self) -> &'static str {
+        self.inner.provider()
+    }
+
+    fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
+        self.inner.transcript_paths(project_root)
+    }
+
+    fn try_parse_new(
+        &self,
+        path: &Path,
+        prev: StoredCursor,
+        project_root: &Path,
+        max_new_bytes: Option<u64>,
+    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
+        self.cancellation.cancel();
+        self.inner
+            .try_parse_new(path, prev, project_root, max_new_bytes)
+    }
+
+    fn parse_new(
+        &self,
+        path: &Path,
+        prev: StoredCursor,
+        project_root: &Path,
+        max_new_bytes: Option<u64>,
+    ) -> Option<ParsedTranscript> {
+        self.cancellation.cancel();
+        self.inner
+            .parse_new(path, prev, project_root, max_new_bytes)
+    }
+}
+
+#[tokio::test]
+async fn source_failure_is_isolated_and_does_not_block_siblings() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let ok_path = temp.path().join("ok.jsonl");
+    let bad_path = temp.path().join("bad.jsonl");
+    std::fs::write(&ok_path, b"{}\n").unwrap();
+    std::fs::write(&bad_path, b"{}\n").unwrap();
+    let db = GlobalDb::open_at(&temp.path().join("global.db"))
+        .await
+        .unwrap();
+    let sources = vec![
+        boxed_source(FakeSource {
+            provider: "alpha",
+            paths: vec![ok_path.clone()],
+            fail: false,
+            budget_log: None,
+        }),
+        boxed_source(FakeSource {
+            provider: "beta",
+            paths: vec![bad_path.clone()],
+            fail: true,
+            budget_log: None,
+        }),
+        boxed_source(FakeSource {
+            provider: "gamma",
+            paths: vec![temp.path().join("gamma.jsonl")],
+            fail: false,
+            budget_log: None,
+        }),
+    ];
+    std::fs::write(temp.path().join("gamma.jsonl"), b"{}\n").unwrap();
+    let bounds = IngestPassBounds {
+        units_per_source: 4,
+        ..TEST_INGEST_BOUNDS
+    };
+    let outcome = ingest_sources_bounded(
+        &db,
+        &project,
+        &sources,
+        bounds,
+        &ObservationCancellation::default(),
+    )
+    .await;
+    assert_eq!(outcome.units_admitted, 3);
+    assert_eq!(outcome.units_failed, 1);
+    assert!(outcome.units_completed >= 1);
+    assert!(!outcome.coverage.is_complete() || !outcome.failures.is_empty());
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|failure| failure.provider == "beta")
+    );
+    assert!(
+        !outcome
+            .failures
+            .iter()
+            .any(|failure| failure.provider == "alpha" || failure.provider == "gamma")
+    );
+    assert_eq!(outcome.coverage, IngestPassCoverage::Complete);
+    assert!(
+        !outcome.scheduling_state_written,
+        "fully covered passes must not persist a scheduling frontier"
+    );
+    assert!(
+        db.get_parse_offset_result(TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn retryable_source_respects_retry_and_pass_byte_bounds() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let path = temp.path().join("retryable.jsonl");
+    std::fs::write(&path, b"{}\n").unwrap();
+    let db = GlobalDb::open_at(&temp.path().join("global.db"))
+        .await
+        .unwrap();
+    let budget_log = Arc::new(Mutex::new(Vec::new()));
+    let sources = vec![boxed_source(FakeSource {
+        provider: "retryable",
+        paths: vec![path],
+        fail: true,
+        budget_log: Some(Arc::clone(&budget_log)),
+    })];
+    let bounds = IngestPassBounds {
+        bytes_per_unit: 4,
+        bytes_per_pass: 12,
+        retries: 2,
+        ..TEST_INGEST_BOUNDS
+    };
+
+    let outcome = ingest_sources_bounded(
+        &db,
+        &project,
+        &sources,
+        bounds,
+        &ObservationCancellation::default(),
+    )
+    .await;
+
+    assert_eq!(*budget_log.lock().unwrap(), vec![4, 4, 4]);
+    assert_eq!(outcome.units_failed, 1);
+    assert_eq!(outcome.failures.len(), 1);
+}
+
+#[tokio::test]
+async fn aggregate_byte_budget_is_granted_once_across_the_pass() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let db = GlobalDb::open_at(&temp.path().join("global.db"))
+        .await
+        .unwrap();
+    let budget_log = Arc::new(Mutex::new(Vec::new()));
+    let mut sources = Vec::new();
+    for (provider, name) in [("a", "a.jsonl"), ("b", "b.jsonl"), ("c", "c.jsonl")] {
+        let path = temp.path().join(name);
+        std::fs::write(&path, b"{}\n").unwrap();
+        sources.push(boxed_source(FakeSource {
+            provider,
+            paths: vec![path],
+            fail: false,
+            budget_log: Some(Arc::clone(&budget_log)),
+        }));
+    }
+    let bounds = IngestPassBounds {
+        bytes_per_unit: 4,
+        bytes_per_pass: 10,
+        ..TEST_INGEST_BOUNDS
+    };
+    let outcome = ingest_sources_bounded(
+        &db,
+        &project,
+        &sources,
+        bounds,
+        &ObservationCancellation::default(),
+    )
+    .await;
+
+    let grants = budget_log.lock().unwrap().clone();
+    assert_eq!(grants, vec![4, 4, 2]);
+    assert_eq!(grants.iter().copied().sum::<u64>(), 10);
+    assert_eq!(outcome.units_admitted, 3);
+    assert_eq!(outcome.coverage, IngestPassCoverage::Complete);
+    assert!(outcome.byte_bounds_enforced);
+}
+
+#[tokio::test]
+async fn zero_byte_pass_defers_work_without_frontier_advance() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let path = temp.path().join("a.jsonl");
+    std::fs::write(&path, b"{}\n").unwrap();
+    let db = GlobalDb::open_at(&temp.path().join("global.db"))
+        .await
+        .unwrap();
+    let budget_log = Arc::new(Mutex::new(Vec::new()));
+    let sources = vec![boxed_source(FakeSource {
+        provider: "a",
+        paths: vec![path],
+        fail: false,
+        budget_log: Some(Arc::clone(&budget_log)),
+    })];
+    let bounds = IngestPassBounds {
+        bytes_per_unit: 4,
+        bytes_per_pass: 0,
+        ..TEST_INGEST_BOUNDS
+    };
+    let outcome = ingest_sources_bounded(
+        &db,
+        &project,
+        &sources,
+        bounds,
+        &ObservationCancellation::default(),
+    )
+    .await;
+
+    assert!(budget_log.lock().unwrap().is_empty());
+    assert_eq!(outcome.units_admitted, 0);
+    assert!(matches!(
+        outcome.coverage,
+        IngestPassCoverage::Backpressured {
+            admitted_units: 0,
+            rejected_units: 1
+        }
+    ));
+    assert!(!outcome.scheduling_state_written);
+    assert_eq!(
+        read_ingest_frontier(&db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
+        Some(0)
+    );
+}
+
+#[tokio::test]
+async fn cancellation_during_unit_keeps_committed_work_without_frontier_write() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let first_path = temp.path().join("a.jsonl");
+    let second_path = temp.path().join("b.jsonl");
+    std::fs::write(&first_path, b"{}\n").unwrap();
+    std::fs::write(&second_path, b"{}\n").unwrap();
+    let db = GlobalDb::open_at(&temp.path().join("global.db"))
+        .await
+        .unwrap();
+    let cancellation = ObservationCancellation::default();
+    let sources: Vec<Box<dyn TranscriptSource>> = vec![
+        Box::new(CancellingSource {
+            inner: FakeSource {
+                provider: "a",
+                paths: vec![first_path],
+                fail: false,
+                budget_log: None,
+            },
+            cancellation: cancellation.clone(),
+        }),
+        boxed_source(FakeSource {
+            provider: "b",
+            paths: vec![second_path],
+            fail: false,
+            budget_log: None,
+        }),
+    ];
+    let bounds = IngestPassBounds {
+        units_per_pass: 1,
+        queue_depth: 1,
+        ..TEST_INGEST_BOUNDS
+    };
+    let outcome = ingest_sources_bounded(&db, &project, &sources, bounds, &cancellation).await;
+
+    assert_eq!(outcome.units_completed, 1);
+    assert!(cancellation.is_cancelled());
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|failure| failure.reason_code == "ingest_pass_cancelled")
+    );
+    assert!(!outcome.scheduling_state_written);
+    assert_eq!(
+        read_ingest_frontier(&db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
+        Some(0)
+    );
+}
+
+#[tokio::test]
+async fn partial_pass_writes_frontier_cancellation_does_not() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let db = GlobalDb::open_at(&temp.path().join("global.db"))
+        .await
+        .unwrap();
+    let mut sources = Vec::new();
+    for (provider, name) in [("a", "a.jsonl"), ("b", "b.jsonl"), ("c", "c.jsonl")] {
+        let path = temp.path().join(name);
+        std::fs::write(&path, b"{}\n").unwrap();
+        sources.push(boxed_source(FakeSource {
+            provider,
+            paths: vec![path],
+            fail: false,
+            budget_log: None,
+        }));
+    }
+    let bounds = IngestPassBounds {
+        units_per_pass: 1,
+        units_per_source: 4,
+        ..TEST_INGEST_BOUNDS
+    };
+    let first = ingest_sources_bounded(
+        &db,
+        &project,
+        &sources,
+        bounds,
+        &ObservationCancellation::default(),
+    )
+    .await;
+    assert!(matches!(
+        first.coverage,
+        IngestPassCoverage::Partial { deferred_units: 2 }
+    ));
+    assert!(first.scheduling_state_written);
+    assert_eq!(
+        read_ingest_frontier(&db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
+        Some(1)
+    );
+
+    let cancellation = ObservationCancellation::default();
+    cancellation.cancel();
+    let cancelled = ingest_sources_bounded(&db, &project, &sources, bounds, &cancellation).await;
+    assert!(
+        cancelled
+            .failures
+            .iter()
+            .any(|failure| failure.reason_code == "ingest_pass_cancelled")
+    );
+    assert!(
+        !cancelled.scheduling_state_written,
+        "cancellation must not advance the scheduling frontier"
+    );
+    assert_eq!(
+        read_ingest_frontier(&db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
+        Some(1)
+    );
+
+    let second = ingest_sources_bounded(
+        &db,
+        &project,
+        &sources,
+        bounds,
+        &ObservationCancellation::default(),
+    )
+    .await;
+    assert_eq!(second.units_admitted, 1);
+    // Frontier advanced past source 0, so the next single-unit pass starts at 1.
+    assert!(second.scheduling_state_written);
+    assert_eq!(
+        read_ingest_frontier(&db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
+        Some(2)
+    );
+}
+
+#[test]
+fn discovery_respects_per_source_and_total_bounds() {
+    let sources = vec![
+        boxed_source(FakeSource {
+            provider: "a",
+            paths: vec![
+                PathBuf::from("a1"),
+                PathBuf::from("a2"),
+                PathBuf::from("a3"),
+            ],
+            fail: false,
+            budget_log: None,
+        }),
+        boxed_source(FakeSource {
+            provider: "b",
+            paths: vec![PathBuf::from("b1"), PathBuf::from("b2")],
+            fail: false,
+            budget_log: None,
+        }),
+    ];
+    let bounds = IngestPassBounds {
+        discovered_units: 3,
+        units_per_source: 2,
+        ..TEST_INGEST_BOUNDS
+    };
+    let (units, deferred) = discover_ingest_units(&sources, Path::new("/tmp/project"), bounds, 0);
+    assert_eq!(deferred, 2);
+    assert_eq!(units.len(), 3);
+    assert_eq!(units.iter().filter(|unit| unit.source_id == "a").count(), 2);
+    assert_eq!(units.iter().filter(|unit| unit.source_id == "b").count(), 1);
+    assert_eq!(
+        units
+            .iter()
+            .map(|unit| unit.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+        vec!["a1", "b1", "a2"],
+        "source zero cannot consume the global discovery cap before source one"
+    );
+}
+
+#[test]
+fn discovery_preserves_provider_page_order_while_deduplicating() {
+    let sources: Vec<Box<dyn TranscriptSource>> = vec![Box::new(PageOrderedSource)];
+    let bounds = IngestPassBounds {
+        discovered_units: 4,
+        units_per_pass: 4,
+        units_per_source: 4,
+        queue_depth: 4,
+        ..TEST_INGEST_BOUNDS
+    };
+
+    let (units, deferred) = discover_ingest_units(&sources, Path::new("/tmp/project"), bounds, 0);
+
+    assert_eq!(deferred, 0);
+    assert_eq!(
+        units
+            .iter()
+            .map(|unit| unit.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+        vec!["z-newest", "a-older"],
+        "generic ingest must not replace provider page order with lexical order"
+    );
+}
+
+#[test]
+fn discovery_emits_typed_deferred_backpressure_for_oversized_paths() {
+    let long = "p".repeat(TranscriptDiscoveryBounds::default_walk().max_path_bytes + 8);
+    let sources = vec![boxed_source(FakeSource {
+        provider: "a",
+        paths: vec![PathBuf::from("ok"), PathBuf::from(long)],
+        fail: false,
+        budget_log: None,
+    })];
+    let bounds = IngestPassBounds {
+        discovered_units: 8,
+        ..TEST_INGEST_BOUNDS
+    };
+    let (units, deferred) = discover_ingest_units(&sources, Path::new("/tmp/project"), bounds, 0);
+    assert_eq!(units.len(), 1);
+    assert_eq!(units[0].path, PathBuf::from("ok"));
+    assert!(
+        deferred >= 1,
+        "oversized path must defer with typed backpressure"
+    );
+    let serialized = format!("{units:?}");
+    assert!(
+        !serialized.contains(&"p".repeat(64)),
+        "unit list must not retain oversized path payloads"
+    );
+}
+
+#[test]
+fn over_cap_source_and_single_peer_both_progress_across_discovery_passes() {
+    let sources = vec![
+        boxed_source(FakeSource {
+            provider: "a",
+            paths: vec![
+                PathBuf::from("a1"),
+                PathBuf::from("a2"),
+                PathBuf::from("a3"),
+            ],
+            fail: false,
+            budget_log: None,
+        }),
+        boxed_source(FakeSource {
+            provider: "b",
+            paths: vec![PathBuf::from("b1")],
+            fail: false,
+            budget_log: None,
+        }),
+    ];
+    let bounds = IngestPassBounds {
+        discovered_units: 2,
+        units_per_pass: 2,
+        units_per_source: 2,
+        queue_depth: 2,
+        ..TEST_INGEST_BOUNDS
+    };
+    let (first, first_deferred) = discover_ingest_units(&sources, Path::new("project"), bounds, 0);
+    assert_eq!(first_deferred, 2);
+    assert_eq!(
+        first
+            .iter()
+            .map(|unit| unit.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+        vec!["a1", "b1"]
+    );
+
+    let (second, second_deferred) =
+        discover_ingest_units(&sources, Path::new("project"), bounds, 2);
+    assert_eq!(second_deferred, 2);
+    assert_eq!(
+        second
+            .iter()
+            .map(|unit| unit.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+        vec!["a2", "a3"]
+    );
+}
+
+#[test]
+fn exhausted_discovery_frontier_restarts_the_bounded_cycle() {
+    let sources = vec![boxed_source(FakeSource {
+        provider: "a",
+        paths: vec![
+            PathBuf::from("a1"),
+            PathBuf::from("a2"),
+            PathBuf::from("a3"),
+        ],
+        fail: false,
+        budget_log: None,
+    })];
+    let bounds = IngestPassBounds {
+        discovered_units: 2,
+        units_per_pass: 2,
+        units_per_source: 2,
+        queue_depth: 2,
+        ..TEST_INGEST_BOUNDS
+    };
+
+    let (units, deferred) = discover_ingest_units(&sources, Path::new("project"), bounds, 3);
+
+    assert_eq!(deferred, 1);
+    assert_eq!(
+        units
+            .iter()
+            .map(|unit| unit.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+        vec!["a1", "a2"]
     );
 }

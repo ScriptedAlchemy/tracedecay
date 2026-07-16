@@ -138,6 +138,33 @@ const PROJECTION_AUDIT_INVALIDATION: &[Trigger] = &[
             END",
     },
     Trigger {
+        name: "workflow_fact_audit_invalidate_insert_v1",
+        table: "observation_workflow_facts",
+        create_sql: "CREATE TRIGGER workflow_fact_audit_invalidate_insert_v1
+            AFTER INSERT ON observation_workflow_facts BEGIN
+                DELETE FROM authority_audit_checkpoints
+                WHERE audit_name = 'observation-authority';
+            END",
+    },
+    Trigger {
+        name: "workflow_fact_audit_invalidate_update_v1",
+        table: "observation_workflow_facts",
+        create_sql: "CREATE TRIGGER workflow_fact_audit_invalidate_update_v1
+            AFTER UPDATE ON observation_workflow_facts BEGIN
+                DELETE FROM authority_audit_checkpoints
+                WHERE audit_name = 'observation-authority';
+            END",
+    },
+    Trigger {
+        name: "workflow_fact_audit_invalidate_delete_v1",
+        table: "observation_workflow_facts",
+        create_sql: "CREATE TRIGGER workflow_fact_audit_invalidate_delete_v1
+            AFTER DELETE ON observation_workflow_facts BEGIN
+                DELETE FROM authority_audit_checkpoints
+                WHERE audit_name = 'observation-authority';
+            END",
+    },
+    Trigger {
         name: "projection_disposition_audit_invalidate_update_v1",
         table: "observation_projection_dispositions",
         create_sql: "CREATE TRIGGER projection_disposition_audit_invalidate_update_v1
@@ -180,7 +207,7 @@ const PROJECTION_AUDIT_INVALIDATION: &[Trigger] = &[
             AFTER UPDATE ON session_messages
             WHEN EXISTS (
                 SELECT 1 FROM observation_projection_provenance
-                WHERE projector_version = 'claude-session-message-v1'
+                WHERE projector_version = 'claude-session-message-v3'
                   AND output_provider = OLD.provider
                   AND output_message_id = OLD.message_id
             ) BEGIN
@@ -195,7 +222,7 @@ const PROJECTION_AUDIT_INVALIDATION: &[Trigger] = &[
             AFTER DELETE ON session_messages
             WHEN EXISTS (
                 SELECT 1 FROM observation_projection_provenance
-                WHERE projector_version = 'claude-session-message-v1'
+                WHERE projector_version = 'claude-session-message-v3'
                   AND output_provider = OLD.provider
                   AND output_message_id = OLD.message_id
             ) BEGIN
@@ -297,6 +324,32 @@ const PROVENANCE_RECEIPT: &[Trigger] = &[
                 SELECT 1 FROM observations
                 WHERE observation_id = NEW.observation_id AND receipt_id = NEW.receipt_id
             ) BEGIN SELECT RAISE(ABORT, 'projection provenance receipt mismatch'); END",
+    },
+];
+
+const WORKFLOW_FACT_RECEIPT: &[Trigger] = &[
+    Trigger {
+        name: "workflow_fact_receipt_insert_v1",
+        table: "observation_workflow_facts",
+        create_sql: "CREATE TRIGGER workflow_fact_receipt_insert_v1
+            BEFORE INSERT ON observation_workflow_facts WHEN NOT EXISTS (
+                SELECT 1 FROM observations
+                WHERE observation_id = NEW.observation_id
+                  AND receipt_id = NEW.receipt_id
+                  AND sequence = NEW.observation_sequence
+            ) BEGIN SELECT RAISE(ABORT, 'workflow fact observation receipt mismatch'); END",
+    },
+    Trigger {
+        name: "workflow_fact_receipt_update_v1",
+        table: "observation_workflow_facts",
+        create_sql: "CREATE TRIGGER workflow_fact_receipt_update_v1
+            BEFORE UPDATE OF observation_id, receipt_id, observation_sequence
+            ON observation_workflow_facts WHEN NOT EXISTS (
+                SELECT 1 FROM observations
+                WHERE observation_id = NEW.observation_id
+                  AND receipt_id = NEW.receipt_id
+                  AND sequence = NEW.observation_sequence
+            ) BEGIN SELECT RAISE(ABORT, 'workflow fact observation receipt mismatch'); END",
     },
 ];
 
@@ -412,6 +465,18 @@ pub(in crate::global_db::schema_contract) const INVARIANTS: &[Invariant] = &[
              WHERE observation.observation_id IS NULL LIMIT 1",
         ),
         violation: "observation projection provenance contains a receipt mismatch",
+    },
+    Invariant {
+        triggers: WORKFLOW_FACT_RECEIPT,
+        audit_query: Some(
+            "SELECT 1 FROM observation_workflow_facts AS workflow
+             LEFT JOIN observations AS observation
+               ON observation.observation_id = workflow.observation_id
+              AND observation.receipt_id = workflow.receipt_id
+              AND observation.sequence = workflow.observation_sequence
+             WHERE observation.observation_id IS NULL LIMIT 1",
+        ),
+        violation: "workflow projection contains an observation receipt mismatch",
     },
     Invariant {
         triggers: DISPOSITION_RECEIPT,

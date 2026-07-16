@@ -2,10 +2,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::baseline::ProviderBaseline;
+use super::model::{PROVIDER_COMMIT_SCOPE, PROVIDER_PARSE_SCOPE, PROVIDER_REPLAY_SCOPE};
 use super::{
-    BENCHMARK_COMMAND, CONCURRENCY, EVIDENCE_RUNNER, MEASURED_REPETITIONS, RECORDS_PER_REPETITION,
-    WARMUP_REPETITIONS, WORKLOAD_ID, WORKLOAD_IMPLEMENTATION, WORKLOAD_MANIFEST,
-    WORKLOAD_SCHEMA_VERSION,
+    BENCHMARK_COMMAND, CONCURRENCY, EVIDENCE_RUNNER, MEASURED_REPETITIONS, PROVIDER_PIPELINE_SCOPE,
+    RECORDS_PER_REPETITION, WARMUP_REPETITIONS, WORKLOAD_ID, WORKLOAD_IMPLEMENTATION,
+    WORKLOAD_MANIFEST, WORKLOAD_SCHEMA_VERSION,
 };
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -19,6 +20,10 @@ pub(super) struct WorkloadManifest {
     repetitions: Value,
     input: Value,
     provider_baselines: Vec<ProviderBaseline>,
+    #[serde(default)]
+    provider_result: Option<Value>,
+    #[serde(default)]
+    hook_telemetry_readiness: Option<Value>,
     phases: Vec<String>,
     setup_excluded: Vec<String>,
     verification_excluded: Vec<String>,
@@ -61,14 +66,54 @@ fn expected() -> WorkloadManifest {
             "concurrency": CONCURRENCY
         }),
         input: json!({
-            "provider": "claude",
-            "scope": "profile",
-            "format": "jsonl",
-            "record_type": "user",
+            "providers": ["claude", "codex", "cursor", "hermes", "kiro", "cline", "roo-code", "kilo"],
+            "scopes": ["profile", "project"],
+            "formats": ["jsonl", "json_snapshot", "sqlite"],
             "unique_ids": true,
             "secret_shaped_field_per_record": true
         }),
         provider_baselines: super::baseline::expected(),
+        provider_result: Some(json!({
+            "schema_version": 1,
+            "artifact_id": "provider-observation-performance-result-v1",
+            "result_field": "provider_observation_performance",
+            "required_provider_count": 8,
+            "records_per_repetition": super::baseline::PROVIDER_RECORDS_PER_REPETITION,
+            "pipeline_scope": PROVIDER_PIPELINE_SCOPE,
+            "required_phase_scopes": {
+                "parse": PROVIDER_PARSE_SCOPE,
+                "commit": PROVIDER_COMMIT_SCOPE,
+                "replay": PROVIDER_REPLAY_SCOPE
+            },
+            "required_distributions": [
+                "parse.latency", "commit.latency", "replay.latency",
+                "pipeline_latency", "no_op_latency"
+            ],
+            "required_resources": [
+                "cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"
+            ],
+            "required_backlog_fields": ["replay_limit", "max_backlog_records"],
+            "required_fairness_fields": [
+                "policy", "rounds", "providers_per_round",
+                "max_provider_turn_distance", "turns"
+            ],
+            "required_no_op_observation_count_delta": 0
+        })),
+        hook_telemetry_readiness: Some(json!({
+            "artifact_id": "hook-telemetry-baseline-readiness-v1",
+            "artifact_kind": "readiness_and_fixture_identity_not_runtime_contract",
+            "result_field": "hook_telemetry_readiness",
+            "direct_fixture_paths": [
+                "tests/fixtures/host_events/claude/baseline.json",
+                "tests/fixtures/host_events/codex/baseline.json",
+                "tests/fixtures/host_events/cursor/baseline.json",
+                "tests/fixtures/host_events/hermes/baseline.json",
+                "tests/fixtures/host_events/kiro/baseline.json"
+            ],
+            "fixture_identity_method": "sha256_recorded_in_runtime_readiness_catalog",
+            "canonical_payload_method": "crate_hooks_measure_host_event_payload_bytes",
+            "canonical_telemetry_contract": "crate_hooks_host_hook_telemetry_contract"
+        })),
         phases: strings(&[
             "scan_complete_transcript",
             "parse_records",
@@ -106,6 +151,14 @@ fn expected() -> WorkloadManifest {
                 "numerator": "committed_and_replayed_input_records",
                 "denominator": "summed_pipeline_latency"
             },
+            "provider_pipeline_scope": {
+                "measured": PROVIDER_PIPELINE_SCOPE,
+                "separate_phase_distributions": {
+                    "parse": PROVIDER_PARSE_SCOPE,
+                    "commit": PROVIDER_COMMIT_SCOPE,
+                    "replay": PROVIDER_REPLAY_SCOPE
+                }
+            },
             "cpu": {
                 "source": "proc_self_stat_user_plus_system",
                 "clock_ticks_per_second": "getconf_clk_tck",
@@ -131,6 +184,13 @@ fn expected() -> WorkloadManifest {
                 "fields": [
                     "repetition", "latency_ns", "cpu_ticks", "process_write_bytes",
                     "database_storage_growth_bytes", "peak_rss_kib", "replayed_observations"
+                ]
+            },
+            "provider_phase_raw_samples": {
+                "phases": ["parse", "commit", "replay"],
+                "fields": [
+                    "repetition", "latency_ns", "cpu_ticks", "process_write_bytes",
+                    "database_storage_growth_bytes", "peak_rss_kib", "record_count"
                 ]
             }
         }),

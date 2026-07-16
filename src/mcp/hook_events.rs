@@ -5,6 +5,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Shared with hook emitters so the receiver accepts the same agent keys.
@@ -61,6 +62,84 @@ pub(crate) struct HookEvent {
     pub(crate) receipt: Option<crate::daemon::HookTerminalReceipt>,
 }
 
+impl HookEvent {
+    pub(crate) fn admission_source(&self) -> String {
+        let mut identity = Vec::new();
+        if let Some(route) = self.route.as_ref() {
+            if let Some(session_id) = route
+                .session_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                push_admission_identity_part(&mut identity, "session", session_id.as_bytes());
+            } else if let Some(thread_id) =
+                route.thread_id.as_deref().filter(|value| !value.is_empty())
+            {
+                push_admission_identity_part(&mut identity, "thread", thread_id.as_bytes());
+            } else if let Some(worktree) = route.worktree.as_deref() {
+                push_admission_identity_part(
+                    &mut identity,
+                    "worktree",
+                    worktree.as_os_str().as_encoded_bytes(),
+                );
+            } else if let Some(cwd) = route.cwd.as_deref() {
+                push_admission_identity_part(
+                    &mut identity,
+                    "route_cwd",
+                    cwd.as_os_str().as_encoded_bytes(),
+                );
+            }
+        }
+        if identity.is_empty()
+            && let Some(cwd) = self.cwd.as_deref()
+        {
+            push_admission_identity_part(&mut identity, "cwd", cwd.as_os_str().as_encoded_bytes());
+        }
+        if identity.is_empty()
+            && let Some(receipt) = self.receipt.as_ref()
+        {
+            if let Some(turn_id) = receipt.turn_id.as_deref().filter(|value| !value.is_empty()) {
+                push_admission_identity_part(&mut identity, "turn", turn_id.as_bytes());
+            } else if let Some(tool_call_id) = receipt
+                .tool_call_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                push_admission_identity_part(&mut identity, "tool_call", tool_call_id.as_bytes());
+            } else if let Some(watermark) = receipt
+                .transcript_watermark
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                push_admission_identity_part(&mut identity, "watermark", watermark.as_bytes());
+            }
+        }
+        if identity.is_empty() {
+            push_admission_identity_part(&mut identity, "event", self.kind.as_key().as_bytes());
+            for path in &self.rel_paths {
+                push_admission_identity_part(&mut identity, "path", path.as_bytes());
+            }
+            if let Some(command) = self.command.as_deref() {
+                push_admission_identity_part(&mut identity, "command", command.as_bytes());
+            }
+        }
+        format!(
+            "{}:{}",
+            self.agent.as_wire(),
+            crate::context::read_cache::digest_bytes(&identity)
+        )
+    }
+}
+
+fn push_admission_identity_part(buffer: &mut Vec<u8>, label: &str, value: &[u8]) {
+    buffer.extend_from_slice(label.len().to_string().as_bytes());
+    buffer.push(b':');
+    buffer.extend_from_slice(label.as_bytes());
+    buffer.extend_from_slice(value.len().to_string().as_bytes());
+    buffer.push(b':');
+    buffer.extend_from_slice(value);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HookEventPlan {
     SyncFiles(Vec<String>),
@@ -86,8 +165,345 @@ pub(crate) enum HookEventPlan {
     Noop,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum DurableHookEventPlan {
+    SyncFiles {
+        rel_paths: Vec<String>,
+    },
+    AddBranch {
+        branch: String,
+    },
+    AddBranchAt {
+        root: PathBuf,
+        branch: String,
+        agent: String,
+    },
+    SyncCurrentBranch {
+        branch: String,
+        agent: String,
+    },
+    DebouncedIncrementalSync {
+        agent: String,
+    },
+    RecordTerminalReceipt {
+        route: Option<crate::daemon::HookRouteMetadata>,
+        receipt: crate::daemon::HookTerminalReceipt,
+    },
+    MarkTurnIngested {
+        route: Option<crate::daemon::HookRouteMetadata>,
+        transcript_watermark: String,
+    },
+    Noop,
+}
+
+/// Durable spool envelope version. Bump when the plan inventory or field policy
+/// changes in a non-compatible way; keep decode arms for prior versions when
+/// retained spool records must still replay.
+const DURABLE_HOOK_EVENT_ENVELOPE_VERSION: u16 = 1;
+
+/// Lookup identifiers needed outside receipt-state equality (session and
+/// watermark) stay bounded. Session ids are run through
+/// [`crate::privacy::protect_sensitive_structural_id`] so credential-shaped
+/// values become stable digests while public ids remain byte-for-byte.
+/// Equality-only thread/tool/turn identifiers are hashed before persistence.
+const DURABLE_MAX_IDENTIFIER_BYTES: usize = 256;
+const DURABLE_MAX_BRANCH_BYTES: usize = 256;
+const DURABLE_MAX_STATUS_BYTES: usize = 64;
+const DURABLE_MAX_PATH_BYTES: usize = 1024;
+const DURABLE_MAX_REL_PATH_BYTES: usize = 512;
+const DURABLE_MAX_REL_PATHS: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableHookEventEnvelope {
+    version: u16,
+    plan: DurableHookEventPlan,
+}
+
+#[derive(Deserialize)]
+struct DurableHookEventEnvelopeHeader {
+    version: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DurableHookEventDecodeError {
+    Malformed,
+    UnsupportedVersion,
+}
+
+fn durable_bound_optional_str(value: Option<&str>, max_bytes: usize) -> Result<Option<String>, ()> {
+    match value {
+        None | Some("") => Ok(None),
+        Some(value)
+            if value.len() > max_bytes
+                || value.as_bytes().contains(&0)
+                || value.chars().any(char::is_control) =>
+        {
+            Err(())
+        }
+        Some(value) => Ok(Some(value.to_string())),
+    }
+}
+
+fn durable_bound_required_str(value: &str, max_bytes: usize) -> Result<String, ()> {
+    if value.is_empty()
+        || value.len() > max_bytes
+        || value.as_bytes().contains(&0)
+        || value.chars().any(char::is_control)
+    {
+        Err(())
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+fn protect_optional_hook_structural_id(value: Option<&str>) -> Result<Option<String>, ()> {
+    crate::privacy::protect_optional_sensitive_structural_id(value).map_err(|_| ())
+}
+
+fn protect_hook_route_structural_ids(
+    route: &mut crate::daemon::HookRouteMetadata,
+) -> Result<(), ()> {
+    route.session_id = protect_optional_hook_structural_id(route.session_id.as_deref())?;
+    route.thread_id = protect_optional_hook_structural_id(route.thread_id.as_deref())?;
+    Ok(())
+}
+
+fn protect_hook_receipt_structural_ids(
+    receipt: &mut crate::daemon::HookTerminalReceipt,
+) -> Result<(), ()> {
+    receipt.tool_call_id = protect_optional_hook_structural_id(receipt.tool_call_id.as_deref())?;
+    receipt.turn_id = protect_optional_hook_structural_id(receipt.turn_id.as_deref())?;
+    receipt.transcript_watermark =
+        protect_optional_hook_structural_id(receipt.transcript_watermark.as_deref())?;
+    Ok(())
+}
+
+fn sanitize_durable_status(value: Option<&str>) -> Result<Option<String>, ()> {
+    let Some(value) = durable_bound_optional_str(value, DURABLE_MAX_STATUS_BYTES)? else {
+        return Ok(None);
+    };
+    let normalized = value.to_ascii_lowercase();
+    Ok(Some(match normalized.as_str() {
+        "success" | "succeeded" | "completed" | "failed" | "error" | "cancelled" | "canceled"
+        | "timeout" | "timed_out" | "skipped" => normalized,
+        _ => "unknown".to_string(),
+    }))
+}
+
+/// Persist only route fields required for receipt lookup/replay. Absolute
+/// `cwd`/`worktree` paths and branch labels are not effects for receipt plans,
+/// so they are dropped. Structural ids use the same deterministic protection
+/// as transcript/LCM storage so receipt, analytics, span, and reopen joins
+/// preserve one identity.
+fn sanitize_durable_route(
+    route: Option<&crate::daemon::HookRouteMetadata>,
+) -> Result<Option<crate::daemon::HookRouteMetadata>, ()> {
+    let Some(route) = route else {
+        return Ok(None);
+    };
+    let mut sanitized = crate::daemon::HookRouteMetadata {
+        session_id: durable_bound_optional_str(
+            route.session_id.as_deref(),
+            DURABLE_MAX_IDENTIFIER_BYTES,
+        )?,
+        thread_id: durable_bound_optional_str(
+            route.thread_id.as_deref(),
+            DURABLE_MAX_IDENTIFIER_BYTES,
+        )?,
+        cwd: None,
+        worktree: None,
+        branch: None,
+    };
+    protect_hook_route_structural_ids(&mut sanitized)?;
+    Ok(Some(sanitized))
+}
+
+fn sanitize_durable_receipt(
+    receipt: &crate::daemon::HookTerminalReceipt,
+) -> Result<crate::daemon::HookTerminalReceipt, ()> {
+    let mut sanitized = crate::daemon::HookTerminalReceipt {
+        tool_call_id: durable_bound_optional_str(
+            receipt.tool_call_id.as_deref(),
+            DURABLE_MAX_IDENTIFIER_BYTES,
+        )?,
+        turn_id: durable_bound_optional_str(
+            receipt.turn_id.as_deref(),
+            DURABLE_MAX_IDENTIFIER_BYTES,
+        )?,
+        status: sanitize_durable_status(receipt.status.as_deref())?,
+        duration_ms: receipt.duration_ms,
+        transcript_watermark: durable_bound_optional_str(
+            receipt.transcript_watermark.as_deref(),
+            DURABLE_MAX_IDENTIFIER_BYTES,
+        )?,
+    };
+    protect_hook_receipt_structural_ids(&mut sanitized)?;
+    Ok(sanitized)
+}
+
+/// Normalize an effect root for durable storage. Canonicalization and live
+/// project reauthorization happen at replay via [`authorize_add_branch_at_root`].
+fn normalize_durable_effect_root(root: &Path) -> Result<PathBuf, ()> {
+    bound_absolute_add_branch_at_root(root).map_err(|_| ())
+}
+
+fn sanitize_durable_rel_paths(rel_paths: &[String]) -> Result<Vec<String>, ()> {
+    let sanitized = safe_hook_rel_paths(rel_paths);
+    if sanitized.len() != rel_paths.len() || sanitized.len() > DURABLE_MAX_REL_PATHS {
+        return Err(());
+    }
+    if sanitized
+        .iter()
+        .any(|path| path.len() > DURABLE_MAX_REL_PATH_BYTES)
+    {
+        return Err(());
+    }
+    Ok(sanitized)
+}
+
+fn durable_plan_from_runtime(plan: &HookEventPlan) -> Result<DurableHookEventPlan, ()> {
+    Ok(match plan {
+        HookEventPlan::SyncFiles(rel_paths) => DurableHookEventPlan::SyncFiles {
+            rel_paths: sanitize_durable_rel_paths(rel_paths)?,
+        },
+        HookEventPlan::AddBranch(branch) => DurableHookEventPlan::AddBranch {
+            branch: durable_bound_required_str(branch, DURABLE_MAX_BRANCH_BYTES)?,
+        },
+        HookEventPlan::AddBranchAt {
+            root,
+            branch,
+            agent,
+        } => DurableHookEventPlan::AddBranchAt {
+            root: normalize_durable_effect_root(root)?,
+            branch: durable_bound_required_str(branch, DURABLE_MAX_BRANCH_BYTES)?,
+            agent: agent.as_wire().to_string(),
+        },
+        HookEventPlan::SyncCurrentBranch { branch, agent } => {
+            DurableHookEventPlan::SyncCurrentBranch {
+                branch: durable_bound_required_str(branch, DURABLE_MAX_BRANCH_BYTES)?,
+                agent: agent.as_wire().to_string(),
+            }
+        }
+        HookEventPlan::DebouncedIncrementalSync(agent) => {
+            DurableHookEventPlan::DebouncedIncrementalSync {
+                agent: agent.as_wire().to_string(),
+            }
+        }
+        HookEventPlan::RecordTerminalReceipt { route, receipt } => {
+            DurableHookEventPlan::RecordTerminalReceipt {
+                route: sanitize_durable_route(route.as_ref())?,
+                receipt: sanitize_durable_receipt(receipt)?,
+            }
+        }
+        HookEventPlan::MarkTurnIngested {
+            route,
+            transcript_watermark,
+        } => DurableHookEventPlan::MarkTurnIngested {
+            route: sanitize_durable_route(route.as_ref())?,
+            transcript_watermark: protect_optional_hook_structural_id(Some(
+                &durable_bound_required_str(transcript_watermark, DURABLE_MAX_IDENTIFIER_BYTES)?,
+            ))?
+            .ok_or(())?,
+        },
+        HookEventPlan::Noop => DurableHookEventPlan::Noop,
+    })
+}
+
+fn runtime_plan_from_durable(
+    durable: DurableHookEventPlan,
+) -> Result<HookEventPlan, DurableHookEventDecodeError> {
+    match durable {
+        DurableHookEventPlan::SyncFiles { rel_paths } => Ok(HookEventPlan::SyncFiles(
+            sanitize_durable_rel_paths(&rel_paths)
+                .map_err(|()| DurableHookEventDecodeError::Malformed)?,
+        )),
+        DurableHookEventPlan::AddBranch { branch } => Ok(HookEventPlan::AddBranch(
+            durable_bound_required_str(&branch, DURABLE_MAX_BRANCH_BYTES)
+                .map_err(|()| DurableHookEventDecodeError::Malformed)?,
+        )),
+        DurableHookEventPlan::AddBranchAt {
+            root,
+            branch,
+            agent,
+        } => Ok(HookEventPlan::AddBranchAt {
+            root: normalize_durable_effect_root(&root)
+                .map_err(|()| DurableHookEventDecodeError::Malformed)?,
+            branch: durable_bound_required_str(&branch, DURABLE_MAX_BRANCH_BYTES)
+                .map_err(|()| DurableHookEventDecodeError::Malformed)?,
+            agent: HookAgent::from_wire(&agent).ok_or(DurableHookEventDecodeError::Malformed)?,
+        }),
+        DurableHookEventPlan::SyncCurrentBranch { branch, agent } => {
+            Ok(HookEventPlan::SyncCurrentBranch {
+                branch: durable_bound_required_str(&branch, DURABLE_MAX_BRANCH_BYTES)
+                    .map_err(|()| DurableHookEventDecodeError::Malformed)?,
+                agent: HookAgent::from_wire(&agent)
+                    .ok_or(DurableHookEventDecodeError::Malformed)?,
+            })
+        }
+        DurableHookEventPlan::DebouncedIncrementalSync { agent } => {
+            Ok(HookEventPlan::DebouncedIncrementalSync(
+                HookAgent::from_wire(&agent).ok_or(DurableHookEventDecodeError::Malformed)?,
+            ))
+        }
+        DurableHookEventPlan::RecordTerminalReceipt { route, receipt } => {
+            Ok(HookEventPlan::RecordTerminalReceipt {
+                route: sanitize_durable_route(route.as_ref())
+                    .map_err(|()| DurableHookEventDecodeError::Malformed)?,
+                receipt: sanitize_durable_receipt(&receipt)
+                    .map_err(|()| DurableHookEventDecodeError::Malformed)?,
+            })
+        }
+        DurableHookEventPlan::MarkTurnIngested {
+            route,
+            transcript_watermark,
+        } => Ok(HookEventPlan::MarkTurnIngested {
+            route: sanitize_durable_route(route.as_ref())
+                .map_err(|()| DurableHookEventDecodeError::Malformed)?,
+            transcript_watermark: protect_optional_hook_structural_id(Some(
+                &durable_bound_required_str(&transcript_watermark, DURABLE_MAX_IDENTIFIER_BYTES)
+                    .map_err(|()| DurableHookEventDecodeError::Malformed)?,
+            ))
+            .map_err(|()| DurableHookEventDecodeError::Malformed)?
+            .ok_or(DurableHookEventDecodeError::Malformed)?,
+        }),
+        DurableHookEventPlan::Noop => Ok(HookEventPlan::Noop),
+    }
+}
+
+pub(crate) fn encode_durable_hook_event_plan(plan: &HookEventPlan) -> Result<Vec<u8>, ()> {
+    let plan = durable_plan_from_runtime(plan)?;
+    serde_json::to_vec(&DurableHookEventEnvelope {
+        version: DURABLE_HOOK_EVENT_ENVELOPE_VERSION,
+        plan,
+    })
+    .map_err(|_| ())
+}
+
+pub(crate) fn decode_durable_hook_event_plan(
+    payload: &[u8],
+) -> Result<HookEventPlan, DurableHookEventDecodeError> {
+    let header = serde_json::from_slice::<DurableHookEventEnvelopeHeader>(payload)
+        .map_err(|_| DurableHookEventDecodeError::Malformed)?;
+    if header.version != DURABLE_HOOK_EVENT_ENVELOPE_VERSION {
+        return Err(DurableHookEventDecodeError::UnsupportedVersion);
+    }
+    let durable = serde_json::from_slice::<DurableHookEventEnvelope>(payload)
+        .map_err(|_| DurableHookEventDecodeError::Malformed)?
+        .plan;
+    runtime_plan_from_durable(durable)
+}
+
 pub(crate) fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
-    let event = serde_json::from_value::<crate::daemon::DaemonHookEvent>(params?.clone()).ok()?;
+    let mut event =
+        serde_json::from_value::<crate::daemon::DaemonHookEvent>(params?.clone()).ok()?;
+    if let Some(route) = &mut event.route {
+        protect_hook_route_structural_ids(route).ok()?;
+    }
+    if let Some(receipt) = &mut event.receipt {
+        protect_hook_receipt_structural_ids(receipt).ok()?;
+    }
     Some(HookEvent {
         agent: HookAgent::from_wire(&event.agent)?,
         kind: HookEventKind::from_wire(&event.event)?,
@@ -330,6 +746,113 @@ fn branch_plan_for_root(
     }
 }
 
+/// Effect-time authorization failure for durable branch-write plans
+/// ([`HookEventPlan::AddBranch`], [`HookEventPlan::AddBranchAt`],
+/// [`HookEventPlan::SyncCurrentBranch`]).
+///
+/// Queued plans keep their encoded root/branch; this error means the effect
+/// must not run until a later replay reauthorizes against live git state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AddBranchAtRootAuthError {
+    Empty,
+    NotAbsolute,
+    Unbounded,
+    Unresolvable,
+    Unauthorized,
+}
+
+impl AddBranchAtRootAuthError {
+    pub(crate) const fn reason_code(self) -> &'static str {
+        match self {
+            Self::Empty
+            | Self::NotAbsolute
+            | Self::Unbounded
+            | Self::Unresolvable
+            | Self::Unauthorized => "stale_branch_authorization",
+        }
+    }
+}
+
+const MAX_ADD_BRANCH_AT_ROOT_BYTES: usize = DURABLE_MAX_PATH_BYTES;
+const MAX_ADD_BRANCH_AT_ROOT_COMPONENTS: usize = 64;
+
+/// Normalize and bound a durable effect root, then freshly reauthorize it
+/// against the live project root via canonical path + git common-dir identity.
+///
+/// Admit-time membership is never reused: removal, replacement, symlink/path
+/// swap, or common-dir drift fail closed instead of applying a stale write.
+pub(crate) fn authorize_add_branch_at_root(
+    planned_root: &Path,
+    project_root: &Path,
+) -> Result<PathBuf, AddBranchAtRootAuthError> {
+    let bounded = bound_absolute_add_branch_at_root(planned_root)?;
+    let canonical = bounded
+        .canonicalize()
+        .map_err(|_| AddBranchAtRootAuthError::Unresolvable)?;
+    let live_worktree_root = crate::worktree::git_worktree_root(&canonical)
+        .and_then(|root| root.canonicalize().ok())
+        .ok_or(AddBranchAtRootAuthError::Unauthorized)?;
+    if live_worktree_root != canonical {
+        return Err(AddBranchAtRootAuthError::Unauthorized);
+    }
+    let project_canonical = project_root
+        .canonicalize()
+        .map_err(|_| AddBranchAtRootAuthError::Unresolvable)?;
+    if !root_belongs_to_project(&canonical, &project_canonical) {
+        return Err(AddBranchAtRootAuthError::Unauthorized);
+    }
+    Ok(canonical)
+}
+
+/// Revalidate live root identity and current branch immediately before a
+/// durable branch-write effect. Admit-time root/branch are never reused.
+pub(crate) fn authorize_planned_branch_effect(
+    planned_root: &Path,
+    project_root: &Path,
+    planned_branch: &str,
+) -> Result<PathBuf, AddBranchAtRootAuthError> {
+    let root = authorize_add_branch_at_root(planned_root, project_root)?;
+    if crate::branch::current_branch(&root).as_deref() != Some(planned_branch) {
+        return Err(AddBranchAtRootAuthError::Unauthorized);
+    }
+    Ok(root)
+}
+
+fn bound_absolute_add_branch_at_root(path: &Path) -> Result<PathBuf, AddBranchAtRootAuthError> {
+    let raw = path.as_os_str().as_encoded_bytes();
+    if raw.is_empty() {
+        return Err(AddBranchAtRootAuthError::Empty);
+    }
+    if !path.is_absolute() {
+        return Err(AddBranchAtRootAuthError::NotAbsolute);
+    }
+    if raw.len() > MAX_ADD_BRANCH_AT_ROOT_BYTES || raw.contains(&0) {
+        return Err(AddBranchAtRootAuthError::Unbounded);
+    }
+
+    let mut components = 0usize;
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(AddBranchAtRootAuthError::Unbounded);
+            }
+            Component::Normal(part) => {
+                components = components.saturating_add(1);
+                if components > MAX_ADD_BRANCH_AT_ROOT_COMPONENTS {
+                    return Err(AddBranchAtRootAuthError::Unbounded);
+                }
+                normalized.push(part);
+            }
+        }
+    }
+    Ok(normalized)
+}
+
 fn root_belongs_to_project(root: &Path, project_root: &Path) -> bool {
     paths_same(root, project_root) || git_roots_share_common_dir(root, project_root)
 }
@@ -371,7 +894,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        HookAgent, HookEvent, HookEventKind, HookEventPlan, parse_hook_event, plan_hook_event,
+        AddBranchAtRootAuthError, DurableHookEventDecodeError, HookAgent, HookEvent, HookEventKind,
+        HookEventPlan, authorize_add_branch_at_root, decode_durable_hook_event_plan,
+        encode_durable_hook_event_plan, parse_hook_event, plan_hook_event,
     };
 
     fn parse_or_panic(params: &serde_json::Value) -> HookEvent {
@@ -936,6 +1461,431 @@ mod tests {
                 branch: "main".to_string(),
                 agent: HookAgent::Kiro,
             }
+        );
+    }
+
+    #[test]
+    fn durable_plan_round_trip_preserves_supported_variants() {
+        let route = Some(crate::daemon::HookRouteMetadata {
+            session_id: Some("session-1".to_string()),
+            thread_id: None,
+            cwd: None,
+            worktree: None,
+            branch: None,
+        });
+        let receipt = crate::daemon::HookTerminalReceipt {
+            tool_call_id: None,
+            turn_id: None,
+            status: Some("success".to_string()),
+            duration_ms: Some(4),
+            transcript_watermark: Some("message-1".to_string()),
+        };
+        for plan in [
+            HookEventPlan::SyncFiles(vec!["src/lib.rs".to_string()]),
+            HookEventPlan::AddBranch("feature/test".to_string()),
+            HookEventPlan::AddBranchAt {
+                root: PathBuf::from("/tmp/worktree"),
+                branch: "feature/test".to_string(),
+                agent: HookAgent::Codex,
+            },
+            HookEventPlan::SyncCurrentBranch {
+                branch: "main".to_string(),
+                agent: HookAgent::Claude,
+            },
+            HookEventPlan::DebouncedIncrementalSync(HookAgent::Cursor),
+            HookEventPlan::RecordTerminalReceipt {
+                route: route.clone(),
+                receipt: receipt.clone(),
+            },
+            HookEventPlan::MarkTurnIngested {
+                route: route.clone(),
+                transcript_watermark: "message-1".to_string(),
+            },
+            HookEventPlan::Noop,
+        ] {
+            let encoded = encode_durable_hook_event_plan(&plan).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&encoded).unwrap()["version"],
+                1
+            );
+            assert_eq!(decode_durable_hook_event_plan(&encoded).unwrap(), plan);
+        }
+    }
+
+    #[test]
+    fn durable_plan_excludes_unclassified_shell_content() {
+        let event = parse_or_panic(&json!({
+            "agent": "codex",
+            "event": "postToolUseShell",
+            "command": "echo provider-secret-content",
+            "cwd": "/tmp/project"
+        }));
+        let source = event.admission_source();
+        assert!(source.starts_with("codex:"));
+        assert!(!source.contains("provider-secret-content"));
+        let plan = plan_hook_event(&event, Path::new("/tmp/project"), Some("main"));
+        let encoded = encode_durable_hook_event_plan(&plan).unwrap();
+        assert!(
+            !String::from_utf8(encoded)
+                .unwrap()
+                .contains("provider-secret-content")
+        );
+    }
+
+    #[test]
+    fn durable_plan_rejects_malformed_paths_and_agents() {
+        assert_eq!(
+            decode_durable_hook_event_plan(
+                br#"{"version":1,"plan":{"kind":"sync_files","rel_paths":["../private"]}}"#,
+            ),
+            Err(DurableHookEventDecodeError::Malformed)
+        );
+        assert_eq!(
+            decode_durable_hook_event_plan(
+                br#"{"version":1,"plan":{"kind":"debounced_incremental_sync","agent":"unknown"}}"#,
+            ),
+            Err(DurableHookEventDecodeError::Malformed)
+        );
+    }
+
+    #[test]
+    fn durable_plan_rejects_unsupported_version_before_plan_shape() {
+        assert_eq!(
+            decode_durable_hook_event_plan(
+                br#"{"version":2,"plan":{"kind":"future_host_event","opaque":"ignored"}}"#,
+            ),
+            Err(DurableHookEventDecodeError::UnsupportedVersion)
+        );
+    }
+
+    #[test]
+    fn durable_plan_strips_route_paths_and_rejects_unbounded_identifiers() {
+        let route = Some(crate::daemon::HookRouteMetadata {
+            session_id: Some("session-1".to_string()),
+            thread_id: Some("thread-1".to_string()),
+            cwd: Some(PathBuf::from("/tmp/secret-home")),
+            worktree: Some(PathBuf::from("/tmp/secret-worktree")),
+            branch: Some("main".to_string()),
+        });
+        let receipt = crate::daemon::HookTerminalReceipt {
+            tool_call_id: Some("call-1".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            status: Some("success".to_string()),
+            duration_ms: Some(4),
+            transcript_watermark: Some("message-1".to_string()),
+        };
+        let plan = HookEventPlan::RecordTerminalReceipt {
+            route: route.clone(),
+            receipt: receipt.clone(),
+        };
+        let encoded = encode_durable_hook_event_plan(&plan).unwrap();
+        let encoded_text = String::from_utf8(encoded.clone()).unwrap();
+        assert!(!encoded_text.contains("secret-home"));
+        assert!(!encoded_text.contains("secret-worktree"));
+        assert!(encoded_text.contains("thread-1"));
+        assert!(encoded_text.contains("call-1"));
+        assert!(encoded_text.contains("turn-1"));
+        assert!(!encoded_text.contains("\"branch\":\"main\""));
+        let decoded = decode_durable_hook_event_plan(&encoded).unwrap();
+        let HookEventPlan::RecordTerminalReceipt {
+            route: decoded_route,
+            receipt: decoded_receipt,
+        } = decoded
+        else {
+            panic!("expected RecordTerminalReceipt");
+        };
+        let decoded_route = decoded_route.expect("route");
+        assert_eq!(decoded_route.session_id.as_deref(), Some("session-1"));
+        assert_eq!(decoded_route.thread_id.as_deref(), Some("thread-1"));
+        assert!(decoded_route.branch.is_none());
+        assert!(decoded_route.cwd.is_none());
+        assert!(decoded_route.worktree.is_none());
+        assert_eq!(decoded_receipt.tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(decoded_receipt.turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(decoded_receipt.status.as_deref(), Some("success"));
+        assert_eq!(decoded_receipt.duration_ms, Some(4));
+        assert_eq!(
+            decoded_receipt.transcript_watermark.as_deref(),
+            Some("message-1")
+        );
+
+        let mut private_status = receipt.clone();
+        private_status.status = Some("private-status-payload".to_string());
+        let encoded = encode_durable_hook_event_plan(&HookEventPlan::RecordTerminalReceipt {
+            route: None,
+            receipt: private_status,
+        })
+        .unwrap();
+        assert!(!String::from_utf8_lossy(&encoded).contains("private-status-payload"));
+        let HookEventPlan::RecordTerminalReceipt { receipt, .. } =
+            decode_durable_hook_event_plan(&encoded).unwrap()
+        else {
+            panic!("expected receipt");
+        };
+        assert_eq!(receipt.status.as_deref(), Some("unknown"));
+
+        let oversized = "x".repeat(super::DURABLE_MAX_IDENTIFIER_BYTES + 1);
+        assert!(
+            encode_durable_hook_event_plan(&HookEventPlan::MarkTurnIngested {
+                route: None,
+                transcript_watermark: oversized,
+            })
+            .is_err()
+        );
+        assert!(
+            encode_durable_hook_event_plan(&HookEventPlan::AddBranchAt {
+                root: PathBuf::from("/tmp/worktree/../escape"),
+                branch: "feature".to_string(),
+                agent: HookAgent::Codex,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn hook_boundary_protects_credential_ids_once_across_durable_receipt_joins() {
+        let raw = ["AKIA", "SYNTHETIC", "CANARY", "6"].concat();
+        let protected = crate::privacy::protect_sensitive_structural_id(&raw).unwrap();
+        let params = serde_json::to_value(crate::daemon::DaemonHookEvent::hermes_terminal_receipt(
+            PathBuf::from("/tmp/project"),
+            crate::daemon::HookRouteMetadata {
+                session_id: Some(raw.clone()),
+                thread_id: Some(raw.clone()),
+                cwd: Some(PathBuf::from("/tmp/project")),
+                worktree: None,
+                branch: Some("main".to_string()),
+            },
+            crate::daemon::HookTerminalReceipt {
+                tool_call_id: Some(raw.clone()),
+                turn_id: Some(raw.clone()),
+                status: Some("success".to_string()),
+                duration_ms: Some(1),
+                transcript_watermark: Some(raw.clone()),
+            },
+        ))
+        .unwrap();
+        let event = parse_or_panic(&params);
+        let plan = plan_hook_event(&event, Path::new("/tmp/project"), Some("main"));
+        let encoded = encode_durable_hook_event_plan(&plan).unwrap();
+        assert!(!String::from_utf8_lossy(&encoded).contains(&raw));
+
+        let HookEventPlan::RecordTerminalReceipt { route, receipt } =
+            decode_durable_hook_event_plan(&encoded).unwrap()
+        else {
+            panic!("expected terminal receipt");
+        };
+        let route = route.expect("protected route");
+        for actual in [
+            route.session_id.as_deref(),
+            route.thread_id.as_deref(),
+            receipt.tool_call_id.as_deref(),
+            receipt.turn_id.as_deref(),
+            receipt.transcript_watermark.as_deref(),
+        ] {
+            assert_eq!(actual, Some(protected.as_str()));
+        }
+        assert_eq!(
+            crate::privacy::protect_sensitive_structural_id(&protected).unwrap(),
+            protected
+        );
+    }
+
+    #[test]
+    fn durable_plan_rejects_legacy_unversioned_payloads_as_malformed() {
+        assert_eq!(
+            decode_durable_hook_event_plan(br#"{"kind":"noop"}"#),
+            Err(DurableHookEventDecodeError::Malformed)
+        );
+    }
+
+    #[test]
+    fn admission_source_is_bounded_private_and_fair_per_host_session() {
+        let first = parse_or_panic(&json!({
+            "agent": "claude",
+            "event": "sessionStart",
+            "cwd": "/tmp/project",
+            "route": { "session_id": "private-session-alpha" }
+        }));
+        let same_session = parse_or_panic(&json!({
+            "agent": "claude",
+            "event": "postToolUseShell",
+            "command": "echo different-event",
+            "cwd": "/tmp/project",
+            "route": { "session_id": "private-session-alpha" }
+        }));
+        let other_session = parse_or_panic(&json!({
+            "agent": "claude",
+            "event": "sessionStart",
+            "cwd": "/tmp/project",
+            "route": { "session_id": "private-session-beta" }
+        }));
+        let first_source = first.admission_source();
+        assert_eq!(first_source, same_session.admission_source());
+        assert_ne!(first_source, other_session.admission_source());
+        assert!(first_source.starts_with("claude:"));
+        assert!(first_source.len() < 96);
+        assert!(!first_source.contains("private-session-alpha"));
+
+        let fallback = parse_or_panic(&json!({
+            "agent": "cursor",
+            "event": "afterFileEdit",
+            "rel_paths": ["src/one.rs"]
+        }));
+        let other_fallback = parse_or_panic(&json!({
+            "agent": "cursor",
+            "event": "afterFileEdit",
+            "rel_paths": ["src/two.rs"]
+        }));
+        assert_eq!(fallback.admission_source(), fallback.admission_source());
+        assert_ne!(
+            fallback.admission_source(),
+            other_fallback.admission_source()
+        );
+    }
+
+    #[test]
+    fn add_branch_at_effect_auth_accepts_linked_worktree_canonical_root() {
+        let (_base, project_root, worktree_root) = setup_linked_session_worktree();
+        let authorized = authorize_add_branch_at_root(&worktree_root, &project_root)
+            .expect("linked worktree should authorize");
+        assert_eq!(
+            authorized,
+            worktree_root
+                .canonicalize()
+                .expect("worktree should canonicalize")
+        );
+    }
+
+    #[test]
+    fn add_branch_at_effect_auth_rejects_relative_and_parent_escape() {
+        let (_base, project_root, _worktree_root) = setup_linked_session_worktree();
+        assert_eq!(
+            authorize_add_branch_at_root(Path::new("relative-root"), &project_root),
+            Err(AddBranchAtRootAuthError::NotAbsolute)
+        );
+        let escaped = project_root.join("..").join("outside");
+        assert_eq!(
+            authorize_add_branch_at_root(&escaped, &project_root),
+            Err(AddBranchAtRootAuthError::Unbounded)
+        );
+        assert_eq!(
+            authorize_add_branch_at_root(&project_root.join("src"), &project_root),
+            Err(AddBranchAtRootAuthError::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn add_branch_at_effect_auth_rejects_removed_or_replaced_root() {
+        let (_base, project_root, worktree_root) = setup_linked_session_worktree();
+        let planned = worktree_root.clone();
+        authorize_add_branch_at_root(&planned, &project_root).expect("precondition");
+
+        std::fs::remove_dir_all(&worktree_root).expect("remove worktree");
+        assert_eq!(
+            authorize_add_branch_at_root(&planned, &project_root),
+            Err(AddBranchAtRootAuthError::Unresolvable)
+        );
+
+        // Replacement at the same path with an unrelated repository must not
+        // inherit the queued plan's prior admission.
+        std::fs::create_dir_all(worktree_root.join("src")).expect("recreate");
+        std::fs::write(worktree_root.join("src/lib.rs"), "pub fn other() {}\n").expect("write");
+        run_git(&worktree_root, &["init", "-b", "main"]);
+        run_git(&worktree_root, &["config", "user.email", "test@test.com"]);
+        run_git(&worktree_root, &["config", "user.name", "Test"]);
+        run_git(&worktree_root, &["add", "."]);
+        run_git(&worktree_root, &["commit", "-m", "replacement"]);
+        assert_eq!(
+            authorize_add_branch_at_root(&planned, &project_root),
+            Err(AddBranchAtRootAuthError::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn add_branch_at_effect_auth_rejects_common_dir_drift() {
+        let (_base, project_root, worktree_root) = setup_linked_session_worktree();
+        let planned = worktree_root.clone();
+        authorize_add_branch_at_root(&planned, &project_root).expect("precondition");
+
+        let stranger = project_root.parent().expect("base").join("unrelated-repo");
+        std::fs::create_dir_all(stranger.join("src")).expect("stranger dirs");
+        std::fs::write(stranger.join("src/lib.rs"), "pub fn stranger() {}\n").expect("write");
+        run_git(&stranger, &["init", "-b", "main"]);
+        run_git(&stranger, &["config", "user.email", "test@test.com"]);
+        run_git(&stranger, &["config", "user.name", "Test"]);
+        run_git(&stranger, &["add", "."]);
+        run_git(&stranger, &["commit", "-m", "stranger"]);
+        let stranger_git = stranger
+            .join(".git")
+            .canonicalize()
+            .expect("stranger gitdir");
+
+        // Linked worktrees store a gitdir pointer; rewriting it changes the
+        // common-dir identity without changing the planned path string.
+        let git_pointer = worktree_root.join(".git");
+        assert!(git_pointer.is_file(), "linked worktree uses gitfile");
+        std::fs::write(
+            &git_pointer,
+            format!("gitdir: {}\n", stranger_git.display()),
+        )
+        .expect("rewrite gitdir pointer");
+
+        assert_eq!(
+            authorize_add_branch_at_root(&planned, &project_root),
+            Err(AddBranchAtRootAuthError::Unauthorized)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add_branch_at_effect_auth_rejects_symlink_path_swap() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let base_root = git_test_root(base.path());
+        let project_root = base_root.join("project");
+        let worktree_root = base_root.join("session-worktree");
+        let alias = base_root.join("alias-root");
+        std::fs::create_dir_all(project_root.join("src")).expect("project");
+        std::fs::write(project_root.join("src/lib.rs"), "pub fn marker() {}\n").expect("write");
+        run_git(&project_root, &["init", "-b", "main"]);
+        run_git(&project_root, &["config", "user.email", "test@test.com"]);
+        run_git(&project_root, &["config", "user.name", "Test"]);
+        run_git(&project_root, &["add", "."]);
+        run_git(&project_root, &["commit", "-m", "initial"]);
+        let worktree_arg = worktree_root.to_string_lossy();
+        run_git(
+            &project_root,
+            &[
+                "worktree",
+                "add",
+                worktree_arg.as_ref(),
+                "-b",
+                "feature/session",
+            ],
+        );
+        std::os::unix::fs::symlink(&worktree_root, &alias).expect("alias symlink");
+
+        let authorized = authorize_add_branch_at_root(&alias, &project_root)
+            .expect("alias into linked worktree should authorize");
+        assert_eq!(
+            authorized,
+            worktree_root.canonicalize().expect("canonicalize worktree")
+        );
+
+        let stranger = base_root.join("stranger");
+        std::fs::create_dir_all(stranger.join("src")).expect("stranger");
+        std::fs::write(stranger.join("src/lib.rs"), "pub fn stranger() {}\n").expect("write");
+        run_git(&stranger, &["init", "-b", "main"]);
+        run_git(&stranger, &["config", "user.email", "test@test.com"]);
+        run_git(&stranger, &["config", "user.name", "Test"]);
+        run_git(&stranger, &["add", "."]);
+        run_git(&stranger, &["commit", "-m", "stranger"]);
+
+        std::fs::remove_file(&alias).expect("remove alias");
+        std::os::unix::fs::symlink(&stranger, &alias).expect("swap alias");
+
+        assert_eq!(
+            authorize_add_branch_at_root(&alias, &project_root),
+            Err(AddBranchAtRootAuthError::Unauthorized)
         );
     }
 }

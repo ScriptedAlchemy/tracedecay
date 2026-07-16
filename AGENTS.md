@@ -37,10 +37,12 @@
 ## Learned User Preferences
 
 - Do not merge a batch of PRs until aggregate verification is stable; a single flaky pass is not enough.
-- Delegate code edits to execution-focused subagents; use planning/review-focused agents for planning, review, and thinking.
+- Prefer GPT-5.6 Sol as the lead/orchestrator and Cursor Grok as scoped workers; delegate token-heavy evidence gathering while the lead independently verifies edits, synthesizes findings, and makes final judgments.
 - When orchestrating parallel agents, the lead dictates exact scoped edits, subagents execute, and the lead reviews diffs before any push.
 - Subagents should not invent scope beyond what the lead dictated.
 - For Cursor plugin fixes, dogfood the official TraceDecay install or upgrade flow instead of hand-editing installed plugin files.
+- In shared dirty checkouts with concurrent agents, work in-place (do not create worktrees), re-read files immediately before editing, and stage, commit, and push only changes made for the current task.
+- For provider and observation acceptance, treat only checked-in real fixtures as binding evidence; reject synthetic, lookalike, or invented protocol fields.
 
 ## Git
 
@@ -57,3 +59,9 @@
 - Multi-PR merge verification: build a detached temporary worktree on
   `origin/master`, merge all target branches, then run ordinary Cargo tests and
   let the local shim allocate the isolated build and test-data lane.
+- V2 Plan 35 assigns the daemon the LSP gateway/broker; Claude Code connects through one configured-language plugin, while non-LSP hosts receive equivalent diagnostics through hooks, hints, or MCP.
+- V2 Plan 37 is the architectural center for branch-aware feedback cycles, read-only GitHub PR review-comment ingestion/surfacing (never posting, updating, resolving, or replying), and concurrent-agent proximity; LSP projects findings as editor evidence only and is not universal transport; it reuses existing diagnostic, graph, suggestion, workflow, and host-contract authorities.
+- Plan 37's first coherent milestone spans PR11–PR13 and ships post-edit diagnostics and impact, CI failure localization, GitHub review ingest/display, and tiered agent proximity together; later PRs add dashboard/Doctor, multi-root, and remote composition without GitHub writes.
+- V2 Plan 27 PR6 owns the host-neutral integration catalog model and observation adapters; PR13 owns packaging, registration, and lifecycle, and every Hermes profile binds to the single user TraceDecay profile.
+- The V2 roadmap treats PR6's daemon host-admission spool and PR16's remote offline-capture spool as distinct products with separate scope.
+- Project-scoped host admission and ingestion must propagate an authoritative typed `ProjectId`; paths and mutable labels are not identity sources, while projectless Hermes uses user-profile authority.

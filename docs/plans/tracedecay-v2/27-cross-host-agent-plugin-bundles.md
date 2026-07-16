@@ -2,16 +2,18 @@
 
 ## Status / role
 
-PR6 establishes the host-neutral integration catalog model, working Claude
-Code, Codex, Cursor, Hermes, and Kiro observation adapters, canonical event
-semantics, and conformance fixtures. PR13 completes packaging, registration,
-conflict handling, install/repair/uninstall, one configured-language TraceDecay
-LSP plugin for Claude Code, the Cursor desktop native-diagnostics adapter,
-Cursor cloud/Codex/Hermes/Kiro hook/MCP/CLI or typed unavailable paths, host
-install/registration/protocol conformance findings and fixtures, and cutover for
-every supported host. PR14 owns canonical Doctor presentation, diagnosis, and
-remediation orchestration that invokes PR13 lifecycle operations without
-redefining repair mechanics.
+PR6's current branch implementation establishes the host-neutral integration
+catalog model, working Claude Code, Codex, Cursor, Hermes, and Kiro observation
+adapters, canonical event semantics, daemon host admission, and executable host
+fixtures. PR6 remains active until final correctness review, aggregate gates,
+and clean attested benchmark acceptance complete. PR13 completes packaging,
+registration, conflict handling, install/repair/uninstall, one
+configured-language TraceDecay LSP plugin for Claude Code, the Cursor desktop
+native-diagnostics adapter, Cursor cloud/Codex/Hermes/Kiro hook/MCP/CLI or typed
+unavailable paths, host install/registration/protocol conformance findings and
+fixtures, and cutover for every supported host. PR14 owns canonical Doctor
+presentation, diagnosis, and remediation orchestration that invokes PR13
+lifecycle operations without redefining repair mechanics.
 
 ## Outcome
 

@@ -1,15 +1,19 @@
 use std::error::Error;
 use std::future::Future;
 
+use serde_json::Value;
 use tracedecay_domain::{
-    CanonicalObservationIdV1, DurableObservationV1, ObservationContractError, PayloadDigestV1,
-    PayloadReferenceV1,
+    CanonicalObservationIdV1, CanonicalWorkflowSemanticKindV1, DurableObservationV1,
+    ObservationContractError, PayloadDigestV1, PayloadReferenceV1,
 };
 
 use crate::{SessionMessageRecord, SessionRecord};
 
 pub const SESSION_MESSAGE_PROJECTOR_VERSION_V1: &str = "claude-session-message-v1";
-pub const CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION_V1;
+pub const SESSION_MESSAGE_PROJECTOR_VERSION_V2: &str = "claude-session-message-v2";
+pub const SESSION_MESSAGE_PROJECTOR_VERSION_V3: &str = "claude-session-message-v3";
+pub const SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION_V3;
+pub const CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION;
 
 /// Immutable provenance for one observation-derived searchable message row.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,6 +23,18 @@ pub struct ProjectionProvenance {
 }
 
 impl ProjectionProvenance {
+    fn for_observation(observation: &DurableObservationV1) -> Self {
+        Self {
+            observation_id: observation.observation_id().clone(),
+            receipt_id: observation
+                .receipt()
+                .receipt()
+                .receipt_id()
+                .as_str()
+                .to_string(),
+        }
+    }
+
     pub fn observation_id(&self) -> &CanonicalObservationIdV1 {
         &self.observation_id
     }
@@ -28,7 +44,7 @@ impl ProjectionProvenance {
     }
 
     pub fn projector_version(&self) -> &'static str {
-        SESSION_MESSAGE_PROJECTOR_VERSION_V1
+        SESSION_MESSAGE_PROJECTOR_VERSION
     }
 }
 
@@ -50,6 +66,11 @@ impl ProjectionSkipReason {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ObservationProjection {
     Message(Box<SessionMessageProjection>),
+    Composite {
+        message: Option<Box<SessionMessageProjection>>,
+        derived_messages: Vec<SessionMessageProjection>,
+        workflow_facts: Vec<WorkflowFactProjection>,
+    },
     Skipped(ProjectionSkipReason),
 }
 
@@ -57,13 +78,35 @@ impl ObservationProjection {
     pub fn message(&self) -> Option<&SessionMessageProjection> {
         match self {
             Self::Message(projection) => Some(projection),
+            Self::Composite { message, .. } => message.as_deref(),
             Self::Skipped(_) => None,
         }
     }
 
+    pub fn workflow_facts(&self) -> &[WorkflowFactProjection] {
+        match self {
+            Self::Composite { workflow_facts, .. } => workflow_facts,
+            Self::Message(_) | Self::Skipped(_) => &[],
+        }
+    }
+
+    pub fn messages(&self) -> impl Iterator<Item = &SessionMessageProjection> {
+        let derived_messages: &[SessionMessageProjection] = match self {
+            Self::Composite {
+                derived_messages, ..
+            } => derived_messages,
+            Self::Message(_) | Self::Skipped(_) => &[],
+        };
+        self.message().into_iter().chain(derived_messages)
+    }
+
+    pub fn output_count(&self) -> usize {
+        self.messages().count() + self.workflow_facts().len()
+    }
+
     pub fn skip_reason(&self) -> Option<ProjectionSkipReason> {
         match self {
-            Self::Message(_) => None,
+            Self::Message(_) | Self::Composite { .. } => None,
             Self::Skipped(reason) => Some(*reason),
         }
     }
@@ -73,8 +116,23 @@ impl ObservationProjection {
         session: SessionRecord,
         message: SessionMessageRecord,
     ) -> ProjectionStoreResult<Self> {
+        Ok(Self::Message(Box::new(Self::message_projection(
+            observation,
+            session,
+            message,
+            0,
+        )?)))
+    }
+
+    fn message_projection(
+        observation: &DurableObservationV1,
+        session: SessionRecord,
+        message: SessionMessageRecord,
+        output_ordinal: u32,
+    ) -> ProjectionStoreResult<SessionMessageProjection> {
         let digest_value = serde_json::json!({
-            "projector_version": SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+            "projector_version": SESSION_MESSAGE_PROJECTOR_VERSION,
+            "output_ordinal": output_ordinal,
             "session": &session,
             "message": &message,
         });
@@ -82,20 +140,63 @@ impl ObservationProjection {
             .map_err(ProjectionStoreError::Contract)?
             .digest()
             .clone();
-        Ok(Self::Message(Box::new(SessionMessageProjection {
+        Ok(SessionMessageProjection {
             session,
             message,
-            provenance: ProjectionProvenance {
-                observation_id: observation.observation_id().clone(),
-                receipt_id: observation
-                    .receipt()
-                    .receipt()
-                    .receipt_id()
-                    .as_str()
-                    .to_string(),
-            },
+            provenance: ProjectionProvenance::for_observation(observation),
             output_digest,
-        })))
+            output_ordinal,
+        })
+    }
+
+    pub fn for_composite(
+        observation: &DurableObservationV1,
+        message: Option<(SessionRecord, SessionMessageRecord)>,
+        workflow_facts: Vec<(SessionRecord, WorkflowFactRecord)>,
+    ) -> ProjectionStoreResult<Self> {
+        if workflow_facts.is_empty() {
+            return Err(ProjectionStoreError::Contract(
+                ObservationContractError::InvalidCanonicalPayload,
+            ));
+        }
+        Self::for_outputs(observation, message.into_iter().collect(), workflow_facts)
+    }
+
+    pub fn for_outputs(
+        observation: &DurableObservationV1,
+        messages: Vec<(SessionRecord, SessionMessageRecord)>,
+        workflow_facts: Vec<(SessionRecord, WorkflowFactRecord)>,
+    ) -> ProjectionStoreResult<Self> {
+        if messages.is_empty() && workflow_facts.is_empty() {
+            return Err(ProjectionStoreError::Contract(
+                ObservationContractError::InvalidCanonicalPayload,
+            ));
+        }
+        let mut messages = messages
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, (session, message))| {
+                let ordinal = u32::try_from(ordinal).map_err(|_| {
+                    ProjectionStoreError::Contract(
+                        ObservationContractError::InvalidCanonicalPayload,
+                    )
+                })?;
+                Self::message_projection(observation, session, message, ordinal)
+            })
+            .collect::<ProjectionStoreResult<Vec<_>>>()?;
+        let workflow_facts = workflow_facts
+            .into_iter()
+            .map(|(session, fact)| WorkflowFactProjection::new(observation, session, fact))
+            .collect::<ProjectionStoreResult<Vec<_>>>()?;
+        if workflow_facts.is_empty() && messages.len() == 1 {
+            return Ok(Self::Message(Box::new(messages.remove(0))));
+        }
+        let message = (!messages.is_empty()).then(|| Box::new(messages.remove(0)));
+        Ok(Self::Composite {
+            message,
+            derived_messages: messages,
+            workflow_facts,
+        })
     }
 
     pub fn for_skip(
@@ -113,6 +214,7 @@ pub struct SessionMessageProjection {
     message: SessionMessageRecord,
     provenance: ProjectionProvenance,
     output_digest: PayloadDigestV1,
+    output_ordinal: u32,
 }
 
 impl SessionMessageProjection {
@@ -122,6 +224,97 @@ impl SessionMessageProjection {
 
     pub fn message(&self) -> &SessionMessageRecord {
         &self.message
+    }
+
+    pub fn provenance(&self) -> &ProjectionProvenance {
+        &self.provenance
+    }
+
+    pub fn output_digest(&self) -> &PayloadDigestV1 {
+        &self.output_digest
+    }
+
+    pub fn output_ordinal(&self) -> u32 {
+        self.output_ordinal
+    }
+}
+
+/// Provider-neutral workflow row derived from one canonical semantic fact.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowFactRecord {
+    pub fact_ordinal: u32,
+    pub semantic_kind: CanonicalWorkflowSemanticKindV1,
+    pub provider_reference: Option<String>,
+    pub item_id: Option<String>,
+    pub parent_reference: Option<String>,
+    pub list_reference: Option<String>,
+    pub state: Option<String>,
+    pub status: Option<String>,
+    pub item_order: Option<u64>,
+    pub native_revision: Option<String>,
+    pub event_sequence: Option<u64>,
+    pub source_sequence: Option<u64>,
+    pub native_timestamp: Option<i64>,
+    pub ordering_domain: String,
+    pub content: Option<Value>,
+    pub content_text: String,
+}
+
+/// Deterministic normalized workflow output and receipt provenance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowFactProjection {
+    session: SessionRecord,
+    fact: WorkflowFactRecord,
+    provenance: ProjectionProvenance,
+    output_digest: PayloadDigestV1,
+}
+
+impl WorkflowFactProjection {
+    fn new(
+        observation: &DurableObservationV1,
+        session: SessionRecord,
+        fact: WorkflowFactRecord,
+    ) -> ProjectionStoreResult<Self> {
+        let digest_value = serde_json::json!({
+            "projector_version": SESSION_MESSAGE_PROJECTOR_VERSION,
+            "session": &session,
+            "fact": {
+                "fact_ordinal": fact.fact_ordinal,
+                "semantic_kind": fact.semantic_kind,
+                "provider_reference": fact.provider_reference,
+                "item_id": fact.item_id,
+                "parent_reference": fact.parent_reference,
+                "list_reference": fact.list_reference,
+                "state": fact.state,
+                "status": fact.status,
+                "item_order": fact.item_order,
+                "native_revision": fact.native_revision,
+                "event_sequence": fact.event_sequence,
+                "source_sequence": fact.source_sequence,
+                "native_timestamp": fact.native_timestamp,
+                "ordering_domain": fact.ordering_domain,
+                "content": fact.content,
+                "content_text": fact.content_text,
+            },
+        });
+        let output_digest = PayloadReferenceV1::for_payload(&digest_value)
+            .map_err(ProjectionStoreError::Contract)?
+            .digest()
+            .clone();
+        Ok(Self {
+            session,
+            fact,
+            provenance: ProjectionProvenance::for_observation(observation),
+            output_digest,
+        })
+    }
+
+    pub fn session(&self) -> &SessionRecord {
+        &self.session
+    }
+
+    pub fn fact(&self) -> &WorkflowFactRecord {
+        &self.fact
     }
 
     pub fn provenance(&self) -> &ProjectionProvenance {
@@ -147,7 +340,7 @@ impl ProjectionCheckpoint {
     }
 
     pub fn projector_version(&self) -> &'static str {
-        SESSION_MESSAGE_PROJECTOR_VERSION_V1
+        SESSION_MESSAGE_PROJECTOR_VERSION
     }
 
     pub fn last_sequence(&self) -> u64 {
@@ -157,7 +350,7 @@ impl ProjectionCheckpoint {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProjectionPersistOutcome {
-    Projected(ProjectionCheckpoint),
+    Projected(ProjectedObservation),
     Skipped {
         checkpoint: ProjectionCheckpoint,
         reason: ProjectionSkipReason,
@@ -165,10 +358,34 @@ pub enum ProjectionPersistOutcome {
     ExactDuplicate(ProjectionCheckpoint),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectedObservation {
+    checkpoint: ProjectionCheckpoint,
+    output_count: usize,
+}
+
+impl ProjectedObservation {
+    pub fn new(checkpoint: ProjectionCheckpoint, output_count: usize) -> Self {
+        Self {
+            checkpoint,
+            output_count,
+        }
+    }
+
+    pub fn checkpoint(&self) -> &ProjectionCheckpoint {
+        &self.checkpoint
+    }
+
+    pub fn output_count(&self) -> usize {
+        self.output_count
+    }
+}
+
 impl ProjectionPersistOutcome {
     pub fn checkpoint(&self) -> &ProjectionCheckpoint {
         match self {
-            Self::Projected(checkpoint) | Self::ExactDuplicate(checkpoint) => checkpoint,
+            Self::Projected(projected) => projected.checkpoint(),
+            Self::ExactDuplicate(checkpoint) => checkpoint,
             Self::Skipped { checkpoint, .. } => checkpoint,
         }
     }

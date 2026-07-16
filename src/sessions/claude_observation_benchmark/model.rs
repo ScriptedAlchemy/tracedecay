@@ -1,7 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+use super::baseline::HookTelemetryReadiness;
 use crate::sessions::claude_observation::ClaudeObservationIngestStats;
 use crate::sessions::shared::TranscriptIngestStats;
+
+pub(super) const PROVIDER_PARSE_SCOPE: &str = "native_provider_format_decode";
+pub(super) const PROVIDER_COMMIT_SCOPE: &str =
+    "production_adapter_parse_normalize_sanitize_commit_and_project";
+pub(super) const PROVIDER_REPLAY_SCOPE: &str = "authoritative_store_bounded_replay";
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +81,7 @@ impl NoOpTotals {
             records_rejected,
             records_quarantined,
             projections_completed,
+            projection_outputs: _,
             projections_skipped,
             projection_duplicates,
             deferred_sources,
@@ -117,6 +124,88 @@ pub(super) struct RawPhaseSample {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub(super) struct RawProviderPhaseSample {
+    pub(super) repetition: usize,
+    pub(super) latency_ns: u64,
+    pub(super) cpu_ticks: u64,
+    pub(super) process_write_bytes: u64,
+    pub(super) database_storage_growth_bytes: u64,
+    pub(super) peak_rss_kib: u64,
+    pub(super) record_count: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ProviderPhaseResult {
+    pub(super) scope: String,
+    pub(super) raw_samples: Vec<RawProviderPhaseSample>,
+    pub(super) latency: Distribution,
+    pub(super) cpu_ticks: u64,
+    pub(super) cpu_ms: f64,
+    pub(super) process_write_bytes: u64,
+    pub(super) database_storage_growth_bytes: u64,
+    pub(super) peak_rss_kib: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ProviderBenchmarkResult {
+    pub(super) provider: String,
+    pub(super) production_path: String,
+    pub(super) pipeline_scope: String,
+    pub(super) measured_repetitions: usize,
+    pub(super) observations_per_repetition: usize,
+    pub(super) replay_limit: usize,
+    pub(super) max_backlog_records: usize,
+    pub(super) parse: ProviderPhaseResult,
+    pub(super) commit: ProviderPhaseResult,
+    pub(super) replay: ProviderPhaseResult,
+    pub(super) pipeline_raw_samples: Vec<RawPhaseSample>,
+    pub(super) pipeline_latency: Distribution,
+    pub(super) pipeline_records_per_second: f64,
+    pub(super) pipeline_cpu_ticks: u64,
+    pub(super) pipeline_cpu_ms: f64,
+    pub(super) pipeline_process_write_bytes: u64,
+    pub(super) pipeline_database_storage_growth_bytes: u64,
+    pub(super) peak_rss_kib: u64,
+    pub(super) no_op_raw_samples: Vec<RawPhaseSample>,
+    pub(super) no_op_latency: Distribution,
+    pub(super) no_op_cpu_ticks: u64,
+    pub(super) no_op_cpu_ms: f64,
+    pub(super) no_op_process_write_bytes: u64,
+    pub(super) no_op_database_storage_growth_bytes: u64,
+    pub(super) no_op_observation_count_delta: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ProviderBenchmarkSuiteResult {
+    pub(super) schema_version: u32,
+    pub(super) workload_id: String,
+    pub(super) fairness: ProviderFairnessResult,
+    pub(super) providers: Vec<ProviderBenchmarkResult>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ProviderFairnessResult {
+    pub(super) policy: String,
+    pub(super) rounds: usize,
+    pub(super) providers_per_round: usize,
+    pub(super) max_provider_turn_distance: usize,
+    pub(super) turns: Vec<ProviderScheduleTurn>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ProviderScheduleTurn {
+    pub(super) round: usize,
+    pub(super) position: usize,
+    pub(super) provider: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(super) struct GitSnapshot {
     pub(super) commit: String,
     pub(super) tree: String,
@@ -130,6 +219,8 @@ pub(super) struct WorkloadIdentity {
     pub(super) manifest_sha256: String,
     pub(super) harness_paths: Vec<String>,
     pub(super) harness_sha256: String,
+    pub(super) native_fixture_paths: Vec<String>,
+    pub(super) native_fixtures_sha256: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -144,7 +235,17 @@ pub(super) struct BuildIdentity {
     pub(super) commit: String,
     pub(super) tree: String,
     pub(super) profile: String,
-    pub(super) commit_keyed_target: bool,
+    pub(super) source_mode: String,
+    pub(super) source_manifest_sha256: String,
+    pub(super) source_file_count: usize,
+    pub(super) target_triple: String,
+    pub(super) rustc_version: String,
+    pub(super) cargo_version: String,
+    pub(super) rustflags: String,
+    pub(super) rustc_wrapper: String,
+    pub(super) rustc_workspace_wrapper: String,
+    pub(super) cargo_config_identity: String,
+    pub(super) data_root_basis: String,
     pub(super) executable_sha256: String,
     pub(super) executable_size_bytes: u64,
 }
@@ -187,4 +288,10 @@ pub(super) struct BenchmarkResult {
     pub(super) no_op_replay_database_storage_growth_bytes: u64,
     pub(super) no_op_replay_observation_count_delta: i64,
     pub(super) no_op_replay_totals: NoOpTotals,
+    /// Additive schema-2 field. Current acceptance validation requires it,
+    /// while historical schema-2 artifacts can still deserialize.
+    #[serde(default)]
+    pub(super) provider_observation_performance: Option<ProviderBenchmarkSuiteResult>,
+    #[serde(default)]
+    pub(super) hook_telemetry_readiness: Option<HookTelemetryReadiness>,
 }

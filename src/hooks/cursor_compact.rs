@@ -40,18 +40,38 @@ impl CursorPreCompactOutcome {
 }
 
 pub async fn cursor_pre_compact_via_daemon(event_json: &str) -> CursorPreCompactOutcome {
-    match tokio::time::timeout(
+    cursor_pre_compact_via_daemon_with_telemetry(event_json, None).await
+}
+
+pub(super) async fn cursor_pre_compact_via_daemon_with_telemetry(
+    event_json: &str,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) -> CursorPreCompactOutcome {
+    if let Some(telemetry) = telemetry {
+        telemetry.note_timeout_budget(CURSOR_PRE_COMPACT_BUDGET);
+    }
+    if let Ok(outcome) = tokio::time::timeout(
         CURSOR_PRE_COMPACT_BUDGET,
-        cursor_pre_compact_via_daemon_inner(event_json),
+        cursor_pre_compact_via_daemon_inner(event_json, telemetry),
     )
     .await
     {
-        Ok(outcome) => outcome,
-        Err(_) => CursorPreCompactOutcome::error("timed out"),
+        if let Some(telemetry) = telemetry {
+            telemetry.note_timed_out(false);
+        }
+        outcome
+    } else {
+        if let Some(telemetry) = telemetry {
+            telemetry.note_timed_out(true);
+        }
+        CursorPreCompactOutcome::error("timed out")
     }
 }
 
-async fn cursor_pre_compact_via_daemon_inner(event_json: &str) -> CursorPreCompactOutcome {
+async fn cursor_pre_compact_via_daemon_inner(
+    event_json: &str,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) -> CursorPreCompactOutcome {
     let root = serde_json::from_str::<serde_json::Value>(event_json)
         .ok()
         .as_ref()
@@ -65,6 +85,7 @@ async fn cursor_pre_compact_via_daemon_inner(event_json: &str) -> CursorPreCompa
             "action": "cursor_compact",
             "event_json": event_json,
         }),
+        telemetry,
     )
     .await
     {

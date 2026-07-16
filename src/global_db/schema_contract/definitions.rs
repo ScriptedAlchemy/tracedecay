@@ -25,6 +25,7 @@ const fn column(
 
 #[derive(Clone, Copy)]
 pub(super) struct ForeignKey {
+    pub(super) sequence: i64,
     pub(super) from: &'static str,
     pub(super) target_table: &'static str,
     pub(super) target_column: &'static str,
@@ -37,7 +38,18 @@ const fn foreign_key(
     target_column: &'static str,
     on_delete: &'static str,
 ) -> ForeignKey {
+    foreign_key_sequence(from, target_table, target_column, on_delete, 0)
+}
+
+const fn foreign_key_sequence(
+    from: &'static str,
+    target_table: &'static str,
+    target_column: &'static str,
+    on_delete: &'static str,
+    sequence: i64,
+) -> ForeignKey {
     ForeignKey {
+        sequence,
         from,
         target_table,
         target_column,
@@ -252,6 +264,7 @@ pub(super) const TABLES: &[Table] = &[
         [
             column("projector_version", "TEXT", true, None, 1),
             column("observation_id", "TEXT", true, None, 2),
+            column("output_ordinal", "INTEGER", true, Some("0"), 3),
             column("receipt_id", "TEXT", true, None, 0),
             column("output_provider", "TEXT", true, None, 0),
             column("output_message_id", "TEXT", true, None, 0),
@@ -282,6 +295,17 @@ pub(super) const TABLES: &[Table] = &[
         []
     ),
     table!(
+        "observation_projection_migrations",
+        [
+            column("source_projector_version", "TEXT", true, None, 1),
+            column("target_projector_version", "TEXT", true, None, 2),
+            column("source_frontier", "INTEGER", true, None, 0),
+            column("migrated_through", "INTEGER", true, None, 0),
+            column("completed", "INTEGER", true, None, 0),
+        ],
+        []
+    ),
+    table!(
         "observation_projection_aliases",
         [
             column("projector_version", "TEXT", true, None, 1),
@@ -305,6 +329,280 @@ pub(super) const TABLES: &[Table] = &[
             column("reason", "TEXT", true, None, 0),
         ],
         [
+            foreign_key(
+                "observation_id",
+                "observations",
+                "observation_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "receipt_id",
+                "sanitization_receipts",
+                "receipt_id",
+                "NO ACTION"
+            ),
+        ]
+    ),
+    table!(
+        "observation_workflow_facts",
+        [
+            column("projector_version", "TEXT", true, None, 1),
+            column("observation_id", "TEXT", true, None, 2),
+            column("fact_ordinal", "INTEGER", true, None, 3),
+            column("receipt_id", "TEXT", true, None, 0),
+            column("observation_sequence", "INTEGER", true, None, 0),
+            column("provider", "TEXT", true, None, 0),
+            column("session_id", "TEXT", true, None, 0),
+            column("semantic_kind", "TEXT", true, None, 0),
+            column("provider_reference", "TEXT", false, None, 0),
+            column("item_id", "TEXT", false, None, 0),
+            column("parent_reference", "TEXT", false, None, 0),
+            column("list_reference", "TEXT", false, None, 0),
+            column("state", "TEXT", false, None, 0),
+            column("status", "TEXT", false, None, 0),
+            column("item_order", "INTEGER", false, None, 0),
+            column("native_revision", "TEXT", false, None, 0),
+            column("event_sequence", "INTEGER", false, None, 0),
+            column("source_sequence", "INTEGER", false, None, 0),
+            column("native_timestamp", "INTEGER", false, None, 0),
+            column("ordering_domain", "TEXT", true, None, 0),
+            column("content_json", "TEXT", false, None, 0),
+            column("content_text", "TEXT", true, None, 0),
+            column("output_digest", "TEXT", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "observation_id",
+                "observations",
+                "observation_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "receipt_id",
+                "sanitization_receipts",
+                "receipt_id",
+                "NO ACTION"
+            ),
+        ]
+    ),
+    table!(
+        "observation_projection_rebuilds",
+        [
+            column("projector_version", "TEXT", false, None, 1),
+            column("generation", "TEXT", true, None, 0),
+            column("frontier_sequence", "INTEGER", true, None, 0),
+            column("aliases_staged_through", "INTEGER", true, Some("0"), 0),
+            column("staged_through", "INTEGER", true, Some("0"), 0),
+            column("projected_rows", "INTEGER", true, Some("0"), 0),
+            column("skipped_observations", "INTEGER", true, Some("0"), 0),
+            column("state", "TEXT", true, None, 0),
+        ],
+        []
+    ),
+    table!(
+        "observation_projection_rebuild_aliases",
+        [
+            column("projector_version", "TEXT", true, None, 1),
+            column("generation", "TEXT", true, None, 2),
+            column("observation_id", "TEXT", true, None, 3),
+            column("output_provider", "TEXT", true, None, 0),
+            column("output_message_id", "TEXT", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "projector_version",
+                "observation_projection_rebuilds",
+                "projector_version",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "observation_projection_rebuilds",
+                "generation",
+                "CASCADE",
+                1
+            ),
+            foreign_key(
+                "observation_id",
+                "observations",
+                "observation_id",
+                "NO ACTION"
+            ),
+        ]
+    ),
+    table!(
+        "observation_projection_rebuild_sessions",
+        [
+            column("projector_version", "TEXT", true, None, 1),
+            column("generation", "TEXT", true, None, 2),
+            column("provider", "TEXT", true, None, 3),
+            column("session_id", "TEXT", true, None, 4),
+            column("session_json", "TEXT", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "projector_version",
+                "observation_projection_rebuilds",
+                "projector_version",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "observation_projection_rebuilds",
+                "generation",
+                "CASCADE",
+                1
+            ),
+        ]
+    ),
+    table!(
+        "observation_projection_rebuild_messages",
+        [
+            column("projector_version", "TEXT", true, None, 1),
+            column("generation", "TEXT", true, None, 2),
+            column("output_provider", "TEXT", true, None, 3),
+            column("output_message_id", "TEXT", true, None, 4),
+            column("message_json", "TEXT", true, None, 0),
+            column("content_hash", "TEXT", true, None, 0),
+            column("snippet_text", "TEXT", true, None, 0),
+            column("index_text", "TEXT", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "projector_version",
+                "observation_projection_rebuilds",
+                "projector_version",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "observation_projection_rebuilds",
+                "generation",
+                "CASCADE",
+                1
+            ),
+        ]
+    ),
+    table!(
+        "observation_projection_rebuild_provenance",
+        [
+            column("projector_version", "TEXT", true, None, 1),
+            column("generation", "TEXT", true, None, 2),
+            column("observation_id", "TEXT", true, None, 3),
+            column("output_ordinal", "INTEGER", true, None, 4),
+            column("receipt_id", "TEXT", true, None, 0),
+            column("output_provider", "TEXT", true, None, 0),
+            column("output_message_id", "TEXT", true, None, 0),
+            column("output_digest", "TEXT", true, None, 0),
+            column("message_created", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "projector_version",
+                "observation_projection_rebuilds",
+                "projector_version",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "observation_projection_rebuilds",
+                "generation",
+                "CASCADE",
+                1
+            ),
+            foreign_key(
+                "observation_id",
+                "observations",
+                "observation_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "receipt_id",
+                "sanitization_receipts",
+                "receipt_id",
+                "NO ACTION"
+            ),
+        ]
+    ),
+    table!(
+        "observation_projection_rebuild_dispositions",
+        [
+            column("projector_version", "TEXT", true, None, 1),
+            column("generation", "TEXT", true, None, 2),
+            column("observation_id", "TEXT", true, None, 3),
+            column("receipt_id", "TEXT", true, None, 0),
+            column("reason", "TEXT", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "projector_version",
+                "observation_projection_rebuilds",
+                "projector_version",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "observation_projection_rebuilds",
+                "generation",
+                "CASCADE",
+                1
+            ),
+            foreign_key(
+                "observation_id",
+                "observations",
+                "observation_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "receipt_id",
+                "sanitization_receipts",
+                "receipt_id",
+                "NO ACTION"
+            ),
+        ]
+    ),
+    table!(
+        "observation_projection_rebuild_workflow_facts",
+        [
+            column("projector_version", "TEXT", true, None, 1),
+            column("generation", "TEXT", true, None, 2),
+            column("observation_id", "TEXT", true, None, 3),
+            column("fact_ordinal", "INTEGER", true, None, 4),
+            column("receipt_id", "TEXT", true, None, 0),
+            column("observation_sequence", "INTEGER", true, None, 0),
+            column("provider", "TEXT", true, None, 0),
+            column("session_id", "TEXT", true, None, 0),
+            column("semantic_kind", "TEXT", true, None, 0),
+            column("provider_reference", "TEXT", false, None, 0),
+            column("item_id", "TEXT", false, None, 0),
+            column("parent_reference", "TEXT", false, None, 0),
+            column("list_reference", "TEXT", false, None, 0),
+            column("state", "TEXT", false, None, 0),
+            column("status", "TEXT", false, None, 0),
+            column("item_order", "INTEGER", false, None, 0),
+            column("native_revision", "TEXT", false, None, 0),
+            column("event_sequence", "INTEGER", false, None, 0),
+            column("source_sequence", "INTEGER", false, None, 0),
+            column("native_timestamp", "INTEGER", false, None, 0),
+            column("ordering_domain", "TEXT", true, None, 0),
+            column("content_json", "TEXT", false, None, 0),
+            column("content_text", "TEXT", true, None, 0),
+            column("output_digest", "TEXT", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "projector_version",
+                "observation_projection_rebuilds",
+                "projector_version",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "observation_projection_rebuilds",
+                "generation",
+                "CASCADE",
+                1
+            ),
             foreign_key(
                 "observation_id",
                 "observations",
@@ -384,4 +682,134 @@ pub(super) const INDEXES: &[Index] = &[
         origin: "c",
         columns: &["output_provider", "output_message_id", "projector_version"],
     },
+    Index {
+        table: "observation_workflow_facts",
+        name: Some("idx_observation_workflow_facts_query"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "provider",
+            "session_id",
+            "semantic_kind",
+            "status",
+            "observation_sequence",
+        ],
+    },
+    Index {
+        table: "observation_workflow_facts",
+        name: Some("idx_observation_workflow_facts_item"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "provider",
+            "session_id",
+            "semantic_kind",
+            "item_id",
+            "provider_reference",
+            "event_sequence",
+            "source_sequence",
+            "observation_sequence",
+        ],
+    },
+    Index {
+        table: "observation_projection_rebuilds",
+        name: None,
+        unique: true,
+        origin: "u",
+        columns: &["projector_version", "generation"],
+    },
+    Index {
+        table: "observation_projection_rebuild_provenance",
+        name: Some("idx_projection_rebuild_provenance_output"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "projector_version",
+            "generation",
+            "output_provider",
+            "output_message_id",
+        ],
+    },
+    Index {
+        table: "observation_projection_rebuild_workflow_facts",
+        name: Some("idx_projection_rebuild_workflow_goal"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "projector_version",
+            "generation",
+            "provider",
+            "session_id",
+            "semantic_kind",
+            "provider_reference",
+            "observation_sequence",
+        ],
+    },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::{INDEXES, TABLES};
+
+    const REBUILD_TABLES: &[&str] = &[
+        "observation_projection_rebuilds",
+        "observation_projection_rebuild_aliases",
+        "observation_projection_rebuild_sessions",
+        "observation_projection_rebuild_messages",
+        "observation_projection_rebuild_provenance",
+        "observation_projection_rebuild_dispositions",
+        "observation_projection_rebuild_workflow_facts",
+    ];
+
+    #[test]
+    fn rebuild_schema_contract_registration_is_complete() {
+        let tables = TABLES
+            .iter()
+            .map(|table| table.name)
+            .filter(|name| name.starts_with("observation_projection_rebuild"))
+            .collect::<Vec<_>>();
+        assert_eq!(tables, REBUILD_TABLES);
+
+        let indexes = INDEXES
+            .iter()
+            .filter(|index| index.table.starts_with("observation_projection_rebuild"))
+            .map(|index| (index.table, index.name, index.unique, index.columns))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            indexes,
+            vec![
+                (
+                    "observation_projection_rebuilds",
+                    None,
+                    true,
+                    &["projector_version", "generation"] as &[_],
+                ),
+                (
+                    "observation_projection_rebuild_provenance",
+                    Some("idx_projection_rebuild_provenance_output"),
+                    false,
+                    &[
+                        "projector_version",
+                        "generation",
+                        "output_provider",
+                        "output_message_id",
+                    ],
+                ),
+                (
+                    "observation_projection_rebuild_workflow_facts",
+                    Some("idx_projection_rebuild_workflow_goal"),
+                    false,
+                    &[
+                        "projector_version",
+                        "generation",
+                        "provider",
+                        "session_id",
+                        "semantic_kind",
+                        "provider_reference",
+                        "observation_sequence",
+                    ],
+                ),
+            ]
+        );
+    }
+}

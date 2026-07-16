@@ -1,24 +1,30 @@
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
 use tracedecay::application::observation::{
-    CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest, CaptureObservationOutcome,
-    CaptureObservationRequest, GetObservationRequest, ObservationApplication,
-    ObservationApplicationError, ObservationCancellation, ReplayObservationsRequest,
+    AdvanceNonDurableSourceCursorRequest, CaptureClaudeObservationOutcome,
+    CaptureClaudeObservationRequest, CaptureObservationOutcome, CaptureObservationRequest,
+    GetObservationRequest, ObservationApplication, ObservationApplicationError,
+    ObservationCancellation, ReplayObservationsRequest,
 };
 use tracedecay::privacy::{
-    ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1, RecordSanitizerV1, parse_claude_record_v1,
-    parse_observation_record_v1,
+    ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1,
+    PrivacySanitizerError, RecordSanitizerV1, parse_claude_record_v1,
+    parse_normalized_observation_record_v1, parse_observation_record_v1,
 };
 use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
-    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
-    ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ObservationId, ObservationIdentityMaterialV1,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
-    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
+    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ClaudeByteRangeV1,
+    ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1,
+    ClaudeSourceIdentityV1, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    ProviderId, RetentionClass, SessionId,
 };
+use tracedecay_store::observation::{NonDurableFrameReason, ObservationCursorAdvance};
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationReplayRequest,
-    ObservationStore, ProjectionPersistOutcome, ProjectionStoreError,
+    ObservationStore, ProjectionPersistOutcome,
 };
 
 use crate::common::{isolated_lcm_db_path, open_lcm_db};
@@ -28,6 +34,7 @@ const OBSERVATION_TABLES: &[&str] = &[
     "sanitization_receipts",
     "observations",
     "source_cursors",
+    "source_cursor_advances",
     "projection_queue",
     "observation_projection_provenance",
     "observation_projection_checkpoints",
@@ -104,6 +111,9 @@ async fn durable_text(tmp: &TempDir) -> Vec<String> {
         .query(
             "SELECT observation_json FROM observations
              UNION ALL SELECT receipt_json FROM sanitization_receipts
+             UNION ALL SELECT source_json || scope_json || cursor_json FROM source_cursors
+             UNION ALL SELECT source_json || scope_json || coverage_json || reason ||
+                 COALESCE(receipt_id, '') FROM source_cursor_advances
              UNION ALL SELECT observation_id || receipt_id || output_digest
                  FROM observation_projection_provenance
              UNION ALL SELECT projector_version || CAST(last_sequence AS TEXT)
@@ -354,13 +364,28 @@ async fn native_ordering_domain_survives_authoritative_capture() {
     .unwrap();
     let range = ObservationSourceRangeV1::new(41, 42).unwrap();
     let ordering_domain = ObservationOrderingDomainV1::SqliteRowId;
-    let record = serde_json::to_vec(&conversational_record(
-        "message-native-ordering",
-        "native ordering payload",
-        "safe-value",
-    ))
-    .unwrap();
-    let parsed = parse_observation_record_v1(&record, range, ordering_domain).unwrap();
+    let record = serde_json::to_vec(&json!({ "text": "native ordering payload" })).unwrap();
+    let parsed =
+        parse_normalized_observation_record_v1(&record, range, ordering_domain, |native| {
+            CanonicalObservationEnvelopeV1::new(
+                ProviderId::new("hermes").unwrap(),
+                "message",
+                ObservationId::new("hermes.message.native-ordering").unwrap(),
+                CanonicalObservationRelationsV1::new(
+                    SessionId::new("session.native-ordering").unwrap(),
+                )
+                .with_message_id(ObservationId::new("hermes.message.native-ordering").unwrap()),
+                vec![CanonicalObservationFactV1::Message {
+                    role: CanonicalMessageRoleV1::Assistant,
+                    content: native,
+                    model: None,
+                    timestamp: None,
+                }],
+                CanonicalObservationEvidenceV1::new(ordering_domain, range),
+            )
+            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+        })
+        .unwrap();
     let request = CaptureObservationRequest::new(
         parsed,
         ObservationIdentityMaterialV1::for_native_record(
@@ -394,20 +419,448 @@ async fn native_ordering_domain_survives_authoritative_capture() {
     assert_eq!(cursor.ordering_domain(), ordering_domain);
     assert_eq!(cursor.position(), 42);
 
-    let projection_error = store
-        .project_observation(&observation_id)
-        .await
-        .expect_err("an unmapped provider must fail closed");
-    assert!(matches!(
-        projection_error,
-        ProjectionStoreError::UnsupportedProvider(provider) if provider == "hermes"
-    ));
+    let projected = store.project_observation(&observation_id).await.unwrap();
+    assert!(matches!(projected, ProjectionPersistOutcome::Projected(_)));
     assert_eq!(
         store.projection_checkpoint().await.unwrap().last_sequence(),
-        0
+        1
     );
-    assert_eq!(
-        store.next_queued_observation().await.unwrap().as_ref(),
-        Some(&observation_id)
+    assert!(store.next_queued_observation().await.unwrap().is_none());
+}
+
+const CROSS_PROVIDERS: &[&str] = &[
+    "claude", "codex", "cursor", "hermes", "kiro", "cline", "roo-code", "kilo",
+];
+
+fn provider_source(provider: &str) -> ObservationSourceIdentityV1 {
+    ObservationSourceIdentityV1::for_provider(
+        ProviderId::new(provider).unwrap(),
+        SessionId::new(format!("session.app-cross.{provider}")).unwrap(),
+    )
+    .unwrap()
+}
+
+fn provider_cursor(provider: &str, position: u64) -> ObservationSourceCursorV1 {
+    ObservationSourceCursorV1::for_ordering(
+        provider_source(provider),
+        ObservationScopeV1::Profile,
+        ObservationSourceGenerationV1::new(GENERATION).unwrap(),
+        ObservationOrderingDomainV1::SqliteRowId,
+        position,
+    )
+    .unwrap()
+}
+
+fn provider_capture_request(
+    provider: &str,
+    record_id: &str,
+    start: u64,
+    end: u64,
+    text: &str,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    cancellation: ObservationCancellation,
+) -> CaptureObservationRequest {
+    provider_capture_request_with_canonical_provider(
+        provider,
+        provider,
+        record_id,
+        ObservationSourceRangeV1::new(start, end).unwrap(),
+        text,
+        expected_cursor,
+        cancellation,
+    )
+}
+
+fn provider_capture_request_with_canonical_provider(
+    provider: &str,
+    canonical_provider: &str,
+    record_id: &str,
+    range: ObservationSourceRangeV1,
+    text: &str,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    cancellation: ObservationCancellation,
+) -> CaptureObservationRequest {
+    let record = json!({ "text": text });
+    let encoded = serde_json::to_vec(&record).unwrap();
+    let ordering_domain = ObservationOrderingDomainV1::SqliteRowId;
+    let canonical_provider = canonical_provider.to_owned();
+    let record_owned = record_id.to_owned();
+    let session_id = format!("session.app-cross.{provider}");
+    let parsed =
+        parse_normalized_observation_record_v1(&encoded, range, ordering_domain, move |native| {
+            CanonicalObservationEnvelopeV1::new(
+                ProviderId::new(&canonical_provider).unwrap(),
+                "message",
+                ObservationId::new(record_owned.clone()).unwrap(),
+                CanonicalObservationRelationsV1::new(SessionId::new(session_id.clone()).unwrap())
+                    .with_message_id(ObservationId::new(record_owned.clone()).unwrap()),
+                vec![CanonicalObservationFactV1::Message {
+                    role: CanonicalMessageRoleV1::Assistant,
+                    content: native,
+                    model: None,
+                    timestamp: None,
+                }],
+                CanonicalObservationEvidenceV1::new(ordering_domain, range),
+            )
+            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+        })
+        .unwrap();
+    CaptureObservationRequest::new(
+        parsed,
+        ObservationIdentityMaterialV1::for_native_record(
+            provider_source(provider),
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(GENERATION).unwrap(),
+            range,
+            ordering_domain,
+            ObservationId::new(record_id).unwrap(),
+        )
+        .unwrap(),
+        expected_cursor,
+        RetentionClass::new("retention.observation-application-test").unwrap(),
+        cancellation,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn missing_and_conflicting_canonical_identity_leave_authoritative_state_empty() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let application = ObservationApplication::new(
+        GlobalDbObservationStore::new(&db),
+        RecordSanitizerV1::observation_v1().unwrap(),
     );
+    let range = ObservationSourceRangeV1::new(0, 1).unwrap();
+    let ordering_domain = ObservationOrderingDomainV1::SqliteRowId;
+    let raw = serde_json::to_vec(&json!({ "text": "identity canary" })).unwrap();
+    let parsed = parse_observation_record_v1(&raw, range, ordering_domain).unwrap();
+    let identity = ObservationIdentityMaterialV1::for_native_record(
+        provider_source("codex"),
+        ObservationScopeV1::Profile,
+        ObservationSourceGenerationV1::new(GENERATION).unwrap(),
+        range,
+        ordering_domain,
+        ObservationId::new("codex.missing-canonical").unwrap(),
+    )
+    .unwrap();
+    let missing = CaptureObservationRequest::new(
+        parsed,
+        identity,
+        None,
+        RetentionClass::new("retention.observation-application-test").unwrap(),
+        ObservationCancellation::default(),
+    )
+    .unwrap();
+    let missing_error = application
+        .capture_observation(missing)
+        .await
+        .expect_err("provider-neutral capture requires canonical identity");
+    assert!(matches!(
+        missing_error,
+        ObservationApplicationError::Privacy(PrivacySanitizerError::CanonicalEnvelopeRequired)
+    ));
+    assert_eq!(table_counts(&tmp).await, vec![0; OBSERVATION_TABLES.len()]);
+
+    let conflicting = provider_capture_request_with_canonical_provider(
+        "codex",
+        "cursor",
+        "codex.conflicting-provider",
+        range,
+        "identity canary",
+        None,
+        ObservationCancellation::default(),
+    );
+    let conflicting_error = application
+        .capture_observation(conflicting)
+        .await
+        .expect_err("canonical and routing providers must agree");
+    assert!(matches!(
+        conflicting_error,
+        ObservationApplicationError::Privacy(PrivacySanitizerError::CanonicalProviderMismatch)
+    ));
+    assert_eq!(table_counts(&tmp).await, vec![0; OBSERVATION_TABLES.len()]);
+}
+
+// These contract cases construct normalized canonical provider-tagged records directly.
+// They do not exercise provider transcript parsers or JSONL framing.
+#[tokio::test]
+async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_frame_and_commit_before_ack()
+ {
+    for provider in CROSS_PROVIDERS {
+        let tmp = TempDir::new().unwrap();
+        let db = open_lcm_db(&tmp).await;
+        let application = ObservationApplication::new(
+            GlobalDbObservationStore::new(&db),
+            RecordSanitizerV1::observation_v1().unwrap(),
+        );
+        let store = GlobalDbObservationStore::new(&db);
+        let source = provider_source(provider);
+        let record_id = format!("{provider}.message.app-cross");
+
+        let cancelled = ObservationCancellation::default();
+        cancelled.cancel();
+        let cancelled_outcome = application
+            .capture_observation(provider_capture_request(
+                provider,
+                &record_id,
+                0,
+                1,
+                "cancelled before commit",
+                None,
+                cancelled,
+            ))
+            .await;
+        assert!(
+            matches!(
+                cancelled_outcome,
+                Err(ObservationApplicationError::Cancelled)
+            ),
+            "{provider}: pre-cancel must not capture, got {cancelled_outcome:?}"
+        );
+        assert!(
+            store
+                .get_source_cursor(&source, &ObservationScopeV1::Profile)
+                .await
+                .unwrap()
+                .is_none(),
+            "{provider}"
+        );
+        assert_eq!(table_counts(&tmp).await, vec![0; OBSERVATION_TABLES.len()]);
+
+        let first = application
+            .capture_observation(provider_capture_request(
+                provider,
+                &record_id,
+                0,
+                1,
+                "stable application payload",
+                None,
+                ObservationCancellation::default(),
+            ))
+            .await
+            .unwrap();
+        let first_receipt = first.sanitization_receipt().clone();
+        let observation_id = match &first {
+            CaptureObservationOutcome::Persisted { outcome, .. } => {
+                assert!(matches!(outcome, ObservationPersistOutcome::Committed(_)));
+                outcome.receipt().observation().observation_id().clone()
+            }
+            other => panic!("{provider}: first capture must persist, got {other:?}"),
+        };
+        let counts_after_commit = table_counts(&tmp).await;
+        let cursor_after_commit = store
+            .get_source_cursor(&source, &ObservationScopeV1::Profile)
+            .await
+            .unwrap();
+
+        let duplicate = application
+            .capture_observation(provider_capture_request(
+                provider,
+                &record_id,
+                0,
+                1,
+                "stable application payload",
+                None,
+                ObservationCancellation::default(),
+            ))
+            .await
+            .unwrap();
+        match &duplicate {
+            CaptureObservationOutcome::Persisted { outcome, .. } => {
+                assert!(
+                    matches!(outcome, ObservationPersistOutcome::ExactDuplicate(_)),
+                    "{provider}: exact retry must be ExactDuplicate, got {outcome:?}"
+                );
+            }
+            other => panic!("{provider}: exact retry must persist as duplicate, got {other:?}"),
+        }
+        assert_eq!(
+            duplicate.sanitization_receipt(),
+            &first_receipt,
+            "{provider}"
+        );
+        assert_eq!(table_counts(&tmp).await, counts_after_commit, "{provider}");
+
+        let conflict = application
+            .capture_observation(provider_capture_request(
+                provider,
+                &record_id,
+                0,
+                1,
+                "conflicting application payload",
+                None,
+                ObservationCancellation::default(),
+            ))
+            .await
+            .expect_err("{provider}: conflicting identity must fail");
+        assert!(
+            matches!(
+                conflict,
+                ObservationApplicationError::Store(
+                    tracedecay_store::ObservationStoreError::ObservationCollision { .. }
+                )
+            ),
+            "{provider}: expected ObservationCollision, got {conflict:?}"
+        );
+        assert_eq!(table_counts(&tmp).await, counts_after_commit, "{provider}");
+        assert_eq!(
+            store
+                .get_source_cursor(&source, &ObservationScopeV1::Profile)
+                .await
+                .unwrap(),
+            cursor_after_commit,
+            "{provider}"
+        );
+
+        let malformed_advance = ObservationCursorAdvance::for_ordering(
+            source.clone(),
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(GENERATION).unwrap(),
+            ObservationOrderingDomainV1::SqliteRowId,
+            cursor_after_commit.clone(),
+            ObservationSourceRangeV1::new(1, 2).unwrap(),
+            NonDurableFrameReason::MalformedFrame,
+        )
+        .unwrap();
+        application
+            .advance_non_durable_source_cursor(AdvanceNonDurableSourceCursorRequest::new(
+                malformed_advance.clone(),
+                ObservationCancellation::default(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_source_cursor(&source, &ObservationScopeV1::Profile)
+                .await
+                .unwrap(),
+            Some(provider_cursor(provider, 2)),
+            "{provider}"
+        );
+        let malformed_advance_retry = application
+            .advance_non_durable_source_cursor(AdvanceNonDurableSourceCursorRequest::new(
+                malformed_advance,
+                ObservationCancellation::default(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            malformed_advance_retry,
+            tracedecay_store::observation::CursorAdvanceOutcome::ExactDuplicate,
+            "{provider}"
+        );
+
+        let captured_after_malformed_frame = application
+            .capture_observation(provider_capture_request(
+                provider,
+                &format!("{provider}.message.app-after-malformed"),
+                2,
+                3,
+                "captured after non-durable malformed frame",
+                Some(provider_cursor(provider, 2)),
+                ObservationCancellation::default(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                captured_after_malformed_frame,
+                CaptureObservationOutcome::Persisted {
+                    outcome: ObservationPersistOutcome::Committed(_),
+                    ..
+                }
+            ),
+            "{provider}: capture after malformed-frame coverage must commit, got {captured_after_malformed_frame:?}"
+        );
+
+        let cancel_after = ObservationCancellation::default();
+        cancel_after.cancel();
+        assert!(
+            matches!(
+                application
+                    .get_observation(GetObservationRequest::new(
+                        observation_id.clone(),
+                        cancel_after.clone(),
+                    ))
+                    .await,
+                Err(ObservationApplicationError::Cancelled)
+            ),
+            "{provider}"
+        );
+        assert!(
+            matches!(
+                application
+                    .replay_observations(ReplayObservationsRequest::new(
+                        ObservationReplayRequest::new(0, 10).unwrap(),
+                        cancel_after,
+                    ))
+                    .await,
+                Err(ObservationApplicationError::Cancelled)
+            ),
+            "{provider}"
+        );
+
+        let replay_before_restart = application
+            .replay_observations(ReplayObservationsRequest::new(
+                ObservationReplayRequest::new(0, 10).unwrap(),
+                ObservationCancellation::default(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(replay_before_restart.observations().len(), 2, "{provider}");
+        let counts_before_restart = table_counts(&tmp).await;
+        drop(application);
+        drop(db);
+
+        // Commit-before-ack / crash-restart: reopen and retry the original capture.
+        let db = open_lcm_db(&tmp).await;
+        let application = ObservationApplication::new(
+            GlobalDbObservationStore::new(&db),
+            RecordSanitizerV1::observation_v1().unwrap(),
+        );
+        let restarted = application
+            .capture_observation(provider_capture_request(
+                provider,
+                &record_id,
+                0,
+                1,
+                "stable application payload",
+                None,
+                ObservationCancellation::default(),
+            ))
+            .await
+            .unwrap();
+        match &restarted {
+            CaptureObservationOutcome::Persisted { outcome, .. } => {
+                assert!(
+                    matches!(outcome, ObservationPersistOutcome::ExactDuplicate(_)),
+                    "{provider}: restart retry must be ExactDuplicate, got {outcome:?}"
+                );
+                assert_eq!(
+                    outcome.receipt().observation().observation_id(),
+                    &observation_id,
+                    "{provider}"
+                );
+            }
+            other => panic!("{provider}: restart retry must persist duplicate, got {other:?}"),
+        }
+        assert_eq!(
+            table_counts(&tmp).await,
+            counts_before_restart,
+            "{provider}"
+        );
+        let replay_after_restart = application
+            .replay_observations(ReplayObservationsRequest::new(
+                ObservationReplayRequest::new(0, 10).unwrap(),
+                ObservationCancellation::default(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            replay_after_restart.observations().len(),
+            replay_before_restart.observations().len(),
+            "{provider}"
+        );
+    }
 }

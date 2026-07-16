@@ -3,7 +3,7 @@
 //! Each agent sends its own event schema and expects its own output shape, so
 //! handlers stay agent-specific while shared plumbing lives here.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
@@ -15,6 +15,9 @@ mod cursor;
 mod cursor_compact;
 mod cursor_shell;
 pub mod hint_outcomes;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod hook_boundary_failure_matrix;
 mod kiro;
 pub(crate) mod memory_inject;
 mod post_tool_use;
@@ -63,16 +66,32 @@ pub use steering::{
 
 #[cfg(test)]
 use analytics::HOOK_ANALYTICS_FILENAME;
+pub(crate) use analytics::HookCompletedReadinessDistributions;
+#[cfg(test)]
+pub(crate) use analytics::{host_hook_telemetry_contract, measure_host_event_payload_bytes};
 use analytics::{
     mint_hint_id, record_hint_analytics, record_hint_emitted, record_hook_analytics,
     record_hook_invoked, record_workspace_status_analytics,
 };
+
+pub(crate) fn aggregate_hook_completed_readiness(
+    rows: &[Value],
+) -> HookCompletedReadinessDistributions {
+    analytics::aggregate_hook_completed_readiness(rows)
+}
 use tool_hints::{HintAgent, ToolHint};
 
 macro_rules! read_hook_event {
     () => {{
-        match $crate::hooks::read_stdin_to_string() {
-            Ok(event) => event,
+        match $crate::hooks::read_stdin_bounded() {
+            Ok($crate::hooks::HookStdinRead::Event(event)) => event,
+            Ok($crate::hooks::HookStdinRead::Oversized) => {
+                eprintln!(
+                    "tracedecay hook: stdin exceeds wire message bound ({})",
+                    $crate::application::host_admission::WIRE_RECORD_TOO_LARGE
+                );
+                return 0;
+            }
             Err(e) => {
                 eprintln!("tracedecay hook: failed to read stdin: {e}");
                 return 1;
@@ -124,21 +143,67 @@ fn parse_daemon_tool_json_content(result: &Value, tool_name: &str) -> crate::err
 pub(crate) async fn daemon_hook_action(
     project_root: Option<&Path>,
     mut arguments: Value,
+    telemetry: Option<&analytics::HookTimingSpan>,
 ) -> crate::errors::Result<Value> {
     arguments["format"] = serde_json::json!("json");
+    let payload_bytes = analytics::measure_json_payload_bytes(&arguments);
     #[cfg(test)]
     if let Some(result) = take_test_daemon_hook_action(project_root, &arguments) {
+        if let Some(telemetry) = telemetry {
+            telemetry.note_completed_daemon_call(payload_bytes, 0, &result);
+        }
         return result;
     }
-    let handshake = crate::daemon::DaemonHandshake::for_current_client(
+    let handshake = match crate::daemon::DaemonHandshake::for_current_client(
         project_root.map(Path::to_path_buf),
         None,
         false,
         project_root.is_some(),
-    )?;
-    let result =
-        crate::daemon::call_default_tool(&handshake, "tracedecay_hook_runtime", arguments).await?;
-    parse_daemon_tool_json_content(&result, "tracedecay_hook_runtime")
+    ) {
+        Ok(handshake) => handshake,
+        Err(error) => {
+            let err = Err(error);
+            if let Some(telemetry) = telemetry {
+                telemetry.note_daemon_result(&err);
+            }
+            return err;
+        }
+    };
+    let started = std::time::Instant::now();
+    let result = crate::daemon::call_default_tool(&handshake, "tracedecay_hook_runtime", arguments)
+        .await
+        .and_then(|result| parse_daemon_tool_json_content(&result, "tracedecay_hook_runtime"));
+    if let Some(telemetry) = telemetry {
+        telemetry.note_completed_daemon_call(
+            payload_bytes,
+            analytics::elapsed_us(started),
+            &result,
+        );
+    }
+    result
+}
+
+pub(crate) async fn notify_hook_event_with_telemetry(
+    project_root: &Path,
+    event: crate::daemon::DaemonHookEvent,
+    telemetry: &analytics::HookTimingSpan,
+) {
+    let payload_bytes = analytics::measure_json_payload_bytes(&event);
+    crate::daemon::notify_hook_event(project_root, event).await;
+    telemetry.note_completed_daemon_notification(payload_bytes);
+}
+
+pub(crate) async fn notify_hook_event_with_optional_telemetry(
+    project_root: &Path,
+    event: crate::daemon::DaemonHookEvent,
+    telemetry: Option<&analytics::HookTimingSpan>,
+) {
+    match telemetry {
+        Some(telemetry) => {
+            notify_hook_event_with_telemetry(project_root, event, telemetry).await;
+        }
+        None => crate::daemon::notify_hook_event(project_root, event).await,
+    }
 }
 
 pub async fn hook_hermes_terminal_receipt() -> i32 {
@@ -160,14 +225,22 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         .as_ref()
         .and_then(|route| route.cwd.clone().or_else(|| route.worktree.clone()))
         .or_else(|| event.cwd.clone());
-    if let Some(project_root) = match cwd {
+    let project_root = match cwd {
         Some(cwd) => crate::config::discover_project_root_with_identity(&cwd).await,
         None => None,
-    } {
-        crate::daemon::notify_hook_event(&project_root, event).await;
+    };
+    let hook_telemetry = record_hook_invoked(
+        project_root.as_deref(),
+        HintAgent::Hermes,
+        event.event.as_str(),
+        &event_json,
+    );
+    if let Some(project_root) = project_root.as_ref() {
+        notify_hook_event_with_telemetry(project_root, event, &hook_telemetry).await;
     } else if let Err(error) = daemon_hook_action(
         None,
         serde_json::json!({ "action": "hermes_receipt", "event": event }),
+        Some(&hook_telemetry),
     )
     .await
     {
@@ -211,6 +284,7 @@ pub async fn hook_user_session_review() -> i32 {
             "provider": provider,
             "session_id": session_id,
         }),
+        None,
     )
     .await
     {
@@ -246,6 +320,17 @@ fn now_unix_secs() -> i64 {
 #[cfg(test)]
 pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
     crate::config::lock_user_data_dir_test_env()
+}
+
+#[cfg(test)]
+pub(crate) fn run_with_test_env_lock<T>(future: impl std::future::Future<Output = T>) -> T {
+    let _lock = lock_test_env();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("build hook test runtime")
+        .block_on(future)
 }
 
 #[cfg(test)]
@@ -582,10 +667,84 @@ fn append_tool_hint(context: &mut String, hint: &ToolHint) {
     context.push('\n');
 }
 
-pub(crate) fn read_stdin_to_string() -> std::io::Result<String> {
-    let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
-    Ok(input)
+pub(crate) enum HookStdinRead {
+    Event(String),
+    /// Stdin exceeded [`crate::application::host_admission::MAX_WIRE_MESSAGE_BYTES`].
+    /// No payload bytes are retained.
+    Oversized,
+}
+
+/// Read host-hook stdin with the PR6 wire message byte cap enforced before
+/// whole-body materialization.
+pub(crate) fn read_stdin_bounded() -> std::io::Result<HookStdinRead> {
+    read_stdin_bounded_from(&mut std::io::stdin().lock())
+}
+
+/// Testable stdin reader: streams until EOF while retaining at most
+/// [`crate::application::host_admission::MAX_WIRE_MESSAGE_BYTES`].
+pub(crate) fn read_stdin_bounded_from(
+    reader: &mut impl std::io::Read,
+) -> std::io::Result<HookStdinRead> {
+    use crate::application::host_admission::{
+        MAX_WIRE_MESSAGE_BYTES, WireReadOutcome, read_bounded_to_string,
+    };
+    match read_bounded_to_string(reader, MAX_WIRE_MESSAGE_BYTES)? {
+        WireReadOutcome::Ready(event) => Ok(HookStdinRead::Event(event)),
+        WireReadOutcome::Oversized => Ok(HookStdinRead::Oversized),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod wire_stdin_bound_tests {
+    use super::{HookStdinRead, read_stdin_bounded_from};
+    use crate::application::host_admission::MAX_WIRE_MESSAGE_BYTES;
+    use std::io::{self, Read};
+
+    struct ChunkedHostileReader {
+        remaining: usize,
+        chunk: Vec<u8>,
+    }
+
+    impl ChunkedHostileReader {
+        fn new(total: usize, chunk_byte: u8, chunk_len: usize) -> Self {
+            Self {
+                remaining: total,
+                chunk: vec![chunk_byte; chunk_len.max(1)],
+            }
+        }
+    }
+
+    impl Read for ChunkedHostileReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Ok(0);
+            }
+            let n = buf.len().min(self.chunk.len()).min(self.remaining);
+            buf[..n].copy_from_slice(&self.chunk[..n]);
+            self.remaining -= n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn hook_stdin_streams_hostile_input_and_returns_oversized_without_payload() {
+        let mut hostile =
+            ChunkedHostileReader::new(MAX_WIRE_MESSAGE_BYTES + 512 * 1024, b'h', 4096);
+        let outcome = read_stdin_bounded_from(&mut hostile).unwrap();
+        assert!(matches!(outcome, HookStdinRead::Oversized));
+        assert!(hostile.remaining < MAX_WIRE_MESSAGE_BYTES + 512 * 1024);
+    }
+
+    #[test]
+    fn hook_stdin_accepts_exact_wire_cap() {
+        let body = vec![b'a'; MAX_WIRE_MESSAGE_BYTES];
+        let outcome = read_stdin_bounded_from(&mut body.as_slice()).unwrap();
+        match outcome {
+            HookStdinRead::Event(event) => assert_eq!(event.len(), MAX_WIRE_MESSAGE_BYTES),
+            HookStdinRead::Oversized => panic!("exact cap must be accepted"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -726,9 +885,22 @@ mod hint_analytics_tests {
             .find(|row| event_kind(row) == "hook_completed")
             .expect("hook_completed row");
         assert_eq!(row["hook_name"].as_str(), Some("PostToolUse"));
-        assert_eq!(row["tool_name"].as_str(), Some("Bash"));
+        for forbidden in [
+            "tool_name",
+            "session_id",
+            "project_root",
+            "event_cwd",
+            "command",
+        ] {
+            assert!(
+                row.get(forbidden).is_none(),
+                "hook telemetry must omit {forbidden}"
+            );
+        }
         assert!(row["duration_us"].as_u64().is_some());
         assert!(row["duration_ms"].as_u64().is_some());
+        assert!(row["hook_wall_time_us"].as_u64().is_some());
+        assert_eq!(row["coverage"], "host_measured");
     }
 
     #[test]

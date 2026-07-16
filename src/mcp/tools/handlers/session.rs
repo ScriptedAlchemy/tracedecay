@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use serde_json::{Map, Value, json};
+use tracedecay_domain::ProjectId;
 
 use super::super::render::{self, Md, truncated_json_envelope_with_handle};
 use super::support::{
@@ -494,7 +495,7 @@ struct MessageSearchRequest<'a> {
     git_filter: GitScopeFilter,
     time_range: SessionSearchTimeRange,
     workflow_scope: Option<WorkflowScopeFilter>,
-    /// When true, ignore FTS and list each session's latest Codex goal
+    /// When true, ignore FTS and list each session's latest goal
     /// (`kind = 'goal'`) instead. `query` is optional in this mode.
     goals: bool,
 }
@@ -617,6 +618,24 @@ async fn search_session_messages_in_db(
         )
         .await
     }
+}
+
+/// Goals mode: pass only currently supported `message_search` request fields
+/// into `recent_session_goals_filtered`. The DB API also accepts `session_id`
+/// and `status`, but those have no matching request fields yet — do not invent
+/// them (and do not remap `parent_session_id`).
+async fn recent_session_goals_for_request(
+    db: &GlobalDb,
+    request: &MessageSearchRequest<'_>,
+) -> Vec<SessionMessageSearchResult> {
+    db.recent_session_goals_filtered(
+        request.requested_provider,
+        request.project_key,
+        None,
+        None,
+        request.limit,
+    )
+    .await
 }
 
 /// Merge per-project shards into a single relevance-ordered top-K.
@@ -2376,6 +2395,10 @@ pub(super) async fn handle_message_search(
                 skipped_project_count += 1;
                 continue;
             };
+            let Ok(project_id) = ProjectId::new(context.project.project_id.clone()) else {
+                skipped_project_count += 1;
+                continue;
+            };
             // One project's malformed store relpath must not abort the whole
             // cross-project sweep; skip it like the neighboring missing-context
             // / missing-db / open-failure branches.
@@ -2407,12 +2430,7 @@ pub(super) async fn handle_message_search(
             } else {
                 PathBuf::from(&context.project.canonical_root)
             };
-            destinations.push((
-                db,
-                project_root,
-                context.project.project_id.clone(),
-                has_write_authority,
-            ));
+            destinations.push((db, project_root, project_id, has_write_authority));
         }
         let catch_up_authorized = request.catch_up
             && destinations
@@ -2451,8 +2469,12 @@ pub(super) async fn handle_message_search(
                 let hermes_destinations = destinations
                     .iter()
                     .filter(|(_, _, _, has_write_authority)| *has_write_authority)
-                    .map(|(db, project_root, _, _)| {
-                        crate::sessions::hermes::ProjectIngestDestination { db, project_root }
+                    .map(|(db, project_root, project_id, _)| {
+                        crate::sessions::hermes::ProjectIngestDestination {
+                            db,
+                            project_root,
+                            project_id: project_id.clone(),
+                        }
                     })
                     .collect::<Vec<_>>();
                 let _ = crate::sessions::hermes::ingest_for_projects(&hermes_destinations).await;
@@ -2472,7 +2494,7 @@ pub(super) async fn handle_message_search(
                     let outcome = crate::sessions::ingest_project_sources_for_provider(
                         db,
                         project_root,
-                        Some(project_id.as_str()),
+                        Some(project_id.clone()),
                         provider,
                         false,
                     )
@@ -2487,7 +2509,11 @@ pub(super) async fn handle_message_search(
         let searched_project_count = destinations.len();
         let mut results = Vec::new();
         for (db, _, _, _) in &destinations {
-            let mut project_results = search_session_messages_in_db(db, &request).await;
+            let mut project_results = if request.goals {
+                recent_session_goals_for_request(db, &request).await
+            } else {
+                search_session_messages_in_db(db, &request).await
+            };
             results.append(&mut project_results);
         }
         sort_and_truncate_message_results_by_relevance(&mut results, request.limit);
@@ -2621,10 +2647,13 @@ pub(super) async fn handle_message_search(
             };
             catch_up_failures.extend(outcome.failures);
         }
+        let target_project_id = target_project_id
+            .as_deref()
+            .and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
         let outcome = crate::sessions::ingest_project_sources_for_provider(
             db,
             &target_root,
-            target_project_id.as_deref(),
+            target_project_id,
             provider,
             true,
         )
@@ -2647,8 +2676,7 @@ pub(super) async fn handle_message_search(
         None => None,
     };
     let results = if request.goals {
-        db.recent_session_goals(request.project_key, request.limit)
-            .await
+        recent_session_goals_for_request(db, &request).await
     } else {
         search_session_messages_in_db(db, &request).await
     };
@@ -2739,8 +2767,7 @@ pub(super) async fn handle_user_message_search(
         &opened_db
     };
     let results = if request.goals {
-        db.recent_session_goals(request.project_key, request.limit)
-            .await
+        recent_session_goals_for_request(db, &request).await
     } else {
         search_session_messages_in_db(db, &request).await
     };

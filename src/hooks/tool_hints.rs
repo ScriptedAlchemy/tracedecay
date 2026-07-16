@@ -7,24 +7,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum HintAgent {
-    Claude,
-    Cursor,
-    Codex,
-    Kiro,
-}
-
-impl HintAgent {
-    pub(crate) fn as_key(self) -> &'static str {
-        match self {
-            HintAgent::Claude => "claude",
-            HintAgent::Cursor => "cursor",
-            HintAgent::Codex => "codex",
-            HintAgent::Kiro => "kiro",
-        }
-    }
-}
+pub use tracedecay_domain::HostIntegrationIdV1 as HintAgent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HintCategory {

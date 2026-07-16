@@ -608,6 +608,7 @@ pub(crate) fn diagnostics_summary_from_parts(
 ) -> Value {
     let hook_rows = &hook_analytics.rows;
     let hook_call_count = hook_invocation_count(hook_rows);
+    let hook_readiness = crate::hooks::aggregate_hook_completed_readiness(hook_rows);
 
     let Some(events) = durable_events else {
         return json!({
@@ -620,6 +621,7 @@ pub(crate) fn diagnostics_summary_from_parts(
             "tracedecay_call_count": 0,
             "hook_call_count": hook_call_count,
             "hook_sources": hook_analytics.sources.clone(),
+            "hook_readiness": hook_readiness,
             "ratios": diagnostics_ratios(message_count, 0, 0, 0, hook_call_count),
             "by_event_kind": [],
             "by_tool": [],
@@ -695,6 +697,7 @@ pub(crate) fn diagnostics_summary_from_parts(
         "tracedecay_call_count": tracedecay_call_count,
         "hook_call_count": hook_call_count,
         "hook_sources": hook_analytics.sources.clone(),
+        "hook_readiness": hook_readiness,
         "events_per_hour": events_per_hour,
         "ratios": diagnostics_ratios(
             message_count,
@@ -785,12 +788,28 @@ pub(crate) fn read_hook_analytics_rows_at(
             read_hook_analytics_file(&global_path, project_root, &mut out);
         }
     }
-    out.rows.sort_by_key(|row| {
+    sort_hook_analytics_rows(&mut out.rows);
+    out
+}
+
+fn sort_hook_analytics_rows(rows: &mut [Value]) {
+    // `sort_by` is stable. Rows sort chronologically, then by durable event fields.
+    // Exact-key ties (including rows with all fields missing) retain deterministic
+    // ingestion order: project JSONL line order, followed by profile JSONL line order.
+    rows.sort_by(|left, right| {
+        hook_analytics_row_order_key(left).cmp(&hook_analytics_row_order_key(right))
+    });
+}
+
+fn hook_analytics_row_order_key(row: &Value) -> (i64, &str, &str, &str) {
+    (
         row.get("ts_unix_ms")
             .and_then(Value::as_i64)
-            .unwrap_or_default()
-    });
-    out
+            .unwrap_or_default(),
+        row.get("session_id").and_then(Value::as_str).unwrap_or(""),
+        row.get("hook_name").and_then(Value::as_str).unwrap_or(""),
+        row.get("agent").and_then(Value::as_str).unwrap_or(""),
+    )
 }
 
 fn read_hook_analytics_file(
@@ -939,8 +958,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        HookAnalyticsRows, hint_efficacy_from_events, hint_summary_from_events,
-        read_hook_analytics_file,
+        HookAnalyticsRows, diagnostics_summary_from_parts, hint_efficacy_from_events,
+        hint_summary_from_events, read_hook_analytics_file, recent_hook_rows,
+        sort_hook_analytics_rows,
     };
 
     #[test]
@@ -1016,6 +1036,79 @@ mod tests {
     }
 
     #[test]
+    fn hook_analytics_row_order_is_stable_on_timestamp_ties() {
+        let mut rows = vec![
+            json!({"source_marker": "project-missing"}),
+            json!({"source_marker": "profile-missing"}),
+            json!({
+                "ts_unix_ms": 10,
+                "session_id": "b",
+                "hook_name": "post",
+                "agent": "claude"
+            }),
+            json!({
+                "ts_unix_ms": 10,
+                "session_id": "a",
+                "hook_name": "post",
+                "agent": "claude"
+            }),
+            json!({
+                "ts_unix_ms": 9,
+                "session_id": "z",
+                "hook_name": "pre",
+                "agent": "codex"
+            }),
+            json!({
+                "ts_unix_ms": 10,
+                "session_id": "a",
+                "hook_name": "pre",
+                "agent": "claude"
+            }),
+            json!({
+                "ts_unix_ms": 10,
+                "session_id": "a",
+                "hook_name": "post",
+                "agent": "claude",
+                "source_marker": "project-exact-tie"
+            }),
+            json!({
+                "ts_unix_ms": 10,
+                "session_id": "a",
+                "hook_name": "post",
+                "agent": "claude",
+                "source_marker": "profile-exact-tie"
+            }),
+        ];
+        sort_hook_analytics_rows(&mut rows);
+        assert_eq!(rows[0]["source_marker"], json!("project-missing"));
+        assert_eq!(rows[1]["source_marker"], json!("profile-missing"));
+        assert_eq!(rows[2]["ts_unix_ms"], json!(9));
+        assert_eq!(rows[3]["session_id"], json!("a"));
+        assert_eq!(rows[3]["hook_name"], json!("post"));
+        assert_eq!(rows[4]["source_marker"], json!("project-exact-tie"));
+        assert_eq!(rows[5]["source_marker"], json!("profile-exact-tie"));
+        assert_eq!(rows[6]["session_id"], json!("a"));
+        assert_eq!(rows[6]["hook_name"], json!("pre"));
+        assert_eq!(rows[7]["session_id"], json!("b"));
+    }
+
+    #[test]
+    fn recent_hook_rows_remain_newest_first_after_global_sort() {
+        let mut rows = vec![
+            json!({"event": "hook_invoked", "ts_unix_ms": 10, "session_id": "a"}),
+            json!({"event": "hook_invoked", "ts_unix_ms": 12, "session_id": "c"}),
+            json!({"event": "hook_invoked", "ts_unix_ms": 11, "session_id": "b"}),
+        ];
+        sort_hook_analytics_rows(&mut rows);
+
+        let recent = recent_hook_rows(&rows, 2);
+        assert_eq!(recent[0]["ts_unix_ms"], json!(12));
+        assert_eq!(recent[0]["session_id"], json!("c"));
+        assert_eq!(recent[1]["ts_unix_ms"], json!(11));
+        assert_eq!(recent[1]["session_id"], json!("b"));
+    }
+
+    #[test]
     fn hook_analytics_sources_report_malformed_jsonl_rows() {
         let dir = tempfile::tempdir().unwrap();
         let store_root = dir.path().join("store");
@@ -1047,5 +1140,59 @@ mod tests {
                 .as_str()
                 .is_some_and(|error| error.contains("EOF"))
         );
+    }
+
+    #[test]
+    fn diagnostics_summary_aggregates_real_hook_completed_rows_safely() {
+        let hook_analytics = HookAnalyticsRows {
+            rows: vec![json!({
+                "event": "hook_completed",
+                "agent": "untrusted-host",
+                "hook_name": "privateHookName",
+                "hook_wall_time_us": 0,
+                "daemon_rtt_us": null,
+                "payload_bytes": 0,
+                "daemon_ipc_payload_bytes": null,
+                "timeout": {"budget_ms": null, "timed_out": null},
+                "disposition": {
+                    "class": "untrusted-class",
+                    "status": "untrusted-status",
+                    "retryable": null,
+                    "reason_code": "private-reason"
+                }
+            })],
+            sources: Vec::new(),
+        };
+
+        let summary = diagnostics_summary_from_parts(0, &hook_analytics, None);
+        assert_eq!(summary["hook_readiness"]["collection_status"], "measured");
+        assert_eq!(summary["hook_readiness"]["events_considered"], 1);
+        assert_eq!(
+            summary["hook_readiness"]["hook_wall_time_distribution"][0]["host"],
+            "other"
+        );
+        assert_eq!(
+            summary["hook_readiness"]["hook_wall_time_distribution"][0]["summary"]["min"],
+            0
+        );
+        assert_eq!(
+            summary["hook_readiness"]["host_ipc_rtt_distribution"][0]["summary"]["availability"],
+            "no_samples"
+        );
+        assert_eq!(
+            summary["hook_readiness"]["disposition_counts_by_host"][0]["class"],
+            "unknown"
+        );
+
+        let encoded = serde_json::to_string(&summary["hook_readiness"]).unwrap();
+        for forbidden in [
+            "untrusted-host",
+            "privateHookName",
+            "private-reason",
+            "hook_name",
+            "reason_code",
+        ] {
+            assert!(!encoded.contains(forbidden));
+        }
     }
 }

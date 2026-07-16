@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 #[cfg(unix)]
@@ -243,6 +243,7 @@ mod branch_admin;
 mod git_watch;
 #[cfg(unix)]
 pub mod pr_autotrack;
+mod profile_host_admission_replay;
 #[cfg(unix)]
 mod scheduler;
 mod service;
@@ -255,52 +256,8 @@ pub use service::{
     service_status, socket_path_or_default, uninstall_service,
 };
 
-/// A host whose lifecycle hooks notify the daemon.
-///
-/// Kept shared between hook emitters and daemon-side parsing so new hosts
-/// cannot be accepted by one side and dropped by the other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HookAgent {
-    Claude,
-    Codex,
-    Cursor,
-    Kiro,
-    Hermes,
-}
-
-impl HookAgent {
-    pub fn as_wire(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-            Self::Cursor => "cursor",
-            Self::Kiro => "kiro",
-            Self::Hermes => "hermes",
-        }
-    }
-
-    pub fn from_wire(value: &str) -> Option<Self> {
-        match value {
-            "claude" => Some(Self::Claude),
-            "codex" => Some(Self::Codex),
-            "cursor" => Some(Self::Cursor),
-            "kiro" => Some(Self::Kiro),
-            "hermes" => Some(Self::Hermes),
-            _ => None,
-        }
-    }
-
-    /// Marker file used to debounce this agent's incremental syncs.
-    pub fn sync_marker_file(self) -> &'static str {
-        match self {
-            Self::Claude => ".claude_post_tool_sync_at",
-            Self::Codex => ".codex_shell_sync_at",
-            Self::Cursor => ".cursor_shell_sync_at",
-            Self::Kiro => ".kiro_post_tool_sync_at",
-            Self::Hermes => ".hermes_terminal_receipt_at",
-        }
-    }
-}
+/// A domain-catalogued host whose lifecycle hooks notify the daemon.
+pub use tracedecay_domain::HostIntegrationIdV1 as HookAgent;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookRouteMetadata {
@@ -922,7 +879,7 @@ async fn ensure_daemon_connection_live(
 }
 
 async fn next_daemon_response_line<R>(
-    lines: &mut tokio::io::Lines<R>,
+    reader: &mut R,
     connection: &DaemonConnection,
     request_label: &str,
     liveness_poll_interval: Duration,
@@ -930,9 +887,19 @@ async fn next_daemon_response_line<R>(
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
+    use crate::application::host_admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
     loop {
-        match timeout(liveness_poll_interval, lines.next_line()).await {
-            Ok(line) => return line.map_err(Into::into),
+        match timeout(liveness_poll_interval, read_bounded_mcp_line(reader)).await {
+            Ok(Ok(line)) => return Ok(line),
+            Ok(Err(error)) if is_wire_oversized_io_error(&error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "daemon {request_label} response exceeded wire message bound ({})",
+                        crate::application::host_admission::WIRE_RECORD_TOO_LARGE
+                    ),
+                });
+            }
+            Ok(Err(error)) => return Err(error.into()),
             Err(_) => ensure_daemon_connection_live(connection, request_label).await?,
         }
     }
@@ -1168,6 +1135,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     clients.abort_all();
     while clients.join_next().await.is_some() {}
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
+    store_administration.shutdown_host_admission_replay().await;
     shutdown_project_servers(&store_administration).await;
     endpoint_cleanup
 }
@@ -1399,7 +1367,7 @@ async fn send_daemon_request_line_with_liveness_poll(
     writer.flush().await?;
     writer.shutdown().await?;
 
-    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let mut reader = tokio::io::BufReader::new(reader);
     let request = serde_json::from_str::<JsonRpcRequest>(line).ok();
     let request_id = request.as_ref().and_then(|request| request.id.clone());
     let request_label = request
@@ -1408,7 +1376,7 @@ async fn send_daemon_request_line_with_liveness_poll(
     let mut responses = Vec::new();
     let mut matched_response = request_id.is_none();
     while let Some(response_line) = next_daemon_response_line(
-        &mut lines,
+        &mut reader,
         &connection,
         request_label,
         liveness_poll_interval,
@@ -1607,10 +1575,10 @@ async fn call_tool_with_liveness_poll(
     writer.flush().await?;
     writer.shutdown().await?;
 
-    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let mut reader = tokio::io::BufReader::new(reader);
     loop {
         let line =
-            next_daemon_response_line(&mut lines, &connection, tool_name, liveness_poll_interval)
+            next_daemon_response_line(&mut reader, &connection, tool_name, liveness_poll_interval)
                 .await?;
         let Some(line) = line else {
             return Err(TraceDecayError::Config {
@@ -2402,6 +2370,12 @@ impl DaemonEngine {
             .store_administration
             .global_database(&cg.store_layout().sessions_db_path)
             .await?;
+        let host_admission_broker = self
+            .store_administration
+            .host_admission_broker(&session_db)
+            .await?
+            .broker()
+            .cloned();
         let user_session_db = self
             .store_administration
             .user_session_database(&handshake.client_identity.global_db_path)
@@ -2430,6 +2404,7 @@ impl DaemonEngine {
                     project_sessions: session_db,
                     user_sessions: user_session_db,
                 },
+                host_admission_broker,
                 database_owner_reconciler,
                 writers: crate::mcp::server::McpServerWriters::daemon_owned(
                     coordinated_dashboard_automation_writer(self.store_administration.clone()),
@@ -2539,6 +2514,9 @@ impl DaemonEngine {
 
     async fn shutdown_background_tasks(&self) {
         self.shutdown_automation_schedulers().await;
+        self.store_administration
+            .shutdown_host_admission_replay()
+            .await;
 
         self.git_watcher.shutdown().await;
         if let Some(handle) = self.pr_autotrack_task.lock().await.take() {
@@ -2574,6 +2552,53 @@ async fn shutdown_project_servers(store_administration: &StoreAdministration) {
     for server in servers {
         server.shutdown().await;
     }
+}
+
+/// Kick coalesced per-profile replay without awaiting a pass (handshake-safe).
+async fn ensure_user_profile_host_admission_replay_for_identity(
+    store_administration: &StoreAdministration,
+    client_identity: &DaemonClientIdentity,
+) -> Result<()> {
+    let Ok(user_session_db) = store_administration
+        .user_session_database(&client_identity.global_db_path)
+        .await
+    else {
+        eprintln!("[tracedecay] user-profile host admission disposition: authority_unavailable");
+        return Ok(());
+    };
+    let Ok(state) = store_administration
+        .host_admission_broker(&user_session_db)
+        .await
+    else {
+        eprintln!("[tracedecay] user-profile host admission disposition: authority_unavailable");
+        return Ok(());
+    };
+    if let Some(outcome) = state.unavailable_outcome() {
+        eprintln!(
+            "[tracedecay] user-profile host admission disposition: {}",
+            outcome.reason_code.unwrap_or("spool_unavailable")
+        );
+    }
+    // host_admission_broker already kicks the coalesced worker for user-sessions DBs.
+    Ok(())
+}
+
+#[cfg(test)]
+async fn replay_user_profile_host_admission_for_identity(
+    store_administration: &StoreAdministration,
+    client_identity: &DaemonClientIdentity,
+) -> Result<()> {
+    ensure_user_profile_host_admission_replay_for_identity(store_administration, client_identity)
+        .await?;
+    let Ok(broker_path) = authority::canonical_identity_path(
+        &crate::sessions::user_sessions_db_path(&client_identity.profile_root),
+    ) else {
+        return Ok(());
+    };
+    let _ = store_administration
+        .wait_user_profile_host_admission_replay_idle(&broker_path, Duration::from_secs(5))
+        .await;
+    Ok(())
 }
 
 #[cfg(all(unix, test))]
@@ -2667,7 +2692,7 @@ async fn serve_broker_socket_client(
     let mut transport = BrokerStreamTransport::new(stream);
     if let Some(expected_token) = auth_token.as_deref() {
         let preface_line = tokio::select! {
-            result = transport.read_line() => result?,
+            result = read_line_handling_wire_oversized(&mut transport) => result?,
             () = engine.lifecycle.wait_for_draining() => return Ok(()),
         };
         let Some(preface_line) = preface_line else {
@@ -2684,7 +2709,7 @@ async fn serve_broker_socket_client(
         }
     }
     let line = tokio::select! {
-        result = transport.read_line() => result?,
+        result = read_line_handling_wire_oversized(&mut transport) => result?,
         () = engine.lifecycle.wait_for_draining() => return Ok(()),
     };
     let Some(line) = line else {
@@ -2695,10 +2720,15 @@ async fn serve_broker_socket_client(
     };
     let mut handshake = DaemonHandshake::from_line(&line)?;
     engine.log_client_version_skew(&handshake).await;
+    ensure_user_profile_host_admission_replay_for_identity(
+        &engine.store_administration,
+        &handshake.client_identity,
+    )
+    .await?;
     // Resolve initialize roots only after authentication and inside daemon
     // authority. The proxy process never opens the registry database.
     let first_request_line = tokio::select! {
-        result = transport.read_line() => result?,
+        result = read_line_handling_wire_oversized(&mut transport) => result?,
         () = engine.lifecycle.wait_for_draining() => return Ok(()),
     };
     let Some(first_request_line) = first_request_line else {
@@ -2767,7 +2797,7 @@ async fn serve_broker_socket_client(
     };
     let mut transport = ReplayTransport::new(transport);
     if !initialize_handled {
-        transport.push_replay(first_request_line);
+        transport.push_replay(first_request_line)?;
     }
 
     if let Some(server) = server {
@@ -2799,7 +2829,7 @@ async fn serve_windows_broker_client(
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<()> {
     let mut transport = BrokerStreamTransport::new(stream);
-    let Some(preface_line) = transport.read_line().await? else {
+    let Some(preface_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };
     let preface =
@@ -2811,14 +2841,19 @@ async fn serve_windows_broker_client(
             message: "daemon client authentication failed".to_string(),
         });
     }
-    let Some(handshake_line) = transport.read_line().await? else {
+    let Some(handshake_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };
     let Some(setup_activity) = lifecycle.try_enter() else {
         return Ok(());
     };
     let mut handshake = DaemonHandshake::from_line(&handshake_line)?;
-    let Some(first_request_line) = transport.read_line().await? else {
+    ensure_user_profile_host_admission_replay_for_identity(
+        &store_administration,
+        &handshake.client_identity,
+    )
+    .await?;
+    let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };
     let initialize_route =
@@ -2876,7 +2911,7 @@ async fn serve_windows_broker_client(
         .await?;
         let mut transport = ReplayTransport::new(transport);
         if !initialize_handled {
-            transport.push_replay(first_request_line);
+            transport.push_replay(first_request_line)?;
         }
         Box::pin(server.run_daemon_connection_with_timings(
             &mut transport,
@@ -2887,7 +2922,7 @@ async fn serve_windows_broker_client(
     } else {
         drop(setup_activity);
         let mut transport = ReplayTransport::new(transport);
-        transport.push_replay(first_request_line);
+        transport.push_replay(first_request_line)?;
         serve_projectless_client(
             &mut transport,
             &handshake.client_identity,
@@ -2967,6 +3002,11 @@ async fn portable_project_server(
     let session_db = store_administration
         .global_database(&cg.store_layout().sessions_db_path)
         .await?;
+    let host_admission_broker = store_administration
+        .host_admission_broker(&session_db)
+        .await?
+        .broker()
+        .cloned();
     let user_session_db = store_administration
         .user_session_database(&handshake.client_identity.global_db_path)
         .await?;
@@ -2982,6 +3022,7 @@ async fn portable_project_server(
                 project_sessions: session_db,
                 user_sessions: user_session_db,
             },
+            host_admission_broker,
             database_owner_reconciler,
             writers: crate::mcp::server::McpServerWriters::daemon_owned(
                 coordinated_dashboard_automation_writer(store_administration.clone()),
@@ -3130,6 +3171,21 @@ async fn write_json_rpc_response(
     Ok(())
 }
 
+/// Read one newline-delimited frame. Oversized input gets a typed non-durable
+/// rejection and returns `Ok(None)` without retaining payload bytes.
+async fn read_line_handling_wire_oversized(
+    transport: &mut impl McpTransport,
+) -> Result<Option<String>> {
+    match transport.read_line().await {
+        Ok(line) => Ok(line),
+        Err(error) if crate::application::host_admission::is_wire_oversized_io_error(&error) => {
+            let _ = crate::mcp::transport::write_wire_oversized_rejection(transport, &error).await;
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 async fn serve_projectless_client(
     transport: &mut impl McpTransport,
     client_identity: &DaemonClientIdentity,
@@ -3138,7 +3194,7 @@ async fn serve_projectless_client(
 ) -> Result<()> {
     loop {
         let line = tokio::select! {
-            result = transport.read_line() => result?,
+            result = read_line_handling_wire_oversized(transport) => result?,
             () = lifecycle.wait_for_draining() => break,
         };
         let Some(line) = line else {
@@ -3238,11 +3294,25 @@ async fn projectless_tools_call_response(
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
+        let host_admission_state = match store_administration
+            .host_admission_broker(&user_session_db)
+            .await
+        {
+            Ok(state) => state,
+            Err(error) => {
+                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+            }
+        };
+        let host_admission_broker = match &host_admission_state {
+            branch_admin::HostAdmissionBrokerState::Available(broker) => Ok(broker),
+            branch_admin::HostAdmissionBrokerState::Unavailable(outcome) => Err(*outcome),
+        };
         return match crate::mcp::tools::handle_projectless_hook_runtime(
             arguments,
             &client_identity.profile_root,
             global_db.as_ref(),
             crate::mcp::tools::SessionAuthorities::new(None, Some(&user_session_db)),
+            host_admission_broker,
         )
         .await
         {
@@ -3289,7 +3359,7 @@ fn projectless_tool_call(
 }
 
 struct BrokerStreamTransport {
-    reader: tokio::io::Lines<tokio::io::BufReader<tokio::io::ReadHalf<BrokerStream>>>,
+    reader: tokio::io::BufReader<tokio::io::ReadHalf<BrokerStream>>,
     writer: tokio::io::WriteHalf<BrokerStream>,
 }
 
@@ -3297,7 +3367,7 @@ impl BrokerStreamTransport {
     fn new(stream: BrokerStream) -> Self {
         let (reader, writer) = stream.into_split();
         Self {
-            reader: tokio::io::BufReader::new(reader).lines(),
+            reader: tokio::io::BufReader::new(reader),
             writer,
         }
     }
@@ -3305,7 +3375,7 @@ impl BrokerStreamTransport {
 
 impl crate::mcp::McpTransport for BrokerStreamTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        self.reader.next_line().await
+        crate::application::host_admission::read_bounded_mcp_line(&mut self.reader).await
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
@@ -3320,3 +3390,172 @@ impl crate::mcp::McpTransport for BrokerStreamTransport {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod wire_bound_tests {
+    use super::{BrokerStreamTransport, read_line_handling_wire_oversized};
+    use crate::application::host_admission::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
+    use crate::mcp::McpTransport;
+    use tokio::io::AsyncWriteExt;
+
+    use super::transport::{BrokerListener, BrokerStream, default_loopback_endpoint};
+
+    #[tokio::test]
+    async fn broker_transport_streams_hostile_frame_and_typed_rejection_has_no_payload() {
+        let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
+            .await
+            .expect("bind");
+
+        let client = BrokerStream::connect(&bound).await.expect("connect");
+        let server = listener.accept().await.expect("accept");
+        let mut server_transport = BrokerStreamTransport::new(server);
+
+        let writer = tokio::spawn(async move {
+            let mut client = client;
+            // Stream hostile bytes without pre-building a MAX+1 String in the
+            // product reader path; allocate only a small chunk buffer here.
+            let chunk = vec![b'w'; 8192];
+            let mut remaining =
+                crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES + 64 * 1024;
+            while remaining > 0 {
+                let n = remaining.min(chunk.len());
+                client.write_all(&chunk[..n]).await.expect("write");
+                remaining -= n;
+            }
+            client.write_all(b"\n").await.expect("newline");
+            client.flush().await.expect("flush");
+        });
+
+        let err = server_transport.read_line().await.expect_err("oversized");
+        assert!(is_wire_oversized_io_error(&err));
+        assert_eq!(err.to_string(), WIRE_RECORD_TOO_LARGE);
+        // Reason code is `wire_record_too_large` (contains 'w'); assert the
+        // hostile fill pattern itself is not echoed.
+        assert!(!err.to_string().contains("wwww"));
+        writer.await.expect("writer");
+    }
+
+    #[tokio::test]
+    async fn broker_transport_accepts_exact_cap_and_recovers_next_frame_after_oversize() {
+        let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
+            .await
+            .expect("bind");
+
+        let client = BrokerStream::connect(&bound).await.expect("connect");
+        let server = listener.accept().await.expect("accept");
+        let mut server_transport = BrokerStreamTransport::new(server);
+
+        let writer = tokio::spawn(async move {
+            let mut client = client;
+            let chunk = vec![b'a'; 8192];
+            let mut remaining = crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES;
+            while remaining > 0 {
+                let n = remaining.min(chunk.len());
+                client.write_all(&chunk[..n]).await.expect("write exact");
+                remaining -= n;
+            }
+            client.write_all(b"\n").await.expect("exact newline");
+
+            let chunk = vec![b'z'; 8192];
+            let mut remaining = crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES + 1;
+            while remaining > 0 {
+                let n = remaining.min(chunk.len());
+                client
+                    .write_all(&chunk[..n])
+                    .await
+                    .expect("write oversized");
+                remaining -= n;
+            }
+            client.write_all(b"\n").await.expect("oversized newline");
+            client
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n")
+                .await
+                .expect("next frame");
+            client.flush().await.expect("flush");
+        });
+
+        assert_eq!(
+            server_transport
+                .read_line()
+                .await
+                .expect("exact accepted")
+                .expect("exact line")
+                .len(),
+            crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES
+        );
+        let error = server_transport
+            .read_line()
+            .await
+            .expect_err("one over rejected");
+        assert!(is_wire_oversized_io_error(&error));
+        assert_eq!(
+            server_transport
+                .read_line()
+                .await
+                .expect("next read")
+                .as_deref(),
+            Some(r#"{"jsonrpc":"2.0","method":"ping"}"#)
+        );
+        writer.await.expect("writer");
+    }
+
+    #[tokio::test]
+    async fn read_line_handling_writes_typed_rejection_without_payload_bytes() {
+        let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
+            .await
+            .expect("bind");
+
+        let mut client = BrokerStream::connect(&bound).await.expect("connect");
+        let server = listener.accept().await.expect("accept");
+        let mut server_transport = BrokerStreamTransport::new(server);
+
+        let writer = tokio::spawn(async move {
+            let prefix =
+                br#"{"jsonrpc":"2.0","id":"daemon-7","method":"tools/call","params":{"payload":""#;
+            client.write_all(prefix).await.expect("prefix");
+            let chunk = vec![b'q'; 4096];
+            let mut remaining = crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES
+                + 32 * 1024
+                - prefix.len();
+            while remaining > 0 {
+                let n = remaining.min(chunk.len());
+                client.write_all(&chunk[..n]).await.expect("write");
+                remaining -= n;
+            }
+            client.write_all(b"\n").await.expect("newline");
+            client.flush().await.expect("flush");
+            client
+        });
+
+        let outcome = read_line_handling_wire_oversized(&mut server_transport)
+            .await
+            .expect("typed handling");
+        assert!(outcome.is_none());
+
+        let mut client = writer.await.expect("writer");
+        let mut response = Vec::new();
+        let mut buf = [0_u8; 1024];
+        loop {
+            let n = tokio::io::AsyncReadExt::read(&mut client, &mut buf)
+                .await
+                .expect("read rejection");
+            if n == 0 {
+                break;
+            }
+            response.extend_from_slice(&buf[..n]);
+            if response.contains(&b'\n') {
+                break;
+            }
+        }
+        let response: serde_json::Value =
+            serde_json::from_slice(&response).expect("JSON-RPC rejection");
+        assert_eq!(response["id"], serde_json::json!("daemon-7"));
+        assert_eq!(response["error"]["code"], serde_json::json!(-32600));
+        assert_eq!(
+            response["error"]["message"],
+            serde_json::json!(WIRE_RECORD_TOO_LARGE)
+        );
+        assert!(!response.to_string().contains('q'));
+    }
+}

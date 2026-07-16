@@ -117,7 +117,7 @@ fn foreign_keys_match(actual: &[ActualForeignKey], contract: &Table) -> bool {
     actual.len() == contract.foreign_keys.len()
         && contract.foreign_keys.iter().all(|expected| {
             actual.iter().any(|actual| {
-                actual.sequence == 0
+                actual.sequence == expected.sequence
                     && actual.from.eq_ignore_ascii_case(expected.from)
                     && actual
                         .target_table

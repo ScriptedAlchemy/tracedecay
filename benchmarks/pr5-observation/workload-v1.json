@@ -23,63 +23,527 @@
     "concurrency": 1
   },
   "input": {
-    "provider": "claude",
-    "scope": "profile",
-    "format": "jsonl",
-    "record_type": "user",
+    "providers": [
+      "claude",
+      "codex",
+      "cursor",
+      "hermes",
+      "kiro",
+      "cline",
+      "roo-code",
+      "kilo"
+    ],
+    "scopes": [
+      "profile",
+      "project"
+    ],
+    "formats": [
+      "jsonl",
+      "json_snapshot",
+      "sqlite"
+    ],
     "unique_ids": true,
     "secret_shaped_field_per_record": true
   },
   "provider_baselines": [
     {
       "provider": "claude",
-      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-claude-session", "message_id": "benchmark-claude-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
-      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
-      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+      "fixture": {
+        "format": "checked_in_native_bounded_copy_v1",
+        "source_paths": [
+          "tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json"
+        ],
+        "session_id": "benchmark-claude-session",
+        "message_id": "benchmark-claude-message-0",
+        "redacted_secret": "[TraceDecay redacted: fixture]"
+      },
+      "checks": [
+        "parse",
+        "normalize",
+        "sanitize",
+        "commit",
+        "replay",
+        "duplicate_noop",
+        "projection",
+        "backlog",
+        "fairness",
+        "peak_resource"
+      ],
+      "bounds": {
+        "records_per_repetition": 8,
+        "replay_limit": 9,
+        "max_backlog_records": 8,
+        "fair_rotation_providers": 8,
+        "peak_resource_fields": [
+          "cpu_ticks",
+          "process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib"
+        ]
+      },
+      "measurement": {
+        "harness_path": "claude_production_observation_pipeline_v1",
+        "harness_measures_performance": true,
+        "result_schema": "provider-observation-performance-result-v1",
+        "required_metrics": [
+          "parse_latency_p50_p95_p99",
+          "commit_latency_p50_p95_p99",
+          "replay_latency_p50_p95_p99",
+          "pipeline_latency_p50_p95_p99",
+          "pipeline_records_per_second",
+          "pipeline_cpu",
+          "pipeline_process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib",
+          "no_op_replay_latency_p50_p95_p99",
+          "no_op_observation_count_delta",
+          "bounded_replay_backlog_records"
+        ]
+      }
     },
     {
       "provider": "codex",
-      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-codex-session", "message_id": "benchmark-codex-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
-      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
-      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+      "fixture": {
+        "format": "checked_in_native_bounded_copy_v1",
+        "source_paths": [
+          "tests/fixtures/provider_normalization/codex/session_meta.input.json",
+          "tests/fixtures/provider_normalization/codex/agent_message.input.json"
+        ],
+        "session_id": "benchmark-codex-session",
+        "message_id": "benchmark-codex-message-0",
+        "redacted_secret": "[TraceDecay redacted: fixture]"
+      },
+      "checks": [
+        "parse",
+        "normalize",
+        "sanitize",
+        "commit",
+        "replay",
+        "duplicate_noop",
+        "projection",
+        "backlog",
+        "fairness",
+        "peak_resource"
+      ],
+      "bounds": {
+        "records_per_repetition": 8,
+        "replay_limit": 9,
+        "max_backlog_records": 8,
+        "fair_rotation_providers": 8,
+        "peak_resource_fields": [
+          "cpu_ticks",
+          "process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib"
+        ]
+      },
+      "measurement": {
+        "harness_path": "codex_production_observation_pipeline_v1",
+        "harness_measures_performance": true,
+        "result_schema": "provider-observation-performance-result-v1",
+        "required_metrics": [
+          "parse_latency_p50_p95_p99",
+          "commit_latency_p50_p95_p99",
+          "replay_latency_p50_p95_p99",
+          "pipeline_latency_p50_p95_p99",
+          "pipeline_records_per_second",
+          "pipeline_cpu",
+          "pipeline_process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib",
+          "no_op_replay_latency_p50_p95_p99",
+          "no_op_observation_count_delta",
+          "bounded_replay_backlog_records"
+        ]
+      }
     },
     {
       "provider": "cursor",
-      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-cursor-session", "message_id": "benchmark-cursor-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
-      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
-      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+      "fixture": {
+        "format": "checked_in_native_bounded_copy_v1",
+        "source_paths": [
+          "tests/fixtures/provider_normalization/cursor/tool_use.input.json"
+        ],
+        "session_id": "benchmark-cursor-session",
+        "message_id": "benchmark-cursor-message-0",
+        "redacted_secret": "[TraceDecay redacted: fixture]"
+      },
+      "checks": [
+        "parse",
+        "normalize",
+        "sanitize",
+        "commit",
+        "replay",
+        "duplicate_noop",
+        "projection",
+        "backlog",
+        "fairness",
+        "peak_resource"
+      ],
+      "bounds": {
+        "records_per_repetition": 8,
+        "replay_limit": 9,
+        "max_backlog_records": 8,
+        "fair_rotation_providers": 8,
+        "peak_resource_fields": [
+          "cpu_ticks",
+          "process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib"
+        ]
+      },
+      "measurement": {
+        "harness_path": "cursor_production_observation_pipeline_v1",
+        "harness_measures_performance": true,
+        "result_schema": "provider-observation-performance-result-v1",
+        "required_metrics": [
+          "parse_latency_p50_p95_p99",
+          "commit_latency_p50_p95_p99",
+          "replay_latency_p50_p95_p99",
+          "pipeline_latency_p50_p95_p99",
+          "pipeline_records_per_second",
+          "pipeline_cpu",
+          "pipeline_process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib",
+          "no_op_replay_latency_p50_p95_p99",
+          "no_op_observation_count_delta",
+          "bounded_replay_backlog_records"
+        ]
+      }
     },
     {
       "provider": "hermes",
-      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-hermes-session", "message_id": "benchmark-hermes-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
-      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
-      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+      "fixture": {
+        "format": "checked_in_native_bounded_copy_v1",
+        "source_paths": [
+          "tests/fixtures/provider_normalization/hermes/assistant_tool_call.input.json"
+        ],
+        "session_id": "benchmark-hermes-session",
+        "message_id": "benchmark-hermes-message-0",
+        "redacted_secret": "[TraceDecay redacted: fixture]"
+      },
+      "checks": [
+        "parse",
+        "normalize",
+        "sanitize",
+        "commit",
+        "replay",
+        "duplicate_noop",
+        "projection",
+        "backlog",
+        "fairness",
+        "peak_resource"
+      ],
+      "bounds": {
+        "records_per_repetition": 8,
+        "replay_limit": 9,
+        "max_backlog_records": 8,
+        "fair_rotation_providers": 8,
+        "peak_resource_fields": [
+          "cpu_ticks",
+          "process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib"
+        ]
+      },
+      "measurement": {
+        "harness_path": "hermes_production_observation_pipeline_v1",
+        "harness_measures_performance": true,
+        "result_schema": "provider-observation-performance-result-v1",
+        "required_metrics": [
+          "parse_latency_p50_p95_p99",
+          "commit_latency_p50_p95_p99",
+          "replay_latency_p50_p95_p99",
+          "pipeline_latency_p50_p95_p99",
+          "pipeline_records_per_second",
+          "pipeline_cpu",
+          "pipeline_process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib",
+          "no_op_replay_latency_p50_p95_p99",
+          "no_op_observation_count_delta",
+          "bounded_replay_backlog_records"
+        ]
+      }
     },
     {
       "provider": "kiro",
-      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-kiro-session", "message_id": "benchmark-kiro-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
-      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
-      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+      "fixture": {
+        "format": "checked_in_native_bounded_copy_v1",
+        "source_paths": [
+          "tests/fixtures/provider_normalization/kiro/workspace_session.input.json"
+        ],
+        "session_id": "benchmark-kiro-session",
+        "message_id": "benchmark-kiro-message-0",
+        "redacted_secret": "[TraceDecay redacted: fixture]"
+      },
+      "checks": [
+        "parse",
+        "normalize",
+        "sanitize",
+        "commit",
+        "replay",
+        "duplicate_noop",
+        "projection",
+        "backlog",
+        "fairness",
+        "peak_resource"
+      ],
+      "bounds": {
+        "records_per_repetition": 8,
+        "replay_limit": 9,
+        "max_backlog_records": 8,
+        "fair_rotation_providers": 8,
+        "peak_resource_fields": [
+          "cpu_ticks",
+          "process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib"
+        ]
+      },
+      "measurement": {
+        "harness_path": "kiro_production_observation_pipeline_v1",
+        "harness_measures_performance": true,
+        "result_schema": "provider-observation-performance-result-v1",
+        "required_metrics": [
+          "parse_latency_p50_p95_p99",
+          "commit_latency_p50_p95_p99",
+          "replay_latency_p50_p95_p99",
+          "pipeline_latency_p50_p95_p99",
+          "pipeline_records_per_second",
+          "pipeline_cpu",
+          "pipeline_process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib",
+          "no_op_replay_latency_p50_p95_p99",
+          "no_op_observation_count_delta",
+          "bounded_replay_backlog_records"
+        ]
+      }
     },
     {
       "provider": "cline",
-      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-cline-session", "message_id": "benchmark-cline-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
-      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
-      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+      "fixture": {
+        "format": "checked_in_native_bounded_copy_v1",
+        "source_paths": [
+          "tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json",
+          "tests/fixtures/transcript_golden/cline_like/input/task_metadata.json"
+        ],
+        "session_id": "benchmark-cline-session",
+        "message_id": "benchmark-cline-message-0",
+        "redacted_secret": "[TraceDecay redacted: fixture]"
+      },
+      "checks": [
+        "parse",
+        "normalize",
+        "sanitize",
+        "commit",
+        "replay",
+        "duplicate_noop",
+        "projection",
+        "backlog",
+        "fairness",
+        "peak_resource"
+      ],
+      "bounds": {
+        "records_per_repetition": 8,
+        "replay_limit": 9,
+        "max_backlog_records": 8,
+        "fair_rotation_providers": 8,
+        "peak_resource_fields": [
+          "cpu_ticks",
+          "process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib"
+        ]
+      },
+      "measurement": {
+        "harness_path": "cline_production_observation_pipeline_v1",
+        "harness_measures_performance": true,
+        "result_schema": "provider-observation-performance-result-v1",
+        "required_metrics": [
+          "parse_latency_p50_p95_p99",
+          "commit_latency_p50_p95_p99",
+          "replay_latency_p50_p95_p99",
+          "pipeline_latency_p50_p95_p99",
+          "pipeline_records_per_second",
+          "pipeline_cpu",
+          "pipeline_process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib",
+          "no_op_replay_latency_p50_p95_p99",
+          "no_op_observation_count_delta",
+          "bounded_replay_backlog_records"
+        ]
+      }
     },
     {
       "provider": "roo-code",
-      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-roo-code-session", "message_id": "benchmark-roo-code-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
-      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
-      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+      "fixture": {
+        "format": "checked_in_native_bounded_copy_v1",
+        "source_paths": [
+          "tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json",
+          "tests/fixtures/transcript_golden/cline_like/input/task_metadata.json"
+        ],
+        "session_id": "benchmark-roo-code-session",
+        "message_id": "benchmark-roo-code-message-0",
+        "redacted_secret": "[TraceDecay redacted: fixture]"
+      },
+      "checks": [
+        "parse",
+        "normalize",
+        "sanitize",
+        "commit",
+        "replay",
+        "duplicate_noop",
+        "projection",
+        "backlog",
+        "fairness",
+        "peak_resource"
+      ],
+      "bounds": {
+        "records_per_repetition": 8,
+        "replay_limit": 9,
+        "max_backlog_records": 8,
+        "fair_rotation_providers": 8,
+        "peak_resource_fields": [
+          "cpu_ticks",
+          "process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib"
+        ]
+      },
+      "measurement": {
+        "harness_path": "roo-code_production_observation_pipeline_v1",
+        "harness_measures_performance": true,
+        "result_schema": "provider-observation-performance-result-v1",
+        "required_metrics": [
+          "parse_latency_p50_p95_p99",
+          "commit_latency_p50_p95_p99",
+          "replay_latency_p50_p95_p99",
+          "pipeline_latency_p50_p95_p99",
+          "pipeline_records_per_second",
+          "pipeline_cpu",
+          "pipeline_process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib",
+          "no_op_replay_latency_p50_p95_p99",
+          "no_op_observation_count_delta",
+          "bounded_replay_backlog_records"
+        ]
+      }
     },
     {
       "provider": "kilo",
-      "fixture": {"format": "deterministic_redacted_synthetic_v1", "session_id": "benchmark-kilo-session", "message_id": "benchmark-kilo-message-0", "redacted_secret": "[TraceDecay redacted: fixture]"},
-      "checks": ["parse", "normalize", "sanitize", "commit", "replay", "duplicate_noop", "projection", "backlog", "fairness", "peak_resource"],
-      "bounds": {"records_per_repetition": 64, "replay_limit": 65, "max_backlog_records": 64, "fair_rotation_providers": 8, "peak_resource_fields": ["cpu_ticks", "process_write_bytes", "database_storage_growth_bytes", "peak_rss_kib"]}
+      "fixture": {
+        "format": "checked_in_native_bounded_copy_v1",
+        "source_paths": [
+          "tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json",
+          "tests/fixtures/transcript_golden/cline_like/input/task_metadata.json"
+        ],
+        "session_id": "benchmark-kilo-session",
+        "message_id": "benchmark-kilo-message-0",
+        "redacted_secret": "[TraceDecay redacted: fixture]"
+      },
+      "checks": [
+        "parse",
+        "normalize",
+        "sanitize",
+        "commit",
+        "replay",
+        "duplicate_noop",
+        "projection",
+        "backlog",
+        "fairness",
+        "peak_resource"
+      ],
+      "bounds": {
+        "records_per_repetition": 8,
+        "replay_limit": 9,
+        "max_backlog_records": 8,
+        "fair_rotation_providers": 8,
+        "peak_resource_fields": [
+          "cpu_ticks",
+          "process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib"
+        ]
+      },
+      "measurement": {
+        "harness_path": "kilo_production_observation_pipeline_v1",
+        "harness_measures_performance": true,
+        "result_schema": "provider-observation-performance-result-v1",
+        "required_metrics": [
+          "parse_latency_p50_p95_p99",
+          "commit_latency_p50_p95_p99",
+          "replay_latency_p50_p95_p99",
+          "pipeline_latency_p50_p95_p99",
+          "pipeline_records_per_second",
+          "pipeline_cpu",
+          "pipeline_process_write_bytes",
+          "database_storage_growth_bytes",
+          "peak_rss_kib",
+          "no_op_replay_latency_p50_p95_p99",
+          "no_op_observation_count_delta",
+          "bounded_replay_backlog_records"
+        ]
+      }
     }
   ],
+  "provider_result": {
+    "schema_version": 1,
+    "artifact_id": "provider-observation-performance-result-v1",
+    "result_field": "provider_observation_performance",
+    "required_provider_count": 8,
+    "records_per_repetition": 8,
+    "pipeline_scope": "production_parse_normalize_sanitize_commit_project_and_replay",
+    "required_phase_scopes": {
+      "parse": "native_provider_format_decode",
+      "commit": "production_adapter_parse_normalize_sanitize_commit_and_project",
+      "replay": "authoritative_store_bounded_replay"
+    },
+    "required_distributions": [
+      "parse.latency",
+      "commit.latency",
+      "replay.latency",
+      "pipeline_latency",
+      "no_op_latency"
+    ],
+    "required_resources": [
+      "cpu_ticks",
+      "process_write_bytes",
+      "database_storage_growth_bytes",
+      "peak_rss_kib"
+    ],
+    "required_backlog_fields": [
+      "replay_limit",
+      "max_backlog_records"
+    ],
+    "required_fairness_fields": [
+      "policy",
+      "rounds",
+      "providers_per_round",
+      "max_provider_turn_distance",
+      "turns"
+    ],
+    "required_no_op_observation_count_delta": 0
+  },
+  "hook_telemetry_readiness": {
+    "artifact_id": "hook-telemetry-baseline-readiness-v1",
+    "artifact_kind": "readiness_and_fixture_identity_not_runtime_contract",
+    "result_field": "hook_telemetry_readiness",
+    "direct_fixture_paths": [
+      "tests/fixtures/host_events/claude/baseline.json",
+      "tests/fixtures/host_events/codex/baseline.json",
+      "tests/fixtures/host_events/cursor/baseline.json",
+      "tests/fixtures/host_events/hermes/baseline.json",
+      "tests/fixtures/host_events/kiro/baseline.json"
+    ],
+    "fixture_identity_method": "sha256_recorded_in_runtime_readiness_catalog",
+    "canonical_payload_method": "crate_hooks_measure_host_event_payload_bytes",
+    "canonical_telemetry_contract": "crate_hooks_host_hook_telemetry_contract"
+  },
   "phases": [
     "scan_complete_transcript",
     "parse_records",
@@ -108,7 +572,11 @@
     "latency": {
       "source": "monotonic_clock",
       "unit": "nanoseconds",
-      "percentiles": [50, 95, 99],
+      "percentiles": [
+        50,
+        95,
+        99
+      ],
       "percentile_method": "nearest_rank",
       "dispersion": "sample_stddev"
     },
@@ -117,10 +585,21 @@
       "numerator": "committed_and_replayed_input_records",
       "denominator": "summed_pipeline_latency"
     },
+    "provider_pipeline_scope": {
+      "measured": "production_parse_normalize_sanitize_commit_project_and_replay",
+      "separate_phase_distributions": {
+        "parse": "native_provider_format_decode",
+        "commit": "production_adapter_parse_normalize_sanitize_commit_and_project",
+        "replay": "authoritative_store_bounded_replay"
+      }
+    },
     "cpu": {
       "source": "proc_self_stat_user_plus_system",
       "clock_ticks_per_second": "getconf_clk_tck",
-      "reported_units": ["ticks", "milliseconds"]
+      "reported_units": [
+        "ticks",
+        "milliseconds"
+      ]
     },
     "peak_memory": {
       "source": "proc_self_status_vmhwm",
@@ -133,12 +612,19 @@
       "unit": "bytes"
     },
     "database_storage_growth": {
-      "files": ["database", "wal", "shm"],
+      "files": [
+        "database",
+        "wal",
+        "shm"
+      ],
       "method": "summed_file_length_growth",
       "unit": "bytes"
     },
     "raw_samples": {
-      "phases": ["pipeline", "no_op_replay"],
+      "phases": [
+        "pipeline",
+        "no_op_replay"
+      ],
       "fields": [
         "repetition",
         "latency_ns",
@@ -148,8 +634,24 @@
         "peak_rss_kib",
         "replayed_observations"
       ]
+    },
+    "provider_phase_raw_samples": {
+      "phases": [
+        "parse",
+        "commit",
+        "replay"
+      ],
+      "fields": [
+        "repetition",
+        "latency_ns",
+        "cpu_ticks",
+        "process_write_bytes",
+        "database_storage_growth_bytes",
+        "peak_rss_kib",
+        "record_count"
+      ]
     }
   },
-  "command": "cargo test --quiet --locked --release --lib sessions::claude_observation_benchmark::production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1",
+  "command": "cargo test --quiet --release --lib sessions::claude_observation_benchmark::production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1",
   "evidence_runner": "scripts/run-pr5-observation-benchmark.sh"
 }

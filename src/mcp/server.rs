@@ -5,7 +5,7 @@
 //! The server exposes code graph tools via the Model Context Protocol,
 //! allowing AI assistants to query the code graph interactively.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -15,6 +15,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::application::host_admission::{
+    HostAdmissionOutcome, HostAdmissionStatus, TerminalReason, is_wire_oversized_io_error,
+};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::mcp::project_route::{
@@ -27,6 +30,10 @@ use crate::mcp::tool_analytics::{
     McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
 use crate::path_tree::format_compact_annotated_path_list;
+use crate::sessions::git_correlation::{
+    self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
+    SpanObservation, SpanSource,
+};
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use super::hook_events::{self, HookAgent, HookEventPlan};
@@ -736,6 +743,8 @@ fn serialize_response_line(resp: &JsonRpcResponse) -> String {
     }
 }
 
+use super::transport::write_wire_oversized_rejection;
+
 /// Cached result of a latest-version check against GitHub releases.
 struct VersionCheckState {
     latest: Option<String>,
@@ -892,6 +901,10 @@ pub(crate) struct McpServerConstructionContext {
     registry_db: Option<Arc<GlobalDb>>,
     session_db: Option<Arc<GlobalDb>>,
     user_session_db: Option<Arc<GlobalDb>>,
+    host_admission_broker: Option<crate::application::host_admission::SharedHostAdmissionBroker>,
+    /// When true (daemon-owned project servers), spawn a cancellable worker that
+    /// continues bounded host-admission replay passes until idle.
+    own_project_host_admission_replay: bool,
     allow_default_registry_fallback: bool,
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
@@ -915,6 +928,8 @@ pub(crate) struct McpServerDaemonDatabases {
 
 pub(crate) struct McpServerDaemonAuthority {
     pub(crate) databases: McpServerDaemonDatabases,
+    pub(crate) host_admission_broker:
+        Option<crate::application::host_admission::SharedHostAdmissionBroker>,
     pub(crate) database_owner_reconciler: DatabaseOwnerReconciler,
     pub(crate) writers: McpServerWriters,
 }
@@ -942,6 +957,8 @@ impl McpServerConstructionContext {
             registry_db: None,
             session_db: None,
             user_session_db: None,
+            host_admission_broker: None,
+            own_project_host_admission_replay: false,
             allow_default_registry_fallback: true,
             automation_scheduler_reconciler: None,
             database_owner_reconciler: None,
@@ -974,6 +991,7 @@ impl McpServerConstructionContext {
     ) -> Self {
         let McpServerDaemonAuthority {
             databases,
+            host_admission_broker,
             database_owner_reconciler,
             writers,
         } = authority;
@@ -984,6 +1002,8 @@ impl McpServerConstructionContext {
             registry_db: Some(databases.registry),
             session_db: Some(databases.project_sessions),
             user_session_db: Some(databases.user_sessions),
+            host_admission_broker,
+            own_project_host_admission_replay: true,
             allow_default_registry_fallback: false,
             automation_scheduler_reconciler: None,
             database_owner_reconciler: Some(database_owner_reconciler),
@@ -998,6 +1018,12 @@ impl McpServerConstructionContext {
         reconciler: crate::dashboard::AutomationSchedulerReconciler,
     ) -> Self {
         self.automation_scheduler_reconciler = Some(reconciler);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_owned_project_host_admission_replay(mut self) -> Self {
+        self.own_project_host_admission_replay = true;
         self
     }
 
@@ -1070,6 +1096,13 @@ pub struct McpServer {
     /// Daemon-owned user-scope session store. All project servers borrow this
     /// shared authority instead of reopening `user-sessions.db` per tool call.
     user_session_db: Option<Arc<GlobalDb>>,
+    /// Daemon-retained admission queue for non-replayable project host events.
+    /// Direct servers do not create an independent spool authority.
+    host_admission_broker: Option<crate::application::host_admission::SharedHostAdmissionBroker>,
+    /// Owned cancellable project replay worker (daemon-owned servers). Joined on
+    /// [`Self::shutdown`] so Unix and Windows drain the same way.
+    project_host_admission_replay:
+        tokio::sync::Mutex<Option<project_host_admission_replay::ProjectHostAdmissionReplayTask>>,
     /// Registry used for project-selector reads. This remains available even
     /// when global accounting is disabled so daemon clients do not fall back
     /// to the daemon process profile for selector resolution.
@@ -1213,6 +1246,7 @@ async fn run_startup_session_catch_up(
         );
         return None;
     };
+    let project_id = project_id.and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
     let project_outcome = crate::sessions::ingest_project_sources_for_provider(
         db.as_ref(),
         project_root,
@@ -1291,6 +1325,64 @@ impl McpServer {
         registry_db: Option<Arc<GlobalDb>>,
         allow_default_registry_fallback: bool,
     ) -> Arc<Self> {
+        let context = Self::direct_context_with_dbs(
+            cg,
+            scope_prefix,
+            global_db,
+            registry_db,
+            allow_default_registry_fallback,
+        )
+        .await;
+        Self::new_with_context(context).await
+    }
+
+    /// Builds a direct test server with an isolated project admission spool.
+    #[cfg(feature = "test-transport")]
+    #[doc(hidden)]
+    pub async fn new_with_dbs_and_host_admission_for_test(
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+        global_db: Option<Arc<GlobalDb>>,
+        registry_db: Option<Arc<GlobalDb>>,
+        allow_default_registry_fallback: bool,
+    ) -> Arc<Self> {
+        let mut context = Self::direct_context_with_dbs(
+            cg,
+            scope_prefix,
+            global_db,
+            registry_db,
+            allow_default_registry_fallback,
+        )
+        .await;
+        let Some(session_db) = context.session_db.as_ref() else {
+            panic!("test server project sessions database should open");
+        };
+        let database_path = session_db.db_path().to_path_buf();
+        let opened = tokio::task::spawn_blocking(move || {
+            crate::application::host_admission::HostAdmissionRuntime::open_for_database(
+                &database_path,
+            )
+        })
+        .await;
+        let Ok(opened) = opened else {
+            panic!("test server host-admission task should complete");
+        };
+        let Ok((runtime, _)) = opened else {
+            panic!("test server host-admission spool should open");
+        };
+        context.host_admission_broker = Some(Arc::new(
+            crate::application::host_admission::HostAdmissionBroker::new(runtime),
+        ));
+        Self::new_with_context(context).await
+    }
+
+    async fn direct_context_with_dbs(
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+        global_db: Option<Arc<GlobalDb>>,
+        registry_db: Option<Arc<GlobalDb>>,
+        allow_default_registry_fallback: bool,
+    ) -> McpServerConstructionContext {
         let profile_root = registry_db
             .as_ref()
             .and_then(|db| db.db_path().parent().map(Path::to_path_buf))
@@ -1311,16 +1403,13 @@ impl McpServer {
         let session_db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
             .await
             .map(Arc::new);
-        Self::new_with_context(
-            McpServerConstructionContext::direct(cg, scope_prefix).with_direct_databases(
-                global_db,
-                registry_db,
-                session_db,
-                user_session_db,
-                allow_default_registry_fallback,
-            ),
+        McpServerConstructionContext::direct(cg, scope_prefix).with_direct_databases(
+            global_db,
+            registry_db,
+            session_db,
+            user_session_db,
+            allow_default_registry_fallback,
         )
-        .await
     }
 
     pub(crate) async fn new_with_context(context: McpServerConstructionContext) -> Arc<Self> {
@@ -1331,6 +1420,8 @@ impl McpServer {
             registry_db,
             session_db,
             user_session_db,
+            host_admission_broker,
+            own_project_host_admission_replay,
             allow_default_registry_fallback,
             automation_scheduler_reconciler,
             database_owner_reconciler,
@@ -1390,6 +1481,8 @@ impl McpServer {
             session_db,
             registry_db,
             user_session_db,
+            host_admission_broker,
+            project_host_admission_replay: tokio::sync::Mutex::new(None),
             allow_default_registry_fallback,
             automation_scheduler_reconciler,
             database_owner_reconciler,
@@ -1436,6 +1529,28 @@ impl McpServer {
                 crate::tracedecay::current_timestamp(),
             );
         });
+        if own_project_host_admission_replay
+            && let Some(broker) = server.host_admission_broker.clone()
+        {
+            let server_for_pass = Arc::downgrade(&server);
+            let pass = Arc::new(move || {
+                let server = server_for_pass.clone();
+                Box::pin(async move {
+                    let Some(server) = server.upgrade() else {
+                        return HostAdmissionOutcome::retained_unavailable("spool_unavailable");
+                    };
+                    let outcome = server.replay_host_admission(None).await;
+                    Self::report_host_admission_outcome(outcome);
+                    outcome
+                })
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = HostAdmissionOutcome> + Send>,
+                    >
+            });
+            let worker =
+                project_host_admission_replay::ProjectHostAdmissionReplayTask::start(broker, pass);
+            *server.project_host_admission_replay.lock().await = Some(worker);
+        }
 
         // D1: startup catch-up sync. Reconciles changes made while the server
         // was down (terminal `git pull`, IDE edits before launch, another
@@ -2320,6 +2435,10 @@ impl McpServer {
                                     Ok(Some(line)) => line,
                                     Ok(None) => break,
                                     Err(e) => {
+                                        if is_wire_oversized_io_error(&e) {
+                                            let _ = write_wire_oversized_rejection(transport, &e).await;
+                                            break;
+                                        }
                                         self.shutdown_if(shutdown_on_exit).await;
                                         return Err(e.into());
                                     }
@@ -2335,6 +2454,10 @@ impl McpServer {
                                     Ok(Some(line)) => line,
                                     Ok(None) => break,
                                     Err(e) => {
+                                        if is_wire_oversized_io_error(&e) {
+                                            let _ = write_wire_oversized_rejection(transport, &e).await;
+                                            break;
+                                        }
                                         self.shutdown_if(shutdown_on_exit).await;
                                         return Err(e.into());
                                     }
@@ -2347,6 +2470,10 @@ impl McpServer {
                             Ok(Some(line)) => line,
                             Ok(None) => break,
                             Err(e) => {
+                                if is_wire_oversized_io_error(&e) {
+                                    let _ = write_wire_oversized_rejection(transport, &e).await;
+                                    break;
+                                }
                                 self.shutdown_if(shutdown_on_exit).await;
                                 return Err(e.into());
                             }
@@ -2362,6 +2489,10 @@ impl McpServer {
                                     Ok(Some(line)) => line,
                                     Ok(None) => break,
                                     Err(e) => {
+                                        if is_wire_oversized_io_error(&e) {
+                                            let _ = write_wire_oversized_rejection(transport, &e).await;
+                                            break;
+                                        }
                                         self.shutdown_if(shutdown_on_exit).await;
                                         return Err(e.into());
                                     }
@@ -2374,6 +2505,10 @@ impl McpServer {
                             Ok(Some(line)) => line,
                             Ok(None) => break,
                             Err(e) => {
+                                if is_wire_oversized_io_error(&e) {
+                                    let _ = write_wire_oversized_rejection(transport, &e).await;
+                                    break;
+                                }
                                 self.shutdown_if(shutdown_on_exit).await;
                                 return Err(e.into());
                             }
@@ -2497,6 +2632,10 @@ impl McpServer {
         // Idempotency guard: only run the persistence path once.
         if self.shutdown_done.swap(true, Ordering::SeqCst) {
             return;
+        }
+
+        if let Some(worker) = self.project_host_admission_replay.lock().await.take() {
+            worker.shutdown().await;
         }
 
         let uptime = self.stats.started_at.elapsed();
@@ -2645,33 +2784,276 @@ impl McpServer {
         &self,
         params: Option<&Value>,
         route_cache: &mut HookProjectRouteCache,
-    ) {
+    ) -> HostAdmissionOutcome {
         let Some(event) = hook_events::parse_hook_event(params) else {
-            return;
+            let outcome = HostAdmissionOutcome::degraded("malformed_event");
+            Self::report_host_admission_outcome(outcome);
+            return outcome;
         };
         let cg = self.reopen_if_branch_drifted().await;
         let root = cg.project_root().to_path_buf();
-        self.update_hook_workspace_route(&event, route_cache).await;
         let current_branch = crate::branch::current_branch(&root);
-        self.record_hook_route_analytics(&root, &event, current_branch.as_deref());
-        self.record_hook_span_observation(&event).await;
         let plan = hook_events::plan_hook_event(&event, &root, current_branch.as_deref());
-        self.run_hook_event_plan(cg, &root, plan).await;
+        let Ok(payload) = hook_events::encode_durable_hook_event_plan(&plan) else {
+            let outcome = HostAdmissionOutcome::degraded("invalid_host_event_plan");
+            Self::report_host_admission_outcome(outcome);
+            return outcome;
+        };
+        let admission_source = event.admission_source();
+        let admitted = match self.host_admission_broker.as_ref() {
+            Some(broker) => broker.admit(&admission_source, &payload).await,
+            None => Err(HostAdmissionOutcome::retained_unavailable(
+                "spool_unavailable",
+            )),
+        };
+        let admitted = match admitted {
+            Ok(admitted) => admitted,
+            Err(outcome) => {
+                Self::report_host_admission_outcome(outcome);
+                return outcome;
+            }
+        };
+        // Connection routing is identity for subsequent tool calls on this
+        // connection: publish it as soon as the routing event is durably
+        // appended, even when effect processing is deferred/retained. Do not
+        // wait for Committed — delayed replay must not leave tools unrouted.
+        self.update_hook_workspace_route(&event, route_cache).await;
+        let outcome = self.replay_host_admission(Some(admitted.seq)).await;
+        // Route analytics + span observations are side writes: only after the
+        // durable spool record is authoritatively committed (Committed or
+        // ExactDuplicate). Failures are best-effort and must never change the
+        // admission outcome already decided above.
+        if matches!(
+            outcome.status,
+            HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
+        ) {
+            self.record_hook_route_analytics(
+                &root,
+                &event,
+                current_branch.as_deref(),
+                admitted.seq,
+            );
+            self.record_hook_span_observation(&event).await;
+        }
+        Self::report_host_admission_outcome(outcome);
+        outcome
     }
 
-    async fn run_hook_event_plan(&self, cg: Arc<TraceDecay>, root: &Path, plan: HookEventPlan) {
+    async fn replay_host_admission(&self, target_seq: Option<u64>) -> HostAdmissionOutcome {
+        const MAX_RECORDS_PER_PASS: usize = 64;
+
+        let Some(broker) = self.host_admission_broker.as_ref() else {
+            return HostAdmissionOutcome::retained_unavailable("spool_unavailable");
+        };
+        let replay = match broker.begin_replay().await {
+            Ok(replay) => replay,
+            Err(outcome) => return outcome,
+        };
+        let mut attempted = HashSet::new();
+        let mut blocked_sources = HashSet::new();
+        let mut retained_leases = Vec::new();
+        let mut non_committed_outcome = None;
+        let mut target_outcome = None;
+        let mut terminal_outcome = None;
+        for _ in 0..MAX_RECORDS_PER_PASS {
+            let record = match replay.lease_next().await {
+                Ok(Some(record)) => record,
+                Ok(None) => break,
+                Err(outcome) => {
+                    terminal_outcome = Some(outcome);
+                    break;
+                }
+            };
+            if blocked_sources.contains(&record.source) {
+                retained_leases.push(record.seq);
+                continue;
+            }
+            if !attempted.insert(record.seq) {
+                let outcome = HostAdmissionOutcome::spool_ack_conflict();
+                blocked_sources.insert(record.source);
+                retained_leases.push(record.seq);
+                non_committed_outcome.get_or_insert(outcome);
+                if target_seq == Some(record.seq) {
+                    target_outcome = Some(outcome);
+                }
+                continue;
+            }
+            let plan = match hook_events::decode_durable_hook_event_plan(&record.payload) {
+                Ok(plan) => plan,
+                Err(hook_events::DurableHookEventDecodeError::UnsupportedVersion) => {
+                    let outcome = HostAdmissionOutcome::durable_payload_unsupported_version();
+                    blocked_sources.insert(record.source);
+                    retained_leases.push(record.seq);
+                    non_committed_outcome.get_or_insert(outcome);
+                    if target_seq == Some(record.seq) {
+                        target_outcome = Some(outcome);
+                    }
+                    continue;
+                }
+                Err(hook_events::DurableHookEventDecodeError::Malformed) => {
+                    let outcome = HostAdmissionOutcome::durable_payload_malformed();
+                    match replay
+                        .quarantine(record.seq, TerminalReason::MalformedPayload)
+                        .await
+                    {
+                        Ok(_) => {
+                            non_committed_outcome.get_or_insert(outcome);
+                            if target_seq == Some(record.seq) {
+                                target_outcome = Some(outcome);
+                            }
+                        }
+                        Err(failure) if failure == HostAdmissionOutcome::quarantine_full() => {
+                            blocked_sources.insert(record.source);
+                            retained_leases.push(record.seq);
+                            non_committed_outcome.get_or_insert(failure);
+                            if target_seq == Some(record.seq) {
+                                target_outcome = Some(failure);
+                            }
+                        }
+                        Err(failure) => {
+                            terminal_outcome = Some(failure);
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            };
+            let cg = self.reopen_if_branch_drifted().await;
+            let root = cg.project_root().to_path_buf();
+            let canonical_outcome = self.run_hook_event_plan(cg, &root, plan).await;
+            let outcome = if canonical_outcome.reason_code == Some("stale_branch_authorization")
+                && !canonical_outcome.retryable
+            {
+                match replay
+                    .quarantine(record.seq, TerminalReason::StaleBranchAuthorization)
+                    .await
+                {
+                    Ok(_) => {
+                        non_committed_outcome.get_or_insert(canonical_outcome);
+                        canonical_outcome
+                    }
+                    Err(failure) if failure == HostAdmissionOutcome::quarantine_full() => {
+                        blocked_sources.insert(record.source);
+                        retained_leases.push(record.seq);
+                        non_committed_outcome.get_or_insert(failure);
+                        failure
+                    }
+                    Err(failure) => {
+                        terminal_outcome = Some(failure);
+                        break;
+                    }
+                }
+            } else if matches!(
+                canonical_outcome.status,
+                HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
+            ) {
+                match replay.commit(record.seq).await {
+                    Ok(_) => canonical_outcome,
+                    Err(outcome) => {
+                        terminal_outcome = Some(outcome);
+                        break;
+                    }
+                }
+            } else {
+                blocked_sources.insert(record.source);
+                retained_leases.push(record.seq);
+                non_committed_outcome.get_or_insert(canonical_outcome);
+                canonical_outcome
+            };
+            if target_seq == Some(record.seq) {
+                target_outcome = Some(outcome);
+            }
+        }
+        for seq in retained_leases.into_iter().rev() {
+            if let Err(outcome) = replay.defer(seq).await {
+                return outcome;
+            }
+        }
+        terminal_outcome
+            .or(target_outcome)
+            .or(non_committed_outcome)
+            .unwrap_or_else(HostAdmissionOutcome::accepted_for_replay)
+    }
+
+    fn report_host_admission_outcome(outcome: HostAdmissionOutcome) {
+        if outcome.status.is_replay_progress() {
+            return;
+        }
+        eprintln!(
+            "[tracedecay] host admission disposition: {}",
+            outcome.reason_code.unwrap_or("host_admission_unavailable")
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_project_host_admission_replay_idle(&self, timeout: Duration) -> bool {
+        let worker = self
+            .project_host_admission_replay
+            .lock()
+            .await
+            .as_ref()
+            .map(|task| Arc::clone(task.worker()));
+        match worker {
+            Some(worker) => worker.wait_idle(timeout).await,
+            None => true,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn project_host_admission_replay_pass_count(&self) -> usize {
+        let guard = self.project_host_admission_replay.lock().await;
+        guard.as_ref().map_or(
+            0,
+            project_host_admission_replay::ProjectHostAdmissionReplayTask::pass_count,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn project_host_admission_replay_backoff_count(&self) -> usize {
+        let guard = self.project_host_admission_replay.lock().await;
+        guard.as_ref().map_or(
+            0,
+            project_host_admission_replay::ProjectHostAdmissionReplayTask::backoff_count,
+        )
+    }
+
+    async fn run_hook_event_plan(
+        &self,
+        cg: Arc<TraceDecay>,
+        root: &Path,
+        plan: HookEventPlan,
+    ) -> HostAdmissionOutcome {
         match plan {
             HookEventPlan::SyncFiles(rel_paths) => {
                 match cg.sync_if_stale_silent(&rel_paths).await {
-                    Ok(()) | Err(TraceDecayError::SyncLock { .. }) => {
+                    Ok(()) => {
                         self.refresh_file_token_map().await;
+                        HostAdmissionOutcome::replay_completed(true, false)
                     }
-                    Err(e) => eprintln!("[tracedecay] hook file sync failed: {e}"),
+                    Err(TraceDecayError::SyncLock { .. }) => {
+                        HostAdmissionOutcome::retained_backpressured("daemon_backpressure")
+                    }
+                    Err(_) => {
+                        HostAdmissionOutcome::retained_unavailable("canonical_admission_failed")
+                    }
                 }
             }
             HookEventPlan::AddBranch(branch) => {
+                // Project-root plans must revalidate live root + current branch
+                // immediately before effect — same strictness as AddBranchAt.
+                let root = match hook_events::authorize_planned_branch_effect(root, root, &branch) {
+                    Ok(authorized) => authorized,
+                    Err(error) => {
+                        return match error {
+                            hook_events::AddBranchAtRootAuthError::Unresolvable => {
+                                HostAdmissionOutcome::retained_unavailable(error.reason_code())
+                            }
+                            _ => HostAdmissionOutcome::degraded(error.reason_code()),
+                        };
+                    }
+                };
                 let request = HookBranchWriteRequest {
-                    root: root.to_path_buf(),
+                    root,
                     branch,
                     open_options: cg.open_options(),
                     incremental_sync_agent: None,
@@ -2680,21 +3062,47 @@ impl McpServer {
                     Ok(result) => match result.branch_outcome {
                         crate::branch::BranchAddOutcome::Added => {
                             self.reopen_after_branch_tracking_added().await;
+                            HostAdmissionOutcome::replay_completed(true, false)
                         }
                         crate::branch::BranchAddOutcome::AlreadyTracked => {
                             self.refresh_file_token_map().await;
+                            HostAdmissionOutcome::replay_completed(false, true)
                         }
-                        crate::branch::BranchAddOutcome::Deferred
-                        | crate::branch::BranchAddOutcome::NotIndexed => {}
+                        crate::branch::BranchAddOutcome::Deferred => {
+                            HostAdmissionOutcome::retained_backpressured("daemon_backpressure")
+                        }
+                        crate::branch::BranchAddOutcome::NotIndexed => {
+                            HostAdmissionOutcome::retained_unavailable(
+                                "canonical_admission_unavailable",
+                            )
+                        }
                     },
-                    Err(e) => eprintln!("[tracedecay] hook branch tracking failed: {e}"),
+                    Err(_) => {
+                        HostAdmissionOutcome::retained_unavailable("canonical_admission_failed")
+                    }
                 }
             }
             HookEventPlan::AddBranchAt {
-                root,
+                root: effect_root,
                 branch,
                 agent,
             } => {
+                // Durable effect roots stay concrete (not hashed) and must be
+                // freshly normalized, canonicalized, and reauthorized before
+                // any write — admit-time membership/branch are never reused.
+                let root =
+                    match hook_events::authorize_planned_branch_effect(&effect_root, root, &branch)
+                    {
+                        Ok(authorized) => authorized,
+                        Err(error) => {
+                            return match error {
+                                hook_events::AddBranchAtRootAuthError::Unresolvable => {
+                                    HostAdmissionOutcome::retained_unavailable(error.reason_code())
+                                }
+                                _ => HostAdmissionOutcome::degraded(error.reason_code()),
+                            };
+                        }
+                    };
                 let request = HookBranchWriteRequest {
                     root,
                     branch,
@@ -2702,16 +3110,48 @@ impl McpServer {
                     incremental_sync_agent: Some(agent),
                 };
                 match (self.hook_branch_writer)(request).await {
-                    Ok(result) if result.refresh_file_token_map => {
-                        self.refresh_file_token_map().await;
+                    Ok(result) => {
+                        if result.refresh_file_token_map {
+                            self.refresh_file_token_map().await;
+                        }
+                        match result.branch_outcome {
+                            crate::branch::BranchAddOutcome::Added => {
+                                HostAdmissionOutcome::replay_completed(true, false)
+                            }
+                            crate::branch::BranchAddOutcome::AlreadyTracked => {
+                                HostAdmissionOutcome::replay_completed(false, true)
+                            }
+                            crate::branch::BranchAddOutcome::Deferred => {
+                                HostAdmissionOutcome::retained_backpressured("daemon_backpressure")
+                            }
+                            crate::branch::BranchAddOutcome::NotIndexed => {
+                                HostAdmissionOutcome::retained_unavailable(
+                                    "canonical_admission_unavailable",
+                                )
+                            }
+                        }
                     }
-                    Ok(_) => {}
-                    Err(e) => eprintln!("[tracedecay] hook worktree branch write failed: {e}"),
+                    Err(_) => {
+                        HostAdmissionOutcome::retained_unavailable("canonical_admission_failed")
+                    }
                 }
             }
             HookEventPlan::SyncCurrentBranch { branch, agent } => {
+                // Session/workspace sync plans capture branch at admit time;
+                // revalidate live root + current branch immediately before effect.
+                let root = match hook_events::authorize_planned_branch_effect(root, root, &branch) {
+                    Ok(authorized) => authorized,
+                    Err(error) => {
+                        return match error {
+                            hook_events::AddBranchAtRootAuthError::Unresolvable => {
+                                HostAdmissionOutcome::retained_unavailable(error.reason_code())
+                            }
+                            _ => HostAdmissionOutcome::degraded(error.reason_code()),
+                        };
+                    }
+                };
                 let request = HookBranchWriteRequest {
-                    root: root.to_path_buf(),
+                    root,
                     branch,
                     open_options: cg.open_options(),
                     incremental_sync_agent: Some(agent),
@@ -2720,22 +3160,30 @@ impl McpServer {
                     Ok(result) => match result.branch_outcome {
                         crate::branch::BranchAddOutcome::Added => {
                             self.reopen_after_branch_tracking_added().await;
+                            HostAdmissionOutcome::replay_completed(true, false)
                         }
                         crate::branch::BranchAddOutcome::AlreadyTracked => {
                             if result.refresh_file_token_map {
                                 self.refresh_file_token_map().await;
                             }
+                            HostAdmissionOutcome::replay_completed(false, true)
                         }
-                        crate::branch::BranchAddOutcome::Deferred
-                        | crate::branch::BranchAddOutcome::NotIndexed => {}
+                        crate::branch::BranchAddOutcome::Deferred => {
+                            HostAdmissionOutcome::retained_backpressured("daemon_backpressure")
+                        }
+                        crate::branch::BranchAddOutcome::NotIndexed => {
+                            HostAdmissionOutcome::retained_unavailable(
+                                "canonical_admission_unavailable",
+                            )
+                        }
                     },
-                    Err(e) => {
-                        eprintln!("[tracedecay] hook current branch tracking failed: {e}");
+                    Err(_) => {
+                        HostAdmissionOutcome::retained_unavailable("canonical_admission_failed")
                     }
                 }
             }
             HookEventPlan::DebouncedIncrementalSync(agent) => {
-                self.run_hook_incremental_sync(cg, agent).await;
+                self.run_hook_incremental_sync(cg, agent).await
             }
             HookEventPlan::RecordTerminalReceipt { route, receipt } => {
                 match crate::automation::host_receipts::record(
@@ -2749,9 +3197,12 @@ impl McpServer {
                         if let Some(reconcile) = &self.automation_scheduler_reconciler {
                             reconcile();
                         }
+                        HostAdmissionOutcome::replay_completed(true, false)
                     }
-                    Ok(false) => {}
-                    Err(error) => eprintln!("[tracedecay] host receipt record failed: {error}"),
+                    Ok(false) => HostAdmissionOutcome::replay_completed(false, true),
+                    Err(_) => {
+                        HostAdmissionOutcome::retained_unavailable("canonical_admission_failed")
+                    }
                 }
             }
             HookEventPlan::MarkTurnIngested {
@@ -2769,19 +3220,29 @@ impl McpServer {
                         if let Some(reconcile) = &self.automation_scheduler_reconciler {
                             reconcile();
                         }
+                        HostAdmissionOutcome::replay_completed(true, false)
                     }
-                    Err(error) => eprintln!("[tracedecay] turn ingest receipt failed: {error}"),
+                    Err(_) => {
+                        HostAdmissionOutcome::retained_unavailable("canonical_admission_failed")
+                    }
                 }
             }
-            HookEventPlan::Noop => {}
+            HookEventPlan::Noop => HostAdmissionOutcome::replay_completed(false, true),
         }
     }
 
-    async fn run_hook_incremental_sync(&self, cg: Arc<TraceDecay>, agent: HookAgent) {
+    async fn run_hook_incremental_sync(
+        &self,
+        cg: Arc<TraceDecay>,
+        agent: HookAgent,
+    ) -> HostAdmissionOutcome {
         match run_hook_incremental_sync_direct(&cg, agent).await {
-            Ok(true) => self.refresh_file_token_map().await,
-            Ok(false) => {}
-            Err(e) => eprintln!("[tracedecay] hook incremental sync failed: {e}"),
+            Ok(true) => {
+                self.refresh_file_token_map().await;
+                HostAdmissionOutcome::replay_completed(true, false)
+            }
+            Ok(false) => HostAdmissionOutcome::replay_completed(false, true),
+            Err(_) => HostAdmissionOutcome::retained_unavailable("canonical_admission_failed"),
         }
     }
 
@@ -3070,7 +3531,14 @@ impl McpServer {
             );
         };
 
-        let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+        let mut arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+        if crate::mcp::project_route::protect_tool_structural_ids(&mut arguments).is_err() {
+            return JsonRpcResponse::error(
+                id,
+                ErrorCode::InvalidParams,
+                "invalid structural identifier".to_string(),
+            );
+        }
         let analytics_arguments = arguments.clone();
         let analytics_session_id = mcp_analytics_session_id(&arguments);
 
@@ -3466,17 +3934,25 @@ impl McpServer {
         });
     }
 
+    /// Best-effort hook-route analytics after authoritative admission commit.
+    ///
+    /// Insert failures are logged only — they never alter
+    /// [`HostAdmissionOutcome`]. The durable admission sequence is carried as
+    /// the event idempotency identity, so identical but distinct admissions
+    /// remain distinct analytics rows.
     fn record_hook_route_analytics(
         &self,
         project_root: &std::path::Path,
         event: &hook_events::HookEvent,
         current_branch: Option<&str>,
+        admission_seq: u64,
     ) {
         let Some(event) = hook_route_analytics_event(
             project_root,
             event,
             current_branch,
             crate::tracedecay::current_timestamp(),
+            admission_seq,
         ) else {
             return;
         };
@@ -3485,6 +3961,8 @@ impl McpServer {
         };
         self.spawn_observed_ledger_write(async move {
             if let Err(e) = gdb.append_analytics_event(&event).await {
+                // Deliberate fail-open: admission already committed; telemetry
+                // loss is preferred over blocking or rewriting host outcomes.
                 eprintln!("[tracedecay] hook route analytics insert failed: {e}");
             }
         });
@@ -3508,19 +3986,23 @@ impl McpServer {
     /// merge regardless, so a dropped observation only widens a span slightly
     /// less).
     async fn record_hook_span_observation(&self, event: &hook_events::HookEvent) {
-        use crate::sessions::git_correlation::{
-            self as gc, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
-            SpanObservation, SpanSource,
-        };
+        const MAX_SPAN_IDENTIFIER_BYTES: usize = 256;
 
         let Some(route) = event.route.as_ref() else {
             return;
         };
-        let Some(session_id) = route
-            .session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+
+        let bounded_identifier = |value: Option<&str>| {
+            value
+                .filter(|value| {
+                    !value.is_empty()
+                        && value.len() <= MAX_SPAN_IDENTIFIER_BYTES
+                        && !value.chars().any(char::is_control)
+                })
+                .map(str::to_string)
+        };
+        let Some(session_id) = bounded_identifier(route.session_id.as_deref())
+            .and_then(|value| crate::privacy::protect_sensitive_structural_id(&value).ok())
         else {
             return;
         };
@@ -3544,32 +4026,23 @@ impl McpServer {
             return;
         };
 
-        // Worktree preference: the routed worktree, else the cwd's git
-        // worktree root, else the resolved project root. Never fabricated.
-        let worktree_raw = route
-            .worktree
-            .as_deref()
-            .map(Path::to_path_buf)
-            .or_else(|| crate::worktree::git_worktree_root(cwd))
-            .unwrap_or_else(|| project_root.clone());
-        let worktree = gc::normalize_worktree(&worktree_raw.to_string_lossy());
-
-        let branch = route
-            .branch
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        let thread_id = route
-            .thread_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
+        // Derive the worktree and branch from the freshly authorized cwd.
+        // Route-provided worktree/branch strings are hints, not authority.
+        let worktree_raw =
+            crate::worktree::git_worktree_root(cwd).unwrap_or_else(|| project_root.clone());
+        let Ok(worktree_raw) =
+            hook_events::authorize_add_branch_at_root(&worktree_raw, &active_project_root)
+        else {
+            return;
+        };
+        let worktree = git_correlation::normalize_worktree(&worktree_raw.to_string_lossy());
+        let branch = bounded_identifier(crate::branch::current_branch(&worktree_raw).as_deref());
+        let thread_id = bounded_identifier(route.thread_id.as_deref())
+            .and_then(|value| crate::privacy::protect_sensitive_structural_id(&value).ok());
         let ts = crate::tracedecay::current_timestamp();
 
         // Hook routes are provider-agnostic: leave provider empty.
-        let key = gc::span_debounce_key("", session_id, branch.as_deref(), &worktree);
+        let key = git_correlation::span_debounce_key("", &session_id, branch.as_deref(), &worktree);
         let should_record = self
             .span_observation_debounce
             .lock()
@@ -3582,7 +4055,7 @@ impl McpServer {
 
         let observation = SpanObservation {
             provider: String::new(),
-            session_id: session_id.to_string(),
+            session_id,
             thread_id,
             branch,
             worktree,
@@ -3690,6 +4163,8 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
         _ => None,
     }
 }
+mod project_host_admission_replay;
+
 /// D7 (staleness UX) + D1/D4 (startup catch-up + sync-on-read) behavioural
 /// tests. The pure-logic banner tests need no server; the server tests build
 /// a real indexed `TraceDecay` over a temp git repo, mirroring the
@@ -3702,7 +4177,13 @@ mod background_refresh_writer_tests;
 mod freshness_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+mod hook_boundary_failure_matrix_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod hook_branch_writer_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod host_admission_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod staleness_banner_tests;

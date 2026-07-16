@@ -7,9 +7,12 @@ use tracedecay_domain::{
     CanonicalClaudeSanitizationReceiptMaterialV1, CanonicalMessageRoleV1,
     CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
     CanonicalObservationIdV1, CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1,
-    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
-    ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
-    IdempotencyKeyV1, ObservationCollisionOutcomeV1, ObservationContractError, ObservationId,
+    CanonicalWorkflowSemanticKindV1, ClaudeByteRangeV1, ClaudeFileGenerationV1,
+    ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
+    ComponentVersion, DurableClaudeObservationV1, IdempotencyKeyV1,
+    MAX_CANONICAL_OBSERVATION_FACTS_V1, MAX_OBSERVATION_RECORD_BYTES,
+    MAX_OBSERVATION_STRUCTURE_DEPTH, MAX_OBSERVATION_STRUCTURE_VALUES,
+    ObservationCollisionOutcomeV1, ObservationContractError, ObservationId,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceIdentityV1, PayloadReferenceV1, ProjectId, ProviderId, RetentionClass,
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
@@ -67,6 +70,49 @@ fn durable(
         payload,
     )
     .unwrap()
+}
+
+fn envelope_with_content(
+    content: Value,
+) -> Result<CanonicalObservationEnvelopeV1, ObservationContractError> {
+    CanonicalObservationEnvelopeV1::new(
+        ProviderId::new("fixture-provider").unwrap(),
+        "message",
+        ObservationId::new("message.fixture").unwrap(),
+        CanonicalObservationRelationsV1::new(SessionId::new("session.fixture").unwrap()),
+        vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::Assistant,
+            content,
+            model: None,
+            timestamp: None,
+        }],
+        CanonicalObservationEvidenceV1::new(
+            ObservationOrderingDomainV1::FileBytes,
+            ClaudeByteRangeV1::new(1, 2).unwrap(),
+        ),
+    )
+}
+
+fn json_structure_metrics(value: &Value) -> (usize, usize) {
+    let mut values = 0usize;
+    let mut max_depth = 0usize;
+    let mut stack = vec![(value, 1usize)];
+    while let Some((current, depth)) = stack.pop() {
+        values += 1;
+        max_depth = max_depth.max(depth);
+        match current {
+            Value::Array(items) => stack.extend(items.iter().map(|item| (item, depth + 1))),
+            Value::Object(fields) => {
+                stack.extend(fields.values().map(|item| (item, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    (values, max_depth)
+}
+
+fn nested_arrays(depth: usize) -> Value {
+    (0..depth).fold(Value::Null, |value, _| Value::Array(vec![value]))
 }
 
 #[test]
@@ -198,6 +244,219 @@ fn canonical_envelope_preserves_typed_facts_without_inventing_relations() {
             .get("thread_id")
             .is_none()
     );
+}
+
+#[test]
+fn canonical_session_fact_keeps_project_identity_separate_from_native_location() {
+    let envelope = CanonicalObservationEnvelopeV1::new(
+        ProviderId::new("hermes").unwrap(),
+        "message",
+        ObservationId::new("message.session-location").unwrap(),
+        CanonicalObservationRelationsV1::new(SessionId::new("session.location").unwrap())
+            .with_message_id(ObservationId::new("message.session-location").unwrap()),
+        vec![
+            CanonicalObservationFactV1::Session {
+                project_path: Some("/workspace/project".to_owned()),
+                location_path: Some("/workspace/project/.worktrees/feature".to_owned()),
+                transcript_path: Some("/transcripts/session.jsonl".to_owned()),
+                title: None,
+                started_at: Some(10),
+                ended_at: Some(20),
+                source: Some("provider_store".to_owned()),
+                native_source: None,
+                profile: None,
+                location_provenance: Some("profile_pin".to_owned()),
+            },
+            CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!({"text": "safe"}),
+                model: None,
+                timestamp: Some(20),
+            },
+        ],
+        CanonicalObservationEvidenceV1::new(
+            ObservationOrderingDomainV1::SqliteRowId,
+            ClaudeByteRangeV1::new(1, 2).unwrap(),
+        ),
+    )
+    .unwrap();
+
+    let wire = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(wire["facts"][0]["project_path"], "/workspace/project");
+    assert_eq!(
+        wire["facts"][0]["location_path"],
+        "/workspace/project/.worktrees/feature"
+    );
+    assert_eq!(
+        wire["facts"][0]["transcript_path"],
+        "/transcripts/session.jsonl"
+    );
+    let decoded: CanonicalObservationEnvelopeV1 = serde_json::from_value(wire).unwrap();
+    decoded.validate().unwrap();
+    assert_eq!(decoded, envelope);
+}
+
+#[test]
+fn canonical_envelope_accepts_byte_depth_and_value_boundaries() {
+    let empty = envelope_with_content(Value::String(String::new())).unwrap();
+    let empty_bytes = serde_json::to_vec(&empty).unwrap().len();
+    let byte_boundary = envelope_with_content(Value::String(
+        "x".repeat(MAX_OBSERVATION_RECORD_BYTES - empty_bytes),
+    ))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&byte_boundary).unwrap().len(),
+        MAX_OBSERVATION_RECORD_BYTES
+    );
+
+    let depth_boundary =
+        envelope_with_content(nested_arrays(MAX_OBSERVATION_STRUCTURE_DEPTH - 4)).unwrap();
+    assert_eq!(
+        json_structure_metrics(&serde_json::to_value(depth_boundary).unwrap()).1,
+        MAX_OBSERVATION_STRUCTURE_DEPTH
+    );
+
+    let base = envelope_with_content(Value::Null).unwrap();
+    let base_values = json_structure_metrics(&serde_json::to_value(base).unwrap()).0;
+    let value_boundary = envelope_with_content(Value::Array(vec![
+        Value::Null;
+        MAX_OBSERVATION_STRUCTURE_VALUES
+            - base_values
+    ]))
+    .unwrap();
+    assert_eq!(
+        json_structure_metrics(&serde_json::to_value(value_boundary).unwrap()).0,
+        MAX_OBSERVATION_STRUCTURE_VALUES
+    );
+}
+
+#[test]
+fn canonical_envelope_rejects_every_limit_overflow() {
+    let empty = envelope_with_content(Value::String(String::new())).unwrap();
+    let empty_bytes = serde_json::to_vec(&empty).unwrap().len();
+    let byte_error = envelope_with_content(Value::String(
+        "x".repeat(MAX_OBSERVATION_RECORD_BYTES - empty_bytes + 1),
+    ))
+    .unwrap_err();
+    assert_eq!(
+        byte_error,
+        ObservationContractError::CanonicalEnvelopeTooLarge
+    );
+
+    let depth_error =
+        envelope_with_content(nested_arrays(MAX_OBSERVATION_STRUCTURE_DEPTH - 3)).unwrap_err();
+    assert_eq!(
+        depth_error,
+        ObservationContractError::CanonicalEnvelopeTooDeep
+    );
+
+    let base = envelope_with_content(Value::Null).unwrap();
+    let base_values = json_structure_metrics(&serde_json::to_value(base).unwrap()).0;
+    let values_error = envelope_with_content(Value::Array(vec![
+        Value::Null;
+        MAX_OBSERVATION_STRUCTURE_VALUES
+            - base_values
+            + 1
+    ]))
+    .unwrap_err();
+    assert_eq!(
+        values_error,
+        ObservationContractError::CanonicalEnvelopeTooManyValues
+    );
+
+    let fact = CanonicalObservationFactV1::Usage {
+        input_tokens: None,
+        output_tokens: None,
+        cache_read_tokens: None,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+    };
+    let facts_error = CanonicalObservationEnvelopeV1::new(
+        ProviderId::new("fixture-provider").unwrap(),
+        "usage",
+        ObservationId::new("usage.fixture").unwrap(),
+        CanonicalObservationRelationsV1::new(SessionId::new("session.fixture").unwrap()),
+        vec![fact; MAX_CANONICAL_OBSERVATION_FACTS_V1 + 1],
+        CanonicalObservationEvidenceV1::new(
+            ObservationOrderingDomainV1::FileBytes,
+            ClaudeByteRangeV1::new(1, 2).unwrap(),
+        ),
+    )
+    .unwrap_err();
+    assert_eq!(facts_error, ObservationContractError::CanonicalFactsTooMany);
+}
+
+#[test]
+fn workflow_lifecycle_facts_preserve_native_optional_evidence_and_legacy_wire() {
+    let range = ClaudeByteRangeV1::new(8, 9).unwrap();
+    let envelope = CanonicalObservationEnvelopeV1::new(
+        ProviderId::new("fixture-provider").unwrap(),
+        "workflow_event",
+        ObservationId::new("workflow.fixture").unwrap(),
+        CanonicalObservationRelationsV1::new(SessionId::new("session.workflow-fixture").unwrap()),
+        vec![
+            CanonicalObservationFactV1::WorkflowLifecycle {
+                semantic_kind: CanonicalWorkflowSemanticKindV1::TodoList,
+                provider_reference: Some("native-list.7".to_owned()),
+                item_id: None,
+                parent_reference: Some("native-plan.3".to_owned()),
+                list_reference: None,
+                state: Some("active".to_owned()),
+                status: None,
+                item_order: None,
+                revision: Some("rev-a".to_owned()),
+                event_sequence: Some(41),
+                content: Some(json!({"title": "release checklist"})),
+            },
+            CanonicalObservationFactV1::WorkflowLifecycle {
+                semantic_kind: CanonicalWorkflowSemanticKindV1::TodoItem,
+                provider_reference: Some("native-item.9".to_owned()),
+                item_id: Some("stable-item.9".to_owned()),
+                parent_reference: None,
+                list_reference: Some("native-list.7".to_owned()),
+                state: None,
+                status: Some("in_progress".to_owned()),
+                item_order: Some(2),
+                revision: None,
+                event_sequence: None,
+                content: Some(json!({"text": "publish artifacts"})),
+            },
+        ],
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::DaemonSequence, range)
+            .with_native_sequence(52),
+    )
+    .unwrap();
+
+    let wire = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(wire["facts"][0]["semantic_kind"], "todo_list");
+    assert_eq!(wire["facts"][1]["item_order"], 2);
+    assert!(wire["facts"][0].get("item_id").is_none());
+    assert!(wire["facts"][0].get("status").is_none());
+    assert!(wire["facts"][1].get("state").is_none());
+    assert!(wire["facts"][1].get("revision").is_none());
+    let decoded: CanonicalObservationEnvelopeV1 = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(decoded, envelope);
+
+    let legacy = json!({
+        "version": 1,
+        "provider": "fixture-provider",
+        "native_record_kind": "workflow",
+        "stable_record_id": "legacy.workflow.1",
+        "relations": {"session_id": "session.workflow-fixture"},
+        "facts": [{
+            "kind": "workflow",
+            "evidence_kind": "task",
+            "reference": "legacy.task.1",
+            "content": {"text": "legacy task"}
+        }],
+        "evidence": {
+            "ordering_domain": "daemon_sequence",
+            "range": {"start": 1, "end": 2}
+        }
+    });
+    let legacy_decoded: CanonicalObservationEnvelopeV1 =
+        serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(legacy_decoded).unwrap(), legacy);
 }
 
 #[test]
@@ -575,5 +834,69 @@ fn collision_classification_distinguishes_duplicates_collisions_and_new_identity
     assert_eq!(
         classify_observation_collision(&existing, &distinct),
         ObservationCollisionOutcomeV1::Distinct
+    );
+}
+
+#[test]
+fn workflow_lifecycle_payload_dedupe_and_conflict_remain_deterministic() {
+    let material = profile_material();
+    let payload = |content: Value, status: &str| {
+        serde_json::to_value(
+            CanonicalObservationEnvelopeV1::new(
+                ProviderId::new("claude").unwrap(),
+                "workflow",
+                ObservationId::new("workflow.lifecycle.1").unwrap(),
+                CanonicalObservationRelationsV1::new(SessionId::new("session.fixture").unwrap()),
+                vec![CanonicalObservationFactV1::WorkflowLifecycle {
+                    semantic_kind: CanonicalWorkflowSemanticKindV1::Task,
+                    provider_reference: Some("task.native.1".to_owned()),
+                    item_id: Some("task.stable.1".to_owned()),
+                    parent_reference: None,
+                    list_reference: None,
+                    state: None,
+                    status: Some(status.to_owned()),
+                    item_order: None,
+                    revision: Some("1".to_owned()),
+                    event_sequence: Some(7),
+                    content: Some(content),
+                }],
+                CanonicalObservationEvidenceV1::new(
+                    ObservationOrderingDomainV1::FileBytes,
+                    ClaudeByteRangeV1::new(12, 34).unwrap(),
+                ),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let first = durable(
+        material.clone(),
+        payload(
+            json!({"text": "ship", "details": {"a": 1, "b": 2}}),
+            "pending",
+        ),
+    );
+    let reordered = durable(
+        material.clone(),
+        payload(
+            json!({"details": {"b": 2, "a": 1}, "text": "ship"}),
+            "pending",
+        ),
+    );
+    let conflicting = durable(
+        material,
+        payload(
+            json!({"details": {"a": 1, "b": 2}, "text": "ship"}),
+            "completed",
+        ),
+    );
+
+    assert_eq!(
+        classify_observation_collision(&first, &reordered),
+        ObservationCollisionOutcomeV1::ExactDuplicate
+    );
+    assert_eq!(
+        classify_observation_collision(&first, &conflicting),
+        ObservationCollisionOutcomeV1::IdentityCollision
     );
 }

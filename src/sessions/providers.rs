@@ -12,6 +12,18 @@ pub enum SessionProvider {
 }
 
 impl SessionProvider {
+    pub const ALL: [Self; 9] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Cursor,
+        Self::Hermes,
+        Self::Kiro,
+        Self::Cline,
+        Self::RooCode,
+        Self::Kilo,
+        Self::Vibe,
+    ];
+
     pub const fn id(self) -> &'static str {
         match self {
             Self::Cursor => "cursor",
@@ -39,6 +51,12 @@ impl SessionProvider {
             "hermes" => Some(Self::Hermes),
             _ => None,
         }
+    }
+
+    /// Whether this provider emits the canonical observation contract used by
+    /// host admission. Vibe remains transcript-only.
+    pub const fn supports_host_admission(self) -> bool {
+        !matches!(self, Self::Vibe)
     }
 }
 

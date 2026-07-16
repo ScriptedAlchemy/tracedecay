@@ -100,17 +100,39 @@ fn write(
     ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap()
 }
 
+const CROSS_PROVIDERS: &[&str] = &[
+    "claude", "codex", "cursor", "hermes", "kiro", "cline", "roo-code", "kilo",
+];
+
 fn native_source() -> ObservationSourceIdentityV1 {
+    provider_source("hermes", "session.observation-store-native")
+}
+
+fn provider_source(provider: &str, session_id: &str) -> ObservationSourceIdentityV1 {
     ObservationSourceIdentityV1::for_provider(
-        ProviderId::new("hermes").unwrap(),
-        SessionId::new("session.observation-store-native").unwrap(),
+        ProviderId::new(provider).unwrap(),
+        SessionId::new(session_id).unwrap(),
     )
     .unwrap()
 }
 
 fn native_cursor(generation: u64, position: u64) -> ObservationSourceCursorV1 {
+    provider_cursor(
+        "hermes",
+        "session.observation-store-native",
+        generation,
+        position,
+    )
+}
+
+fn provider_cursor(
+    provider: &str,
+    session_id: &str,
+    generation: u64,
+    position: u64,
+) -> ObservationSourceCursorV1 {
     ObservationSourceCursorV1::for_ordering(
-        native_source(),
+        provider_source(provider, session_id),
         scope(),
         ObservationSourceGenerationV1::new(generation).unwrap(),
         ObservationOrderingDomainV1::SqliteRowId,
@@ -127,6 +149,40 @@ fn native_observation(
     native_record_id: &str,
     body: &str,
 ) -> DurableClaudeObservationV1 {
+    provider_observation(ProviderObservationFixture {
+        provider: "hermes",
+        session_id: "session.observation-store-native",
+        generation,
+        start,
+        end,
+        receipt_id,
+        native_record_id,
+        body,
+    })
+}
+
+struct ProviderObservationFixture<'a> {
+    provider: &'a str,
+    session_id: &'a str,
+    generation: u64,
+    start: u64,
+    end: u64,
+    receipt_id: &'a str,
+    native_record_id: &'a str,
+    body: &'a str,
+}
+
+fn provider_observation(fixture: ProviderObservationFixture<'_>) -> DurableClaudeObservationV1 {
+    let ProviderObservationFixture {
+        provider,
+        session_id,
+        generation,
+        start,
+        end,
+        receipt_id,
+        native_record_id,
+        body,
+    } = fixture;
     let payload = json!({
         "kind": "assistant_message",
         "body": body,
@@ -144,7 +200,7 @@ fn native_observation(
     )
     .unwrap();
     let identity = ObservationIdentityMaterialV1::for_native_record(
-        native_source(),
+        provider_source(provider, session_id),
         scope(),
         ObservationSourceGenerationV1::new(generation).unwrap(),
         ObservationSourceRangeV1::new(start, end).unwrap(),
@@ -166,12 +222,41 @@ fn native_write(
     observation: DurableClaudeObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> ObservationWrite {
+    provider_write(observation, expected_cursor)
+}
+
+fn provider_write(
+    observation: DurableClaudeObservationV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+) -> ObservationWrite {
     let generation = observation.identity().generation().generation_id();
     let position = observation.identity().position().end();
-    ObservationWrite::new(
-        observation,
+    let next_cursor = ObservationSourceCursorV1::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        ObservationSourceGenerationV1::new(generation).unwrap(),
+        ObservationOrderingDomainV1::SqliteRowId,
+        position,
+    )
+    .unwrap();
+    ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap()
+}
+
+fn provider_malformed_advance(
+    provider: &str,
+    session_id: &str,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    start: u64,
+    end: u64,
+) -> ObservationCursorAdvance {
+    ObservationCursorAdvance::for_ordering(
+        provider_source(provider, session_id),
+        scope(),
+        ObservationSourceGenerationV1::new(GENERATION).unwrap(),
+        ObservationOrderingDomainV1::SqliteRowId,
         expected_cursor,
-        native_cursor(generation, position),
+        ObservationSourceRangeV1::new(start, end).unwrap(),
+        NonDurableFrameReason::MalformedFrame,
     )
     .unwrap()
 }
@@ -1475,4 +1560,290 @@ async fn point_read_and_replay_follow_authoritative_sequence_order() {
     assert_eq!(page.len(), 1);
     assert_eq!(page[0].sequence(), sequences[1]);
     assert_eq!(page[0].observation(), &observations[1]);
+}
+
+// These store-contract cases construct provider-tagged durable records directly.
+// They do not exercise provider transcript parsers or JSONL framing.
+#[tokio::test]
+async fn cross_provider_duplicate_conflict_reorder_non_durable_malformed_frame_and_restart_are_idempotent()
+ {
+    for provider in CROSS_PROVIDERS {
+        let session_id = format!("session.cross-store.{provider}");
+        let record_id = format!("{provider}.message.cross-store");
+        let tmp = TempDir::new().unwrap();
+        let db = open_lcm_db(&tmp).await;
+        let store = GlobalDbObservationStore::new(&db);
+        let source = provider_source(provider, &session_id);
+        let counts_before_commit = user_table_counts(&tmp).await;
+        let original = provider_observation(ProviderObservationFixture {
+            provider,
+            session_id: &session_id,
+            generation: GENERATION,
+            start: 0,
+            end: 1,
+            receipt_id: &format!("receipt.cross.{provider}.original"),
+            native_record_id: &record_id,
+            body: "stable cross-provider payload",
+        });
+
+        let first = store
+            .persist_observation(provider_write(original.clone(), None))
+            .await
+            .unwrap();
+        let original_receipt = match first {
+            ObservationPersistOutcome::Committed(receipt) => receipt,
+            other => panic!("{provider}: first persist must commit, got {other:?}"),
+        };
+        let cursor_after_commit = store.get_source_cursor(&source, &scope()).await.unwrap();
+        let counts_after_commit = user_table_counts(&tmp).await;
+        assert_eq!(original_receipt.observation(), &original, "{provider}");
+        assert_eq!(
+            cursor_after_commit.as_ref(),
+            Some(original_receipt.committed_cursor()),
+            "{provider}"
+        );
+        let commit_deltas = table_deltas(&counts_before_commit, &counts_after_commit);
+        assert_eq!(commit_deltas.len(), 4, "{provider}: {commit_deltas:?}");
+        assert!(
+            commit_deltas.values().all(|delta| *delta == 1),
+            "{provider}: {commit_deltas:?}"
+        );
+        assert_eq!(
+            commit_deltas.get("projection_queue"),
+            Some(&1),
+            "{provider}"
+        );
+        let replay_after_commit = store
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(replay_after_commit.len(), 1, "{provider}");
+
+        let duplicate = store
+            .persist_observation(provider_write(original.clone(), None))
+            .await
+            .unwrap();
+        assert!(
+            matches!(duplicate, ObservationPersistOutcome::ExactDuplicate(_)),
+            "{provider}: exact retry must be ExactDuplicate, got {duplicate:?}"
+        );
+        assert_eq!(
+            store.get_source_cursor(&source, &scope()).await.unwrap(),
+            cursor_after_commit,
+            "{provider}"
+        );
+        assert_eq!(
+            user_table_counts(&tmp).await,
+            counts_after_commit,
+            "{provider}"
+        );
+
+        let colliding = provider_observation(ProviderObservationFixture {
+            provider,
+            session_id: &session_id,
+            generation: GENERATION,
+            start: 0,
+            end: 1,
+            receipt_id: &format!("receipt.cross.{provider}.collision"),
+            native_record_id: &record_id,
+            body: "conflicting cross-provider payload",
+        });
+        let collision = store
+            .persist_observation(provider_write(colliding, None))
+            .await
+            .expect_err("{provider}: conflicting identity must fail closed");
+        assert!(
+            matches!(
+                collision,
+                ObservationStoreError::ObservationCollision { .. }
+            ),
+            "{provider}: expected ObservationCollision, got {collision:?}"
+        );
+        assert_eq!(
+            store.get_source_cursor(&source, &scope()).await.unwrap(),
+            cursor_after_commit,
+            "{provider}"
+        );
+        assert_eq!(
+            store
+                .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+                .await
+                .unwrap(),
+            replay_after_commit,
+            "{provider}"
+        );
+        assert_eq!(
+            user_table_counts(&tmp).await,
+            counts_after_commit,
+            "{provider}"
+        );
+
+        let reordered = provider_observation(ProviderObservationFixture {
+            provider,
+            session_id: &session_id,
+            generation: GENERATION,
+            start: 0,
+            end: 2,
+            receipt_id: &format!("receipt.cross.{provider}.reorder"),
+            native_record_id: &format!("{provider}.message.reordered"),
+            body: "reordered payload",
+        });
+        let reorder_error = store
+            .persist_observation(provider_write(reordered.clone(), None))
+            .await
+            .expect_err("{provider}: stale CAS reorder must roll back");
+        assert!(
+            matches!(reorder_error, ObservationStoreError::CursorConflict { .. }),
+            "{provider}: expected CursorConflict, got {reorder_error:?}"
+        );
+        assert!(
+            store
+                .get_observation(reordered.observation_id())
+                .await
+                .unwrap()
+                .is_none(),
+            "{provider}: reordered candidate must not persist"
+        );
+        assert_eq!(
+            user_table_counts(&tmp).await,
+            counts_after_commit,
+            "{provider}"
+        );
+
+        // A complete malformed frame advances non-durable coverage without an observation.
+        // This does not model an incomplete JSONL tail.
+        let malformed_advance_outcome = store
+            .advance_source_cursor(provider_malformed_advance(
+                provider,
+                &session_id,
+                cursor_after_commit.clone(),
+                1,
+                2,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            malformed_advance_outcome,
+            CursorAdvanceOutcome::Committed,
+            "{provider}"
+        );
+        let cursor_after_malformed_frame =
+            Some(provider_cursor(provider, &session_id, GENERATION, 2));
+        assert_eq!(
+            store.get_source_cursor(&source, &scope()).await.unwrap(),
+            cursor_after_malformed_frame,
+            "{provider}"
+        );
+        assert_eq!(
+            store
+                .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "{provider}: malformed-frame coverage must not invent observations"
+        );
+        let malformed_advance_retry = store
+            .advance_source_cursor(provider_malformed_advance(
+                provider,
+                &session_id,
+                cursor_after_commit.clone(),
+                1,
+                2,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            malformed_advance_retry,
+            CursorAdvanceOutcome::ExactDuplicate,
+            "{provider}"
+        );
+
+        let after_malformed_frame = provider_observation(ProviderObservationFixture {
+            provider,
+            session_id: &session_id,
+            generation: GENERATION,
+            start: 2,
+            end: 3,
+            receipt_id: &format!("receipt.cross.{provider}.after-malformed"),
+            native_record_id: &format!("{provider}.message.after-malformed"),
+            body: "payload after non-durable malformed frame",
+        });
+        let after_malformed_frame_outcome = store
+            .persist_observation(provider_write(
+                after_malformed_frame.clone(),
+                cursor_after_malformed_frame.clone(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                after_malformed_frame_outcome,
+                ObservationPersistOutcome::Committed(_)
+            ),
+            "{provider}: observation after malformed-frame coverage must commit, got {after_malformed_frame_outcome:?}"
+        );
+        let observation_id = original.observation_id().clone();
+        let after_malformed_frame_id = after_malformed_frame.observation_id().clone();
+        let counts_before_restart = user_table_counts(&tmp).await;
+        let replay_before_restart = store
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(replay_before_restart.len(), 2, "{provider}");
+        drop(db);
+
+        // Crash/restart + commit-before-ack: reopen and retry the original write.
+        let db = open_lcm_db(&tmp).await;
+        let store = GlobalDbObservationStore::new(&db);
+        let restarted_duplicate = store
+            .persist_observation(provider_write(original.clone(), None))
+            .await
+            .unwrap();
+        let restarted_receipt = match restarted_duplicate {
+            ObservationPersistOutcome::ExactDuplicate(receipt) => receipt,
+            other => panic!("{provider}: restart retry must be ExactDuplicate, got {other:?}"),
+        };
+        assert_eq!(
+            restarted_receipt.observation().observation_id(),
+            &observation_id,
+            "{provider}"
+        );
+        assert_eq!(
+            restarted_receipt.sequence(),
+            original_receipt.sequence(),
+            "{provider}"
+        );
+        assert_eq!(
+            store
+                .get_observation(&observation_id)
+                .await
+                .unwrap()
+                .expect("original survives restart")
+                .observation(),
+            &original,
+            "{provider}"
+        );
+        assert!(
+            store
+                .get_observation(&after_malformed_frame_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "{provider}"
+        );
+        assert_eq!(
+            store
+                .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+                .await
+                .unwrap(),
+            replay_before_restart,
+            "{provider}"
+        );
+        assert_eq!(
+            user_table_counts(&tmp).await,
+            counts_before_restart,
+            "{provider}"
+        );
+    }
 }

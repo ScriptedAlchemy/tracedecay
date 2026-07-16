@@ -4,17 +4,22 @@ use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmission
 use crate::application::observation::ObservationCancellation;
 use crate::global_db::GlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
-use crate::sessions::source::{self, TranscriptSource, try_ingest_source};
-use crate::sessions::{
-    SessionProvider, claude_observation, cline_like, codex, cursor, cursor_composer, hermes, kiro,
-    vibe,
-};
+use crate::sessions::source::{self, TranscriptDiscoveryBounds, TranscriptSource};
+use crate::sessions::{SessionProvider, claude_observation, codex, cursor, cursor_composer};
 use tracedecay_domain::ObservationScopeV1;
 
 use super::failure::{
-    TranscriptCatchUpFailure, classify_transcript_ingest_failure, claude_catch_up_failure,
+    IngestPassBounds, IngestPassCoverage, IngestPassOutcome, ProviderRunFold,
+    TranscriptCatchUpFailure, allocate_pass_byte_budgets, classify_transcript_ingest_failure,
+    scheduling_write_required,
+};
+use super::scheduler::{
+    USER_CATCH_UP_PROVIDERS, USER_INGEST_PROVIDER_FRONTIER_KEY, default_ingest_pass_bounds,
+    finish_user_provider_coverage, plan_user_provider_admission, read_ingest_frontier,
+    write_ingest_frontier,
 };
 use super::startup::TranscriptIngestOutcome;
+use super::user_provider::run_user_provider;
 
 pub const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
 
@@ -89,21 +94,67 @@ pub(crate) async fn try_ingest_user_codex_sessions_with_db(
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,
 ) -> source::TranscriptIngestResult<TranscriptIngestStats> {
+    try_ingest_user_codex_sessions_with_db_bounded(
+        db,
+        profile_root,
+        session_id,
+        registered_roots,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .map(|outcome| outcome.stats)
+}
+
+pub(super) async fn try_ingest_user_codex_sessions_with_db_bounded(
+    db: &GlobalDb,
+    profile_root: &Path,
+    session_id: Option<String>,
+    registered_roots: Vec<PathBuf>,
+    max_total_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+) -> source::TranscriptIngestResult<BoundedProviderOutcome> {
     let Some(source) = codex::CodexSource::new() else {
-        return Ok(TranscriptIngestStats::default());
+        return Ok(BoundedProviderOutcome {
+            stats: TranscriptIngestStats::default(),
+            bytes_consumed: 0,
+            deferred_by_byte_cap: false,
+        });
     };
     let source = source.for_user_scope(session_id.clone(), registered_roots.clone());
-    for path in source.transcript_paths(profile_root) {
-        codex::try_admit_codex_jsonl_observations_for_profile(
+    let discovery =
+        source.discover_transcript_paths(profile_root, TranscriptDiscoveryBounds::default_walk());
+    let mut remaining = max_total_new_bytes;
+    let mut bytes_consumed = 0u64;
+    let mut deferred_by_byte_cap = discovery.is_truncated();
+    let paths = discovery.paths;
+    for path in paths {
+        if cancellation.is_cancelled() {
+            break;
+        }
+        let progress = codex::try_admit_codex_jsonl_observations_for_profile(
             &path,
             db,
             session_id.as_deref(),
             &registered_roots,
-            None,
+            remaining,
         )
         .await?;
+        deferred_by_byte_cap |= progress.source_deferred;
+        bytes_consumed = bytes_consumed.saturating_add(progress.bytes_consumed);
+        if let Some(available) = remaining {
+            remaining = Some(available.saturating_sub(progress.bytes_consumed));
+        }
     }
-    drain_observation_projections(db, "codex").await
+    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db));
+    let stats =
+        drain_observation_projections(&facade, &ObservationScopeV1::Profile, "codex", cancellation)
+            .await?;
+    Ok(BoundedProviderOutcome {
+        stats,
+        bytes_consumed,
+        deferred_by_byte_cap,
+    })
 }
 
 pub async fn ingest_user_cursor_sessions() -> TranscriptIngestStats {
@@ -134,31 +185,63 @@ async fn try_ingest_user_cursor_sessions_with_db(
     db: &GlobalDb,
     registered_roots: Vec<PathBuf>,
 ) -> source::TranscriptIngestResult<TranscriptIngestStats> {
-    let owned = if let Some(source) = cursor_composer::CursorComposerSource::new() {
+    try_ingest_user_cursor_sessions_with_db_bounded(db, registered_roots, None)
+        .await
+        .map(|outcome| outcome.stats)
+}
+
+pub(super) struct BoundedProviderOutcome {
+    pub(super) stats: TranscriptIngestStats,
+    pub(super) bytes_consumed: u64,
+    pub(super) deferred_by_byte_cap: bool,
+}
+
+pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
+    db: &GlobalDb,
+    registered_roots: Vec<PathBuf>,
+    max_new_bytes: Option<u64>,
+) -> source::TranscriptIngestResult<BoundedProviderOutcome> {
+    let composer = if let Some(source) = cursor_composer::CursorComposerSource::new() {
         source
-            .ingest_user(
+            .ingest_user_capped(
                 db,
                 &registered_roots,
                 cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
+                max_new_bytes,
             )
             .await
-            .owned_session_ids
     } else {
-        std::collections::HashSet::default()
+        cursor_composer::CursorComposerSweepOutcome::default()
     };
-    let sweep =
-        cursor::try_ingest_cursor_user_sweep_capped(db, &registered_roots, None, owned).await?;
-    Ok(TranscriptIngestStats {
-        sessions_upserted: sweep.sessions_upserted,
-        messages_upserted: sweep.messages_upserted,
+    let remaining = max_new_bytes.map(|limit| limit.saturating_sub(composer.bytes_consumed));
+    let sweep = cursor::try_ingest_cursor_user_sweep_capped(
+        db,
+        &registered_roots,
+        remaining,
+        composer.owned_session_ids,
+    )
+    .await?;
+    Ok(BoundedProviderOutcome {
+        stats: TranscriptIngestStats {
+            sessions_upserted: composer
+                .sessions_upserted
+                .saturating_add(sweep.sessions_upserted),
+            messages_upserted: composer
+                .messages_upserted
+                .saturating_add(sweep.messages_upserted),
+        },
+        bytes_consumed: composer.bytes_consumed.saturating_add(sweep.bytes_consumed),
+        deferred_by_byte_cap: composer.deferred_by_byte_cap || sweep.source_deferred,
     })
 }
 
 async fn drain_observation_projections(
-    db: &GlobalDb,
+    facade: &HostAdmissionFacade<'_>,
+    scope: &ObservationScopeV1,
     provider: &'static str,
+    cancellation: &ObservationCancellation,
 ) -> source::TranscriptIngestResult<TranscriptIngestStats> {
-    let stats = claude_observation::drain_projection_queue(db, &ObservationCancellation::default())
+    let stats = claude_observation::drain_projection_queue(facade, scope, cancellation)
         .await
         .map_err(|error| match error {
             claude_observation::ClaudeObservationIngestError::Transcript(error) => error,
@@ -242,159 +325,181 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots(
     provider: Option<SessionProvider>,
     roots: Vec<PathBuf>,
 ) -> TranscriptIngestOutcome {
-    let mut stats = TranscriptIngestStats::default();
-    let mut failures = Vec::new();
-    if provider_selected(provider, SessionProvider::Codex) {
-        match try_ingest_user_codex_sessions_with_db(db, profile_root, None, roots.clone()).await {
-            Ok(source_stats) => stats = stats.merge(source_stats),
-            Err(error) => {
-                let failure = classify_transcript_ingest_failure("codex", "observation", &error);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "Codex transcript catch-up failed"
-                );
-                failures.push(failure);
-            }
+    ingest_user_global_sources_for_provider_with_roots_bounded(
+        db,
+        profile_root,
+        provider,
+        roots,
+        default_ingest_pass_bounds(),
+        &ObservationCancellation::default(),
+    )
+    .await
+    .into_transcript_outcome()
+}
+
+/// Bounded fair multi-provider user catch-up with typed coverage outcomes.
+pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
+    db: &GlobalDb,
+    profile_root: &Path,
+    provider: Option<SessionProvider>,
+    roots: Vec<PathBuf>,
+    bounds: IngestPassBounds,
+    cancellation: &ObservationCancellation,
+) -> IngestPassOutcome {
+    let selected: Vec<SessionProvider> = USER_CATCH_UP_PROVIDERS
+        .iter()
+        .copied()
+        .filter(|candidate| provider_selected(provider, *candidate))
+        .collect();
+    let Some(frontier) = read_ingest_frontier(db, USER_INGEST_PROVIDER_FRONTIER_KEY).await else {
+        return IngestPassOutcome::failed(TranscriptCatchUpFailure::pass_frontier_unavailable());
+    };
+    let plan = plan_user_provider_admission(selected.len(), frontier, bounds);
+    let mut coverage = plan.coverage;
+
+    let mut provider_runs = ProviderRunFold::default();
+    let mut attempted = 0usize;
+    let mut cancelled = false;
+    let budget_slots = plan
+        .admitted_indices
+        .len()
+        .saturating_mul(bounds.retries.saturating_add(1));
+    let initial_budgets = allocate_pass_byte_budgets(budget_slots, bounds);
+    let mut remaining_bytes = initial_budgets
+        .iter()
+        .copied()
+        .fold(0_u64, u64::saturating_add);
+    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db));
+
+    'providers: for &index in &plan.admitted_indices {
+        if cancellation.is_cancelled() {
+            cancelled = true;
+            provider_runs
+                .failures
+                .push(TranscriptCatchUpFailure::pass_cancelled());
+            break;
         }
-    }
-    if provider_selected(provider, SessionProvider::Cursor) {
-        match try_ingest_user_cursor_sessions_with_db(db, roots.clone()).await {
-            Ok(source_stats) => stats = stats.merge(source_stats),
-            Err(error) => {
-                let failure = classify_transcript_ingest_failure("cursor", "observation", &error);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "Cursor transcript catch-up failed"
-                );
-                failures.push(failure);
-            }
-        }
-    }
-    if provider_selected(provider, SessionProvider::Hermes) {
-        stats = stats.merge(hermes::ingest_user_sessions(db, &roots).await);
-    }
-    if provider_selected(provider, SessionProvider::Claude) {
-        match claude_observation::ingest_user_sessions(
-            db,
-            profile_root,
-            None,
-            roots.clone(),
-            None,
-            crate::application::observation::ObservationCancellation::default(),
-        )
-        .await
-        {
-            Ok(observation_stats) => {
-                stats = stats.merge(observation_stats.transcript);
-            }
-            Err(error) => {
-                let failure = claude_catch_up_failure("observation", &error);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "Claude observation catch-up failed"
-                );
-                failures.push(failure);
-            }
-        }
-    }
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::new(None, Some(db)));
-    if provider_selected(provider, SessionProvider::Kiro)
-        && let Some(source) = kiro::KiroSource::new()
-    {
-        let source = source.for_user_scope(roots.clone());
-        if let Err(error) = kiro::capture_kiro_snapshot_observations(
-            &facade,
-            &source,
-            profile_root,
-            ObservationScopeV1::Profile,
-            None,
-        )
-        .await
-        {
-            let failure = classify_transcript_ingest_failure("kiro", "observation", &error);
-            tracing::warn!(
-                reason_code = failure.reason_code,
-                retryable = failure.retryable,
-                "user Kiro observation catch-up failed"
-            );
-            failures.push(failure);
-        }
-    }
-    for (candidate, source) in [
-        (SessionProvider::Cline, cline_like::ClineLikeSource::cline()),
-        (
-            SessionProvider::RooCode,
-            cline_like::ClineLikeSource::roo_code(),
-        ),
-        (SessionProvider::Kilo, cline_like::ClineLikeSource::kilo()),
-    ] {
-        if !provider_selected(provider, candidate) {
-            continue;
-        }
-        let Some(source) = source else {
+        let Some(candidate) = selected.get(index).copied() else {
             continue;
         };
-        let source = source.for_user_scope(roots.clone());
-        if let Err(error) = cline_like::capture_cline_like_snapshot_observations(
+        if remaining_bytes == 0 || bounds.bytes_per_unit == 0 {
+            break;
+        }
+        attempted = attempted.saturating_add(1);
+        let mut retries = 0usize;
+        loop {
+            let grant = remaining_bytes.min(bounds.bytes_per_unit);
+            if grant == 0 {
+                break 'providers;
+            }
+            let mut unit_result = run_user_provider(
+                db,
+                profile_root,
+                &roots,
+                &facade,
+                candidate,
+                grant,
+                cancellation,
+            )
+            .await;
+            let within_byte_grant = unit_result.bytes_consumed <= grant;
+            unit_result.byte_bounds_enforced &= within_byte_grant;
+            remaining_bytes = remaining_bytes.saturating_sub(unit_result.bytes_consumed.min(grant));
+            if unit_result.succeeded() {
+                provider_runs.record(unit_result);
+                break;
+            }
+            if unit_result.retryable()
+                && retries < bounds.retries
+                && remaining_bytes > 0
+                && !cancellation.is_cancelled()
+            {
+                provider_runs.record_retry(&unit_result);
+                retries = retries.saturating_add(1);
+                continue;
+            }
+            provider_runs.record(unit_result);
+            break;
+        }
+        if cancellation.is_cancelled() {
+            cancelled = true;
+            provider_runs
+                .failures
+                .push(TranscriptCatchUpFailure::pass_cancelled());
+            break;
+        }
+    }
+
+    if !cancelled {
+        match drain_observation_projections(
             &facade,
-            &source,
-            profile_root,
-            ObservationScopeV1::Profile,
-            None,
+            &ObservationScopeV1::Profile,
+            provider.map_or("observation", SessionProvider::id),
+            cancellation,
         )
         .await
         {
-            let failure = classify_transcript_ingest_failure(candidate.id(), "observation", &error);
-            tracing::warn!(
-                provider = candidate.id(),
-                reason_code = failure.reason_code,
-                retryable = failure.retryable,
-                "user snapshot observation catch-up failed"
-            );
-            failures.push(failure);
-        }
-    }
-
-    if provider_selected(provider, SessionProvider::Vibe)
-        && let Some(source) = vibe::VibeSource::new()
-    {
-        let source = source.for_user_scope(roots);
-        match try_ingest_source(db, &source, profile_root, None).await {
-            Ok(source_stats) => stats = stats.merge(source_stats),
+            Ok(projection_stats) => {
+                provider_runs.stats = provider_runs.stats.merge(projection_stats);
+            }
             Err(error) => {
-                let failure = classify_transcript_ingest_failure("vibe", "transcript", &error);
+                let failure =
+                    classify_transcript_ingest_failure("observation", "projection", &error);
                 tracing::warn!(
                     reason_code = failure.reason_code,
                     retryable = failure.retryable,
-                    "user Vibe transcript catch-up failed"
+                    "user observation projection drain failed"
                 );
-                failures.push(failure);
+                provider_runs.failures.push(failure);
             }
         }
     }
-
-    match drain_observation_projections(db, provider.map_or("observation", SessionProvider::id))
-        .await
-    {
-        Ok(projection_stats) => stats = stats.merge(projection_stats),
-        Err(error) => {
-            let failure = classify_transcript_ingest_failure("observation", "projection", &error);
-            tracing::warn!(
-                reason_code = failure.reason_code,
-                retryable = failure.retryable,
-                "user observation projection drain failed"
-            );
-            failures.push(failure);
-        }
+    if !cancelled {
+        coverage = finish_user_provider_coverage(
+            coverage,
+            selected.len(),
+            attempted,
+            usize::try_from(provider_runs.deferred_units).unwrap_or(usize::MAX),
+        );
     }
-    if stats.messages_upserted > 0 {
+    if provider_runs.stats.messages_upserted > 0 {
         crate::hooks::schedule_user_session_review(
             provider.map_or("all", SessionProvider::id),
             None,
         );
     }
-    TranscriptIngestOutcome::new(stats, failures)
+
+    if matches!(coverage, IngestPassCoverage::Backpressured { .. })
+        && !provider_runs
+            .failures
+            .iter()
+            .any(|failure| failure.reason_code == "ingest_pass_backpressured")
+    {
+        provider_runs
+            .failures
+            .push(TranscriptCatchUpFailure::pass_backpressured());
+    }
+
+    let write = scheduling_write_required(coverage, attempted, cancelled);
+    let scheduling_state_written = if write {
+        write_ingest_frontier(db, USER_INGEST_PROVIDER_FRONTIER_KEY, frontier, attempted).await
+    } else {
+        false
+    };
+    if write && !scheduling_state_written {
+        provider_runs
+            .failures
+            .push(TranscriptCatchUpFailure::pass_frontier_unavailable());
+    }
+
+    IngestPassOutcome {
+        stats: provider_runs.stats,
+        failures: provider_runs.failures,
+        coverage,
+        scheduling_state_written,
+        units_admitted: u64::try_from(attempted).unwrap_or(u64::MAX),
+        units_completed: provider_runs.units_completed,
+        units_failed: provider_runs.units_failed,
+        byte_bounds_enforced: provider_runs.byte_bounds_enforced,
+    }
 }

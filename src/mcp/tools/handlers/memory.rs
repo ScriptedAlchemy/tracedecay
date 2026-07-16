@@ -256,11 +256,12 @@ fn update_rejected_secret_like(err: &TraceDecayError) -> Option<String> {
     }
 }
 
-fn action_mutates_memory(action: &str) -> bool {
-    matches!(
-        action,
-        "add" | "update" | "remove" | "search" | "probe" | "related" | "reason" | "list"
-    )
+fn action_writes_memory(action: &str) -> bool {
+    matches!(action, "add" | "update" | "remove")
+}
+
+fn action_records_retrieval(action: &str) -> bool {
+    matches!(action, "search" | "probe" | "related" | "reason" | "list")
 }
 
 async fn record_retrieval_counts(
@@ -326,7 +327,7 @@ pub(super) async fn handle_fact_store(
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
     let cross_project_selector = project_selector_present(&args, &["project_path"]);
-    if action_mutates_memory(action) && cross_project_selector {
+    if action_writes_memory(action) && cross_project_selector {
         return Err(config_error(
             "cross-project fact_store writes are not supported; omit project_selector to write the active project",
         ));
@@ -343,7 +344,8 @@ async fn handle_fact_store_for_target(
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
     let db = target_memory.db();
-    let reader = if action_mutates_memory(action) {
+    let records_retrieval = !cross_project_selector && action_records_retrieval(action);
+    let reader = if action_writes_memory(action) || records_retrieval {
         None
     } else {
         Some(
@@ -813,6 +815,36 @@ mod tests {
         assert!(rendered.contains("existing fact"), "{rendered}");
         assert!(!rendered.contains("uncommitted fact"), "{rendered}");
         transaction.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_fact_search_records_retrieval_without_snapshot_deadlock() {
+        let (_tmp, cg, fact_id) = seeded_memory().await;
+        let target = TargetMemoryDb {
+            db: TargetMemoryDbHandle::Active(cg.db()),
+            project_root: cg.project_root().to_path_buf(),
+            user_scope: true,
+        };
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle_fact_store_for_target(
+                json!({ "action": "search", "query": "existing fact" }),
+                false,
+                target,
+            ),
+        )
+        .await
+        .expect("local retrieval-counting actions must not hold a read snapshot")
+        .unwrap();
+
+        let fact = MemoryStore::new(cg.db().conn())
+            .get_fact(fact_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fact.retrieval_count, 1);
+        assert_eq!(fact.access_count, 1);
     }
 
     #[tokio::test]

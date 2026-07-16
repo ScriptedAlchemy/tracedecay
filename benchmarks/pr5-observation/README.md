@@ -1,26 +1,78 @@
-# PR5 observation-pipeline baseline
+# Provider-observation pipeline benchmark
 
-The versioned [workload](workload-v1.json) runs the production Claude
-scan/parse, sanitizer, authoritative commit, projection/V1 fold, and bounded
-replay path. It also carries one provider-neutral, versioned baseline schema
-for claude, codex, cursor, hermes, kiro, cline, roo-code, and kilo. Each entry
-uses a deterministic redacted synthetic fixture and bounds parse, normalize,
-sanitize, commit, replay, duplicate-noop, projection, backlog, fairness, and
-peak-resource checks supported by this harness. A normal test deserializes the
-complete manifest with unknown fields denied and checks its input, provider
-catalog, phases, excluded setup, no-op invariants, metrics, platform,
-repetitions, identity, and command against the executable harness.
+The directory keeps its PR5 name for artifact provenance. Workload schema 3 is
+the PR6 multi-provider acceptance harness; the earlier checked-in results remain
+historical PR5 evidence and are not current PR6 acceptance.
+
+The versioned [workload](workload-v1.json) runs production scan/parse,
+normalization, sanitizer, authoritative commit, projection/V1 fold, bounded
+replay, and exact repeat-ingest no-op paths for claude, codex, cursor, hermes,
+kiro, cline, roo-code, and kilo. Each provider baseline machine-asserts parse,
+normalize, sanitize, commit, replay, duplicate-noop, projection, backlog,
+fairness, and peak-resource checks. The measured loop executes one provider
+turn per round in catalog order, records every turn, and validates an
+eight-provider maximum turn distance. Each provider input is a bounded copy of
+the checked-in native fixtures named in the workload; unique identities and
+secret-shaped canaries are injected into those native shapes and the canaries
+must be absent from durable observations. The acceptance result embeds a versioned
+`provider-observation-performance-result-v1` containing per-provider raw
+parse/commit/replay/pipeline/no-op samples, p50/p95/p99 distributions,
+throughput, CPU, process write I/O, database growth, peak RSS, bounded replay backlog, and
+observation-count deltas. The pipeline is the real production
+parse/normalize/sanitize/commit/project/replay path. The separate parse
+distribution measures native provider-format decoding over the exact bounded
+input, commit measures the full production adapter through authoritative commit
+and projection, and replay measures the bounded authoritative-store query.
+Scopes are embedded beside each distribution so the commit sample is not
+misrepresented as excluding the adapter's parse and normalization work.
+
+The provider catalog remains schema v1. Its measurement block is an additive
+optional field for wire compatibility, while executable validation requires
+that block for every supported provider and rejects pending paths. This avoids
+an unnecessary incompatible schema-v2 claim. A normal test deserializes the
+complete manifest with unknown fields denied, executes every production adapter
+once, and proves each repeat is a durable no-op.
+
+Current acceptance artifacts must include the nested
+`provider_observation_performance` result and `hook_telemetry_readiness`
+evidence. The two checked-in artifacts remain
+valid only as `historical_stale`: `evidence-index.json` lists both under
+`historical_stale` and has no `current_acceptance`, so the retired-evidence
+validator intentionally does not require fields introduced by the new
+workload. A new artifact becomes current only after a clean attested run emits
+and validates real provider measurements.
+
+The acceptance result embeds hook telemetry readiness as
+`hook-telemetry-baseline-readiness-v1`, not as a measured baseline. It reads the
+redacted fixtures under `tests/fixtures/host_events` directly, records each
+fixture path and SHA-256 identity, and computes compact canonical request-byte
+samples. It consumes `crate::hooks::host_hook_telemetry_contract` and
+`crate::hooks::measure_host_event_payload_bytes`; it defines no second runtime
+telemetry schema. Current production telemetry exposes hook wall time, daemon
+RTT, host-event/IPC byte counts, timeout state, and disposition per invocation
+on instrumented hosts; Hermes coverage remains partial. Checked-in distributions
+and aggregate timeout/disposition counts remain explicitly unavailable rather
+than being represented as zero.
 
 An acceptance result uses result schema 2 against workload schema 3. It embeds
-SHA-256 identities for the manifest, all compiled harness sources, and executing
-test binary; build-time and runtime Git commit/tree identities must match. Matching clean Git snapshots are
-taken before and after the workload. The runner builds in a target directory
-keyed by the clean commit, and the harness rejects debug assertions, direct
-unattested invocations, a changing HEAD/tree, or a worktree that becomes dirty.
+SHA-256 identities for the manifest, native fixtures, all compiled harness
+sources, and executing test binary. The runner requires a clean commit, expands
+that exact commit with `git archive`, writes and hashes a full tracked-source
+manifest, makes the source snapshot read-only, and validates every compiler
+input before and after measurement. It invokes ordinary Cargo without setting a
+target directory, so stock Cargo and cargo-slot select their normal target. Test
+data is created beside the executing test binary inside that selected target.
+The result also records the host target, Rust/Cargo versions, normalized Rust
+flags, wrapper identities, and Cargo-config identity.
 
 Linux `/proc` is the explicit measurement platform contract. Preflight requires
 all measured interfaces, a successful write of `5` to
 `/proc/self/clear_refs`, and a nonzero `getconf CLK_TCK`, before warmup begins.
+CPU, process-write, storage-growth, and peak-RSS provider fields therefore
+contain measurements only for successful Linux evidence runs. Unsupported
+platforms reject at preflight; the harness never substitutes numeric zero for
+an unavailable counter. Zero is reserved for an available counter that
+actually measured no work, including the strict repeat-ingest no-op assertion.
 The module still compiles on non-Linux targets; an attempted evidence run there
 with the manifest's exact Cargo command executes the ignored test and rejects
 the unsupported platform at preflight. Direct Cargo invocations on Linux also
@@ -29,8 +81,8 @@ CPU identity accepts common x86, ARM, POWER, and other Linux
 `/proc/cpuinfo` labels.
 
 Every replayed authoritative payload is checked for canary removal and a
-redaction marker, and every folded V1 message is checked for exact identity,
-role, text, and canary absence. These assertions and V1 point reads run after
+payload-bound sanitization receipt, and every folded V1 message is checked for
+exact identity, role, text, and canary absence. These assertions and V1 point reads run after
 each phase snapshot, so correctness verification is not charged to latency,
 CPU, I/O, or storage-growth measurements. The run also requires zero legacy
 transcript writes: the observation projector is the only V1 message writer,
@@ -40,7 +92,8 @@ new observations; a full replay verifies unchanged cardinality afterward.
 
 Evidence uses a two-commit workflow:
 
-1. Commit all code and manifest changes, then start from that clean commit.
+1. Commit all code, native fixtures, and manifest changes, then start from that
+   clean commit.
 2. Run the command below. It creates one schema-2 result, updates
    [evidence-index.json](evidence-index.json), and runs the strict directory
    validator. Commit only that result, the index, and this README's measured

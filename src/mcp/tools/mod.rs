@@ -27,7 +27,10 @@ pub use handlers::{
     SessionAuthorities, ToolCallRegistryOptions, handle_tool_call, handle_tool_call_with_registry,
     handle_tool_call_with_registry_and_implicit_project, handle_user_lcm_tool,
 };
-pub(crate) use handlers::{handle_projectless_admin_cli, handle_projectless_hook_runtime};
+pub(crate) use handlers::{
+    handle_projectless_admin_cli, handle_projectless_hook_runtime,
+    replay_projectless_hermes_host_admission,
+};
 
 /// Maximum character length for a tool response before truncation.
 const MAX_RESPONSE_CHARS: usize = 15_000;

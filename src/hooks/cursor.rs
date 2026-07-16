@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::cursor_compact::cursor_pre_compact_via_daemon;
 use super::cursor_shell::paths_same;
 use super::memory_inject;
 use super::post_tool_use::{captured_tool_output, trusted_tool_failure};
@@ -100,17 +99,18 @@ pub async fn hook_cursor_post_tool_use() -> i32 {
 pub async fn hook_cursor_before_submit_prompt() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    let _hook_telemetry = record_hook_invoked(
+    let hook_telemetry = record_hook_invoked(
         root.as_deref(),
         HintAgent::Cursor,
         "beforeSubmitPrompt",
         &event,
     );
-    reset_counter_for_cursor_event(&event).await;
-    ingest_cursor_transcript_for_event(
+    reset_counter_for_cursor_event(&event, Some(&hook_telemetry)).await;
+    ingest_cursor_transcript_for_event_inner(
         &event,
         Some(CURSOR_HOT_INGEST_MAX_BYTES),
         CURSOR_HOT_INGEST_BUDGET,
+        Some(&hook_telemetry),
     )
     .await;
     let context = Box::pin(cursor_before_submit_prompt_context(&event)).await;
@@ -202,14 +202,18 @@ async fn cursor_prompt_memory_recall(event_json: &str) -> Option<String> {
 /// regular capped catch-up ingest applies. The response is logged but unused,
 /// so an empty object is emitted. Fail-open.
 pub async fn hook_cursor_session_end() -> i32 {
+    hook_cursor_session_completion("sessionEnd").await
+}
+
+async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    let _hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionEnd", &event);
+    let hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Cursor, hook_name, &event);
     let outcome = ingest_cursor_transcript_for_event_inner(
         &event,
         Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
         CURSOR_STOP_INGEST_BUDGET,
+        Some(&hook_telemetry),
     )
     .await;
     if outcome.user_scope && outcome.messages_upserted > 0 {
@@ -227,21 +231,7 @@ pub async fn hook_cursor_session_end() -> i32 {
 /// tails appended during the turn. The `stop` output is informational only, so
 /// we emit an empty object and never ask the agent to continue. Fail-open.
 pub async fn hook_cursor_stop() -> i32 {
-    let event = read_hook_event!();
-    let root = cursor_project_root_from_event_with_identity(&event).await;
-    let _hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Cursor, "stop", &event);
-    let outcome = ingest_cursor_transcript_for_event_inner(
-        &event,
-        Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
-        CURSOR_STOP_INGEST_BUDGET,
-    )
-    .await;
-    if outcome.user_scope && outcome.messages_upserted > 0 {
-        let session_id = event_session_id_from_json(&event);
-        super::schedule_user_session_review("cursor", session_id.as_deref());
-    }
-    println!("{}", serde_json::json!({}));
-    0
+    hook_cursor_session_completion("stop").await
 }
 
 /// Cursor `preCompact` hook handler.
@@ -255,10 +245,14 @@ pub async fn hook_cursor_stop() -> i32 {
 pub async fn hook_cursor_pre_compact() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    let _hook_telemetry =
+    let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "preCompact", &event);
     if std::env::var(crate::sessions::cursor_agent::CURSOR_SUMMARY_CHILD_ENV).is_err() {
-        let outcome = cursor_pre_compact_via_daemon(&event).await;
+        let outcome = super::cursor_compact::cursor_pre_compact_via_daemon_with_telemetry(
+            &event,
+            Some(&hook_telemetry),
+        )
+        .await;
         if outcome.status == "error" {
             eprintln!(
                 "tracedecay Cursor preCompact summary failed: {}",
@@ -288,9 +282,9 @@ pub async fn hook_cursor_pre_compact() -> i32 {
 pub async fn hook_cursor_after_file_edit() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    let _hook_telemetry =
+    let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "afterFileEdit", &event);
-    notify_cursor_after_file_edit(&event).await;
+    notify_cursor_after_file_edit(&event, &hook_telemetry).await;
     if let Some(decision) = cursor_after_file_edit_decision_for_hook(&event).await {
         println!("{decision}");
     }
@@ -306,15 +300,16 @@ pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    let _hook_telemetry =
+    let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", &event);
     if let (Some(root), Some(event)) = (root.as_ref(), cursor_session_start_hook_event(&parsed)) {
-        crate::daemon::notify_hook_event(root, event).await;
+        super::notify_hook_event_with_telemetry(root, event, &hook_telemetry).await;
     }
-    ingest_cursor_transcript_for_event(
+    ingest_cursor_transcript_for_event_inner(
         &event,
         Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
         CURSOR_SESSION_INGEST_BUDGET,
+        Some(&hook_telemetry),
     )
     .await;
     let mut context = cursor_session_context_for_root(root.as_deref()).await;
@@ -368,13 +363,13 @@ async fn cursor_session_context_for_root(root: Option<&Path>) -> String {
 pub async fn hook_cursor_after_shell() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    let _hook_telemetry = record_hook_invoked(
+    let hook_telemetry = record_hook_invoked(
         root.as_deref(),
         HintAgent::Cursor,
         "afterShellExecution",
         &event,
     );
-    notify_cursor_after_shell_event(&event).await;
+    notify_cursor_after_shell_event(&event, &hook_telemetry).await;
     0
 }
 
@@ -384,9 +379,9 @@ pub async fn hook_cursor_after_shell() -> i32 {
 pub async fn hook_cursor_workspace_open() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
-    let _hook_telemetry =
+    let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "workspaceOpen", &event);
-    notify_cursor_workspace_open(&event).await;
+    notify_cursor_workspace_open(&event, &hook_telemetry).await;
     if let Some(root) = root.as_deref() {
         memory_inject::regenerate_cursor_memory_rule(root).await;
     }
@@ -708,7 +703,10 @@ pub fn cursor_session_start_json(project_root: Option<&Path>, additional_context
 ///
 /// Resolves the edited repo-relative paths locally, then lets the daemon own
 /// scheduling and sync execution. No-ops when no in-project paths were edited.
-async fn notify_cursor_after_file_edit(event_json: &str) {
+async fn notify_cursor_after_file_edit(
+    event_json: &str,
+    telemetry: &super::analytics::HookTimingSpan,
+) {
     let Some(root) = cursor_project_root_from_event_with_identity(event_json).await else {
         return;
     };
@@ -719,16 +717,20 @@ async fn notify_cursor_after_file_edit(event_json: &str) {
     if rels.is_empty() {
         return;
     }
-    crate::daemon::notify_hook_event(
+    super::notify_hook_event_with_telemetry(
         &root,
         crate::daemon::DaemonHookEvent::cursor_after_file_edit(rels)
             .with_route(hook_route_metadata_from_event(event_json, &root)),
+        telemetry,
     )
     .await;
 }
 
 /// Best-effort daemon notification for Cursor `afterShellExecution`.
-async fn notify_cursor_after_shell_event(event_json: &str) {
+async fn notify_cursor_after_shell_event(
+    event_json: &str,
+    telemetry: &super::analytics::HookTimingSpan,
+) {
     let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
         return;
     };
@@ -743,37 +745,46 @@ async fn notify_cursor_after_shell_event(event_json: &str) {
         return;
     }
     let cwd = cursor_event_cwd(&parsed).unwrap_or_else(|| root.clone());
-    crate::daemon::notify_hook_event(
+    super::notify_hook_event_with_telemetry(
         &root,
         crate::daemon::DaemonHookEvent::cursor_after_shell_execution(command.to_string(), cwd)
             .with_route(hook_route_metadata_from_event(event_json, &root)),
+        telemetry,
     )
     .await;
 }
 
 /// Best-effort daemon notification for Cursor `workspaceOpen`.
-async fn notify_cursor_workspace_open(event_json: &str) {
+async fn notify_cursor_workspace_open(
+    event_json: &str,
+    telemetry: &super::analytics::HookTimingSpan,
+) {
     let Some(root) = cursor_project_root_from_event_with_identity(event_json).await else {
         return;
     };
     if !crate::tracedecay::TraceDecay::has_initialized_store(&root).await {
         return;
     }
-    crate::daemon::notify_hook_event(
+    super::notify_hook_event_with_telemetry(
         &root,
         crate::daemon::DaemonHookEvent::cursor_workspace_open(root.clone())
             .with_route(hook_route_metadata_from_event(event_json, &root)),
+        telemetry,
     )
     .await;
 }
 
-async fn reset_counter_for_cursor_event(event_json: &str) {
+async fn reset_counter_for_cursor_event(
+    event_json: &str,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) {
     let Some(project_root) = cursor_project_root_from_event_with_identity(event_json).await else {
         return;
     };
     if let Err(error) = super::daemon_hook_action(
         Some(&project_root),
         serde_json::json!({ "action": "reset_counter" }),
+        telemetry,
     )
     .await
     {
@@ -785,19 +796,8 @@ async fn reset_counter_for_cursor_event(event_json: &str) {
 /// the resolved project session DB, bounded by `max_new_bytes` (the hot-path cap)
 /// and an overall `budget`. Always fails open: a timeout, missing transcript, or
 /// any error is swallowed so the calling hook never blocks the agent.
-pub(super) async fn ingest_cursor_transcript_for_event(
-    event_json: &str,
-    max_new_bytes: Option<u64>,
-    budget: Duration,
-) -> bool {
-    ingest_cursor_transcript_for_event_inner(event_json, max_new_bytes, budget)
-        .await
-        .completed
-}
-
 #[derive(Default)]
 struct CursorIngestOutcome {
-    completed: bool,
     user_scope: bool,
     messages_upserted: u64,
 }
@@ -806,6 +806,7 @@ async fn ingest_cursor_transcript_for_event_inner(
     event_json: &str,
     max_new_bytes: Option<u64>,
     budget: Duration,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
 ) -> CursorIngestOutcome {
     let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
         return CursorIngestOutcome::default();
@@ -820,31 +821,42 @@ async fn ingest_cursor_transcript_for_event_inner(
     if let Some(max_new_bytes) = max_new_bytes {
         args["max_new_bytes"] = serde_json::json!(max_new_bytes);
     }
+    args["timeout_budget_ms"] = serde_json::json!(budget.as_millis() as u64);
+    if let Some(telemetry) = telemetry {
+        telemetry.note_timeout_budget(budget);
+    }
     match tokio::time::timeout(
         budget,
-        super::daemon_hook_action(project_root.as_deref(), args),
+        super::daemon_hook_action(project_root.as_deref(), args, telemetry),
     )
     .await
     {
-        Ok(Ok(result)) => CursorIngestOutcome {
-            completed: result
-                .get("completed")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            user_scope: result
-                .get("user_scope")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            messages_upserted: result
-                .get("messages_upserted")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-        },
+        Ok(Ok(result)) => {
+            if let Some(telemetry) = telemetry {
+                telemetry.note_timed_out(false);
+            }
+            CursorIngestOutcome {
+                user_scope: result
+                    .get("user_scope")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                messages_upserted: result
+                    .get("messages_upserted")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            }
+        }
         Ok(Err(error)) => {
+            if let Some(telemetry) = telemetry {
+                telemetry.note_timed_out(false);
+            }
             eprintln!("[tracedecay] Cursor transcript ingest daemon call failed: {error}");
             CursorIngestOutcome::default()
         }
         Err(_) => {
+            if let Some(telemetry) = telemetry {
+                telemetry.note_timed_out(true);
+            }
             eprintln!("[tracedecay] Cursor transcript ingest daemon call timed out");
             CursorIngestOutcome::default()
         }
@@ -989,6 +1001,35 @@ mod tests {
     use super::super::tool_hints::HintCategory;
     use super::*;
     use crate::config::USER_DATA_DIR_ENV;
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn transcript_ingest_forwards_its_budget_to_the_daemon() {
+        let _lock = crate::hooks::lock_test_env();
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([
+            serde_json::json!({ "user_scope": true, "messages_upserted": 2 }),
+        ]);
+        let event = serde_json::json!({ "session_id": "cursor-budget" }).to_string();
+
+        let outcome = ingest_cursor_transcript_for_event_inner(
+            &event,
+            Some(4_096),
+            Duration::from_millis(250),
+            None,
+        )
+        .await;
+
+        assert!(outcome.user_scope);
+        assert_eq!(outcome.messages_upserted, 2);
+        let calls = daemon.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, None);
+        assert_eq!(calls[0].1["action"], "ingest_transcript");
+        assert_eq!(calls[0].1["provider"], "cursor");
+        assert_eq!(calls[0].1["max_new_bytes"], 4_096);
+        assert_eq!(calls[0].1["timeout_budget_ms"], 250);
+        assert_eq!(calls[0].1["format"], "json");
+    }
 
     #[test]
     fn cursor_session_start_event_signals_daemon_with_real_cwd() {

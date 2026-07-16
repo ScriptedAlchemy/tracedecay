@@ -60,35 +60,45 @@ pub(super) fn fold_scanned_frames(
             file_generation: scan.file_generation,
             offset: frame.offset,
             session_cwd: sanitized_session_cwd.as_deref(),
+            source_path: Some(scan.identity.source_id.as_str()),
             raw_message_id: frame.raw_message_id(),
             raw_tool_event_ids: frame.raw_tool_event_ids(),
+            raw_hook_tool_use_id: frame.raw_hook_tool_use_id(),
         };
         let mut message = match map_sanitized_claude_record(record, &context) {
             ClaudeRecordDisposition::Message { message, .. } => Some(*message),
-            ClaudeRecordDisposition::NonConversational => system_hook_message_from_line(
-                record,
-                source_path,
-                &context,
-                frame
-                    .raw_hook_tool_use_id()
-                    .filter(|raw| record.get("toolUseID").and_then(Value::as_str) == Some(*raw)),
-            ),
+            ClaudeRecordDisposition::NonConversational => {
+                let owned_native = envelope_native_content(record);
+                let native = owned_native.as_ref().unwrap_or(record);
+                system_hook_message_from_line(
+                    native,
+                    source_path,
+                    &context,
+                    frame.raw_hook_tool_use_id().filter(|raw| {
+                        native.get("toolUseID").and_then(Value::as_str) == Some(*raw)
+                    }),
+                )
+            }
         };
         if message.is_none() {
+            let owned_native = envelope_native_content(record);
+            let marker_source = owned_native.as_ref().unwrap_or(record);
             let marker_record = if frame.raw_logical_parent_uuid()
-                != record.get("logicalParentUuid").and_then(Value::as_str)
-                || record
+                != marker_source
+                    .get("logicalParentUuid")
+                    .and_then(Value::as_str)
+                || marker_source
                     .get("logicalParentUuid")
                     .and_then(Value::as_str)
                     .is_some_and(|id| id.starts_with("[TraceDecay redacted:"))
             {
-                let mut record = record.clone();
+                let mut record = marker_source.clone();
                 if let Some(record) = record.as_object_mut() {
                     record.remove("logicalParentUuid");
                 }
                 Cow::Owned(record)
             } else {
-                Cow::Borrowed(record)
+                Cow::Borrowed(marker_source)
             };
             message = structured_marker_from_line(
                 marker_record.as_ref(),
@@ -132,6 +142,44 @@ pub(super) fn fold_scanned_frames(
         draft,
         messages,
         new_cursor: scan.next_cursor.state,
+    })
+}
+
+fn envelope_native_content(record: &Value) -> Option<Value> {
+    let envelope =
+        serde_json::from_value::<tracedecay_domain::CanonicalObservationEnvelopeV1>(record.clone())
+            .ok()?;
+    envelope.facts().iter().find_map(|fact| {
+        let (tracedecay_domain::CanonicalObservationFactV1::Git {
+            content: Some(content),
+            ..
+        }
+        | tracedecay_domain::CanonicalObservationFactV1::Workflow {
+            content: Some(content),
+            ..
+        }
+        | tracedecay_domain::CanonicalObservationFactV1::WorkflowLifecycle {
+            content: Some(content),
+            ..
+        }
+        | tracedecay_domain::CanonicalObservationFactV1::Compaction {
+            summary: Some(content),
+            ..
+        }
+        | tracedecay_domain::CanonicalObservationFactV1::Reasoning {
+            content: Some(content),
+            ..
+        }
+        | tracedecay_domain::CanonicalObservationFactV1::Message { content, .. }
+        | tracedecay_domain::CanonicalObservationFactV1::ToolResult { content, .. }
+        | tracedecay_domain::CanonicalObservationFactV1::ToolInvocation {
+            arguments: content,
+            ..
+        }) = fact
+        else {
+            return None;
+        };
+        content.get("type").is_some().then(|| content.clone())
     })
 }
 

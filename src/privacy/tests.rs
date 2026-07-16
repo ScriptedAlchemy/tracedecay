@@ -1,11 +1,11 @@
 use serde_json::{Value, json};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ClaudeByteRangeV1,
-    ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1, ClaudeSourceIdentityV1,
-    ObservationId, ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1,
-    PayloadReferenceV1, ProviderId, RetentionClass, SanitizerDispositionV1, SensitivityV1,
-    SessionId,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalWorkflowSemanticKindV1,
+    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
+    ClaudeSourceIdentityV1, ObservationContractError, ObservationId, ObservationOrderingDomainV1,
+    ObservationScopeV1, ObservationSourceIdentityV1, PayloadReferenceV1, ProviderId,
+    RetentionClass, SanitizerDispositionV1, SensitivityV1, SessionId,
 };
 
 use super::{
@@ -257,6 +257,296 @@ fn provider_sanitizer_uses_provider_neutral_policy_and_receipt_domain() {
             .starts_with("privacy.observation.v1.")
     );
     assert!(outcome.durable_observation().is_some());
+}
+
+#[test]
+fn provider_sanitizer_allows_only_legacy_claude_to_omit_native_record_identity() {
+    let record = serde_json::to_vec(&json!({"message": "legacy identity fixture"})).unwrap();
+    let range = ClaudeByteRangeV1::new(0, u64::try_from(record.len()).unwrap()).unwrap();
+    let fixture = |provider: &str| {
+        let provider_id = ProviderId::new(provider).unwrap();
+        let session_id = SessionId::new("session.legacy-identity").unwrap();
+        let stable_record_id = ObservationId::new(format!("message.{provider}.legacy")).unwrap();
+        let parsed = parse_normalized_observation_record_v1(
+            &record,
+            range,
+            ObservationOrderingDomainV1::FileBytes,
+            |_| {
+                CanonicalObservationEnvelopeV1::new(
+                    provider_id.clone(),
+                    "message",
+                    stable_record_id.clone(),
+                    CanonicalObservationRelationsV1::new(session_id.clone())
+                        .with_message_id(stable_record_id.clone()),
+                    vec![CanonicalObservationFactV1::Message {
+                        role: CanonicalMessageRoleV1::Assistant,
+                        content: json!({"text": "legacy identity fixture"}),
+                        model: None,
+                        timestamp: None,
+                    }],
+                    CanonicalObservationEvidenceV1::new(
+                        ObservationOrderingDomainV1::FileBytes,
+                        range,
+                    ),
+                )
+                .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            },
+        )
+        .unwrap();
+        let source = ObservationSourceIdentityV1::for_provider(provider_id, session_id).unwrap();
+        let identity = ClaudeObservationIdentityMaterialV1::new(
+            source,
+            ObservationScopeV1::Profile,
+            ClaudeFileGenerationV1::new(1).unwrap(),
+            range,
+        )
+        .unwrap();
+        (parsed, identity)
+    };
+
+    let (parsed, identity) = fixture("claude");
+    let outcome = ClaudeRecordSanitizerV1::observation_v1()
+        .unwrap()
+        .sanitize_parsed(parsed, identity, retention_class())
+        .expect("legacy Claude range identity remains compatible");
+    assert!(
+        outcome
+            .durable_observation()
+            .unwrap()
+            .identity()
+            .native_record_id()
+            .is_none()
+    );
+
+    let (parsed, identity) = fixture("hermes");
+    let error = ClaudeRecordSanitizerV1::observation_v1()
+        .unwrap()
+        .sanitize_parsed(parsed, identity, retention_class())
+        .expect_err("non-Claude canonical observations require native record identity");
+    assert!(matches!(
+        error,
+        PrivacySanitizerError::DomainContract(ObservationContractError::InvalidCanonicalPayload)
+    ));
+}
+
+#[test]
+fn provider_sanitizer_preserves_stable_public_structural_ids() {
+    let record = serde_json::to_vec(&json!({"message": "public identity fixture"})).unwrap();
+    let range = ClaudeByteRangeV1::new(40, 41).unwrap();
+    let parsed = parse_normalized_observation_record_v1(
+        &record,
+        range,
+        ObservationOrderingDomainV1::DaemonSequence,
+        |_| {
+            CanonicalObservationEnvelopeV1::new(
+                ProviderId::new("provider-neutral-fixture").unwrap(),
+                "message",
+                ObservationId::new("message.public-123").unwrap(),
+                CanonicalObservationRelationsV1::new(SessionId::new("session.public-123").unwrap())
+                    .with_message_id(ObservationId::new("message.public-123").unwrap()),
+                vec![CanonicalObservationFactV1::Message {
+                    role: CanonicalMessageRoleV1::Assistant,
+                    content: Value::String("safe".to_owned()),
+                    model: None,
+                    timestamp: None,
+                }],
+                CanonicalObservationEvidenceV1::new(
+                    ObservationOrderingDomainV1::DaemonSequence,
+                    range,
+                ),
+            )
+            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+        },
+    )
+    .unwrap();
+    let identity = ClaudeObservationIdentityMaterialV1::for_native_record(
+        ObservationSourceIdentityV1::for_provider(
+            ProviderId::new("provider-neutral-fixture").unwrap(),
+            SessionId::new("session.public-123").unwrap(),
+        )
+        .unwrap(),
+        ObservationScopeV1::Profile,
+        ClaudeFileGenerationV1::new(1).unwrap(),
+        range,
+        ObservationOrderingDomainV1::DaemonSequence,
+        ObservationId::new("message.public-123").unwrap(),
+    )
+    .unwrap();
+
+    let outcome = ClaudeRecordSanitizerV1::observation_v1()
+        .unwrap()
+        .sanitize_parsed(parsed, identity, retention_class())
+        .unwrap();
+    let durable = outcome.durable_observation().expect("durable observation");
+    assert_eq!(durable.source().session_id().as_str(), "session.public-123");
+    assert_eq!(
+        durable
+            .identity()
+            .native_record_id()
+            .map(ObservationId::as_str),
+        Some("message.public-123")
+    );
+    assert_eq!(
+        durable.payload()["relations"]["session_id"].as_str(),
+        Some(durable.source().session_id().as_str())
+    );
+    assert_eq!(
+        durable.payload()["relations"]["message_id"].as_str(),
+        Some("message.public-123")
+    );
+}
+
+#[test]
+fn provider_sanitizer_protects_credential_shaped_structural_ids_consistently() {
+    let raw = ["AKIA", "STRUCTURAL", "000000"].concat();
+    let record = serde_json::to_vec(&json!({"message": "protected identity fixture"})).unwrap();
+    let range = ClaudeByteRangeV1::new(50, 51).unwrap();
+    let provider = ProviderId::new("provider-neutral-fixture").unwrap();
+    let parsed = parse_normalized_observation_record_v1(
+        &record,
+        range,
+        ObservationOrderingDomainV1::DaemonSequence,
+        |_| {
+            CanonicalObservationEnvelopeV1::new(
+                provider.clone(),
+                "message",
+                ObservationId::new(raw.clone()).unwrap(),
+                CanonicalObservationRelationsV1::new(SessionId::new(raw.clone()).unwrap())
+                    .with_message_id(ObservationId::new(raw.clone()).unwrap()),
+                vec![CanonicalObservationFactV1::Message {
+                    role: CanonicalMessageRoleV1::Assistant,
+                    content: Value::String("safe".to_owned()),
+                    model: None,
+                    timestamp: None,
+                }],
+                CanonicalObservationEvidenceV1::new(
+                    ObservationOrderingDomainV1::DaemonSequence,
+                    range,
+                ),
+            )
+            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+        },
+    )
+    .unwrap();
+    let identity = ClaudeObservationIdentityMaterialV1::for_native_record(
+        ObservationSourceIdentityV1::for_provider(provider, SessionId::new(raw.clone()).unwrap())
+            .unwrap(),
+        ObservationScopeV1::Profile,
+        ClaudeFileGenerationV1::new(1).unwrap(),
+        range,
+        ObservationOrderingDomainV1::DaemonSequence,
+        ObservationId::new(raw.clone()).unwrap(),
+    )
+    .unwrap();
+
+    let outcome = ClaudeRecordSanitizerV1::observation_v1()
+        .unwrap()
+        .sanitize_parsed(parsed, identity, retention_class())
+        .unwrap();
+    let durable = outcome.durable_observation().unwrap();
+    let protected = durable.source().session_id().as_str();
+    assert!(protected.starts_with("privacy.structural-id.v1."));
+    assert_eq!(
+        durable
+            .identity()
+            .native_record_id()
+            .map(ObservationId::as_str),
+        Some(protected)
+    );
+    assert_eq!(
+        durable.payload()["stable_record_id"].as_str(),
+        Some(protected)
+    );
+    assert_eq!(
+        durable.payload()["relations"]["session_id"].as_str(),
+        Some(protected)
+    );
+    assert_eq!(
+        durable.payload()["relations"]["message_id"].as_str(),
+        Some(protected)
+    );
+    assert!(!serde_json::to_string(durable).unwrap().contains(&raw));
+    assert!(
+        outcome
+            .findings()
+            .iter()
+            .all(|finding| !finding.location().contains(&raw))
+    );
+}
+
+#[test]
+fn provider_neutral_workflow_fact_redaction_leaks_no_raw_secret() {
+    const SECRET: &str = "workflow-secret-canary-must-not-persist";
+    let record = serde_json::to_vec(&json!({
+        "text": "publish release",
+        "api_key": SECRET
+    }))
+    .unwrap();
+    let range = ClaudeByteRangeV1::new(20, 21).unwrap();
+    let parsed = parse_normalized_observation_record_v1(
+        &record,
+        range,
+        ObservationOrderingDomainV1::DaemonSequence,
+        |native| {
+            CanonicalObservationEnvelopeV1::new(
+                ProviderId::new("provider-neutral-fixture").unwrap(),
+                "workflow_fixture",
+                ObservationId::new("workflow.privacy-fixture").unwrap(),
+                CanonicalObservationRelationsV1::new(
+                    SessionId::new("session.workflow-privacy-fixture").unwrap(),
+                ),
+                vec![CanonicalObservationFactV1::WorkflowLifecycle {
+                    semantic_kind: CanonicalWorkflowSemanticKindV1::Task,
+                    provider_reference: Some("task.native.privacy-fixture".to_owned()),
+                    item_id: Some("task.stable.privacy-fixture".to_owned()),
+                    parent_reference: None,
+                    list_reference: None,
+                    state: None,
+                    status: Some("pending".to_owned()),
+                    item_order: None,
+                    revision: None,
+                    event_sequence: Some(1),
+                    content: Some(native),
+                }],
+                CanonicalObservationEvidenceV1::new(
+                    ObservationOrderingDomainV1::DaemonSequence,
+                    range,
+                ),
+            )
+            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+        },
+    )
+    .unwrap();
+    let identity = ClaudeObservationIdentityMaterialV1::for_native_record(
+        ObservationSourceIdentityV1::for_provider(
+            ProviderId::new("provider-neutral-fixture").unwrap(),
+            SessionId::new("session.workflow-privacy-fixture").unwrap(),
+        )
+        .unwrap(),
+        ObservationScopeV1::Profile,
+        ClaudeFileGenerationV1::new(1).unwrap(),
+        range,
+        ObservationOrderingDomainV1::DaemonSequence,
+        ObservationId::new("workflow.privacy-fixture").unwrap(),
+    )
+    .unwrap();
+    let outcome = ClaudeRecordSanitizerV1::observation_v1()
+        .unwrap()
+        .sanitize_parsed(parsed, identity, retention_class())
+        .unwrap();
+    let durable = outcome
+        .durable_observation()
+        .expect("redacted workflow fact remains durable");
+    let durable_json = serde_json::to_string(durable).unwrap();
+    let receipt_json = serde_json::to_string(outcome.receipt()).unwrap();
+
+    assert!(!durable_json.contains(SECRET));
+    assert!(!receipt_json.contains(SECRET));
+    assert!(durable_json.contains("[TraceDecay redacted:"));
+    assert!(outcome.findings().iter().all(|finding| {
+        !format!("{finding:?}").contains(SECRET)
+            && finding.action() == SanitizationActionV1::Redacted
+    }));
 }
 
 #[test]

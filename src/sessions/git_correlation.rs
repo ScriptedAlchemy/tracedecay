@@ -481,6 +481,7 @@ pub struct SpanObservationDebounce {
 
 /// Default minimum spacing between recorded hook-route observations for one key.
 pub const DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS: i64 = 30;
+const MAX_SPAN_OBSERVATION_DEBOUNCE_KEYS: usize = 4096;
 
 impl SpanObservationDebounce {
     pub fn new() -> Self {
@@ -498,6 +499,18 @@ impl SpanObservationDebounce {
         {
             return false;
         }
+        if !self.last_write.contains_key(key)
+            && self.last_write.len() >= MAX_SPAN_OBSERVATION_DEBOUNCE_KEYS
+            && let Some(oldest) = self
+                .last_write
+                .iter()
+                .min_by(|(left_key, left_ts), (right_key, right_ts)| {
+                    left_ts.cmp(right_ts).then_with(|| left_key.cmp(right_key))
+                })
+                .map(|(key, _)| key.clone())
+        {
+            self.last_write.remove(&oldest);
+        }
         self.last_write.insert(key.to_string(), ts);
         true
     }
@@ -512,10 +525,11 @@ pub fn span_debounce_key(
     branch: Option<&str>,
     worktree: &str,
 ) -> String {
-    format!(
+    let material = format!(
         "{provider}\u{1f}{session_id}\u{1f}{}\u{1f}{worktree}",
         branch.unwrap_or("\u{0}")
-    )
+    );
+    crate::context::read_cache::digest_bytes(material.as_bytes())
 }
 
 /// Creates the correlation tables when missing. Version-gated via

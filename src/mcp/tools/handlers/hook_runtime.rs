@@ -1,9 +1,6 @@
-use serde_json::{Value, json};
-use std::path::Path;
-
 use crate::application::host_admission::{
     HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
-    HostAdmissionStatus,
+    HostAdmissionStatus, SharedHostAdmissionBroker, TerminalReason,
 };
 use crate::application::observation::ObservationCancellation;
 use crate::automation::config_error;
@@ -14,6 +11,9 @@ use crate::mcp::tools::ToolResult;
 use crate::sessions::claude_observation::ClaudeObservationIngestError;
 use crate::sessions::source::TranscriptSource;
 use crate::tracedecay::TraceDecay;
+use serde_json::{Value, json};
+use std::collections::HashSet;
+use std::path::Path;
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use super::{SessionAuthorities, rendered_tool_json};
@@ -55,7 +55,7 @@ pub async fn handle_hook_runtime(
             codex_compact(cg, &args, required_project_db(session_authorities)?).await?
         }
         "cursor_compact" => {
-            cursor_compact(&args, required_project_db(session_authorities)?).await?
+            cursor_compact(cg, &args, required_project_db(session_authorities)?).await?
         }
         other => {
             return Err(config_error(format!(
@@ -71,6 +71,7 @@ pub async fn handle_projectless_hook_runtime(
     profile_root: &Path,
     global_db: &GlobalDb,
     session_authorities: SessionAuthorities<'_>,
+    host_admission_broker: std::result::Result<&SharedHostAdmissionBroker, HostAdmissionOutcome>,
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
     if !projectless_action_allowed(action, &args) {
@@ -91,7 +92,15 @@ pub async fn handle_projectless_hook_runtime(
         }
         "user_review" => user_review(&args, profile_root).await?,
         "hermes_receipt" => {
-            hermes_receipt(&args, profile_root, required_user_db(session_authorities)?).await?
+            let host_admission_broker =
+                host_admission_broker.map_err(map_host_admission_outcome)?;
+            hermes_receipt(
+                &args,
+                profile_root,
+                required_user_db(session_authorities)?,
+                host_admission_broker,
+            )
+            .await?
         }
         _ => unreachable!("projectless hook action validated above"),
     };
@@ -104,11 +113,28 @@ fn projectless_action_allowed(action: &str, args: &Value) -> bool {
             && args.get("user_scope").and_then(Value::as_bool) == Some(true))
 }
 
-fn host_admission_facade(authorities: SessionAuthorities<'_>) -> HostAdmissionFacade<'_> {
-    HostAdmissionFacade::new(HostAdmissionAuthorities::new(
-        authorities.project.map(AsRef::as_ref),
-        authorities.user.map(AsRef::as_ref),
-    ))
+fn host_admission_facade<'a>(
+    cg: Option<&TraceDecay>,
+    scope: HostAdmissionScope,
+    authorities: SessionAuthorities<'a>,
+) -> Result<HostAdmissionFacade<'a>> {
+    let authority = match scope {
+        HostAdmissionScope::Project => match authorities.project {
+            Some(db) => HostAdmissionAuthorities::for_project(
+                db.as_ref(),
+                project_observation_id(
+                    cg.ok_or_else(|| config_error("project admission requires a project"))?,
+                )?,
+            ),
+            None => HostAdmissionAuthorities::default(),
+        },
+        HostAdmissionScope::Profile => authorities
+            .user
+            .map_or_else(HostAdmissionAuthorities::default, |db| {
+                HostAdmissionAuthorities::for_profile(db.as_ref())
+            }),
+    };
+    Ok(HostAdmissionFacade::new(authority))
 }
 
 fn required_project_db(authorities: SessionAuthorities<'_>) -> Result<&GlobalDb> {
@@ -125,28 +151,40 @@ fn required_user_db(authorities: SessionAuthorities<'_>) -> Result<&GlobalDb> {
         .ok_or_else(|| config_error("daemon user session database is unavailable"))
 }
 
-fn project_observation_id(project_root: &Path) -> Result<ProjectId> {
-    let marker = crate::storage::read_repository_identity_marker(project_root)
-        .map_err(|_| config_error("project observation identity is unavailable"))?
+fn project_observation_id(cg: &TraceDecay) -> Result<ProjectId> {
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
         .ok_or_else(|| config_error("project observation identity is unavailable"))?;
-    ProjectId::new(marker.project_id)
+    ProjectId::new(project_id.to_string())
         .map_err(|_| config_error("project observation identity is invalid"))
 }
 
-async fn drain_host_observation_projections(db: &GlobalDb) -> Result<u64> {
-    let stats = crate::sessions::claude_observation::drain_projection_queue(
-        db,
-        &ObservationCancellation::default(),
-    )
-    .await
-    .map_err(|error| map_claude_observation_ingest_error(&error))?;
+async fn drain_host_observation_projections(
+    admission: &HostAdmissionFacade<'_>,
+    scope: &ObservationScopeV1,
+    cancellation: &ObservationCancellation,
+) -> Result<u64> {
+    let stats =
+        crate::sessions::claude_observation::drain_projection_queue(admission, scope, cancellation)
+            .await
+            .map_err(|error| map_claude_observation_ingest_error(&error))?;
     Ok(stats.transcript.messages_upserted)
 }
 
 async fn codex_compact(cg: &TraceDecay, args: &Value, db: &GlobalDb) -> Result<Value> {
     let event_json = required_str(args, "event_json")?;
     if let Some(source) = crate::sessions::codex::CodexSource::new() {
-        let project_id = project_observation_id(cg.project_root())?;
+        let project_id = project_observation_id(cg)?;
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+            db,
+            project_id.clone(),
+        ));
         for path in source.transcript_paths(cg.project_root()) {
             crate::sessions::codex::try_admit_codex_jsonl_observations_for_project(
                 &path,
@@ -158,7 +196,8 @@ async fn codex_compact(cg: &TraceDecay, args: &Value, db: &GlobalDb) -> Result<V
             .await
             .map_err(|error| map_transcript_ingest_error(&error))?;
         }
-        drain_host_observation_projections(db).await?;
+        let cancellation = ObservationCancellation::default();
+        drain_host_observation_projections(&admission, &scope, &cancellation).await?;
     }
     let session_id = serde_json::from_str::<Value>(event_json)
         .ok()
@@ -201,7 +240,7 @@ async fn codex_compact(cg: &TraceDecay, args: &Value, db: &GlobalDb) -> Result<V
     }))
 }
 
-async fn cursor_compact(args: &Value, db: &GlobalDb) -> Result<Value> {
+async fn cursor_compact(cg: &TraceDecay, args: &Value, db: &GlobalDb) -> Result<Value> {
     let event_json = required_str(args, "event_json")?;
     let parsed: Value = serde_json::from_str(event_json)?;
     let session_id = ["session_id", "conversation_id", "chat_id"]
@@ -209,10 +248,14 @@ async fn cursor_compact(args: &Value, db: &GlobalDb) -> Result<Value> {
         .find_map(|key| parsed.get(*key).and_then(Value::as_str))
         .filter(|value| !value.is_empty())
         .ok_or_else(|| config_error("Cursor preCompact event omitted session id"))?;
-    let ingest =
-        crate::sessions::cursor::try_ingest_cursor_transcript_event_capped(event_json, db, None)
-            .await
-            .map_err(|error| map_transcript_ingest_error(&error))?;
+    let ingest = crate::sessions::cursor::try_ingest_cursor_transcript_event_capped(
+        event_json,
+        db,
+        project_observation_id(cg)?,
+        None,
+    )
+    .await
+    .map_err(|error| map_transcript_ingest_error(&error))?;
     let messages_to_compact = event_usize(&parsed, &["messages_to_compact", "compact_count"]);
     if messages_to_compact == Some(0) {
         return Ok(cursor_compact_skipped("no messages to compact"));
@@ -362,8 +405,8 @@ async fn ingest_transcript(
     } else {
         HostAdmissionScope::Project
     };
-    let admission =
-        host_admission_facade(session_authorities).accept_replay(provider, admission_scope);
+    let admission = host_admission_facade(cg, admission_scope, session_authorities)?
+        .accept_replay(provider, admission_scope);
     match admission.status {
         HostAdmissionStatus::Unavailable => {
             return Err(TraceDecayError::hook_runtime(
@@ -382,6 +425,8 @@ async fn ingest_transcript(
         _ => {}
     }
     let mut claude_observation_stats = None;
+    let mut snapshot_capture = None;
+    let cancellation = ObservationCancellation::default();
     let messages_upserted = match (provider, user_scope) {
         ("claude", true) => {
             let profile_root =
@@ -401,7 +446,7 @@ async fn ingest_transcript(
                     max_new_bytes
                         .unwrap_or(crate::sessions::claude_observation::CLAUDE_HOOK_MAX_NEW_BYTES),
                 ),
-                crate::application::observation::ObservationCancellation::default(),
+                cancellation.clone(),
             )
             .await
             .map_err(|error| map_claude_observation_ingest_error(&error))?;
@@ -446,12 +491,14 @@ async fn ingest_transcript(
             .messages_upserted
         }
         ("cursor", false) => {
-            cg.ok_or_else(|| config_error("project transcript ingest requires a project"))?;
+            let cg =
+                cg.ok_or_else(|| config_error("project transcript ingest requires a project"))?;
             let event_json = required_str(args, "event_json")?;
             let db = required_project_db(session_authorities)?;
             crate::sessions::cursor::try_ingest_cursor_transcript_event_capped(
                 event_json,
                 db,
+                project_observation_id(cg)?,
                 max_new_bytes,
             )
             .await
@@ -469,17 +516,20 @@ async fn ingest_transcript(
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
             let source = source.for_user_scope(roots);
-            let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::new(None, Some(db)));
-            crate::sessions::kiro::capture_kiro_snapshot_observations(
+            let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db));
+            let capture = crate::sessions::kiro::capture_kiro_snapshot_observations(
                 &facade,
                 &source,
                 profile_root,
                 ObservationScopeV1::Profile,
                 max_new_bytes,
+                &cancellation,
             )
             .await
             .map_err(|error| map_transcript_ingest_error(&error))?;
-            drain_host_observation_projections(db).await?
+            snapshot_capture = Some(capture);
+            drain_host_observation_projections(&facade, &ObservationScopeV1::Profile, &cancellation)
+                .await?
         }
         ("kiro", false) => {
             let cg =
@@ -487,20 +537,24 @@ async fn ingest_transcript(
             let db = required_project_db(session_authorities)?;
             let source = crate::sessions::kiro::KiroSource::new()
                 .ok_or_else(|| config_error("Kiro transcript source is unavailable"))?;
+            let project_id = project_observation_id(cg)?;
             let scope = ObservationScopeV1::Project {
-                project_id: project_observation_id(cg.project_root())?,
+                project_id: project_id.clone(),
             };
-            let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::new(Some(db), None));
-            crate::sessions::kiro::capture_kiro_snapshot_observations(
+            let facade =
+                HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(db, project_id));
+            let capture = crate::sessions::kiro::capture_kiro_snapshot_observations(
                 &facade,
                 &source,
                 cg.project_root(),
-                scope,
+                scope.clone(),
                 max_new_bytes,
+                &cancellation,
             )
             .await
             .map_err(|error| map_transcript_ingest_error(&error))?;
-            drain_host_observation_projections(db).await?
+            snapshot_capture = Some(capture);
+            drain_host_observation_projections(&facade, &scope, &cancellation).await?
         }
         _ => {
             return Err(config_error(format!(
@@ -509,6 +563,9 @@ async fn ingest_transcript(
         }
     };
     let authority_changed = messages_upserted > 0
+        || snapshot_capture
+            .as_ref()
+            .is_some_and(|capture| capture.stats.messages_upserted > 0)
         || claude_observation_stats
             .as_ref()
             .is_some_and(|stats| stats.observations_committed > 0 || stats.cursor_advances > 0);
@@ -516,20 +573,29 @@ async fn ingest_transcript(
         && claude_observation_stats
             .as_ref()
             .is_some_and(|stats| stats.observation_duplicates > 0 || stats.cursor_duplicates > 0);
-    let admission = if admission.status == HostAdmissionStatus::AcceptedForReplay {
-        HostAdmissionOutcome::replay_completed(authority_changed, exact_duplicate)
-    } else {
-        admission
-    };
+    let deferred_by_byte_cap = snapshot_capture
+        .as_ref()
+        .is_some_and(|capture| capture.deferred_by_byte_cap);
+    let admission = complete_ingest_admission(
+        admission,
+        authority_changed,
+        exact_duplicate,
+        deferred_by_byte_cap,
+    );
     let mut output = json!({
         "action": "ingest_transcript",
         "provider": provider,
         "user_scope": user_scope,
-        "completed": true,
+        "completed": !deferred_by_byte_cap,
         "status": admission.status,
         "admission": admission,
         "messages_upserted": messages_upserted,
     });
+    if let Some(capture) = snapshot_capture {
+        output["observations_committed"] = json!(capture.stats.messages_upserted);
+        output["bytes_consumed"] = json!(capture.bytes_consumed);
+        output["deferred_by_byte_cap"] = json!(capture.deferred_by_byte_cap);
+    }
     if let Some(stats) = claude_observation_stats {
         output["observations_committed"] = json!(stats.observations_committed);
         output["observation_duplicates"] = json!(stats.observation_duplicates);
@@ -544,6 +610,21 @@ async fn ingest_transcript(
         output["source_bytes_scanned"] = json!(stats.source_bytes_scanned);
     }
     Ok(output)
+}
+
+fn complete_ingest_admission(
+    admission: HostAdmissionOutcome,
+    authority_changed: bool,
+    exact_duplicate: bool,
+    deferred_by_byte_cap: bool,
+) -> HostAdmissionOutcome {
+    if deferred_by_byte_cap {
+        HostAdmissionOutcome::retained_backpressured("ingest_pass_backpressured")
+    } else if admission.status == HostAdmissionStatus::AcceptedForReplay {
+        HostAdmissionOutcome::replay_completed(authority_changed, exact_duplicate)
+    } else {
+        admission
+    }
 }
 
 fn map_transcript_ingest_error(
@@ -672,86 +753,278 @@ async fn run_user_review(
     .await
 }
 
-async fn hermes_receipt(args: &Value, profile_root: &Path, session_db: &GlobalDb) -> Result<Value> {
-    let event: crate::daemon::DaemonHookEvent = serde_json::from_value(
-        args.get("event")
-            .cloned()
-            .ok_or_else(|| config_error("missing required parameter `event`"))?,
-    )?;
-    let receipt = event
-        .receipt
-        .clone()
-        .ok_or_else(|| config_error("Hermes event omitted receipt"))?;
+fn map_host_admission_outcome(outcome: HostAdmissionOutcome) -> TraceDecayError {
+    TraceDecayError::hook_runtime(
+        outcome.reason_code.unwrap_or("canonical_admission_failed"),
+        outcome.retryable,
+        "projectless Hermes receipt host admission failed",
+    )
+}
+
+async fn apply_projectless_hermes_receipt_plan(
+    profile_root: &Path,
+    plan: crate::mcp::hook_events::HookEventPlan,
+) -> HostAdmissionOutcome {
     let dashboard_root = crate::automation::runner::user_automation_root(profile_root);
-    match event.event.as_str() {
-        "terminalReceipt" | "turnCompleted" => {
-            crate::automation::host_receipts::record(&dashboard_root, event.route, receipt).await?;
-            Ok(json!({ "action": "hermes_receipt", "status": "recorded" }))
+    match plan {
+        crate::mcp::hook_events::HookEventPlan::RecordTerminalReceipt { route, receipt } => {
+            match crate::automation::host_receipts::record(&dashboard_root, route, receipt).await {
+                Ok(true) => HostAdmissionOutcome::replay_completed(true, false),
+                Ok(false) => HostAdmissionOutcome::replay_completed(false, true),
+                Err(_) => HostAdmissionOutcome::retained_unavailable("canonical_admission_failed"),
+            }
         }
-        "turnIngested" => {
-            let watermark = receipt
-                .transcript_watermark
-                .as_deref()
-                .ok_or_else(|| config_error("Hermes turnIngested omitted transcript watermark"))?;
-            crate::automation::host_receipts::mark_turn_ingested(
-                &dashboard_root,
-                event.route,
-                watermark,
-            )
-            .await?;
-            let Some(ready) =
-                crate::automation::host_receipts::oldest_ready(&dashboard_root).await?
-            else {
-                return Ok(json!({ "action": "hermes_receipt", "status": "ingested" }));
-            };
-            if session_db
-                .lcm_load_raw_message("hermes", &ready.transcript_watermark)
-                .await
-                .is_none()
-            {
-                return Ok(json!({ "action": "hermes_receipt", "status": "awaiting_transcript" }));
-            }
-            if crate::automation::scheduler::load_scheduler_control(&dashboard_root)
-                .await?
-                .paused
-            {
-                return Ok(json!({ "action": "hermes_receipt", "status": "paused" }));
-            }
-            let session_id = ready
-                .pending
-                .route
-                .as_ref()
-                .and_then(|route| route.session_id.clone());
-            let run = run_user_review(
-                profile_root,
-                "hermes",
-                session_id,
-                Some(format!("user_host_receipt_{}", ready.pending.generation)),
-                crate::automation::run_ledger::AutomationTrigger::HostReceipt,
-            )
-            .await?;
-            if run.session_reflector.ledger_record.status == AutomationRunStatus::Succeeded
-                && run.memory_curator.ledger_record.status != AutomationRunStatus::Failed
-                && run.skill_writer.ledger_record.status == AutomationRunStatus::Succeeded
-            {
-                crate::automation::host_receipts::mark_consumed(
-                    &dashboard_root,
-                    &ready.pending.session_key,
-                    ready.pending.generation,
-                )
-                .await?;
-            }
-            Ok(json!({ "action": "hermes_receipt", "status": "reviewed" }))
-        }
-        other => Err(config_error(format!(
-            "unsupported Hermes receipt event: {other}"
-        ))),
+        crate::mcp::hook_events::HookEventPlan::MarkTurnIngested {
+            route,
+            transcript_watermark,
+        } => match crate::automation::host_receipts::mark_turn_ingested(
+            &dashboard_root,
+            route,
+            &transcript_watermark,
+        )
+        .await
+        {
+            Ok(()) => HostAdmissionOutcome::replay_completed(true, false),
+            Err(_) => HostAdmissionOutcome::retained_unavailable("canonical_admission_failed"),
+        },
+        _ => HostAdmissionOutcome::degraded("invalid_host_event_plan"),
     }
+}
+
+async fn replay_projectless_hermes_receipts(
+    broker: &SharedHostAdmissionBroker,
+    profile_root: &Path,
+    target_seq: Option<u64>,
+) -> std::result::Result<HostAdmissionOutcome, HostAdmissionOutcome> {
+    const MAX_RECORDS_PER_PASS: usize = 64;
+
+    let replay = broker.begin_replay().await?;
+    let mut attempted = HashSet::new();
+    let mut blocked_sources = HashSet::new();
+    let mut retained_leases = Vec::new();
+    let mut retained_outcome = None;
+    let mut target_outcome = None;
+    let mut terminal_outcome = None;
+    for _ in 0..MAX_RECORDS_PER_PASS {
+        let record = match replay.lease_next().await {
+            Ok(Some(record)) => record,
+            Ok(None) => break,
+            Err(outcome) => {
+                terminal_outcome = Some(outcome);
+                break;
+            }
+        };
+        if blocked_sources.contains(&record.source) {
+            retained_leases.push(record.seq);
+            continue;
+        }
+        if !attempted.insert(record.seq) {
+            let outcome = HostAdmissionOutcome::spool_ack_conflict();
+            blocked_sources.insert(record.source);
+            retained_leases.push(record.seq);
+            retained_outcome.get_or_insert(outcome);
+            if target_seq == Some(record.seq) {
+                target_outcome = Some(outcome);
+            }
+            continue;
+        }
+        let plan = match crate::mcp::hook_events::decode_durable_hook_event_plan(&record.payload) {
+            Ok(plan) => plan,
+            Err(crate::mcp::hook_events::DurableHookEventDecodeError::UnsupportedVersion) => {
+                let outcome = HostAdmissionOutcome::durable_payload_unsupported_version();
+                blocked_sources.insert(record.source);
+                retained_leases.push(record.seq);
+                retained_outcome.get_or_insert(outcome);
+                if target_seq == Some(record.seq) {
+                    target_outcome = Some(outcome);
+                }
+                continue;
+            }
+            Err(crate::mcp::hook_events::DurableHookEventDecodeError::Malformed) => {
+                let outcome = HostAdmissionOutcome::durable_payload_malformed();
+                match replay
+                    .quarantine(record.seq, TerminalReason::MalformedPayload)
+                    .await
+                {
+                    Ok(_) => {
+                        retained_outcome.get_or_insert(outcome);
+                        if target_seq == Some(record.seq) {
+                            target_outcome = Some(outcome);
+                        }
+                    }
+                    Err(failure) if failure == HostAdmissionOutcome::quarantine_full() => {
+                        blocked_sources.insert(record.source);
+                        retained_leases.push(record.seq);
+                        retained_outcome.get_or_insert(failure);
+                        if target_seq == Some(record.seq) {
+                            target_outcome = Some(failure);
+                        }
+                    }
+                    Err(failure) => {
+                        terminal_outcome = Some(failure);
+                        break;
+                    }
+                }
+                continue;
+            }
+        };
+        let canonical_outcome = apply_projectless_hermes_receipt_plan(profile_root, plan).await;
+        let outcome = if matches!(
+            canonical_outcome.status,
+            HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
+        ) {
+            match replay.commit(record.seq).await {
+                Ok(_) => canonical_outcome,
+                Err(outcome) => {
+                    terminal_outcome = Some(outcome);
+                    break;
+                }
+            }
+        } else {
+            blocked_sources.insert(record.source);
+            retained_leases.push(record.seq);
+            retained_outcome.get_or_insert(canonical_outcome);
+            canonical_outcome
+        };
+        if target_seq == Some(record.seq) {
+            target_outcome = Some(outcome);
+        }
+    }
+    for seq in retained_leases.into_iter().rev() {
+        replay.defer(seq).await?;
+    }
+    Ok(terminal_outcome
+        .or(target_outcome)
+        .or(retained_outcome)
+        .unwrap_or_else(HostAdmissionOutcome::accepted_for_replay))
+}
+
+pub(crate) async fn replay_projectless_hermes_host_admission(
+    broker: &SharedHostAdmissionBroker,
+    profile_root: &Path,
+) -> HostAdmissionOutcome {
+    replay_projectless_hermes_receipts(broker, profile_root, None)
+        .await
+        .unwrap_or_else(|outcome| outcome)
+}
+
+async fn continue_projectless_hermes_review(
+    profile_root: &Path,
+    session_db: &GlobalDb,
+) -> Result<Value> {
+    let dashboard_root = crate::automation::runner::user_automation_root(profile_root);
+    let Some(ready) = crate::automation::host_receipts::oldest_ready(&dashboard_root).await? else {
+        return Ok(json!({ "action": "hermes_receipt", "status": "ingested" }));
+    };
+    if session_db
+        .lcm_load_raw_message("hermes", &ready.transcript_watermark)
+        .await
+        .is_none()
+    {
+        return Ok(json!({ "action": "hermes_receipt", "status": "awaiting_transcript" }));
+    }
+    if crate::automation::scheduler::load_scheduler_control(&dashboard_root)
+        .await?
+        .paused
+    {
+        return Ok(json!({ "action": "hermes_receipt", "status": "paused" }));
+    }
+    let session_id = ready
+        .pending
+        .route
+        .as_ref()
+        .and_then(|route| route.session_id.clone());
+    let run = run_user_review(
+        profile_root,
+        "hermes",
+        session_id,
+        Some(format!("user_host_receipt_{}", ready.pending.generation)),
+        crate::automation::run_ledger::AutomationTrigger::HostReceipt,
+    )
+    .await?;
+    if run.session_reflector.ledger_record.status == AutomationRunStatus::Succeeded
+        && run.memory_curator.ledger_record.status != AutomationRunStatus::Failed
+        && run.skill_writer.ledger_record.status == AutomationRunStatus::Succeeded
+    {
+        crate::automation::host_receipts::mark_consumed(
+            &dashboard_root,
+            &ready.pending.session_key,
+            ready.pending.generation,
+        )
+        .await?;
+    }
+    Ok(json!({ "action": "hermes_receipt", "status": "reviewed" }))
+}
+
+async fn hermes_receipt(
+    args: &Value,
+    profile_root: &Path,
+    session_db: &GlobalDb,
+    broker: &SharedHostAdmissionBroker,
+) -> Result<Value> {
+    let event_value = args
+        .get("event")
+        .cloned()
+        .ok_or_else(|| config_error("missing required parameter `event`"))?;
+    let event: crate::daemon::DaemonHookEvent = serde_json::from_value(event_value.clone())?;
+    if event.receipt.is_none() {
+        return Err(config_error("Hermes event omitted receipt"));
+    }
+    let hook_event =
+        crate::mcp::hook_events::parse_hook_event(Some(&event_value)).ok_or_else(|| {
+            config_error(format!("unsupported Hermes receipt event: {}", event.event))
+        })?;
+    let plan = crate::mcp::hook_events::plan_hook_event(&hook_event, profile_root, None);
+    let is_turn_ingested = matches!(
+        plan,
+        crate::mcp::hook_events::HookEventPlan::MarkTurnIngested { .. }
+    );
+    if !matches!(
+        plan,
+        crate::mcp::hook_events::HookEventPlan::RecordTerminalReceipt { .. }
+            | crate::mcp::hook_events::HookEventPlan::MarkTurnIngested { .. }
+    ) {
+        return Err(config_error(format!(
+            "unsupported Hermes receipt event: {}",
+            event.event
+        )));
+    }
+    if is_turn_ingested
+        && event
+            .receipt
+            .as_ref()
+            .and_then(|receipt| receipt.transcript_watermark.as_deref())
+            .is_none_or(str::is_empty)
+    {
+        return Err(config_error(
+            "Hermes turnIngested omitted transcript watermark",
+        ));
+    }
+    let payload = crate::mcp::hook_events::encode_durable_hook_event_plan(&plan)
+        .map_err(|()| config_error("invalid Hermes receipt host event plan"))?;
+    let admitted = broker
+        .admit(&hook_event.admission_source(), &payload)
+        .await
+        .map_err(map_host_admission_outcome)?;
+    let outcome = replay_projectless_hermes_receipts(broker, profile_root, Some(admitted.seq))
+        .await
+        .map_err(map_host_admission_outcome)?;
+    if !matches!(
+        outcome.status,
+        HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
+    ) {
+        return Err(map_host_admission_outcome(outcome));
+    }
+    if is_turn_ingested {
+        return continue_projectless_hermes_review(profile_root, session_db).await;
+    }
+    Ok(json!({ "action": "hermes_receipt", "status": "recorded" }))
 }
 
 #[cfg(test)]
 mod tests {
     use std::io;
+    use std::sync::Arc;
 
     use tracedecay_domain::{
         CanonicalObservationIdV1, ObservationCollisionOutcomeV1, PayloadDigestV1,
@@ -787,6 +1060,27 @@ mod tests {
     }
 
     #[test]
+    fn bounded_snapshot_deferral_is_typed_retryable_backpressure() {
+        let deferred = complete_ingest_admission(
+            HostAdmissionOutcome::accepted_for_replay(),
+            true,
+            false,
+            true,
+        );
+        assert_eq!(deferred.status, HostAdmissionStatus::Backpressured);
+        assert!(deferred.retryable);
+        assert_eq!(deferred.reason_code, Some("ingest_pass_backpressured"));
+
+        let completed = complete_ingest_admission(
+            HostAdmissionOutcome::accepted_for_replay(),
+            true,
+            false,
+            false,
+        );
+        assert_eq!(completed.status, HostAdmissionStatus::Committed);
+    }
+
+    #[test]
     fn cursor_compaction_response_matches_hook_contract() {
         let value = cursor_compact_skipped("no messages to compact");
         let outcome: crate::hooks::CursorPreCompactOutcome = serde_json::from_value(value).unwrap();
@@ -801,6 +1095,25 @@ mod tests {
         let none = SessionAuthorities::default();
         assert!(required_project_db(none).is_err());
         assert!(required_user_db(none).is_err());
+    }
+
+    #[tokio::test]
+    async fn replayable_profile_ingest_admission_does_not_require_host_spool() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db = std::sync::Arc::new(
+            GlobalDb::open_at(&temp.path().join("user-sessions.db"))
+                .await
+                .unwrap(),
+        );
+        let admission = host_admission_facade(
+            None,
+            HostAdmissionScope::Profile,
+            SessionAuthorities::new(None, Some(&db)),
+        )
+        .unwrap()
+        .accept_replay("cursor", HostAdmissionScope::Profile);
+
+        assert_eq!(admission.status, HostAdmissionStatus::AcceptedForReplay);
     }
 
     #[tokio::test]
@@ -1040,5 +1353,265 @@ mod tests {
         let rendered = data.to_string();
         assert!(!rendered.contains("private expected cursor"));
         assert!(!rendered.contains("private actual cursor"));
+    }
+
+    fn hermes_turn_completed_event(session_id: &str, watermark: &str) -> Value {
+        json!({
+            "agent": "hermes",
+            "event": "turnCompleted",
+            "route": { "session_id": session_id },
+            "receipt": {
+                "status": "success",
+                "transcript_watermark": watermark
+            }
+        })
+    }
+
+    fn user_profile_broker(user_sessions_db: &Path) -> SharedHostAdmissionBroker {
+        let (runtime, _) =
+            crate::application::host_admission::HostAdmissionRuntime::open_for_database(
+                user_sessions_db,
+            )
+            .expect("open user-profile host admission spool");
+        Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime))
+    }
+
+    #[tokio::test]
+    async fn projectless_hermes_receipt_uses_user_profile_without_local_writer() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("tracedecay-profile");
+        let hermes_home = temp.path().join("hermes-home");
+        let hermes_profile = hermes_home.join("profiles/test");
+        std::fs::create_dir_all(&hermes_profile).unwrap();
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let user_sessions_db = profile_root.join("user-sessions.db");
+        let db = GlobalDb::open_at(&user_sessions_db).await.unwrap();
+        let broker = user_profile_broker(&user_sessions_db);
+
+        let result = hermes_receipt(
+            &json!({
+                "action": "hermes_receipt",
+                "event": hermes_turn_completed_event("session-local-writer", "wm-local-1"),
+            }),
+            &profile_root,
+            &db,
+            &broker,
+        )
+        .await
+        .expect("projectless Hermes receipt should commit through the user-profile broker");
+
+        assert_eq!(result["action"], "hermes_receipt");
+        assert_eq!(result["status"], "recorded");
+        assert_eq!(broker.pending_count().await, 0);
+        let automation_root = crate::automation::runner::user_automation_root(&profile_root);
+        assert!(
+            automation_root.join("host_receipts.json").is_file(),
+            "receipt watermark state must live under the user TraceDecay profile"
+        );
+        for forbidden in [
+            hermes_profile.join("host_receipts.json"),
+            hermes_profile.join("sessions.db"),
+            hermes_profile.join(".tracedecay"),
+            hermes_home.join("host_receipts.json"),
+            hermes_home.join(".tracedecay"),
+        ] {
+            assert!(
+                !forbidden.exists(),
+                "projectless Hermes receipt must not create a local fallback writer at {}",
+                forbidden.display()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn projectless_hermes_receipt_is_durable_before_apply_and_replays_after_restart() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("tracedecay-profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let user_sessions_db = profile_root.join("user-sessions.db");
+        let db = GlobalDb::open_at(&user_sessions_db).await.unwrap();
+        let automation_root = crate::automation::runner::user_automation_root(&profile_root);
+        // Block canonical apply so admission can prove durability-before-attempt.
+        std::fs::write(&automation_root, "not-a-directory").unwrap();
+
+        let broker = user_profile_broker(&user_sessions_db);
+        let err = hermes_receipt(
+            &json!({
+                "action": "hermes_receipt",
+                "event": hermes_turn_completed_event("session-restart", "wm-restart-1"),
+            }),
+            &profile_root,
+            &db,
+            &broker,
+        )
+        .await
+        .expect_err("blocked user-automation root must retain the durable Hermes receipt");
+        let data = structured_hook_error_data(&err).expect("bounded hook error");
+        assert_eq!(data["reason_code"], "canonical_admission_failed");
+        assert_eq!(data["retryable"], true);
+        assert_eq!(broker.pending_count().await, 1);
+        drop(broker);
+
+        std::fs::remove_file(&automation_root).unwrap();
+        let recovered = user_profile_broker(&user_sessions_db);
+        let outcome = replay_projectless_hermes_host_admission(&recovered, &profile_root).await;
+        // A full drain with no target seq reports accepted_for_replay once the
+        // retained prefix is committed; the durable watermark is the authority.
+        assert!(matches!(
+            outcome.status,
+            HostAdmissionStatus::Committed | HostAdmissionStatus::AcceptedForReplay
+        ));
+        assert_eq!(recovered.pending_count().await, 0);
+        assert!(
+            automation_root.join("host_receipts.json").is_file(),
+            "restart replay must write receipts only under the user TraceDecay profile"
+        );
+    }
+
+    fn valid_hermes_terminal_receipt_payload(session_id: &str, watermark: &str) -> Vec<u8> {
+        let plan = crate::mcp::hook_events::HookEventPlan::RecordTerminalReceipt {
+            route: Some(crate::daemon::HookRouteMetadata {
+                session_id: Some(session_id.to_string()),
+                thread_id: None,
+                cwd: None,
+                worktree: None,
+                branch: None,
+            }),
+            receipt: crate::daemon::HookTerminalReceipt {
+                tool_call_id: None,
+                turn_id: None,
+                status: Some("success".to_string()),
+                duration_ms: Some(1),
+                transcript_watermark: Some(watermark.to_string()),
+            },
+        };
+        crate::mcp::hook_events::encode_durable_hook_event_plan(&plan).unwrap()
+    }
+
+    #[tokio::test]
+    async fn malformed_profile_source_does_not_starve_valid_sibling_source() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("tracedecay-profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let user_sessions_db = profile_root.join("user-sessions.db");
+        let _db = GlobalDb::open_at(&user_sessions_db).await.unwrap();
+        let broker = user_profile_broker(&user_sessions_db);
+        let valid_payload =
+            valid_hermes_terminal_receipt_payload("session-sibling", "wm-sibling-1");
+
+        let malformed = broker
+            .admit(
+                "hermes:malformed-source",
+                br#"{"version":1,"plan":{"kind":"add_branch","branch":""}}"#,
+            )
+            .await
+            .unwrap();
+        broker
+            .admit("hermes:valid-source", &valid_payload)
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            replay_projectless_hermes_receipts(&broker, &profile_root, Some(malformed.seq)),
+        )
+        .await
+        .expect("bounded profile replay must not spin on the malformed record")
+        .expect("replay should finish with a typed disposition");
+
+        assert_eq!(outcome.reason_code, Some("host_event_payload_malformed"));
+        assert!(!outcome.retryable);
+        assert_eq!(
+            broker.pending_count().await,
+            0,
+            "terminal evidence is quarantined and the committed sibling releases active capacity"
+        );
+        assert_eq!(broker.quarantine_count().await, 1);
+        let automation_root = crate::automation::runner::user_automation_root(&profile_root);
+        assert!(
+            automation_root.join("host_receipts.json").is_file(),
+            "valid sibling must apply under the user TraceDecay profile"
+        );
+
+        let reopen = replay_projectless_hermes_host_admission(&broker, &profile_root).await;
+        assert_eq!(reopen.status, HostAdmissionStatus::AcceptedForReplay);
+        assert_eq!(broker.pending_count().await, 0);
+        assert_eq!(broker.quarantine_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn malformed_profile_payload_is_quarantined_across_reopen() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("tracedecay-profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let user_sessions_db = profile_root.join("user-sessions.db");
+        let _db = GlobalDb::open_at(&user_sessions_db).await.unwrap();
+        let broker = user_profile_broker(&user_sessions_db);
+        let admitted = broker
+            .admit(
+                "hermes:invalid-plan-fixture",
+                br#"{"version":1,"plan":{"kind":"add_branch","branch":""}}"#,
+            )
+            .await
+            .unwrap();
+
+        let outcome =
+            replay_projectless_hermes_receipts(&broker, &profile_root, Some(admitted.seq))
+                .await
+                .expect("replay should finish with a typed disposition");
+
+        assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
+        assert_eq!(outcome.reason_code, Some("host_event_payload_malformed"));
+        assert!(!outcome.retryable);
+        assert_eq!(broker.pending_count().await, 0);
+        assert_eq!(broker.quarantine_count().await, 1);
+        let rendered = serde_json::to_string(&outcome).unwrap();
+        assert!(!rendered.contains("invalid-plan-fixture"));
+        assert!(!rendered.contains("\"branch\":\"\""));
+        drop(broker);
+
+        let recovered = user_profile_broker(&user_sessions_db);
+        assert_eq!(recovered.pending_count().await, 0);
+        assert_eq!(recovered.quarantine_count().await, 1);
+        let reopen = replay_projectless_hermes_host_admission(&recovered, &profile_root).await;
+        assert_eq!(reopen.status, HostAdmissionStatus::AcceptedForReplay);
+        assert_eq!(recovered.pending_count().await, 0);
+        assert_eq!(recovered.quarantine_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn unsupported_profile_payload_version_is_retained_without_apply() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("tracedecay-profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let user_sessions_db = profile_root.join("user-sessions.db");
+        let _db = GlobalDb::open_at(&user_sessions_db).await.unwrap();
+        let broker = user_profile_broker(&user_sessions_db);
+        let admitted = broker
+            .admit(
+                "hermes:future-plan-fixture",
+                br#"{"version":2,"plan":{"kind":"future_host_event","opaque":"private"}}"#,
+            )
+            .await
+            .unwrap();
+
+        let outcome =
+            replay_projectless_hermes_receipts(&broker, &profile_root, Some(admitted.seq))
+                .await
+                .expect("replay should finish with a typed disposition");
+
+        assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
+        assert_eq!(
+            outcome.reason_code,
+            Some("host_event_payload_unsupported_version")
+        );
+        assert!(outcome.retryable);
+        assert_eq!(broker.pending_count().await, 1);
+        assert_eq!(broker.quarantine_count().await, 0);
+        let automation_root = crate::automation::runner::user_automation_root(&profile_root);
+        assert!(
+            !automation_root.join("host_receipts.json").is_file(),
+            "unsupported version must not attempt canonical profile apply"
+        );
     }
 }

@@ -1,13 +1,11 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+pub use tracedecay_domain::MAX_OBSERVATION_RECORD_BYTES;
 use tracedecay_domain::{
-    CanonicalObservationEnvelopeV1, ClaudeByteRangeV1, ObservationOrderingDomainV1, ProviderId,
+    CanonicalObservationEnvelopeV1, ClaudeByteRangeV1, MAX_OBSERVATION_STRUCTURE_DEPTH,
+    MAX_OBSERVATION_STRUCTURE_VALUES, ObservationOrderingDomainV1, ProviderId,
 };
-
-pub const MAX_OBSERVATION_RECORD_BYTES: usize = 1024 * 1024;
-const DEFAULT_MAX_DEPTH: usize = 96;
-const DEFAULT_MAX_VALUES: usize = 50_000;
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum ClaudeRecordParseErrorV1 {
@@ -51,8 +49,8 @@ impl ParseLimits {
     pub(super) const fn default_policy() -> Self {
         Self {
             record_bytes: MAX_OBSERVATION_RECORD_BYTES,
-            depth: DEFAULT_MAX_DEPTH,
-            values: DEFAULT_MAX_VALUES,
+            depth: MAX_OBSERVATION_STRUCTURE_DEPTH,
+            values: MAX_OBSERVATION_STRUCTURE_VALUES,
         }
     }
 }
@@ -98,7 +96,7 @@ impl ParsedClaudeRecordV1 {
         &self.raw_digest
     }
 
-    pub(super) fn canonical_provider(&self) -> Option<&ProviderId> {
+    pub(crate) fn canonical_provider(&self) -> Option<&ProviderId> {
         self.canonical_provider.as_ref()
     }
 

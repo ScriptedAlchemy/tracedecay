@@ -7,6 +7,7 @@
 //! wire format while later providers retain typed native ordering evidence.
 
 use std::cmp::Ordering;
+use std::io::{self, Write};
 
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -30,6 +31,12 @@ const CLAUDE_RECEIPT_SANITIZED_PAYLOAD_DOMAIN: &[u8] = b"sanitized-payload-diges
 const CLAUDE_RECEIPT_NO_PAYLOAD_DOMAIN: &[u8] = b"no-durable-payload\0";
 const CLAUDE_RECEIPT_ID_PREFIX: &str = "privacy.claude.v1.";
 const OBSERVATION_RECEIPT_ID_PREFIX: &str = "privacy.observation.v1.";
+
+/// Shared parse and canonical-envelope limits for one observation record.
+pub const MAX_OBSERVATION_RECORD_BYTES: usize = 1024 * 1024;
+pub const MAX_OBSERVATION_STRUCTURE_DEPTH: usize = 96;
+pub const MAX_OBSERVATION_STRUCTURE_VALUES: usize = 50_000;
+pub const MAX_CANONICAL_OBSERVATION_FACTS_V1: usize = MAX_OBSERVATION_STRUCTURE_VALUES;
 
 /// Pure validation failures at the observation contract boundary.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -78,6 +85,14 @@ pub enum ObservationContractError {
     InvalidCanonicalRecordKind,
     #[error("canonical observation envelope must contain at least one fact")]
     CanonicalFactsRequired,
+    #[error("canonical observation envelope exceeds the fact-count limit")]
+    CanonicalFactsTooMany,
+    #[error("canonical observation envelope exceeds the byte limit")]
+    CanonicalEnvelopeTooLarge,
+    #[error("canonical observation envelope exceeds the nesting limit")]
+    CanonicalEnvelopeTooDeep,
+    #[error("canonical observation envelope exceeds the value-count limit")]
+    CanonicalEnvelopeTooManyValues,
     #[error("durable canonical observation payload is invalid")]
     InvalidCanonicalPayload,
     #[error("canonical observation ordering evidence is invalid")]
@@ -699,9 +714,101 @@ impl CanonicalObservationEnvelopeV1 {
         if self.facts.is_empty() {
             return Err(ObservationContractError::CanonicalFactsRequired);
         }
+        if self.facts.len() > MAX_CANONICAL_OBSERVATION_FACTS_V1 {
+            return Err(ObservationContractError::CanonicalFactsTooMany);
+        }
         for fact in &self.facts {
             fact.validate()?;
         }
+        validate_canonical_envelope_limits(self)?;
+        Ok(())
+    }
+}
+
+fn validate_canonical_envelope_limits(
+    envelope: &CanonicalObservationEnvelopeV1,
+) -> Result<(), ObservationContractError> {
+    let mut content_values = 0usize;
+    for fact in &envelope.facts {
+        if let Some(content) = fact.content() {
+            validate_value_structure(content, 4, &mut content_values)?;
+        }
+    }
+
+    let mut writer = ByteLimitWriter::new(MAX_OBSERVATION_RECORD_BYTES);
+    match serde_json::to_writer(&mut writer, envelope) {
+        Err(_) if writer.exceeded => {
+            return Err(ObservationContractError::CanonicalEnvelopeTooLarge);
+        }
+        Err(_) => return Err(ObservationContractError::CanonicalEncoding),
+        Ok(()) => {}
+    }
+
+    let value =
+        serde_json::to_value(envelope).map_err(|_| ObservationContractError::CanonicalEncoding)?;
+    let mut values = 0usize;
+    validate_value_structure(&value, 1, &mut values)
+}
+
+fn validate_value_structure(
+    value: &Value,
+    initial_depth: usize,
+    values: &mut usize,
+) -> Result<(), ObservationContractError> {
+    let mut stack = vec![(value, initial_depth)];
+    while let Some((current, depth)) = stack.pop() {
+        *values = values.saturating_add(1);
+        if *values > MAX_OBSERVATION_STRUCTURE_VALUES {
+            return Err(ObservationContractError::CanonicalEnvelopeTooManyValues);
+        }
+        if depth > MAX_OBSERVATION_STRUCTURE_DEPTH {
+            return Err(ObservationContractError::CanonicalEnvelopeTooDeep);
+        }
+        match current {
+            Value::Object(fields) => stack.extend(
+                fields
+                    .values()
+                    .map(|child| (child, depth.saturating_add(1))),
+            ),
+            Value::Array(items) => {
+                stack.extend(items.iter().map(|child| (child, depth.saturating_add(1))))
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+struct ByteLimitWriter {
+    written: usize,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl ByteLimitWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            written: 0,
+            limit,
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for ByteLimitWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let remaining = self.limit.saturating_sub(self.written);
+        if buffer.len() > remaining {
+            self.exceeded = true;
+            return Err(io::Error::other(
+                "canonical observation byte limit exceeded",
+            ));
+        }
+        self.written += buffer.len();
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
@@ -717,6 +824,8 @@ pub struct CanonicalObservationRelationsV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message_id: Option<ObservationId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_session_id: Option<SessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     parent_message_id: Option<ObservationId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_id: Option<ObservationId>,
@@ -731,6 +840,7 @@ impl CanonicalObservationRelationsV1 {
             thread_id: None,
             turn_id: None,
             message_id: None,
+            parent_session_id: None,
             parent_message_id: None,
             agent_id: None,
             parent_agent_id: None,
@@ -752,6 +862,12 @@ impl CanonicalObservationRelationsV1 {
     #[must_use]
     pub fn with_message_id(mut self, message_id: ObservationId) -> Self {
         self.message_id = Some(message_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_parent_session_id(mut self, parent_session_id: SessionId) -> Self {
+        self.parent_session_id = Some(parent_session_id);
         self
     }
 
@@ -781,6 +897,10 @@ impl CanonicalObservationRelationsV1 {
         self.message_id.as_ref()
     }
 
+    pub fn parent_session_id(&self) -> Option<&SessionId> {
+        self.parent_session_id.as_ref()
+    }
+
     pub fn agent_id(&self) -> Option<&ObservationId> {
         self.agent_id.as_ref()
     }
@@ -793,6 +913,11 @@ impl CanonicalObservationRelationsV1 {
         self.session_id
             .validate()
             .map_err(|_| ObservationContractError::InvalidSourceIdentity)?;
+        if let Some(parent_session_id) = &self.parent_session_id {
+            parent_session_id
+                .validate()
+                .map_err(|_| ObservationContractError::InvalidSourceIdentity)?;
+        }
         for id in [
             self.thread_id.as_ref(),
             self.turn_id.as_ref(),
@@ -931,6 +1056,17 @@ pub enum CanonicalWorkflowEvidenceKindV1 {
     Unknown,
 }
 
+/// Provider-neutral meaning of one native workflow lifecycle fact.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalWorkflowSemanticKindV1 {
+    Goal,
+    Plan,
+    TodoList,
+    TodoItem,
+    Task,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CanonicalBoundaryKindV1 {
@@ -955,6 +1091,27 @@ pub enum CanonicalUnknownStateV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CanonicalObservationFactV1 {
+    Session {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        location_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ended_at: Option<i64>,
+        source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native_source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        location_provenance: Option<String>,
+    },
     Message {
         role: CanonicalMessageRoleV1,
         content: Value,
@@ -1014,6 +1171,29 @@ pub enum CanonicalObservationFactV1 {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content: Option<Value>,
     },
+    WorkflowLifecycle {
+        semantic_kind: CanonicalWorkflowSemanticKindV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_reference: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_reference: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        list_reference: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_order: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_sequence: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<Value>,
+    },
     Boundary {
         boundary_kind: CanonicalBoundaryKindV1,
     },
@@ -1024,8 +1204,48 @@ pub enum CanonicalObservationFactV1 {
 }
 
 impl CanonicalObservationFactV1 {
+    /// Returns the structured payload carried by facts that own one.
+    pub fn content(&self) -> Option<&Value> {
+        match self {
+            Self::Message { content, .. }
+            | Self::ToolResult { content, .. }
+            | Self::ToolInvocation {
+                arguments: content, ..
+            } => Some(content),
+            Self::Compaction { summary, .. }
+            | Self::Reasoning {
+                content: summary, ..
+            }
+            | Self::Git {
+                content: summary, ..
+            }
+            | Self::Workflow {
+                content: summary, ..
+            }
+            | Self::WorkflowLifecycle {
+                content: summary, ..
+            } => summary.as_ref(),
+            Self::Session { .. }
+            | Self::Usage { .. }
+            | Self::Boundary { .. }
+            | Self::Unknown { .. } => None,
+        }
+    }
+
     fn validate(&self) -> Result<(), ObservationContractError> {
         match self {
+            Self::Session {
+                started_at,
+                ended_at,
+                ..
+            } => {
+                if (*started_at)
+                    .zip(*ended_at)
+                    .is_some_and(|(start, end)| end < start)
+                {
+                    return Err(ObservationContractError::InvalidCanonicalOrderingEvidence);
+                }
+            }
             Self::ToolInvocation {
                 invocation_id,
                 name,
@@ -1051,6 +1271,31 @@ impl CanonicalObservationFactV1 {
             Self::Git { reference, .. } | Self::Workflow { reference, .. } => {
                 if let Some(reference) = reference {
                     validate_canonical_label(reference)?;
+                }
+            }
+            Self::WorkflowLifecycle {
+                provider_reference,
+                item_id,
+                parent_reference,
+                list_reference,
+                state,
+                status,
+                revision,
+                ..
+            } => {
+                for value in [
+                    provider_reference,
+                    item_id,
+                    parent_reference,
+                    list_reference,
+                    state,
+                    status,
+                    revision,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    validate_canonical_label(value)?;
                 }
             }
             Self::Unknown { native_kind, .. } => validate_canonical_label(native_kind)?,

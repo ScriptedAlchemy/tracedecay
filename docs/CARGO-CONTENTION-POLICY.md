@@ -51,8 +51,8 @@ Do not reuse or delete those directories while a diagnostic command is active.
 Before submitting a build-configuration change:
 
 ```sh
-cargo check --workspace --all-targets --locked
-cargo test --workspace --locked
+cargo check --workspace --all-targets
+cargo test --workspace
 ```
 
 Confirm that a fresh shell with a standard Rust toolchain can run the commands

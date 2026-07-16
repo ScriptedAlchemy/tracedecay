@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::global_db::GlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
 
-use super::failure::TranscriptCatchUpFailure;
+use super::failure::{IngestPassCoverage, IngestPassOutcome, TranscriptCatchUpFailure};
 use super::user::{
     ingest_user_global_sources_for_provider_with_roots, registered_project_roots_from,
 };
@@ -11,6 +11,7 @@ use super::user::{
 pub(crate) struct TranscriptIngestOutcome {
     pub stats: TranscriptIngestStats,
     pub failures: Vec<TranscriptCatchUpFailure>,
+    pub coverage: IngestPassCoverage,
 }
 
 impl TranscriptIngestOutcome {
@@ -18,15 +19,23 @@ impl TranscriptIngestOutcome {
         stats: TranscriptIngestStats,
         failures: Vec<TranscriptCatchUpFailure>,
     ) -> Self {
-        Self { stats, failures }
+        Self {
+            stats,
+            failures,
+            coverage: IngestPassCoverage::Complete,
+        }
+    }
+
+    pub(super) fn from_pass(outcome: IngestPassOutcome) -> Self {
+        Self {
+            stats: outcome.stats,
+            failures: outcome.failures,
+            coverage: outcome.coverage,
+        }
     }
 
     pub(crate) fn is_success(&self) -> bool {
-        self.failures.is_empty()
-    }
-
-    pub(super) fn push_failure(&mut self, failure: TranscriptCatchUpFailure) {
-        self.failures.push(failure);
+        self.coverage.is_complete() && self.failures.is_empty()
     }
 }
 

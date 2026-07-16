@@ -435,10 +435,13 @@ fn spawn_session_catch_up_ingest(
     project_id: Option<String>,
 ) {
     tokio::spawn(async move {
+        let project_id = project_id
+            .as_deref()
+            .and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
         let project_outcome = crate::sessions::ingest_project_sources_for_provider(
             db.as_ref(),
             &project_root,
-            project_id.as_deref(),
+            project_id,
             None,
             true,
         )

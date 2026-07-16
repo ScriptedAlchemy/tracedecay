@@ -10,14 +10,52 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use tempfile::TempDir;
-use tracedecay::sessions::cursor::open_project_session_db;
-use tracedecay::sessions::cursor::{CursorSweepSource, cursor_project_slug};
+use tracedecay::sessions::cursor::{
+    CursorSweepSource, cursor_project_slug, open_project_session_db,
+    resolved_project_session_db_path,
+};
 use tracedecay::sessions::cursor_composer::CursorComposerSource;
 use tracedecay::sessions::source::ingest_source;
+use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
 
-use crate::support::init_project;
+use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
+use crate::restart_atomicity::{
+    durable_table_count, fixture_project_id, mark_test_project, observation_source_cursor,
+    set_projection_failure,
+};
+use crate::support::{init_git_repo, init_project};
 
 const CAP: usize = 256;
+
+async fn composer_workflow_fact_count(project: &Path) -> u64 {
+    let db_path = resolved_project_session_db_path(project).await.unwrap();
+    let raw = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = raw.connect().unwrap();
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM observation_workflow_facts", ())
+        .await
+        .unwrap();
+    let count = rows.next().await.unwrap().unwrap().get::<u64>(0).unwrap();
+    drop(rows);
+    drop(conn);
+    drop(raw);
+    count
+}
+
+async fn composer_observation_json_blobs(project: &Path) -> Vec<String> {
+    let db_path = resolved_project_session_db_path(project).await.unwrap();
+    let raw = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = raw.connect().unwrap();
+    let mut rows = conn
+        .query("SELECT observation_json FROM observations", ())
+        .await
+        .unwrap();
+    let mut values = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        values.push(row.get::<String>(0).unwrap());
+    }
+    values
+}
 
 /// Write a `state.vscdb` with the `cursorDiskKV` schema at the real Cursor
 /// path under `home`, populated with the given `(key, value)` rows.
@@ -119,7 +157,7 @@ async fn composer_envelope_and_bubbles_ingest_rows() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let outcome = CursorComposerSource::with_home(&home)
-        .ingest(&db, &project, CAP)
+        .ingest(&db, &project, fixture_project_id(), CAP)
         .await;
 
     assert_eq!(
@@ -171,16 +209,33 @@ async fn composer_envelope_and_bubbles_ingest_rows() {
     assert_eq!(pr.kind.as_deref(), Some("pr_link"));
     assert!(pr.text.contains("example.invalid/pr/7"));
 
-    // Plan row from the envelope todos.
-    let plan = db
-        .get_session_message("cursor", "comp-1:plan")
-        .await
-        .expect("plan row");
-    assert_eq!(plan.kind.as_deref(), Some("plan"));
-    let plan_meta: serde_json::Value =
-        serde_json::from_str(plan.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(plan_meta["todos"][0]["id"], "t1");
-    assert_eq!(plan_meta["todos"][1]["status"], "pending");
+    // Envelope todos admit as WorkflowLifecycle TodoList/TodoItem (searchable).
+    let first = db
+        .search_session_messages("cursor", None, "First todo", 10)
+        .await;
+    assert!(
+        first.iter().any(|hit| {
+            hit.message.text.contains("First todo")
+                && hit.message.metadata_json.as_deref().is_some_and(|meta| {
+                    meta.contains("\"item_id\":\"t1\"") && meta.contains("completed")
+                })
+        }),
+        "envelope todo t1 must project with native id/status"
+    );
+    let second = db
+        .search_session_messages("cursor", None, "Second todo", 10)
+        .await;
+    assert!(
+        second.iter().any(|hit| {
+            hit.message.text.contains("Second todo")
+                && hit
+                    .message
+                    .metadata_json
+                    .as_deref()
+                    .is_some_and(|meta| meta.contains("pending"))
+        }),
+        "envelope todo t2 must project with native pending status"
+    );
 }
 
 /// The JSONL sweep skips any session id owned by the composer store, so the two
@@ -218,7 +273,7 @@ async fn composer_owned_session_dedupes_jsonl_sweep() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let outcome = CursorComposerSource::with_home(&home)
-        .ingest(&db, &project, CAP)
+        .ingest(&db, &project, fixture_project_id(), CAP)
         .await;
     assert!(outcome.owned_session_ids.contains("comp-1"));
 
@@ -234,7 +289,7 @@ async fn composer_owned_session_dedupes_jsonl_sweep() {
     // Control: without the skip set the same JSONL file would ingest.
     let db2 = open_project_session_db(&project).await.unwrap();
     let _ = CursorComposerSource::with_home(&home)
-        .ingest(&db2, &project, CAP)
+        .ingest(&db2, &project, fixture_project_id(), CAP)
         .await;
     let plain_sweep = CursorSweepSource::with_home(&home);
     let plain = ingest_source(&db2, &plain_sweep, &project, None).await;
@@ -265,10 +320,14 @@ async fn composer_watermark_skips_unchanged_and_reingests_growth() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = CursorComposerSource::with_home(&home);
-    let first = source.ingest(&db, &project, CAP).await;
+    let first = source
+        .ingest(&db, &project, fixture_project_id(), CAP)
+        .await;
     assert_eq!(first.sessions_upserted, 1);
 
-    let second = source.ingest(&db, &project, CAP).await;
+    let second = source
+        .ingest(&db, &project, fixture_project_id(), CAP)
+        .await;
     assert_eq!(
         second.sessions_upserted, 0,
         "unchanged session must skip without re-upserting"
@@ -288,13 +347,183 @@ async fn composer_watermark_skips_unchanged_and_reingests_growth() {
         ],
     )
     .await;
-    let third = source.ingest(&db, &project, CAP).await;
+    let third = source
+        .ingest(&db, &project, fixture_project_id(), CAP)
+        .await;
     assert_eq!(third.sessions_upserted, 1, "growth re-ingests");
     let reply = db
         .get_session_message("cursor", "comp-1:b2")
         .await
         .expect("new bubble row");
     assert!(reply.text.contains("Second turn reply"));
+}
+
+#[tokio::test]
+// This test mutates process-wide HOME while asynchronous storage work runs;
+// it must hold the shared environment lock for the full test.
+#[allow(clippy::await_holding_lock)]
+async fn composer_projection_failure_commits_frontier_and_replays_once() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+
+    let env = envelope("comp-crash", &project, &["b1"]);
+    let b1 = serde_json::json!({ "type": 1, "text": "Composer crash prefix." });
+    write_state_vscdb(
+        &home,
+        &[
+            kv("composerData:comp-crash", &env),
+            kv("bubbleId:comp-crash:b1", &b1),
+        ],
+    )
+    .await;
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let first =
+        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    assert!(first.messages_upserted >= 1);
+    assert!(db.get_session("cursor", "comp-crash").await.is_some());
+    let prefix_cursor = observation_source_cursor(&db, "cursor", "comp-crash", &project)
+        .await
+        .expect("committed Cursor composer observation cursor");
+    assert!(prefix_cursor.position() >= 1);
+    let observations_before = durable_table_count(&project, "observations").await;
+    let receipts_before = durable_table_count(&project, "sanitization_receipts").await;
+
+    let grown = envelope("comp-crash", &project, &["b1", "b2"]);
+    let b2 = serde_json::json!({ "type": 2, "text": "Composer projection retry suffix." });
+    write_state_vscdb(
+        &home,
+        &[
+            kv("composerData:comp-crash", &grown),
+            kv("bubbleId:comp-crash:b1", &b1),
+            kv("bubbleId:comp-crash:b2", &b2),
+        ],
+    )
+    .await;
+
+    set_projection_failure(&project, true).await;
+    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    let committed_cursor = observation_source_cursor(&db, "cursor", "comp-crash", &project)
+        .await
+        .expect("committed Cursor composer observation cursor");
+    assert_eq!(committed_cursor.generation(), prefix_cursor.generation());
+    assert!(committed_cursor.position() > prefix_cursor.position());
+    // Canonical observation + receipt commit before V1 projection acknowledgement.
+    let committed_observations = durable_table_count(&project, "observations").await;
+    let committed_receipts = durable_table_count(&project, "sanitization_receipts").await;
+    assert!(committed_observations > observations_before);
+    assert!(committed_receipts > receipts_before);
+    assert!(durable_table_count(&project, "projection_queue").await >= 1);
+    assert!(
+        db.search_session_messages("cursor", None, "projection retry suffix", 10)
+            .await
+            .is_empty()
+    );
+    drop(db);
+
+    set_projection_failure(&project, false).await;
+    let recovered = open_project_session_db(&project).await.unwrap();
+    let _ = ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Cursor))
+        .await;
+    assert_eq!(
+        recovered
+            .search_session_messages("cursor", None, "projection retry suffix", 10)
+            .await
+            .len(),
+        1
+    );
+    assert_eq!(
+        observation_source_cursor(&recovered, "cursor", "comp-crash", &project).await,
+        Some(committed_cursor.clone())
+    );
+    assert_eq!(
+        durable_table_count(&project, "observations").await,
+        committed_observations
+    );
+    assert_eq!(
+        durable_table_count(&project, "sanitization_receipts").await,
+        committed_receipts
+    );
+    assert_eq!(durable_table_count(&project, "projection_queue").await, 0);
+    assert_eq!(
+        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Cursor))
+            .await
+            .messages_upserted,
+        0
+    );
+    assert_eq!(
+        observation_source_cursor(&recovered, "cursor", "comp-crash", &project).await,
+        Some(committed_cursor)
+    );
+}
+
+#[tokio::test]
+async fn composer_replaced_envelope_converges_without_duplicate_bubbles() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+
+    let env = envelope("comp-replaced", &project, &["b1"]);
+    let b1 = serde_json::json!({ "type": 1, "text": "Original composer bubble." });
+    write_state_vscdb(
+        &home,
+        &[
+            kv("composerData:comp-replaced", &env),
+            kv("bubbleId:comp-replaced:b1", &b1),
+        ],
+    )
+    .await;
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CursorComposerSource::with_home(&home);
+    assert_eq!(
+        source
+            .ingest(&db, &project, fixture_project_id(), CAP)
+            .await
+            .sessions_upserted,
+        1
+    );
+
+    // Grow with a new bubble id (replacement/growth of the envelope), mirroring
+    // the existing watermark growth contract.
+    let replaced = envelope("comp-replaced", &project, &["b1", "b2"]);
+    let b2 = serde_json::json!({ "type": 2, "text": "late-composer-repl-9f3a reply." });
+    write_state_vscdb(
+        &home,
+        &[
+            kv("composerData:comp-replaced", &replaced),
+            kv("bubbleId:comp-replaced:b1", &b1),
+            kv("bubbleId:comp-replaced:b2", &b2),
+        ],
+    )
+    .await;
+    assert_eq!(
+        source
+            .ingest(&db, &project, fixture_project_id(), CAP)
+            .await
+            .sessions_upserted,
+        1
+    );
+    assert_eq!(
+        db.search_session_messages("cursor", None, "late-composer-repl-9f3a", 10)
+            .await
+            .len(),
+        1
+    );
+    assert_eq!(
+        source
+            .ingest(&db, &project, fixture_project_id(), CAP)
+            .await
+            .sessions_upserted,
+        0
+    );
 }
 
 /// A bubble discovered after a later header was already covered must not be
@@ -324,7 +553,12 @@ async fn composer_late_header_converges_with_rebuild() {
     let incremental_db = open_project_session_db(&incremental_project).await.unwrap();
     let source = CursorComposerSource::with_home(&incremental_home);
     source
-        .ingest(&incremental_db, &incremental_project, CAP)
+        .ingest(
+            &incremental_db,
+            &incremental_project,
+            fixture_project_id(),
+            CAP,
+        )
         .await;
 
     write_state_vscdb(
@@ -341,7 +575,12 @@ async fn composer_late_header_converges_with_rebuild() {
     )
     .await;
     source
-        .ingest(&incremental_db, &incremental_project, CAP)
+        .ingest(
+            &incremental_db,
+            &incremental_project,
+            fixture_project_id(),
+            CAP,
+        )
         .await;
 
     let rebuild_tmp = TempDir::new().unwrap();
@@ -362,7 +601,7 @@ async fn composer_late_header_converges_with_rebuild() {
     .await;
     let rebuild_db = open_project_session_db(&rebuild_project).await.unwrap();
     CursorComposerSource::with_home(&rebuild_home)
-        .ingest(&rebuild_db, &rebuild_project, CAP)
+        .ingest(&rebuild_db, &rebuild_project, fixture_project_id(), CAP)
         .await;
 
     for bubble_id in ["b1", "b2", "b3"] {
@@ -406,7 +645,9 @@ async fn composer_reordered_headers_keep_native_identity() {
     .await;
     let db = open_project_session_db(&project).await.unwrap();
     let source = CursorComposerSource::with_home(&home);
-    source.ingest(&db, &project, CAP).await;
+    source
+        .ingest(&db, &project, fixture_project_id(), CAP)
+        .await;
 
     write_state_vscdb(
         &home,
@@ -421,7 +662,9 @@ async fn composer_reordered_headers_keep_native_identity() {
         ],
     )
     .await;
-    source.ingest(&db, &project, CAP).await;
+    source
+        .ingest(&db, &project, fixture_project_id(), CAP)
+        .await;
 
     for (bubble_id, text) in [
         ("b1", "First prompt."),
@@ -472,7 +715,7 @@ async fn composer_tolerates_malformed_and_reads_store_db() {
 
     let db = open_project_session_db(&project).await.unwrap();
     let outcome = CursorComposerSource::with_home(&home)
-        .ingest(&db, &project, CAP)
+        .ingest(&db, &project, fixture_project_id(), CAP)
         .await;
 
     // Both the composer envelope session and the store.db chat session ingested.
@@ -501,6 +744,75 @@ async fn composer_tolerates_malformed_and_reads_store_db() {
     assert_eq!(
         store_session.transcript_path.as_deref(),
         Some(expected_store_path.to_string_lossy().as_ref())
+    );
+}
+
+/// Oversized bubble TEXT built in SQL must not become a durable message row.
+#[tokio::test]
+async fn composer_sql_oversized_bubble_is_non_durable_without_payload_leak() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+
+    let env = envelope("comp-oversize", &project, &["b-ok", "b-huge"]);
+    let ok_bubble = serde_json::json!({ "type": 1, "text": "small ok bubble" });
+    // Build the hostile bubble value entirely inside SQLite.
+    let dir = home
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("state.vscdb");
+    let db = libsql::Builder::new_local(&path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute_batch(
+        "PRAGMA journal_mode=DELETE;\n\
+         CREATE TABLE IF NOT EXISTS cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+        libsql::params![format!("composerData:comp-oversize"), env.to_string()],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+        libsql::params![
+            format!("bubbleId:comp-oversize:b-ok"),
+            ok_bubble.to_string()
+        ],
+    )
+    .await
+    .unwrap();
+    // 1 MiB + 2 of hex zeros via zeroblob — never a Rust String of that size
+    // in the product path. length(value) = 2 * 524289 = 1_048_578.
+    conn.execute(
+        "INSERT OR REPLACE INTO cursorDiskKV (key, value) \
+         SELECT 'bubbleId:comp-oversize:b-huge', hex(zeroblob(524289))",
+        (),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(db);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let outcome = CursorComposerSource::with_home(&home)
+        .ingest_capped(&db, &project, fixture_project_id(), CAP, Some(64 * 1024))
+        .await;
+
+    assert!(
+        outcome.owned_session_ids.contains("comp-oversize"),
+        "valid envelope still owns the session"
+    );
+    assert!(
+        db.get_session_message("cursor", "comp-oversize:b-huge")
+            .await
+            .is_none(),
+        "oversized bubble must not persist"
     );
 }
 
@@ -571,6 +883,358 @@ async fn write_store_db(path: &Path) {
     drop(db);
 }
 
+/// Production path: checked-in envelope todos admit as WorkflowLifecycle facts
+/// with stable list/item refs and native array order.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn composer_envelope_todos_admit_workflow_lifecycle_facts() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/provider_normalization/cursor_composer/envelope_todos.input.json"
+    ))
+    .expect("checked-in composer envelope todos fixture");
+    let mut env = envelope("comp-1", &project, &["b-user"]);
+    env["todos"] = fixture["todos"].clone();
+    let user_bubble = serde_json::json!({
+        "type": 1,
+        "text": "Please work the checklist."
+    });
+
+    write_state_vscdb(
+        &home,
+        &[
+            kv("composerData:comp-1", &env),
+            kv("bubbleId:comp-1:b-user", &user_bubble),
+        ],
+    )
+    .await;
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    assert_eq!(
+        durable_table_count(&project, "projection_queue").await,
+        0,
+        "envelope lifecycle projection must be applied synchronously"
+    );
+    assert_eq!(
+        composer_workflow_fact_count(&project).await,
+        3,
+        "one TodoList and two TodoItem facts must be projected"
+    );
+
+    let hits = db
+        .search_session_messages("cursor", None, "First todo", 10)
+        .await;
+    assert_eq!(hits.len(), 1, "todo item content must be searchable");
+    assert_eq!(hits[0].message.kind.as_deref(), Some("todo_item"));
+    let meta: serde_json::Value =
+        serde_json::from_str(hits[0].message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(meta["item_id"], "t1");
+    assert_eq!(meta["list_reference"], "comp-1");
+    assert_eq!(meta["status"], "completed");
+    assert_eq!(meta["item_order"], 0);
+    assert!(meta.get("revision").is_none());
+    assert_eq!(meta["provider_reference"], "t1");
+
+    let second = db
+        .search_session_messages("cursor", None, "Second todo", 10)
+        .await;
+    assert_eq!(second.len(), 1);
+    let second_meta: serde_json::Value =
+        serde_json::from_str(second[0].message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(second_meta["item_id"], "t2");
+    assert_eq!(second_meta["status"], "pending");
+    assert_eq!(second_meta["item_order"], 1);
+    assert_eq!(second_meta["list_reference"], "comp-1");
+
+    // Co-located bubble Message remains searchable alongside WorkflowLifecycle.
+    assert_eq!(
+        db.search_session_messages("cursor", None, "Please work the checklist", 10)
+            .await
+            .len(),
+        1
+    );
+}
+
+/// Exact redelivery of the same envelope todos is idempotent.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn composer_envelope_todos_exact_duplicate_is_idempotent() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/provider_normalization/cursor_composer/envelope_todos.input.json"
+    ))
+    .unwrap();
+    let mut env = envelope("comp-1", &project, &["b-user"]);
+    env["todos"] = fixture["todos"].clone();
+    let user_bubble = serde_json::json!({ "type": 1, "text": "Idempotent checklist prompt." });
+    write_state_vscdb(
+        &home,
+        &[
+            kv("composerData:comp-1", &env),
+            kv("bubbleId:comp-1:b-user", &user_bubble),
+        ],
+    )
+    .await;
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    let observations_before = durable_table_count(&project, "observations").await;
+    let workflow_before = composer_workflow_fact_count(&project).await;
+    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    assert_eq!(
+        durable_table_count(&project, "observations").await,
+        observations_before,
+        "unchanged envelope todos must not create observations"
+    );
+    assert_eq!(
+        composer_workflow_fact_count(&project).await,
+        workflow_before
+    );
+    assert_eq!(
+        db.search_session_messages("cursor", None, "First todo", 10)
+            .await
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn composer_envelope_todo_secret_is_sanitized_before_persistence() {
+    const SECRET: &str = "AKIACOMPOSERTODO0001";
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    let mut env = envelope("comp-secret", &project, &[]);
+    env["todos"] = serde_json::json!([
+        {
+            "id": "todo-secret",
+            "content": format!("rotate access key {SECRET}"),
+            "status": "pending"
+        }
+    ]);
+    write_state_vscdb(&home, &[kv("composerData:comp-secret", &env)]).await;
+
+    let db = open_project_session_db(&project).await.unwrap();
+    CursorComposerSource::with_home(&home)
+        .ingest(&db, &project, fixture_project_id(), CAP)
+        .await;
+    drop(db);
+
+    let joined = composer_observation_json_blobs(&project).await.join("\n");
+    assert!(joined.contains("workflow_lifecycle"));
+    assert!(
+        !joined.contains(SECRET),
+        "secret-bearing todo content must be sanitized before persistence"
+    );
+}
+
+/// Same todo checkpoint with divergent envelope evidence (createdAt) after a
+/// generation change is an identity collision — first durable facts remain.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn composer_envelope_todos_conflict_does_not_overwrite() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/provider_normalization/cursor_composer/envelope_todos.input.json"
+    ))
+    .unwrap();
+    let mut env = envelope("comp-1", &project, &["b-user"]);
+    env["todos"] = fixture["todos"].clone();
+    let user_bubble = serde_json::json!({ "type": 1, "text": "Conflict checklist prompt." });
+    write_state_vscdb(
+        &home,
+        &[
+            kv("composerData:comp-1", &env),
+            kv("bubbleId:comp-1:b-user", &user_bubble),
+        ],
+    )
+    .await;
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    let workflow_before = composer_workflow_fact_count(&project).await;
+    assert_eq!(workflow_before, 3);
+
+    // New snapshot generation, same todos (same content fingerprint checkpoint),
+    // but divergent createdAt → same native identity, different payload digest.
+    let state_db = home
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage")
+        .join("state.vscdb");
+    std::fs::remove_file(&state_db).unwrap();
+    env["createdAt"] = serde_json::json!(1_700_000_000_999_i64);
+    write_state_vscdb(
+        &home,
+        &[
+            kv("composerData:comp-1", &env),
+            kv("bubbleId:comp-1:b-user", &user_bubble),
+        ],
+    )
+    .await;
+
+    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+
+    assert_eq!(
+        composer_workflow_fact_count(&project).await,
+        workflow_before,
+        "identity collision must not project a second todo snapshot"
+    );
+    assert_eq!(
+        db.search_session_messages("cursor", None, "First todo", 10)
+            .await
+            .len(),
+        1,
+        "original envelope todo content must remain"
+    );
+}
+
+/// Fixture-backed pending→completed status update after restart admits a new
+/// content-fingerprint checkpoint without inventing revision fields.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn composer_envelope_todo_status_update_after_restart_admits_new_checkpoint() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/provider_normalization/cursor_composer/envelope_todos.input.json"
+    ))
+    .unwrap();
+    assert!(fixture.get("lastUpdatedAt").is_some_and(|v| v.is_null()));
+    let mut env = envelope("comp-1", &project, &["b-user"]);
+    env["todos"] = fixture["todos"].clone();
+    let user_bubble = serde_json::json!({ "type": 1, "text": "Update checklist prompt." });
+    write_state_vscdb(
+        &home,
+        &[
+            kv("composerData:comp-1", &env),
+            kv("bubbleId:comp-1:b-user", &user_bubble),
+        ],
+    )
+    .await;
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    let pending = db
+        .search_session_messages("cursor", None, "Second todo", 10)
+        .await;
+    assert_eq!(pending.len(), 1);
+    let pending_meta: serde_json::Value =
+        serde_json::from_str(pending[0].message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(pending_meta["status"], "pending");
+    assert_eq!(pending_meta["item_order"], 1);
+    assert!(pending_meta.get("revision").is_none());
+    drop(db);
+
+    // Restart against the same vscdb inode, then apply native status, content,
+    // and array-order changes without inventing a revision.
+    env["todos"][1]["status"] = serde_json::json!("completed");
+    env["todos"][1]["content"] = serde_json::json!("Second todo revised");
+    env["todos"].as_array_mut().unwrap().swap(0, 1);
+    write_state_vscdb(
+        &home,
+        &[
+            kv("composerData:comp-1", &env),
+            kv("bubbleId:comp-1:b-user", &user_bubble),
+        ],
+    )
+    .await;
+    let db = open_project_session_db(&project).await.unwrap();
+    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cursor)).await;
+    assert_eq!(
+        composer_workflow_fact_count(&project).await,
+        6,
+        "restart update must project a second list snapshot"
+    );
+
+    let hits = db
+        .search_session_messages("cursor", None, "Second todo", 10)
+        .await;
+    assert!(
+        hits.len() >= 2,
+        "status update must admit a new checkpointed observation; got {}",
+        hits.len()
+    );
+    let statuses: Vec<String> = hits
+        .iter()
+        .filter_map(|hit| {
+            let meta: serde_json::Value =
+                serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
+            assert_eq!(meta["item_id"], "t2");
+            assert_eq!(meta["list_reference"], "comp-1");
+            assert!(meta.get("revision").is_none());
+            meta["status"].as_str().map(str::to_string)
+        })
+        .collect();
+    assert!(statuses.iter().any(|s| s == "pending"));
+    assert!(statuses.iter().any(|s| s == "completed"));
+    let revised = hits
+        .iter()
+        .find(|hit| hit.message.text.contains("Second todo revised"))
+        .expect("updated todo content must be searchable after restart");
+    let revised_meta: serde_json::Value =
+        serde_json::from_str(revised.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(revised_meta["status"], "completed");
+    assert_eq!(revised_meta["item_order"], 0);
+    assert!(revised_meta.get("revision").is_none());
+    let first_todo = db
+        .search_session_messages("cursor", None, "First todo", 10)
+        .await;
+    assert_eq!(
+        first_todo.len(),
+        2,
+        "the sibling's native order transition must remain visible"
+    );
+    let mut first_orders = first_todo
+        .iter()
+        .map(|hit| {
+            serde_json::from_str::<serde_json::Value>(hit.message.metadata_json.as_deref().unwrap())
+                .unwrap()["item_order"]
+                .as_u64()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    first_orders.sort_unstable();
+    assert_eq!(first_orders, vec![0, 1]);
+}
+
 /// Manual live smoke check against the real ~21 GB `state.vscdb`. Ignored by
 /// default; run with:
 /// `CURSOR_SMOKE_PROJECT=/abs/project cargo nextest run --run-ignored all \
@@ -601,7 +1265,7 @@ async fn live_smoke_real_state_vscdb() {
 
     let start = std::time::Instant::now();
     let outcome = CursorComposerSource::with_home(&home)
-        .ingest(&db, &project, 50)
+        .ingest(&db, &project, fixture_project_id(), 50)
         .await;
     let elapsed = start.elapsed();
     eprintln!(

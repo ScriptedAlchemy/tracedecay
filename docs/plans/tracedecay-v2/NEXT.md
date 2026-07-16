@@ -4,6 +4,20 @@ PR5 completed the production Claude observation path. PR6 moves every remaining
 supported session source onto that same sanitizer, daemon authority, durable
 cursor, replay, and projection contract while preserving provider-native facts.
 
+## Current branch status
+
+The current branch contains the host-neutral integration catalog, the remaining
+provider adapters, bounded daemon host admission, fair provider scheduling,
+atomic projection and staged bounded rebuild, typed hook telemetry, and
+executable native host fixtures. Focused direct tests cover catalog completeness,
+provider replay and no-op behavior, admission failure and lifecycle cases,
+projection convergence, cancellation, and telemetry-fixture readiness.
+
+PR6 is not complete until the remaining correctness review is closed, the full
+Linux, Windows, all-feature, Clippy, and workspace gates pass, and a clean
+attested provider-observation benchmark creates the current acceptance artifact.
+The benchmark index intentionally has no `current_acceptance` until that run.
+
 ## Product slice
 
 Cover the currently supported Codex, Cursor, Hermes, Kiro, and Cline-like

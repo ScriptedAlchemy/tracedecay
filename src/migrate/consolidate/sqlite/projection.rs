@@ -39,7 +39,7 @@ pub(super) async fn materialize(conn: &Connection, target: &str, source: &str) -
          FROM {target}.observation_projection_provenance;
 
          CREATE TEMP TABLE consolidation_projection_source_mapped AS
-         SELECT p.projector_version, p.observation_id, p.receipt_id,
+         SELECT p.projector_version, p.observation_id, p.output_ordinal, p.receipt_id,
                 p.output_provider, p.output_message_id, m.mapped_id,
                 p.output_digest, p.message_created
          FROM {source}.observation_projection_provenance AS p
@@ -61,7 +61,8 @@ pub(super) async fn materialize(conn: &Connection, target: &str, source: &str) -
          SELECT mapped.projector_version, mapped.observation_id,
                 mapped.output_provider, mapped.mapped_id
          FROM consolidation_projection_source_mapped AS mapped
-         WHERE NOT EXISTS (
+         WHERE mapped.output_ordinal=0
+           AND NOT EXISTS (
              SELECT 1 FROM consolidation_projection_stable_claims AS stable
              WHERE stable.projector_version=mapped.projector_version
                AND stable.observation_id=mapped.observation_id
@@ -89,12 +90,12 @@ pub(super) async fn materialize(conn: &Connection, target: &str, source: &str) -
          GROUP BY projector_version, observation_id;
 
          CREATE TEMP TABLE consolidation_projection_provenance_candidates AS
-         SELECT p.projector_version, p.observation_id, p.receipt_id,
+         SELECT p.projector_version, p.observation_id, p.output_ordinal, p.receipt_id,
                 p.output_provider, p.output_message_id,
                 p.output_digest, p.message_created
          FROM {target}.observation_projection_provenance AS p
          UNION ALL
-         SELECT p.projector_version, p.observation_id, p.receipt_id,
+         SELECT p.projector_version, p.observation_id, p.output_ordinal, p.receipt_id,
                 p.output_provider, p.output_message_id, p.output_digest,
                 CASE WHEN EXISTS (
                      SELECT 1 FROM {target}.session_messages AS message
@@ -114,15 +115,16 @@ pub(super) async fn materialize(conn: &Connection, target: &str, source: &str) -
          WHERE m.mapped_id IS NULL;
 
          CREATE TEMP TABLE consolidation_projection_displaced AS
-         SELECT p.projector_version, p.observation_id, p.receipt_id,
+         SELECT p.projector_version, p.observation_id, p.output_ordinal, p.receipt_id,
                 p.output_provider, p.output_message_id,
                 p.output_digest, p.message_created
          FROM consolidation_projection_provenance_candidates AS p
          JOIN consolidation_projection_alias_plan AS alias
            ON alias.projector_version=p.projector_version
           AND alias.observation_id=p.observation_id
-         WHERE alias.output_provider IS NOT p.output_provider
-            OR alias.output_message_id IS NOT p.output_message_id;
+         WHERE p.output_ordinal=0
+           AND (alias.output_provider IS NOT p.output_provider
+                OR alias.output_message_id IS NOT p.output_message_id);
 
          CREATE TEMP TABLE consolidation_projection_provenance_claims AS
          SELECT p.*
@@ -131,24 +133,26 @@ pub(super) async fn materialize(conn: &Connection, target: &str, source: &str) -
              SELECT 1 FROM consolidation_projection_displaced AS displaced
              WHERE displaced.projector_version=p.projector_version
                AND displaced.observation_id=p.observation_id
+               AND displaced.output_ordinal=p.output_ordinal
          );
 
          CREATE TEMP TABLE consolidation_projection_provenance_plan(
              projector_version TEXT NOT NULL,
              observation_id TEXT NOT NULL,
+             output_ordinal INTEGER NOT NULL,
              receipt_id TEXT NOT NULL,
              output_provider TEXT NOT NULL,
              output_message_id TEXT NOT NULL,
              output_digest TEXT NOT NULL,
              message_created INTEGER NOT NULL,
-             PRIMARY KEY(projector_version, observation_id)
+             PRIMARY KEY(projector_version, observation_id, output_ordinal)
          );
          INSERT INTO consolidation_projection_provenance_plan
-         SELECT projector_version, observation_id, MIN(receipt_id),
+         SELECT projector_version, observation_id, output_ordinal, MIN(receipt_id),
                 MIN(output_provider), MIN(output_message_id), MIN(output_digest),
                 MAX(message_created)
          FROM consolidation_projection_provenance_claims
-         GROUP BY projector_version, observation_id;
+         GROUP BY projector_version, observation_id, output_ordinal;
 
          CREATE TEMP TABLE consolidation_projection_removal_plan(
              output_provider TEXT NOT NULL,
@@ -263,6 +267,15 @@ pub(super) async fn merge(conn: &Connection) -> Result<()> {
          DELETE FROM observation_projection_dispositions;
          INSERT INTO observation_projection_dispositions
          SELECT * FROM consolidation_projection_disposition_plan;
+         DELETE FROM observation_projection_rebuild_aliases;
+         DELETE FROM observation_projection_rebuild_sessions;
+         DELETE FROM observation_projection_rebuild_messages;
+         DELETE FROM observation_projection_rebuild_provenance;
+         DELETE FROM observation_projection_rebuild_dispositions;
+         DELETE FROM observation_projection_rebuild_workflow_facts;
+         DELETE FROM observation_projection_rebuilds;
+         DELETE FROM observation_projection_migrations;
+         DELETE FROM observation_workflow_facts;
          DELETE FROM observation_projection_checkpoints;
          DELETE FROM projection_queue;
          INSERT INTO projection_queue(observation_id, observation_sequence)
@@ -316,7 +329,7 @@ pub(super) async fn verify(conn: &Connection) -> Result<()> {
             "projection provenance",
             "observation_projection_provenance",
             "consolidation_projection_provenance_plan",
-            "projector_version, observation_id, receipt_id, output_provider,
+            "projector_version, observation_id, output_ordinal, receipt_id, output_provider,
              output_message_id, output_digest, message_created",
         ),
         (

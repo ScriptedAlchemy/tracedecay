@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::{claude_observation, source};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +31,292 @@ impl TranscriptCatchUpFailure {
             retryable,
         }
     }
+
+    /// Typed overload when the bounded multi-source pass cannot admit more work.
+    pub(super) const fn pass_backpressured() -> Self {
+        Self::new("scheduler", "pass", "ingest_pass_backpressured", true)
+    }
+
+    /// Typed cancellation before the pass finished covering admitted work.
+    pub(super) const fn pass_cancelled() -> Self {
+        Self::new("scheduler", "pass", "ingest_pass_cancelled", true)
+    }
+
+    pub(super) const fn pass_frontier_unavailable() -> Self {
+        Self::new("scheduler", "frontier", "ingest_frontier_unavailable", true)
+    }
+}
+
+/// One provider adapter's bounded contribution to a catch-up pass.
+///
+/// Adapters describe what happened; [`ProviderRunFold`] is the sole authority
+/// that combines provider results into pass-level stats and unit accounting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ProviderRunOutcome {
+    pub stats: TranscriptIngestStats,
+    pub failures: Vec<TranscriptCatchUpFailure>,
+    pub bytes_consumed: u64,
+    pub deferred_units: u64,
+    pub byte_bounds_enforced: bool,
+    admitted: bool,
+}
+
+impl ProviderRunOutcome {
+    pub(super) fn bounded(
+        stats: TranscriptIngestStats,
+        bytes_consumed: u64,
+        deferred_by_byte_cap: bool,
+    ) -> Self {
+        Self {
+            stats,
+            failures: Vec::new(),
+            bytes_consumed,
+            deferred_units: u64::from(deferred_by_byte_cap),
+            byte_bounds_enforced: true,
+            admitted: true,
+        }
+    }
+
+    pub(super) fn skipped() -> Self {
+        Self {
+            stats: TranscriptIngestStats::default(),
+            failures: Vec::new(),
+            bytes_consumed: 0,
+            deferred_units: 0,
+            byte_bounds_enforced: true,
+            admitted: false,
+        }
+    }
+
+    pub(super) fn failed(failure: TranscriptCatchUpFailure, bytes_consumed: u64) -> Self {
+        let mut outcome = Self::bounded(TranscriptIngestStats::default(), bytes_consumed, false);
+        outcome.failures.push(failure);
+        outcome
+    }
+
+    pub(super) fn add_failure(&mut self, failure: TranscriptCatchUpFailure) {
+        self.failures.push(failure);
+    }
+
+    pub(super) fn add_stats(&mut self, stats: TranscriptIngestStats) {
+        self.stats = self.stats.merge(stats);
+    }
+
+    pub(super) fn add_deferred_units(&mut self, deferred_units: u64) {
+        self.deferred_units = self.deferred_units.saturating_add(deferred_units);
+    }
+
+    pub(super) fn retryable(&self) -> bool {
+        self.failures
+            .last()
+            .is_some_and(|failure| failure.retryable)
+    }
+
+    pub(super) fn succeeded(&self) -> bool {
+        self.failures.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ProviderRunFold {
+    pub stats: TranscriptIngestStats,
+    pub failures: Vec<TranscriptCatchUpFailure>,
+    pub units_admitted: u64,
+    pub units_completed: u64,
+    pub units_failed: u64,
+    pub deferred_units: u64,
+    pub byte_bounds_enforced: bool,
+}
+
+impl Default for ProviderRunFold {
+    fn default() -> Self {
+        Self {
+            stats: TranscriptIngestStats::default(),
+            failures: Vec::new(),
+            units_admitted: 0,
+            units_completed: 0,
+            units_failed: 0,
+            deferred_units: 0,
+            byte_bounds_enforced: true,
+        }
+    }
+}
+
+impl ProviderRunFold {
+    pub(super) fn record_retry(&mut self, outcome: &ProviderRunOutcome) {
+        self.deferred_units = self.deferred_units.saturating_add(outcome.deferred_units);
+        self.byte_bounds_enforced &= outcome.byte_bounds_enforced;
+    }
+
+    pub(super) fn record(&mut self, outcome: ProviderRunOutcome) {
+        if !outcome.admitted {
+            return;
+        }
+        self.units_admitted = self.units_admitted.saturating_add(1);
+        if outcome.failures.is_empty() {
+            if outcome.deferred_units == 0 {
+                self.units_completed = self.units_completed.saturating_add(1);
+            }
+        } else {
+            self.units_failed = self.units_failed.saturating_add(1);
+        }
+        self.stats = self.stats.merge(outcome.stats);
+        self.failures.extend(outcome.failures);
+        self.deferred_units = self.deferred_units.saturating_add(outcome.deferred_units);
+        self.byte_bounds_enforced &= outcome.byte_bounds_enforced;
+    }
+}
+
+/// Hard limits for one multi-source ingest pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IngestPassBounds {
+    /// Maximum work units discovered before discovery itself is truncated.
+    pub discovered_units: usize,
+    /// Maximum work units admitted into one pass after fair rotation.
+    pub units_per_pass: usize,
+    /// Maximum pending/admitted units attributed to any single source.
+    pub units_per_source: usize,
+    /// Maximum pending queue depth across all sources during admission.
+    pub queue_depth: usize,
+    /// Maximum newly-read source bytes charged to one admitted unit.
+    pub bytes_per_unit: u64,
+    /// Maximum newly-read source bytes charged across the whole pass.
+    pub bytes_per_pass: u64,
+    /// Maximum in-pass retry attempts for a failed unit (0 = isolate and continue).
+    pub retries: usize,
+}
+
+/// Typed coverage / overload outcome for one bounded ingest pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IngestPassCoverage {
+    /// Every discovered unit was admitted and dispositioned in this pass.
+    Complete,
+    /// Some discovered work remains; a durable scheduling frontier may advance.
+    Partial { deferred_units: u64 },
+    /// Admission hit a hard queue/source/pass bound before the discovered set fit.
+    Backpressured {
+        admitted_units: u64,
+        rejected_units: u64,
+    },
+}
+
+impl IngestPassCoverage {
+    pub(crate) const fn is_complete(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
+/// Narrow additive pass result required by PR6 bounded multi-source scheduling.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IngestPassOutcome {
+    pub stats: TranscriptIngestStats,
+    pub failures: Vec<TranscriptCatchUpFailure>,
+    pub coverage: IngestPassCoverage,
+    /// True only when a durable scheduling frontier write was performed.
+    pub scheduling_state_written: bool,
+    pub units_admitted: u64,
+    pub units_completed: u64,
+    pub units_failed: u64,
+    /// False when an admitted provider API performs an internally unbounded
+    /// sweep and therefore cannot honor the pass byte budget end-to-end.
+    pub byte_bounds_enforced: bool,
+}
+
+impl IngestPassOutcome {
+    pub(super) fn failed(failure: TranscriptCatchUpFailure) -> Self {
+        Self {
+            stats: TranscriptIngestStats::default(),
+            failures: vec![failure],
+            coverage: IngestPassCoverage::Complete,
+            scheduling_state_written: false,
+            units_admitted: 0,
+            units_completed: 0,
+            units_failed: 0,
+            byte_bounds_enforced: true,
+        }
+    }
+
+    pub(super) fn into_transcript_outcome(self) -> super::startup::TranscriptIngestOutcome {
+        super::startup::TranscriptIngestOutcome::from_pass(self)
+    }
+}
+
+/// Pure round-robin admission over a discovered unit count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RoundRobinAdmission {
+    pub admitted_indices: Vec<usize>,
+    pub coverage: IngestPassCoverage,
+}
+
+/// Rotate `[0, discovered)` by `frontier_offset`, then admit at most `max_units`.
+///
+/// A fully covered pass (`discovered <= max_units`) reports complete coverage;
+/// callers persist rotation only for bounded partial passes.
+pub(crate) fn plan_round_robin_admission(
+    discovered: usize,
+    frontier_offset: u64,
+    max_units: usize,
+) -> RoundRobinAdmission {
+    if discovered == 0 {
+        return RoundRobinAdmission {
+            admitted_indices: Vec::new(),
+            coverage: IngestPassCoverage::Complete,
+        };
+    }
+    if max_units == 0 {
+        return RoundRobinAdmission {
+            admitted_indices: Vec::new(),
+            coverage: IngestPassCoverage::Backpressured {
+                admitted_units: 0,
+                rejected_units: u64::try_from(discovered).unwrap_or(u64::MAX),
+            },
+        };
+    }
+    let start = usize::try_from(frontier_offset).unwrap_or(usize::MAX) % discovered;
+    let admitted = discovered.min(max_units);
+    let order = (start..discovered).chain(0..start).take(admitted).collect();
+    let deferred = discovered - admitted;
+    let coverage = if deferred == 0 {
+        IngestPassCoverage::Complete
+    } else {
+        IngestPassCoverage::Partial {
+            deferred_units: u64::try_from(deferred).unwrap_or(u64::MAX),
+        }
+    };
+    RoundRobinAdmission {
+        admitted_indices: order,
+        coverage,
+    }
+}
+
+pub(crate) fn allocate_pass_byte_budgets(unit_count: usize, bounds: IngestPassBounds) -> Vec<u64> {
+    let mut remaining = bounds.bytes_per_pass;
+    let mut budgets = Vec::with_capacity(unit_count.min(bounds.units_per_pass));
+    while budgets.len() < unit_count && remaining > 0 && bounds.bytes_per_unit > 0 {
+        let grant = remaining.min(bounds.bytes_per_unit);
+        budgets.push(grant);
+        remaining = remaining.saturating_sub(grant);
+    }
+    budgets
+}
+
+/// Decide whether a completed pass should persist a scheduling frontier.
+///
+/// Cancellation and full coverage never write. Partial / backpressured passes
+/// write only when at least one unit was attempted so rotation can continue.
+pub(crate) fn scheduling_write_required(
+    coverage: IngestPassCoverage,
+    attempted_units: usize,
+    cancelled: bool,
+) -> bool {
+    if cancelled || attempted_units == 0 || coverage.is_complete() {
+        return false;
+    }
+    matches!(
+        coverage,
+        IngestPassCoverage::Partial { .. } | IngestPassCoverage::Backpressured { .. }
+    )
 }
 
 pub(crate) fn classify_transcript_ingest_failure(

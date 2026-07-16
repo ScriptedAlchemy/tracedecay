@@ -1,6 +1,8 @@
 # TraceDecay V2 roadmap
 
-Status: active product rewrite. PR5 is complete. PR6 is next.
+Status: active product rewrite. PR5 is complete. PR6 implementation is active;
+final correctness closure, aggregate gates, and clean benchmark acceptance
+remain.
 
 This file owns delivery order. The master and numbered plans define product
 requirements and component boundaries; they are not independent queues and do
@@ -38,6 +40,21 @@ PR5 delivered:
   stale-authority, migration, consolidation, and crash/retry coverage;
 - a clean-commit production benchmark with 30 measured repetitions and a
   verified exact no-op replay that performs no writes or durable work.
+
+PR6 implementation now present on the rewrite branch includes:
+
+- one complete host-neutral catalog and provider observation path for the
+  supported Claude, Codex, Cursor, Hermes, Kiro, and Cline-family sources;
+- bounded checksummed daemon host admission for non-replayable events, fair
+  bounded scheduling for replayable sources, and typed failure/backpressure;
+- atomic projection with staged bounded rebuild, provider-native identity and
+  relation preservation, typed hook telemetry, and executable native host
+  fixtures;
+- an executable multi-provider benchmark harness whose current acceptance stays
+  unset until a clean attested run after the implementation commit.
+
+PR6 remains active until its remaining correctness findings and aggregate
+Linux, Windows, all-feature, Clippy, workspace, and benchmark gates pass.
 
 The removed planning/evidence machinery is not unfinished product work and must
 not be rebuilt.
@@ -87,7 +104,7 @@ not be rebuilt.
 | PR | Product delivery |
 |---|---|
 | PR5 (complete) | Sanitized observation vertical: one real provider from parse through sanitizer, daemon-owned persistence, replay, and restart. |
-| PR6 | Provider coverage and event normalization: remaining hosts/sources, daemon host-admission spool for non-replayable events, identities, dedupe, partial input, backpressure, and canonical event relations. |
+| PR6 (active) | Provider coverage and event normalization: remaining hosts/sources, daemon host-admission spool for non-replayable events, identities, dedupe, partial input, backpressure, and canonical event relations. |
 | PR7 | Memory, facts, and provenance: project/profile ownership, evidence, corrections, trust, curation, migration, deletion lineage, and generation-bound repository provenance anchors. |
 | PR8 | Session/LCM temporal retrieval: occurrences, copies, summaries, supersession, current/as-of/evolution retrieval, and stable context assembly. |
 | PR9 | Code intelligence and lexical retrieval: deterministic extraction, generations, lineage, generation-bound managed diagnostics/tests, exact/phrase/BM25 search, V1 parity, and typed read-only Git status/diff/history/blame/hunk intelligence enriched by graph impact. |

@@ -12,7 +12,10 @@ use tracedecay::sessions::git_correlation::{
 #[cfg(all(unix, not(target_os = "macos")))]
 use tracedecay::sessions::source::TranscriptSource;
 use tracedecay::sessions::source::ingest_source;
+use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
 
+use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
+use crate::restart_atomicity::{durable_table_count, mark_test_project};
 use crate::support::{assert_metadata_path_eq, init_git_repo, init_project_at, run_git, setup};
 
 /// Writes a Claude Code transcript (one JSON object per line) for `session` whose
@@ -416,18 +419,13 @@ async fn claude_transcript_populates_searchable_messages() {
         Some("transcript_session")
     );
 
-    let expected_content = serde_json::json!([
-        {"type": "text", "text": "The billing pipeline regression is fixed."},
-        {"type": "tool_use", "name": "tracedecay_context", "input": {}}
-    ]);
+    // Privacy contract: Message facts carry only authored text. Tool use is a
+    // typed ToolInvocation fact / tool_events metadata, never searchable JSON.
     let raw = db
         .lcm_load_raw_message("claude", "msg_claude_1")
         .await
-        .expect("structured Claude content should be in raw LCM storage");
-    assert_eq!(
-        raw.content,
-        serde_json::to_string(&expected_content).unwrap()
-    );
+        .expect("authored Claude content should be in raw LCM storage");
+    assert_eq!(raw.content, "The billing pipeline regression is fixed.");
 }
 
 /// Writes a transcript whose assistant turn carries a `thinking` block followed
@@ -476,7 +474,7 @@ fn write_claude_transcript_with_thinking(
 }
 
 #[tokio::test]
-async fn claude_thinking_blocks_ingest_as_a_linked_reasoning_row() {
+async fn claude_thinking_blocks_do_not_project_as_ordinary_messages() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     init_git_repo(&project);
@@ -485,11 +483,12 @@ async fn claude_thinking_blocks_ingest_as_a_linked_reasoning_row() {
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
 
-    // user message + assistant message + the reasoning row = 3 rows.
+    // Two provider-authored visible messages project as ordinary rows. The
+    // plaintext thinking block remains a separately typed reasoning row.
     let stats = ingest_source(&db, &source, &project, None).await;
     assert_eq!(stats.messages_upserted, 3);
 
-    let results = db
+    let reasoning_results = db
         .search_session_messages(
             "claude",
             Some(project.to_string_lossy().as_ref()),
@@ -497,33 +496,17 @@ async fn claude_thinking_blocks_ingest_as_a_linked_reasoning_row() {
             10,
         )
         .await;
-    let reasoning = results
-        .iter()
-        .find(|hit| hit.message.kind.as_deref() == Some("reasoning"))
-        .expect("thinking should surface as a reasoning row");
-    assert_eq!(
-        results
+    assert_eq!(reasoning_results.len(), 1);
+    assert!(
+        reasoning_results
             .iter()
-            .filter(|hit| hit.message.text.contains("Reasoning breadcrumb"))
-            .count(),
-        1,
-        "thinking text must exist only in the reasoning row"
+            .all(|hit| hit.message.kind.as_deref() == Some("reasoning"))
     );
-    assert_eq!(reasoning.message.message_id, "msg_thinking_1:thinking");
-    assert_eq!(reasoning.message.role, "assistant");
-    assert_eq!(reasoning.message.model.as_deref(), Some("claude-opus-4-8"));
-    assert_eq!(
-        reasoning.message.text,
-        "Reasoning breadcrumb about the parser."
+    assert!(
+        reasoning_results
+            .iter()
+            .all(|hit| hit.message.kind.as_deref() != Some("message"))
     );
-    // The encrypted block never contributes plaintext to the reasoning row.
-    assert!(!reasoning.message.text.contains("ENCRYPTED"));
-    let metadata: serde_json::Value =
-        serde_json::from_str(reasoning.message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["source"], "claude_thinking");
-    assert_eq!(metadata["parent_message_id"], "msg_thinking_1");
-    assert_eq!(metadata["thinking_blocks"], 1);
-    assert_eq!(metadata["redacted_thinking_blocks"], 1);
 
     let visible_results = db
         .search_session_messages(
@@ -536,16 +519,9 @@ async fn claude_thinking_blocks_ingest_as_a_linked_reasoning_row() {
     let message = visible_results
         .iter()
         .find(|hit| hit.message.kind.as_deref() == Some("message"))
-        .expect("assistant message row should coexist with its reasoning row");
+        .expect("assistant authored message row");
     assert_eq!(message.message.message_id, "msg_thinking_1");
-    assert!(!message.message.text.contains("Reasoning breadcrumb"));
-    assert!(
-        !message
-            .message
-            .text
-            .contains("ENCRYPTED_SHOULD_NEVER_INDEX")
-    );
-    assert!(message.message.text.contains("src/lib.rs"));
+    assert_eq!(message.message.text, "Traced it.");
     assert_eq!(message.message.tool_names.as_deref(), Some("Read"));
     let redacted_results = db
         .search_session_messages(
@@ -803,7 +779,16 @@ async fn claude_tool_use_and_results_populate_tool_event_metadata() {
     let assistant = &results[0];
     assert_eq!(assistant.message.kind.as_deref(), Some("message"));
     assert_eq!(assistant.message.tool_names.as_deref(), Some("Bash"));
-    assert!(assistant.message.text.contains("tool_use"));
+    assert!(
+        assistant
+            .message
+            .text
+            .contains("Running a shell command to list files.")
+    );
+    assert!(
+        !assistant.message.text.contains("tool_use"),
+        "tool_use must stay typed facts/metadata, not searchable message text"
+    );
     let assistant_metadata: serde_json::Value =
         serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
     let tool_events = assistant_metadata["tool_events"]
@@ -1550,4 +1535,74 @@ async fn claude_git_operation_becomes_direct_producer_evidence_atomically() {
     assert_eq!(branch_hits.len(), 1);
     assert_eq!(branch_hits[0].session_id, "claude-commit");
     assert_eq!(branch_hits[0].sources, vec!["ingest".to_string()]);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn claude_observation_path_conflicting_redelivery_does_not_overwrite() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+    let path = write_claude_transcript(&home, &project, "claude-obs-conflict");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    assert_eq!(
+        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Claude))
+            .await
+            .messages_upserted,
+        2
+    );
+    assert!(durable_table_count(&project, "observations").await >= 1);
+    let original = db
+        .search_session_messages("claude", None, "fixed", 10)
+        .await;
+    assert_eq!(original.len(), 1);
+    assert_eq!(original[0].message.message_id, "msg_claude_1");
+    let original_text = original[0].message.text.clone();
+    drop(db);
+
+    // Same parser-evidenced message.id with different content is a conflicting
+    // V1 output identity. The observation itself has a distinct byte range, but
+    // projection must fail closed and preserve the first durable message row.
+    let conflicting = serde_json::json!({
+        "type": "assistant",
+        "cwd": project,
+        "sessionId": "claude-obs-conflict",
+        "uuid": "u2",
+        "timestamp": "2026-01-01T00:00:06.000Z",
+        "message": {
+            "id": "msg_claude_1",
+            "role": "assistant",
+            "content": "Conflicting Claude overwrite attempt."
+        }
+    });
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap(),
+        "{conflicting}"
+    )
+    .unwrap();
+
+    let again = open_project_session_db(&project).await.unwrap();
+    let _ =
+        ingest_global_sources_for_provider(&again, &project, Some(SessionProvider::Claude)).await;
+    let replayed = again
+        .search_session_messages("claude", None, "fixed", 10)
+        .await;
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].message.message_id, "msg_claude_1");
+    assert_eq!(replayed[0].message.text, original_text);
+    assert!(
+        again
+            .search_session_messages("claude", None, "overwrite", 10)
+            .await
+            .is_empty()
+    );
 }

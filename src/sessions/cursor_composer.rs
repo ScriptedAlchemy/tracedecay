@@ -24,7 +24,12 @@
 //! `file:…?immutable=1&mode=ro` URI (`SQLite` skips all locking and never writes
 //! a `-wal`/`-shm`), and we only ever issue **indexed** lookups: a single
 //! bounded range scan over the `composerData:` key prefix and primary-key
-//! (`key = ?`) point lookups for bubbles. No full-table scans.
+//! (`key = ?`) point lookups for bubbles. No full-table scans. Every `TEXT` /
+//! `BLOB` payload is length-gated in SQL (`length` + conditional materialize)
+//! against the shared observation / JSONL frame ceilings and the pass byte
+//! budget before any Rust `String`/`Vec`/`serde_json::Value` allocation.
+//! `store.db` blobs are fetched by id while walking the reachable DAG — never
+//! collected via `SELECT id, data FROM blobs`.
 //!
 //! ## Incremental + dedupe
 //!
@@ -44,10 +49,9 @@ use std::path::{Path, PathBuf};
 use libsql::{Builder, OpenFlags};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use tracedecay_domain::{CanonicalObservationFactV1, CanonicalWorkflowSemanticKindV1};
 use tracedecay_domain::{
-    CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
-    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
-    CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ProjectId, ProviderId, RetentionClass, SessionId,
@@ -62,9 +66,23 @@ use crate::application::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
 use crate::global_db::GlobalDb;
-use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
+use crate::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_normalized_observation_record_v1};
+use crate::sessions::ingest_byte_budget::IngestByteBudget;
 use crate::sessions::shared::path_belongs_to_project;
-use crate::sessions::source::TranscriptIngestError;
+use crate::sessions::snapshot_observation::MAX_SNAPSHOT_METADATA_BYTES;
+use crate::sessions::source::{MAX_JSONL_RECORD_BYTES, TranscriptIngestError};
+
+mod observation;
+
+use observation::{
+    composer_todos_have_admittable_items, normalize_cursor_composer_envelope_observation,
+    normalize_cursor_composer_observation_with_message_id,
+};
+#[cfg(test)]
+pub(crate) use observation::{
+    normalize_cursor_composer_observation,
+    normalize_cursor_composer_observation_with_projected_message_id,
+};
 
 /// `SQLITE_OPEN_URI` — not exposed by libsql's [`OpenFlags`], so we OR the raw
 /// bit in (libsql forwards `flags.bits()` verbatim to `sqlite3_open_v2`). This
@@ -85,21 +103,50 @@ pub fn build_cursor_composer_capture_request(
     position: u64,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> Result<CaptureObservationRequest, String> {
+    build_cursor_composer_capture_request_for_project(
+        composer_id,
+        bubble_id,
+        bubble,
+        None,
+        None,
+        scope,
+        generation,
+        position,
+        expected_cursor,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_cursor_composer_capture_request_for_project(
+    composer_id: &str,
+    bubble_id: &str,
+    bubble: &Value,
+    project_path: Option<&str>,
+    envelope: Option<&Value>,
+    scope: ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    position: u64,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+) -> Result<CaptureObservationRequest, String> {
     let range =
         tracedecay_domain::ObservationSourceRangeV1::new(position, position.saturating_add(1))
             .map_err(|error| format!("invalid Cursor composer position: {error}"))?;
-    let encoded = serde_json::to_vec(bubble)
+    let native = composer_observation_with_session(bubble, project_path, envelope);
+    let encoded = serde_json::to_vec(&native)
         .map_err(|error| format!("could not encode Cursor composer bubble: {error}"))?;
     let native_record_id = cursor_composer_native_record_id(composer_id, bubble_id)?;
+    let projected_message_id = ObservationId::new(format!("{composer_id}:{bubble_id}"))
+        .map_err(|error| format!("invalid Cursor composer V1 message identity: {error}"))?;
     let parsed = parse_normalized_observation_record_v1(
         &encoded,
         range,
         ObservationOrderingDomainV1::SnapshotOrder,
         |native| {
-            normalize_cursor_composer_observation(
+            normalize_cursor_composer_observation_with_message_id(
                 &native,
                 composer_id,
                 native_record_id.clone(),
+                projected_message_id.clone(),
                 range,
                 position,
             )
@@ -133,13 +180,47 @@ pub fn build_cursor_composer_capture_request(
     .map_err(|error| format!("invalid Cursor composer capture request: {error}"))
 }
 
+fn composer_observation_with_session(
+    bubble: &Value,
+    project_path: Option<&str>,
+    envelope: Option<&Value>,
+) -> Value {
+    let mut native = bubble.clone();
+    if let Some(object) = native.as_object_mut() {
+        if let Some(project_path) = project_path {
+            object.insert(
+                "tracedecayProjectPath".to_string(),
+                Value::String(project_path.to_string()),
+            );
+        }
+        if let Some(envelope) = envelope {
+            for (key, value) in [
+                ("tracedecaySessionTitle", envelope.get("name")),
+                (
+                    "tracedecaySessionModel",
+                    envelope.pointer("/modelConfig/modelName"),
+                ),
+                ("tracedecaySessionStartedAt", envelope.get("createdAt")),
+                ("tracedecaySessionEndedAt", envelope.get("lastUpdatedAt")),
+            ] {
+                if let Some(value) = value.filter(|value| !value.is_null()) {
+                    object.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+    }
+    native
+}
+
 pub async fn capture_cursor_composer_observation(
     db: &GlobalDb,
     request: CaptureObservationRequest,
 ) -> Result<CaptureObservationOutcome, TranscriptIngestError> {
     let authorities = match request.scope() {
-        ObservationScopeV1::Project { .. } => HostAdmissionAuthorities::new(Some(db), None),
-        ObservationScopeV1::Profile => HostAdmissionAuthorities::new(None, Some(db)),
+        ObservationScopeV1::Project { project_id } => {
+            HostAdmissionAuthorities::for_project(db, project_id.clone())
+        }
+        ObservationScopeV1::Profile => HostAdmissionAuthorities::for_profile(db),
     };
     HostAdmissionFacade::new(authorities)
         .capture_observation(request)
@@ -147,206 +228,88 @@ pub async fn capture_cursor_composer_observation(
         .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })
 }
 
-fn normalize_cursor_composer_observation(
-    native: &Value,
+/// Capture a `composerData:<composerId>` envelope observation when native
+/// `todos[{id,content,status}]` are present. Uses a distinct `source_key` so the
+/// bubble cursor stream is not displaced by envelope list updates.
+///
+/// Envelope native identity includes a todo checkpoint (authentic
+/// `lastUpdatedAt` when present, otherwise a deterministic content fingerprint
+/// over native todo id/content/status/order) so pending→completed and content
+/// or order revisions admit as new observations without inventing
+/// `WorkflowLifecycle.revision`.
+pub fn build_cursor_composer_envelope_capture_request(
     composer_id: &str,
-    stable_record_id: ObservationId,
-    range: tracedecay_domain::ObservationSourceRangeV1,
-    position: u64,
-) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    let timestamp = bubble_epoch(native, "createdAt");
-    let relations = CanonicalObservationRelationsV1::new(
-        SessionId::new(composer_id)
-            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+    envelope: &Value,
+    scope: ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+) -> Result<CaptureObservationRequest, String> {
+    build_cursor_composer_envelope_capture_request_for_project(
+        composer_id,
+        envelope,
+        None,
+        scope,
+        generation,
+        expected_cursor,
     )
-    .with_message_id(stable_record_id.clone());
-    let mut facts = Vec::new();
+}
 
-    if let Some(text) = native
-        .get("text")
-        .and_then(Value::as_str)
-        .filter(|text| !text.trim().is_empty())
-    {
-        facts.push(CanonicalObservationFactV1::Message {
-            role: match native.get("type").and_then(Value::as_i64) {
-                Some(1) => CanonicalMessageRoleV1::User,
-                Some(2) => CanonicalMessageRoleV1::Assistant,
-                _ => CanonicalMessageRoleV1::Unknown,
-            },
-            content: Value::String(text.to_string()),
-            model: ["model", "modelId", "modelName"]
-                .into_iter()
-                .find_map(|key| native.get(key).and_then(Value::as_str))
-                .filter(|model| !model.trim().is_empty())
-                .map(str::to_string),
-            timestamp,
-        });
-    }
-
-    if let Some(tool) = native.get("toolFormerData").filter(|tool| !tool.is_null()) {
-        let invocation_id = composer_observation_id(
-            tool.get("toolCallId")
-                .or_else(|| tool.get("id"))
-                .and_then(Value::as_str),
-            &stable_record_id,
-        );
-        let name = tool
-            .get("name")
-            .and_then(Value::as_str)
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or("tool")
-            .to_string();
-        facts.push(CanonicalObservationFactV1::ToolInvocation {
-            invocation_id: invocation_id.clone(),
-            name,
-            arguments: Value::Null,
-        });
-        if tool.get("result").is_some_and(|result| !result.is_null()) {
-            facts.push(CanonicalObservationFactV1::ToolResult {
-                invocation_id: Some(invocation_id),
-                content: Value::Null,
-                success: tool
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .map(|status| matches!(status, "completed" | "success" | "succeeded")),
-            });
-        }
-    }
-
-    if let Some(thinking) = native
-        .pointer("/thinking/text")
-        .filter(|thinking| !thinking.is_null())
-        .cloned()
-    {
-        facts.push(CanonicalObservationFactV1::Reasoning {
-            visibility: CanonicalReasoningVisibilityV1::Visible,
-            content: Some(thinking),
-        });
-    }
-
-    if let Some(token_count) = native.get("tokenCount") {
-        let input_tokens = composer_canonical_u64(token_count.get("inputTokens"));
-        let output_tokens = composer_canonical_u64(token_count.get("outputTokens"));
-        if input_tokens.is_some() || output_tokens.is_some() {
-            facts.push(CanonicalObservationFactV1::Usage {
-                input_tokens,
-                output_tokens,
-                cache_read_tokens: None,
-                cache_write_tokens: None,
-                reasoning_tokens: None,
-            });
-        }
-    }
-
-    append_composer_git_facts(native, &mut facts);
-    if let Some(todos) = native.get("todos").and_then(Value::as_array) {
-        let items = todos
-            .iter()
-            .filter_map(|todo| todo.get("content").and_then(Value::as_str))
-            .filter(|content| !content.trim().is_empty())
-            .map(|content| Value::String(content.to_string()))
-            .collect::<Vec<_>>();
-        if !items.is_empty() {
-            facts.push(CanonicalObservationFactV1::Workflow {
-                evidence_kind: CanonicalWorkflowEvidenceKindV1::Plan,
-                reference: None,
-                content: Some(Value::Array(items)),
-            });
-        }
-    }
-    if native
-        .get("isCompacted")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        facts.push(CanonicalObservationFactV1::Compaction {
-            summary: native.get("text").cloned(),
-            input_tokens: None,
-            output_tokens: None,
-        });
-    }
-    if facts.is_empty() {
-        facts.push(CanonicalObservationFactV1::Unknown {
-            native_kind: "bubble".to_string(),
-            state: CanonicalUnknownStateV1::Absent,
-        });
-    }
-
-    let mut evidence =
-        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range)
-            .with_native_sequence(position);
-    if let Some(timestamp) = timestamp {
-        evidence = evidence.with_native_timestamp(timestamp);
-    }
-    CanonicalObservationEnvelopeV1::new(
-        ProviderId::new(PROVIDER)
-            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
-        "bubble",
-        stable_record_id,
-        relations,
-        facts,
-        evidence,
+fn build_cursor_composer_envelope_capture_request_for_project(
+    composer_id: &str,
+    envelope: &Value,
+    project_path: Option<&str>,
+    scope: ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+) -> Result<CaptureObservationRequest, String> {
+    let position = expected_cursor
+        .as_ref()
+        .filter(|cursor| cursor.generation() == generation)
+        .map_or(0, ObservationSourceCursorV1::position);
+    let range =
+        tracedecay_domain::ObservationSourceRangeV1::new(position, position.saturating_add(1))
+            .map_err(|error| format!("invalid Cursor composer envelope position: {error}"))?;
+    let checkpoint = composer_envelope_todo_checkpoint(envelope)
+        .ok_or_else(|| "Cursor composer envelope has no admittable todo checkpoint".to_string())?;
+    let encoded = serde_json::to_vec(envelope)
+        .map_err(|error| format!("could not encode Cursor composer envelope: {error}"))?;
+    let native_record_id = cursor_composer_envelope_native_record_id(composer_id, checkpoint)?;
+    let parsed = parse_normalized_observation_record_v1(
+        &encoded,
+        range,
+        ObservationOrderingDomainV1::SnapshotOrder,
+        |native| {
+            normalize_cursor_composer_envelope_observation(
+                &native,
+                composer_id,
+                project_path,
+                native_record_id.clone(),
+                range,
+                position,
+            )
+        },
     )
-    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
-}
-
-fn append_composer_git_facts(native: &Value, facts: &mut Vec<CanonicalObservationFactV1>) {
-    if let Some(commits) = native.get("commits").and_then(Value::as_array) {
-        for commit in commits {
-            let reference = ["hash", "sha", "id"]
-                .into_iter()
-                .find_map(|key| commit.get(key).and_then(Value::as_str))
-                .map(str::to_string);
-            facts.push(CanonicalObservationFactV1::Git {
-                evidence_kind: CanonicalGitEvidenceKindV1::Commit,
-                reference,
-                content: None,
-            });
-        }
-    }
-    if native
-        .get("gitDiffs")
-        .and_then(Value::as_array)
-        .is_some_and(|diffs| !diffs.is_empty())
-    {
-        facts.push(CanonicalObservationFactV1::Git {
-            evidence_kind: CanonicalGitEvidenceKindV1::Diff,
-            reference: None,
-            content: None,
-        });
-    }
-    if let Some(pull_requests) = native.get("pullRequests").and_then(Value::as_array) {
-        for pull_request in pull_requests {
-            let reference = ["url", "htmlUrl", "html_url", "id"]
-                .into_iter()
-                .find_map(|key| pull_request.get(key).and_then(Value::as_str))
-                .map(str::to_string);
-            facts.push(CanonicalObservationFactV1::Git {
-                evidence_kind: CanonicalGitEvidenceKindV1::PullRequest,
-                reference: reference.clone(),
-                content: None,
-            });
-            facts.push(CanonicalObservationFactV1::Workflow {
-                evidence_kind: CanonicalWorkflowEvidenceKindV1::PullRequest,
-                reference,
-                content: None,
-            });
-        }
-    }
-}
-
-fn composer_observation_id(native_id: Option<&str>, fallback: &ObservationId) -> ObservationId {
-    native_id
-        .and_then(|native_id| ObservationId::new(native_id).ok())
-        .unwrap_or_else(|| fallback.clone())
-}
-
-fn composer_canonical_u64(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
-    })
+    .map_err(|error| format!("could not parse Cursor composer envelope: {error}"))?;
+    let source = cursor_composer_envelope_source(composer_id)?;
+    let identity = ObservationIdentityMaterialV1::for_native_record(
+        source,
+        scope,
+        generation,
+        range,
+        ObservationOrderingDomainV1::SnapshotOrder,
+        native_record_id,
+    )
+    .map_err(|error| format!("invalid Cursor composer envelope identity: {error}"))?;
+    CaptureObservationRequest::new(
+        parsed,
+        identity,
+        expected_cursor,
+        RetentionClass::new(COMPOSER_OBSERVATION_RETENTION)
+            .map_err(|error| format!("invalid Cursor composer retention: {error}"))?,
+        ObservationCancellation::default(),
+    )
+    .map_err(|error| format!("invalid Cursor composer envelope capture request: {error}"))
+    .map(|request| request.with_resume_checkpoint(generation.file_id(), checkpoint))
 }
 
 fn cursor_composer_native_record_id(
@@ -368,19 +331,129 @@ fn cursor_composer_native_record_id(
         .map_err(|error| format!("invalid Cursor composer native identity: {error}"))
 }
 
+/// Checkpoint for mutable envelope todos. The checked-in provider fixture has
+/// `lastUpdatedAt: null`, so use only native todo id/content/status in provider
+/// array order and never invent revision semantics.
+fn composer_envelope_todo_checkpoint(native: &Value) -> Option<u64> {
+    let todos = native.get("todos")?.as_array()?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.cursor-composer-todo-checkpoint.v1\0");
+    let mut any = false;
+    for (index, todo) in todos.iter().enumerate() {
+        let Some(item_id) = todo
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+        else {
+            continue;
+        };
+        let Some(content) = todo
+            .get("content")
+            .and_then(Value::as_str)
+            .filter(|content| !content.trim().is_empty())
+        else {
+            continue;
+        };
+        any = true;
+        hasher.update(u64::try_from(index).ok()?.to_le_bytes());
+        hasher.update(u64::try_from(item_id.len()).ok()?.to_le_bytes());
+        hasher.update(item_id.as_bytes());
+        hasher.update(u64::try_from(content.len()).ok()?.to_le_bytes());
+        hasher.update(content.as_bytes());
+        if let Some(status) = todo
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|status| !status.trim().is_empty())
+        {
+            hasher.update([1]);
+            hasher.update(u64::try_from(status.len()).ok()?.to_le_bytes());
+            hasher.update(status.as_bytes());
+        } else {
+            hasher.update([0]);
+        }
+    }
+    if !any {
+        return None;
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    Some(u64::from_le_bytes(bytes).max(1))
+}
+
+fn cursor_composer_envelope_native_record_id(
+    composer_id: &str,
+    checkpoint: u64,
+) -> Result<ObservationId, String> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.cursor-composer-envelope.v1\0");
+    hasher.update(composer_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(checkpoint.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").map_err(|error| {
+            format!("could not encode Cursor composer envelope identity: {error}")
+        })?;
+    }
+    ObservationId::new(format!("cursor.composer.envelope.sha256:{encoded}"))
+        .map_err(|error| format!("invalid Cursor composer envelope native identity: {error}"))
+}
+
+fn cursor_composer_envelope_source(
+    composer_id: &str,
+) -> Result<ObservationSourceIdentityV1, String> {
+    let source_key = SessionId::new(format!("{composer_id}:composerData"))
+        .map_err(|error| format!("invalid Cursor composer envelope source key: {error}"))?;
+    ObservationSourceIdentityV1::for_provider_source(
+        ProviderId::new(PROVIDER)
+            .map_err(|error| format!("invalid Cursor provider id: {error}"))?,
+        SessionId::new(composer_id)
+            .map_err(|error| format!("invalid Cursor composer id: {error}"))?,
+        source_key,
+    )
+    .map_err(|error| format!("invalid Cursor composer envelope source: {error}"))
+}
+
 /// Default ceiling on how many *new/changed* composer sessions one sweep pass
 /// ingests, so the first backfill of thousands of sessions never blocks
 /// startup; already-watermarked sessions are skipped cheaply and do not count.
 pub const DEFAULT_COMPOSER_ENVELOPE_CAP: usize = 256;
+
+/// Maximum bytes materializable for one `composerData:` session envelope.
+/// Reuses the JSONL frame ceiling so long header lists stay within one
+/// transcript-frame-sized allocation.
+const MAX_COMPOSER_ENVELOPE_BYTES: u64 = MAX_JSONL_RECORD_BYTES as u64;
+/// Default cumulative sweep ceiling: one maximum-size envelope plus the byte
+/// needed by bounded readers to prove that a record crossed the ceiling.
+const DEFAULT_COMPOSER_SWEEP_BYTES: u64 = MAX_COMPOSER_ENVELOPE_BYTES + 1;
+
+/// Maximum bytes materializable for `store.db` `meta` hex/JSON.
+const MAX_COMPOSER_STORE_META_BYTES: u64 = MAX_SNAPSHOT_METADATA_BYTES;
+/// `meta.value` is hexadecimal text, so its encoded byte ceiling is twice the
+/// decoded metadata ceiling.
+const MAX_COMPOSER_STORE_META_HEX_BYTES: u64 = MAX_COMPOSER_STORE_META_BYTES * 2;
+
+/// Cap on DAG blob visits / child refs per store — aligns with the default
+/// ingest discovery unit ceiling (`IngestPassBounds::discovered_units`).
+const MAX_COMPOSER_STORE_BLOB_VISITS: usize = 4096;
+
+/// Maximum UTF-8 bytes in one `SQLite` key / blob id.
+const MAX_COMPOSER_SQLITE_KEY_BYTES: u64 = 512;
 
 /// Outcome of one composer sweep pass.
 #[derive(Debug, Default, Clone)]
 pub struct CursorComposerSweepOutcome {
     pub sessions_upserted: u64,
     pub messages_upserted: u64,
-    /// Every composer session id that belongs to the swept project (whether
-    /// ingested this pass or deferred by the cap). The JSONL sweep skips these
-    /// so the two Cursor sources never double-ingest the same session.
+    /// Serialized bytes of new observation payloads processed by this pass.
+    pub bytes_consumed: u64,
+    /// At least one new observation was deferred by the aggregate byte cap.
+    pub deferred_by_byte_cap: bool,
+    /// Bounded set of composer session ids observed during the sweep. The
+    /// JSONL sweep skips these so the two Cursor sources do not double-ingest
+    /// the same session within the bounded discovery window.
     pub owned_session_ids: HashSet<String>,
 }
 
@@ -398,10 +471,53 @@ pub struct CursorComposerSource {
 }
 
 struct ComposerIngestContext<'a> {
+    db: &'a GlobalDb,
     facade: HostAdmissionFacade<'a>,
     scope: ObservationScopeV1,
     project_root: Option<&'a Path>,
     registered_roots: &'a [PathBuf],
+}
+
+/// Outcome of a length-gated `SQLite` text/blob fetch that never materializes
+/// oversized or over-budget payloads into `Rust`.
+#[derive(Debug)]
+enum BoundedSqliteValue<T> {
+    Missing,
+    Ready { byte_len: u64, value: T },
+    Oversized { byte_len: u64 },
+    BudgetExceeded { byte_len: u64 },
+    Malformed { byte_len: u64 },
+}
+
+fn effective_sqlite_cap(max_bytes: u64, remaining: Option<u64>) -> u64 {
+    match remaining {
+        Some(remaining) => remaining.min(max_bytes),
+        None => max_bytes,
+    }
+}
+
+fn composer_payload_bytes(value: &Value) -> u64 {
+    serde_json::to_vec(value)
+        .ok()
+        .and_then(|encoded| u64::try_from(encoded.len()).ok())
+        .unwrap_or(u64::MAX)
+}
+
+fn max_composer_record_bytes() -> u64 {
+    u64::try_from(MAX_OBSERVATION_RECORD_BYTES).unwrap_or(u64::MAX)
+}
+
+fn composer_source_charge(bytes: u64) -> u64 {
+    bytes.min(max_composer_record_bytes().saturating_add(1))
+}
+
+fn composer_budget_bytes(value: &Value) -> u64 {
+    composer_payload_bytes(value).min(max_composer_record_bytes().saturating_add(1))
+}
+
+fn composer_id_from_envelope_key(key: &str) -> Option<&str> {
+    key.strip_prefix("composerData:")
+        .filter(|id| !id.is_empty() && id.len() as u64 <= MAX_COMPOSER_SQLITE_KEY_BYTES)
 }
 
 impl CursorComposerSource {
@@ -433,25 +549,59 @@ impl CursorComposerSource {
         &self,
         db: &GlobalDb,
         project_root: &Path,
+        project_id: ProjectId,
         envelope_cap: usize,
     ) -> CursorComposerSweepOutcome {
+        self.ingest_capped(
+            db,
+            project_root,
+            project_id,
+            envelope_cap,
+            Some(DEFAULT_COMPOSER_SWEEP_BYTES),
+        )
+        .await
+    }
+
+    /// [`Self::ingest`] with one aggregate serialized-payload byte budget
+    /// shared across every composer store discovered during the pass.
+    pub async fn ingest_capped(
+        &self,
+        db: &GlobalDb,
+        project_root: &Path,
+        project_id: ProjectId,
+        envelope_cap: usize,
+        max_new_bytes: Option<u64>,
+    ) -> CursorComposerSweepOutcome {
         let mut outcome = CursorComposerSweepOutcome::default();
-        let Ok(scope) = project_scope(project_root) else {
-            return outcome;
-        };
+        let mut byte_budget =
+            IngestByteBudget::bounded(max_new_bytes.unwrap_or(DEFAULT_COMPOSER_SWEEP_BYTES));
         let context = ComposerIngestContext {
-            facade: HostAdmissionFacade::new(HostAdmissionAuthorities::new(Some(db), None)),
-            scope,
+            db,
+            facade: HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+                db,
+                project_id.clone(),
+            )),
+            scope: ObservationScopeV1::Project { project_id },
             project_root: Some(project_root),
             registered_roots: &[],
         };
+        drain_composer_projection_queue(&context).await;
         // ws-hash -> workspace fsPath, harvested from envelopes so per-session
         // store.db files (which key only by ws-hash) can be scoped to a project.
         let mut workspace_paths = HashMap::new();
-        self.ingest_state_vscdb(&context, envelope_cap, &mut outcome, &mut workspace_paths)
+        self.ingest_state_vscdb(
+            &context,
+            envelope_cap,
+            &mut byte_budget,
+            &mut outcome,
+            &mut workspace_paths,
+        )
+        .await;
+        self.ingest_chat_store_dbs(&context, &workspace_paths, &mut byte_budget, &mut outcome)
             .await;
-        self.ingest_chat_store_dbs(&context, &workspace_paths, &mut outcome)
-            .await;
+        drain_composer_projection_queue(&context).await;
+        outcome.bytes_consumed = byte_budget.consumed();
+        outcome.deferred_by_byte_cap = byte_budget.deferred();
         outcome
     }
 
@@ -461,18 +611,49 @@ impl CursorComposerSource {
         registered_roots: &[PathBuf],
         envelope_cap: usize,
     ) -> CursorComposerSweepOutcome {
+        self.ingest_user_capped(
+            db,
+            registered_roots,
+            envelope_cap,
+            Some(DEFAULT_COMPOSER_SWEEP_BYTES),
+        )
+        .await
+    }
+
+    /// [`Self::ingest_user`] with one aggregate serialized-payload byte budget
+    /// shared across every composer store discovered during the pass.
+    pub async fn ingest_user_capped(
+        &self,
+        db: &GlobalDb,
+        registered_roots: &[PathBuf],
+        envelope_cap: usize,
+        max_new_bytes: Option<u64>,
+    ) -> CursorComposerSweepOutcome {
         let mut outcome = CursorComposerSweepOutcome::default();
+        let mut byte_budget =
+            IngestByteBudget::bounded(max_new_bytes.unwrap_or(DEFAULT_COMPOSER_SWEEP_BYTES));
         let context = ComposerIngestContext {
-            facade: HostAdmissionFacade::new(HostAdmissionAuthorities::new(None, Some(db))),
+            db,
+            facade: HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db)),
             scope: ObservationScopeV1::Profile,
             project_root: None,
             registered_roots,
         };
+        drain_composer_projection_queue(&context).await;
         let mut workspace_paths = HashMap::new();
-        self.ingest_state_vscdb(&context, envelope_cap, &mut outcome, &mut workspace_paths)
+        self.ingest_state_vscdb(
+            &context,
+            envelope_cap,
+            &mut byte_budget,
+            &mut outcome,
+            &mut workspace_paths,
+        )
+        .await;
+        self.ingest_chat_store_dbs(&context, &workspace_paths, &mut byte_budget, &mut outcome)
             .await;
-        self.ingest_chat_store_dbs(&context, &workspace_paths, &mut outcome)
-            .await;
+        drain_composer_projection_queue(&context).await;
+        outcome.bytes_consumed = byte_budget.consumed();
+        outcome.deferred_by_byte_cap = byte_budget.deferred();
         outcome
     }
 
@@ -480,6 +661,7 @@ impl CursorComposerSource {
         &self,
         context: &ComposerIngestContext<'_>,
         envelope_cap: usize,
+        byte_budget: &mut IngestByteBudget,
         outcome: &mut CursorComposerSweepOutcome,
         workspace_paths: &mut HashMap<String, String>,
     ) {
@@ -490,12 +672,16 @@ impl CursorComposerSource {
             return;
         };
         let conn = &ro.conn;
-        // Bounded, index-backed range scan over just the composerData prefix.
+        // Indexed prefix scan of keys + byte lengths only — never SELECT full
+        // envelope text here. Point-fetch materializes only when the UTF-8 byte
+        // length fits both ceilings.
         let Ok(mut rows) = conn
             .query(
-                "SELECT key, value FROM cursorDiskKV \
-                 WHERE key >= 'composerData:' AND key < 'composerData;'",
-                (),
+                "SELECT key, length(CAST(value AS BLOB)) AS nbytes \
+                 FROM cursorDiskKV \
+                 WHERE key >= 'composerData:' AND key < 'composerData;' \
+                   AND length(CAST(key AS BLOB)) <= ?1",
+                libsql::params![MAX_COMPOSER_SQLITE_KEY_BYTES as i64],
             )
             .await
         else {
@@ -504,16 +690,60 @@ impl CursorComposerSource {
 
         let mut ingested_this_pass = 0usize;
         while let Ok(Some(row)) = rows.next().await {
-            let Ok(value) = row.get::<String>(1) else {
+            let Ok(key) = row.get::<String>(0) else {
                 continue;
             };
+            let Some(nbytes) = row.get::<i64>(1).ok().filter(|n| *n >= 0).map(|n| n as u64) else {
+                continue;
+            };
+            if nbytes > MAX_COMPOSER_ENVELOPE_BYTES {
+                if !byte_budget
+                    .try_consume(nbytes.min(MAX_COMPOSER_ENVELOPE_BYTES.saturating_add(1)))
+                {
+                    break;
+                }
+                continue;
+            }
+            if byte_budget.exhausted() {
+                byte_budget.defer();
+                break;
+            }
+            if byte_budget
+                .remaining()
+                .is_some_and(|remaining| nbytes > remaining)
+            {
+                byte_budget.defer();
+                break;
+            }
+            let value = match fetch_kv_text_bounded(
+                conn,
+                &key,
+                MAX_COMPOSER_ENVELOPE_BYTES,
+                byte_budget.remaining(),
+            )
+            .await
+            {
+                BoundedSqliteValue::Ready { value, .. } => value,
+                BoundedSqliteValue::BudgetExceeded { .. } => {
+                    byte_budget.defer();
+                    break;
+                }
+                BoundedSqliteValue::Oversized { .. }
+                | BoundedSqliteValue::Malformed { .. }
+                | BoundedSqliteValue::Missing => continue,
+            };
+            if !byte_budget.try_consume(nbytes) {
+                break;
+            }
             let Ok(envelope) = serde_json::from_str::<Value>(&value) else {
                 continue;
             };
             let Some(composer_id) = envelope
                 .get("composerId")
                 .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
+                .filter(|id| !id.is_empty() && id.len() as u64 <= MAX_COMPOSER_SQLITE_KEY_BYTES)
+                .map(str::to_string)
+                .or_else(|| composer_id_from_envelope_key(&key).map(str::to_string))
             else {
                 continue;
             };
@@ -521,11 +751,17 @@ impl CursorComposerSource {
                 continue;
             };
             if let Some(ws_hash) = workspace_hash(&envelope) {
-                workspace_paths
-                    .entry(ws_hash)
-                    .or_insert_with(|| project.path.clone());
+                if workspace_paths.contains_key(&ws_hash)
+                    || workspace_paths.len() < MAX_COMPOSER_STORE_BLOB_VISITS
+                {
+                    workspace_paths
+                        .entry(ws_hash)
+                        .or_insert_with(|| project.path.clone());
+                } else {
+                    byte_budget.defer();
+                }
             }
-            let _selected_project = match context.project_root {
+            let selected_project = match context.project_root {
                 Some(root) if path_belongs_to_project(Path::new(&project.path), root) => {
                     ComposerProject {
                         path: project.path.clone(),
@@ -543,8 +779,14 @@ impl CursorComposerSource {
                     path: "user".to_string(),
                 },
             };
-            // Own this session for JSONL dedupe regardless of the per-pass cap.
-            outcome.owned_session_ids.insert(composer_id.to_string());
+            // Keep JSONL dedupe state bounded independently of SQLite row count.
+            if outcome.owned_session_ids.contains(&composer_id)
+                || outcome.owned_session_ids.len() < MAX_COMPOSER_STORE_BLOB_VISITS
+            {
+                outcome.owned_session_ids.insert(composer_id.clone());
+            } else {
+                byte_budget.defer();
+            }
 
             let headers = envelope
                 .get("fullConversationHeadersOnly")
@@ -560,12 +802,57 @@ impl CursorComposerSource {
             };
             let mut session_accepted = false;
             let mut messages = 0_u64;
+            if composer_todos_have_admittable_items(&envelope)
+                && let Some(todo_checkpoint) = composer_envelope_todo_checkpoint(&envelope)
+                && let Ok(envelope_source) = cursor_composer_envelope_source(&composer_id)
+                && let Ok(envelope_expected_cursor) = context
+                    .facade
+                    .get_source_cursor(&envelope_source, &context.scope)
+                    .await
+            {
+                // Same generation + position is not enough: envelope todos mutate
+                // in place. Skip only when the stored resume fingerprint still
+                // matches the current todo checkpoint.
+                let envelope_already_covered =
+                    envelope_expected_cursor.as_ref().is_some_and(|cursor| {
+                        cursor.generation() == generation
+                            && cursor.position() >= 1
+                            && cursor.resume_fingerprint() == Some(todo_checkpoint)
+                    });
+                if !envelope_already_covered
+                    && let Ok(request) = build_cursor_composer_envelope_capture_request_for_project(
+                        &composer_id,
+                        &envelope,
+                        Some(&selected_project.path),
+                        context.scope.clone(),
+                        generation,
+                        envelope_expected_cursor,
+                    )
+                    && let Ok(outcome) = context.facade.capture_observation(request).await
+                    && let CaptureObservationOutcome::Persisted {
+                        outcome: persisted, ..
+                    } = outcome
+                {
+                    session_accepted = true;
+                    if matches!(persisted, ObservationPersistOutcome::Committed(_)) {
+                        messages = messages.saturating_add(1);
+                    }
+                }
+            }
             for (position, header) in headers.iter().enumerate() {
                 let Some(bubble_id) = header.get("bubbleId").and_then(Value::as_str) else {
                     continue;
                 };
-                let position = position as u64;
-                let Ok(source) = cursor_composer_source(composer_id) else {
+                if context
+                    .db
+                    .get_session_message(PROVIDER, &format!("{composer_id}:{bubble_id}"))
+                    .await
+                    .is_some()
+                {
+                    continue;
+                }
+                let header_position = position as u64;
+                let Ok(source) = cursor_composer_source(&composer_id) else {
                     break;
                 };
                 let Ok(expected_cursor) = context
@@ -575,36 +862,25 @@ impl CursorComposerSource {
                 else {
                     break;
                 };
-                if expected_cursor.as_ref().is_some_and(|cursor| {
-                    cursor.generation() == generation
-                        && cursor.position() >= position.saturating_add(1)
-                }) {
-                    continue;
+                let position = expected_cursor.as_ref().map_or(header_position, |cursor| {
+                    if cursor.generation() == generation {
+                        cursor.position().max(header_position)
+                    } else {
+                        header_position
+                    }
+                });
+                if byte_budget.exhausted() {
+                    byte_budget.defer();
+                    break;
                 }
-                let Some(bubble) = fetch_bubble(conn, composer_id, bubble_id).await else {
-                    continue;
-                };
-                let Ok(request) = build_cursor_composer_capture_request(
-                    composer_id,
-                    bubble_id,
-                    &bubble,
-                    context.scope.clone(),
-                    generation,
-                    position,
-                    expected_cursor.clone(),
-                ) else {
-                    continue;
-                };
-                match context.facade.capture_observation(request).await {
-                    Ok(CaptureObservationOutcome::Persisted {
-                        outcome: persisted, ..
-                    }) => {
-                        session_accepted = true;
-                        if matches!(persisted, ObservationPersistOutcome::Committed(_)) {
-                            messages = messages.saturating_add(1);
+                match fetch_bubble_bounded(conn, &composer_id, bubble_id, byte_budget.remaining())
+                    .await
+                {
+                    BoundedSqliteValue::Missing => {}
+                    BoundedSqliteValue::Oversized { byte_len } => {
+                        if !byte_budget.try_consume(composer_source_charge(byte_len)) {
+                            break;
                         }
-                    }
-                    Ok(CaptureObservationOutcome::Rejected { receipt, .. }) => {
                         if advance_composer_coverage(
                             ComposerCoverageContext {
                                 facade: &context.facade,
@@ -614,8 +890,8 @@ impl CursorComposerSource {
                             source,
                             position,
                             expected_cursor,
-                            ObservationCoverageReason::SanitizerRejected,
-                            receipt,
+                            ObservationCoverageReason::OversizedFrame,
+                            None,
                         )
                         .await
                         .is_err()
@@ -623,7 +899,10 @@ impl CursorComposerSource {
                             break;
                         }
                     }
-                    Ok(CaptureObservationOutcome::Quarantined { receipt, .. }) => {
+                    BoundedSqliteValue::Malformed { byte_len } => {
+                        if !byte_budget.try_consume(composer_source_charge(byte_len)) {
+                            break;
+                        }
                         if advance_composer_coverage(
                             ComposerCoverageContext {
                                 facade: &context.facade,
@@ -633,8 +912,8 @@ impl CursorComposerSource {
                             source,
                             position,
                             expected_cursor,
-                            ObservationCoverageReason::SanitizerQuarantined,
-                            receipt,
+                            ObservationCoverageReason::MalformedFrame,
+                            None,
                         )
                         .await
                         .is_err()
@@ -642,7 +921,98 @@ impl CursorComposerSource {
                             break;
                         }
                     }
-                    Err(_) => break,
+                    BoundedSqliteValue::BudgetExceeded { .. } => {
+                        byte_budget.defer();
+                        break;
+                    }
+                    BoundedSqliteValue::Ready {
+                        byte_len,
+                        value: bubble,
+                    } => {
+                        if !byte_budget.try_consume(byte_len.max(composer_budget_bytes(&bubble))) {
+                            break;
+                        }
+                        let request = build_cursor_composer_capture_request_for_project(
+                            &composer_id,
+                            bubble_id,
+                            &bubble,
+                            Some(&selected_project.path),
+                            Some(&envelope),
+                            context.scope.clone(),
+                            generation,
+                            position,
+                            expected_cursor.clone(),
+                        );
+                        let Ok(request) = request else {
+                            if advance_composer_coverage(
+                                ComposerCoverageContext {
+                                    facade: &context.facade,
+                                    scope: &context.scope,
+                                    generation,
+                                },
+                                source,
+                                position,
+                                expected_cursor,
+                                ObservationCoverageReason::MalformedFrame,
+                                None,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        };
+                        match context.facade.capture_observation(request).await {
+                            Ok(CaptureObservationOutcome::Persisted {
+                                outcome: persisted, ..
+                            }) => {
+                                session_accepted = true;
+                                if matches!(persisted, ObservationPersistOutcome::Committed(_)) {
+                                    messages = messages.saturating_add(1);
+                                }
+                            }
+                            Ok(CaptureObservationOutcome::Rejected { receipt, .. }) => {
+                                if advance_composer_coverage(
+                                    ComposerCoverageContext {
+                                        facade: &context.facade,
+                                        scope: &context.scope,
+                                        generation,
+                                    },
+                                    source,
+                                    position,
+                                    expected_cursor,
+                                    ObservationCoverageReason::SanitizerRejected,
+                                    Some(receipt),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Ok(CaptureObservationOutcome::Quarantined { receipt, .. }) => {
+                                if advance_composer_coverage(
+                                    ComposerCoverageContext {
+                                        facade: &context.facade,
+                                        scope: &context.scope,
+                                        generation,
+                                    },
+                                    source,
+                                    position,
+                                    expected_cursor,
+                                    ObservationCoverageReason::SanitizerQuarantined,
+                                    Some(receipt),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
                 }
             }
             if session_accepted {
@@ -656,6 +1026,7 @@ impl CursorComposerSource {
         &self,
         context: &ComposerIngestContext<'_>,
         workspace_paths: &HashMap<String, String>,
+        byte_budget: &mut IngestByteBudget,
         outcome: &mut CursorComposerSweepOutcome,
     ) {
         let Ok(ws_entries) = std::fs::read_dir(&self.chats_dir) else {
@@ -667,7 +1038,7 @@ impl CursorComposerSource {
             }
             let ws_hash = ws_entry.file_name().to_string_lossy().to_string();
             // Scope by ws-hash -> project mapping harvested from the envelopes.
-            let _project_path = match (workspace_paths.get(&ws_hash), context.project_root) {
+            let project_path = match (workspace_paths.get(&ws_hash), context.project_root) {
                 (Some(path), Some(root)) if path_belongs_to_project(Path::new(path), root) => {
                     path.clone()
                 }
@@ -690,7 +1061,7 @@ impl CursorComposerSource {
                 if !store_path.is_file() {
                     continue;
                 }
-                self.ingest_one_store_db(context, &store_path, outcome)
+                self.ingest_one_store_db(context, &store_path, &project_path, byte_budget, outcome)
                     .await;
             }
         }
@@ -700,25 +1071,54 @@ impl CursorComposerSource {
         &self,
         context: &ComposerIngestContext<'_>,
         store_path: &Path,
+        project_path: &str,
+        byte_budget: &mut IngestByteBudget,
         outcome: &mut CursorComposerSweepOutcome,
     ) {
         let Some(ro) = open_readonly_immutable(store_path).await else {
             return;
         };
         let conn = &ro.conn;
-        let Some(meta) = read_store_meta(conn).await else {
-            return;
+        let meta = match read_store_meta_bounded(conn, byte_budget.remaining()).await {
+            BoundedSqliteValue::Ready { byte_len, value } => {
+                if !byte_budget.try_consume(byte_len) {
+                    return;
+                }
+                value
+            }
+            BoundedSqliteValue::BudgetExceeded { .. } => {
+                byte_budget.defer();
+                return;
+            }
+            BoundedSqliteValue::Oversized { byte_len }
+            | BoundedSqliteValue::Malformed { byte_len } => {
+                let _ = byte_budget.try_consume(composer_source_charge(byte_len));
+                return;
+            }
+            BoundedSqliteValue::Missing => return,
         };
-        let blobs = read_store_blobs(conn).await;
-        if blobs.is_empty() {
-            return;
+        let session_id = format!("cursor-chat:{}", meta.agent_id);
+        if outcome.owned_session_ids.contains(&session_id)
+            || outcome.owned_session_ids.len() < MAX_COMPOSER_STORE_BLOB_VISITS
+        {
+            outcome.owned_session_ids.insert(session_id.clone());
+        } else {
+            byte_budget.defer();
         }
-        let ordered = order_store_messages(&blobs, meta.latest_root_blob_id.as_deref());
+
+        let ordered = match order_store_messages_bounded(
+            conn,
+            meta.latest_root_blob_id.as_deref(),
+            byte_budget,
+        )
+        .await
+        {
+            StoreWalkOutcome::Messages(messages) => messages,
+            StoreWalkOutcome::DeferredEmpty => return,
+        };
         if ordered.is_empty() {
             return;
         }
-        let session_id = format!("cursor-chat:{}", meta.agent_id);
-        outcome.owned_session_ids.insert(session_id.clone());
 
         let Some(generation) = snapshot_generation(store_path) else {
             return;
@@ -728,7 +1128,7 @@ impl CursorComposerSource {
         };
         let mut session_accepted = false;
         let mut messages = 0_u64;
-        for (ordinal, (role, content)) in ordered.iter().enumerate() {
+        for (ordinal, (role, content, source_bytes)) in ordered.into_iter().enumerate() {
             let position = ordinal as u64;
             let Ok(expected_cursor) = context
                 .facade
@@ -742,7 +1142,11 @@ impl CursorComposerSource {
             }) {
                 continue;
             }
-            let text = crate::sessions::shared::message_storage_text(content);
+            if byte_budget.exhausted() {
+                byte_budget.defer();
+                break;
+            }
+            let text = crate::sessions::shared::message_storage_text(&content);
             if text.trim().is_empty() {
                 continue;
             }
@@ -750,16 +1154,43 @@ impl CursorComposerSource {
                 "type": if role == "user" { 1 } else { 2 },
                 "text": text,
                 "createdAt": meta.created_at.map(|seconds| seconds.saturating_mul(1000)),
+                "tracedecayTranscriptPath": store_path.to_string_lossy(),
             });
-            let Ok(request) = build_cursor_composer_capture_request(
+            // Reachable blob bytes were charged during the SQL-gated DAG walk.
+            // Charge only observation-payload inflation beyond that source size.
+            let payload = composer_budget_bytes(&bubble);
+            if payload > source_bytes && !byte_budget.try_consume(payload - source_bytes) {
+                break;
+            }
+            let request = build_cursor_composer_capture_request_for_project(
                 &session_id,
-                &format!("chat:{ordinal}"),
+                &ordinal.to_string(),
                 &bubble,
+                Some(project_path),
+                None,
                 context.scope.clone(),
                 generation,
                 position,
                 expected_cursor.clone(),
-            ) else {
+            );
+            let Ok(request) = request else {
+                if advance_composer_coverage(
+                    ComposerCoverageContext {
+                        facade: &context.facade,
+                        scope: &context.scope,
+                        generation,
+                    },
+                    source.clone(),
+                    position,
+                    expected_cursor,
+                    ObservationCoverageReason::MalformedFrame,
+                    None,
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
                 continue;
             };
             match context.facade.capture_observation(request).await {
@@ -782,7 +1213,7 @@ impl CursorComposerSource {
                         position,
                         expected_cursor,
                         ObservationCoverageReason::SanitizerRejected,
-                        receipt,
+                        Some(receipt),
                     )
                     .await
                     .is_err()
@@ -801,7 +1232,7 @@ impl CursorComposerSource {
                         position,
                         expected_cursor,
                         ObservationCoverageReason::SanitizerQuarantined,
-                        receipt,
+                        Some(receipt),
                     )
                     .await
                     .is_err()
@@ -815,6 +1246,18 @@ impl CursorComposerSource {
         if session_accepted {
             outcome.add(1, messages);
         }
+    }
+}
+
+async fn drain_composer_projection_queue(context: &ComposerIngestContext<'_>) {
+    if let Err(error) = crate::sessions::claude_observation::drain_projection_queue(
+        &context.facade,
+        &context.scope,
+        &ObservationCancellation::default(),
+    )
+    .await
+    {
+        tracing::debug!(?error, "Cursor composer projection drain deferred");
     }
 }
 
@@ -861,21 +1304,32 @@ async fn advance_composer_coverage(
     position: u64,
     expected_cursor: Option<ObservationSourceCursorV1>,
     reason: ObservationCoverageReason,
-    receipt: tracedecay_domain::SanitizationReceiptV1,
+    receipt: Option<tracedecay_domain::SanitizationReceiptV1>,
 ) -> Result<(), String> {
     let range =
         tracedecay_domain::ObservationSourceRangeV1::new(position, position.saturating_add(1))
             .map_err(|error| format!("invalid Cursor composer coverage range: {error}"))?;
-    let advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
-        source,
-        context.scope.clone(),
-        context.generation,
-        ObservationOrderingDomainV1::SnapshotOrder,
-        expected_cursor,
-        range,
-        reason,
-        receipt,
-    )
+    let advance = match receipt {
+        Some(receipt) => ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
+            source,
+            context.scope.clone(),
+            context.generation,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            expected_cursor,
+            range,
+            reason,
+            receipt,
+        ),
+        None => ObservationCursorAdvance::for_ordering(
+            source,
+            context.scope.clone(),
+            context.generation,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            expected_cursor,
+            range,
+            reason,
+        ),
+    }
     .map_err(|error| format!("invalid Cursor composer coverage transition: {error}"))?;
     context
         .facade
@@ -883,18 +1337,6 @@ async fn advance_composer_coverage(
         .await
         .map(|_| ())
         .map_err(host_admission_error)
-}
-
-fn project_scope(project_root: &Path) -> Result<ObservationScopeV1, String> {
-    let layout = crate::storage::resolve_layout_for_current_profile(project_root)
-        .map_err(|_| "could not resolve Cursor project identity".to_string())?;
-    let project_id = layout
-        .identity
-        .project_id
-        .ok_or_else(|| "Cursor project identity is unavailable".to_string())?;
-    let project_id =
-        ProjectId::new(project_id).map_err(|_| "invalid Cursor project identity".to_string())?;
-    Ok(ObservationScopeV1::Project { project_id })
 }
 
 fn host_admission_error(outcome: HostAdmissionOutcome) -> String {
@@ -952,22 +1394,71 @@ fn immutable_ro_uri(db_path: &Path) -> Option<String> {
     Some(format!("file:{encoded}?immutable=1&mode=ro"))
 }
 
-async fn fetch_bubble(
+async fn fetch_kv_text_bounded(
+    conn: &libsql::Connection,
+    key: &str,
+    max_bytes: u64,
+    remaining: Option<u64>,
+) -> BoundedSqliteValue<String> {
+    let effective_cap = effective_sqlite_cap(max_bytes, remaining);
+    let Ok(mut rows) = conn
+        .query(
+            "SELECT length(CAST(value AS BLOB)) AS nbytes, \
+             CASE WHEN length(CAST(value AS BLOB)) <= ?1 THEN value ELSE NULL END AS payload \
+             FROM cursorDiskKV WHERE key = ?2",
+            libsql::params![effective_cap as i64, key],
+        )
+        .await
+    else {
+        return BoundedSqliteValue::Missing;
+    };
+    let Ok(Some(row)) = rows.next().await else {
+        return BoundedSqliteValue::Missing;
+    };
+    let Ok(nbytes_i) = row.get::<i64>(0) else {
+        return BoundedSqliteValue::Missing;
+    };
+    if nbytes_i < 0 {
+        return BoundedSqliteValue::Missing;
+    }
+    let byte_len = nbytes_i as u64;
+    match row.get::<String>(1) {
+        Ok(value) => BoundedSqliteValue::Ready { byte_len, value },
+        Err(_) if byte_len > max_bytes => BoundedSqliteValue::Oversized { byte_len },
+        Err(_) if remaining.is_some_and(|cap| byte_len > cap) => {
+            BoundedSqliteValue::BudgetExceeded { byte_len }
+        }
+        Err(_) => BoundedSqliteValue::Missing,
+    }
+}
+
+async fn fetch_bubble_bounded(
     conn: &libsql::Connection,
     composer_id: &str,
     bubble_id: &str,
-) -> Option<Value> {
+    remaining: Option<u64>,
+) -> BoundedSqliteValue<Value> {
     let key = format!("bubbleId:{composer_id}:{bubble_id}");
-    let mut rows = conn
-        .query(
-            "SELECT value FROM cursorDiskKV WHERE key = ?1",
-            libsql::params![key],
-        )
-        .await
-        .ok()?;
-    let row = rows.next().await.ok()??;
-    let value = row.get::<String>(0).ok()?;
-    serde_json::from_str::<Value>(&value).ok()
+    if key.len() as u64 > MAX_COMPOSER_SQLITE_KEY_BYTES {
+        return BoundedSqliteValue::Missing;
+    }
+    match fetch_kv_text_bounded(conn, &key, max_composer_record_bytes(), remaining).await {
+        BoundedSqliteValue::Missing => BoundedSqliteValue::Missing,
+        BoundedSqliteValue::Oversized { byte_len } => BoundedSqliteValue::Oversized { byte_len },
+        BoundedSqliteValue::BudgetExceeded { byte_len } => {
+            BoundedSqliteValue::BudgetExceeded { byte_len }
+        }
+        BoundedSqliteValue::Malformed { byte_len } => BoundedSqliteValue::Malformed { byte_len },
+        BoundedSqliteValue::Ready { byte_len, value } => {
+            match serde_json::from_str::<Value>(&value) {
+                Ok(parsed) => BoundedSqliteValue::Ready {
+                    byte_len,
+                    value: parsed,
+                },
+                Err(_) => BoundedSqliteValue::Malformed { byte_len },
+            }
+        }
+    }
 }
 
 fn envelope_project(envelope: &Value) -> Option<ComposerProject> {
@@ -1008,7 +1499,7 @@ fn workspace_hash(envelope: &Value) -> Option<String> {
         .get("workspaceIdentifier")
         .and_then(|w| w.get("id"))
         .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
+        .filter(|id| !id.is_empty() && id.len() as u64 <= MAX_COMPOSER_SQLITE_KEY_BYTES)
         .map(str::to_string)
 }
 
@@ -1021,7 +1512,7 @@ fn epoch_ms_to_secs(ms: Option<i64>) -> Option<i64> {
 }
 
 // ---------------------------------------------------------------------------
-// store.db blob-DAG reader
+// store.db blob-DAG reader (SQL length-gated, reachable-only)
 // ---------------------------------------------------------------------------
 
 struct StoreMeta {
@@ -1030,95 +1521,285 @@ struct StoreMeta {
     created_at: Option<i64>,
 }
 
-async fn read_store_meta(conn: &libsql::Connection) -> Option<StoreMeta> {
-    let mut rows = conn
-        .query("SELECT value FROM meta WHERE key = '0'", ())
-        .await
-        .ok()?;
-    let row = rows.next().await.ok()??;
-    let hex = row.get::<String>(0).ok()?;
-    let bytes = decode_hex(&hex)?;
-    let meta = serde_json::from_slice::<Value>(&bytes).ok()?;
-    let agent_id = meta.get("agentId").and_then(Value::as_str)?.to_string();
-    Some(StoreMeta {
-        agent_id,
-        latest_root_blob_id: meta
-            .get("latestRootBlobId")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        created_at: epoch_ms_to_secs(meta.get("createdAt").and_then(Value::as_i64)),
-    })
+enum StoreWalkOutcome {
+    Messages(Vec<(String, Value, u64)>),
+    DeferredEmpty,
 }
 
-/// All `(blob_id, raw_bytes)` in the store's `blobs` table.
-async fn read_store_blobs(conn: &libsql::Connection) -> Vec<(String, Vec<u8>)> {
-    let Ok(mut rows) = conn.query("SELECT id, data FROM blobs", ()).await else {
-        return Vec::new();
+async fn read_store_meta_bounded(
+    conn: &libsql::Connection,
+    remaining: Option<u64>,
+) -> BoundedSqliteValue<StoreMeta> {
+    let decoded_cap = effective_sqlite_cap(MAX_COMPOSER_STORE_META_BYTES, remaining);
+    let encoded_cap = decoded_cap.saturating_mul(2);
+    let Ok(mut rows) = conn
+        .query(
+            "SELECT length(CAST(value AS BLOB)) AS nbytes, \
+             CASE WHEN length(CAST(value AS BLOB)) <= ?1 THEN value ELSE NULL END AS payload \
+             FROM meta WHERE key = '0'",
+            libsql::params![encoded_cap as i64],
+        )
+        .await
+    else {
+        return BoundedSqliteValue::Missing;
     };
-    let mut out = Vec::new();
+    let Ok(Some(row)) = rows.next().await else {
+        return BoundedSqliteValue::Missing;
+    };
+    let Some(encoded_bytes) = row.get::<i64>(0).ok().filter(|n| *n >= 0).map(|n| n as u64) else {
+        return BoundedSqliteValue::Missing;
+    };
+    let decoded_bytes = encoded_bytes.saturating_add(1) / 2;
+    if encoded_bytes > MAX_COMPOSER_STORE_META_HEX_BYTES {
+        return BoundedSqliteValue::Oversized {
+            byte_len: decoded_bytes,
+        };
+    }
+    if remaining.is_some_and(|cap| decoded_bytes > cap) {
+        return BoundedSqliteValue::BudgetExceeded {
+            byte_len: decoded_bytes,
+        };
+    }
+    let Ok(hex) = row.get::<String>(1) else {
+        return BoundedSqliteValue::Malformed {
+            byte_len: decoded_bytes,
+        };
+    };
+    let Some(bytes) = decode_hex(&hex) else {
+        return BoundedSqliteValue::Malformed {
+            byte_len: decoded_bytes,
+        };
+    };
+    if bytes.len() as u64 > MAX_COMPOSER_STORE_META_BYTES {
+        return BoundedSqliteValue::Oversized {
+            byte_len: bytes.len() as u64,
+        };
+    }
+    let Ok(meta) = serde_json::from_slice::<Value>(&bytes) else {
+        return BoundedSqliteValue::Malformed {
+            byte_len: bytes.len() as u64,
+        };
+    };
+    let Some(agent_id) = meta
+        .get("agentId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && id.len() as u64 <= MAX_COMPOSER_SQLITE_KEY_BYTES)
+        .map(str::to_string)
+    else {
+        return BoundedSqliteValue::Malformed {
+            byte_len: bytes.len() as u64,
+        };
+    };
+    BoundedSqliteValue::Ready {
+        byte_len: bytes.len() as u64,
+        value: StoreMeta {
+            agent_id,
+            latest_root_blob_id: meta
+                .get("latestRootBlobId")
+                .and_then(Value::as_str)
+                .filter(|id| id.len() as u64 <= MAX_COMPOSER_SQLITE_KEY_BYTES)
+                .map(str::to_string),
+            created_at: epoch_ms_to_secs(meta.get("createdAt").and_then(Value::as_i64)),
+        },
+    }
+}
+
+async fn fetch_store_blob_bounded(
+    conn: &libsql::Connection,
+    blob_id: &str,
+    remaining: Option<u64>,
+) -> BoundedSqliteValue<Vec<u8>> {
+    if blob_id.is_empty() || blob_id.len() as u64 > MAX_COMPOSER_SQLITE_KEY_BYTES {
+        return BoundedSqliteValue::Missing;
+    }
+    let max_bytes = max_composer_record_bytes();
+    let effective_cap = effective_sqlite_cap(max_bytes, remaining);
+    let Ok(mut rows) = conn
+        .query(
+            "SELECT length(CAST(data AS BLOB)) AS nbytes, \
+             CASE WHEN length(CAST(data AS BLOB)) <= ?1 THEN data ELSE NULL END AS payload \
+             FROM blobs WHERE id = ?2",
+            libsql::params![effective_cap as i64, blob_id],
+        )
+        .await
+    else {
+        return BoundedSqliteValue::Missing;
+    };
+    let Ok(Some(row)) = rows.next().await else {
+        return BoundedSqliteValue::Missing;
+    };
+    let Ok(nbytes_i) = row.get::<i64>(0) else {
+        return BoundedSqliteValue::Missing;
+    };
+    if nbytes_i < 0 {
+        return BoundedSqliteValue::Missing;
+    }
+    let byte_len = nbytes_i as u64;
+    let data = row
+        .get::<Vec<u8>>(1)
+        .or_else(|_| row.get::<String>(1).map(String::into_bytes));
+    match data {
+        Ok(value) => BoundedSqliteValue::Ready { byte_len, value },
+        Err(_) if byte_len > max_bytes => BoundedSqliteValue::Oversized { byte_len },
+        Err(_) if remaining.is_some_and(|cap| byte_len > cap) => {
+            BoundedSqliteValue::BudgetExceeded { byte_len }
+        }
+        Err(_) => BoundedSqliteValue::Missing,
+    }
+}
+
+/// Walk the blob DAG from `root` (or id-sorted fallback), fetching each blob by
+/// primary key with SQL length/budget gates. Never `SELECT`s the full `blobs`
+/// table. Charges reachable blob bytes against `byte_budget` as they materialize.
+async fn order_store_messages_bounded(
+    conn: &libsql::Connection,
+    root: Option<&str>,
+    byte_budget: &mut IngestByteBudget,
+) -> StoreWalkOutcome {
+    let mut ordered = Vec::new();
+    let mut visited = HashSet::new();
+    let mut deferred = false;
+
+    if let Some(root) = root {
+        walk_store_blob_bounded(
+            conn,
+            root,
+            byte_budget,
+            &mut visited,
+            &mut ordered,
+            &mut deferred,
+        )
+        .await;
+        if deferred && ordered.is_empty() {
+            return StoreWalkOutcome::DeferredEmpty;
+        }
+        if !ordered.is_empty() {
+            return StoreWalkOutcome::Messages(ordered);
+        }
+    }
+
+    // Fallback: id-sorted leaf scan — ids only first, then length-gated fetches.
+    let Ok(mut rows) = conn
+        .query(
+            "SELECT id FROM blobs \
+             WHERE length(CAST(id AS BLOB)) <= ?1 \
+             ORDER BY id \
+             LIMIT ?2",
+            libsql::params![
+                MAX_COMPOSER_SQLITE_KEY_BYTES as i64,
+                MAX_COMPOSER_STORE_BLOB_VISITS as i64
+            ],
+        )
+        .await
+    else {
+        return StoreWalkOutcome::Messages(ordered);
+    };
     while let Ok(Some(row)) = rows.next().await {
+        if visited.len() >= MAX_COMPOSER_STORE_BLOB_VISITS {
+            byte_budget.defer();
+            break;
+        }
         let Ok(id) = row.get::<String>(0) else {
             continue;
         };
-        let data = row
-            .get::<Vec<u8>>(1)
-            .or_else(|_| row.get::<String>(1).map(String::into_bytes));
-        if let Ok(data) = data {
-            out.push((id, data));
+        if !visited.insert(id.clone()) {
+            continue;
+        }
+        if byte_budget.exhausted() {
+            byte_budget.defer();
+            deferred = true;
+            break;
+        }
+        match fetch_store_blob_bounded(conn, &id, byte_budget.remaining()).await {
+            BoundedSqliteValue::Ready { byte_len, value } => {
+                if !byte_budget.try_consume(byte_len) {
+                    deferred = true;
+                    break;
+                }
+                if let Some((role, content)) = store_blob_message(&value) {
+                    ordered.push((role, content, byte_len));
+                }
+            }
+            BoundedSqliteValue::BudgetExceeded { .. } => {
+                byte_budget.defer();
+                deferred = true;
+                break;
+            }
+            BoundedSqliteValue::Oversized { byte_len }
+            | BoundedSqliteValue::Malformed { byte_len } => {
+                if !byte_budget.try_consume(composer_source_charge(byte_len)) {
+                    deferred = true;
+                    break;
+                }
+            }
+            BoundedSqliteValue::Missing => {}
         }
     }
-    out
+    if deferred && ordered.is_empty() {
+        StoreWalkOutcome::DeferredEmpty
+    } else {
+        StoreWalkOutcome::Messages(ordered)
+    }
 }
 
-/// Walk the blob DAG from `root` and return the ordered `(role, content)` of
-/// every plain-JSON message leaf. Protobuf node blobs are traversed for their
-/// length-32 child references; protobuf leaf blobs are tolerated but skipped.
-/// Falls back to id-sorted order when the DAG cannot be walked.
-fn order_store_messages(blobs: &[(String, Vec<u8>)], root: Option<&str>) -> Vec<(String, Value)> {
-    let by_id: HashMap<&str, &[u8]> = blobs
-        .iter()
-        .map(|(id, data)| (id.as_str(), data.as_slice()))
-        .collect();
-    let mut ordered = Vec::new();
-
-    if let Some(root) = root {
-        let mut visited = HashSet::new();
-        walk_store_blob(root, &by_id, &mut visited, &mut ordered);
-        if !ordered.is_empty() {
-            return ordered;
-        }
-    }
-
-    // Fallback: id-sorted JSON leaves.
-    let mut ids: Vec<&str> = by_id.keys().copied().collect();
-    ids.sort_unstable();
-    for id in ids {
-        if let Some(message) = store_blob_message(by_id[id]) {
-            ordered.push(message);
-        }
-    }
-    ordered
-}
-
-fn walk_store_blob<'a>(
+async fn walk_store_blob_bounded(
+    conn: &libsql::Connection,
     id: &str,
-    by_id: &HashMap<&'a str, &'a [u8]>,
+    byte_budget: &mut IngestByteBudget,
     visited: &mut HashSet<String>,
-    ordered: &mut Vec<(String, Value)>,
+    ordered: &mut Vec<(String, Value, u64)>,
+    deferred: &mut bool,
 ) {
+    if *deferred || visited.len() >= MAX_COMPOSER_STORE_BLOB_VISITS {
+        if visited.len() >= MAX_COMPOSER_STORE_BLOB_VISITS {
+            byte_budget.defer();
+            *deferred = true;
+        }
+        return;
+    }
     if !visited.insert(id.to_string()) {
         return;
     }
-    let Some(bytes) = by_id.get(id) else {
-        return;
-    };
-    if let Some(message) = store_blob_message(bytes) {
-        ordered.push(message);
+    if byte_budget.exhausted() {
+        byte_budget.defer();
+        *deferred = true;
         return;
     }
-    for child in protobuf_child_refs(bytes) {
-        if by_id.contains_key(child.as_str()) {
-            walk_store_blob(&child, by_id, visited, ordered);
+    match fetch_store_blob_bounded(conn, id, byte_budget.remaining()).await {
+        BoundedSqliteValue::Missing => {}
+        BoundedSqliteValue::Oversized { byte_len } | BoundedSqliteValue::Malformed { byte_len } => {
+            if !byte_budget.try_consume(composer_source_charge(byte_len)) {
+                *deferred = true;
+            }
+        }
+        BoundedSqliteValue::BudgetExceeded { .. } => {
+            byte_budget.defer();
+            *deferred = true;
+        }
+        BoundedSqliteValue::Ready { byte_len, value } => {
+            if !byte_budget.try_consume(byte_len) {
+                *deferred = true;
+                return;
+            }
+            if let Some((role, content)) = store_blob_message(&value) {
+                ordered.push((role, content, byte_len));
+                return;
+            }
+            let children = protobuf_child_refs(&value);
+            for child in children.into_iter().take(MAX_COMPOSER_STORE_BLOB_VISITS) {
+                if *deferred {
+                    return;
+                }
+                Box::pin(walk_store_blob_bounded(
+                    conn,
+                    &child,
+                    byte_budget,
+                    visited,
+                    ordered,
+                    deferred,
+                ))
+                .await;
+            }
         }
     }
 }
@@ -1138,6 +1819,9 @@ fn protobuf_child_refs(bytes: &[u8]) -> Vec<String> {
     let mut refs = Vec::new();
     let mut i = 0usize;
     while i < bytes.len() {
+        if refs.len() >= MAX_COMPOSER_STORE_BLOB_VISITS {
+            break;
+        }
         let Some((tag, next)) = read_varint(bytes, i) else {
             break;
         };
@@ -1146,16 +1830,14 @@ fn protobuf_child_refs(bytes: &[u8]) -> Vec<String> {
         let wire = tag & 0x7;
         match wire {
             0 => {
-                // varint
                 let Some((_, next)) = read_varint(bytes, i) else {
                     break;
                 };
                 i = next;
             }
-            1 => i += 8, // 64-bit
-            5 => i += 4, // 32-bit
+            1 => i += 8,
+            5 => i += 4,
             2 => {
-                // length-delimited
                 let Some((len, next)) = read_varint(bytes, i) else {
                     break;
                 };
@@ -1285,10 +1967,554 @@ mod tests {
         ] {
             assert!(rendered.contains(fact), "missing canonical fact {fact}");
         }
+        assert!(!rendered.contains("TodoList") && !rendered.contains("todo_list"));
         assert!(rendered.contains("SnapshotOrder"));
         assert!(rendered.contains(record_id.as_str()));
         assert!(!rendered.contains("/secret/workspace"));
         assert!(!rendered.contains("credential-redacted"));
         assert!(!rendered.contains("secret result"));
+        let relations = serde_json::to_value(envelope.relations()).unwrap();
+        assert_eq!(relations["thread_id"], "composer-redacted");
+        assert_eq!(relations["message_id"], record_id.as_str());
+        assert!(relations.get("turn_id").is_none());
+        assert!(relations.get("agent_id").is_none());
+        assert!(relations.get("parent_agent_id").is_none());
+    }
+
+    #[test]
+    fn composer_bubble_without_turn_field_leaves_turn_unset() {
+        let native = json!({
+            "bubbleId": "bubble-1",
+            "type": 1,
+            "text": "hello from composer"
+        });
+        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
+        let record_id = cursor_composer_native_record_id("composer-native", "bubble-1").unwrap();
+        let envelope = normalize_cursor_composer_observation(
+            &native,
+            "composer-native",
+            record_id.clone(),
+            range,
+            0,
+        )
+        .unwrap();
+        let relations = serde_json::to_value(envelope.relations()).unwrap();
+        assert_eq!(relations["session_id"], "composer-native");
+        assert_eq!(relations["thread_id"], "composer-native");
+        assert_eq!(relations["message_id"], record_id.as_str());
+        assert!(relations.get("turn_id").is_none());
+        assert!(relations.get("agent_id").is_none());
+        assert!(relations.get("parent_agent_id").is_none());
+    }
+
+    /// Exact assistant bubble fields from
+    /// `tests/transcript_ingest_suite/cursor_composer.rs`
+    /// (`composer_envelope_and_bubbles_ingest_rows`). Provider-parser evidence is
+    /// the Cursor composer `bubbleId` payload (`type`/`text`/`toolFormerData`/
+    /// `thinking`/`tokenCount`); expected output is the canonical envelope with
+    /// Cursor provider + bubble-id native provenance.
+    #[test]
+    fn fixture_backed_composer_assistant_bubble_reaches_canonical_envelope() {
+        let native: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble.input.json"
+        ))
+        .expect("Cursor composer golden input");
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble.expected_envelope.json"
+        ))
+        .expect("Cursor composer golden expected envelope");
+        let range = tracedecay_domain::ObservationSourceRangeV1::new(1, 2).unwrap();
+        let record_id = cursor_composer_native_record_id("comp-1", "b-asst").unwrap();
+        let envelope =
+            normalize_cursor_composer_observation(&native, "comp-1", record_id.clone(), range, 1)
+                .unwrap();
+        assert_eq!(
+            envelope.provider().as_str(),
+            expected["provider"].as_str().unwrap()
+        );
+        assert_eq!(
+            envelope.native_record_kind(),
+            expected["native_record_kind"].as_str().unwrap()
+        );
+        assert_eq!(envelope.stable_record_id().as_str(), record_id.as_str());
+        let actual = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(actual["version"], expected["version"]);
+        assert_eq!(actual["evidence"], expected["evidence"]);
+        let fact_kinds = actual["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|fact| fact["kind"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let expected_fact_kinds = expected["fact_kinds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|kind| kind.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(fact_kinds, expected_fact_kinds);
+        let relations = actual["relations"].as_object().unwrap();
+        assert_eq!(relations["session_id"], expected["relations"]["session_id"]);
+        assert_eq!(relations["thread_id"], expected["relations"]["thread_id"]);
+        assert_eq!(relations["message_id"], record_id.as_str());
+        for absent in expected["relations"]["absent"].as_array().unwrap() {
+            assert!(relations.get(absent.as_str().unwrap()).is_none());
+        }
+        let rendered = actual.to_string();
+        for required in expected["encoded_must_contain"].as_array().unwrap() {
+            assert!(rendered.contains(required.as_str().unwrap()));
+        }
+        for rejected in expected["encoded_must_not_contain"].as_array().unwrap() {
+            assert!(!rendered.contains(rejected.as_str().unwrap()));
+        }
+    }
+
+    /// Checked-in `composerData` envelope `todos[{id,content,status}]` map to
+    /// `WorkflowLifecycle` `TodoList` + `TodoItem` facts with native order and refs.
+    #[test]
+    fn fixture_backed_composer_envelope_todos_reach_workflow_lifecycle() {
+        let native: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/provider_normalization/cursor_composer/envelope_todos.input.json"
+        ))
+        .expect("Cursor composer envelope todos golden input");
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/provider_normalization/cursor_composer/envelope_todos.expected_envelope.json"
+        ))
+        .expect("Cursor composer envelope todos expected envelope");
+        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
+        // Fixture lastUpdatedAt is null — checkpoint is the content fingerprint.
+        assert!(native.get("lastUpdatedAt").is_some_and(Value::is_null));
+        let checkpoint = composer_envelope_todo_checkpoint(&native)
+            .expect("fixture todos must yield a content fingerprint checkpoint");
+        let record_id = cursor_composer_envelope_native_record_id("comp-1", checkpoint).unwrap();
+        let envelope = normalize_cursor_composer_envelope_observation(
+            &native,
+            "comp-1",
+            None,
+            record_id.clone(),
+            range,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            envelope.provider().as_str(),
+            expected["provider"].as_str().unwrap()
+        );
+        assert_eq!(
+            envelope.native_record_kind(),
+            expected["native_record_kind"].as_str().unwrap()
+        );
+        assert_eq!(envelope.stable_record_id().as_str(), record_id.as_str());
+        let actual = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(actual["version"], expected["version"]);
+        assert_eq!(actual["evidence"], expected["evidence"]);
+        let fact_kinds = actual["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|fact| fact["kind"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let expected_fact_kinds = expected["fact_kinds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|kind| kind.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(fact_kinds, expected_fact_kinds);
+        let expected_lifecycle = expected["workflow_lifecycle"].as_array().unwrap();
+        let actual_facts = actual["facts"].as_array().unwrap();
+        assert_eq!(actual_facts.len(), expected_lifecycle.len());
+        for (actual_fact, expected_fact) in actual_facts.iter().zip(expected_lifecycle.iter()) {
+            assert_eq!(actual_fact["semantic_kind"], expected_fact["semantic_kind"]);
+            assert_eq!(
+                actual_fact["provider_reference"],
+                expected_fact["provider_reference"]
+            );
+            if let Some(item_id) = expected_fact.get("item_id") {
+                assert_eq!(actual_fact["item_id"], *item_id);
+            }
+            if let Some(list_reference) = expected_fact.get("list_reference") {
+                assert_eq!(actual_fact["list_reference"], *list_reference);
+            }
+            if let Some(status) = expected_fact.get("status") {
+                assert_eq!(actual_fact["status"], *status);
+            }
+            if let Some(item_order) = expected_fact.get("item_order") {
+                assert_eq!(actual_fact["item_order"], *item_order);
+            }
+            if let Some(content) = expected_fact.get("content") {
+                assert_eq!(actual_fact["content"], *content);
+            }
+            for absent in expected_fact["absent"].as_array().unwrap() {
+                assert!(actual_fact.get(absent.as_str().unwrap()).is_none());
+            }
+        }
+        let relations = actual["relations"].as_object().unwrap();
+        assert_eq!(relations["session_id"], expected["relations"]["session_id"]);
+        assert_eq!(relations["thread_id"], expected["relations"]["thread_id"]);
+        for absent in expected["relations"]["absent"].as_array().unwrap() {
+            assert!(relations.get(absent.as_str().unwrap()).is_none());
+        }
+        let rendered = actual.to_string();
+        for required in expected["encoded_must_contain"].as_array().unwrap() {
+            assert!(rendered.contains(required.as_str().unwrap()));
+        }
+        for rejected in expected["encoded_must_not_contain"].as_array().unwrap() {
+            assert!(!rendered.contains(rejected.as_str().unwrap()));
+        }
+    }
+
+    #[test]
+    fn envelope_todo_checkpoint_uses_fixture_backed_content_fingerprint() {
+        let native: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/provider_normalization/cursor_composer/envelope_todos.input.json"
+        ))
+        .expect("Cursor composer envelope todos golden input");
+        assert!(native.get("lastUpdatedAt").is_some_and(Value::is_null));
+        let baseline = composer_envelope_todo_checkpoint(&native).unwrap();
+        let mut pending_second = native.clone();
+        pending_second["todos"][1]["status"] = Value::String("completed".to_string());
+        let updated = composer_envelope_todo_checkpoint(&pending_second).unwrap();
+        assert_ne!(
+            baseline, updated,
+            "pending→completed must change the content fingerprint checkpoint"
+        );
+        assert_ne!(
+            cursor_composer_envelope_native_record_id("comp-1", baseline).unwrap(),
+            cursor_composer_envelope_native_record_id("comp-1", updated).unwrap()
+        );
+        let mut edited = native.clone();
+        edited["todos"][1]["content"] = Value::String("Second todo revised".to_string());
+        assert_ne!(
+            baseline,
+            composer_envelope_todo_checkpoint(&edited).unwrap(),
+            "content edits must change the checkpoint"
+        );
+        let mut reordered = native.clone();
+        reordered["todos"].as_array_mut().unwrap().swap(0, 1);
+        assert_ne!(
+            baseline,
+            composer_envelope_todo_checkpoint(&reordered).unwrap(),
+            "native array-order changes must change the checkpoint"
+        );
+    }
+
+    /// Bubble text + todos co-locate `Message` and `WorkflowLifecycle` facts.
+    #[test]
+    fn fixture_backed_composer_bubble_colocates_message_and_todo_lifecycle() {
+        let native: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble_with_todos.input.json"
+        ))
+        .expect("Cursor composer bubble+todos golden input");
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/provider_normalization/cursor_composer/assistant_bubble_with_todos.expected_envelope.json"
+        ))
+        .expect("Cursor composer bubble+todos expected envelope");
+        let range = tracedecay_domain::ObservationSourceRangeV1::new(1, 2).unwrap();
+        let record_id = cursor_composer_native_record_id("comp-1", "b-todos").unwrap();
+        let envelope =
+            normalize_cursor_composer_observation(&native, "comp-1", record_id.clone(), range, 1)
+                .unwrap();
+        let actual = serde_json::to_value(&envelope).unwrap();
+        let fact_kinds = actual["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|fact| fact["kind"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let expected_fact_kinds = expected["fact_kinds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|kind| kind.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(fact_kinds, expected_fact_kinds);
+        assert!(
+            envelope
+                .facts()
+                .iter()
+                .any(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. })),
+            "message fact must remain co-located"
+        );
+        assert!(
+            envelope.facts().iter().any(|fact| matches!(
+                fact,
+                CanonicalObservationFactV1::WorkflowLifecycle {
+                    semantic_kind: CanonicalWorkflowSemanticKindV1::TodoList,
+                    ..
+                }
+            )),
+            "todo list fact required"
+        );
+        let items: Vec<_> = envelope
+            .facts()
+            .iter()
+            .filter_map(|fact| match fact {
+                CanonicalObservationFactV1::WorkflowLifecycle {
+                    semantic_kind: CanonicalWorkflowSemanticKindV1::TodoItem,
+                    item_id,
+                    status,
+                    item_order,
+                    content,
+                    list_reference,
+                    ..
+                } => Some((item_id, status, item_order, content, list_reference)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].0.as_deref(), Some("t1"));
+        assert_eq!(items[0].1.as_deref(), Some("completed"));
+        assert_eq!(*items[0].2, Some(0));
+        assert_eq!(
+            items[0].3.as_ref().and_then(Value::as_str),
+            Some("First todo")
+        );
+        assert_eq!(items[0].4.as_deref(), Some("comp-1"));
+        assert_eq!(items[1].0.as_deref(), Some("t2"));
+        assert_eq!(items[1].1.as_deref(), Some("pending"));
+        assert_eq!(*items[1].2, Some(1));
+        assert_eq!(
+            items[1].3.as_ref().and_then(Value::as_str),
+            Some("Second todo")
+        );
+        assert_eq!(items[1].4.as_deref(), Some("comp-1"));
+        let rendered = actual.to_string();
+        for required in expected["encoded_must_contain"].as_array().unwrap() {
+            assert!(rendered.contains(required.as_str().unwrap()));
+        }
+        assert!(!rendered.contains("\"revision\""));
+    }
+
+    #[test]
+    fn composer_todo_without_native_id_is_not_promoted() {
+        let native = json!({
+            "type": 2,
+            "text": "Working the checklist.",
+            "todos": [
+                {"content": "No stable identity", "status": "pending"},
+                {"id": "t2", "content": "Native identity", "status": "completed"}
+            ]
+        });
+        let range = tracedecay_domain::ObservationSourceRangeV1::new(1, 2).unwrap();
+        let record_id = cursor_composer_native_record_id("comp-1", "b-todos").unwrap();
+        let envelope =
+            normalize_cursor_composer_observation(&native, "comp-1", record_id, range, 1).unwrap();
+        let items = envelope
+            .facts()
+            .iter()
+            .filter_map(|fact| match fact {
+                CanonicalObservationFactV1::WorkflowLifecycle {
+                    semantic_kind: CanonicalWorkflowSemanticKindV1::TodoItem,
+                    item_id,
+                    item_order,
+                    ..
+                } => Some((item_id.as_deref(), *item_order)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(items, vec![(Some("t2"), Some(1))]);
+    }
+
+    /// Exact provider bool `isCompacted: true` remains the only compaction
+    /// promotion path; lookalike keys/string forms stay ignored.
+    #[test]
+    fn composer_is_compacted_true_promotes_compaction_fact() {
+        let native = json!({
+            "type": 2,
+            "text": "post-compaction bubble",
+            "isCompacted": true,
+        });
+        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
+        let record_id =
+            cursor_composer_native_record_id("composer-compacted", "bubble-compacted").unwrap();
+        let envelope = normalize_cursor_composer_observation(
+            &native,
+            "composer-compacted",
+            record_id,
+            range,
+            0,
+        )
+        .unwrap();
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Compaction {
+                summary: Some(Value::String(text)),
+                ..
+            } if text == "post-compaction bubble"
+        )));
+    }
+
+    async fn open_temp_kv_db_with_rows(rows: &[(&str, &str)]) -> (tempfile::TempDir, ReadOnlyDb) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("state.vscdb");
+        {
+            let db = Builder::new_local(&path).build().await.unwrap();
+            let conn = db.connect().unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode=DELETE;\n\
+                 CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+            )
+            .await
+            .unwrap();
+            for (key, value) in rows {
+                conn.execute(
+                    "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+                    libsql::params![*key, *value],
+                )
+                .await
+                .unwrap();
+            }
+        }
+        let ro = open_readonly_immutable(&path).await.expect("open readonly");
+        (tmp, ro)
+    }
+
+    async fn open_temp_kv_db_with_sql(setup_sql: &str) -> (tempfile::TempDir, ReadOnlyDb) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("state.vscdb");
+        {
+            let db = Builder::new_local(&path).build().await.unwrap();
+            let conn = db.connect().unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode=DELETE;\n\
+                 CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+            )
+            .await
+            .unwrap();
+            conn.execute_batch(setup_sql).await.unwrap();
+        }
+        let ro = open_readonly_immutable(&path).await.expect("open readonly");
+        (tmp, ro)
+    }
+
+    #[tokio::test]
+    async fn sql_length_gate_rejects_oversized_bubble_built_in_sql() {
+        // Hostile TEXT is constructed entirely in SQL (hex(zeroblob)) so the
+        // product fetch never receives a pre-built Rust String of that value.
+        let setup = "INSERT INTO cursorDiskKV(key, value) \
+             SELECT 'bubbleId:comp:hostile', hex(zeroblob(33));";
+        let (tmp, ro) = open_temp_kv_db_with_sql(setup).await;
+        let _keep = tmp;
+
+        match fetch_kv_text_bounded(&ro.conn, "bubbleId:comp:hostile", 64, None).await {
+            BoundedSqliteValue::Oversized { byte_len } => {
+                assert_eq!(byte_len, 66);
+            }
+            other => panic!("expected Oversized, got {other:?}"),
+        }
+        match fetch_bubble_bounded(&ro.conn, "comp", "hostile", None).await {
+            // 66 bytes is under the real 1 MiB record ceiling; complete non-JSON
+            // text receives typed malformed coverage rather than disappearing.
+            BoundedSqliteValue::Malformed { byte_len } => assert_eq!(byte_len, 66),
+            other => panic!("unexpected bubble outcome {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sql_length_gate_counts_utf8_bytes_not_characters() {
+        // SQLite length(TEXT) would report 40 characters and incorrectly admit
+        // this 80-byte value under a 64-byte ceiling. Construct it in SQL so no
+        // product Rust code pre-materializes the hostile text.
+        let setup = "INSERT INTO cursorDiskKV(key, value) \
+             SELECT 'bubbleId:comp:multibyte', \
+                    replace(hex(zeroblob(40)), '00', 'é');";
+        let (tmp, ro) = open_temp_kv_db_with_sql(setup).await;
+        let _keep = tmp;
+
+        match fetch_kv_text_bounded(&ro.conn, "bubbleId:comp:multibyte", 64, None).await {
+            BoundedSqliteValue::Oversized { byte_len } => assert_eq!(byte_len, 80),
+            other => panic!("expected UTF-8 byte Oversized, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sql_budget_gate_defers_before_materializing_bubble_text() {
+        let (tmp, ro) =
+            open_temp_kv_db_with_rows(&[("bubbleId:comp:b1", r#"{"type":1,"text":"hello"}"#)])
+                .await;
+        let _keep = tmp;
+
+        match fetch_bubble_bounded(&ro.conn, "comp", "b1", Some(4)).await {
+            BoundedSqliteValue::BudgetExceeded { byte_len } => {
+                assert!(byte_len > 4);
+            }
+            other => panic!("expected BudgetExceeded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn store_blob_zeroblob_is_skipped_without_full_table_select() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("store.db");
+        let root = "aa".repeat(32);
+        {
+            let db = Builder::new_local(&path).build().await.unwrap();
+            let conn = db.connect().unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode=DELETE;\n\
+                 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);\n\
+                 CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);",
+            )
+            .await
+            .unwrap();
+            let leaf = "bb".repeat(32);
+            let meta = serde_json::json!({
+                "agentId": "agent-adv",
+                "latestRootBlobId": root,
+                "createdAt": 1_700_000_000_000i64,
+            });
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES ('0', ?1)",
+                libsql::params![encode_hex(meta.to_string().as_bytes())],
+            )
+            .await
+            .unwrap();
+            let hostile = (max_composer_record_bytes() as i64).saturating_add(64);
+            conn.execute(
+                "INSERT INTO blobs(id, data) VALUES (?1, zeroblob(?2))",
+                libsql::params![root.clone(), hostile],
+            )
+            .await
+            .unwrap();
+            conn.execute(
+                "INSERT INTO blobs(id, data) VALUES (?1, ?2)",
+                libsql::params![
+                    leaf,
+                    libsql::Value::Blob(
+                        serde_json::json!({"role":"user","content":"reachable"})
+                            .to_string()
+                            .into_bytes()
+                    )
+                ],
+            )
+            .await
+            .unwrap();
+        }
+
+        let ro = open_readonly_immutable(&path).await.unwrap();
+        let mut budget = IngestByteBudget::bounded(DEFAULT_COMPOSER_SWEEP_BYTES);
+        let outcome = order_store_messages_bounded(&ro.conn, Some(&root), &mut budget).await;
+        // Hostile root is skipped (oversized); fallback id-sort still finds the leaf.
+        match outcome {
+            StoreWalkOutcome::Messages(messages) => {
+                assert!(
+                    messages.iter().any(|(role, _, _)| role == "user"),
+                    "bounded fallback should still reach the valid leaf"
+                );
+            }
+            StoreWalkOutcome::DeferredEmpty => panic!("default sweep budget should reach leaf"),
+        }
+    }
+
+    #[test]
+    fn configured_composer_sqlite_bounds_match_shared_pr6_ceilings() {
+        assert_eq!(max_composer_record_bytes(), 1_048_576);
+        assert_eq!(MAX_COMPOSER_ENVELOPE_BYTES, 16 * 1024 * 1024);
+        assert_eq!(DEFAULT_COMPOSER_SWEEP_BYTES, 16 * 1024 * 1024 + 1);
+        assert_eq!(MAX_COMPOSER_STORE_META_BYTES, 256 * 1024);
+        assert_eq!(MAX_COMPOSER_STORE_META_HEX_BYTES, 512 * 1024);
+        assert_eq!(MAX_COMPOSER_STORE_BLOB_VISITS, 4096);
+        assert_eq!(MAX_COMPOSER_SQLITE_KEY_BYTES, 512);
     }
 }

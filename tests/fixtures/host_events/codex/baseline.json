@@ -12,8 +12,8 @@
     {
       "state": "degraded",
       "admission_provider": "codex",
-      "request": {"hook_event_name": "SessionStart", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "payload": {"malformed": true}},
-      "admission": {"status": "degraded", "retryable": false, "reason_code": "malformed_event"},
+      "request": {"hook_event_name": "SessionStart", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "source": "startup"},
+      "admission": {"status": "degraded", "retryable": false, "reason_code": "spool_record_too_large"},
       "response": {"exit_code": 0, "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"<REDACTED_CONTEXT>\"}}", "stderr": ""}
     },
     {
@@ -26,7 +26,7 @@
     {
       "state": "unknown",
       "admission_provider": "codex-future",
-      "request": {"hook_event_name": "FutureEvent", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>"},
+      "request": {"hook_event_name": "SessionStart", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "source": "startup"},
       "admission": {"status": "unknown", "retryable": false, "reason_code": "unknown_provider"},
       "response": {"exit_code": 0, "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"<REDACTED_CONTEXT>\"}}", "stderr": ""}
     }

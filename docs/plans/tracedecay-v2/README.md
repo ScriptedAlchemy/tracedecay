@@ -1,7 +1,8 @@
 # TraceDecay V2 rewrite
 
-Status: active product rewrite. PR5 is complete, PR6 is next, and PR #421
-remains open.
+Status: active product rewrite. PR5 is complete. PR6 implementation is active in
+the current branch; final correctness closure, aggregate gates, and a clean
+attested provider-observation benchmark remain. PR #421 remains open.
 
 The authoritative delivery order is [00-plan-set-index.md](00-plan-set-index.md).
 The next executable slice is [NEXT.md](NEXT.md). Numbered plans define component
@@ -28,6 +29,15 @@ requirements and boundaries, not separate crate-first work queues.
   preserve atomic restart/retry behavior; exact no-op replay performs no writes.
 - The committed PR5 workload and clean-commit acceptance artifact record the
   production parse/sanitize/commit/project/replay baseline for PR20.
+- PR6 extends that path across the supported Claude, Codex, Cursor, Hermes,
+  Kiro, and Cline-family sources through one host-neutral catalog and provider
+  observation contract.
+- Non-replayable events use bounded daemon-owned host admission; replayable
+  sources use bounded fair scheduling, atomic cursor/projection commits, and a
+  staged bounded projection rebuild rather than provider-local durable state.
+- Executable native host fixtures and typed hook-telemetry readiness now replace
+  prose-only provider claims. Current benchmark acceptance remains unset until
+  the clean attested PR6 run and aggregate gates pass.
 
 ## Storage and authority
 

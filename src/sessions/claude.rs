@@ -23,13 +23,20 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::privacy::protect_sensitive_structural_id;
 use crate::sessions::shared::{
     StoredCursor, TranscriptLocationMetadataKeys, path_belongs_to_project,
 };
-use crate::sessions::source::{
-    JsonlFrameDeferral, ParsedTranscript, TranscriptCursorKey, TranscriptSource,
-    collect_files_with_ext,
+use crate::sessions::snapshot_observation::{
+    MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
 };
+use crate::sessions::source::{
+    FileDiscoveryLimit, FileDiscoveryReport, JsonlFrameDeferral, ParsedTranscript,
+    TranscriptCursorKey, TranscriptDiscoveryBounds, TranscriptSource, bound_path_list,
+    collect_files_with_ext_bounded, path_byte_len,
+};
+mod canonical;
+mod canonical_projection;
 mod cursor;
 mod frames;
 mod parser;
@@ -159,17 +166,22 @@ impl ClaudeSource {
             return None;
         }
         let subagent = claude_subagent_identity(&scan.identity.source_path);
-        if self
+        let expected_session_id = self
             .user_scope
             .as_ref()
             .and_then(|scope| scope.session_id.as_deref())
-            .is_some_and(|expected| {
-                expected != scan.identity.session_id
-                    && subagent
-                        .as_ref()
-                        .is_none_or(|info| expected != info.parent_session_id)
-            })
-        {
+            .map(protect_sensitive_structural_id)
+            .transpose()
+            .ok()?;
+        let parent_session_id = subagent
+            .as_ref()
+            .map(|info| protect_sensitive_structural_id(&info.parent_session_id))
+            .transpose()
+            .ok()?;
+        if expected_session_id.is_some_and(|expected| {
+            expected != scan.identity.session_id
+                && parent_session_id.as_deref() != Some(expected.as_str())
+        }) {
             return None;
         }
 
@@ -184,7 +196,7 @@ impl ClaudeSource {
                 if scan_start == 0 {
                     scan.frames
                         .iter()
-                        .filter_map(ClaudeSourceFrame::scope_value)
+                        .map(ClaudeSourceFrame::scope_value)
                         .find_map(record_cwd)
                 } else {
                     None
@@ -198,7 +210,7 @@ impl ClaudeSource {
         let mut retained = Vec::with_capacity(scan.frames.len());
         let mut excluded = Vec::new();
         for frame in scan.frames.drain(..) {
-            let record = frame.scope_value()?;
+            let record = frame.scope_value();
             let line_cwd = record_cwd(record).or_else(|| session_cwd.clone());
             let include = self.user_scope.as_ref().map_or_else(
                 || {
@@ -295,43 +307,121 @@ pub(crate) async fn try_ingest_user_sessions_with_source(
     .map(|stats| stats.transcript)
 }
 
+fn discover_claude_session_scoped_paths(
+    projects_dir: &Path,
+    session_id: &str,
+    bounds: TranscriptDiscoveryBounds,
+) -> FileDiscoveryReport {
+    let mut paths = Vec::new();
+    let mut truncated = None;
+    let mut skipped_oversized_entries = 0u64;
+    let mut bytes_charged = 0u64;
+    let Ok(projects) = std::fs::read_dir(projects_dir) else {
+        return FileDiscoveryReport {
+            paths,
+            truncated,
+            skipped_oversized_entries,
+            bytes_charged,
+        };
+    };
+    // Stream project slug entries; never collect the full read_dir into a Vec.
+    for project_entry in projects.flatten() {
+        if truncated.is_some() {
+            break;
+        }
+        let Ok(file_type) = project_entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() || !file_type.is_dir() {
+            continue;
+        }
+        let project = projects_dir.join(project_entry.file_name());
+        let transcript = project.join(format!("{session_id}.jsonl"));
+        let remaining = TranscriptDiscoveryBounds {
+            max_files: bounds.max_files.saturating_sub(paths.len()),
+            max_discovery_bytes: bounds.max_discovery_bytes.saturating_sub(bytes_charged),
+            ..bounds
+        };
+        if remaining.max_files == 0 || remaining.max_discovery_bytes == 0 {
+            truncated = Some(FileDiscoveryLimit::FileCount);
+            break;
+        }
+        if transcript.is_file() {
+            let path_bytes = path_byte_len(&transcript);
+            if path_bytes > remaining.max_path_bytes {
+                skipped_oversized_entries = skipped_oversized_entries.saturating_add(1);
+            } else {
+                let charge = u64::try_from(path_bytes).unwrap_or(u64::MAX);
+                if bytes_charged.saturating_add(charge) > bounds.max_discovery_bytes {
+                    truncated = Some(FileDiscoveryLimit::DiscoveryBytes);
+                    break;
+                }
+                bytes_charged = bytes_charged.saturating_add(charge);
+                paths.push(transcript);
+            }
+        }
+        let subagent_bounds = TranscriptDiscoveryBounds {
+            max_files: bounds.max_files.saturating_sub(paths.len()),
+            max_discovery_bytes: bounds.max_discovery_bytes.saturating_sub(bytes_charged),
+            ..bounds
+        };
+        if subagent_bounds.max_files == 0 || subagent_bounds.max_discovery_bytes == 0 {
+            truncated = Some(FileDiscoveryLimit::FileCount);
+            break;
+        }
+        let subagents = collect_files_with_ext_bounded(
+            &project.join(session_id).join("subagents"),
+            "jsonl",
+            MAX_SCAN_DEPTH,
+            subagent_bounds,
+        );
+        bytes_charged = bytes_charged.saturating_add(subagents.bytes_charged);
+        skipped_oversized_entries =
+            skipped_oversized_entries.saturating_add(subagents.skipped_oversized_entries);
+        paths.extend(subagents.paths);
+        if let Some(limit) = subagents.truncated {
+            truncated = Some(limit);
+            break;
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    // Re-apply bounds after sort/dedup so materialization stays inside the cap.
+    let mut report = bound_path_list(paths, bounds);
+    report.truncated = report.truncated.or(truncated);
+    report.skipped_oversized_entries = report
+        .skipped_oversized_entries
+        .saturating_add(skipped_oversized_entries);
+    report.bytes_charged = report.bytes_charged.max(bytes_charged);
+    report
+}
+
 impl TranscriptSource for ClaudeSource {
     fn provider(&self) -> &'static str {
         PROVIDER
     }
 
-    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
+    fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
+        self.discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk())
+            .paths
+    }
+
+    fn discover_transcript_paths(
+        &self,
+        _project_root: &Path,
+        bounds: TranscriptDiscoveryBounds,
+    ) -> FileDiscoveryReport {
         if let Some(session_id) = self
             .user_scope
             .as_ref()
             .and_then(|scope| scope.session_id.as_deref())
         {
-            let mut paths = Vec::new();
-            let Ok(projects) = std::fs::read_dir(&self.projects_dir) else {
-                return paths;
-            };
-            for project in projects.flatten().map(|entry| entry.path()) {
-                if !project.is_dir() {
-                    continue;
-                }
-                let transcript = project.join(format!("{session_id}.jsonl"));
-                if transcript.is_file() {
-                    paths.push(transcript);
-                }
-                paths.extend(collect_files_with_ext(
-                    &project.join(session_id).join("subagents"),
-                    "jsonl",
-                    MAX_SCAN_DEPTH,
-                ));
-            }
-            paths.sort();
-            paths.dedup();
-            return paths;
+            return discover_claude_session_scoped_paths(&self.projects_dir, session_id, bounds);
         }
         // Scan every project slug; `parse_new` filters by recorded `cwd` so each
         // project only ingests its own sessions without us having to replicate
         // Claude's slug-encoding scheme.
-        collect_files_with_ext(&self.projects_dir, "jsonl", MAX_SCAN_DEPTH)
+        collect_files_with_ext_bounded(&self.projects_dir, "jsonl", MAX_SCAN_DEPTH, bounds)
     }
 
     fn cursor_key(&self, transcript_path: &Path) -> TranscriptCursorKey {
@@ -458,7 +548,9 @@ fn read_subagent_meta(transcript_path: &Path) -> ClaudeSubagentMeta {
         .to_os_string();
     meta_filename.push(".meta.json");
     let meta_path = transcript_path.with_file_name(meta_filename);
-    let Ok(text) = std::fs::read_to_string(&meta_path) else {
+    let Ok(Some(text)) =
+        read_snapshot_text_bounded(PROVIDER, &meta_path, MAX_SNAPSHOT_METADATA_BYTES)
+    else {
         return ClaudeSubagentMeta::default();
     };
     let Ok(value) = serde_json::from_str::<Value>(&text) else {

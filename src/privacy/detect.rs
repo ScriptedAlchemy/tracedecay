@@ -16,7 +16,6 @@ const REDACTED_ASSIGNMENT: &str = "[TraceDecay redacted: credential assignment]"
 const REDACTED_PRIVATE_KEY: &str = "[TraceDecay redacted: private key]";
 const REDACTED_ENTROPY: &str = "[TraceDecay redacted: high-entropy token]";
 const REDACTED_SENSITIVE_FIELD: &str = "[TraceDecay redacted: sensitive field]";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PrivacyDetectorV1 {
     ExactCredential,

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use libsql::{Connection, Value, params};
 use sha2::{Digest, Sha256};
+use tracedecay_domain::ProjectId;
 
 use crate::db::Database;
 use crate::global_db::GlobalDb;
@@ -469,10 +470,14 @@ async fn migrate_legacy_state_store(
     let target = GlobalDb::open_at(&target_layout.sessions_db_path)
         .await
         .ok_or_else(|| CandidateError::Failed("could not open target session store".to_string()))?;
+    let project_id = ProjectId::new(target_layout.project_id).map_err(|error| {
+        CandidateError::Failed(format!("invalid target project identity: {error}"))
+    })?;
     let stats = crate::sessions::hermes::ingest_legacy_pinned_profile(
         &target,
         profile_dir,
         &target_project.root,
+        project_id,
     )
     .await
     .map_err(CandidateError::Failed)?;

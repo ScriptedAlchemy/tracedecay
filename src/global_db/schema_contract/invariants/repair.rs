@@ -4,7 +4,7 @@ use libsql::{Connection, params};
 use tracedecay_domain::{
     DurableObservationV1, ObservationOrderingDomainV1, ObservationSourceCursorV1,
 };
-use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION_V1;
+use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 
 use crate::global_db::global_db_operation_error;
 
@@ -29,7 +29,7 @@ pub(super) async fn repair_projection_frontier(
         .query(
             "SELECT last_sequence FROM observation_projection_checkpoints
              WHERE projector_version = ?1",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -65,11 +65,15 @@ pub(super) async fn repair_projection_frontier(
     let mut coverage = conn
         .query(
             "SELECT observation.sequence,
-                    (EXISTS(
+                    ((EXISTS(
                         SELECT 1 FROM observation_projection_provenance AS provenance
                         WHERE provenance.projector_version = ?1
                           AND provenance.observation_id = observation.observation_id
-                    ) + EXISTS(
+                    ) OR EXISTS(
+                        SELECT 1 FROM observation_workflow_facts AS workflow
+                        WHERE workflow.projector_version = ?1
+                          AND workflow.observation_id = observation.observation_id
+                    )) + EXISTS(
                         SELECT 1 FROM observation_projection_dispositions AS disposition
                         WHERE disposition.projector_version = ?1
                           AND disposition.observation_id = observation.observation_id
@@ -78,7 +82,7 @@ pub(super) async fn repair_projection_frontier(
              WHERE observation.sequence > ?2 AND observation.sequence <= ?3
              ORDER BY observation.sequence ASC",
             params![
-                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 coverage_start,
                 checkpoint
             ],
@@ -108,7 +112,7 @@ pub(super) async fn repair_projection_frontier(
         conn.execute(
             "UPDATE observation_projection_checkpoints SET last_sequence = ?2
              WHERE projector_version = ?1",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1, repaired_checkpoint],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, repaired_checkpoint],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;

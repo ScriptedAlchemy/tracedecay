@@ -496,6 +496,33 @@ async fn open_active_project_session_db(cg: &TraceDecay) -> GlobalDb {
         .expect("active project-local session db should open")
 }
 
+async fn message_search_with_project_session_authority(
+    cg: &TraceDecay,
+    mut args: Value,
+    session_db: &Arc<GlobalDb>,
+) -> tracedecay::errors::Result<ToolResult> {
+    if let Some(object) = args.as_object_mut() {
+        object
+            .entry("format".to_owned())
+            .or_insert_with(|| json!("json"));
+    }
+    tracedecay::mcp::tools::handle_tool_call_with_registry_and_implicit_project(
+        cg,
+        "tracedecay_message_search",
+        args,
+        None,
+        None,
+        tracedecay::mcp::tools::ToolCallRegistryOptions {
+            session_authorities: tracedecay::mcp::tools::SessionAuthorities::new(
+                Some(session_db),
+                None,
+            ),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
 /// Creates a small Rust library with an integration-style test that calls a
 /// public entry point, which then reaches an internal helper. This exercises
 /// the calibrated depth-3 attribution path in `tracedecay_test_risk`.
@@ -8940,6 +8967,7 @@ async fn mcp_session_retrieval_preserves_observed_location_metadata() {
 #[tokio::test]
 async fn message_search_catches_up_provider_transcripts_before_querying() {
     let (cg, _env, _dir) = setup_empty_project().await;
+    let session_db = Arc::new(open_active_project_session_db(&cg).await);
     let home = cg.project_root().join("home");
     let project = cg.project_root().to_path_buf();
     let project_text = project.to_string_lossy();
@@ -8981,16 +9009,14 @@ async fn message_search_catches_up_provider_transcripts_before_querying() {
     )
     .unwrap();
 
-    let codex_result = handle_tool_call(
+    let codex_result = message_search_with_project_session_authority(
         &cg,
-        "tracedecay_message_search",
         json!({
             "query": "codex provider catchup",
             "provider": "codex",
             "limit": 5
         }),
-        None,
-        None,
+        &session_db,
     )
     .await
     .unwrap();
@@ -9018,16 +9044,14 @@ async fn message_search_catches_up_provider_transcripts_before_querying() {
     )
     .unwrap();
 
-    let appended_codex_result = handle_tool_call(
+    let appended_codex_result = message_search_with_project_session_authority(
         &cg,
-        "tracedecay_message_search",
         json!({
             "query": "deterministic-provider-only-token",
             "provider": "codex",
             "limit": 5
         }),
-        None,
-        None,
+        &session_db,
     )
     .await
     .unwrap();
@@ -9038,16 +9062,14 @@ async fn message_search_catches_up_provider_transcripts_before_querying() {
     assert_eq!(appended_codex["count"], 1);
     assert_eq!(appended_codex["results"][0]["message"]["provider"], "codex");
 
-    let requested_codex_unified_result = handle_tool_call(
+    let requested_codex_unified_result = message_search_with_project_session_authority(
         &cg,
-        "tracedecay_message_search",
         json!({
             "query": "rsbuild recall evidence",
             "provider": "codex",
             "limit": 5
         }),
-        None,
-        None,
+        &session_db,
     )
     .await
     .unwrap();
@@ -9073,16 +9095,14 @@ async fn message_search_catches_up_provider_transcripts_before_querying() {
         "provider-scoped search should only ingest the requested provider"
     );
 
-    let cursor_result = handle_tool_call(
+    let cursor_result = message_search_with_project_session_authority(
         &cg,
-        "tracedecay_message_search",
         json!({
             "query": "cursor provider catchup",
             "provider": "cursor",
             "limit": 5
         }),
-        None,
-        None,
+        &session_db,
     )
     .await
     .unwrap();
@@ -9091,12 +9111,10 @@ async fn message_search_catches_up_provider_transcripts_before_querying() {
     assert_eq!(cursor["count"], 1);
     assert_eq!(cursor["results"][0]["message"]["provider"], "cursor");
 
-    let all_result = handle_tool_call(
+    let all_result = message_search_with_project_session_authority(
         &cg,
-        "tracedecay_message_search",
         json!({"query": "rsbuild recall evidence", "limit": 5}),
-        None,
-        None,
+        &session_db,
     )
     .await
     .unwrap();
@@ -9116,6 +9134,7 @@ async fn message_search_catches_up_provider_transcripts_before_querying() {
 #[tokio::test]
 async fn message_search_can_skip_catch_up_for_read_only_audits() {
     let (cg, _env, _dir) = setup_empty_project().await;
+    let session_db = Arc::new(open_active_project_session_db(&cg).await);
     let home = cg.project_root().join("home");
     let project = cg.project_root().to_path_buf();
     let project_text = project.to_string_lossy();
@@ -9143,17 +9162,15 @@ async fn message_search_can_skip_catch_up_for_read_only_audits() {
     )
     .unwrap();
 
-    let read_only_result = handle_tool_call(
+    let read_only_result = message_search_with_project_session_authority(
         &cg,
-        "tracedecay_message_search",
         json!({
             "query": "read only transcript catchup",
             "provider": "codex",
             "catch_up": false,
             "limit": 5
         }),
-        None,
-        None,
+        &session_db,
     )
     .await
     .unwrap();
@@ -9171,16 +9188,14 @@ async fn message_search_can_skip_catch_up_for_read_only_audits() {
         "catch_up=false must not ingest provider transcripts"
     );
 
-    let catch_up_result = handle_tool_call(
+    let catch_up_result = message_search_with_project_session_authority(
         &cg,
-        "tracedecay_message_search",
         json!({
             "query": "read only transcript catchup",
             "provider": "codex",
             "limit": 5
         }),
-        None,
-        None,
+        &session_db,
     )
     .await
     .unwrap();

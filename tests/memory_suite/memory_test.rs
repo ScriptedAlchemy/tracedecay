@@ -159,6 +159,7 @@ async fn entity_grooming_rewires_links_supports_alias_retrieval_and_repairs_vect
         .unwrap();
     let winner = entity_id(&db, "tracedecay").await;
     let loser = entity_id(&db, "memorygraph").await;
+    drop(writer);
     db.execute_write(
         "corrupt fact vector fixture",
         "UPDATE memory_facts SET hrr_vector = X'00', hrr_algebra = 'wrong', hrr_dim = 1,
@@ -167,6 +168,8 @@ async fn entity_grooming_rewires_links_supports_alias_retrieval_and_repairs_vect
     )
     .await
     .unwrap();
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     let report = store
         .apply_grooming_batch(
@@ -841,6 +844,7 @@ async fn rebuild_dirty_banks_preserves_rows_updated_during_rebuild() {
         .unwrap();
     let before = dirty_bank_updated_at(&db, "project").await;
 
+    drop(writer);
     db.execute_write_batch(
         "install dirty-bank trigger fixture",
         "CREATE TRIGGER mark_project_dirty_after_bank_insert
@@ -854,6 +858,8 @@ async fn rebuild_dirty_banks_preserves_rows_updated_during_rebuild() {
     )
     .await
     .unwrap();
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     assert_eq!(store.rebuild_dirty_banks().await.unwrap(), 2);
     assert_eq!(dirty_bank_names(&db).await, vec!["project"]);
@@ -1143,6 +1149,7 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
     let vector_len: i64 = row.get(0).unwrap();
     assert_eq!(vector_len, 8200);
 
+    drop(writer);
     db.execute_write(
         "clear compact vector fixture",
         "UPDATE memory_facts SET hrr_vector = NULL, hrr_dim = 8 WHERE fact_id = ?1",
@@ -1150,6 +1157,8 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
     )
     .await
     .unwrap();
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     assert_eq!(store.compute_missing_vectors(10).await.unwrap(), 1);
     assert_eq!(store.compute_missing_vectors(10).await.unwrap(), 0);
@@ -1173,6 +1182,7 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
         "fresh and recomputed vectors should be marked as f32 precision with compact blobs"
     );
 
+    drop(writer);
     db.execute_write(
         "clear vector before bank rebuild fixture",
         "UPDATE memory_facts SET hrr_vector = NULL WHERE fact_id = ?1",
@@ -1180,6 +1190,8 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
     )
     .await
     .unwrap();
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
     assert_eq!(
         store
             .rebuild_bank("project", Some(MemoryCategory::Project))
@@ -1224,6 +1236,7 @@ async fn compute_missing_vectors_backfills_legacy_f64_precision_to_f32() {
     let legacy_bytes = bincode::serialize(&baseline_vector).unwrap();
     assert_eq!(legacy_bytes.len(), 16_392);
 
+    drop(writer);
     db.execute_write(
         "install legacy vector fixture",
         "UPDATE memory_facts
@@ -1233,6 +1246,8 @@ async fn compute_missing_vectors_backfills_legacy_f64_precision_to_f32() {
     )
     .await
     .unwrap();
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     assert_eq!(store.compute_missing_vectors(10).await.unwrap(), 1);
     assert_eq!(store.compute_missing_vectors(10).await.unwrap(), 0);
@@ -1318,8 +1333,6 @@ async fn compact_vectors_keep_recall_ordering_after_bank_rebuild() {
 #[tokio::test]
 async fn remove_fact_defers_vacuum_while_peer_connections_are_live() {
     let (db, tmp) = make_memory_store().await;
-    let writer = db.memory_writer().await.unwrap();
-    let store = writer.store();
     let db_path = tmp.path().join("tracedecay.db");
     let mut fact_ids = Vec::new();
     let vector = HolographicEncoder::serialize(&vec![0.0; HolographicEncoder::DIMENSIONS])
@@ -1355,10 +1368,13 @@ async fn remove_fact_defers_vacuum_while_peer_connections_are_live() {
     db.checkpoint().await.unwrap();
     let size_after_insert = std::fs::metadata(&db_path).unwrap().len();
     let (peer, _) = crate::common::open_test_database(&db_path).await.unwrap();
+    let writer = db.memory_writer().await.unwrap();
+    let store = writer.store();
 
     for fact_id in fact_ids {
         assert!(store.remove_fact(fact_id).await.unwrap());
     }
+    drop(writer);
     db.checkpoint().await.unwrap();
     let size_after_delete = std::fs::metadata(&db_path).unwrap().len();
 
@@ -1749,6 +1765,7 @@ async fn fact_retriever_search_includes_old_entity_only_matches() {
         .unwrap()
         .fact
         .unwrap();
+    drop(writer);
 
     seed_newer_unrelated_memory_facts(
         &db,
@@ -1869,6 +1886,7 @@ async fn fact_retriever_reason_applies_entity_predicates_before_limit() {
         .unwrap()
         .fact
         .unwrap();
+    drop(writer);
 
     seed_newer_unrelated_memory_facts(
         &db,

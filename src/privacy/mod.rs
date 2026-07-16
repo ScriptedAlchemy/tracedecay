@@ -8,6 +8,7 @@ mod detect;
 pub(crate) mod detector_kernel;
 mod parse;
 mod sanitize;
+mod structural_id;
 
 pub(crate) use detect::sanitize_provider_metadata_text;
 pub use detect::{
@@ -23,6 +24,9 @@ pub use sanitize::{
     ClaudeSanitizerPolicyV1, OBSERVATION_SANITIZER_VERSION_V1, ObservationSanitizationOutcomeV1,
     PrivacySanitizerError, RecordSanitizerPolicyV1, RecordSanitizerV1, SanitizedClaudeRecordV1,
     SanitizedObservationRecordV1,
+};
+pub(crate) use structural_id::{
+    protect_optional_sensitive_structural_id, protect_sensitive_structural_id,
 };
 
 #[cfg(test)]

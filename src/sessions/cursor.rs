@@ -1,5 +1,7 @@
 use std::fmt::Write as _;
+use std::fs::File;
 use std::hash::BuildHasher;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -8,29 +10,30 @@ use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
-    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationId, ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1,
     ProjectId, ProviderId, RetentionClass, SessionId,
 };
-use tracedecay_store::ObservationPersistOutcome;
-use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
+use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use crate::application::observation::{
-    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
-};
+use crate::application::observation::ObservationCancellation;
 use crate::global_db::GlobalDb;
 use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::sessions::SessionMessageRecord;
+use crate::sessions::ingest_byte_budget::IngestByteBudget;
+use crate::sessions::jsonl_observation_admission::{
+    JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
+    admit_jsonl_observations,
+};
 use crate::sessions::shared::{
     StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
     append_tool_calls_metadata, append_tool_event_metadata, append_usage_metadata,
     content_storage_text_and_tools, paths_equal, title_from_messages,
 };
 use crate::sessions::source::{
-    MAX_JSONL_RECORD_BYTES, ParsedTranscript, SessionDraft, TranscriptIngestError,
-    TranscriptIngestResult, TranscriptSource, collect_files_with_ext, stream_new_jsonl,
-    try_stream_new_jsonl_raw_strict_with_resume,
+    MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlFrame, RawJsonlFrameReader, SessionDraft,
+    TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
+    collect_files_with_ext_bounded, preflight_strict_jsonl, stream_new_jsonl,
 };
 use crate::storage::{
     SESSIONS_DB_FILENAME, default_profile_project_id, default_profile_root,
@@ -48,6 +51,46 @@ const CURSOR_EVENT_LOCATION_KEYS: TranscriptLocationMetadataKeys =
 pub struct CursorTranscriptIngestStats {
     pub sessions_upserted: u64,
     pub messages_upserted: u64,
+    pub bytes_consumed: u64,
+    pub source_deferred: bool,
+}
+
+#[derive(Clone)]
+struct CursorObservationContext {
+    project_path: Option<String>,
+    location_path: Option<String>,
+    transcript_path: String,
+    model: Option<String>,
+    thread_id: Option<String>,
+    location_provenance: Option<String>,
+}
+
+fn cursor_observation_context(
+    event: &Value,
+    transcript_path: &Path,
+    user_scope: bool,
+) -> CursorObservationContext {
+    let (project_path, _) = event_project(event);
+    let project_path = (project_path != "unknown" && !user_scope).then_some(project_path);
+    // Canonical Session facts must be invariant to whether a hook or startup
+    // sweep delivered the record. Route-specific cwd/provenance belongs to
+    // admission evidence, while the selected workspace root is the stable
+    // session location for project-scoped Cursor history.
+    let location_path = project_path.clone();
+    let location_provenance = project_path.as_ref().map(|_| "workspace_root".to_string());
+    CursorObservationContext {
+        project_path,
+        location_path,
+        transcript_path: transcript_path.to_string_lossy().into_owned(),
+        model: cursor_model_string(event),
+        thread_id: event
+            .get("conversation_id")
+            .or_else(|| event.get("chat_id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string),
+        location_provenance,
+    }
 }
 
 pub fn project_session_db_path(project_root: &Path) -> PathBuf {
@@ -193,252 +236,143 @@ impl TranscriptSource for CursorEventSource {
         project_root: &Path,
         max_new_bytes: Option<u64>,
     ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        preflight_cursor_jsonl(path, prev, max_new_bytes)?;
+        preflight_strict_jsonl("cursor", path, prev, max_new_bytes)?;
         Ok(self.parse_new(path, prev, project_root, max_new_bytes))
     }
 }
 
-fn preflight_cursor_jsonl(
-    path: &Path,
-    prev: StoredCursor,
-    max_new_bytes: Option<u64>,
-) -> TranscriptIngestResult<()> {
-    let frames = try_stream_new_jsonl_raw_strict_with_resume(
-        path,
-        prev,
-        max_new_bytes,
-        MAX_JSONL_RECORD_BYTES,
-        None,
-    )?;
-    if let Some(crate::sessions::source::JsonlFrameDeferral::Malformed { offset }) = frames.deferred
-    {
-        return Err(TranscriptIngestError::NonDurableRecord {
-            provider: "cursor",
-            offset,
-            end_offset: frames.read_through.max(offset),
-            reason: "malformed_jsonl_frame",
-        });
-    }
-    for frame in frames.frames {
-        if serde_json::from_slice::<Value>(&frame.bytes).is_err() {
-            return Err(TranscriptIngestError::NonDurableRecord {
-                provider: "cursor",
-                offset: frame.offset,
-                end_offset: frame.end_offset,
-                reason: "malformed_jsonl_frame",
-            });
-        }
-    }
-    Ok(())
-}
-
 const CURSOR_OBSERVATION_RETENTION: &str = "retention.provider-observation";
 
+struct CursorJsonlAdmitState {
+    timestamps: TimestampCarry,
+    generation: u64,
+    namespace_replacement: bool,
+}
+
 async fn admit_cursor_jsonl_observations(
-    event: &Value,
     parent_session_id: &str,
     path: &Path,
-    db: &GlobalDb,
-    user_scope: bool,
+    context: &CursorObservationContext,
+    admission: &HostAdmissionFacade<'_>,
+    scope: &ObservationScopeV1,
     max_new_bytes: Option<u64>,
-) -> TranscriptIngestResult<()> {
+) -> TranscriptIngestResult<JsonlObservationAdmissionProgress> {
     let subagent = cursor_subagent_identity(path, parent_session_id);
-    let session_id = subagent
+    let native_session_id = subagent
         .as_ref()
         .map_or(parent_session_id, |(session_id, _)| session_id.as_str());
     let source = ObservationSourceIdentityV1::for_provider(
         ProviderId::new("cursor")?,
-        SessionId::new(session_id)?,
+        SessionId::new(native_session_id.to_owned())?,
     )?;
-    let scope = cursor_observation_scope(event, user_scope)?;
-    let authorities = if user_scope {
-        HostAdmissionAuthorities::new(None, Some(db))
-    } else {
-        HostAdmissionAuthorities::new(Some(db), None)
-    };
-    let admission = HostAdmissionFacade::new(authorities);
-    let mut expected_cursor = admission
-        .get_source_cursor(&source, &scope)
-        .await
-        .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "cursor" })?;
-    let previous = expected_cursor.as_ref().map_or(
-        StoredCursor {
-            position: 0,
-            mtime: 0,
-            file_id: 0,
-        },
-        |cursor| StoredCursor {
-            position: cursor.position(),
-            mtime: 0,
-            file_id: cursor.generation().generation_id(),
-        },
-    );
-    let resume_state = expected_cursor.as_ref().and_then(|cursor| {
-        Some(crate::sessions::source::JsonlResumeState {
-            generation: cursor.generation().generation_id(),
-            file_identity: cursor.file_identity()?,
-            fingerprint: cursor.resume_fingerprint()?,
-        })
-    });
-    let raw = try_stream_new_jsonl_raw_strict_with_resume(
+    let mut context = context.clone();
+    if let Some((_, agent_id)) = subagent.as_ref() {
+        context.model =
+            parent_dispatch_model_for_subagent(path, parent_session_id, agent_id).or(context.model);
+    }
+    let request = JsonlObservationAdmissionRequest::new(
+        "cursor",
         path,
-        previous,
-        max_new_bytes,
-        MAX_JSONL_RECORD_BYTES,
-        resume_state,
-    )?;
-    let generation = ObservationSourceGenerationV1::new(raw.new_cursor.file_id)?;
-
-    for frame in raw.frames {
-        let range =
-            tracedecay_domain::ObservationSourceRangeV1::new(frame.offset, frame.end_offset)?;
-        let mut stable_record_id = None;
-        let mut unsupported_record = false;
-        let parsed = parse_normalized_observation_record_v1(
-            &frame.bytes,
-            range,
-            ObservationOrderingDomainV1::FileBytes,
-            |native| {
-                if native.get("role").and_then(Value::as_str).is_none() {
-                    unsupported_record = true;
-                    return Err(ObservationRecordParseErrorV1::NormalizationFailed);
-                }
-                let record_id = observation_native_record_id("cursor", session_id, &native)
-                    .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
-                let envelope =
-                    normalize_cursor_observation(&native, session_id, record_id.clone(), range)?;
-                stable_record_id = Some(record_id);
-                Ok(envelope)
-            },
-        )
-        .map_err(|_| TranscriptIngestError::NonDurableRecord {
-            provider: "cursor",
-            offset: frame.offset,
-            end_offset: frame.end_offset,
-            reason: if unsupported_record {
-                "unknown_cursor_record_type"
-            } else {
-                "invalid_cursor_record"
-            },
-        })?;
-        let identity = ObservationIdentityMaterialV1::for_native_record(
-            source.clone(),
-            scope.clone(),
-            generation,
-            range,
-            ObservationOrderingDomainV1::FileBytes,
-            stable_record_id
-                .ok_or(TranscriptIngestError::InvalidFrameState { provider: "cursor" })?,
-        )?;
-        let request = CaptureObservationRequest::new(
-            parsed,
-            identity,
-            expected_cursor.clone(),
-            RetentionClass::new(CURSOR_OBSERVATION_RETENTION)?,
-            ObservationCancellation::default(),
-        )
-        .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "cursor" })?
-        .with_resume_checkpoint(raw.file_identity, frame.resume_fingerprint);
-        let non_durable = match admission.capture_observation(request).await {
-            Ok(CaptureObservationOutcome::Persisted { outcome, .. }) => {
-                match outcome {
-                    ObservationPersistOutcome::Committed(_)
-                    | ObservationPersistOutcome::ExactDuplicate(_)
-                    | ObservationPersistOutcome::CoveredDuplicate(_) => {
-                        if expected_cursor.as_ref().is_none_or(|cursor| {
-                            cursor.generation() != generation
-                                || cursor.position() < frame.end_offset
-                        }) {
-                            expected_cursor = Some(
-                                ObservationSourceCursorV1::for_ordering(
-                                    source.clone(),
-                                    scope.clone(),
-                                    generation,
-                                    ObservationOrderingDomainV1::FileBytes,
-                                    frame.end_offset,
-                                )?
-                                .with_resume_checkpoint(
-                                    raw.file_identity,
-                                    frame.resume_fingerprint,
-                                ),
-                            );
-                        }
-                    }
-                }
-                None
-            }
-            Ok(CaptureObservationOutcome::Rejected { receipt, .. }) => Some((
-                receipt,
-                ObservationCoverageReason::SanitizerRejected,
-                "privacy_rejected_cursor_record",
-            )),
-            Ok(CaptureObservationOutcome::Quarantined { receipt, .. }) => Some((
-                receipt,
-                ObservationCoverageReason::SanitizerQuarantined,
-                "privacy_quarantined_cursor_record",
-            )),
-            Err(outcome) => {
-                return Err(TranscriptIngestError::NonDurableRecord {
-                    provider: "cursor",
-                    offset: frame.offset,
-                    end_offset: frame.end_offset,
-                    reason: outcome.reason_code.unwrap_or("host_admission_incomplete"),
-                });
-            }
-        };
-        if let Some((receipt, coverage_reason, error_reason)) = non_durable {
-            let advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
-                source.clone(),
-                scope.clone(),
-                generation,
-                ObservationOrderingDomainV1::FileBytes,
-                expected_cursor.clone(),
+        admission,
+        source,
+        scope.clone(),
+        RetentionClass::new(CURSOR_OBSERVATION_RETENTION)?,
+    )
+    .with_max_new_bytes(max_new_bytes);
+    let progress = admit_jsonl_observations(
+        request,
+        |scan| CursorJsonlAdmitState {
+            timestamps: TimestampCarry::new(i64::try_from(scan.source_mtime).ok()),
+            generation: scan.generation,
+            namespace_replacement: scan.replacement_rescan,
+        },
+        |state, bytes, range, source_offset| {
+            let mut stable_record_id = None;
+            let mut unsupported_record = false;
+            let parsed = parse_normalized_observation_record_v1(
+                bytes,
                 range,
-                coverage_reason,
-                receipt,
-            )
-            .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "cursor" })?
-            .with_resume_checkpoint(raw.file_identity, frame.resume_fingerprint);
-            admission
-                .advance_non_durable_source_cursor(advance, ObservationCancellation::default())
-                .await
-                .map_err(|outcome| TranscriptIngestError::NonDurableRecord {
-                    provider: "cursor",
-                    offset: frame.offset,
-                    end_offset: frame.end_offset,
-                    reason: outcome
-                        .reason_code
-                        .unwrap_or("non_durable_cursor_advance_failed"),
-                })?;
-            return Err(TranscriptIngestError::NonDurableRecord {
-                provider: "cursor",
-                offset: frame.offset,
-                end_offset: frame.end_offset,
-                reason: error_reason,
-            });
-        }
-    }
-    Ok(())
+                ObservationOrderingDomainV1::FileBytes,
+                |native| {
+                    if native.get("role").and_then(Value::as_str).is_none() {
+                        unsupported_record = true;
+                        return Err(ObservationRecordParseErrorV1::NormalizationFailed);
+                    }
+                    let record_id =
+                        observation_native_record_id("cursor", native_session_id, &native)
+                            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
+                    let message_id = cursor_projected_message_id(
+                        &native,
+                        native_session_id,
+                        source_offset,
+                        state.generation,
+                        state.namespace_replacement,
+                    )?;
+                    let timestamp = state.timestamps.observe(&native);
+                    let native = cursor_native_with_context(native, &context, timestamp);
+                    let (agent_id, parent_agent_id) = match subagent.as_ref() {
+                        Some((child_id, _)) => (Some(child_id.as_str()), Some(parent_session_id)),
+                        None => (None, None),
+                    };
+                    let envelope = normalize_cursor_observation_with_message_id(
+                        &native,
+                        native_session_id,
+                        record_id.clone(),
+                        message_id.clone(),
+                        range,
+                        agent_id,
+                        parent_agent_id,
+                    )?;
+                    stable_record_id = Some(record_id);
+                    Ok(envelope)
+                },
+            );
+            match parsed {
+                Ok(parsed) => Ok(JsonlFrameAdmission::durable(
+                    parsed,
+                    stable_record_id
+                        .ok_or(TranscriptIngestError::InvalidFrameState { provider: "cursor" })?,
+                )),
+                Err(_) => Ok(JsonlFrameAdmission::non_durable(if unsupported_record {
+                    ObservationCoverageReason::UnsupportedFact
+                } else {
+                    ObservationCoverageReason::MalformedFrame
+                })),
+            }
+        },
+    )
+    .await?;
+    Ok(progress)
 }
 
-fn cursor_observation_scope(
-    event: &Value,
-    user_scope: bool,
-) -> TranscriptIngestResult<ObservationScopeV1> {
-    if user_scope {
-        return Ok(ObservationScopeV1::Profile);
-    }
-    let (_, project_path) = event_project(event);
-    Ok(ObservationScopeV1::Project {
-        project_id: ProjectId::new(default_profile_project_id(Path::new(&project_path)))?,
-    })
-}
-
-fn normalize_cursor_observation(
+#[cfg(test)]
+pub(crate) fn normalize_cursor_observation(
     native: &Value,
     session_id: &str,
     stable_record_id: ObservationId,
     range: tracedecay_domain::ObservationSourceRangeV1,
+    agent_id: Option<&str>,
+    parent_agent_id: Option<&str>,
+) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
+    normalize_cursor_observation_with_message_id(
+        native,
+        session_id,
+        stable_record_id.clone(),
+        stable_record_id,
+        range,
+        agent_id,
+        parent_agent_id,
+    )
+}
+
+fn normalize_cursor_observation_with_message_id(
+    native: &Value,
+    session_id: &str,
+    stable_record_id: ObservationId,
+    projected_message_id: ObservationId,
+    range: tracedecay_domain::ObservationSourceRangeV1,
+    agent_id: Option<&str>,
+    parent_agent_id: Option<&str>,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     let native_kind = native
         .get("type")
@@ -450,36 +384,90 @@ fn normalize_cursor_observation(
         .and_then(|message| message.get("content"))
         .or_else(|| native.get("content"))
         .or_else(|| native.get("message").filter(|message| !message.is_object()));
-    let timestamp = record_timestamp(native).or_else(|| timestamp_tag_from_record(native));
-    let relations = CanonicalObservationRelationsV1::new(
+    let timestamp = record_timestamp(native)
+        .or_else(|| {
+            native
+                .get("tracedecayDerivedTimestamp")
+                .and_then(Value::as_i64)
+        })
+        .or_else(|| timestamp_tag_from_record(native));
+    let mut relations = CanonicalObservationRelationsV1::new(
         SessionId::new(session_id)
             .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
     )
-    .with_message_id(stable_record_id.clone());
-    let mut facts = Vec::new();
+    .with_message_id(projected_message_id);
+    if let Some(thread_id) = cursor_native_thread_id(native) {
+        relations = relations.with_thread_id(thread_id);
+    }
+    if let Some(agent_id) = agent_id.and_then(|id| ObservationId::new(id).ok()) {
+        relations = relations.with_agent_id(agent_id);
+    }
+    if let Some(parent_session_id) = parent_agent_id {
+        if let Ok(parent_agent_id) = ObservationId::new(parent_session_id) {
+            relations = relations.with_parent_agent_id(parent_agent_id);
+        }
+        if let Ok(parent_session_id) = SessionId::new(parent_session_id) {
+            relations = relations.with_parent_session_id(parent_session_id);
+        }
+    }
+    let mut facts = vec![CanonicalObservationFactV1::Session {
+        project_path: native
+            .get("tracedecayProjectPath")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        location_path: native
+            .get("tracedecayLocationPath")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        transcript_path: native
+            .get("tracedecayTranscriptPath")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        title: None,
+        started_at: None,
+        ended_at: None,
+        source: Some("cursor_transcript".to_string()),
+        native_source: Some("cursor".to_string()),
+        profile: None,
+        location_provenance: native
+            .get("tracedecayLocationProvenance")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }];
 
     if let Some(content) = content {
         if let Some(message_content) = canonical_cursor_message_content(content) {
             facts.push(CanonicalObservationFactV1::Message {
                 role: canonical_cursor_role(native.get("role").and_then(Value::as_str)),
                 content: message_content,
-                model: cursor_record_message_model(native, message.unwrap_or(native)),
+                model: cursor_record_message_model(native, message.unwrap_or(native)).or_else(
+                    || {
+                        native
+                            .get("tracedecayModel")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    },
+                ),
                 timestamp,
             });
         }
         append_cursor_content_facts(content, &stable_record_id, &mut facts);
     }
+    append_cursor_tool_call_facts(
+        message
+            .and_then(|message| message.get("tool_calls"))
+            .or_else(|| native.get("tool_calls")),
+        &stable_record_id,
+        &mut facts,
+    );
     append_cursor_usage_fact(native, message, &mut facts);
     append_cursor_git_facts(native, &mut facts);
 
-    if native_kind.to_ascii_lowercase().contains("compact") {
-        facts.push(CanonicalObservationFactV1::Compaction {
-            summary: content.and_then(canonical_cursor_message_content),
-            input_tokens: None,
-            output_tokens: None,
-        });
-    }
-    if facts.is_empty() {
+    // Compaction facts require an exact fixture-backed Cursor JSONL `type`
+    // allowlist. No such native kinds are checked in; do not substring-match
+    // "compact" (that promotes protocol-echo lookalikes). Composer bubbles use
+    // the distinct provider bool `isCompacted` instead.
+    if facts.len() == 1 {
         facts.push(CanonicalObservationFactV1::Unknown {
             native_kind: native_kind.to_string(),
             state: CanonicalUnknownStateV1::Absent,
@@ -503,33 +491,57 @@ fn normalize_cursor_observation(
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
 }
 
+fn cursor_native_with_context(
+    mut native: Value,
+    context: &CursorObservationContext,
+    derived_timestamp: Option<i64>,
+) -> Value {
+    let Some(object) = native.as_object_mut() else {
+        return native;
+    };
+    for (key, value) in [
+        ("tracedecayProjectPath", context.project_path.as_ref()),
+        ("tracedecayLocationPath", context.location_path.as_ref()),
+        (
+            "tracedecayLocationProvenance",
+            context.location_provenance.as_ref(),
+        ),
+        ("tracedecayModel", context.model.as_ref()),
+        ("tracedecayThreadId", context.thread_id.as_ref()),
+    ] {
+        if let Some(value) = value {
+            object.insert(key.to_string(), Value::String(value.clone()));
+        }
+    }
+    object.insert(
+        "tracedecayTranscriptPath".to_string(),
+        Value::String(context.transcript_path.clone()),
+    );
+    if let Some(timestamp) = derived_timestamp {
+        object.insert(
+            "tracedecayDerivedTimestamp".to_string(),
+            Value::from(timestamp),
+        );
+    }
+    native
+}
+
+fn cursor_native_thread_id(native: &Value) -> Option<ObservationId> {
+    native
+        .get("tracedecayThreadId")
+        .or_else(|| native.get("conversation_id"))
+        .or_else(|| native.get("session_id"))
+        .or_else(|| native.get("chat_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .and_then(|id| ObservationId::new(id).ok())
+}
+
 fn canonical_cursor_message_content(content: &Value) -> Option<Value> {
     match content {
         Value::String(text) if !text.trim().is_empty() => Some(Value::String(text.clone())),
-        Value::Array(items) => {
-            let text = items
-                .iter()
-                .filter(|item| {
-                    !matches!(
-                        item.get("type").and_then(Value::as_str),
-                        Some("tool_use" | "tool_result" | "thinking" | "reasoning")
-                    )
-                })
-                .filter_map(|item| {
-                    item.get("text")
-                        .or_else(|| item.get("content"))
-                        .and_then(Value::as_str)
-                        .filter(|text| !text.trim().is_empty())
-                        .map(str::to_string)
-                })
-                .collect::<Vec<_>>();
-            (!text.is_empty()).then(|| Value::Array(text.into_iter().map(Value::String).collect()))
-        }
-        Value::Object(map) => map
-            .get("text")
-            .and_then(Value::as_str)
-            .filter(|text| !text.trim().is_empty())
-            .map(|text| Value::String(text.to_string())),
+        Value::Array(items) if !items.is_empty() => Some(Value::Array(items.clone())),
+        Value::Object(map) if !map.is_empty() => Some(Value::Object(map.clone())),
         _ => None,
     }
 }
@@ -558,7 +570,11 @@ fn append_cursor_content_facts(
                 facts.push(CanonicalObservationFactV1::ToolInvocation {
                     invocation_id,
                     name: name.clone(),
-                    arguments: Value::Null,
+                    arguments: item
+                        .get("input")
+                        .or_else(|| item.get("arguments"))
+                        .cloned()
+                        .unwrap_or(Value::Null),
                 });
                 if is_subagent_dispatch_tool(&name) {
                     facts.push(CanonicalObservationFactV1::Workflow {
@@ -575,7 +591,11 @@ fn append_cursor_content_facts(
                         .or_else(|| item.get("id"))
                         .and_then(Value::as_str)
                         .map(|id| canonical_cursor_observation_id(Some(id), stable_record_id)),
-                    content: Value::Null,
+                    content: item
+                        .get("content")
+                        .or_else(|| item.get("result"))
+                        .cloned()
+                        .unwrap_or(Value::Null),
                     success: item
                         .get("is_error")
                         .and_then(Value::as_bool)
@@ -599,6 +619,38 @@ fn append_cursor_content_facts(
             }
             _ => {}
         }
+    }
+}
+
+fn append_cursor_tool_call_facts(
+    tool_calls: Option<&Value>,
+    stable_record_id: &ObservationId,
+    facts: &mut Vec<CanonicalObservationFactV1>,
+) {
+    let Some(tool_calls) = tool_calls.and_then(Value::as_array) else {
+        return;
+    };
+    for tool_call in tool_calls {
+        let function = tool_call.get("function").unwrap_or(tool_call);
+        let name = function
+            .get("name")
+            .or_else(|| tool_call.get("name"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("tool")
+            .to_string();
+        facts.push(CanonicalObservationFactV1::ToolInvocation {
+            invocation_id: canonical_cursor_observation_id(
+                tool_call.get("id").and_then(Value::as_str),
+                stable_record_id,
+            ),
+            name,
+            arguments: function
+                .get("arguments")
+                .or_else(|| tool_call.get("arguments"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        });
     }
 }
 
@@ -766,6 +818,38 @@ fn observation_native_record_id(
     ))?)
 }
 
+fn cursor_projected_message_id(
+    native: &Value,
+    session_id: &str,
+    source_offset: u64,
+    generation: u64,
+    namespace_replacement: bool,
+) -> Result<ObservationId, ObservationRecordParseErrorV1> {
+    let base = native
+        .get("id")
+        .or_else(|| native.pointer("/message/id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map_or_else(|| format!("{session_id}:{source_offset}"), str::to_string);
+    // Truncate/rename replacements reuse byte offsets across file generations.
+    // Namespace only on replacement rescans so first-generation ids stay stable.
+    let message_id = if namespace_replacement {
+        format!("{base}:generation:{generation}")
+    } else {
+        base
+    };
+    ObservationId::new(message_id).map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
+}
+
+fn namespace_cursor_replacement_message_ids(
+    messages: &mut [SessionMessageRecord],
+    generation: u64,
+) {
+    for message in messages {
+        message.message_id = format!("{}:generation:{generation}", message.message_id);
+    }
+}
+
 /// Parse the newly-appended portion of one Cursor transcript file into a
 /// provider-neutral [`ParsedTranscript`]. Shared by the hook path
 /// ([`CursorEventSource`]) and the startup catch-up sweep
@@ -781,6 +865,11 @@ fn parse_cursor_jsonl(
     user_scope: bool,
 ) -> Option<ParsedTranscript> {
     let new = stream_new_jsonl(path, prev, max_new_bytes)?;
+    // A truncate-and-rewrite can reuse every byte offset from the previous
+    // file generation. Legacy projection keys are offset-based, so keep
+    // replacement rows distinct instead of overwriting retained history.
+    let replayed_from_start =
+        prev.position > 0 && new.lines.first().is_some_and(|line| line.offset == 0);
     let subagent = cursor_subagent_identity(path, parent_session_id);
     let session_id = subagent.as_ref().map_or_else(
         || parent_session_id.to_string(),
@@ -815,6 +904,9 @@ fn parse_cursor_jsonl(
             &session_id,
             context,
         ));
+    }
+    if replayed_from_start {
+        namespace_cursor_replacement_message_ids(&mut messages, new.new_cursor.file_id);
     }
 
     // Defer the (filesystem-walking) project/title/metadata derivation until
@@ -869,7 +961,7 @@ fn parse_cursor_jsonl(
 
 /// Ingest the Cursor transcript referenced by a hook payload into the
 /// provider-neutral session/message tables for the provided database. Project
-/// hooks should pass the resolved project DB from [`open_project_session_db`].
+/// hooks pass both the daemon-resolved project DB and canonical project id.
 ///
 /// Ingestion is **incremental**: it resumes from the byte offset recorded in the
 /// DB's `parse_offsets` table (via the shared [`crate::sessions::source`]
@@ -879,34 +971,38 @@ fn parse_cursor_jsonl(
 pub async fn ingest_cursor_transcript_event(
     event_json: &str,
     db: &GlobalDb,
+    project_id: ProjectId,
 ) -> CursorTranscriptIngestStats {
-    cursor_ingest_or_default(&try_ingest_cursor_transcript_event(event_json, db).await)
+    cursor_ingest_or_default(&try_ingest_cursor_transcript_event(event_json, db, project_id).await)
 }
 
 pub async fn try_ingest_cursor_transcript_event(
     event_json: &str,
     db: &GlobalDb,
+    project_id: ProjectId,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    try_ingest_cursor_transcript_event_capped(event_json, db, None).await
+    try_ingest_cursor_transcript_event_capped(event_json, db, project_id, None).await
 }
 
 /// Like [`ingest_cursor_transcript_event`], but bounds how many newly-appended
 /// bytes a single call will read. Cursor hooks pass byte caps to stay within hook
-/// budgets; capped reads still discover subagent transcript files, with each file
-/// independently subject to the same cap.
+/// budgets. The cap is shared across the parent and every discovered subagent
+/// transcript.
 pub async fn ingest_cursor_transcript_event_capped(
     event_json: &str,
     db: &GlobalDb,
+    project_id: ProjectId,
     max_new_bytes: Option<u64>,
 ) -> CursorTranscriptIngestStats {
     cursor_ingest_or_default(
-        &try_ingest_cursor_transcript_event_capped(event_json, db, max_new_bytes).await,
+        &try_ingest_cursor_transcript_event_capped(event_json, db, project_id, max_new_bytes).await,
     )
 }
 
 pub async fn try_ingest_cursor_transcript_event_capped(
     event_json: &str,
     db: &GlobalDb,
+    project_id: ProjectId,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
     let Ok(event) = serde_json::from_str::<Value>(event_json) else {
@@ -933,19 +1029,33 @@ pub async fn try_ingest_cursor_transcript_event_capped(
         include_subagents: true,
         user_scope: false,
     };
+    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+        db,
+        project_id.clone(),
+    ));
+    let scope = ObservationScopeV1::Project { project_id };
     let parent_session_id = event_session_id(&source.event, &source.transcript_path);
+    let mut budget = match max_new_bytes {
+        Some(limit) => IngestByteBudget::bounded(limit),
+        None => IngestByteBudget::unbounded(),
+    };
     for path in source.transcript_paths(&project_root) {
-        admit_cursor_jsonl_observations(
-            &source.event,
+        let context = cursor_observation_context(&source.event, &path, false);
+        let progress = admit_cursor_jsonl_observations(
             &parent_session_id,
             &path,
-            db,
-            false,
-            max_new_bytes,
+            &context,
+            &admission,
+            &scope,
+            budget.remaining(),
         )
         .await?;
+        budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
-    drain_cursor_observation_projections(db).await
+    let mut stats = drain_cursor_observation_projections(&admission, &scope).await?;
+    stats.bytes_consumed = budget.consumed();
+    stats.source_deferred = budget.deferred();
+    Ok(stats)
 }
 
 pub async fn ingest_cursor_user_transcript_event_capped(
@@ -1042,19 +1152,30 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_registered_root
         include_subagents: true,
         user_scope: true,
     };
+    let scope = ObservationScopeV1::Profile;
+    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db));
     let parent_session_id = event_session_id(&source.event, &source.transcript_path);
+    let mut budget = match max_new_bytes {
+        Some(limit) => IngestByteBudget::bounded(limit),
+        None => IngestByteBudget::unbounded(),
+    };
     for path in source.transcript_paths(&placeholder) {
-        admit_cursor_jsonl_observations(
-            &source.event,
+        let context = cursor_observation_context(&source.event, &path, true);
+        let progress = admit_cursor_jsonl_observations(
             &parent_session_id,
             &path,
-            db,
-            true,
-            max_new_bytes,
+            &context,
+            &admission,
+            &scope,
+            budget.remaining(),
         )
         .await?;
+        budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
-    drain_cursor_observation_projections(db).await
+    let mut stats = drain_cursor_observation_projections(&admission, &scope).await?;
+    stats.bytes_consumed = budget.consumed();
+    stats.source_deferred = budget.deferred();
+    Ok(stats)
 }
 
 /// Canonically admit Cursor JSONL transcripts discovered during a project startup
@@ -1063,6 +1184,7 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_registered_root
 pub async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
     project_root: &Path,
     db: &GlobalDb,
+    project_id: ProjectId,
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
@@ -1074,7 +1196,7 @@ pub async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
         project_root,
         db,
         max_new_bytes,
-        false,
+        ObservationScopeV1::Project { project_id },
     )
     .await
 }
@@ -1098,7 +1220,7 @@ pub async fn try_ingest_cursor_user_sweep_capped<S: BuildHasher>(
         Path::new(""),
         db,
         max_new_bytes,
-        true,
+        ObservationScopeV1::Profile,
     )
     .await
 }
@@ -1108,31 +1230,56 @@ async fn admit_cursor_sweep_observations(
     project_root: &Path,
     db: &GlobalDb,
     max_new_bytes: Option<u64>,
-    user_scope: bool,
+    scope: ObservationScopeV1,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
+    let admission = HostAdmissionFacade::new(match &scope {
+        ObservationScopeV1::Profile => HostAdmissionAuthorities::for_profile(db),
+        ObservationScopeV1::Project { project_id } => {
+            HostAdmissionAuthorities::for_project(db, project_id.clone())
+        }
+    });
+    let mut budget = match max_new_bytes {
+        Some(limit) => IngestByteBudget::bounded(limit),
+        None => IngestByteBudget::unbounded(),
+    };
     for path in source.transcript_paths(project_root) {
         let Some(parent_session_id) = sweep_parent_session_id(&path) else {
             continue;
         };
-        let event = cursor_sweep_event(&parent_session_id, project_root, user_scope);
-        admit_cursor_jsonl_observations(
+        let event = cursor_sweep_event(
+            &parent_session_id,
+            project_root,
+            matches!(&scope, ObservationScopeV1::Profile),
+        );
+        let context = cursor_observation_context(
             &event,
+            &path,
+            matches!(&scope, ObservationScopeV1::Profile),
+        );
+        let progress = admit_cursor_jsonl_observations(
             &parent_session_id,
             &path,
-            db,
-            user_scope,
-            max_new_bytes,
+            &context,
+            &admission,
+            &scope,
+            budget.remaining(),
         )
         .await?;
+        budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
-    drain_cursor_observation_projections(db).await
+    let mut stats = drain_cursor_observation_projections(&admission, &scope).await?;
+    stats.bytes_consumed = budget.consumed();
+    stats.source_deferred = budget.deferred();
+    Ok(stats)
 }
 
 async fn drain_cursor_observation_projections(
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
+    scope: &ObservationScopeV1,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
     let stats = crate::sessions::claude_observation::drain_projection_queue(
-        db,
+        admission,
+        scope,
         &ObservationCancellation::default(),
     )
     .await
@@ -1144,7 +1291,9 @@ async fn drain_cursor_observation_projections(
     })?;
     Ok(CursorTranscriptIngestStats {
         sessions_upserted: stats.transcript.sessions_upserted,
-        messages_upserted: stats.transcript.messages_upserted,
+        messages_upserted: stats.projection_outputs,
+        bytes_consumed: 0,
+        source_deferred: false,
     })
 }
 
@@ -1278,7 +1427,10 @@ impl TranscriptSource for CursorSweepSource {
             let Ok(entries) = std::fs::read_dir(&self.cursor_projects_dir) else {
                 return Vec::new();
             };
-            return entries
+            let default_bounds = TranscriptDiscoveryBounds::default_walk();
+            let mut paths = Vec::new();
+            let mut remaining_bytes = default_bounds.max_discovery_bytes;
+            for entry in entries
                 .filter_map(std::result::Result::ok)
                 .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
                 .filter(|entry| {
@@ -1287,14 +1439,26 @@ impl TranscriptSource for CursorSweepSource {
                         .to_str()
                         .is_some_and(|slug| !registered_slugs.contains(slug))
                 })
-                .flat_map(|entry| {
-                    collect_files_with_ext(
-                        &entry.path().join("agent-transcripts"),
-                        "jsonl",
-                        MAX_SWEEP_SCAN_DEPTH,
-                    )
-                })
-                .collect();
+            {
+                let remaining_files = default_bounds.max_files.saturating_sub(paths.len());
+                if remaining_files == 0 || remaining_bytes == 0 {
+                    break;
+                }
+                let bounds = TranscriptDiscoveryBounds {
+                    max_files: remaining_files,
+                    max_discovery_bytes: remaining_bytes,
+                    ..default_bounds
+                };
+                let report = collect_files_with_ext_bounded(
+                    &entry.path().join("agent-transcripts"),
+                    "jsonl",
+                    MAX_SWEEP_SCAN_DEPTH,
+                    bounds,
+                );
+                remaining_bytes = remaining_bytes.saturating_sub(report.bytes_charged);
+                paths.extend(report.paths);
+            }
+            return paths;
         }
         let Some(slug) = cursor_project_slug(project_root) else {
             return Vec::new();
@@ -1324,7 +1488,13 @@ impl TranscriptSource for CursorSweepSource {
                 return Vec::new();
             }
         }
-        let files = collect_files_with_ext(&transcripts_dir, "jsonl", MAX_SWEEP_SCAN_DEPTH);
+        let files = collect_files_with_ext_bounded(
+            &transcripts_dir,
+            "jsonl",
+            MAX_SWEEP_SCAN_DEPTH,
+            TranscriptDiscoveryBounds::default_walk(),
+        )
+        .paths;
         // Cursor materializes some subagent sessions twice: under their
         // parent's `subagents/` dir and again as a top-level
         // `<id>/<id>.jsonl` copy whose content drifts slightly (so byte
@@ -1388,7 +1558,7 @@ impl TranscriptSource for CursorSweepSource {
         project_root: &Path,
         max_new_bytes: Option<u64>,
     ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        preflight_cursor_jsonl(path, prev, max_new_bytes)?;
+        preflight_strict_jsonl("cursor", path, prev, max_new_bytes)?;
         Ok(self.parse_new(path, prev, project_root, max_new_bytes))
     }
 }
@@ -1509,16 +1679,21 @@ fn cursor_subagent_paths(transcript_path: &Path, parent_session_id: &str) -> Vec
     }
 
     let mut paths = Vec::new();
+    let default_bounds = TranscriptDiscoveryBounds::default_walk();
+    let mut remaining_bytes = default_bounds.max_discovery_bytes;
     for dir in candidates {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-                paths.push(path);
-            }
+        let remaining_files = default_bounds.max_files.saturating_sub(paths.len());
+        if remaining_files == 0 || remaining_bytes == 0 {
+            break;
         }
+        let bounds = TranscriptDiscoveryBounds {
+            max_files: remaining_files,
+            max_discovery_bytes: remaining_bytes,
+            ..default_bounds
+        };
+        let report = collect_files_with_ext_bounded(&dir, "jsonl", 0, bounds);
+        remaining_bytes = remaining_bytes.saturating_sub(report.bytes_charged);
+        paths.extend(report.paths);
     }
     paths.sort();
     paths.dedup();
@@ -1565,11 +1740,25 @@ fn parent_dispatch_model_for_subagent(
 }
 
 fn dispatch_model_for_agent(path: &Path, agent_id: &str) -> Option<String> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    for line in contents.lines() {
-        let Ok(record) = serde_json::from_str::<Value>(line) else {
-            continue;
+    let file = File::open(path).ok()?;
+    let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
+    loop {
+        let frame = frames.next_frame().ok()?;
+        let record = match frame {
+            RawJsonlFrame::Eof => return None,
+            RawJsonlFrame::Complete { .. } | RawJsonlFrame::Partial { .. } => {
+                let Ok(record) = serde_json::from_slice::<Value>(frames.record()) else {
+                    continue;
+                };
+                record
+            }
+            RawJsonlFrame::Oversized { .. } | RawJsonlFrame::BudgetExhausted { .. } => {
+                continue;
+            }
         };
+        if frames.record().is_empty() {
+            continue;
+        }
         let message = record.get("message").unwrap_or(&record);
         let content = message.get("content").unwrap_or(message);
         let Some(items) = content.as_array() else {
@@ -1587,7 +1776,6 @@ fn dispatch_model_for_agent(path: &Path, agent_id: &str) -> Option<String> {
             }
         }
     }
-    None
 }
 
 fn dispatch_targets_agent(item: &Value, agent_id: &str) -> bool {
@@ -1843,13 +2031,13 @@ fn cursor_record_message_model(record: &Value, message: &Value) -> Option<String
     cursor_model_string(record).or_else(|| cursor_model_string(message))
 }
 
-fn cursor_dispatch_model(item: &Value) -> Option<String> {
+pub(crate) fn cursor_dispatch_model(item: &Value) -> Option<String> {
     item.get("input")
         .and_then(cursor_model_string)
         .or_else(|| cursor_model_string(item))
 }
 
-fn is_subagent_dispatch_tool(name: &str) -> bool {
+pub(crate) fn is_subagent_dispatch_tool(name: &str) -> bool {
     matches!(name.to_ascii_lowercase().as_str(), "task" | "subagent")
 }
 
@@ -1867,7 +2055,7 @@ fn content_is_only_subagent_dispatch(content: &Value) -> bool {
         })
 }
 
-fn dispatch_text(item: &Value) -> Option<String> {
+pub(crate) fn dispatch_text(item: &Value) -> Option<String> {
     let input = item.get("input").unwrap_or(item);
     let mut parts = Vec::new();
     for key in ["description", "prompt", "subagent_type"] {
@@ -2165,7 +2353,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_cursor_record_keeps_typed_tools_and_excludes_hook_paths() {
+    fn canonical_cursor_record_keeps_typed_tools_and_structured_content() {
         let native = json!({
             "role": "assistant",
             "cwd": "/secret/worktree",
@@ -2186,16 +2374,191 @@ mod tests {
         let range = tracedecay_domain::ObservationSourceRangeV1::new(10, 90).unwrap();
         let record_id =
             observation_native_record_id("cursor", "session-redacted", &native).unwrap();
-        let envelope =
-            normalize_cursor_observation(&native, "session-redacted", record_id.clone(), range)
-                .unwrap();
+        let envelope = normalize_cursor_observation(
+            &native,
+            "session-redacted",
+            record_id.clone(),
+            range,
+            None,
+            None,
+        )
+        .unwrap();
         let rendered = format!("{envelope:?}");
         assert!(rendered.contains("Message"));
         assert!(rendered.contains("ToolInvocation"));
         assert!(rendered.contains("Reasoning"));
         assert!(rendered.contains("FileBytes"));
         assert!(rendered.contains(record_id.as_str()));
-        assert!(!rendered.contains("/secret/worktree"));
-        assert!(!rendered.contains("credential-redacted"));
+        assert!(rendered.contains("/secret/worktree/file.rs"));
+        assert!(rendered.contains("credential-redacted"));
+        let relations = serde_json::to_value(envelope.relations()).unwrap();
+        assert!(relations.get("thread_id").is_none());
+        assert!(relations.get("turn_id").is_none());
+        assert!(relations.get("agent_id").is_none());
+        assert!(relations.get("parent_agent_id").is_none());
+    }
+
+    #[test]
+    fn cursor_conversation_id_sets_thread_relation_without_inventing_turn() {
+        let native = json!({
+            "role": "user",
+            "conversation_id": "conversation-native",
+            "message": {"content": [{"type": "text", "text": "hello"}]}
+        });
+        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 20).unwrap();
+        let record_id =
+            observation_native_record_id("cursor", "conversation-native", &native).unwrap();
+        let envelope = normalize_cursor_observation(
+            &native,
+            "conversation-native",
+            record_id.clone(),
+            range,
+            None,
+            None,
+        )
+        .unwrap();
+        let relations = serde_json::to_value(envelope.relations()).unwrap();
+        assert_eq!(relations["thread_id"], "conversation-native");
+        assert_eq!(relations["message_id"], record_id.as_str());
+        assert!(relations.get("turn_id").is_none());
+        assert!(relations.get("agent_id").is_none());
+        assert!(relations.get("parent_agent_id").is_none());
+    }
+
+    #[test]
+    fn cursor_subagent_lineage_sets_native_agent_relations() {
+        let native = json!({
+            "role": "assistant",
+            "conversation_id": "child-agent",
+            "message": {"content": [{"type": "text", "text": "subagent reply"}]}
+        });
+        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 20).unwrap();
+        let record_id = observation_native_record_id("cursor", "child-agent", &native).unwrap();
+        let envelope = normalize_cursor_observation(
+            &native,
+            "child-agent",
+            record_id,
+            range,
+            Some("child-agent"),
+            Some("parent-conversation"),
+        )
+        .unwrap();
+        let relations = serde_json::to_value(envelope.relations()).unwrap();
+        assert_eq!(relations["thread_id"], "child-agent");
+        assert_eq!(relations["agent_id"], "child-agent");
+        assert_eq!(relations["parent_agent_id"], "parent-conversation");
+        assert!(relations.get("turn_id").is_none());
+    }
+
+    /// Exact assistant+`tool_use` JSONL shape from
+    /// `tests/transcript_ingest_suite/cursor.rs`
+    /// (`cursor_tool_use_blocks_populate_tool_event_metadata`). Provider-parser
+    /// evidence is the native `role`/`message.content[]` Cursor transcript
+    /// record; the expected output is the canonical envelope projection with
+    /// explicit Cursor provider provenance — not a generic hand-built record.
+    #[test]
+    fn fixture_backed_cursor_jsonl_tool_use_reaches_canonical_envelope() {
+        let native: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/provider_normalization/cursor/tool_use.input.json"
+        ))
+        .expect("Cursor golden input");
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/provider_normalization/cursor/tool_use.expected_envelope.json"
+        ))
+        .expect("Cursor golden expected envelope");
+        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 64).unwrap();
+        let record_id =
+            observation_native_record_id("cursor", "cursor-tool-fixture", &native).unwrap();
+        let envelope = normalize_cursor_observation(
+            &native,
+            "cursor-tool-fixture",
+            record_id.clone(),
+            range,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            envelope.provider().as_str(),
+            expected["provider"].as_str().unwrap()
+        );
+        assert_eq!(
+            envelope.native_record_kind(),
+            expected["native_record_kind"].as_str().unwrap()
+        );
+        assert_eq!(envelope.stable_record_id().as_str(), record_id.as_str());
+        let actual = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(actual["version"], expected["version"]);
+        assert_eq!(actual["evidence"], expected["evidence"]);
+        let relations = actual["relations"].as_object().unwrap();
+        assert_eq!(relations["session_id"], expected["relations"]["session_id"]);
+        assert_eq!(relations["message_id"], record_id.as_str());
+        for absent in expected["relations"]["absent"].as_array().unwrap() {
+            assert!(relations.get(absent.as_str().unwrap()).is_none());
+        }
+        let facts = actual["facts"].as_array().unwrap();
+        assert!(facts.iter().any(|fact| fact["kind"] == "session"));
+        assert!(facts.iter().any(|fact| {
+            fact["kind"] == "message" && fact["content"] == native["message"]["content"]
+        }));
+        assert!(facts.iter().any(|fact| {
+            fact["kind"] == "tool_invocation"
+                && fact["arguments"] == native["message"]["content"][1]["input"]
+        }));
+        assert!(
+            envelope.facts().iter().all(|fact| {
+                !matches!(fact, CanonicalObservationFactV1::WorkflowLifecycle { .. })
+            }),
+            "Cursor JSONL fixture must not emit WorkflowLifecycle without native lifecycle evidence"
+        );
+    }
+
+    #[test]
+    fn fixture_backed_cursor_workflow_lookalike_emits_no_workflow_lifecycle() {
+        let native: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/provider_normalization/cursor/workflow_lookalike.input.json"
+        ))
+        .expect("Cursor workflow lookalike input");
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/provider_normalization/cursor/workflow_lookalike.expected_envelope.json"
+        ))
+        .expect("Cursor workflow lookalike expected");
+        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 64).unwrap();
+        let record_id =
+            observation_native_record_id("cursor", "cursor-workflow-lookalike", &native).unwrap();
+        let envelope = normalize_cursor_observation(
+            &native,
+            "cursor-workflow-lookalike",
+            record_id,
+            range,
+            None,
+            None,
+        )
+        .unwrap();
+        let actual = serde_json::to_value(&envelope).unwrap();
+        let facts = actual["facts"].as_array().unwrap();
+        assert!(facts.iter().any(|fact| {
+            fact["kind"] == "message"
+                && fact["content"].as_str() == expected["expected_message"].as_str()
+        }));
+        for forbidden in expected["forbidden_fact_kinds"].as_array().unwrap() {
+            assert!(
+                facts.iter().all(|fact| fact["kind"] != *forbidden),
+                "forbidden fact kind {forbidden} must remain absent"
+            );
+        }
+        assert!(
+            envelope.facts().iter().all(|fact| {
+                !matches!(fact, CanonicalObservationFactV1::WorkflowLifecycle { .. })
+            }),
+            "Cursor JSONL workflow lookalikes must not become WorkflowLifecycle"
+        );
+        let rendered = actual.to_string();
+        for rejected in expected["encoded_must_not_contain"].as_array().unwrap() {
+            assert!(
+                !rendered.contains(rejected.as_str().unwrap()),
+                "{rejected} must not survive Cursor JSONL normalization"
+            );
+        }
     }
 }

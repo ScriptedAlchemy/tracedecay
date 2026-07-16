@@ -1,3 +1,4 @@
+use std::hash::BuildHasher;
 use std::io::Write;
 
 use tempfile::TempDir;
@@ -5,20 +6,61 @@ use tracedecay::global_db::GlobalDb;
 #[cfg(unix)]
 use tracedecay::hooks::cursor_pre_compact_via_daemon;
 use tracedecay::sessions::cursor::{
-    CursorSweepSource, cursor_project_slug, ingest_cursor_transcript_event,
-    ingest_cursor_transcript_event_capped, ingest_cursor_user_transcript_event_capped,
+    CursorSweepSource, CursorTranscriptIngestStats, cursor_project_slug,
+    ingest_cursor_transcript_event as ingest_cursor_transcript_event_for_project,
+    ingest_cursor_transcript_event_capped as ingest_cursor_transcript_event_capped_for_project,
+    ingest_cursor_user_transcript_event_capped,
     ingest_cursor_user_transcript_event_capped_with_registered_roots, open_project_session_db,
-    project_session_db_path, try_ingest_cursor_project_sweep_capped,
+    project_session_db_path,
+    try_ingest_cursor_project_sweep_capped as try_ingest_cursor_project_sweep_capped_for_project,
 };
 #[cfg(unix)]
 use tracedecay::sessions::lcm::{LcmDescribeRequest, LcmDescribeTarget};
-use tracedecay::sessions::source::ingest_source;
+use tracedecay::sessions::source::{TranscriptIngestResult, ingest_source};
 use tracedecay::sessions::{SessionSearchFilters, SessionSearchScope, SessionSearchTimeRange};
 
 #[cfg(unix)]
 use crate::common::spawn_tracedecay_daemon;
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
+use crate::restart_atomicity::fixture_project_id;
 use crate::support::{assert_metadata_path_eq, init_git_repo, init_project, init_project_at};
+
+async fn ingest_cursor_transcript_event(
+    event_json: &str,
+    db: &GlobalDb,
+) -> CursorTranscriptIngestStats {
+    ingest_cursor_transcript_event_for_project(event_json, db, fixture_project_id()).await
+}
+
+async fn ingest_cursor_transcript_event_capped(
+    event_json: &str,
+    db: &GlobalDb,
+    max_new_bytes: Option<u64>,
+) -> CursorTranscriptIngestStats {
+    ingest_cursor_transcript_event_capped_for_project(
+        event_json,
+        db,
+        fixture_project_id(),
+        max_new_bytes,
+    )
+    .await
+}
+
+async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
+    project_root: &std::path::Path,
+    db: &GlobalDb,
+    max_new_bytes: Option<u64>,
+    skip_session_ids: std::collections::HashSet<String, S>,
+) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
+    try_ingest_cursor_project_sweep_capped_for_project(
+        project_root,
+        db,
+        fixture_project_id(),
+        max_new_bytes,
+        skip_session_ids,
+    )
+    .await
+}
 
 fn cursor_event(project: &std::path::Path, transcript: &std::path::Path) -> serde_json::Value {
     serde_json::json!({
@@ -392,7 +434,7 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
     assert_metadata_path_eq(&session_metadata["cursor_event_worktree"], &project);
     assert_eq!(
         session_metadata["cursor_event_location_provenance"].as_str(),
-        Some("hook_event")
+        Some("workspace_root")
     );
     assert!(session_metadata.get("cursor_event_git_branch").is_none());
     let message_metadata: serde_json::Value =
@@ -401,7 +443,7 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
     assert_metadata_path_eq(&message_metadata["cursor_event_worktree"], &project);
     assert_eq!(
         message_metadata["cursor_event_location_provenance"].as_str(),
-        Some("hook_event")
+        Some("workspace_root")
     );
     assert!(message_metadata.get("cursor_event_git_branch").is_none());
 }
@@ -463,7 +505,7 @@ async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
         assert_metadata_path_eq(&metadata["cursor_event_worktree"], &project);
         assert_eq!(
             metadata["cursor_event_location_provenance"].as_str(),
-            Some("hook_event")
+            Some("workspace_root")
         );
         assert!(metadata.get("cursor_event_git_branch").is_none());
     }
@@ -775,7 +817,7 @@ async fn cursor_transcript_ingest_uses_cwd_root_in_multi_root_workspace() {
         .await
         .expect("session should be stored under root B");
     assert_eq!(session.project_path, root_b.to_string_lossy());
-    assert_eq!(session.project_key, root_b.to_string_lossy());
+    assert_eq!(session.project_key, fixture_project_id().as_str());
 }
 
 #[tokio::test]
@@ -1204,10 +1246,18 @@ async fn cursor_sweep_ingests_historical_transcripts() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn cursor_sweep_after_hook_ingest_is_noop() {
     let tmp = TempDir::new().unwrap();
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let project = init_project(&tmp);
     let home = tmp.path().join("home");
+    let _env_guards = [
+        EnvVarGuard::set("HOME", &home),
+        EnvVarGuard::set("USERPROFILE", &home),
+    ];
     let (parent, _child) = write_sweep_fixture(&home, &project);
 
     let db = open_project_session_db(&project).await.unwrap();
@@ -1221,10 +1271,16 @@ async fn cursor_sweep_after_hook_ingest_is_noop() {
     assert_eq!(hook.sessions_upserted, 2);
     assert_eq!(hook.messages_upserted, 2);
 
-    // The sweep shares the hook path's per-file parse offsets, so everything
-    // the hook already ingested is a no-op: zero new sessions, zero new rows.
-    let sweep = CursorSweepSource::with_home(&home);
-    let stats = ingest_source(&db, &sweep, &project, None).await;
+    // The production sweep shares the hook path's observation frontier, so
+    // everything the hook already admitted is a no-op.
+    let stats = try_ingest_cursor_project_sweep_capped(
+        &project,
+        &db,
+        None,
+        std::collections::HashSet::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(stats.sessions_upserted, 0);
     assert_eq!(stats.messages_upserted, 0);
 
@@ -1265,10 +1321,18 @@ async fn cursor_hook_after_sweep_is_noop() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn cursor_sweep_picks_up_lines_appended_after_hook_ingest() {
     let tmp = TempDir::new().unwrap();
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let project = init_project(&tmp);
     let home = tmp.path().join("home");
+    let _env_guards = [
+        EnvVarGuard::set("HOME", &home),
+        EnvVarGuard::set("USERPROFILE", &home),
+    ];
     let (parent, _child) = write_sweep_fixture(&home, &project);
 
     let db = open_project_session_db(&project).await.unwrap();
@@ -1293,8 +1357,14 @@ async fn cursor_sweep_picks_up_lines_appended_after_hook_ingest() {
     .unwrap();
     drop(file);
 
-    let sweep = CursorSweepSource::with_home(&home);
-    let stats = ingest_source(&db, &sweep, &project, None).await;
+    let stats = try_ingest_cursor_project_sweep_capped(
+        &project,
+        &db,
+        None,
+        std::collections::HashSet::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(stats.sessions_upserted, 1);
     assert_eq!(stats.messages_upserted, 1);
 
@@ -1442,4 +1512,245 @@ async fn cursor_task_tool_dispatch_prompt_becomes_searchable() {
         serde_json::from_str(results[0].message.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["source"], "cursor_transcript");
     assert_eq!(metadata["tool_use_id"], "toolu-task-1");
+}
+
+#[tokio::test]
+async fn cursor_duplicate_replay_and_late_append_are_deterministic() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let transcript = tmp.path().join("cursor-dup.jsonl");
+    let first = "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Cursor duplicate identity line.\"}]}}\n";
+    std::fs::write(&transcript, first).unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-dup",
+        "transcript_path": transcript,
+        "workspace_roots": [project]
+    });
+
+    let db = open_project_session_db(&project).await.unwrap();
+    assert_eq!(
+        ingest_cursor_transcript_event(&event.to_string(), &db)
+            .await
+            .messages_upserted,
+        1
+    );
+
+    // Exact duplicate delivery is a durable no-op.
+    assert_eq!(
+        ingest_cursor_transcript_event(&event.to_string(), &db)
+            .await
+            .messages_upserted,
+        0
+    );
+    assert_eq!(
+        db.search_session_messages("cursor", None, "Cursor duplicate identity", 10)
+            .await
+            .len(),
+        1
+    );
+    let messages_before_late_append = db.session_message_count().await.unwrap();
+
+    // Late append after an unrelated line must still catch up once.
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    file.write_all(
+        b"{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"late-cursor-append-9f3a reply.\"}]}}\n",
+    )
+    .unwrap();
+    drop(file);
+    let late = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+    assert_eq!(late.messages_upserted, 1);
+    assert_eq!(
+        db.session_message_count().await.unwrap(),
+        messages_before_late_append + 1
+    );
+    assert_eq!(
+        db.search_session_messages("cursor", None, "late-cursor-append-9f3a", 10)
+            .await
+            .len(),
+        1
+    );
+
+    // Re-delivering the whole file contents as an exact replay remains a no-op.
+    assert_eq!(
+        ingest_cursor_transcript_event(&event.to_string(), &db)
+            .await
+            .messages_upserted,
+        0
+    );
+}
+
+/// Relocating the transcript path while keeping the same `session_id` and
+/// JSONL content must retain the logical session and content-hash native
+/// observation identity (path is not part of Cursor JSONL native identity).
+#[tokio::test]
+async fn cursor_jsonl_path_relocation_keeps_session_and_native_identity() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let first_dir = tmp.path().join("transcripts-a");
+    let second_dir = tmp.path().join("transcripts-b");
+    std::fs::create_dir_all(&first_dir).unwrap();
+    std::fs::create_dir_all(&second_dir).unwrap();
+    let first_path = first_dir.join("cursor-reloc.jsonl");
+    let second_path = second_dir.join("cursor-reloc.jsonl");
+    // Real Cursor JSONL role/message/content shape already used throughout this
+    // suite (see cursor_duplicate_replay_and_late_append_are_deterministic).
+    let line = "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Cursor path relocation identity line.\"}]}}\n";
+    std::fs::write(&first_path, line).unwrap();
+
+    let event = serde_json::json!({
+        "session_id": "cursor-reloc",
+        "transcript_path": first_path,
+        "workspace_roots": [project]
+    });
+    let db = open_project_session_db(&project).await.unwrap();
+    assert_eq!(
+        ingest_cursor_transcript_event(&event.to_string(), &db)
+            .await
+            .messages_upserted,
+        1
+    );
+    let session = db
+        .get_session("cursor", "cursor-reloc")
+        .await
+        .expect("cursor session after first path");
+    assert_eq!(session.session_id, "cursor-reloc");
+    let messages_before = db.session_message_count().await.unwrap();
+    assert_eq!(
+        db.search_session_messages("cursor", None, "Cursor path relocation identity", 10)
+            .await
+            .len(),
+        1
+    );
+
+    std::fs::rename(&first_path, &second_path).unwrap();
+    let relocated = serde_json::json!({
+        "session_id": "cursor-reloc",
+        "transcript_path": second_path,
+        "workspace_roots": [project]
+    });
+    assert_eq!(
+        ingest_cursor_transcript_event(&relocated.to_string(), &db)
+            .await
+            .messages_upserted,
+        0,
+        "relocated identical JSONL content must be a durable no-op"
+    );
+    let session_after = db
+        .get_session("cursor", "cursor-reloc")
+        .await
+        .expect("cursor session after relocation");
+    assert_eq!(session_after.session_id, session.session_id);
+    assert_eq!(db.session_message_count().await.unwrap(), messages_before);
+    assert_eq!(
+        db.search_session_messages("cursor", None, "Cursor path relocation identity", 10)
+            .await
+            .len(),
+        1
+    );
+}
+
+/// Cursor JSONL fixtures evidence `message.id` (see
+/// cursor_transcript_ingest_preserves_structured_content_in_raw_lcm). Replaying
+/// the same id with different content through production ingest must fail
+/// closed without replacing the authoritative V1 row.
+#[tokio::test]
+async fn cursor_conflicting_message_id_does_not_overwrite() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let transcript = tmp.path().join("cursor-conflict.jsonl");
+    let original = serde_json::json!({
+        "role": "assistant",
+        "message": {
+            "id": "cursor-structured",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Original cursor structured reply."}]
+        }
+    });
+    std::fs::write(&transcript, format!("{original}\n")).unwrap();
+    let event = serde_json::json!({
+        "session_id": "cursor-conflict",
+        "transcript_path": transcript,
+        "workspace_roots": [project]
+    });
+
+    let db = open_project_session_db(&project).await.unwrap();
+    assert_eq!(
+        ingest_cursor_transcript_event(&event.to_string(), &db)
+            .await
+            .messages_upserted,
+        1
+    );
+    let original_hits = db
+        .search_session_messages("cursor", None, "Original", 10)
+        .await;
+    assert_eq!(original_hits.len(), 1);
+    let original_id = original_hits[0].message.message_id.clone();
+    let original_text = original_hits[0].message.text.clone();
+    assert!(original_text.contains("Original cursor structured reply."));
+
+    let conflicting = serde_json::json!({
+        "role": "assistant",
+        "message": {
+            "id": "cursor-structured",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Conflicting cursor overwrite attempt."}]
+        }
+    });
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap(),
+        "{conflicting}\n{conflicting}"
+    )
+    .unwrap();
+    let _ = ingest_cursor_transcript_event(&event.to_string(), &db).await;
+
+    assert!(
+        db.search_session_messages("cursor", None, "overwrite", 10)
+            .await
+            .is_empty(),
+        "conflicting Cursor content must not replace the authoritative row"
+    );
+    assert_eq!(
+        db.get_session_message("cursor", &original_id)
+            .await
+            .expect("authoritative structured message")
+            .text,
+        original_text
+    );
+    assert_eq!(
+        db.get_session("cursor", "cursor-conflict")
+            .await
+            .expect("session identity")
+            .session_id,
+        "cursor-conflict"
+    );
+
+    drop(db);
+    let reopened = open_project_session_db(&project).await.unwrap();
+    assert_eq!(
+        ingest_cursor_transcript_event(&event.to_string(), &reopened)
+            .await
+            .messages_upserted,
+        0
+    );
+    assert_eq!(
+        reopened
+            .search_session_messages("cursor", None, "overwrite", 10)
+            .await
+            .len(),
+        0
+    );
+    assert_eq!(
+        reopened
+            .get_session_message("cursor", &original_id)
+            .await
+            .expect("authoritative structured message after reopen")
+            .text,
+        original_text
+    );
 }

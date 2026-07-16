@@ -4,19 +4,19 @@ use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmission
 use crate::application::observation::ObservationCancellation;
 use crate::global_db::GlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
-use crate::sessions::source::{TranscriptSource, try_ingest_source_with_store};
+use crate::sessions::source::TranscriptSource;
 use crate::sessions::{
-    SessionProvider, claude, claude_observation, cline_like, codex, cursor, cursor_composer,
-    git_correlation, hermes, kiro, vibe, workflow_ingest,
+    SessionProvider, claude_observation, git_correlation, vibe, workflow_ingest,
 };
-use crate::store::GlobalDbTranscriptStore;
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
-use super::failure::{
-    TranscriptCatchUpFailure, classify_transcript_ingest_failure, claude_catch_up_failure,
+use super::failure::{ProviderRunFold, TranscriptCatchUpFailure, claude_catch_up_failure};
+use super::project_provider::{PROJECT_CATCH_UP_PROVIDERS, ProjectProviderRun};
+use super::scheduler::{
+    default_ingest_pass_bounds, ingest_sources, merge_project_provider_backpressure,
 };
 use super::startup::TranscriptIngestOutcome;
-use super::user::{ingest_user_global_sources_for_provider, provider_selected};
+use super::user::provider_selected;
 
 const FILE_TRANSCRIPT_PROVIDERS: &[SessionProvider] = &[SessionProvider::Vibe];
 
@@ -40,12 +40,13 @@ pub async fn ingest_global_sources_for_provider(
     project_root: &Path,
     provider: Option<SessionProvider>,
 ) -> TranscriptIngestStats {
-    let _ = ingest_user_global_sources_for_provider(provider).await;
-    let project_id = crate::storage::read_repository_identity_marker(project_root)
-        .ok()
-        .flatten()
-        .map(|marker| marker.project_id);
-    ingest_project_sources_for_provider(db, project_root, project_id.as_deref(), provider, true)
+    let Ok(Some(marker)) = crate::storage::read_repository_identity_marker(project_root) else {
+        return TranscriptIngestStats::default();
+    };
+    let Ok(project_id) = ProjectId::new(marker.project_id) else {
+        return TranscriptIngestStats::default();
+    };
+    ingest_project_sources_for_provider(db, project_root, Some(project_id), provider, true)
         .await
         .stats
 }
@@ -53,13 +54,26 @@ pub async fn ingest_global_sources_for_provider(
 /// Project-store half of catch-up. Cross-project search runs user ingestion
 /// once, then calls this per destination; Hermes can be excluded because its
 /// dedicated multi-destination driver scans each source database only once.
+///
+/// `project_id` must already be the typed registry or repository-marker identity.
 pub(crate) async fn ingest_project_sources_for_provider(
     db: &GlobalDb,
     project_root: &Path,
-    project_id: Option<&str>,
+    project_id: Option<ProjectId>,
     provider: Option<SessionProvider>,
     include_hermes: bool,
 ) -> TranscriptIngestOutcome {
+    let Some(canonical_project_id) = project_id else {
+        return TranscriptIngestOutcome::new(
+            TranscriptIngestStats::default(),
+            vec![TranscriptCatchUpFailure::new(
+                provider.map_or("all", SessionProvider::id),
+                "project_identity",
+                "project_identity_missing",
+                false,
+            )],
+        );
+    };
     let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
     match provider {
         None => {
@@ -69,165 +83,43 @@ pub(crate) async fn ingest_project_sources_for_provider(
         }
         Some(provider) => push_file_source(&mut sources, provider),
     }
-    let source_outcome = ingest_sources(db, project_root, &sources).await;
-    let mut stats = source_outcome.stats;
-    let mut failures = source_outcome.failures;
-    let project_id = project_id.and_then(|value| ProjectId::new(value.to_string()).ok());
-    let scope = project_id
-        .clone()
-        .map(|project_id| ObservationScopeV1::Project { project_id });
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::new(Some(db), None));
-
-    if provider_selected(provider, SessionProvider::Codex) {
-        if let Some(project_id) = project_id.clone() {
-            if let Some(source) = codex::CodexSource::new() {
-                for path in source.transcript_paths(project_root) {
-                    if let Err(error) = codex::try_admit_codex_jsonl_observations_for_project(
-                        &path,
-                        db,
-                        project_root,
-                        project_id.clone(),
-                        None,
-                    )
-                    .await
-                    {
-                        let failure =
-                            classify_transcript_ingest_failure("codex", "observation", &error);
-                        tracing::warn!(
-                            reason_code = failure.reason_code,
-                            retryable = failure.retryable,
-                            "project Codex observation catch-up failed"
-                        );
-                        failures.push(failure);
-                    }
-                }
-            }
-        } else {
-            failures.push(project_observation_authority_failure("codex"));
-        }
-    }
-
-    if provider_selected(provider, SessionProvider::Kiro) {
-        if let Some(scope) = scope.clone() {
-            if let Some(source) = kiro::KiroSource::new()
-                && let Err(error) = kiro::capture_kiro_snapshot_observations(
-                    &facade,
-                    &source,
-                    project_root,
-                    scope,
-                    None,
-                )
-                .await
-            {
-                let failure = classify_transcript_ingest_failure("kiro", "observation", &error);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "project Kiro observation catch-up failed"
-                );
-                failures.push(failure);
-            }
-        } else {
-            failures.push(project_observation_authority_failure("kiro"));
-        }
-    }
-
-    for (candidate, source) in [
-        (SessionProvider::Cline, cline_like::ClineLikeSource::cline()),
-        (
-            SessionProvider::RooCode,
-            cline_like::ClineLikeSource::roo_code(),
-        ),
-        (SessionProvider::Kilo, cline_like::ClineLikeSource::kilo()),
-    ] {
-        if !provider_selected(provider, candidate) {
-            continue;
-        }
-        let Some(scope) = scope.clone() else {
-            failures.push(project_observation_authority_failure(candidate.id()));
-            continue;
-        };
-        let Some(source) = source else {
-            continue;
-        };
-        if let Err(error) = cline_like::capture_cline_like_snapshot_observations(
-            &facade,
-            &source,
-            project_root,
-            scope,
-            None,
-        )
-        .await
+    let mut source_outcome = ingest_sources(db, project_root, &sources).await;
+    let scope = ObservationScopeV1::Project {
+        project_id: canonical_project_id.clone(),
+    };
+    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+        db,
+        canonical_project_id.clone(),
+    ));
+    let cancellation = ObservationCancellation::default();
+    let provider_byte_cap = default_ingest_pass_bounds().bytes_per_unit;
+    let mut provider_runs = ProviderRunFold::default();
+    for &candidate in PROJECT_CATCH_UP_PROVIDERS {
+        if !provider_selected(provider, candidate)
+            || (candidate == SessionProvider::Hermes && !include_hermes)
         {
-            let failure = classify_transcript_ingest_failure(candidate.id(), "observation", &error);
-            tracing::warn!(
-                provider = candidate.id(),
-                reason_code = failure.reason_code,
-                retryable = failure.retryable,
-                "project snapshot observation catch-up failed"
-            );
-            failures.push(failure);
+            continue;
         }
+        provider_runs.record(
+            ProjectProviderRun {
+                db,
+                project_root,
+                project_id: &canonical_project_id,
+                facade: &facade,
+                scope: &scope,
+                candidate,
+                max_new_bytes: provider_byte_cap,
+                cancellation: &cancellation,
+            }
+            .run()
+            .await,
+        );
     }
 
-    if provider_selected(provider, SessionProvider::Claude) {
-        if let Some(project_id) = project_id.clone() {
-            match ingest_project_claude_observations(db, project_root, project_id).await {
-                Ok(observation_stats) => stats = stats.merge(observation_stats.transcript),
-                Err(error) => {
-                    let failure = claude_catch_up_failure("observation", &error);
-                    tracing::warn!(
-                        reason_code = failure.reason_code,
-                        retryable = failure.retryable,
-                        "project Claude observation catch-up failed"
-                    );
-                    failures.push(failure);
-                }
-            }
-        } else {
-            failures.push(project_observation_authority_failure("claude"));
+    match claude_observation::drain_projection_queue(&facade, &scope, &cancellation).await {
+        Ok(projection_stats) => {
+            provider_runs.stats = provider_runs.stats.merge(projection_stats.transcript);
         }
-    }
-
-    if provider_selected(provider, SessionProvider::Cursor) {
-        let owned = if let Some(source) = cursor_composer::CursorComposerSource::new() {
-            source
-                .ingest(
-                    db,
-                    project_root,
-                    cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
-                )
-                .await
-                .owned_session_ids
-        } else {
-            std::collections::HashSet::new()
-        };
-        match cursor::try_ingest_cursor_project_sweep_capped(project_root, db, None, owned).await {
-            Ok(source_stats) => {
-                stats = stats.merge(TranscriptIngestStats {
-                    sessions_upserted: source_stats.sessions_upserted,
-                    messages_upserted: source_stats.messages_upserted,
-                });
-            }
-            Err(error) => {
-                let failure = classify_transcript_ingest_failure("cursor", "observation", &error);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "project Cursor observation catch-up failed"
-                );
-                failures.push(failure);
-            }
-        }
-    }
-
-    if include_hermes && provider_selected(provider, SessionProvider::Hermes) {
-        stats = stats.merge(hermes::ingest_for_project(db, project_root).await);
-    }
-
-    match claude_observation::drain_projection_queue(db, &ObservationCancellation::default()).await
-    {
-        Ok(projection_stats) => stats = stats.merge(projection_stats.transcript),
         Err(error) => {
             let failure = claude_catch_up_failure("projection", &error);
             tracing::warn!(
@@ -235,46 +127,30 @@ pub(crate) async fn ingest_project_sources_for_provider(
                 retryable = failure.retryable,
                 "project observation projection drain failed"
             );
-            failures.push(failure);
+            provider_runs.failures.push(failure);
         }
     }
+    source_outcome.coverage = merge_project_provider_backpressure(
+        source_outcome.coverage,
+        provider_runs.units_admitted,
+        provider_runs.deferred_units,
+    );
+    if provider_runs.deferred_units > 0
+        && !provider_runs
+            .failures
+            .iter()
+            .any(|failure| failure.reason_code == "ingest_pass_backpressured")
+    {
+        provider_runs
+            .failures
+            .push(TranscriptCatchUpFailure::pass_backpressured());
+    }
     finalize_project_ingest(db, project_root).await;
-    TranscriptIngestOutcome::new(stats, failures)
+    source_outcome.stats = source_outcome.stats.merge(provider_runs.stats);
+    source_outcome.failures.extend(provider_runs.failures);
+    source_outcome
 }
 
-fn project_observation_authority_failure(provider: &'static str) -> TranscriptCatchUpFailure {
-    TranscriptCatchUpFailure::new(
-        provider,
-        "observation",
-        "project_observation_authority_unavailable",
-        false,
-    )
-}
-
-async fn ingest_project_claude_observations(
-    db: &GlobalDb,
-    project_root: &Path,
-    project_id: ProjectId,
-) -> std::result::Result<
-    claude_observation::ClaudeObservationIngestStats,
-    claude_observation::ClaudeObservationIngestError,
-> {
-    let Some(source) = claude::ClaudeSource::new() else {
-        return Ok(claude_observation::ClaudeObservationIngestStats::default());
-    };
-    claude_observation::ingest_source_with_observations(
-        db,
-        &source,
-        project_root,
-        tracedecay_domain::ObservationScopeV1::Project { project_id },
-        None,
-        crate::application::observation::ObservationCancellation::default(),
-    )
-    .await
-}
-
-/// Refreshes derived session data after a caller performs its own optimized
-/// transcript ingest (for example, one shared Hermes source sweep).
 pub(crate) async fn finalize_project_ingest(db: &GlobalDb, project_root: &Path) {
     // Now that messages have landed, attribute any commits that fell inside a
     // recorded session span. Fail-open: a git or DB hiccup never blocks ingest.
@@ -379,35 +255,4 @@ where
     if let Some(source) = source {
         sources.push(Box::new(source));
     }
-}
-
-/// Drive a set of sources against `db` for `project_root`. Separated from
-/// [`ingest_global_sources`] so tests can supply sources rooted at a temporary
-/// home directory instead of the real `~`.
-pub(crate) async fn ingest_sources(
-    db: &GlobalDb,
-    project_root: &Path,
-    sources: &[Box<dyn TranscriptSource>],
-) -> TranscriptIngestOutcome {
-    let store = GlobalDbTranscriptStore::new(db);
-    let mut outcome = TranscriptIngestOutcome::new(TranscriptIngestStats::default(), Vec::new());
-    for source in sources {
-        let provider = source.provider();
-        match try_ingest_source_with_store(&store, source.as_ref(), project_root, None).await {
-            Ok(source_stats) => {
-                outcome.stats = outcome.stats.merge(source_stats);
-            }
-            Err(error) => {
-                let failure = classify_transcript_ingest_failure(provider, "transcript", &error);
-                tracing::warn!(
-                    provider,
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "project transcript catch-up failed"
-                );
-                outcome.push_failure(failure);
-            }
-        }
-    }
-    outcome
 }

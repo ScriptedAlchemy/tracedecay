@@ -20,6 +20,7 @@ use tracedecay_domain::{
 use tracedecay_store::observation::ObservationCoverageV1;
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationWrite,
+    SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 
 use super::*;
@@ -3631,8 +3632,12 @@ async fn inconsistent_projection_alias_fails_authority_preflight_without_target_
         .execute(
             "INSERT INTO observation_projection_aliases(
                  projector_version, observation_id, output_provider, output_message_id
-             ) VALUES ('claude-session-message-v1', ?1, 'claude', ?2)",
-            libsql::params![observation_id, "consolidated/fixture/invalid-alias-message"],
+             ) VALUES (?1, ?2, 'claude', ?3)",
+            libsql::params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation_id,
+                "consolidated/fixture/invalid-alias-message"
+            ],
         )
         .await
         .unwrap();
@@ -4099,8 +4104,12 @@ async fn insert_projection_alias(db: &GlobalDb, observation_id: &str, output_mes
         .execute(
             "INSERT INTO observation_projection_aliases(
                  projector_version, observation_id, output_provider, output_message_id
-             ) VALUES ('claude-session-message-v1', ?1, 'claude', ?2)",
-            libsql::params![observation_id, output_message_id],
+             ) VALUES (?1, ?2, 'claude', ?3)",
+            libsql::params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                observation_id,
+                output_message_id
+            ],
         )
         .await
         .unwrap();
@@ -4192,7 +4201,17 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
         "authority_audit_checkpoints" | "global_schema_migrations" => {
             Some("target-local schema ledger")
         }
-        "observation_projection_checkpoints" | "projection_queue" => Some("derived/rebuilt"),
+        "observation_projection_checkpoints"
+        | "observation_projection_migrations"
+        | "observation_projection_rebuild_aliases"
+        | "observation_projection_rebuild_dispositions"
+        | "observation_projection_rebuild_messages"
+        | "observation_projection_rebuild_provenance"
+        | "observation_projection_rebuild_sessions"
+        | "observation_projection_rebuild_workflow_facts"
+        | "observation_projection_rebuilds"
+        | "observation_workflow_facts"
+        | "projection_queue" => Some("derived/rebuilt"),
         "code_projects" | "graph_scopes" | "project_aliases" | "store_artifacts"
         | "store_instances" => Some("rejected registry-only"),
         name if name == "lcm_raw_messages_fts"

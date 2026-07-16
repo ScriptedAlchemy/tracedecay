@@ -10,8 +10,8 @@
     },
     {
       "state": "degraded", "admission_provider": "kiro",
-      "request": {"hook_event_name": "userPromptSubmit", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "payload": {"malformed": true}},
-      "admission": {"status": "degraded", "retryable": false, "reason_code": "malformed_event"},
+      "request": {"hook_event_name": "userPromptSubmit", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "prompt": "<REDACTED_PROMPT>"},
+      "admission": {"status": "degraded", "retryable": false, "reason_code": "spool_record_too_large"},
       "response": {"exit_code": 0, "stdout": "", "stderr": ""}
     },
     {
@@ -22,7 +22,7 @@
     },
     {
       "state": "unknown", "admission_provider": "kiro-future",
-      "request": {"hook_event_name": "futureEvent", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>"},
+      "request": {"hook_event_name": "userPromptSubmit", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "prompt": "<REDACTED_PROMPT>"},
       "admission": {"status": "unknown", "retryable": false, "reason_code": "unknown_provider"},
       "response": {"exit_code": 0, "stdout": "", "stderr": ""}
     }

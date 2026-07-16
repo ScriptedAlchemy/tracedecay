@@ -136,13 +136,14 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 pub async fn hook_kiro_prompt_submit() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
-    let _hook_telemetry =
+    let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Kiro, "userPromptSubmit", &event);
-    reset_counter_for_kiro_event(&event).await;
+    reset_counter_for_kiro_event(&event, Some(&hook_telemetry)).await;
     let ingest = ingest_kiro_transcript_for_event(
         &event,
         Some(KIRO_HOT_INGEST_MAX_BYTES),
         KIRO_HOT_INGEST_BUDGET,
+        Some(&hook_telemetry),
     )
     .await;
     if ingest.user_scope && ingest.messages_upserted > 0 {
@@ -164,19 +165,23 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
 pub async fn hook_kiro_post_tool_use() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
-    let _hook_telemetry =
+    let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Kiro, "postToolUse", &event);
-    notify_kiro_post_tool_use(&event).await;
+    notify_kiro_post_tool_use(&event, &hook_telemetry).await;
     0
 }
 
-async fn reset_counter_for_kiro_event(event_json: &str) {
+async fn reset_counter_for_kiro_event(
+    event_json: &str,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) {
     let Some(project_root) = kiro_project_root(event_json) else {
         return;
     };
     if let Err(error) = super::daemon_hook_action(
         Some(&project_root),
         serde_json::json!({ "action": "reset_counter" }),
+        telemetry,
     )
     .await
     {
@@ -196,6 +201,7 @@ async fn ingest_kiro_transcript_for_event(
     event_json: &str,
     max_new_bytes: Option<u64>,
     budget: std::time::Duration,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
 ) -> KiroIngestOutcome {
     let project_root = kiro_project_root(event_json);
     let mut args = serde_json::json!({
@@ -207,27 +213,42 @@ async fn ingest_kiro_transcript_for_event(
     if let Some(max_new_bytes) = max_new_bytes {
         args["max_new_bytes"] = serde_json::json!(max_new_bytes);
     }
+    args["timeout_budget_ms"] = serde_json::json!(budget.as_millis() as u64);
+    if let Some(telemetry) = telemetry {
+        telemetry.note_timeout_budget(budget);
+    }
     match tokio::time::timeout(
         budget,
-        super::daemon_hook_action(project_root.as_deref(), args),
+        super::daemon_hook_action(project_root.as_deref(), args, telemetry),
     )
     .await
     {
-        Ok(Ok(result)) => KiroIngestOutcome {
-            user_scope: result
-                .get("user_scope")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            messages_upserted: result
-                .get("messages_upserted")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-        },
+        Ok(Ok(result)) => {
+            if let Some(telemetry) = telemetry {
+                telemetry.note_timed_out(false);
+            }
+            KiroIngestOutcome {
+                user_scope: result
+                    .get("user_scope")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                messages_upserted: result
+                    .get("messages_upserted")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            }
+        }
         Ok(Err(error)) => {
+            if let Some(telemetry) = telemetry {
+                telemetry.note_timed_out(false);
+            }
             eprintln!("[tracedecay] Kiro transcript ingest daemon call failed: {error}");
             KiroIngestOutcome::default()
         }
         Err(_) => {
+            if let Some(telemetry) = telemetry {
+                telemetry.note_timed_out(true);
+            }
             eprintln!("[tracedecay] Kiro transcript ingest daemon call timed out");
             KiroIngestOutcome::default()
         }
@@ -251,7 +272,7 @@ async fn kiro_prompt_memory_recall(event_json: &str) -> Option<String> {
     }
 }
 
-async fn notify_kiro_post_tool_use(event_json: &str) {
+async fn notify_kiro_post_tool_use(event_json: &str, telemetry: &super::analytics::HookTimingSpan) {
     let Some(project_root) = kiro_project_root(event_json) else {
         return;
     };
@@ -259,10 +280,11 @@ async fn notify_kiro_post_tool_use(event_json: &str) {
         return;
     }
     let rel_paths = kiro_post_tool_use_rel_paths(event_json, &project_root);
-    crate::daemon::notify_hook_event(
+    super::notify_hook_event_with_telemetry(
         &project_root,
         crate::daemon::DaemonHookEvent::kiro_post_tool_use(rel_paths, event_cwd(event_json))
             .with_route(hook_route_metadata_from_event(event_json, &project_root)),
+        telemetry,
     )
     .await;
 }
@@ -320,4 +342,44 @@ fn collect_event_path_fields(value: &Value, out: &mut Vec<String>) {
 fn kiro_project_root(event_json: &str) -> Option<PathBuf> {
     let cwd = event_cwd(event_json).or_else(|| std::env::current_dir().ok())?;
     crate::config::discover_project_root(&cwd)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn transcript_ingest_forwards_its_budget_to_the_daemon() {
+        let _lock = crate::hooks::lock_test_env();
+        let cwd = tempfile::tempdir().unwrap();
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([
+            serde_json::json!({ "user_scope": true, "messages_upserted": 3 }),
+        ]);
+        let event = serde_json::json!({
+            "session_id": "kiro-budget",
+            "cwd": cwd.path(),
+        })
+        .to_string();
+
+        let outcome = ingest_kiro_transcript_for_event(
+            &event,
+            Some(8_192),
+            std::time::Duration::from_millis(375),
+            None,
+        )
+        .await;
+
+        assert!(outcome.user_scope);
+        assert_eq!(outcome.messages_upserted, 3);
+        let calls = daemon.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, None);
+        assert_eq!(calls[0].1["action"], "ingest_transcript");
+        assert_eq!(calls[0].1["provider"], "kiro");
+        assert_eq!(calls[0].1["max_new_bytes"], 8_192);
+        assert_eq!(calls[0].1["timeout_budget_ms"], 375);
+        assert_eq!(calls[0].1["format"], "json");
+    }
 }

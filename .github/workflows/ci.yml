@@ -164,6 +164,8 @@ jobs:
           }
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Use lld-link linker
         shell: pwsh
@@ -188,6 +190,10 @@ jobs:
         with:
           shared-key: ci-test-full-windows-msvc-lld
           cache-on-failure: true
+
+      - name: Lint Windows-only Rust paths
+        shell: pwsh
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Build nextest archive
         shell: pwsh

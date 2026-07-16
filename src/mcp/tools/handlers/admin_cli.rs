@@ -397,10 +397,16 @@ async fn sessions_ingest(
         None,
     )
     .await;
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
     let project_outcome = crate::sessions::ingest_project_sources_for_provider(
         project_db,
         cg.project_root(),
-        cg.store_layout().identity.project_id.as_deref(),
+        project_id,
         None,
         true,
     )

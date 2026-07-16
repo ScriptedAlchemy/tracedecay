@@ -924,10 +924,10 @@ fn read_changed_file_detects_change_and_noops_when_unchanged() {
     let path = dir.path().join("chat.json");
     std::fs::write(&path, "[{\"role\":\"user\"}]").unwrap();
 
-    let changed = read_changed_file(&path, StoredCursor::default()).unwrap();
+    let changed = read_changed_file(&path, StoredCursor::default(), 1024).unwrap();
     assert!(changed.contents.contains("user"));
     // Unchanged file → None.
-    assert!(read_changed_file(&path, changed.new_cursor).is_none());
+    assert!(read_changed_file(&path, changed.new_cursor, 1024).is_none());
 }
 
 #[test]
@@ -962,6 +962,95 @@ fn collect_files_bounds_recursive_discovery_by_depth() {
 }
 
 #[test]
+fn collect_files_enforces_file_count_before_materializing_all_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    // Generate candidates incrementally so the walk must stop mid-directory.
+    for index in 0..32 {
+        std::fs::write(dir.path().join(format!("session-{index:02}.jsonl")), "{}\n").unwrap();
+    }
+    let bounds = TranscriptDiscoveryBounds {
+        max_files: 3,
+        ..TranscriptDiscoveryBounds::default_walk()
+    };
+    let report = collect_files_with_ext_bounded(dir.path(), "jsonl", 0, bounds);
+    assert_eq!(report.paths.len(), 3);
+    assert_eq!(report.truncated, Some(FileDiscoveryLimit::FileCount));
+    assert!(
+        report.bytes_charged > 0,
+        "discovery must charge path/metadata bytes before retention"
+    );
+}
+
+#[test]
+fn collect_files_skips_directory_symlink_trees() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let link = dir.path().join("link");
+    std::fs::write(outside.path().join("hidden.jsonl"), "{}\n").unwrap();
+    std::fs::write(dir.path().join("visible.jsonl"), "{}\n").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let report = collect_files_with_ext_bounded(
+            dir.path(),
+            "jsonl",
+            2,
+            TranscriptDiscoveryBounds::default_walk(),
+        );
+        assert_eq!(report.paths, vec![dir.path().join("visible.jsonl")]);
+        assert!(
+            !report
+                .paths
+                .iter()
+                .any(|path| path.ends_with("hidden.jsonl")),
+            "directory symlink escape must not be followed"
+        );
+        assert!(report.truncated.is_none());
+    }
+}
+
+#[test]
+fn collect_files_rejects_oversized_path_components_without_retaining_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let ok = dir.path().join("ok.jsonl");
+    std::fs::write(&ok, "{}\n").unwrap();
+    let ok_bytes = path_byte_len(&ok);
+    let bounds = TranscriptDiscoveryBounds {
+        max_path_bytes: ok_bytes,
+        ..TranscriptDiscoveryBounds::default_walk()
+    };
+    // Stay under common NAME_MAX (255) while exceeding the full-path discovery cap.
+    let oversized_name = format!("{}.jsonl", "x".repeat(80));
+    std::fs::write(dir.path().join(&oversized_name), "{}\n").unwrap();
+    let report = collect_files_with_ext_bounded(dir.path(), "jsonl", 0, bounds);
+    assert_eq!(report.paths, vec![ok]);
+    assert!(report.skipped_oversized_entries >= 1);
+    let leaked = format!("{:?}", report.paths);
+    assert!(
+        !leaked.contains(&oversized_name),
+        "oversized path payload must not be retained"
+    );
+}
+
+#[test]
+fn bound_path_list_stops_on_cumulative_discovery_bytes() {
+    let meta = std::mem::size_of::<std::fs::Metadata>() as u64;
+    let bounds = TranscriptDiscoveryBounds {
+        max_files: 100,
+        max_path_bytes: 64,
+        max_metadata_bytes: meta.max(64),
+        max_discovery_bytes: meta.saturating_mul(2).saturating_add(40),
+    };
+    let paths = (0..20)
+        .map(|index| PathBuf::from(format!("session-{index:02}.jsonl")))
+        .collect::<Vec<_>>();
+    let report = bound_path_list(paths, bounds);
+    assert!(report.paths.len() < 20);
+    assert_eq!(report.truncated, Some(FileDiscoveryLimit::DiscoveryBytes));
+    assert!(report.bytes_charged <= bounds.max_discovery_bytes);
+}
+
+#[test]
 fn stream_new_jsonl_returns_none_for_missing_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("missing.jsonl");
@@ -985,7 +1074,7 @@ fn read_changed_file_returns_none_for_missing_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("missing.json");
 
-    assert!(read_changed_file(&path, StoredCursor::default()).is_none());
+    assert!(read_changed_file(&path, StoredCursor::default(), 1024).is_none());
 }
 
 #[tokio::test]
@@ -1050,4 +1139,53 @@ async fn read_new_rows_returns_none_for_invalid_query() {
     .await;
 
     assert!(rows.is_none());
+}
+
+#[test]
+fn parsed_transcript_structural_ids_are_protected_before_store_writes() {
+    let raw = ["AKIA", "PARSEDID", "00000000"].concat();
+    let mut parsed = ParsedTranscript {
+        draft: SessionDraft {
+            session_id: raw.clone(),
+            project_key: "project.fixture".to_owned(),
+            project_path: "/fixture".to_owned(),
+            title: None,
+            metadata_json: None,
+            parent_session_id: Some(raw.clone()),
+            is_subagent: true,
+            agent_id: Some(raw.clone()),
+            parent_tool_use_id: Some(raw.clone()),
+        },
+        messages: vec![SessionMessageRecord {
+            provider: "test".to_owned(),
+            message_id: raw.clone(),
+            session_id: raw.clone(),
+            role: "assistant".to_owned(),
+            timestamp: None,
+            ordinal: 0,
+            text: "safe".to_owned(),
+            kind: None,
+            model: None,
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        }],
+        new_cursor: StoredCursor::default(),
+    };
+
+    protect_parsed_transcript_structural_ids(&mut parsed).unwrap();
+    let protected = parsed.draft.session_id.clone();
+    assert!(protected.starts_with("privacy.structural-id.v1."));
+    assert_eq!(
+        parsed.draft.parent_session_id.as_deref(),
+        Some(protected.as_str())
+    );
+    assert_eq!(parsed.draft.agent_id.as_deref(), Some(protected.as_str()));
+    assert_eq!(
+        parsed.draft.parent_tool_use_id.as_deref(),
+        Some(protected.as_str())
+    );
+    assert_eq!(parsed.messages[0].message_id, protected);
+    assert_eq!(parsed.messages[0].session_id, protected);
 }

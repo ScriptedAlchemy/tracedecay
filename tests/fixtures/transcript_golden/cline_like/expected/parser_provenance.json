@@ -1,0 +1,41 @@
+{
+  "adapter_module": "src/sessions/cline_like.rs",
+  "parse_entry": "message_from_entry",
+  "normalize_entry": "normalize_cline_like_snapshot_observations",
+  "canonical_entry": "canonical_snapshot_envelope",
+  "native_record_id_keys": [
+    "id",
+    "messageId",
+    "message_id",
+    "requestId",
+    "apiRequestId"
+  ],
+  "tool_name_source": "content[].type == tool_use -> name (joined into tool_names; arguments not evidenced)",
+  "ordering_domain": "snapshot_order",
+  "api_history_filenames_evidenced": [
+    "api_conversation_history.json",
+    "api_messages.json"
+  ],
+  "usage_source": "ui_messages.json say=api_req_started text JSON tokensIn/tokensOut/cacheReads/cacheWrites",
+  "unknown_version": {
+    "emitted": false,
+    "reason": "Cline-family task JSON snapshots are unversioned in repository fixtures and adapters; no unsupported versioned schema contract exists to cover."
+  },
+  "rejected_synthetic_lookalikes": [
+    "threadId",
+    "turnId",
+    "agentId",
+    "parentAgentId",
+    "parentMessageId",
+    "reasoning",
+    "reasoning_visibility",
+    "git",
+    "workflow",
+    "tool_calls",
+    "tool_result"
+  ],
+  "workflow_lifecycle": {
+    "emitted": false,
+    "reason": "No checked-in Cline/Roo/Kilo fixture provides native lifecycle records; hostile workflow lookalikes stay absent from canonical facts."
+  }
+}

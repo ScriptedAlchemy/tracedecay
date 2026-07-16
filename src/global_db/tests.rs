@@ -11,7 +11,7 @@ use tracedecay_store::observation::{
     CursorAdvanceOutcome, NonDurableFrameReason, ObservationCoverageV1, ObservationCursorAdvance,
 };
 use tracedecay_store::{
-    ObservationStoreError, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+    ObservationStoreError, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 
 #[cfg(unix)]
@@ -248,7 +248,7 @@ async fn seed_skip_projection(conn: &Connection, observation: &DurableClaudeObse
          (projector_version, observation_id, receipt_id, reason)
          VALUES (?1, ?2, ?3, ?4)",
         params![
-            SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+            SESSION_MESSAGE_PROJECTOR_VERSION,
             observation.observation_id().as_str(),
             observation.receipt().receipt().receipt_id().as_str(),
             ProjectionSkipReason::NonConversationalRecord.as_str()
@@ -880,7 +880,7 @@ async fn schema_reensure_repairs_projection_queue_to_checkpoint_frontier() {
              (projector_version, observation_id, receipt_id, reason)
              VALUES (?1, ?2, ?3, ?4)",
             params![
-                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 first.observation_id().as_str(),
                 first.receipt().receipt().receipt_id().as_str(),
                 ProjectionSkipReason::NonConversationalRecord.as_str()
@@ -892,7 +892,7 @@ async fn schema_reensure_repairs_projection_queue_to_checkpoint_frontier() {
         .execute(
             "INSERT INTO observation_projection_checkpoints(projector_version, last_sequence)
              VALUES (?1, 1)",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .await
         .unwrap();
@@ -934,8 +934,8 @@ async fn schema_reensure_lowers_checkpoint_without_contiguous_projection_evidenc
     db.conn
         .execute(
             "INSERT INTO observation_projection_checkpoints(projector_version, last_sequence)
-             VALUES ('claude-session-message-v1', 2)",
-            (),
+             VALUES (?1, 2)",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .await
         .unwrap();
@@ -951,7 +951,7 @@ async fn schema_reensure_lowers_checkpoint_without_contiguous_projection_evidenc
         .query(
             "SELECT last_sequence FROM observation_projection_checkpoints
              WHERE projector_version = ?1",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .await
         .unwrap();
@@ -1631,7 +1631,7 @@ async fn checkpoint_with_a_missing_disposition_requeues_the_entire_suffix() {
                  (projector_version, observation_id, receipt_id, reason)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![
-                    SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
                     observation.observation_id().as_str(),
                     observation.receipt().receipt().receipt_id().as_str(),
                     ProjectionSkipReason::NonConversationalRecord.as_str()
@@ -1644,7 +1644,7 @@ async fn checkpoint_with_a_missing_disposition_requeues_the_entire_suffix() {
         .execute(
             "INSERT INTO observation_projection_checkpoints(projector_version, last_sequence)
              VALUES (?1, 3)",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .await
         .unwrap();
@@ -1657,7 +1657,7 @@ async fn checkpoint_with_a_missing_disposition_requeues_the_entire_suffix() {
         .query(
             "SELECT last_sequence FROM observation_projection_checkpoints
              WHERE projector_version = ?1",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .await
         .unwrap();
@@ -1709,7 +1709,7 @@ async fn conflicting_projection_outcomes_are_rejected_atomically() {
               output_message_id, output_digest, message_created)
              VALUES (?1, ?2, ?3, 'claude', 'invalid', 'sha256:invalid', 0)",
             params![
-                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 observation.observation_id().as_str(),
                 observation.receipt().receipt().receipt_id().as_str()
             ],
@@ -1752,7 +1752,7 @@ async fn invalid_projection_skip_reason_is_rejected() {
              (projector_version, observation_id, receipt_id, reason)
              VALUES (?1, ?2, ?3, 'invented_reason')",
             params![
-                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 observation.observation_id().as_str(),
                 observation.receipt().receipt().receipt_id().as_str()
             ],
@@ -1786,7 +1786,7 @@ async fn projection_alias_on_skipped_observation_is_rejected() {
              (projector_version, observation_id, output_provider, output_message_id)
              VALUES (?1, ?2, 'claude', 'consolidated/source/invalid')",
             params![
-                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 observation.observation_id().as_str()
             ],
         )
@@ -2852,10 +2852,6 @@ async fn twelve_same_path_handles_serialize_isolated_writes() {
 
 #[tokio::test]
 async fn deferred_read_snapshot_observes_old_or_new_never_partial() {
-    if crate::db::platform_safe_journal_mode() != "WAL" {
-        return;
-    }
-
     async fn read_tokens(connection: &Connection, project_key: &str) -> i64 {
         let mut rows = connection
             .query(
@@ -2865,6 +2861,10 @@ async fn deferred_read_snapshot_observes_old_or_new_never_partial() {
             .await
             .unwrap();
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    }
+
+    if crate::db::platform_safe_journal_mode() != "WAL" {
+        return;
     }
 
     let dir = tempfile::TempDir::new().unwrap();

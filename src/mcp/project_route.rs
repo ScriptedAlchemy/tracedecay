@@ -200,18 +200,66 @@ pub(crate) fn mcp_analytics_session_id(arguments: &Value) -> Option<String> {
     route_identity_from_arguments(arguments, &["session_id", "sessionId"])
 }
 
+pub(crate) fn protect_tool_structural_ids(arguments: &mut Value) -> Result<(), ()> {
+    const STRUCTURAL_ID_KEYS: &[&str] = &[
+        "session_id",
+        "sessionId",
+        "thread_id",
+        "threadId",
+        "message_id",
+        "messageId",
+        "parent_session_id",
+        "parentSessionId",
+        "agent_id",
+        "agentId",
+        "parent_tool_use_id",
+        "parentToolUseId",
+        "turn_id",
+        "turnId",
+        "tool_call_id",
+        "toolCallId",
+        "conversation_id",
+        "conversationId",
+        "transcript_watermark",
+        "transcriptWatermark",
+        "source_id",
+        "sourceId",
+        "observation_id",
+        "observationId",
+    ];
+
+    fn protect_fields(value: &mut Value, keys: &[&str]) -> Result<(), ()> {
+        let Some(map) = value.as_object_mut() else {
+            return Ok(());
+        };
+        for key in keys {
+            let Some(raw) = map.get(*key).and_then(Value::as_str) else {
+                continue;
+            };
+            let protected = crate::privacy::protect_sensitive_structural_id(raw).map_err(|_| ())?;
+            map.insert((*key).to_string(), Value::String(protected));
+        }
+        Ok(())
+    }
+
+    protect_fields(arguments, STRUCTURAL_ID_KEYS)?;
+    if let Some(meta) = arguments.get_mut("_meta") {
+        protect_fields(meta, STRUCTURAL_ID_KEYS)?;
+    }
+    Ok(())
+}
+
 fn mcp_route_thread_id(arguments: &Value) -> Option<String> {
     route_identity_from_arguments(arguments, &["thread_id", "threadId"])
 }
 
 fn route_identity_from_arguments(arguments: &Value, keys: &[&str]) -> Option<String> {
     fn string_field(value: &Value, key: &str) -> Option<String> {
-        value
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned)
+        let value = value.get(key).and_then(Value::as_str)?;
+        if value.is_empty() {
+            return None;
+        }
+        crate::privacy::protect_sensitive_structural_id(value).ok()
     }
 
     [Some(arguments), arguments.get("_meta")]

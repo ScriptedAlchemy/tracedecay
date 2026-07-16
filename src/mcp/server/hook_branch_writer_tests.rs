@@ -72,6 +72,7 @@ async fn add_branch_plan_uses_injected_writer_without_direct_fallback() {
     let root = dir.path().to_path_buf();
     let branch = "injected-branch";
     git(&root, &["branch", branch]);
+    git(&root, &["switch", branch]);
     let observed = Arc::new(Mutex::new(Vec::new()));
     let writer = recording_writer(
         Arc::clone(&observed),
@@ -112,6 +113,7 @@ async fn add_branch_at_plan_delegates_open_and_sync_without_direct_fallback() {
     let root = dir.path().to_path_buf();
     let branch = "injected-worktree-branch";
     git(&root, &["branch", branch]);
+    git(&root, &["switch", branch]);
     let observed = Arc::new(Mutex::new(Vec::new()));
     let writer = recording_writer(
         Arc::clone(&observed),
@@ -154,7 +156,7 @@ async fn add_branch_at_plan_delegates_open_and_sync_without_direct_fallback() {
 async fn sync_current_branch_deferred_writer_does_not_fall_back_to_direct_sync() {
     let (cg, dir, _pin) = init_indexed_repo().await;
     let root = dir.path().to_path_buf();
-    let branch = "deferred-branch";
+    let branch = crate::branch::current_branch(&root).expect("current branch");
     let observed = Arc::new(Mutex::new(Vec::new()));
     let writer = recording_writer(
         Arc::clone(&observed),
@@ -176,7 +178,7 @@ async fn sync_current_branch_deferred_writer_does_not_fall_back_to_direct_sync()
             snapshot,
             &root,
             HookEventPlan::SyncCurrentBranch {
-                branch: branch.to_string(),
+                branch: branch.clone(),
                 agent: HookAgent::Codex,
             },
         )
@@ -186,7 +188,7 @@ async fn sync_current_branch_deferred_writer_does_not_fall_back_to_direct_sync()
         observed.lock().expect("recording lock").as_slice(),
         &[ObservedWrite {
             root,
-            branch: branch.to_string(),
+            branch,
             incremental_sync_agent: Some(HookAgent::Codex),
         }]
     );
@@ -201,7 +203,7 @@ async fn sync_current_branch_deferred_writer_does_not_fall_back_to_direct_sync()
 async fn sync_current_branch_writer_error_does_not_fall_back_to_direct_sync() {
     let (cg, dir, _pin) = init_indexed_repo().await;
     let root = dir.path().to_path_buf();
-    let branch = "failed-branch";
+    let branch = crate::branch::current_branch(&root).expect("current branch");
     let observed = Arc::new(Mutex::new(Vec::new()));
     let server = McpServer::new_with_context(
         McpServerConstructionContext::direct(cg, None)
@@ -217,7 +219,7 @@ async fn sync_current_branch_writer_error_does_not_fall_back_to_direct_sync() {
             snapshot,
             &root,
             HookEventPlan::SyncCurrentBranch {
-                branch: branch.to_string(),
+                branch: branch.clone(),
                 agent: HookAgent::Codex,
             },
         )
@@ -227,7 +229,7 @@ async fn sync_current_branch_writer_error_does_not_fall_back_to_direct_sync() {
         observed.lock().expect("recording lock").as_slice(),
         &[ObservedWrite {
             root,
-            branch: branch.to_string(),
+            branch,
             incremental_sync_agent: Some(HookAgent::Codex),
         }]
     );

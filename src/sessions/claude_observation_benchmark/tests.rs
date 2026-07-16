@@ -15,12 +15,15 @@ use super::metrics::{
 };
 use super::model::{
     BenchmarkResult, BuildIdentity, Distribution, EvidenceStatus, GitSnapshot, NoOpTotals,
-    RawPhaseSample,
+    PROVIDER_COMMIT_SCOPE, PROVIDER_PARSE_SCOPE, PROVIDER_REPLAY_SCOPE, ProviderBenchmarkResult,
+    ProviderBenchmarkSuiteResult, ProviderFairnessResult, ProviderPhaseResult,
+    ProviderScheduleTurn, RawPhaseSample, RawProviderPhaseSample,
 };
-use super::runner::Fixture;
+use super::runner::{Fixture, exercise_provider_paths_once};
 use super::{
-    BENCHMARK_COMMAND, HARNESS_SOURCES, MEASURED_REPETITIONS, RECORDS_PER_REPETITION,
-    RESULT_SCHEMA_VERSION, WARMUP_REPETITIONS, WORKLOAD_ID, WORKLOAD_MANIFEST,
+    BENCHMARK_COMMAND, HARNESS_SOURCES, MEASURED_REPETITIONS, NATIVE_PROVIDER_FIXTURES,
+    PROVIDER_PIPELINE_SCOPE, RECORDS_PER_REPETITION, RESULT_SCHEMA_VERSION, WARMUP_REPETITIONS,
+    WORKLOAD_ID, WORKLOAD_MANIFEST,
 };
 use super::{baseline, manifest};
 
@@ -33,6 +36,45 @@ fn workload_manifest_matches_executable_contract() {
     assert_eq!(identity.manifest_sha256.len(), 64);
     assert_eq!(identity.harness_sha256.len(), 64);
     assert_eq!(identity.harness_paths.len(), HARNESS_SOURCES.len());
+    assert_eq!(identity.native_fixtures_sha256.len(), 64);
+    assert_eq!(
+        identity.native_fixture_paths.len(),
+        NATIVE_PROVIDER_FIXTURES.len()
+    );
+}
+
+#[test]
+fn providerless_checked_in_results_remain_valid_historical_evidence() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("benchmarks/pr5-observation");
+    assert_eq!(
+        validate_evidence_directory(&directory, false).unwrap(),
+        None
+    );
+    let index: serde_json::Value = serde_json::from_slice(
+        &fs::read(directory.join("evidence-index.json")).expect("read evidence index"),
+    )
+    .expect("parse evidence index");
+    assert!(index["current_acceptance"].is_null());
+    for name in index["historical_stale"]
+        .as_array()
+        .expect("historical evidence list")
+    {
+        let result: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                directory.join(
+                    name.as_str()
+                        .expect("historical evidence filename must be a string"),
+                ),
+            )
+            .expect("read historical evidence"),
+        )
+        .expect("parse historical evidence");
+        assert_eq!(result["evidence_status"], "historical_stale");
+        assert!(
+            result.get("provider_observation_performance").is_none(),
+            "historical providerless evidence must exercise compatibility path"
+        );
+    }
 }
 
 #[test]
@@ -43,6 +85,10 @@ fn provider_baselines_are_versioned_bounded_and_redacted() {
     assert_eq!(
         serialized["catalog_id"],
         "provider-observation-baselines-v1"
+    );
+    assert_eq!(
+        serialized["compatibility"],
+        "v1_additive_optional_measurement_field"
     );
     let baselines = serialized["baselines"].as_array().unwrap();
     assert_eq!(baselines.len(), 8);
@@ -56,22 +102,34 @@ fn provider_baselines_are_versioned_bounded_and_redacted() {
         ]
     );
     for baseline in baselines {
-        assert_eq!(baseline["checks"].as_array().unwrap().len(), 10);
+        let checks = baseline["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 10);
+        assert_eq!(
+            checks.last().and_then(|value| value.as_str()),
+            Some("peak_resource")
+        );
+        assert!(
+            checks
+                .iter()
+                .any(|check| check.as_str() == Some("fairness")),
+            "provider baseline must machine-assert fairness"
+        );
         assert_eq!(
             baseline["bounds"]["records_per_repetition"],
-            RECORDS_PER_REPETITION
+            baseline::PROVIDER_RECORDS_PER_REPETITION
         );
         assert_eq!(
             baseline["bounds"]["replay_limit"],
-            RECORDS_PER_REPETITION + 1
+            baseline::PROVIDER_RECORDS_PER_REPETITION + 1
         );
         assert_eq!(
             baseline["bounds"]["max_backlog_records"],
-            RECORDS_PER_REPETITION
+            baseline::PROVIDER_RECORDS_PER_REPETITION
         );
         assert_eq!(baseline["bounds"]["fair_rotation_providers"], 8);
         let fixture = &baseline["fixture"];
-        assert_eq!(fixture["format"], "deterministic_redacted_synthetic_v1");
+        assert_eq!(fixture["format"], "checked_in_native_bounded_copy_v1");
+        assert!(!fixture["source_paths"].as_array().unwrap().is_empty());
         assert!(
             fixture["redacted_secret"]
                 .as_str()
@@ -84,7 +142,164 @@ fn provider_baselines_are_versioned_bounded_and_redacted() {
                 .unwrap()
                 .contains("benchmark-secret-")
         );
+        let measurement = &baseline["measurement"];
+        assert_eq!(
+            measurement["required_metrics"].as_array().unwrap().len(),
+            12
+        );
+        assert_eq!(measurement["harness_measures_performance"], true);
+        assert_eq!(
+            measurement["result_schema"],
+            "provider-observation-performance-result-v1"
+        );
+        assert_ne!(
+            measurement["harness_path"],
+            "pending_provider_observation_ingest"
+        );
     }
+}
+
+#[test]
+fn hook_telemetry_readiness_uses_direct_fixtures_and_is_honest() {
+    baseline::validate_hook_telemetry_readiness();
+    let readiness = serde_json::to_value(baseline::hook_telemetry_readiness()).unwrap();
+    assert_eq!(
+        readiness["artifact_kind"],
+        "readiness_and_fixture_identity_not_runtime_contract"
+    );
+    assert_eq!(readiness["canonical_contract"]["schema_version"], 1);
+    assert_eq!(
+        readiness["canonical_contract"]["metrics"]["hook_wall_time"],
+        json!(["hook_wall_time_us", "hook_wall_time_ms"])
+    );
+    assert_eq!(
+        readiness["canonical_contract"]["metrics"]["daemon_rtt"],
+        json!(["daemon_rtt_us", "daemon_call_count"])
+    );
+    assert_eq!(
+        readiness["canonical_contract"]["metrics"]["payload_bytes"],
+        json!(["payload_bytes", "daemon_ipc_payload_bytes"])
+    );
+    assert_eq!(
+        readiness["canonical_contract"]["latency_semantics"]["host_ipc_rtt"]["role"],
+        "true_host_ipc_rtt"
+    );
+    assert_eq!(
+        readiness["unavailable_measurements"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        readiness["unavailable_measurements"][0]["metric"],
+        "daemon_processing_duration_distribution"
+    );
+    assert_eq!(
+        readiness["readiness_distributions"]["source_event"],
+        "hook_completed"
+    );
+    assert_eq!(
+        readiness["readiness_distributions"]["collection_status"],
+        "no_samples"
+    );
+    assert_eq!(
+        readiness["readiness_distributions"]["input_rows_received"],
+        0
+    );
+    assert_eq!(
+        readiness["readiness_distributions"]["input_rows_processed"],
+        0
+    );
+    assert_eq!(
+        readiness["readiness_distributions"]["input_rows_dropped_at_cap"],
+        0
+    );
+    assert_eq!(readiness["readiness_distributions"]["events_considered"], 0);
+    assert!(
+        readiness["readiness_distributions"]["hook_wall_time_distribution"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        readiness["readiness_distributions"]["host_ipc_rtt_distribution"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    for host in readiness["host_fixture_measurements"].as_array().unwrap() {
+        assert!(
+            host["fixture_path"]
+                .as_str()
+                .unwrap()
+                .starts_with("tests/fixtures/host_events/")
+        );
+        assert_eq!(host["fixture_sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(
+            host["canonical_request_payload_bytes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+}
+
+#[test]
+fn hook_telemetry_readiness_aggregates_supplied_completed_rows() {
+    let rows = [json!({
+        "event": "hook_completed",
+        "schema_version": 1,
+        "host": "cursor",
+        "hook_wall_time_us": 11,
+        "daemon_rtt_us": 0,
+        "daemon_ipc_payload_bytes": 23,
+        "timeout": {
+            "budget_ms": 750,
+            "timed_out": false
+        },
+        "disposition": {
+            "status": "supported",
+            "retryable": false,
+            "reason_code": null,
+            "class": "application"
+        }
+    })];
+
+    let readiness =
+        serde_json::to_value(baseline::hook_telemetry_readiness_from_rows(&rows)).unwrap();
+    assert_eq!(
+        readiness["readiness_distributions"]["collection_status"],
+        "measured"
+    );
+    assert_eq!(
+        readiness["readiness_distributions"]["input_rows_received"],
+        1
+    );
+    assert_eq!(
+        readiness["readiness_distributions"]["input_rows_processed"],
+        1
+    );
+    assert_eq!(readiness["readiness_distributions"]["events_considered"], 1);
+    assert_eq!(
+        readiness["readiness_distributions"]["host_ipc_rtt_distribution"][0]["summary"]["min"],
+        0
+    );
+    assert_eq!(
+        readiness["readiness_distributions"]["host_ipc_rtt_distribution"][0]["summary"]["absent_count"],
+        0
+    );
+}
+
+#[tokio::test]
+async fn every_provider_executes_a_production_path_and_exact_no_op() {
+    assert_eq!(
+        exercise_provider_paths_once().await,
+        [
+            "claude", "codex", "cursor", "hermes", "kiro", "cline", "roo-code", "kilo",
+        ]
+    );
 }
 
 #[test]
@@ -93,6 +308,46 @@ fn workload_manifest_rejects_missing_or_unvalidated_contract_fields() {
     missing.as_object_mut().unwrap().remove("metrics");
     assert!(!manifest::accepts_value(missing));
 
+    let mut missing_provider_result =
+        serde_json::from_str::<serde_json::Value>(WORKLOAD_MANIFEST).unwrap();
+    missing_provider_result
+        .as_object_mut()
+        .unwrap()
+        .remove("provider_result");
+    assert!(!manifest::accepts_value(missing_provider_result));
+
+    let mut missing_hook_readiness =
+        serde_json::from_str::<serde_json::Value>(WORKLOAD_MANIFEST).unwrap();
+    missing_hook_readiness
+        .as_object_mut()
+        .unwrap()
+        .remove("hook_telemetry_readiness");
+    assert!(!manifest::accepts_value(missing_hook_readiness));
+
+    let mut missing_fairness_check =
+        serde_json::from_str::<serde_json::Value>(WORKLOAD_MANIFEST).unwrap();
+    missing_fairness_check["provider_baselines"][0]["checks"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|check| check.as_str() != Some("fairness"));
+    assert!(!manifest::accepts_value(missing_fairness_check));
+
+    let mut missing_fairness_fields =
+        serde_json::from_str::<serde_json::Value>(WORKLOAD_MANIFEST).unwrap();
+    missing_fairness_fields["provider_result"]
+        .as_object_mut()
+        .unwrap()
+        .remove("required_fairness_fields");
+    assert!(!manifest::accepts_value(missing_fairness_fields));
+
+    let mut missing_fair_rotation_bound =
+        serde_json::from_str::<serde_json::Value>(WORKLOAD_MANIFEST).unwrap();
+    missing_fair_rotation_bound["provider_baselines"][0]["bounds"]
+        .as_object_mut()
+        .unwrap()
+        .remove("fair_rotation_providers");
+    assert!(!manifest::accepts_value(missing_fair_rotation_bound));
+
     let mut extra = serde_json::from_str::<serde_json::Value>(WORKLOAD_MANIFEST).unwrap();
     extra
         .get_mut("input")
@@ -100,6 +355,40 @@ fn workload_manifest_rejects_missing_or_unvalidated_contract_fields() {
         .unwrap()
         .insert("unvalidated".to_string(), json!(true));
     assert!(!manifest::accepts_value(extra));
+}
+
+#[tokio::test]
+async fn claude_observation_path_measures_real_payload_bytes() {
+    let fixture = Fixture::new(10_001).await;
+    let input_bytes = fs::metadata(&fixture.transcript)
+        .expect("benchmark transcript metadata")
+        .len();
+    assert!(input_bytes > 0);
+    let source = fixture.source();
+    let started = std::time::Instant::now();
+    let stats = fixture.ingest(&source).await;
+    let wall_time_ns = started.elapsed().as_nanos();
+    assert!(wall_time_ns > 0);
+    assert_eq!(
+        stats.observations_committed as usize,
+        RECORDS_PER_REPETITION
+    );
+    let observations = fixture.replay().await;
+    let mut total_payload_bytes = 0_usize;
+    for observation in &observations {
+        let payload = observation.observation().payload().to_string();
+        assert!(
+            observation.observation().receipt().payload().is_some(),
+            "observation lacks a payload-bound sanitization receipt"
+        );
+        assert!(
+            !payload.contains("benchmark-secret-"),
+            "observation payload retained secret canary"
+        );
+        total_payload_bytes += payload.len();
+    }
+    assert!(total_payload_bytes > 0);
+    assert_eq!(observations.len(), RECORDS_PER_REPETITION);
 }
 
 #[tokio::test]
@@ -369,6 +658,78 @@ fn strict_evidence_gate_requires_exactly_one_fully_typed_acceptance() {
     )
     .unwrap();
     assert!(validate_evidence_directory(directory, true).is_err());
+
+    let mut missing_provider_performance = synthetic_acceptance_result();
+    missing_provider_performance.provider_observation_performance = None;
+    fs::write(
+        directory.join(result_name),
+        serde_json::to_vec(&missing_provider_performance).unwrap(),
+    )
+    .unwrap();
+    assert!(validate_evidence_directory(directory, true).is_err());
+
+    let mut missing_hook_readiness = synthetic_acceptance_result();
+    missing_hook_readiness.hook_telemetry_readiness = None;
+    fs::write(
+        directory.join(result_name),
+        serde_json::to_vec(&missing_hook_readiness).unwrap(),
+    )
+    .unwrap();
+    assert!(validate_evidence_directory(directory, true).is_err());
+
+    let mut unbounded_provider_backlog = synthetic_acceptance_result();
+    unbounded_provider_backlog
+        .provider_observation_performance
+        .as_mut()
+        .unwrap()
+        .providers[0]
+        .max_backlog_records += 1;
+    fs::write(
+        directory.join(result_name),
+        serde_json::to_vec(&unbounded_provider_backlog).unwrap(),
+    )
+    .unwrap();
+    assert!(validate_evidence_directory(directory, true).is_err());
+
+    let mut unfair_provider_order = synthetic_acceptance_result();
+    unfair_provider_order
+        .provider_observation_performance
+        .as_mut()
+        .unwrap()
+        .fairness
+        .turns
+        .swap(0, 1);
+    fs::write(
+        directory.join(result_name),
+        serde_json::to_vec(&unfair_provider_order).unwrap(),
+    )
+    .unwrap();
+    assert!(validate_evidence_directory(directory, true).is_err());
+
+    let mut unattested_source = synthetic_acceptance_result();
+    unattested_source.build_identity.source_mode = "mutable_worktree".to_string();
+    fs::write(
+        directory.join(result_name),
+        serde_json::to_vec(&unattested_source).unwrap(),
+    )
+    .unwrap();
+    assert!(validate_evidence_directory(directory, true).is_err());
+
+    let mut malformed_provider_phase = synthetic_acceptance_result();
+    malformed_provider_phase
+        .provider_observation_performance
+        .as_mut()
+        .unwrap()
+        .providers[0]
+        .parse
+        .raw_samples[0]
+        .record_count += 1;
+    fs::write(
+        directory.join(result_name),
+        serde_json::to_vec(&malformed_provider_phase).unwrap(),
+    )
+    .unwrap();
+    assert!(validate_evidence_directory(directory, true).is_err());
 }
 
 fn write_evidence_index(directory: &Path, current_acceptance: Option<&str>) {
@@ -421,7 +782,17 @@ fn synthetic_acceptance_result() -> BenchmarkResult {
             commit: git_before.commit.clone(),
             tree: git_before.tree.clone(),
             profile: "release".to_string(),
-            commit_keyed_target: true,
+            source_mode: "git_archive_read_only_v1".to_string(),
+            source_manifest_sha256: "c".repeat(64),
+            source_file_count: 1,
+            target_triple: "synthetic-target".to_string(),
+            rustc_version: "rustc synthetic".to_string(),
+            cargo_version: "cargo synthetic".to_string(),
+            rustflags: "normalized-empty".to_string(),
+            rustc_wrapper: "environment:none;cargo_config:synthetic".to_string(),
+            rustc_workspace_wrapper: "environment:none;cargo_config:synthetic".to_string(),
+            cargo_config_identity: "d".repeat(40),
+            data_root_basis: "current_executable_parent".to_string(),
             executable_sha256: "a".repeat(64),
             executable_size_bytes: 1,
         },
@@ -457,6 +828,135 @@ fn synthetic_acceptance_result() -> BenchmarkResult {
         no_op_replay_database_storage_growth_bytes: no_op.database_storage_growth_bytes,
         no_op_replay_observation_count_delta: 0,
         no_op_replay_totals: NoOpTotals::default(),
+        provider_observation_performance: Some(synthetic_provider_performance(100)),
+        hook_telemetry_readiness: Some(baseline::hook_telemetry_readiness()),
+    }
+}
+
+fn synthetic_provider_performance(clock_ticks_per_second: u64) -> ProviderBenchmarkSuiteResult {
+    let providers = baseline::PROVIDERS
+        .iter()
+        .map(|provider| {
+            let pipeline_raw_samples = (0..MEASURED_REPETITIONS)
+                .map(|repetition| {
+                    sample(
+                        repetition,
+                        1,
+                        2,
+                        3,
+                        4,
+                        baseline::PROVIDER_RECORDS_PER_REPETITION,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let no_op_raw_samples = (0..MEASURED_REPETITIONS)
+                .map(|repetition| sample(repetition, 0, 0, 0, 4, 0))
+                .collect::<Vec<_>>();
+            let pipeline_latencies = pipeline_raw_samples
+                .iter()
+                .map(|sample| sample.latency_ns)
+                .collect::<Vec<_>>();
+            let no_op_latencies = no_op_raw_samples
+                .iter()
+                .map(|sample| sample.latency_ns)
+                .collect::<Vec<_>>();
+            let pipeline = aggregate_samples(&pipeline_raw_samples);
+            let no_op = aggregate_samples(&no_op_raw_samples);
+            let total_pipeline_ns = pipeline_latencies.iter().sum::<u64>();
+            ProviderBenchmarkResult {
+                provider: (*provider).to_string(),
+                production_path: format!("{provider}_production_observation_pipeline_v1"),
+                pipeline_scope: PROVIDER_PIPELINE_SCOPE.to_string(),
+                measured_repetitions: MEASURED_REPETITIONS,
+                observations_per_repetition: baseline::PROVIDER_RECORDS_PER_REPETITION,
+                replay_limit: baseline::PROVIDER_RECORDS_PER_REPETITION + 1,
+                max_backlog_records: baseline::PROVIDER_RECORDS_PER_REPETITION,
+                parse: synthetic_provider_phase(PROVIDER_PARSE_SCOPE, clock_ticks_per_second),
+                commit: synthetic_provider_phase(PROVIDER_COMMIT_SCOPE, clock_ticks_per_second),
+                replay: synthetic_provider_phase(PROVIDER_REPLAY_SCOPE, clock_ticks_per_second),
+                pipeline_raw_samples,
+                pipeline_latency: Distribution::from_samples(&pipeline_latencies),
+                pipeline_records_per_second: (MEASURED_REPETITIONS
+                    * baseline::PROVIDER_RECORDS_PER_REPETITION)
+                    as f64
+                    * 1_000_000_000.0
+                    / total_pipeline_ns as f64,
+                pipeline_cpu_ticks: pipeline.cpu_ticks,
+                pipeline_cpu_ms: ticks_to_ms(pipeline.cpu_ticks, clock_ticks_per_second),
+                pipeline_process_write_bytes: pipeline.process_write_bytes,
+                pipeline_database_storage_growth_bytes: pipeline.database_storage_growth_bytes,
+                peak_rss_kib: pipeline.peak_rss_kib.max(no_op.peak_rss_kib),
+                no_op_raw_samples,
+                no_op_latency: Distribution::from_samples(&no_op_latencies),
+                no_op_cpu_ticks: no_op.cpu_ticks,
+                no_op_cpu_ms: ticks_to_ms(no_op.cpu_ticks, clock_ticks_per_second),
+                no_op_process_write_bytes: no_op.process_write_bytes,
+                no_op_database_storage_growth_bytes: no_op.database_storage_growth_bytes,
+                no_op_observation_count_delta: 0,
+            }
+        })
+        .collect();
+    ProviderBenchmarkSuiteResult {
+        schema_version: 1,
+        workload_id: WORKLOAD_ID.to_string(),
+        fairness: ProviderFairnessResult {
+            policy: "round_robin_v1".to_string(),
+            rounds: MEASURED_REPETITIONS,
+            providers_per_round: baseline::PROVIDERS.len(),
+            max_provider_turn_distance: baseline::PROVIDERS.len(),
+            turns: (0..MEASURED_REPETITIONS)
+                .flat_map(|round| {
+                    baseline::PROVIDERS
+                        .iter()
+                        .enumerate()
+                        .map(move |(position, provider)| ProviderScheduleTurn {
+                            round,
+                            position,
+                            provider: (*provider).to_string(),
+                        })
+                })
+                .collect(),
+        },
+        providers,
+    }
+}
+
+fn synthetic_provider_phase(scope: &str, clock_ticks_per_second: u64) -> ProviderPhaseResult {
+    let raw_samples = (0..MEASURED_REPETITIONS)
+        .map(|repetition| RawProviderPhaseSample {
+            repetition,
+            latency_ns: u64::try_from(repetition).unwrap_or(u64::MAX) + 1,
+            cpu_ticks: 1,
+            process_write_bytes: 2,
+            database_storage_growth_bytes: 3,
+            peak_rss_kib: 4,
+            record_count: baseline::PROVIDER_RECORDS_PER_REPETITION,
+        })
+        .collect::<Vec<_>>();
+    let latencies = raw_samples
+        .iter()
+        .map(|sample| sample.latency_ns)
+        .collect::<Vec<_>>();
+    let cpu_ticks: u64 = raw_samples.iter().map(|sample| sample.cpu_ticks).sum();
+    ProviderPhaseResult {
+        scope: scope.to_string(),
+        latency: Distribution::from_samples(&latencies),
+        cpu_ticks,
+        cpu_ms: ticks_to_ms(cpu_ticks, clock_ticks_per_second),
+        process_write_bytes: raw_samples
+            .iter()
+            .map(|sample| sample.process_write_bytes)
+            .sum(),
+        database_storage_growth_bytes: raw_samples
+            .iter()
+            .map(|sample| sample.database_storage_growth_bytes)
+            .sum(),
+        peak_rss_kib: raw_samples
+            .iter()
+            .map(|sample| sample.peak_rss_kib)
+            .max()
+            .unwrap(),
+        raw_samples,
     }
 }
 

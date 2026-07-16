@@ -653,6 +653,29 @@ fn debounce_admits_out_of_order_older_observation() {
 }
 
 #[test]
+fn debounce_hashes_private_material_and_caps_cardinality() {
+    let private = span_debounce_key(
+        "",
+        "private-session",
+        Some("secret/branch"),
+        "/home/user/private-worktree",
+    );
+    assert!(!private.contains("private-session"));
+    assert!(!private.contains("secret/branch"));
+    assert!(!private.contains("private-worktree"));
+
+    let mut debounce = SpanObservationDebounce::new();
+    for index in 0..(MAX_SPAN_OBSERVATION_DEBOUNCE_KEYS + 32) {
+        let key = span_debounce_key("", &format!("session-{index}"), Some("main"), "/repo");
+        assert!(debounce.should_record(&key, index as i64, 30));
+    }
+    assert_eq!(
+        debounce.last_write.len(),
+        MAX_SPAN_OBSERVATION_DEBOUNCE_KEYS
+    );
+}
+
+#[test]
 fn commit_overlap_kind_classifies_within_extended_and_outside() {
     assert_eq!(
         commit_overlap_kind(100, 200, 150, 60),

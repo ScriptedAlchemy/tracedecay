@@ -49,14 +49,15 @@ pub async fn hook_codex_session_start() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = codex_project_root_from_event_with_identity(&event).await;
-    let _hook_telemetry =
+    let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Codex, "SessionStart", &event);
     if let (Some(root), Some(event)) = (root.as_ref(), codex_session_start_hook_event(&parsed)) {
-        crate::daemon::notify_hook_event(root, event).await;
+        super::notify_hook_event_with_telemetry(root, event, &hook_telemetry).await;
     }
     let (mut context, _) = codex_session_context_for_event(&event).await;
     let session_id = event_session_id(&parsed);
-    if root.is_none() && ingest_user_codex_session(session_id.clone()).await {
+    if root.is_none() && ingest_user_codex_session(session_id.clone(), Some(&hook_telemetry)).await
+    {
         super::schedule_user_session_review("codex", session_id.as_deref());
     }
     let digest = match root.as_deref() {
@@ -90,13 +91,13 @@ fn codex_session_start_hook_event(parsed: &Value) -> Option<crate::daemon::Daemo
 pub async fn hook_codex_user_prompt_submit() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event_with_identity(&event).await;
-    let _hook_telemetry = record_hook_invoked(
+    let hook_telemetry = record_hook_invoked(
         root.as_deref(),
         HintAgent::Codex,
         "UserPromptSubmit",
         &event,
     );
-    reset_counter_for_codex_event(&event).await;
+    reset_counter_for_codex_event(&event, Some(&hook_telemetry)).await;
     let session_id = serde_json::from_str::<Value>(&event)
         .ok()
         .as_ref()
@@ -105,7 +106,7 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
         // Keep recall current, but wait for the native Stop receipt before
         // reflection so one completed turn schedules one review rather than a
         // prompt-only review followed immediately by a final-turn review.
-        let _ = ingest_user_codex_session(session_id).await;
+        let _ = ingest_user_codex_session(session_id, Some(&hook_telemetry)).await;
     }
     let context = Box::pin(codex_user_prompt_submit_context_for_event(&event)).await;
     println!(
@@ -304,10 +305,10 @@ fn decide_codex_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
 pub async fn hook_codex_post_compact() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event_with_identity(&event).await;
-    let _hook_telemetry =
+    let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Codex, "PostCompact", &event);
     if std::env::var_os(crate::sessions::codex_app_server::CODEX_SUMMARY_CHILD_ENV).is_none() {
-        codex_post_compact(&event).await;
+        codex_post_compact(&event, Some(&hook_telemetry)).await;
     }
     println!("{}", serde_json::json!({}));
     0
@@ -324,14 +325,21 @@ pub async fn hook_codex_stop() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = codex_project_root_from_parsed_event_with_identity(&parsed).await;
-    let _hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Codex, "Stop", &event);
+    let hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Codex, "Stop", &event);
     let session_id = event_session_id(&parsed);
-    let ingested = tokio::time::timeout(
+    hook_telemetry.note_timeout_budget(CODEX_STOP_INGEST_BUDGET);
+    let ingested = if let Ok(ingested) = tokio::time::timeout(
         CODEX_STOP_INGEST_BUDGET,
-        finalize_codex_user_session(root.as_deref(), session_id.clone()),
+        finalize_codex_user_session(root.as_deref(), session_id.clone(), Some(&hook_telemetry)),
     )
     .await
-    .unwrap_or(false);
+    {
+        hook_telemetry.note_timed_out(false);
+        ingested
+    } else {
+        hook_telemetry.note_timed_out(true);
+        false
+    };
     if ingested {
         super::schedule_user_session_review("codex", session_id.as_deref());
     }
@@ -342,11 +350,12 @@ pub async fn hook_codex_stop() -> i32 {
 async fn finalize_codex_user_session(
     project_root: Option<&Path>,
     session_id: Option<String>,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
 ) -> bool {
     if project_root.is_some() {
         return false;
     }
-    ingest_user_codex_session(session_id).await
+    ingest_user_codex_session(session_id, telemetry).await
 }
 
 /// Builds a Codex hook stdout payload with `additionalContext`.
@@ -654,7 +663,10 @@ fn codex_apply_patch_added_text(command: &str) -> Option<String> {
     (!added.is_empty()).then(|| added.join("\n"))
 }
 
-async fn codex_post_compact(event_json: &str) {
+async fn codex_post_compact(
+    event_json: &str,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) {
     let root = codex_project_root_from_event_with_identity(event_json).await;
     let action = if root.is_some() {
         "codex_compact"
@@ -674,12 +686,15 @@ async fn codex_post_compact(event_json: &str) {
     if let Some(session_id) = session_id {
         args["session_id"] = serde_json::json!(session_id);
     }
-    if let Err(error) = super::daemon_hook_action(root.as_deref(), args).await {
+    if let Err(error) = super::daemon_hook_action(root.as_deref(), args, telemetry).await {
         eprintln!("[tracedecay] Codex PostCompact daemon call failed: {error}");
     }
 }
 
-async fn ingest_user_codex_session(session_id: Option<String>) -> bool {
+async fn ingest_user_codex_session(
+    session_id: Option<String>,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) -> bool {
     if session_id.is_none() {
         return false;
     }
@@ -691,6 +706,7 @@ async fn ingest_user_codex_session(session_id: Option<String>) -> bool {
             "user_scope": true,
             "session_id": session_id,
         }),
+        telemetry,
     )
     .await
     {
@@ -705,13 +721,17 @@ async fn ingest_user_codex_session(session_id: Option<String>) -> bool {
     }
 }
 
-async fn reset_counter_for_codex_event(event_json: &str) {
+async fn reset_counter_for_codex_event(
+    event_json: &str,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) {
     let Some(project_root) = codex_project_root_from_event_with_identity(event_json).await else {
         return;
     };
     if let Err(error) = super::daemon_hook_action(
         Some(&project_root),
         serde_json::json!({ "action": "reset_counter" }),
+        telemetry,
     )
     .await
     {
@@ -982,13 +1002,14 @@ mod tests {
             serde_json::json!({ "messages_upserted": 0 }),
         ]);
 
-        assert!(finalize_codex_user_session(None, Some("final-turn".to_string())).await);
+        assert!(finalize_codex_user_session(None, Some("final-turn".to_string()), None).await);
         assert!(
-            !finalize_codex_user_session(None, Some("final-turn".to_string())).await,
+            !finalize_codex_user_session(None, Some("final-turn".to_string()), None).await,
             "a repeated Stop receipt must not schedule another review"
         );
         assert!(
-            !finalize_codex_user_session(Some(&general), Some("final-turn".to_string())).await,
+            !finalize_codex_user_session(Some(&general), Some("final-turn".to_string()), None,)
+                .await,
             "project-scoped Stop receipts must never write the user session store"
         );
 

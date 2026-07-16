@@ -2176,8 +2176,14 @@ async fn hook_event_workspace_context_routes_followup_graph_reads() {
         .upsert_code_project("proj_hook_target", target_project, None, None, Some("main"))
         .await
         .expect("target project registers");
-    let server =
-        McpServer::new_with_dbs(active_cg, None, None, Some(Arc::new(registry_db)), false).await;
+    let server = McpServer::new_with_dbs_and_host_admission_for_test(
+        active_cg,
+        None,
+        None,
+        Some(Arc::new(registry_db)),
+        false,
+    )
+    .await;
 
     let responses = run_server_with_messages(
         server.clone(),
@@ -2936,17 +2942,16 @@ async fn setup_branch_drift_fixture() -> (TempDir, PathBuf, Arc<McpServer>) {
         cg.checkpoint().await.unwrap();
     }
 
-    // Back on main: start the server pinned to main's DB.
+    // Back on main: start the server pinned to main's DB. Startup catch-up is
+    // unrelated to branch drift and may scan the host's default transcript
+    // profile, so keep this fixture isolated from that background work.
     git(&project, &["checkout", "main"]);
+    let mut config = tracedecay::config::load_config(&project).expect("load test config");
+    config.sync.session_start_sync = false;
+    tracedecay::config::save_config(&project, &config).expect("disable unrelated catch-up");
     let cg = TraceDecay::open(&project).await.unwrap();
     assert_eq!(cg.serving_branch(), Some("main"));
     let server = McpServer::new(cg, None).await;
-    assert!(
-        server
-            .wait_for_startup_catch_up(std::time::Duration::from_secs(30))
-            .await,
-        "startup catch-up must settle before the mid-test checkout"
-    );
 
     (dir, project, server)
 }
@@ -3227,7 +3232,14 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
         )
         .await
         .unwrap();
-    let server = McpServer::new_with_dbs(cg, None, None, Some(Arc::new(registry)), false).await;
+    let server = McpServer::new_with_dbs_and_host_admission_for_test(
+        cg,
+        None,
+        None,
+        Some(Arc::new(registry)),
+        false,
+    )
+    .await;
 
     let session_id = "sess-live";
     let main_worktree = project_root.to_string_lossy().to_string();

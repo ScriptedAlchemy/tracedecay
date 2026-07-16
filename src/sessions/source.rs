@@ -32,6 +32,7 @@
 //! [`crate::sessions::shared`] so the Hermes `SQLite` sweep can reuse them
 //! without importing from this driver module.
 
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -40,6 +41,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_store::{ParseOffset, TranscriptStoreError, TranscriptWriteBatch};
 
+use crate::application::host_admission::{WireReadOutcome, read_bounded_to_string};
 use crate::global_db::GlobalDb;
 pub use crate::sessions::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 #[allow(unused_imports)]
@@ -267,6 +269,40 @@ pub trait TranscriptSource: Send + Sync {
     /// are tolerated by the driver.
     fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf>;
 
+    /// Bounded discovery used by multi-source ingest admission.
+    ///
+    /// Default applies [`TranscriptDiscoveryBounds`] after `transcript_paths`.
+    /// Providers that enumerate via [`collect_files_with_ext_bounded`] should
+    /// override so limits are enforced before materialization.
+    fn discover_transcript_paths(
+        &self,
+        project_root: &Path,
+        bounds: TranscriptDiscoveryBounds,
+    ) -> FileDiscoveryReport {
+        bound_path_list(self.transcript_paths(project_root), bounds)
+    }
+
+    /// Discover one deterministic page beginning at `start_offset`.
+    ///
+    /// The omitted count covers paths before and after the returned page. It
+    /// lets the scheduler report backpressure without retaining the whole
+    /// source corpus. Providers with a streaming enumerator may override this
+    /// method to apply the offset before materializing paths.
+    fn discover_transcript_paths_page(
+        &self,
+        project_root: &Path,
+        bounds: TranscriptDiscoveryBounds,
+        start_offset: usize,
+    ) -> (FileDiscoveryReport, usize) {
+        let mut paths = self.transcript_paths(project_root);
+        paths.sort();
+        paths.dedup();
+        let total_paths = paths.len();
+        let report = bound_path_list(paths.into_iter().skip(start_offset), bounds);
+        let omitted_paths = total_paths.saturating_sub(report.paths.len());
+        (report, omitted_paths)
+    }
+
     /// Durable identity used to load and advance this transcript's parse
     /// cursor. Providers may override this when the physical path cannot be
     /// represented injectively by the store's legacy text key.
@@ -340,7 +376,9 @@ pub(crate) async fn ingest_source_with_store<S: TranscriptIngestStore>(
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestStats {
     let mut stats = TranscriptIngestStats::default();
-    for path in source.transcript_paths(project_root) {
+    let discovery =
+        source.discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk());
+    for path in discovery.paths {
         match ingest_one(store, source, &path, project_root, max_new_bytes).await {
             Ok(path_stats) => stats = stats.merge(path_stats),
             Err(error) => {
@@ -364,7 +402,9 @@ pub(crate) async fn try_ingest_source_with_store<S: TranscriptIngestStore>(
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<TranscriptIngestStats> {
     let mut stats = TranscriptIngestStats::default();
-    for path in source.transcript_paths(project_root) {
+    let discovery =
+        source.discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk());
+    for path in discovery.paths {
         stats = stats.merge(ingest_one(store, source, &path, project_root, max_new_bytes).await?);
     }
     Ok(stats)
@@ -409,7 +449,7 @@ pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     project_root: &Path,
     loaded: LoadedTranscriptCursor,
     expected_previous: &TranscriptCursorCheckpoint,
-    parsed: ParsedTranscript,
+    mut parsed: ParsedTranscript,
 ) -> TranscriptIngestResult<TranscriptIngestStats> {
     if loaded.checkpoint.key != expected_previous.key {
         return Err(TranscriptIngestError::CursorKeyMismatch {
@@ -417,7 +457,6 @@ pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
             actual: loaded.checkpoint.key.durable_text(),
         });
     }
-
     let cursor_key = loaded.checkpoint.key;
     let cursor_path = cursor_key.store_path();
     let durable_offset = loaded.durable_offset;
@@ -440,7 +479,7 @@ pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
         mirror_legacy_cursor(store, &cursor_key, legacy_offset, next_offset).await?;
         return Ok(TranscriptIngestStats::default());
     }
-
+    protect_parsed_transcript_structural_ids(&mut parsed)?;
     let commit_records =
         crate::sessions::git_correlation::direct_commit_records(&parsed.messages, project_root);
     let span_observations =
@@ -531,6 +570,29 @@ pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     })
 }
 
+fn protect_parsed_transcript_structural_ids(
+    parsed: &mut ParsedTranscript,
+) -> Result<(), crate::privacy::PrivacySanitizerError> {
+    fn protect(value: &mut String) -> Result<(), crate::privacy::PrivacySanitizerError> {
+        *value = crate::privacy::protect_sensitive_structural_id(value)?;
+        Ok(())
+    }
+
+    protect(&mut parsed.draft.session_id)?;
+    for value in [
+        &mut parsed.draft.parent_session_id,
+        &mut parsed.draft.agent_id,
+        &mut parsed.draft.parent_tool_use_id,
+    ] {
+        value.iter_mut().try_for_each(protect)?;
+    }
+    for message in &mut parsed.messages {
+        protect(&mut message.message_id)?;
+        protect(&mut message.session_id)?;
+    }
+    Ok(())
+}
+
 fn merge_session_metadata(existing: Option<&str>, incoming: Option<String>) -> Option<String> {
     let previous = existing.and_then(|value| serde_json::from_str::<Value>(value).ok());
     let next = incoming
@@ -612,7 +674,13 @@ async fn mirror_legacy_cursor<S: TranscriptIngestStore>(
     Ok(())
 }
 
+mod discovery;
 mod jsonl;
+
+pub use discovery::{FileDiscoveryLimit, FileDiscoveryReport, TranscriptDiscoveryBounds};
+pub(crate) use discovery::{
+    bound_path_list, collect_files_with_ext_bounded, os_str_byte_len, path_byte_len,
+};
 
 #[cfg(test)]
 pub(crate) use jsonl::try_stream_new_jsonl_raw_strict;
@@ -628,6 +696,29 @@ use jsonl::{
     stream_new_jsonl_raw_strict, stream_new_jsonl_strict, stream_new_jsonl_with_policy,
 };
 
+pub(crate) fn preflight_strict_jsonl(
+    provider: &'static str,
+    path: &Path,
+    previous: StoredCursor,
+    max_new_bytes: Option<u64>,
+) -> TranscriptIngestResult<()> {
+    let frames = try_stream_new_jsonl_raw_strict_with_resume(
+        path,
+        previous,
+        max_new_bytes,
+        MAX_JSONL_RECORD_BYTES,
+        None,
+    )?;
+    if let Some(JsonlFrameDeferral::Malformed { offset }) = frames.deferred {
+        return Err(TranscriptIngestError::NonDurableRecord {
+            provider,
+            offset,
+            end_offset: frames.read_through.max(offset),
+            reason: "malformed_jsonl_frame",
+        });
+    }
+    Ok(())
+}
 /// Full contents of a changed file plus the advanced cursor.
 pub struct ChangedFile {
     pub contents: String,
@@ -641,7 +732,7 @@ pub struct ChangedFile {
 /// with deterministic ids. Idempotent upserts make re-adding unchanged messages
 /// a no-op. Returns `None` when the file cannot be read or is unchanged since
 /// the last run.
-pub fn read_changed_file(path: &Path, prev: StoredCursor) -> Option<ChangedFile> {
+pub fn read_changed_file(path: &Path, prev: StoredCursor, max_bytes: u64) -> Option<ChangedFile> {
     let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,
         Err(error) => {
@@ -650,13 +741,7 @@ pub fn read_changed_file(path: &Path, prev: StoredCursor) -> Option<ChangedFile>
         }
     };
     let mtime = file_mtime_secs(&meta);
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) => {
-            log_source_skip(path, "read transcript file", &error);
-            return None;
-        }
-    };
+    let contents = read_file_to_string_bounded(path, max_bytes)?;
     let hash = content_hash64(&contents);
 
     // Unchanged since last run (we have read it before and neither content hash
@@ -683,6 +768,7 @@ pub(crate) fn read_changed_with_companion(
     primary: &Path,
     companion: &Path,
     prev: StoredCursor,
+    max_bytes: u64,
 ) -> Option<ChangedFile> {
     let meta = match std::fs::metadata(primary) {
         Ok(meta) => meta,
@@ -692,13 +778,7 @@ pub(crate) fn read_changed_with_companion(
         }
     };
     let mtime = file_mtime_secs(&meta);
-    let contents = match std::fs::read_to_string(primary) {
-        Ok(contents) => contents,
-        Err(error) => {
-            log_source_skip(primary, "read primary transcript file", &error);
-            return None;
-        }
-    };
+    let contents = read_file_to_string_bounded(primary, max_bytes)?;
     let primary_hash = content_hash64(&contents);
     let (companion_hash, companion_mtime) = companion
         .is_file()
@@ -710,13 +790,7 @@ pub(crate) fn read_changed_with_companion(
                     return None;
                 }
             };
-            let companion_contents = match std::fs::read_to_string(companion) {
-                Ok(contents) => contents,
-                Err(error) => {
-                    log_source_skip(companion, "read companion transcript file", &error);
-                    return None;
-                }
-            };
+            let companion_contents = read_file_to_string_bounded(companion, max_bytes)?;
             Some((
                 content_hash64(&companion_contents),
                 file_mtime_secs(&companion_meta),
@@ -744,34 +818,40 @@ pub(crate) fn read_changed_with_companion(
     })
 }
 
-/// Recursively collect files with the given extension under `dir`, bounded by
-/// `max_depth` to avoid runaway traversal. Returns an empty vec when `dir` is
-/// missing or unreadable. Used by global-store adapters (Claude, Codex) whose
-/// transcripts live in nested date/slug directories.
-pub(crate) fn collect_files_with_ext(dir: &Path, ext: &str, max_depth: u8) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    collect_files_inner(dir, ext, max_depth, 0, &mut out);
-    out
-}
-
-fn collect_files_inner(dir: &Path, ext: &str, max_depth: u8, depth: u8, out: &mut Vec<PathBuf>) {
-    if depth > max_depth {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+fn read_file_to_string_bounded(path: &Path, max_bytes: u64) -> Option<String> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            log_source_skip(path, "open transcript file", &error);
+            return None;
+        }
     };
-    for entry in entries.flatten() {
-        // Rebuild from the caller's root spelling. On Windows, DirEntry::path
-        // may add an extended-length prefix, which would create a second
-        // durable cursor key for the same transcript.
-        let path = dir.join(entry.file_name());
-        if path.is_dir() {
-            collect_files_inner(&path, ext, max_depth, depth + 1, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
-            out.push(path);
+    let max_bytes = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+    match read_bounded_to_string(&mut file, max_bytes) {
+        Ok(WireReadOutcome::Ready(contents)) => Some(contents),
+        Ok(WireReadOutcome::Oversized) => None,
+        Err(error) => {
+            log_source_skip(path, "read transcript file", &error);
+            None
         }
     }
+}
+
+/// Recursively collect files with the given extension under `dir`, bounded by
+/// `max_depth` and [`TranscriptDiscoveryBounds::default_walk`] (file count,
+/// path bytes, metadata charge, cumulative discovery bytes). Directory
+/// symlinks are not followed. Returns an empty vec when `dir` is missing or
+/// unreadable. Used by global-store adapters (Claude, Codex) whose transcripts
+/// live in nested date/slug directories.
+#[cfg(test)]
+pub(crate) fn collect_files_with_ext(dir: &Path, ext: &str, max_depth: u8) -> Vec<PathBuf> {
+    collect_files_with_ext_bounded(
+        dir,
+        ext,
+        max_depth,
+        TranscriptDiscoveryBounds::default_walk(),
+    )
+    .paths
 }
 
 /// File modification time in epoch seconds, or 0 when unavailable.
@@ -870,6 +950,17 @@ pub(crate) fn content_hash64(contents: &str) -> u64 {
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
     u64::from_be_bytes(bytes)
+}
+
+pub(crate) fn canonical_framed_sha256(domain: &[u8], parts: &[&[u8]]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update((domain.len() as u64).to_be_bytes());
+    hasher.update(domain);
+    for part in parts {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    hex::encode(hasher.finalize())
 }
 
 #[cfg(test)]

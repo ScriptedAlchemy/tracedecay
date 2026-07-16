@@ -5,8 +5,17 @@ use tracedecay::sessions::cursor::{open_project_session_db, project_session_db_p
 use tracedecay::sessions::source::{
     StoredCursor, TranscriptIngestError, TranscriptSource, ingest_source,
 };
+use tracedecay::sessions::{SessionProvider, ingest_global_sources_for_provider};
+use tracedecay::store::GlobalDbObservationStore;
+use tracedecay_store::ObservationProjectionStore;
 
-use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree, setup};
+use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
+use crate::restart_atomicity::{
+    durable_table_count, mark_test_project, observation_source_cursor, set_projection_failure,
+};
+use crate::support::{
+    assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo, setup,
+};
 
 pub(super) fn vscode_storage_root(
     home: &std::path::Path,
@@ -85,56 +94,38 @@ pub(super) fn write_task(
     project: &std::path::Path,
     task_id: &str,
 ) -> std::path::PathBuf {
+    write_task_with_api_filename(root, project, task_id, "api_conversation_history.json")
+}
+
+/// Write a Cline-family task using checked-in golden fixtures under
+/// `tests/fixtures/transcript_golden/cline_like/`.
+pub(super) fn write_task_with_api_filename(
+    root: &std::path::Path,
+    project: &std::path::Path,
+    task_id: &str,
+    api_filename: &str,
+) -> std::path::PathBuf {
     let dir = root.join(task_id);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("task_metadata.json"),
-        serde_json::to_string_pretty(&serde_json::json!({
-            "task": "Investigate the billing pipeline regression",
-            "workspacePath": project
-        }))
-        .unwrap(),
+    let metadata =
+        include_str!("../fixtures/transcript_golden/cline_like/input/task_metadata.json")
+            .replace("<PROJECT_ROOT>", &project.to_string_lossy());
+    std::fs::write(dir.join("task_metadata.json"), metadata).unwrap();
+    let api = dir.join(api_filename);
+    let fixture_name = match api_filename {
+        "api_messages.json" => api_filename,
+        _ => "api_conversation_history.json",
+    };
+    let history = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/transcript_golden/cline_like/input")
+            .join(fixture_name),
     )
     .unwrap();
-    let api = dir.join("api_conversation_history.json");
-    std::fs::write(
-        &api,
-        serde_json::to_string_pretty(&serde_json::json!([
-            {
-                "role": "user",
-                "content": "Investigate the billing pipeline regression",
-                "ts": 1_800_000_000_i64
-            },
-            {
-                "role": "assistant",
-                "model": "claude-sonnet-4.6",
-                "content": [
-                    {"type": "text", "text": "The billing pipeline regression is fixed."},
-                    {"type": "tool_use", "name": "read_file"}
-                ],
-                "ts": 1_800_000_010_i64
-            }
-        ]))
-        .unwrap(),
-    )
-    .unwrap();
+    std::fs::write(&api, history).unwrap();
     std::fs::write(
         dir.join("ui_messages.json"),
-        serde_json::to_string_pretty(&serde_json::json!([
-            {
-                "type": "say",
-                "say": "api_req_started",
-                "ts": 1_800_000_005_i64,
-                "text": serde_json::json!({
-                    "tokensIn": 1200,
-                    "tokensOut": 350,
-                    "cacheReads": 8000,
-                    "cacheWrites": 500,
-                    "cost": 0.12
-                }).to_string()
-            }
-        ]))
-        .unwrap(),
+        include_str!("../fixtures/transcript_golden/cline_like/input/ui_messages.json"),
     )
     .unwrap();
     api
@@ -441,7 +432,7 @@ async fn cline_usage_index_skips_unemitted_assistant_entries() {
         2
     );
     let hits = db
-        .search_session_messages("cline", None, "usage target", 10)
+        .search_session_messages("cline", None, "target", 10)
         .await;
     assert_eq!(hits.len(), 1);
     let metadata: serde_json::Value =
@@ -450,7 +441,15 @@ async fn cline_usage_index_skips_unemitted_assistant_entries() {
     let usage = db
         .search_session_messages("cline", None, "input_tokens", 10)
         .await;
-    assert_eq!(usage.len(), 1);
+    assert_eq!(
+        usage.len(),
+        1,
+        "usage hits: {:?}",
+        usage
+            .iter()
+            .map(|hit| (&hit.message.message_id, &hit.message.text))
+            .collect::<Vec<_>>()
+    );
     let metadata: serde_json::Value =
         serde_json::from_str(usage[0].message.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["usage"]["input_tokens"], 777);
@@ -676,4 +675,298 @@ async fn cline_like_user_scope_includes_only_unregistered_tasks() {
     let session = db.get_session("cline", "user-task").await.unwrap();
     assert_eq!(session.project_key, "user");
     assert_eq!(session.project_path, "user");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cline_like_replacement_projection_replay_is_deterministic() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Table-driven across the three Cline-like storage roots.
+    for (provider, extension_id, selected_provider) in [
+        ("cline", "saoudrizwan.claude-dev", SessionProvider::Cline),
+        (
+            "roo-code",
+            "rooveterinaryinc.roo-cline",
+            SessionProvider::RooCode,
+        ),
+        ("kilo", "kilocode.kilo-code", SessionProvider::Kilo),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let (home, project) = setup(&tmp);
+        let _home = EnvVarGuard::set("HOME", &home);
+        init_git_repo(&project);
+        mark_test_project(&project);
+        let root = vscode_storage_root(&home, extension_id);
+        let session_id = format!("{provider}-fault");
+        let history = write_task(&root, &project, &session_id);
+
+        let db = open_project_session_db(&project).await.unwrap();
+        let _ = ingest_global_sources_for_provider(&db, &project, Some(selected_provider)).await;
+        assert_eq!(
+            db.session_message_count().await.unwrap(),
+            3,
+            "{provider}: initial durable message cardinality"
+        );
+        let prefix_cursor = observation_source_cursor(&db, provider, &session_id, &project)
+            .await
+            .unwrap_or_else(|| panic!("{provider}: committed observation cursor"));
+        assert_eq!(prefix_cursor.position(), 3, "{provider}: initial frontier");
+        drop(db);
+
+        // Exact restart is a no-op.
+        let replay = open_project_session_db(&project).await.unwrap();
+        assert_eq!(
+            ingest_global_sources_for_provider(&replay, &project, Some(selected_provider))
+                .await
+                .messages_upserted,
+            0,
+            "{provider}: restart no-op"
+        );
+        assert_eq!(
+            observation_source_cursor(&replay, provider, &session_id, &project).await,
+            Some(prefix_cursor.clone()),
+            "{provider}: frontier unchanged on restart"
+        );
+        drop(replay);
+
+        // Replacement with an extra durable turn, interrupted by projection failure.
+        std::fs::write(
+            &history,
+            serde_json::to_string_pretty(&serde_json::json!([
+                {
+                    "role": "user",
+                    "content": "Investigate the billing pipeline regression",
+                    "ts": 1_800_000_000_i64
+                },
+                {
+                    "role": "assistant",
+                    "content": "The billing pipeline regression is fixed.",
+                    "ts": 1_800_000_010_i64
+                },
+                {
+                    "role": "user",
+                    "content": format!("{provider} projection retry suffix"),
+                    "ts": 1_800_000_020_i64
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        set_projection_failure(&project, true).await;
+        let rejected = open_project_session_db(&project).await.unwrap();
+        let _ =
+            ingest_global_sources_for_provider(&rejected, &project, Some(selected_provider)).await;
+        let committed_cursor =
+            observation_source_cursor(&rejected, provider, &session_id, &project)
+                .await
+                .unwrap_or_else(|| panic!("{provider}: committed observation cursor"));
+        assert_ne!(
+            committed_cursor.generation(),
+            prefix_cursor.generation(),
+            "{provider}: replacement starts a new snapshot generation"
+        );
+        assert_eq!(
+            committed_cursor.position(),
+            3,
+            "{provider}: observation frontier commits before projection acknowledgement"
+        );
+        assert_eq!(
+            rejected.session_message_count().await.unwrap(),
+            3,
+            "{provider}: failed projection preserves prior durable cardinality"
+        );
+        assert!(
+            rejected
+                .search_session_messages(provider, None, "projection retry suffix", 10)
+                .await
+                .is_empty(),
+            "{provider}: failed suffix must stay non-durable"
+        );
+        drop(rejected);
+
+        set_projection_failure(&project, false).await;
+        let recovered = open_project_session_db(&project).await.unwrap();
+        let _ =
+            ingest_global_sources_for_provider(&recovered, &project, Some(selected_provider)).await;
+        assert_eq!(
+            recovered
+                .search_session_messages(provider, None, "projection retry suffix", 10)
+                .await
+                .len(),
+            1,
+            "{provider}: recovered suffix searchable"
+        );
+        assert_eq!(
+            observation_source_cursor(&recovered, provider, &session_id, &project).await,
+            Some(committed_cursor),
+            "{provider}: retry must not advance the committed observation frontier"
+        );
+        assert_eq!(
+            ingest_global_sources_for_provider(&recovered, &project, Some(selected_provider),)
+                .await
+                .messages_upserted,
+            0,
+            "{provider}: post-recovery replay"
+        );
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cline_delimiter_ambiguous_native_ids_survive_restart_and_rebuild() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+    let root = vscode_storage_root(&home, "saoudrizwan.claude-dev");
+    let left_path = write_task(&root, &project, "a:b");
+    let right_path = write_task(&root, &project, "a");
+    std::fs::write(
+        left_path,
+        serde_json::json!([{
+            "id": "c",
+            "role": "assistant",
+            "content": "Cline delimiter collision fixture",
+            "ts": 1_800_000_000_i64
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        right_path,
+        serde_json::json!([{
+            "id": "b:c",
+            "role": "assistant",
+            "content": "Cline delimiter collision fixture",
+            "ts": 1_800_000_000_i64
+        }])
+        .to_string(),
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Cline)).await;
+    let hits = db
+        .search_session_messages("cline", None, "delimiter collision fixture", 10)
+        .await;
+    assert_eq!(hits.len(), 2);
+    let mut ids = hits
+        .iter()
+        .map(|hit| hit.message.message_id.as_str())
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 2);
+    assert!(
+        ids.iter()
+            .all(|id| id.starts_with("cline-like.message-id.v2."))
+    );
+    drop(db);
+
+    let reopened = open_project_session_db(&project).await.unwrap();
+    assert_eq!(
+        ingest_global_sources_for_provider(&reopened, &project, Some(SessionProvider::Cline))
+            .await
+            .messages_upserted,
+        0
+    );
+    let committed = durable_table_count(&project, "observations").await;
+    GlobalDbObservationStore::new(&reopened)
+        .rebuild_projection(committed)
+        .await
+        .unwrap();
+    let rebuilt = reopened
+        .search_session_messages("cline", None, "delimiter collision fixture", 10)
+        .await;
+    assert_eq!(rebuilt.len(), 2);
+    assert_ne!(rebuilt[0].message.message_id, rebuilt[1].message.message_id);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn golden_fixture_ingests_through_each_provider_discriminator() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let manifest: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/transcript_golden/cline_like/manifest.json"
+    ))
+    .expect("cline_like golden manifest");
+    assert_eq!(manifest["family"], "cline_like");
+    assert!(
+        manifest["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .any(|note| note
+                .as_str()
+                .is_some_and(|text| text.contains("UnknownVersion"))),
+        "manifest must document the UnknownVersion protocol gap"
+    );
+
+    for (provider, extension_id, selected_provider, api_filename) in [
+        (
+            "cline",
+            "saoudrizwan.claude-dev",
+            SessionProvider::Cline,
+            "api_conversation_history.json",
+        ),
+        (
+            "roo-code",
+            "rooveterinaryinc.roo-cline",
+            SessionProvider::RooCode,
+            "api_messages.json",
+        ),
+        (
+            "kilo",
+            "kilocode.kilo-code",
+            SessionProvider::Kilo,
+            "api_conversation_history.json",
+        ),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let (home, project) = setup(&tmp);
+        let _home = EnvVarGuard::set("HOME", &home);
+        init_git_repo(&project);
+        mark_test_project(&project);
+        let root = vscode_storage_root(&home, extension_id);
+        let session_id = format!("{provider}-golden");
+        let api_path = write_task_with_api_filename(&root, &project, &session_id, api_filename);
+        assert!(
+            api_path.ends_with(api_filename),
+            "{provider}: must exercise real api history filename {api_filename}"
+        );
+        assert!(
+            !api_path
+                .to_string_lossy()
+                .contains("api_conversation_history.json")
+                || api_filename == "api_conversation_history.json",
+            "{provider}: Roo must not silently fall back to Cline filename"
+        );
+
+        let db = open_project_session_db(&project).await.unwrap();
+        let _ = ingest_global_sources_for_provider(&db, &project, Some(selected_provider)).await;
+        let hits = db
+            .search_session_messages(provider, None, "billing pipeline", 10)
+            .await;
+        assert!(
+            hits.iter()
+                .any(|hit| hit.message.tool_names.as_deref() == Some("read_file")),
+            "{provider}: golden tool_use name must reach searchable projection via production ingest"
+        );
+        assert!(
+            hits.iter().all(|hit| hit.message.provider == provider),
+            "{provider}: searchable rows must carry the provider discriminator, not a relabel"
+        );
+        assert!(
+            hits.iter().all(|hit| hit.message.source_path.is_none()),
+            "{provider}: canonical projection must not retain the native source path"
+        );
+    }
 }

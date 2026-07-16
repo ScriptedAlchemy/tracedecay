@@ -9,17 +9,42 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::global_db::{GlobalDb, ParseOffset};
-use tracedecay::sessions::SessionRecord;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::hermes::{
-    ProjectIngestDestination, ingest_for_project, ingest_homes, ingest_homes_for_projects,
-    ingest_user_homes,
+    ProjectIngestDestination, ingest_for_project as ingest_for_project_with_id,
+    ingest_homes as ingest_homes_with_id, ingest_homes_for_projects, ingest_user_homes,
 };
 use tracedecay::sessions::lcm::LcmPreflightRequest;
+use tracedecay::sessions::source::TranscriptIngestStats;
+use tracedecay::sessions::{SessionProvider, SessionRecord, ingest_global_sources_for_provider};
+use tracedecay_domain::{MAX_OBSERVATION_RECORD_BYTES, ProjectId};
 
-use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree};
+use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
+use crate::restart_atomicity::{
+    durable_table_count, fixture_project_id, mark_test_project, observation_source_cursor,
+    set_projection_failure,
+};
+use crate::support::{
+    assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo,
+};
 
 const SESSION_ID: &str = "20260101_000000_abc123";
+
+async fn ingest_for_project(db: &GlobalDb, project_root: &Path) -> TranscriptIngestStats {
+    ingest_for_project_with_id(db, project_root, fixture_project_id()).await
+}
+
+async fn ingest_homes(
+    db: &GlobalDb,
+    hermes_homes: &[PathBuf],
+    project_root: &Path,
+) -> TranscriptIngestStats {
+    ingest_homes_with_id(db, hermes_homes, project_root, fixture_project_id()).await
+}
+
+fn named_project_id(name: &str) -> ProjectId {
+    ProjectId::new(format!("tracedecay-hermes-{name}-fixture")).unwrap()
+}
 
 #[tokio::test]
 async fn hermes_row_cursor_cannot_regress_during_overlapping_sweeps() {
@@ -175,13 +200,11 @@ async fn write_hermes_profile(
     // Real Hermes row shapes: a session_meta bootstrap row (must be skipped),
     // a user prompt, an assistant tool-call turn with empty content, a tool
     // result keyed by tool_name, and a final assistant reply.
-    let tool_calls = serde_json::json!([{
-        "id": "call_FBvwGfCC9lJrXPvOqpDHcjYn",
-        "call_id": "call_FBvwGfCC9lJrXPvOqpDHcjYn",
-        "type": "function",
-        "function": {"name": "terminal", "arguments": "{\"command\":\"cargo test billing\"}"}
-    }])
-    .to_string();
+    let tool_fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/provider_normalization/hermes/assistant_tool_call.input.json"
+    ))
+    .expect("checked-in Hermes tool-call row");
+    let tool_calls = tool_fixture["tool_calls"].to_string();
     for (role, content, tool_calls, tool_name, ts, finish) in [
         (
             "session_meta",
@@ -201,10 +224,10 @@ async fn write_hermes_profile(
         ),
         (
             "assistant",
-            Some(""),
+            tool_fixture["content"].as_str(),
             Some(tool_calls.as_str()),
             None,
-            1_780_629_310.5,
+            tool_fixture["timestamp"].as_f64().unwrap(),
             Some("tool_calls"),
         ),
         (
@@ -260,6 +283,10 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
     assert_eq!(stats.messages_upserted, 4);
     assert_eq!(stats.sessions_upserted, 1);
 
+    let session = db
+        .get_session("hermes", SESSION_ID)
+        .await
+        .expect("hermes session should be stored");
     let results = db
         .search_session_messages(
             "hermes",
@@ -268,13 +295,20 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
             10,
         )
         .await;
-    assert!(results.iter().any(|hit| hit.message.role == "user"));
-    assert!(results.iter().any(|hit| hit.message.role == "assistant"));
     assert!(
-        results
-            .iter()
-            .all(|hit| hit.message.model.as_deref() == Some("gpt-5.5"))
+        results.iter().any(|hit| hit.message.role == "user"),
+        "expected pinned-project user hit; projected session path: {:?}",
+        session.project_path
     );
+    assert!(results.iter().any(|hit| hit.message.role == "assistant"));
+    assert!(results.iter().any(|hit| {
+        hit.message.role == "user" && hit.message.model.as_deref() == Some("gpt-5.5")
+    }));
+    assert!(results.iter().any(|hit| {
+        hit.message.kind.as_deref() == Some("message")
+            && hit.message.model.as_deref() == Some("gpt-5.5")
+            && hit.message.text.contains("billing pipeline test is fixed")
+    }));
     // REAL epoch-second timestamps land truncated to whole seconds.
     assert!(
         results
@@ -282,10 +316,6 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
             .any(|hit| hit.message.timestamp == Some(1_780_629_300))
     );
 
-    let session = db
-        .get_session("hermes", SESSION_ID)
-        .await
-        .expect("hermes session should be stored");
     assert_eq!(session.title.as_deref(), Some("Billing pipeline fix"));
     assert_eq!(session.started_at, Some(1_780_629_300));
     assert_eq!(session.ended_at, Some(1_780_629_340));
@@ -312,15 +342,18 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
             .is_none()
     );
 
-    // The assistant tool-call turn has no content; its text falls back to the
-    // tool_calls JSON and the tool name is extracted.
+    // Empty-content assistant tool-call turns project typed ToolInvocation facts
+    // (not a synthesized Message from tool_calls JSON).
     let tool_turn = db
         .get_session_message("hermes", &format!("{SESSION_ID}:3"))
         .await
         .expect("assistant tool-call turn should be stored");
     assert_eq!(tool_turn.role, "assistant");
-    assert!(tool_turn.text.contains("call_FBvwGfCC9lJrXPvOqpDHcjYn"));
+    assert_eq!(tool_turn.kind.as_deref(), Some("tool_invocation"));
+    assert!(tool_turn.text.contains("cargo test billing"));
+    assert!(!tool_turn.text.contains("call_FBvwGfCC9lJrXPvOqpDHcjYn"));
     assert_eq!(tool_turn.tool_names.as_deref(), Some("terminal"));
+    assert!(tool_turn.model.is_none());
     let tool_metadata: serde_json::Value =
         serde_json::from_str(tool_turn.metadata_json.as_deref().unwrap()).unwrap();
     assert_metadata_path_eq(&tool_metadata["hermes_session_cwd"], &linked_worktree);
@@ -357,7 +390,6 @@ async fn hermes_parent_session_id_marks_subagent_session() {
     let db = open_project_session_db(&project).await.unwrap();
     let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
     assert_eq!(stats.messages_upserted, 4);
-
     let session = db
         .get_session("hermes", SESSION_ID)
         .await
@@ -429,10 +461,15 @@ async fn hermes_projection_sweep_does_not_mutate_runtime_owned_raw_messages() {
         .await
         .expect("runtime-owned raw message should exist before the sweep");
     assert_eq!(raw_before.content, runtime_owned_raw);
+    assert!(
+        db.get_session_message("hermes", &raw_message_id)
+            .await
+            .is_none(),
+        "LCM preflight should not create a session-message projection"
+    );
 
     let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
     assert_eq!(stats.messages_upserted, 4);
-
     // If the Hermes sweep ever switches back to full transcript writes, this
     // message id would overwrite the runtime-owned raw turn with the assistant
     // tool-call JSON from `state.db` row 3.
@@ -449,7 +486,8 @@ async fn hermes_projection_sweep_does_not_mutate_runtime_owned_raw_messages() {
         .await
         .expect("projection row should still be searchable");
     assert_eq!(projection.role, "assistant");
-    assert!(projection.text.contains("call_FBvwGfCC9lJrXPvOqpDHcjYn"));
+    assert_eq!(projection.kind.as_deref(), Some("tool_invocation"));
+    assert!(projection.text.contains("cargo test billing"));
     assert_eq!(projection.tool_names.as_deref(), Some("terminal"));
 }
 
@@ -651,10 +689,12 @@ async fn hermes_shared_sweep_routes_one_source_to_multiple_project_stores() {
         ProjectIngestDestination {
             db: &first_db,
             project_root: &first_project,
+            project_id: named_project_id("first-project"),
         },
         ProjectIngestDestination {
             db: &second_db,
             project_root: &second_project,
+            project_id: named_project_id("second-project"),
         },
     ];
     let stats = ingest_homes_for_projects(std::slice::from_ref(&hermes_home), &destinations).await;
@@ -718,7 +758,12 @@ async fn hermes_shared_sweep_cold_history_completes_under_sixty_seconds() {
     let destinations = dbs
         .iter()
         .zip(&project_roots)
-        .map(|(db, project_root)| ProjectIngestDestination { db, project_root })
+        .enumerate()
+        .map(|(index, (db, project_root))| ProjectIngestDestination {
+            db,
+            project_root,
+            project_id: named_project_id(&format!("benchmark-{index}")),
+        })
         .collect::<Vec<_>>();
 
     let started = std::time::Instant::now();
@@ -757,6 +802,10 @@ async fn sweep_skips_rewound_rows_and_surfaces_reasoning_only_turns() {
     let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
 
     let conn = open_state_db(&state_db).await;
+    let reasoning_fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/provider_normalization/hermes/assistant_reasoning.input.json"
+    ))
+    .expect("checked-in Hermes reasoning-only row");
     // A rewound (soft-deleted) turn and a reasoning-only assistant turn.
     conn.execute(
         "INSERT INTO messages (session_id, role, content, timestamp, active)
@@ -767,8 +816,14 @@ async fn sweep_skips_rewound_rows_and_surfaces_reasoning_only_turns() {
     .unwrap();
     conn.execute(
         "INSERT INTO messages (session_id, role, content, reasoning, timestamp)
-         VALUES (?1, 'assistant', '', 'thinking about the billing fix', 1780629410.0)",
-        libsql::params![SESSION_ID],
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        libsql::params![
+            SESSION_ID,
+            reasoning_fixture["role"].as_str().unwrap(),
+            reasoning_fixture["content"].as_str().unwrap(),
+            reasoning_fixture["reasoning"].as_str().unwrap(),
+            reasoning_fixture["timestamp"].as_f64().unwrap(),
+        ],
     )
     .await
     .unwrap();
@@ -786,15 +841,26 @@ async fn sweep_skips_rewound_rows_and_surfaces_reasoning_only_turns() {
         .get_session_message("hermes", &format!("{SESSION_ID}:7"))
         .await
         .expect("reasoning-only turn should be searchable");
+    assert_eq!(reasoning_turn.kind.as_deref(), Some("reasoning_visible"));
     assert!(
         reasoning_turn
             .text
             .contains("thinking about the billing fix")
     );
+    assert!(reasoning_turn.model.is_none());
     let hits = db
         .search_session_messages("hermes", None, "rewound secret prompt", 10)
         .await;
     assert!(hits.is_empty(), "rewound rows must not surface as history");
+    let reasoning_hits = db
+        .search_session_messages("hermes", None, "thinking about the billing fix", 10)
+        .await;
+    assert!(
+        reasoning_hits
+            .iter()
+            .any(|hit| hit.message.kind.as_deref() == Some("reasoning_visible")),
+        "typed reasoning facts must be independently searchable"
+    );
 }
 
 #[tokio::test]
@@ -1060,4 +1126,401 @@ async fn user_sweep_keeps_registered_session_cwd_as_canonical_history() {
 
     assert_eq!(stats.messages_upserted, 3);
     assert!(user_db.get_session("hermes", SESSION_ID).await.is_some());
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn hermes_projection_failure_commits_row_frontier_and_replays_once() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, project) = setup(&tmp);
+    let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
+    let user_home = hermes_home.parent().unwrap();
+    let _home = EnvVarGuard::set("HOME", user_home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes)).await;
+    let before = db.session_message_count().await.unwrap();
+    assert_eq!(before, 4);
+    let prefix_cursor = observation_source_cursor(&db, "hermes", SESSION_ID, &project)
+        .await
+        .expect("committed Hermes observation cursor");
+    assert!(prefix_cursor.position() >= u64::try_from(before).unwrap());
+    drop(db);
+
+    let conn = open_state_db(&state_db).await;
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp)
+         VALUES (?1, 'user', 'Hermes projection retry suffix', 1780629410.1)",
+        libsql::params![SESSION_ID],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    set_projection_failure(&project, true).await;
+    let rejected = open_project_session_db(&project).await.unwrap();
+    let _ = ingest_global_sources_for_provider(&rejected, &project, Some(SessionProvider::Hermes))
+        .await;
+    let committed_cursor = observation_source_cursor(&rejected, "hermes", SESSION_ID, &project)
+        .await
+        .expect("committed Hermes observation cursor");
+    assert_eq!(committed_cursor.generation(), prefix_cursor.generation());
+    assert_eq!(committed_cursor.position(), prefix_cursor.position() + 1);
+    assert_eq!(rejected.session_message_count().await.unwrap(), before);
+    assert!(
+        rejected
+            .search_session_messages("hermes", None, "projection retry suffix", 10)
+            .await
+            .is_empty()
+    );
+    drop(rejected);
+
+    set_projection_failure(&project, false).await;
+    let recovered = open_project_session_db(&project).await.unwrap();
+    let _ = ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Hermes))
+        .await;
+    assert_eq!(recovered.session_message_count().await.unwrap(), before + 1);
+    assert_eq!(
+        recovered
+            .search_session_messages("hermes", None, "projection retry suffix", 10)
+            .await
+            .len(),
+        1
+    );
+    assert_eq!(
+        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Hermes))
+            .await
+            .messages_upserted,
+        0
+    );
+    assert_eq!(
+        observation_source_cursor(&recovered, "hermes", SESSION_ID, &project).await,
+        Some(committed_cursor)
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn hermes_malformed_row_is_covered_and_valid_suffix_resumes_once() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, project) = setup(&tmp);
+    let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
+    let user_home = hermes_home.parent().unwrap();
+    let _home = EnvVarGuard::set("HOME", user_home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes)).await;
+    let before = db.session_message_count().await.unwrap();
+    assert_eq!(before, 4);
+    let prefix_cursor = observation_source_cursor(&db, "hermes", SESSION_ID, &project)
+        .await
+        .expect("committed Hermes observation cursor");
+    assert!(prefix_cursor.position() >= u64::try_from(before).unwrap());
+
+    let conn = open_state_db(&state_db).await;
+    // Incomplete/malformed tool_calls JSON on an otherwise complete row.
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, tool_calls, timestamp, finish_reason)
+         VALUES (?1, 'assistant', '', '{not-json', 1780629420.2, 'tool_calls')",
+        libsql::params![SESSION_ID],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let covered =
+        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes)).await;
+    assert_eq!(covered.messages_upserted, 0);
+    assert_eq!(db.session_message_count().await.unwrap(), before);
+    let malformed_cursor = observation_source_cursor(&db, "hermes", SESSION_ID, &project)
+        .await
+        .expect("committed Hermes observation cursor");
+    assert_eq!(malformed_cursor.position(), prefix_cursor.position() + 1);
+
+    let conn = open_state_db(&state_db).await;
+    conn.execute(
+        "UPDATE messages
+         SET content = 'Repaired Hermes row at covered identity',
+             tool_calls = '[{\"id\":\"repaired-call\",\"type\":\"function\",\"function\":{\"name\":\"repair\",\"arguments\":\"{}\"}}]'
+         WHERE id = 5",
+        (),
+    )
+        .await
+        .unwrap();
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp)
+         VALUES (?1, 'user', 'Valid Hermes row after malformed tool_calls', 1780629430.3)",
+        libsql::params![SESSION_ID],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    assert_eq!(
+        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes))
+            .await
+            .messages_upserted,
+        1
+    );
+    assert_eq!(
+        observation_source_cursor(&db, "hermes", SESSION_ID, &project)
+            .await
+            .expect("committed Hermes observation cursor")
+            .position(),
+        malformed_cursor.position() + 1
+    );
+    assert!(
+        db.search_session_messages("hermes", None, "Repaired", 10)
+            .await
+            .is_empty(),
+        "a malformed row already covered at row id 5 must not be reinterpreted in place"
+    );
+    assert_eq!(
+        db.search_session_messages("hermes", None, "Valid", 10)
+            .await
+            .len(),
+        1
+    );
+    assert_eq!(
+        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes))
+            .await
+            .messages_upserted,
+        0
+    );
+    assert_eq!(
+        observation_source_cursor(&db, "hermes", SESSION_ID, &project)
+            .await
+            .expect("committed Hermes observation cursor")
+            .position(),
+        malformed_cursor.position() + 1
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn hermes_conflicting_identity_does_not_overwrite_committed_observation() {
+    // Hermes derives native_record_id from immutable message evidence (content/
+    // role/timestamp/tool fields), while the canonical envelope still embeds the
+    // generation-local SQLite row range. A later row that reuses that evidence
+    // therefore collides on observation identity with a different payload range
+    // and must fail closed without overwriting the earlier projection.
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, project) = setup(&tmp);
+    let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
+    let user_home = hermes_home.parent().unwrap();
+    let _home = EnvVarGuard::set("HOME", user_home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes)).await;
+    let before = db.session_message_count().await.unwrap();
+    assert_eq!(before, 4);
+    assert_eq!(
+        db.search_session_messages("hermes", None, "fixed", 10)
+            .await
+            .len(),
+        1
+    );
+    let prefix_cursor = observation_source_cursor(&db, "hermes", SESSION_ID, &project)
+        .await
+        .expect("committed Hermes observation cursor");
+
+    let conn = open_state_db(&state_db).await;
+    // Same immutable message evidence as the final assistant row in write_hermes_profile.
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp, finish_reason)
+         VALUES (?1, 'assistant', 'The billing pipeline test is fixed.', 1780629330.9, 'stop')",
+        libsql::params![SESSION_ID],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes)).await;
+    assert_eq!(db.session_message_count().await.unwrap(), before);
+    assert_eq!(
+        db.search_session_messages("hermes", None, "fixed", 10)
+            .await
+            .len(),
+        1
+    );
+    assert!(
+        db.search_session_messages("hermes", None, "deterministic conflict winner", 10)
+            .await
+            .is_empty()
+    );
+    // Collision fails closed before advancing past the conflicting row.
+    assert_eq!(
+        observation_source_cursor(&db, "hermes", SESSION_ID, &project).await,
+        Some(prefix_cursor)
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn hermes_observation_commit_before_ack_survives_reopen() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, project) = setup(&tmp);
+    let _state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
+    let user_home = hermes_home.parent().unwrap();
+    let _home = EnvVarGuard::set("HOME", user_home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+
+    drop(open_project_session_db(&project).await.unwrap());
+    set_projection_failure(&project, true).await;
+
+    let rejected = open_project_session_db(&project).await.unwrap();
+    let _ = ingest_global_sources_for_provider(&rejected, &project, Some(SessionProvider::Hermes))
+        .await;
+    assert_eq!(rejected.session_message_count().await.unwrap(), 0);
+    assert!(
+        rejected
+            .search_session_messages("hermes", None, "billing pipeline test is fixed", 10)
+            .await
+            .is_empty()
+    );
+    let committed_cursor = observation_source_cursor(&rejected, "hermes", SESSION_ID, &project)
+        .await
+        .expect("Hermes observation frontier commits before projection ack");
+    assert!(committed_cursor.position() > 0);
+    drop(rejected);
+
+    let observations = durable_table_count(&project, "observations").await;
+    let receipts = durable_table_count(&project, "sanitization_receipts").await;
+    let queued = durable_table_count(&project, "projection_queue").await;
+    assert!(
+        observations >= 1,
+        "Hermes observation commits before projection ack"
+    );
+    assert!(
+        receipts >= 1,
+        "Hermes sanitization receipts commit with observations"
+    );
+    assert!(
+        queued >= 1,
+        "Hermes projection work stays queued across the failed ack"
+    );
+
+    set_projection_failure(&project, false).await;
+    let recovered = open_project_session_db(&project).await.unwrap();
+    // Reopen drains the already-committed projection queue before source
+    // discovery runs, so the source replay itself is a no-op.
+    assert_eq!(
+        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Hermes))
+            .await
+            .messages_upserted,
+        0
+    );
+    assert_eq!(recovered.session_message_count().await.unwrap(), 4);
+    assert_eq!(
+        recovered
+            .search_session_messages("hermes", None, "fixed", 10)
+            .await
+            .len(),
+        1
+    );
+    assert_eq!(
+        durable_table_count(&project, "observations").await,
+        observations
+    );
+    assert_eq!(
+        durable_table_count(&project, "sanitization_receipts").await,
+        receipts
+    );
+    assert_eq!(durable_table_count(&project, "projection_queue").await, 0);
+    assert_eq!(
+        ingest_global_sources_for_provider(&recovered, &project, Some(SessionProvider::Hermes))
+            .await
+            .messages_upserted,
+        0
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn hermes_zeroblob_content_is_covered_without_payload_leak() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, project) = setup(&tmp);
+    let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
+    let user_home = hermes_home.parent().unwrap();
+    let _home = EnvVarGuard::set("HOME", user_home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let _ = ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes)).await;
+    let before = db.session_message_count().await.unwrap();
+    let prefix_cursor = observation_source_cursor(&db, "hermes", SESSION_ID, &project)
+        .await
+        .expect("committed Hermes observation cursor");
+
+    let conn = open_state_db(&state_db).await;
+    // Hostile payload exists only inside SQLite (zeroblob); Rust never builds it.
+    let hostile_bytes = MAX_OBSERVATION_RECORD_BYTES.saturating_add(1);
+    conn.execute(
+        &format!(
+            "INSERT INTO messages (session_id, role, content, timestamp)
+             VALUES ('{SESSION_ID}', 'user', zeroblob({hostile_bytes}), 1780629440.0)"
+        ),
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp)
+         VALUES (?1, 'assistant', 'Hermes row after zeroblob cover', 1780629450.0)",
+        libsql::params![SESSION_ID],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let covered =
+        ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Hermes)).await;
+    let after_count = db.session_message_count().await.unwrap();
+    assert_eq!(
+        after_count,
+        before + 1,
+        "zeroblob must not become a durable projected message; only the safe suffix may"
+    );
+    assert!(
+        covered.messages_upserted <= 1,
+        "zeroblob coverage must not count as a durable capture (upserted={})",
+        covered.messages_upserted
+    );
+    let after_cursor = observation_source_cursor(&db, "hermes", SESSION_ID, &project)
+        .await
+        .expect("committed Hermes observation cursor");
+    assert_eq!(
+        after_cursor.position(),
+        prefix_cursor.position() + 2,
+        "zeroblob row must advance coverage and the safe suffix must commit"
+    );
+    assert_eq!(
+        db.search_session_messages("hermes", None, "Hermes row after zeroblob cover", 10)
+            .await
+            .len(),
+        1
+    );
 }

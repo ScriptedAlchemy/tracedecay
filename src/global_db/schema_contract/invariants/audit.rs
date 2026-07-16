@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use libsql::{Connection, params};
 use tracedecay_domain::DurableObservationV1;
 use tracedecay_store::{
-    ObservationProjection, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
-    SessionMessageProjection,
+    ObservationProjection, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION,
+    SessionMessageProjection, WorkflowFactProjection,
 };
 
 use crate::global_db::global_db_operation_error;
@@ -155,7 +155,7 @@ pub(super) async fn audit_checkpoint_is_plausible(
                     SELECT last_sequence FROM observation_projection_checkpoints
                     WHERE projector_version = ?1
                 ), 0)",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION_V1],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -198,6 +198,7 @@ struct ProjectionAuthorityState {
     provenance_rows: i64,
     disposition_rows: i64,
     alias_rows: i64,
+    workflow_rows: i64,
     queued: bool,
 }
 
@@ -212,11 +213,13 @@ impl ProjectionAuthorityState {
                      WHERE projector_version = ?1 AND observation_id = ?2),
                     (SELECT COUNT(*) FROM observation_projection_aliases
                      WHERE projector_version = ?1 AND observation_id = ?2),
+                    (SELECT COUNT(*) FROM observation_workflow_facts
+                     WHERE projector_version = ?1 AND observation_id = ?2),
                     EXISTS(
                         SELECT 1 FROM projection_queue
                         WHERE observation_id = ?2
                     )",
-                params![SESSION_MESSAGE_PROJECTOR_VERSION_V1, observation_id],
+                params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
             )
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -237,15 +240,21 @@ impl ProjectionAuthorityState {
             alias_rows: row
                 .get(2)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            workflow_rows: row
+                .get(3)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
             queued: row
-                .get::<i64>(3)
+                .get::<i64>(4)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?
                 != 0,
         })
     }
 
     fn is_pending_message(self) -> bool {
-        self.provenance_rows == 0 && self.disposition_rows == 0 && self.queued
+        self.provenance_rows == 0
+            && self.disposition_rows == 0
+            && self.workflow_rows == 0
+            && self.queued
     }
 
     fn is_message(self) -> bool {
@@ -256,11 +265,15 @@ impl ProjectionAuthorityState {
         self.provenance_rows == 0
             && self.disposition_rows == 0
             && self.alias_rows == 0
+            && self.workflow_rows == 0
             && self.queued
     }
 
     fn is_skip(self) -> bool {
-        self.provenance_rows == 0 && self.disposition_rows == 1 && self.alias_rows == 0
+        self.provenance_rows == 0
+            && self.disposition_rows == 1
+            && self.alias_rows == 0
+            && self.workflow_rows == 0
     }
 }
 
@@ -276,7 +289,7 @@ impl ProjectionAliasRow {
                 "SELECT output_provider, output_message_id
                  FROM observation_projection_aliases
                  WHERE projector_version = ?1 AND observation_id = ?2",
-                params![SESSION_MESSAGE_PROJECTOR_VERSION_V1, observation_id],
+                params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
             )
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -305,23 +318,34 @@ struct ProjectionProvenanceRow {
 }
 
 impl ProjectionProvenanceRow {
-    async fn load(conn: &Connection, observation_id: &str) -> crate::errors::Result<Self> {
+    async fn load(
+        conn: &Connection,
+        observation_id: &str,
+        output_ordinal: i64,
+    ) -> crate::errors::Result<Option<Self>> {
         let mut rows = conn
             .query(
                 "SELECT receipt_id, output_provider, output_message_id,
                         output_digest, message_created
                  FROM observation_projection_provenance
-                 WHERE projector_version = ?1 AND observation_id = ?2",
-                params![SESSION_MESSAGE_PROJECTOR_VERSION_V1, observation_id],
+                 WHERE projector_version = ?1 AND observation_id = ?2
+                   AND output_ordinal = ?3",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    observation_id,
+                    output_ordinal
+                ],
             )
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let row = rows
+        let Some(row) = rows
             .next()
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?
-            .ok_or_else(|| authority_violation("projection provenance disappeared"))?;
-        Ok(Self {
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
             receipt_id: row
                 .get(0)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?,
@@ -337,7 +361,7 @@ impl ProjectionProvenanceRow {
             message_created: row
                 .get(4)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        })
+        }))
     }
 }
 
@@ -352,7 +376,7 @@ impl ProjectionDispositionRow {
             .query(
                 "SELECT receipt_id, reason FROM observation_projection_dispositions
                  WHERE projector_version = ?1 AND observation_id = ?2",
-                params![SESSION_MESSAGE_PROJECTOR_VERSION_V1, observation_id],
+                params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
             )
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -416,11 +440,9 @@ fn validate_alias_binding(
     unaliased: &ObservationProjection,
     projection: &SessionMessageProjection,
 ) -> crate::errors::Result<()> {
-    let ObservationProjection::Message(unaliased_projection) = unaliased else {
-        return Err(authority_violation(
-            "projection alias is ineligible for a skipped observation",
-        ));
-    };
+    let unaliased_projection = unaliased.message().ok_or_else(|| {
+        authority_violation("projection alias is ineligible without a message output")
+    })?;
     let message = projection.message();
     let unaliased_message = unaliased_projection.message();
     let mapped_suffix = format!("/{}", unaliased_message.message_id);
@@ -457,6 +479,32 @@ fn validate_provenance_row(
     Ok(())
 }
 
+async fn validate_message_projection_row(
+    conn: &Connection,
+    observation_id: &str,
+    projection: &SessionMessageProjection,
+) -> crate::errors::Result<bool> {
+    let message = projection.message();
+    let Some(provenance) =
+        ProjectionProvenanceRow::load(conn, observation_id, i64::from(projection.output_ordinal()))
+            .await?
+    else {
+        return Ok(false);
+    };
+    validate_provenance_row(&provenance, projection)?;
+    ProjectionOutputOwnership::load(conn, &message.provider, &message.message_id)
+        .await?
+        .validate()?;
+    crate::global_db::observation_projection::verify_output_authority(conn, projection)
+        .await
+        .map_err(|error| {
+            authority_violation(format!(
+                "projection output rows disagree with deterministic output: {error}"
+            ))
+        })?;
+    Ok(true)
+}
+
 async fn validate_message_projection(
     conn: &Connection,
     observation_id: &str,
@@ -481,28 +529,19 @@ async fn validate_message_projection(
             "projection authority must contain exactly one message outcome",
         ));
     }
-    let provenance = ProjectionProvenanceRow::load(conn, observation_id).await?;
-    validate_provenance_row(&provenance, projection)?;
-    let message = projection.message();
-    ProjectionOutputOwnership::load(conn, &message.provider, &message.message_id)
-        .await?
-        .validate()?;
-    crate::global_db::observation_projection::verify_output_authority(conn, projection)
-        .await
-        .map_err(|error| {
-            authority_violation(format!(
-                "projection output rows disagree with deterministic output: {error}"
-            ))
-        })
+    if !validate_message_projection_row(conn, observation_id, projection).await? {
+        return Err(authority_violation("projection provenance disappeared"));
+    }
+    Ok(())
 }
 
 async fn validate_skipped_projection(
     conn: &Connection,
     observation: &DurableObservationV1,
-    observation_id: &str,
     state: ProjectionAuthorityState,
     reason: ProjectionSkipReason,
 ) -> crate::errors::Result<()> {
+    let observation_id = observation.observation_id().as_str();
     if state.is_pending_skip() {
         return Ok(());
     }
@@ -522,6 +561,91 @@ async fn validate_skipped_projection(
     Ok(())
 }
 
+async fn validate_composite_projection(
+    conn: &Connection,
+    observation_id: &str,
+    state: ProjectionAuthorityState,
+    unaliased: &ObservationProjection,
+    message: Option<&SessionMessageProjection>,
+    derived_messages: &[SessionMessageProjection],
+    workflow_facts: &[WorkflowFactProjection],
+) -> crate::errors::Result<()> {
+    if workflow_facts.is_empty() && derived_messages.is_empty() {
+        return Err(authority_violation(
+            "composite projection has no additional output",
+        ));
+    }
+    if state.alias_rows > 1 || (message.is_none() && state.alias_rows != 0) {
+        return Err(authority_violation(
+            "composite projection has invalid alias authority",
+        ));
+    }
+    if state.alias_rows == 1 {
+        let projection = message.ok_or_else(|| {
+            authority_violation("projection alias is ineligible without a message output")
+        })?;
+        let alias = ProjectionAliasRow::load(conn, observation_id).await?;
+        validate_alias_binding(&alias, unaliased, projection)?;
+    }
+    let expected_message_rows =
+        i64::try_from(usize::from(message.is_some()) + derived_messages.len())
+            .map_err(|_| authority_violation("message projection count overflow"))?;
+    if state.queued {
+        if state.disposition_rows != 0
+            || state.workflow_rows != 0
+            || state.provenance_rows > expected_message_rows
+        {
+            return Err(authority_violation(
+                "pending composite projection contains invalid partial output",
+            ));
+        }
+        let mut validated_rows = 0_i64;
+        if let Some(projection) = message {
+            validated_rows +=
+                i64::from(validate_message_projection_row(conn, observation_id, projection).await?);
+        }
+        for projection in derived_messages {
+            validated_rows +=
+                i64::from(validate_message_projection_row(conn, observation_id, projection).await?);
+        }
+        if validated_rows != state.provenance_rows {
+            return Err(authority_violation(
+                "pending composite projection contains unexpected message authority",
+            ));
+        }
+        return Ok(());
+    }
+    if state.disposition_rows != 0 || state.provenance_rows != expected_message_rows {
+        return Err(authority_violation(
+            "composite projection has incomplete message authority",
+        ));
+    }
+    if let Some(projection) = message
+        && !validate_message_projection_row(conn, observation_id, projection).await?
+    {
+        return Err(authority_violation("projection provenance disappeared"));
+    }
+    for projection in derived_messages {
+        if !validate_message_projection_row(conn, observation_id, projection).await? {
+            return Err(authority_violation("projection provenance disappeared"));
+        }
+    }
+    let expected_workflow_rows = i64::try_from(workflow_facts.len())
+        .map_err(|_| authority_violation("workflow projection count overflow"))?;
+    if state.workflow_rows != expected_workflow_rows {
+        return Err(authority_violation(
+            "workflow projection authority has incomplete output",
+        ));
+    }
+    crate::global_db::observation_projection::verify_workflow_effects(conn, workflow_facts)
+        .await
+        .map_err(|error| {
+            authority_violation(format!(
+                "workflow projection rows disagree with deterministic output: {error}"
+            ))
+        })
+}
+
 async fn validate_projection_effect(
     conn: &Connection,
     observation: &DurableObservationV1,
@@ -536,12 +660,33 @@ async fn validate_projection_effect(
             })?;
     let observation_id = observation.observation_id().as_str();
     let state = ProjectionAuthorityState::load(conn, observation_id).await?;
-    match effect {
+    match &effect {
         ObservationProjection::Message(projection) => {
-            validate_message_projection(conn, observation_id, state, &unaliased, &projection).await
+            if state.workflow_rows != 0 {
+                return Err(authority_violation(
+                    "message projection contains unexpected workflow output",
+                ));
+            }
+            validate_message_projection(conn, observation_id, state, &unaliased, projection).await
+        }
+        ObservationProjection::Composite {
+            message,
+            derived_messages,
+            workflow_facts,
+        } => {
+            validate_composite_projection(
+                conn,
+                observation_id,
+                state,
+                &unaliased,
+                message.as_deref(),
+                derived_messages,
+                workflow_facts,
+            )
+            .await
         }
         ObservationProjection::Skipped(reason) => {
-            validate_skipped_projection(conn, observation, observation_id, state, reason).await
+            validate_skipped_projection(conn, observation, state, *reason).await
         }
     }
 }
@@ -581,7 +726,7 @@ async fn count_suffix_rows(
     let mut rows = conn
         .query(
             &query,
-            params![after_rowid, SESSION_MESSAGE_PROJECTOR_VERSION_V1],
+            params![after_rowid, SESSION_MESSAGE_PROJECTOR_VERSION],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -644,7 +789,7 @@ pub(super) async fn validate_projection_authority_suffix(
                 current_projection_checkpoint,
                 checkpoint.provenance_rowid,
                 checkpoint.disposition_rowid,
-                SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 checkpoint.alias_rowid
             ],
         )

@@ -6,8 +6,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
     CanonicalClaudeSanitizationReceiptMaterialV1, ClaudeObservationIdentityMaterialV1,
-    ComponentVersion, DurableClaudeObservationV1, ObservationContractError, PayloadReferenceV1,
-    RetentionClass, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    ComponentVersion, DurableClaudeObservationV1, ObservationContractError, ObservationId,
+    ObservationOrderingDomainV1, ObservationSourceIdentityV1, PayloadReferenceV1, RetentionClass,
+    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId,
 };
 
 use super::detect::{
@@ -15,6 +16,7 @@ use super::detect::{
     SanitizationFindingV1, normalize_key, redact_sensitive_values,
 };
 use super::parse::{ParseLimits, ParsedClaudeRecordV1, ParsedPolicyLimitViolation};
+use super::structural_id::{StructuralIdProtectionError, protect_sensitive_structural_id};
 
 pub const CLAUDE_SANITIZER_VERSION_V1: &str = "privacy.claude-record.v1";
 pub const OBSERVATION_SANITIZER_VERSION_V1: &str = "privacy.observation-record.v1";
@@ -35,6 +37,8 @@ pub enum PrivacySanitizerError {
     CanonicalEnvelopeRequired,
     #[error("canonical observation provider does not match observation identity")]
     CanonicalProviderMismatch,
+    #[error("canonical observation structural identity protection failed")]
+    StructuralIdentityProtection,
     #[error("privacy domain contract rejected sanitizer output")]
     DomainContract(#[source] ObservationContractError),
 }
@@ -48,6 +52,12 @@ impl From<ObservationContractError> for PrivacySanitizerError {
 impl From<DetectionError> for PrivacySanitizerError {
     fn from(_: DetectionError) -> Self {
         Self::DetectorUnavailable
+    }
+}
+
+impl From<StructuralIdProtectionError> for PrivacySanitizerError {
+    fn from(_: StructuralIdProtectionError) -> Self {
+        Self::StructuralIdentityProtection
     }
 }
 
@@ -219,7 +229,7 @@ impl ClaudeRecordSanitizerV1 {
     pub fn sanitize_parsed(
         &self,
         parsed: ParsedClaudeRecordV1,
-        identity: ClaudeObservationIdentityMaterialV1,
+        mut identity: ClaudeObservationIdentityMaterialV1,
         retention_class: RetentionClass,
     ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
         if !self.policy.valid {
@@ -231,6 +241,7 @@ impl ClaudeRecordSanitizerV1 {
         if parsed.ordering_domain() != identity.ordering_domain() {
             return Err(PrivacySanitizerError::OrderingDomainMismatch);
         }
+        let mut protected_identity_changed = false;
         if self.policy.provider_neutral {
             let canonical_provider = parsed
                 .canonical_provider()
@@ -238,13 +249,56 @@ impl ClaudeRecordSanitizerV1 {
             if canonical_provider != identity.source().provider() {
                 return Err(PrivacySanitizerError::CanonicalProviderMismatch);
             }
+            let invalid = || {
+                PrivacySanitizerError::DomainContract(
+                    ObservationContractError::InvalidCanonicalPayload,
+                )
+            };
+            if parsed
+                .value()
+                .pointer("/relations/session_id")
+                .and_then(Value::as_str)
+                != Some(identity.source().session_id().as_str())
+            {
+                return Err(invalid());
+            }
+            let stable_record_id = parsed
+                .value()
+                .get("stable_record_id")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            match identity.native_record_id() {
+                Some(native_record_id) if stable_record_id == native_record_id.as_str() => {}
+                None if canonical_provider.as_str() == "claude" => {}
+                Some(_) | None => return Err(invalid()),
+            }
+            let (protected_identity, identity_changed) = protect_observation_identity(&identity)?;
+            identity = protected_identity;
+            protected_identity_changed = identity_changed;
         }
         if let Err(kind) = parsed.verify_limits(self.parse_limits()) {
             return self.non_durable_outcome_from_digest(kind, parsed.raw_digest(), &identity);
         }
 
         let raw_digest = *parsed.raw_digest();
-        let detected = redact_sensitive_values(parsed.into_value(), &self.policy.sensitive_keys)?;
+        let mut payload = parsed.into_value();
+        let structural_identity_protected = if self.policy.provider_neutral {
+            let changed = protect_canonical_payload_structural_ids(&mut payload)?
+                || protected_identity_changed;
+            validate_canonical_structural_identity(&payload, &identity)?;
+            changed
+        } else {
+            false
+        };
+        let mut detected = redact_sensitive_values(payload, &self.policy.sensitive_keys)?;
+        if structural_identity_protected {
+            detected.findings.push(SanitizationFindingV1::new(
+                PrivacyDetectorV1::ExactCredential,
+                "$/structural-identity",
+                DetectionConfidenceV1::Exact,
+                SanitizationActionV1::Redacted,
+            ));
+        }
         if !detected.quarantine_findings.is_empty() {
             return self.quarantined_outcome_from_digest(
                 &raw_digest,
@@ -362,6 +416,160 @@ impl ClaudeRecordSanitizerV1 {
             depth: self.policy.max_depth,
             values: self.policy.max_values,
         }
+    }
+}
+
+fn protect_observation_identity(
+    identity: &ClaudeObservationIdentityMaterialV1,
+) -> Result<(ClaudeObservationIdentityMaterialV1, bool), PrivacySanitizerError> {
+    let provider = identity.source().provider().clone();
+    let (session_id, session_changed) =
+        protected_session_id(identity.source().session_id().as_str())?;
+    let source_has_explicit_key = serde_json::to_value(identity.source())
+        .map_err(|_| PrivacySanitizerError::StructuralIdentityProtection)?
+        .get("source_key")
+        .is_some();
+    let (source_key, source_key_changed) =
+        protected_session_id(identity.source().source_key().as_str())?;
+    let source = if source_has_explicit_key {
+        ObservationSourceIdentityV1::for_provider_source(provider, session_id, source_key)
+    } else {
+        ObservationSourceIdentityV1::for_provider(provider, session_id)
+    }?;
+
+    let scope = identity.scope().clone();
+    let generation = identity.generation();
+    let position = identity.position();
+    let ordering_domain = identity.ordering_domain();
+    let (identity, native_changed) = match identity.native_record_id() {
+        Some(native_record_id) => {
+            let (native_record_id, changed) = protected_observation_id(native_record_id.as_str())?;
+            (
+                ClaudeObservationIdentityMaterialV1::for_native_record(
+                    source,
+                    scope,
+                    generation,
+                    position,
+                    ordering_domain,
+                    native_record_id,
+                )?,
+                changed,
+            )
+        }
+        None if ordering_domain == ObservationOrderingDomainV1::FileBytes => (
+            ClaudeObservationIdentityMaterialV1::new(source, scope, generation, position)?,
+            false,
+        ),
+        None => {
+            return Err(PrivacySanitizerError::DomainContract(
+                ObservationContractError::InvalidNativeRecordIdentity,
+            ));
+        }
+    };
+    Ok((
+        identity,
+        session_changed || source_key_changed || native_changed,
+    ))
+}
+
+fn protected_session_id(value: &str) -> Result<(SessionId, bool), PrivacySanitizerError> {
+    let protected = protect_sensitive_structural_id(value)?;
+    let changed = protected != value;
+    SessionId::new(protected)
+        .map(|value| (value, changed))
+        .map_err(|_| {
+            PrivacySanitizerError::DomainContract(ObservationContractError::InvalidSourceIdentity)
+        })
+}
+
+fn protected_observation_id(value: &str) -> Result<(ObservationId, bool), PrivacySanitizerError> {
+    let protected = protect_sensitive_structural_id(value)?;
+    let changed = protected != value;
+    ObservationId::new(protected)
+        .map(|value| (value, changed))
+        .map_err(|_| {
+            PrivacySanitizerError::DomainContract(
+                ObservationContractError::InvalidNativeRecordIdentity,
+            )
+        })
+}
+
+fn protect_string_field(
+    object: &mut serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<bool, PrivacySanitizerError> {
+    let Some(Value::String(value)) = object.get_mut(field) else {
+        return Ok(false);
+    };
+    let protected = protect_sensitive_structural_id(value)?;
+    let changed = protected != *value;
+    *value = protected;
+    Ok(changed)
+}
+
+fn protect_canonical_payload_structural_ids(
+    payload: &mut Value,
+) -> Result<bool, PrivacySanitizerError> {
+    let object = payload
+        .as_object_mut()
+        .ok_or(PrivacySanitizerError::StructuralIdentityProtection)?;
+    let mut changed = protect_string_field(object, "stable_record_id")?;
+    if let Some(Value::Object(relations)) = object.get_mut("relations") {
+        for field in [
+            "session_id",
+            "thread_id",
+            "turn_id",
+            "message_id",
+            "parent_session_id",
+            "parent_message_id",
+            "agent_id",
+            "parent_agent_id",
+        ] {
+            changed |= protect_string_field(relations, field)?;
+        }
+    }
+    if let Some(Value::Array(facts)) = object.get_mut("facts") {
+        for fact in facts {
+            let fact = fact
+                .as_object_mut()
+                .ok_or(PrivacySanitizerError::StructuralIdentityProtection)?;
+            for field in [
+                "invocation_id",
+                "parent_session_id",
+                "provider_reference",
+                "item_id",
+                "parent_reference",
+                "list_reference",
+            ] {
+                changed |= protect_string_field(fact, field)?;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+fn validate_canonical_structural_identity(
+    payload: &Value,
+    identity: &ClaudeObservationIdentityMaterialV1,
+) -> Result<(), PrivacySanitizerError> {
+    let invalid =
+        || PrivacySanitizerError::DomainContract(ObservationContractError::InvalidCanonicalPayload);
+    let relation_session_id = payload
+        .pointer("/relations/session_id")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
+    if relation_session_id != identity.source().session_id().as_str() {
+        return Err(invalid());
+    }
+
+    let stable_record_id = payload
+        .get("stable_record_id")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
+    match identity.native_record_id() {
+        Some(native_record_id) if stable_record_id == native_record_id.as_str() => Ok(()),
+        None if identity.source().provider().as_str() == "claude" => Ok(()),
+        Some(_) | None => Err(invalid()),
     }
 }
 

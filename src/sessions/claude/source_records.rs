@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
+use tracedecay_domain::{
+    CanonicalObservationEnvelopeV1, CanonicalObservationFactV1, CanonicalReasoningVisibilityV1,
+};
 
 use crate::accounting::parser::parse_timestamp;
 use crate::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_claude_record_v1};
@@ -8,6 +11,7 @@ use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{content_storage_text_and_tools, preview_truncated};
 use crate::sessions::source::{RawJsonlFrame, RawJsonlFrameReader, SessionDraft};
 
+use super::canonical_projection::map_canonical_claude_record;
 use super::record_metadata::{
     SessionAccumulator, compact_boundary_row, is_redaction_marker, message_metadata,
     model_fallback_row, pr_link_row, record_timestamp, source_position_message_id,
@@ -22,8 +26,10 @@ pub(crate) struct ClaudeRecordContext<'a> {
     pub file_generation: u64,
     pub offset: u64,
     pub session_cwd: Option<&'a Path>,
+    pub source_path: Option<&'a str>,
     pub raw_message_id: Option<&'a str>,
     pub raw_tool_event_ids: &'a [String],
+    pub raw_hook_tool_use_id: Option<&'a str>,
 }
 
 /// Minimal canonical projection result. Rich reasoning and marker families remain
@@ -42,15 +48,21 @@ pub(crate) fn map_sanitized_claude_record(
     record: &Value,
     context: &ClaudeRecordContext<'_>,
 ) -> ClaudeRecordDisposition {
+    if let Ok(envelope) = serde_json::from_value::<CanonicalObservationEnvelopeV1>(record.clone()) {
+        return map_canonical_claude_record(&envelope, context);
+    }
     let Ok(offset) = i64::try_from(context.offset) else {
         return ClaudeRecordDisposition::NonConversational;
     };
     let mut accumulator = SessionAccumulator::default();
-    let source_id = format!("claude:{}", context.session_id);
+    let source_path = context.source_path.map_or_else(
+        || PathBuf::from(format!("claude:{}", context.session_id)),
+        PathBuf::from,
+    );
     let Some(mut message) = message_from_line(
         record,
         context.session_id,
-        Path::new(&source_id),
+        &source_path,
         offset,
         context.session_cwd,
         &mut accumulator,
@@ -104,7 +116,10 @@ fn durable_record_message_id(
     source_position_message_id(context.session_id, context.file_generation, offset)
 }
 
-fn retain_unchanged_tool_event_ids(metadata: &mut Map<String, Value>, raw_ids: &[String]) {
+pub(super) fn retain_unchanged_tool_event_ids(
+    metadata: &mut Map<String, Value>,
+    raw_ids: &[String],
+) {
     let Some(events) = metadata
         .get_mut("tool_events")
         .and_then(Value::as_array_mut)
@@ -284,6 +299,9 @@ pub(super) fn reasoning_from_line(
     context: &ClaudeRecordContext<'_>,
     owning_message_id: Option<&str>,
 ) -> Option<SessionMessageRecord> {
+    if let Ok(envelope) = serde_json::from_value::<CanonicalObservationEnvelopeV1>(record.clone()) {
+        return reasoning_from_canonical_envelope(&envelope, path, context, owning_message_id);
+    }
     let offset = i64::try_from(context.offset).ok()?;
     if record.get("type").and_then(Value::as_str) != Some("assistant") {
         return None;
@@ -311,8 +329,6 @@ pub(super) fn reasoning_from_line(
     if thinking_parts.is_empty() {
         return None;
     }
-    let text = thinking_parts.join("\n\n");
-
     let base_id = owning_message_id.map_or_else(
         || durable_record_message_id(record, context, offset),
         str::to_string,
@@ -328,6 +344,95 @@ pub(super) fn reasoning_from_line(
         .and_then(Value::as_str)
         .map(str::to_string);
 
+    build_reasoning_record(
+        path,
+        context,
+        ReasoningRecordParts {
+            base_id,
+            role,
+            model,
+            timestamp: record_timestamp(record),
+            thinking_parts,
+            redacted_blocks,
+        },
+    )
+}
+
+fn reasoning_from_canonical_envelope(
+    envelope: &CanonicalObservationEnvelopeV1,
+    path: &Path,
+    context: &ClaudeRecordContext<'_>,
+    owning_message_id: Option<&str>,
+) -> Option<SessionMessageRecord> {
+    if envelope.native_record_kind() != "assistant" {
+        return None;
+    }
+    let mut thinking_parts = Vec::new();
+    let mut redacted_blocks = 0usize;
+    let mut model = None;
+    let mut timestamp = None;
+    for fact in envelope.facts() {
+        match fact {
+            CanonicalObservationFactV1::Reasoning {
+                visibility: CanonicalReasoningVisibilityV1::Visible,
+                content: Some(content),
+            } => {
+                if let Some(text) = content.as_str().filter(|text| !text.trim().is_empty()) {
+                    thinking_parts.push(text.to_owned());
+                }
+            }
+            CanonicalObservationFactV1::Reasoning {
+                visibility: CanonicalReasoningVisibilityV1::Redacted,
+                ..
+            } => redacted_blocks = redacted_blocks.saturating_add(1),
+            CanonicalObservationFactV1::Message {
+                model: fact_model,
+                timestamp: fact_timestamp,
+                ..
+            } => {
+                model.clone_from(fact_model);
+                timestamp = *fact_timestamp;
+            }
+            _ => {}
+        }
+    }
+    if thinking_parts.is_empty() {
+        return None;
+    }
+    let base_id = owning_message_id.map_or_else(
+        || envelope.stable_record_id().as_str().to_owned(),
+        str::to_owned,
+    );
+    build_reasoning_record(
+        path,
+        context,
+        ReasoningRecordParts {
+            base_id,
+            role: "assistant".to_owned(),
+            model,
+            timestamp,
+            thinking_parts,
+            redacted_blocks,
+        },
+    )
+}
+
+struct ReasoningRecordParts {
+    base_id: String,
+    role: String,
+    model: Option<String>,
+    timestamp: Option<i64>,
+    thinking_parts: Vec<String>,
+    redacted_blocks: usize,
+}
+
+fn build_reasoning_record(
+    path: &Path,
+    context: &ClaudeRecordContext<'_>,
+    parts: ReasoningRecordParts,
+) -> Option<SessionMessageRecord> {
+    let offset = i64::try_from(context.offset).ok()?;
+    let text = parts.thinking_parts.join("\n\n");
     let mut metadata = Map::new();
     metadata.insert(
         "source".to_string(),
@@ -336,16 +441,16 @@ pub(super) fn reasoning_from_line(
     // Parent linkage back to the assistant message row that owns this reasoning.
     metadata.insert(
         "parent_message_id".to_string(),
-        Value::String(base_id.clone()),
+        Value::String(parts.base_id.clone()),
     );
     metadata.insert(
         "thinking_blocks".to_string(),
-        Value::from(thinking_parts.len() as i64),
+        Value::from(parts.thinking_parts.len() as i64),
     );
-    if redacted_blocks > 0 {
+    if parts.redacted_blocks > 0 {
         metadata.insert(
             "redacted_thinking_blocks".to_string(),
-            Value::from(redacted_blocks as i64),
+            Value::from(parts.redacted_blocks as i64),
         );
     }
 
@@ -354,14 +459,14 @@ pub(super) fn reasoning_from_line(
         // `{base}:thinking` keeps re-ingest idempotent and can never collide
         // with the owning message row's `{base}` id under the
         // `(provider, message_id)` primary key.
-        message_id: format!("{base_id}:thinking"),
+        message_id: format!("{}:thinking", parts.base_id),
         session_id: context.session_id.to_string(),
-        role,
-        timestamp: record_timestamp(record),
+        role: parts.role,
+        timestamp: parts.timestamp,
         ordinal: offset,
         text,
         kind: Some(KIND_REASONING.to_string()),
-        model,
+        model: parts.model,
         tool_names: None,
         source_path: Some(path.to_string_lossy().to_string()),
         source_offset: Some(offset),
@@ -517,9 +622,22 @@ pub(super) fn structured_marker_from_line(
 
 /// Common ISO-8601 timestamp read for a top-level record.
 pub(super) fn record_cwd(record: &Value) -> Option<PathBuf> {
-    record
+    if let Some(cwd) = record
         .get("cwd")
         .and_then(Value::as_str)
         .filter(|cwd| !cwd.is_empty())
-        .map(PathBuf::from)
+    {
+        return Some(PathBuf::from(cwd));
+    }
+    let Ok(envelope) = serde_json::from_value::<CanonicalObservationEnvelopeV1>(record.clone())
+    else {
+        return None;
+    };
+    envelope.facts().iter().find_map(|fact| match fact {
+        CanonicalObservationFactV1::Session {
+            location_path: Some(path),
+            ..
+        } if !path.is_empty() => Some(PathBuf::from(path)),
+        _ => None,
+    })
 }

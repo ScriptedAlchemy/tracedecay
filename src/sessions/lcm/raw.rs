@@ -218,6 +218,24 @@ async fn upsert_inline_raw_message(
     .is_ok()
 }
 
+/// Mirrors a sanitized observation projection into the raw LCM store.
+///
+/// Observation payloads have already crossed the privacy boundary, so this
+/// path preserves the canonical projected text instead of reprocessing the
+/// provider payload or performing filesystem-backed externalization.
+pub(crate) async fn upsert_projected_raw_message(
+    conn: &Connection,
+    message: &SessionMessageRecord,
+) -> bool {
+    upsert_inline_raw_message(
+        conn,
+        message,
+        &message.text,
+        message.metadata_json.as_deref(),
+    )
+    .await
+}
+
 fn externalized_payload_metadata(
     payload_ref: &LcmPayloadRef,
     protection: &IngestProtection,

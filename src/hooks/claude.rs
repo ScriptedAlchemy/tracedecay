@@ -8,8 +8,9 @@ use super::codex::{codex_additional_context_json, codex_project_root_from_parsed
 use super::memory_inject;
 use super::post_tool_use::{
     CLAUDE_POST_TOOL_USE_SHELL_TOOLS, CLAUDE_POST_TOOL_USE_SPEC, captured_tool_output,
-    is_claude_edit_tool, is_claude_hint_tool, is_post_tool_use_failure_event, notify_post_tool_use,
-    tool_input_command_str, tool_input_edit_text, tool_input_file_path_str, trusted_tool_failure,
+    is_claude_edit_tool, is_claude_hint_tool, is_post_tool_use_failure_event,
+    notify_post_tool_use_with_telemetry, tool_input_command_str, tool_input_edit_text,
+    tool_input_file_path_str, trusted_tool_failure,
 };
 use super::steering::{
     append_context_block, append_context_recovery_hint, append_tracedecay_bootstrap_context,
@@ -149,7 +150,7 @@ pub async fn hook_claude_session_start() -> i32 {
     // Resolve the project root the same identity-aware way the printed context
     // does, including global-only stores and fresh harness-created worktrees.
     let root = claude_session_project_root(&parsed).await;
-    let _hook_telemetry =
+    let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Claude, "SessionStart", &event);
     let mut context = claude_session_context_for_event(&event).await;
     let session_id = event_session_id(&parsed);
@@ -175,7 +176,7 @@ pub async fn hook_claude_session_start() -> i32 {
     if let Some(root) = root.as_ref()
         && let Some(event) = claude_session_start_hook_event(&parsed)
     {
-        crate::daemon::notify_hook_event(root, event).await;
+        super::notify_hook_event_with_telemetry(root, event, &hook_telemetry).await;
     }
     if session_start_from_compaction(&event) {
         append_context_recovery_hint(&mut context);
@@ -299,7 +300,7 @@ pub async fn hook_claude_post_tool_use() -> i32 {
         "PostToolUse"
     };
     let root = claude_project_root_from_event_with_identity(&event).await;
-    let _hook_telemetry =
+    let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Claude, hook_event_name, &event);
     if let Some(context) = claude_post_tool_use_hint_context(&event) {
         println!(
@@ -307,7 +308,7 @@ pub async fn hook_claude_post_tool_use() -> i32 {
             codex_additional_context_json(hook_event_name, &context)
         );
     }
-    notify_post_tool_use(&CLAUDE_POST_TOOL_USE_SPEC, &event).await;
+    notify_post_tool_use_with_telemetry(&CLAUDE_POST_TOOL_USE_SPEC, &event, &hook_telemetry).await;
     0
 }
 
@@ -374,8 +375,15 @@ fn decide_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
 /// `UserPromptSubmit` hook handler: resets the project counter and injects
 /// scope-correct memory recall.
 pub async fn hook_prompt_submit() {
-    let event = match super::read_stdin_to_string() {
-        Ok(event) => event,
+    let event = match super::read_stdin_bounded() {
+        Ok(super::HookStdinRead::Event(event)) => event,
+        Ok(super::HookStdinRead::Oversized) => {
+            eprintln!(
+                "tracedecay hook: stdin exceeds wire message bound ({})",
+                crate::application::host_admission::WIRE_RECORD_TOO_LARGE
+            );
+            return;
+        }
         Err(error) => {
             eprintln!("tracedecay hook: failed to read stdin: {error}");
             return;
@@ -383,20 +391,26 @@ pub async fn hook_prompt_submit() {
     };
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = claude_session_project_root(&parsed).await;
-    let _hook_telemetry = record_hook_invoked(
+    let hook_telemetry = record_hook_invoked(
         root.as_deref(),
         HintAgent::Claude,
         "UserPromptSubmit",
         &event,
     );
     let session_id = event_session_id(&parsed);
-    if root.is_none() && ingest_user_claude_session(session_id.clone()).await {
+    if root.is_none()
+        && ingest_user_claude_session_with_telemetry(session_id.clone(), Some(&hook_telemetry))
+            .await
+    {
         super::schedule_user_session_review("claude", session_id.as_deref());
     }
     if let Some(root) = root.as_deref()
-        && let Err(error) =
-            super::daemon_hook_action(Some(root), serde_json::json!({ "action": "reset_counter" }))
-                .await
+        && let Err(error) = super::daemon_hook_action(
+            Some(root),
+            serde_json::json!({ "action": "reset_counter" }),
+            Some(&hook_telemetry),
+        )
+        .await
     {
         eprintln!("[tracedecay] local counter reset daemon call failed: {error}");
     }
@@ -427,12 +441,25 @@ pub async fn hook_prompt_submit() {
 
 /// `Stop` hook handler: ingests new session data and prints a cost receipt.
 pub async fn hook_stop() {
-    let event = super::read_stdin_to_string().unwrap_or_default();
+    let event = match super::read_stdin_bounded() {
+        Ok(super::HookStdinRead::Event(event)) => event,
+        Ok(super::HookStdinRead::Oversized) => {
+            eprintln!(
+                "tracedecay hook: stdin exceeds wire message bound ({})",
+                crate::application::host_admission::WIRE_RECORD_TOO_LARGE
+            );
+            return;
+        }
+        Err(_) => String::new(),
+    };
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = claude_session_project_root(&parsed).await;
     let session_id = event_session_id(&parsed);
-    let _hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Claude, "Stop", &event);
-    if root.is_none() && ingest_user_claude_session(session_id.clone()).await {
+    let hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Claude, "Stop", &event);
+    if root.is_none()
+        && ingest_user_claude_session_with_telemetry(session_id.clone(), Some(&hook_telemetry))
+            .await
+    {
         super::schedule_user_session_review("claude", session_id.as_deref());
     }
 
@@ -440,6 +467,7 @@ pub async fn hook_stop() {
     match super::daemon_hook_action(
         Some(&project_path),
         serde_json::json!({ "action": "accounting_receipt" }),
+        Some(&hook_telemetry),
     )
     .await
     {
@@ -474,6 +502,13 @@ pub async fn hook_stop() {
 /// Incrementally ingests one live projectless Claude session into the profile
 /// session store. `false` means no new transcript evidence was written.
 pub async fn ingest_user_claude_session(session_id: Option<String>) -> bool {
+    ingest_user_claude_session_with_telemetry(session_id, None).await
+}
+
+async fn ingest_user_claude_session_with_telemetry(
+    session_id: Option<String>,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) -> bool {
     if session_id.is_none() {
         return false;
     }
@@ -485,6 +520,7 @@ pub async fn ingest_user_claude_session(session_id: Option<String>) -> bool {
             "user_scope": true,
             "session_id": session_id,
         }),
+        telemetry,
     )
     .await
     {

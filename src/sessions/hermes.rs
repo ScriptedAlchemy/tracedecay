@@ -46,29 +46,66 @@ use crate::privacy::{
     MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1,
     parse_normalized_observation_record_v1,
 };
+use crate::sessions::ingest_byte_budget::IngestByteBudget;
 use crate::sessions::shared::{
-    NewRows, ProjectRootMatcher, StoredCursor, TranscriptIngestStats, path_belongs_to_project,
+    ProjectRootMatcher, StoredCursor, TranscriptIngestStats, path_belongs_to_project,
 };
+use crate::sessions::source::STRICT_JSONL_BATCH_BYTES;
 const PROVIDER: &str = "hermes";
 const OBSERVATION_RETENTION: &str = "transcript.hermes.v1";
+/// Maximum messages joined per `SQLite` page (row-count bound before collection).
 const CHUNK_ROWS: usize = 2000;
+/// Per-value payload bound before `String` materialization (observation record cap).
+const MAX_HERMES_VALUE_BYTES: usize = MAX_OBSERVATION_RECORD_BYTES;
+/// Identity/text metadata bound (matches `SessionId` canonical max of 512 bytes).
+const MAX_HERMES_IDENTITY_BYTES: usize = 512;
+/// Cumulative SQL-measured bytes admitted into one page (reuses JSONL batch bound).
+const MAX_HERMES_PAGE_BYTES: u64 = STRICT_JSONL_BATCH_BYTES;
+const MAX_HERMES_PROJECTIONS_PER_DRAIN: usize = 256;
 
-/// Ingests Hermes sessions proven to belong to `project_root` into `db`.
+/// Result of a Hermes sweep with one aggregate logical source-byte budget.
+#[derive(Debug, Default, Clone)]
+pub struct HermesSweepOutcome {
+    pub stats: TranscriptIngestStats,
+    pub bytes_consumed: u64,
+    pub deferred_by_byte_cap: bool,
+}
+
+/// Ingests Hermes sessions proven to belong to `project_root` into the
+/// daemon-authorized canonical `project_id` scope in `db`.
 ///
 /// Discovery is bounded to the default user integration (`~/.hermes`) and its
 /// immediate named-profile children; environment overrides are ignored.
-pub async fn ingest_for_project(db: &GlobalDb, project_root: &Path) -> TranscriptIngestStats {
+pub async fn ingest_for_project(
+    db: &GlobalDb,
+    project_root: &Path,
+    project_id: ProjectId,
+) -> TranscriptIngestStats {
+    ingest_for_project_capped(db, project_root, project_id, None)
+        .await
+        .stats
+}
+
+/// [`ingest_for_project`] with one aggregate logical source-byte budget shared
+/// across every discovered Hermes profile.
+pub async fn ingest_for_project_capped(
+    db: &GlobalDb,
+    project_root: &Path,
+    project_id: ProjectId,
+    max_new_bytes: Option<u64>,
+) -> HermesSweepOutcome {
     let homes = crate::sessions::home_dir()
         .map(|home| vec![home.join(".hermes")])
         .unwrap_or_default();
-    ingest_homes(db, &homes, project_root).await
+    ingest_homes_capped(db, &homes, project_root, project_id, max_new_bytes).await
 }
 
 /// One project-store destination for a shared Hermes source sweep.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ProjectIngestDestination<'a> {
     pub db: &'a GlobalDb,
     pub project_root: &'a Path,
+    pub project_id: ProjectId,
 }
 
 /// Ingests Hermes history for several registered projects while opening and
@@ -93,10 +130,10 @@ pub async fn ingest_homes_for_projects(
     for source in all_profile_sources(hermes_homes) {
         let eligible = destinations
             .iter()
-            .copied()
             .filter(|destination| {
                 source_is_candidate_for_project(&source, destination.project_root)
             })
+            .cloned()
             .collect::<Vec<_>>();
         if eligible.is_empty() {
             continue;
@@ -110,6 +147,14 @@ pub async fn ingest_homes_for_projects(
             ),
         }
     }
+    for destination in destinations {
+        let scope = ObservationScopeV1::Project {
+            project_id: destination.project_id.clone(),
+        };
+        if let Err(error) = drain_hermes_projections(destination.db, &scope).await {
+            tracing::debug!(error, "Hermes shared projection drain deferred");
+        }
+    }
     stats
 }
 
@@ -120,11 +165,36 @@ pub async fn ingest_homes(
     db: &GlobalDb,
     hermes_homes: &[PathBuf],
     project_root: &Path,
+    project_id: ProjectId,
 ) -> TranscriptIngestStats {
-    let mut stats = TranscriptIngestStats::default();
+    ingest_homes_capped(db, hermes_homes, project_root, project_id, None)
+        .await
+        .stats
+}
+
+pub async fn ingest_homes_capped(
+    db: &GlobalDb,
+    hermes_homes: &[PathBuf],
+    project_root: &Path,
+    project_id: ProjectId,
+    max_new_bytes: Option<u64>,
+) -> HermesSweepOutcome {
+    let mut outcome = HermesSweepOutcome::default();
+    let mut budget = match max_new_bytes {
+        Some(limit) => IngestByteBudget::bounded(limit),
+        None => IngestByteBudget::unbounded(),
+    };
     for source in candidate_state_dbs(hermes_homes, project_root) {
-        match try_ingest_state_db(db, &source, project_root).await {
-            Ok(source_stats) => stats = stats.merge(source_stats),
+        match try_ingest_state_db_bounded(
+            db,
+            &source,
+            project_root,
+            project_id.clone(),
+            &mut budget,
+        )
+        .await
+        {
+            Ok(source_stats) => outcome.stats = outcome.stats.merge(source_stats),
             Err(error) => tracing::debug!(
                 state_db = %source.state_db.display(),
                 error,
@@ -132,7 +202,13 @@ pub async fn ingest_homes(
             ),
         }
     }
-    stats
+    let scope = ObservationScopeV1::Project { project_id };
+    if let Err(error) = drain_hermes_projections(db, &scope).await {
+        tracing::debug!(error, "Hermes project projection drain deferred");
+    }
+    outcome.bytes_consumed = budget.consumed();
+    outcome.deferred_by_byte_cap = budget.deferred();
+    outcome
 }
 
 /// Ingests canonical historical Hermes observations into the profile scope.
@@ -142,10 +218,22 @@ pub async fn ingest_user_sessions(
     db: &GlobalDb,
     registered_roots: &[PathBuf],
 ) -> TranscriptIngestStats {
+    ingest_user_sessions_capped(db, registered_roots, None)
+        .await
+        .stats
+}
+
+/// [`ingest_user_sessions`] with one aggregate logical source-byte budget
+/// shared across every discovered Hermes profile.
+pub async fn ingest_user_sessions_capped(
+    db: &GlobalDb,
+    registered_roots: &[PathBuf],
+    max_new_bytes: Option<u64>,
+) -> HermesSweepOutcome {
     let homes = crate::sessions::home_dir()
         .map(|home| vec![home.join(".hermes")])
         .unwrap_or_default();
-    ingest_user_homes(db, &homes, registered_roots).await
+    ingest_user_homes_capped(db, &homes, registered_roots, max_new_bytes).await
 }
 
 pub async fn ingest_user_homes(
@@ -153,10 +241,25 @@ pub async fn ingest_user_homes(
     hermes_homes: &[PathBuf],
     registered_roots: &[PathBuf],
 ) -> TranscriptIngestStats {
-    let mut stats = TranscriptIngestStats::default();
+    ingest_user_homes_capped(db, hermes_homes, registered_roots, None)
+        .await
+        .stats
+}
+
+pub async fn ingest_user_homes_capped(
+    db: &GlobalDb,
+    hermes_homes: &[PathBuf],
+    registered_roots: &[PathBuf],
+    max_new_bytes: Option<u64>,
+) -> HermesSweepOutcome {
+    let mut outcome = HermesSweepOutcome::default();
+    let mut budget = match max_new_bytes {
+        Some(limit) => IngestByteBudget::bounded(limit),
+        None => IngestByteBudget::unbounded(),
+    };
     for source in all_profile_sources(hermes_homes) {
-        match try_ingest_user_state_db(db, &source, registered_roots).await {
-            Ok(source_stats) => stats = stats.merge(source_stats),
+        match try_ingest_user_state_db_bounded(db, &source, registered_roots, &mut budget).await {
+            Ok(source_stats) => outcome.stats = outcome.stats.merge(source_stats),
             Err(error) => tracing::debug!(
                 state_db = %source.state_db.display(),
                 error,
@@ -164,7 +267,12 @@ pub async fn ingest_user_homes(
             ),
         }
     }
-    stats
+    if let Err(error) = drain_hermes_projections(db, &ObservationScopeV1::Profile).await {
+        tracing::debug!(error, "Hermes profile projection drain deferred");
+    }
+    outcome.bytes_consumed = budget.consumed();
+    outcome.deferred_by_byte_cap = budget.deferred();
+    outcome
 }
 
 /// Strict one-time import for a legacy profile whose project pin was already
@@ -174,6 +282,7 @@ pub(crate) async fn ingest_legacy_pinned_profile(
     db: &GlobalDb,
     profile_dir: &Path,
     project_root: &Path,
+    project_id: ProjectId,
 ) -> Result<TranscriptIngestStats, String> {
     let state_db = profile_dir.join("state.db");
     if !state_db.is_file() {
@@ -190,8 +299,17 @@ pub(crate) async fn ingest_legacy_pinned_profile(
     let source = HermesProfileSource {
         state_db,
         legacy_project_pin: Some(legacy_project_pin),
+        profile: profile_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string),
     };
-    try_ingest_state_db(db, &source, project_root).await
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+    let stats = try_ingest_state_db(db, &source, project_root, project_id).await?;
+    drain_hermes_projections(db, &scope).await?;
+    Ok(stats)
 }
 
 /// Locates the `state.db` of every profile that maps to `project_root`.
@@ -203,6 +321,7 @@ pub(crate) async fn ingest_legacy_pinned_profile(
 struct HermesProfileSource {
     state_db: PathBuf,
     legacy_project_pin: Option<PathBuf>,
+    profile: Option<String>,
 }
 
 fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
@@ -219,7 +338,7 @@ fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
                 })?
             }));
         }
-        for (profile_dir, _) in profiles {
+        for (profile_dir, profile) in profiles {
             let state_db = profile_dir.join("state.db");
             if state_db.is_file() && seen.insert(state_db.clone()) {
                 out.push(HermesProfileSource {
@@ -228,6 +347,7 @@ fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
                         &profile_dir.join("config.yaml"),
                     )
                     .map(PathBuf::from),
+                    profile,
                 });
             }
         }
@@ -258,7 +378,7 @@ fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<Her
                 candidates.push((profile_dir, name));
             }
         }
-        for (profile_dir, _) in candidates {
+        for (profile_dir, profile) in candidates {
             let legacy_project_pin =
                 read_config_pinned_project_root(&profile_dir.join("config.yaml"))
                     .map(PathBuf::from);
@@ -274,6 +394,7 @@ fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<Her
                 out.push(HermesProfileSource {
                     state_db,
                     legacy_project_pin,
+                    profile,
                 });
             }
         }
@@ -307,6 +428,10 @@ struct HermesRow {
     session_model: Option<String>,
     parent_session_id: Option<String>,
     session_cwd: Option<String>,
+    session_source: Option<String>,
+    session_title: Option<String>,
+    session_started_at: Option<f64>,
+    session_ended_at: Option<f64>,
     session_input_tokens: Option<i64>,
     session_output_tokens: Option<i64>,
     session_cache_read_tokens: Option<i64>,
@@ -315,6 +440,73 @@ struct HermesRow {
     /// `messages.active` soft-delete flag (0 = rewound/undone turn). Legacy
     /// stores without the column read as 1.
     active: i64,
+    /// Set when SQL `typeof`/`length` rejected a column before materialization.
+    sql_value_oversized: bool,
+    /// Sum of SQL `length()` charges for text/blob columns (not Rust `String::len`).
+    sql_measured_bytes: u64,
+}
+
+/// One bounded `SQLite` page: row count, per-value, and cumulative byte caps applied
+/// before `String`/`Vec` materialization.
+struct HermesPageRead {
+    items: Vec<HermesRow>,
+    new_cursor: StoredCursor,
+    /// More rows remain at the authority, but the page byte budget stopped collection.
+    truncated_by_byte_budget: bool,
+}
+
+fn text_bytes<const N: usize>(values: [Option<&str>; N]) -> u64 {
+    values.into_iter().flatten().fold(0_u64, |total, value| {
+        total.saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX))
+    })
+}
+
+fn hermes_native_payload_bytes(row: &HermesRow) -> u64 {
+    let text_bytes = text_bytes([
+        Some(row.session_id.as_str()),
+        Some(row.role.as_str()),
+        row.content.as_deref(),
+        row.reasoning.as_deref(),
+        row.tool_name.as_deref(),
+        row.tool_calls.as_deref(),
+        row.session_model.as_deref(),
+        row.parent_session_id.as_deref(),
+        row.session_source.as_deref(),
+        row.session_title.as_deref(),
+    ]);
+    let scalar_count = u64::from(row.timestamp.is_some())
+        .saturating_add(u64::from(row.session_started_at.is_some()))
+        .saturating_add(u64::from(row.session_ended_at.is_some()))
+        .saturating_add(u64::from(row.session_input_tokens.is_some()))
+        .saturating_add(u64::from(row.session_output_tokens.is_some()))
+        .saturating_add(u64::from(row.session_cache_read_tokens.is_some()))
+        .saturating_add(u64::from(row.session_cache_write_tokens.is_some()))
+        .saturating_add(u64::from(row.session_reasoning_tokens.is_some()));
+    text_bytes.saturating_add(scalar_count.saturating_mul(8))
+}
+
+fn hermes_row_bytes(row: &HermesRow) -> u64 {
+    hermes_native_payload_bytes(row)
+        .saturating_add(text_bytes([row.session_cwd.as_deref()]))
+        .saturating_add(16)
+}
+
+fn hermes_budget_bytes(row: &HermesRow) -> u64 {
+    let capped = u64::try_from(MAX_OBSERVATION_RECORD_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    // Prefer SQL-measured length (includes rejected oversize/blob sizes) so
+    // hostile values charge the pass budget without being materialized.
+    row.sql_measured_bytes
+        .max(hermes_row_bytes(row))
+        .min(capped)
+}
+
+fn hermes_page_row_charge(sql_measured_bytes: u64) -> u64 {
+    let capped = u64::try_from(MAX_HERMES_VALUE_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    sql_measured_bytes.min(capped)
 }
 
 struct HermesObservationRecord {
@@ -322,6 +514,35 @@ struct HermesObservationRecord {
     native_record_id: ObservationId,
     source: ObservationSourceIdentityV1,
     range: ObservationSourceRangeV1,
+}
+
+#[derive(Clone)]
+struct HermesProjectionMetadata {
+    project_path: Option<String>,
+    location_path: Option<String>,
+    profile: Option<String>,
+    location_provenance: Option<&'static str>,
+}
+
+fn project_projection_metadata(
+    row: &HermesRow,
+    source: &HermesProfileSource,
+    authority_project_root: &Path,
+    location_provenance: &'static str,
+) -> HermesProjectionMetadata {
+    let presentation_path = match location_provenance {
+        "profile_pin" => source.legacy_project_pin.as_deref(),
+        "session_cwd" => row.session_cwd.as_deref().map(Path::new),
+        _ => None,
+    }
+    .filter(|path| path.is_absolute() && path_belongs_to_project(path, authority_project_root))
+    .unwrap_or(authority_project_root);
+    HermesProjectionMetadata {
+        project_path: Some(authority_project_root.to_string_lossy().into_owned()),
+        location_path: Some(presentation_path.to_string_lossy().into_owned()),
+        profile: source.profile.clone(),
+        location_provenance: Some(location_provenance),
+    }
 }
 
 enum HermesAdmissionAction {
@@ -356,6 +577,14 @@ struct HermesNativeObservation {
     tool_calls: Option<Value>,
     timestamp: Option<f64>,
     usage: HermesNativeUsage,
+    project_path: Option<String>,
+    location_path: Option<String>,
+    title: Option<String>,
+    started_at: Option<f64>,
+    ended_at: Option<f64>,
+    source: Option<String>,
+    profile: Option<String>,
+    location_provenance: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -374,10 +603,15 @@ struct HermesNativeUsage {
 
 fn native_observation_record(
     row: &HermesRow,
+    projection: &HermesProjectionMetadata,
     source: ObservationSourceIdentityV1,
     range: ObservationSourceRangeV1,
 ) -> Result<HermesObservationRecord, ObservationCoverageReason> {
-    if row.timestamp.is_some_and(|value| !value.is_finite()) {
+    if [row.timestamp, row.session_started_at, row.session_ended_at]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_finite())
+    {
         return Err(ObservationCoverageReason::MalformedFrame);
     }
     let tool_calls = match row
@@ -401,6 +635,14 @@ fn native_observation_record(
         "tool_name": row.tool_name,
         "tool_calls": tool_calls,
         "timestamp": row.timestamp,
+        "project_path": projection.project_path,
+        "location_path": projection.location_path,
+        "title": row.session_title,
+        "started_at": row.session_started_at,
+        "ended_at": row.session_ended_at,
+        "source": row.session_source,
+        "profile": projection.profile,
+        "location_provenance": projection.location_provenance,
         "usage": {
             "input_tokens": row.session_input_tokens,
             "output_tokens": row.session_output_tokens,
@@ -449,6 +691,11 @@ fn normalize_native_observation(
         .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
     let session_id = SessionId::new(&native.session_id)
         .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
+    // Preserve Hermes' public V1 message identity while the observation keeps
+    // its content-derived idempotency key. SQLite row IDs are native ordering
+    // evidence and remain stable for the lifetime of one state database.
+    let message_id = ObservationId::new(format!("{}:{}", native.session_id, range.end()))
+        .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
     let identity_evidence = json!({
         "session_id": native.session_id,
         "role": native.role,
@@ -463,32 +710,72 @@ fn normalize_native_observation(
     let agent_id = stable_native_id("hermes.session", &json!(native.session_id))
         .map_err(|()| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
     let mut relations = CanonicalObservationRelationsV1::new(session_id)
-        .with_message_id(stable_record_id.clone())
+        .with_message_id(message_id)
         .with_agent_id(agent_id);
     if let Some(parent_session_id) = native.parent_session_id.as_deref() {
+        let parent_session_id = SessionId::new(parent_session_id)
+            .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
         let parent_agent_id = stable_native_id("hermes.session", &json!(parent_session_id))
             .map_err(|()| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
-        relations = relations.with_parent_agent_id(parent_agent_id);
+        relations = relations
+            .with_parent_session_id(parent_session_id)
+            .with_parent_agent_id(parent_agent_id);
     }
 
     let role = canonical_message_role(&native.role)?;
-    let mut facts = Vec::new();
+    let mut facts = vec![CanonicalObservationFactV1::Session {
+        project_path: native.project_path,
+        location_path: native.location_path,
+        transcript_path: None,
+        title: native.title,
+        started_at: native.started_at.map(|value| value as i64),
+        ended_at: native.ended_at.map(|value| value as i64),
+        source: Some("hermes_state_db".to_string()),
+        native_source: native.source,
+        profile: native.profile,
+        location_provenance: native.location_provenance,
+    }];
+    // Message carries provider-authored content only. Empty assistant rows keep
+    // typed Reasoning / ToolInvocation facts projectable instead of synthesizing
+    // reasoning text or tool_calls JSON into Message.content.
+    if let Some(content) = native
+        .content
+        .as_deref()
+        .filter(|content| !content.trim().is_empty())
+        .map(|content| Value::String(content.to_string()))
+    {
+        facts.push(CanonicalObservationFactV1::Message {
+            role,
+            content,
+            model: native.model.clone(),
+            timestamp: native.timestamp.map(|value| value as i64),
+        });
+    }
     if role == CanonicalMessageRoleV1::Tool {
         facts.push(CanonicalObservationFactV1::ToolResult {
             invocation_id: None,
             content: native.content.clone().map_or(Value::Null, Value::String),
             success: None,
         });
-    } else {
-        facts.push(CanonicalObservationFactV1::Message {
-            role,
-            content: native.content.clone().map_or(Value::Null, Value::String),
-            model: native.model.clone(),
-            timestamp: native.timestamp.map(|value| value as i64),
-        });
     }
     append_tool_invocations(&mut facts, native.tool_calls.as_ref(), &stable_record_id)?;
 
+    let (visibility, content) = match native.reasoning {
+        Some(content) => (
+            CanonicalReasoningVisibilityV1::Visible,
+            Some(Value::String(content)),
+        ),
+        None if role == CanonicalMessageRoleV1::Assistant => {
+            (CanonicalReasoningVisibilityV1::Unavailable, None)
+        }
+        None => (CanonicalReasoningVisibilityV1::NotApplicable, None),
+    };
+    facts.push(CanonicalObservationFactV1::Reasoning {
+        visibility,
+        content,
+    });
+    // Reasoning before Usage so reasoning-only rows project as reasoning_visible
+    // instead of an empty usage fallback when Message is absent.
     if let Some((
         input_tokens,
         output_tokens,
@@ -505,20 +792,6 @@ fn normalize_native_observation(
             reasoning_tokens,
         });
     }
-    let (visibility, content) = match native.reasoning {
-        Some(content) => (
-            CanonicalReasoningVisibilityV1::Visible,
-            Some(Value::String(content)),
-        ),
-        None if role == CanonicalMessageRoleV1::Assistant => {
-            (CanonicalReasoningVisibilityV1::Unavailable, None)
-        }
-        None => (CanonicalReasoningVisibilityV1::NotApplicable, None),
-    };
-    facts.push(CanonicalObservationFactV1::Reasoning {
-        visibility,
-        content,
-    });
 
     let mut evidence =
         CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SqliteRowId, range)
@@ -634,8 +907,8 @@ fn nonnegative_token_count(
 #[allow(clippy::too_many_arguments)]
 fn prepare_observation_row(
     row: &HermesRow,
-    admitted: bool,
-    scope: ObservationScopeV1,
+    projection: Option<&HermesProjectionMetadata>,
+    scope: &ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
     file_identity: u64,
@@ -652,17 +925,42 @@ fn prepare_observation_row(
     let end = u64::try_from(row.id).map_err(|_| "invalid Hermes SQLite row id".to_string())?;
     let range = ObservationSourceRangeV1::new(start, end)
         .map_err(|_| "invalid Hermes SQLite row range".to_string())?;
-    let coverage = if !admitted || row.active == 0 {
+    let coverage = if row.sql_value_oversized
+        || hermes_native_payload_bytes(row)
+            > u64::try_from(MAX_OBSERVATION_RECORD_BYTES).unwrap_or(u64::MAX)
+    {
+        Some(ObservationCoverageReason::OversizedFrame)
+    } else if projection.is_none() || row.active == 0 {
         Some(ObservationCoverageReason::OutOfScope)
     } else if !matches!(row.role.as_str(), "user" | "assistant" | "tool" | "system") {
         Some(ObservationCoverageReason::UnsupportedFact)
+    } else if row
+        .content
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+        && row
+            .reasoning
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        && row
+            .tool_calls
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        && row
+            .tool_name
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+    {
+        Some(ObservationCoverageReason::BlankFrame)
     } else {
         None
     };
     let action = if let Some(reason) = coverage {
         HermesAdmissionAction::Cover(reason)
     } else {
-        match native_observation_record(row, source.clone(), range) {
+        let projection = projection
+            .ok_or_else(|| "admitted Hermes row has no projection metadata".to_string())?;
+        match native_observation_record(row, projection, source.clone(), range) {
             Err(reason) => HermesAdmissionAction::Cover(reason),
             Ok(normalized) => {
                 let encoded = serde_json::to_vec(&normalized.native)
@@ -691,7 +989,7 @@ fn prepare_observation_row(
                         Ok(parsed) => {
                             let identity = ObservationIdentityMaterialV1::for_native_record(
                                 normalized.source,
-                                scope,
+                                scope.clone(),
                                 generation,
                                 normalized.range,
                                 ObservationOrderingDomainV1::SqliteRowId,
@@ -757,18 +1055,6 @@ fn sqlite_incarnation(path: &Path) -> Result<(ObservationSourceGenerationV1, u64
     Ok((generation, file_identity, resume_fingerprint))
 }
 
-fn project_scope(project_root: &Path) -> Result<ObservationScopeV1, String> {
-    let layout = crate::storage::resolve_layout_for_current_profile(project_root)
-        .map_err(|_| "could not resolve Hermes project identity".to_string())?;
-    let project_id = layout
-        .identity
-        .project_id
-        .ok_or_else(|| "Hermes project identity is unavailable".to_string())?;
-    let project_id =
-        ProjectId::new(project_id).map_err(|_| "invalid Hermes project identity".to_string())?;
-    Ok(ObservationScopeV1::Project { project_id })
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn advance_coverage(
     facade: &HostAdmissionFacade<'_>,
@@ -826,6 +1112,34 @@ fn host_admission_error(outcome: HostAdmissionOutcome) -> String {
     .to_string()
 }
 
+async fn drain_hermes_projections(db: &GlobalDb, scope: &ObservationScopeV1) -> Result<(), String> {
+    let authorities = match scope {
+        ObservationScopeV1::Project { project_id } => {
+            HostAdmissionAuthorities::for_project(db, project_id.clone())
+        }
+        ObservationScopeV1::Profile => HostAdmissionAuthorities::for_profile(db),
+    };
+    let facade = HostAdmissionFacade::new(authorities);
+    loop {
+        let outcome = facade
+            .drain_projection_queue(
+                PROVIDER,
+                scope,
+                &ObservationCancellation::default(),
+                MAX_HERMES_PROJECTIONS_PER_DRAIN,
+            )
+            .await
+            .map_err(host_admission_error)?;
+        let processed = outcome
+            .projected
+            .saturating_add(outcome.skipped)
+            .saturating_add(outcome.exact_duplicates);
+        if processed < u64::try_from(MAX_HERMES_PROJECTIONS_PER_DRAIN).unwrap_or(u64::MAX) {
+            return Ok(());
+        }
+    }
+}
+
 async fn admit_rows(
     db: &GlobalDb,
     rows: &[HermesRow],
@@ -833,11 +1147,13 @@ async fn admit_rows(
     generation: ObservationSourceGenerationV1,
     file_identity: u64,
     resume_fingerprint: u64,
-    route: impl Fn(&HermesRow) -> bool,
+    route: impl Fn(&HermesRow) -> Option<HermesProjectionMetadata>,
 ) -> Result<TranscriptIngestStats, String> {
-    let authorities = match scope {
-        ObservationScopeV1::Project { .. } => HostAdmissionAuthorities::new(Some(db), None),
-        ObservationScopeV1::Profile => HostAdmissionAuthorities::new(None, Some(db)),
+    let authorities = match &scope {
+        ObservationScopeV1::Project { project_id } => {
+            HostAdmissionAuthorities::for_project(db, project_id.clone())
+        }
+        ObservationScopeV1::Profile => HostAdmissionAuthorities::for_profile(db),
     };
     let facade = HostAdmissionFacade::new(authorities);
     let mut stats = TranscriptIngestStats::default();
@@ -857,8 +1173,8 @@ async fn admit_rows(
         }
         let admission = prepare_observation_row(
             row,
-            route(row),
-            scope.clone(),
+            route(row).as_ref(),
+            &scope,
             generation,
             expected_cursor,
             file_identity,
@@ -971,11 +1287,61 @@ async fn table_columns(
     Ok(out)
 }
 
+fn sql_byte_len(expr: &str) -> String {
+    format!("length(CAST({expr} AS BLOB))")
+}
+
+/// Returns the column only when it is TEXT, within `max_bytes`, and the whole
+/// row fits the current cumulative page budget. Hostile BLOB/`zeroblob`
+/// values and rows deferred to the next page never appear in the result set.
+fn sql_bounded_text(expr: &str, max_bytes: usize, row_fits_budget: &str) -> String {
+    let byte_len = sql_byte_len(expr);
+    format!(
+        "CASE WHEN ({row_fits_budget}) AND typeof({expr}) = 'text' \
+              AND {byte_len} <= {max_bytes} THEN {expr} ELSE NULL END"
+    )
+}
+
+/// Returns only `SQLite`'s fixed-size numeric representations. `SQLite` columns
+/// are dynamically typed, so selecting a nominal REAL/INTEGER column directly
+/// could otherwise materialize an attacker-controlled TEXT/BLOB value.
+fn sql_bounded_number(expr: &str) -> String {
+    format!("CASE WHEN typeof({expr}) IN ('integer', 'real') THEN {expr} ELSE NULL END")
+}
+
+/// SQL UTF-8/blob byte charge without returning the value. Caps each column at
+/// `max_bytes + 1` so oversized/zeroblob sizes cannot inflate page accounting
+/// unboundedly while still signaling oversize.
+fn sql_capped_len(expr: &str, max_bytes: usize) -> String {
+    let cap = max_bytes.saturating_add(1);
+    let byte_len = sql_byte_len(expr);
+    format!(
+        "CASE
+            WHEN {expr} IS NULL THEN 0
+            WHEN typeof({expr}) IN ('text', 'blob') AND {byte_len} > {max_bytes} THEN {cap}
+            WHEN typeof({expr}) IN ('text', 'blob') THEN {byte_len}
+            WHEN typeof({expr}) IN ('integer', 'real') THEN length(CAST({expr} AS BLOB))
+            ELSE {cap}
+         END"
+    )
+}
+
+fn sql_value_oversized(expr: &str, max_bytes: usize) -> String {
+    let byte_len = sql_byte_len(expr);
+    format!(
+        "CASE
+            WHEN {expr} IS NULL THEN 0
+            WHEN typeof({expr}) = 'text' AND {byte_len} <= {max_bytes} THEN 0
+            ELSE 1
+         END"
+    )
+}
+
 fn select_new_messages_sql(
     message_columns: &std::collections::BTreeSet<String>,
     session_columns: &std::collections::BTreeSet<String>,
 ) -> String {
-    let reasoning_expr = if message_columns.contains("reasoning") {
+    let reasoning_raw = if message_columns.contains("reasoning") {
         "m.reasoning"
     } else {
         "NULL"
@@ -985,36 +1351,138 @@ fn select_new_messages_sql(
     } else {
         "1"
     };
-    let session_cwd_expr = if session_columns.contains("cwd") {
+    let session_cwd_raw = if session_columns.contains("cwd") {
         "s.cwd"
     } else {
         "NULL"
     };
+    let session_source_raw = if session_columns.contains("source") {
+        "s.source"
+    } else {
+        "NULL"
+    };
+    let session_title_raw = if session_columns.contains("title") {
+        "s.title"
+    } else {
+        "NULL"
+    };
+    let session_started_at = if session_columns.contains("started_at") {
+        "s.started_at"
+    } else {
+        "NULL"
+    };
+    let session_ended_at = if session_columns.contains("ended_at") {
+        "s.ended_at"
+    } else {
+        "NULL"
+    };
+    let id_max = MAX_HERMES_IDENTITY_BYTES;
+    let value_max = MAX_HERMES_VALUE_BYTES;
+    let measured = format!(
+        "{session_id_len} + {role_len} + {content_len} + {reasoning_len} + {tool_name_len} + {tool_calls_len} + {model_len} + {parent_len} + {cwd_len} + {source_len} + {title_len}",
+        session_id_len = sql_capped_len("m.session_id", id_max),
+        role_len = sql_capped_len("m.role", id_max),
+        content_len = sql_capped_len("m.content", value_max),
+        reasoning_len = sql_capped_len(reasoning_raw, value_max),
+        tool_name_len = sql_capped_len("m.tool_name", id_max),
+        tool_calls_len = sql_capped_len("m.tool_calls", value_max),
+        model_len = sql_capped_len("s.model", id_max),
+        parent_len = sql_capped_len("s.parent_session_id", id_max),
+        cwd_len = sql_capped_len(session_cwd_raw, value_max),
+        source_len = sql_capped_len(session_source_raw, id_max),
+        title_len = sql_capped_len(session_title_raw, value_max),
+    );
+    let oversized = format!(
+        "CASE WHEN ({session_id_os} + {role_os} + {content_os} + {reasoning_os} + {tool_name_os} + {tool_calls_os} + {model_os} + {parent_os} + {cwd_os} + {source_os} + {title_os}) > 0 THEN 1 ELSE 0 END",
+        session_id_os = sql_value_oversized("m.session_id", id_max),
+        role_os = sql_value_oversized("m.role", id_max),
+        content_os = sql_value_oversized("m.content", value_max),
+        reasoning_os = sql_value_oversized(reasoning_raw, value_max),
+        tool_name_os = sql_value_oversized("m.tool_name", id_max),
+        tool_calls_os = sql_value_oversized("m.tool_calls", value_max),
+        model_os = sql_value_oversized("s.model", id_max),
+        parent_os = sql_value_oversized("s.parent_session_id", id_max),
+        cwd_os = sql_value_oversized(session_cwd_raw, value_max),
+        source_os = sql_value_oversized(session_source_raw, id_max),
+        title_os = sql_value_oversized(session_title_raw, value_max),
+    );
+    let row_fits_budget = format!("({measured}) <= ?2");
+    let session_id = sql_bounded_text("m.session_id", id_max, &row_fits_budget);
+    let role = sql_bounded_text("m.role", id_max, &row_fits_budget);
+    let content = sql_bounded_text("m.content", value_max, &row_fits_budget);
+    let reasoning = sql_bounded_text(reasoning_raw, value_max, &row_fits_budget);
+    let tool_name = sql_bounded_text("m.tool_name", id_max, &row_fits_budget);
+    let tool_calls = sql_bounded_text("m.tool_calls", value_max, &row_fits_budget);
+    let model = sql_bounded_text("s.model", id_max, &row_fits_budget);
+    let parent_session_id = sql_bounded_text("s.parent_session_id", id_max, &row_fits_budget);
+    let session_cwd = sql_bounded_text(session_cwd_raw, value_max, &row_fits_budget);
+    let session_source = sql_bounded_text(session_source_raw, id_max, &row_fits_budget);
+    let session_title = sql_bounded_text(session_title_raw, value_max, &row_fits_budget);
+    let timestamp = sql_bounded_number("m.timestamp");
+    let session_started_at = sql_bounded_number(session_started_at);
+    let session_ended_at = sql_bounded_number(session_ended_at);
+    let input_tokens = sql_bounded_number("s.input_tokens");
+    let output_tokens = sql_bounded_number("s.output_tokens");
+    let cache_read_tokens = sql_bounded_number("s.cache_read_tokens");
+    let cache_write_tokens = sql_bounded_number("s.cache_write_tokens");
+    let reasoning_tokens = sql_bounded_number("s.reasoning_tokens");
+    let active = sql_bounded_number(active_expr);
+    let typed_oversized = format!(
+        "CASE WHEN ({oversized}) > 0 OR ({measured}) > {MAX_HERMES_PAGE_BYTES} \
+              THEN 1 ELSE 0 END"
+    );
     format!(
-        "SELECT m.id, m.session_id, m.role, m.content, {reasoning_expr}, m.tool_name,
-                m.tool_calls, m.timestamp,
-                s.model, s.parent_session_id, {session_cwd_expr},
-                s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_write_tokens,
-                s.reasoning_tokens, {active_expr}
+        "SELECT m.id,
+                {session_id},
+                {role},
+                {content},
+                {reasoning},
+                {tool_name},
+                {tool_calls},
+                {timestamp},
+                {model},
+                {parent_session_id},
+                {session_cwd},
+                {session_source},
+                {session_title},
+                {session_started_at},
+                {session_ended_at},
+                {input_tokens}, {output_tokens}, {cache_read_tokens}, {cache_write_tokens},
+                {reasoning_tokens}, {active},
+                CAST(({measured}) AS INTEGER) AS measured_bytes,
+                CAST(({typed_oversized}) AS INTEGER) AS value_oversized,
+                CAST(({row_fits_budget}) AS INTEGER) AS row_fits_budget
          FROM messages m LEFT JOIN sessions s ON s.id = m.session_id
-         WHERE m.id > ?
+         WHERE m.id > ?1
          ORDER BY m.id
-         LIMIT {CHUNK_ROWS}"
+         LIMIT 1"
     )
 }
 
-/// Incrementally scans one Hermes `state.db`; each fully materialized row is
-/// admitted against its session-scoped authoritative SQLite-row cursor. The
-/// caller decides whether a source error is runtime noise or migration-blocking.
+/// Incrementally scans one Hermes `state.db`; each bounded page is admitted
+/// against its session-scoped authoritative SQLite-row cursor. The caller
+/// decides whether a source error is runtime noise or migration-blocking.
 async fn try_ingest_state_db(
     db: &GlobalDb,
     source: &HermesProfileSource,
     project_root: &Path,
+    project_id: ProjectId,
+) -> Result<TranscriptIngestStats, String> {
+    let mut budget = IngestByteBudget::unbounded();
+    try_ingest_state_db_bounded(db, source, project_root, project_id, &mut budget).await
+}
+
+async fn try_ingest_state_db_bounded(
+    db: &GlobalDb,
+    source: &HermesProfileSource,
+    project_root: &Path,
+    project_id: ProjectId,
+    budget: &mut IngestByteBudget,
 ) -> Result<TranscriptIngestStats, String> {
     let state_db = &source.state_db;
     let conn = open_read_only_strict(state_db).await?;
     let (generation, file_identity, resume_fingerprint) = sqlite_incarnation(state_db)?;
-    let scope = project_scope(project_root)?;
+    let scope = ObservationScopeV1::Project { project_id };
     let select_sql = select_new_messages_sql(
         &message_columns(&conn).await?,
         &table_columns(&conn, "sessions").await?,
@@ -1027,15 +1495,28 @@ async fn try_ingest_state_db(
         if row_count == 0 {
             return Ok(stats);
         }
-        let locations = turn_project_locations(&new.items, project_root, source);
+        let bounded_count = new
+            .items
+            .iter()
+            .take_while(|row| budget.try_consume(hermes_budget_bytes(row)))
+            .count();
+        if bounded_count == 0 {
+            return Ok(stats);
+        }
+        let bounded = &new.items[..bounded_count];
+        let locations = turn_project_locations(bounded, project_root, source);
         let admitted = admit_rows(
             db,
-            &new.items,
+            bounded,
             scope.clone(),
             generation,
             file_identity,
             resume_fingerprint,
-            |row| locations.contains(&row.id),
+            |row| {
+                locations.get(&row.id).copied().map(|provenance| {
+                    project_projection_metadata(row, source, project_root, provenance)
+                })
+            },
         )
         .await?;
         stats.messages_upserted = stats
@@ -1044,7 +1525,16 @@ async fn try_ingest_state_db(
         stats.sessions_upserted = stats
             .sessions_upserted
             .saturating_add(admitted.sessions_upserted);
-        read_cursor.position = new.new_cursor.position;
+        read_cursor.position = bounded
+            .last()
+            .and_then(|row| u64::try_from(row.id).ok())
+            .unwrap_or(read_cursor.position);
+        if bounded_count < row_count {
+            return Ok(stats);
+        }
+        if new.truncated_by_byte_budget {
+            continue;
+        }
         if row_count < CHUNK_ROWS {
             return Ok(stats);
         }
@@ -1063,8 +1553,10 @@ async fn try_ingest_state_db_for_projects(
     let (generation, file_identity, resume_fingerprint) = sqlite_incarnation(state_db)?;
     let scopes = destinations
         .iter()
-        .map(|destination| project_scope(destination.project_root))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|destination| ObservationScopeV1::Project {
+            project_id: destination.project_id.clone(),
+        })
+        .collect::<Vec<_>>();
     let select_sql = select_new_messages_sql(
         &message_columns(&conn).await?,
         &table_columns(&conn, "sessions").await?,
@@ -1073,7 +1565,6 @@ async fn try_ingest_state_db_for_projects(
         .par_iter()
         .map(|destination| ProjectRootMatcher::new(destination.project_root))
         .collect::<Vec<_>>();
-    let mut destination_routes = HashMap::<PathBuf, Vec<usize>>::new();
     let mut read_cursor = StoredCursor::default();
     let mut stats = TranscriptIngestStats::default();
     loop {
@@ -1082,6 +1573,8 @@ async fn try_ingest_state_db_for_projects(
         if row_count == 0 {
             return Ok(stats);
         }
+        // Per-page route cache: avoid unbounded growth across many SQLite pages.
+        let mut destination_routes = HashMap::<PathBuf, Vec<usize>>::new();
         let locations = turn_project_locations_for_destinations(
             &new.items,
             &destination_matchers,
@@ -1096,7 +1589,20 @@ async fn try_ingest_state_db_for_projects(
                 generation,
                 file_identity,
                 resume_fingerprint,
-                |row| locations[index].by_row_id.contains(&row.id),
+                |row| {
+                    locations[index]
+                        .by_row_id
+                        .get(&row.id)
+                        .copied()
+                        .map(|provenance| {
+                            project_projection_metadata(
+                                row,
+                                source,
+                                destination.project_root,
+                                provenance,
+                            )
+                        })
+                },
             )
             .await?;
             stats.messages_upserted = stats
@@ -1107,16 +1613,20 @@ async fn try_ingest_state_db_for_projects(
                 .saturating_add(admitted.sessions_upserted);
         }
         read_cursor.position = new.new_cursor.position;
+        if new.truncated_by_byte_budget {
+            continue;
+        }
         if row_count < CHUNK_ROWS {
             return Ok(stats);
         }
     }
 }
 
-async fn try_ingest_user_state_db(
+async fn try_ingest_user_state_db_bounded(
     db: &GlobalDb,
     source: &HermesProfileSource,
     _registered_roots: &[PathBuf],
+    budget: &mut IngestByteBudget,
 ) -> Result<TranscriptIngestStats, String> {
     let state_db = &source.state_db;
     let conn = open_read_only_strict(state_db).await?;
@@ -1134,15 +1644,38 @@ async fn try_ingest_user_state_db(
         if row_count == 0 {
             return Ok(stats);
         }
-        let locations = user_turn_locations(&new.items, source);
+        let bounded_count = new
+            .items
+            .iter()
+            .take_while(|row| budget.try_consume(hermes_budget_bytes(row)))
+            .count();
+        if bounded_count == 0 {
+            return Ok(stats);
+        }
+        let bounded = &new.items[..bounded_count];
+        let locations = user_turn_locations(bounded, source);
+        let profile = source.profile.clone();
+        let fallback_provenance = source
+            .legacy_project_pin
+            .as_ref()
+            .map_or("session_cwd", |_| "profile_pin");
         let admitted = admit_rows(
             db,
-            &new.items,
+            bounded,
             scope.clone(),
             generation,
             file_identity,
             resume_fingerprint,
-            |row| locations.contains(&row.id),
+            |row| {
+                locations
+                    .contains(&row.id)
+                    .then(|| HermesProjectionMetadata {
+                        project_path: None,
+                        location_path: None,
+                        profile: profile.clone(),
+                        location_provenance: Some(fallback_provenance),
+                    })
+            },
         )
         .await?;
         stats.messages_upserted = stats
@@ -1151,7 +1684,16 @@ async fn try_ingest_user_state_db(
         stats.sessions_upserted = stats
             .sessions_upserted
             .saturating_add(admitted.sessions_upserted);
-        read_cursor.position = new.new_cursor.position;
+        read_cursor.position = bounded
+            .last()
+            .and_then(|row| u64::try_from(row.id).ok())
+            .unwrap_or(read_cursor.position);
+        if bounded_count < row_count {
+            return Ok(stats);
+        }
+        if new.truncated_by_byte_budget {
+            continue;
+        }
         if row_count < CHUNK_ROWS {
             return Ok(stats);
         }
@@ -1174,14 +1716,20 @@ async fn read_new_rows_strict(
     conn: &libsql::Connection,
     select_sql: &str,
     prev: StoredCursor,
-) -> Result<NewRows<HermesRow>, String> {
-    let mut rows = conn
-        .query(select_sql, libsql::params![prev.position as i64])
-        .await
-        .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
+) -> Result<HermesPageRead, String> {
     let mut items = Vec::new();
     let mut max_rowid = prev.position;
-    loop {
+    let mut page_bytes = 0_u64;
+    let mut truncated_by_byte_budget = false;
+    while items.len() < CHUNK_ROWS {
+        let remaining = MAX_HERMES_PAGE_BYTES.saturating_sub(page_bytes);
+        let mut rows = conn
+            .query(
+                select_sql,
+                libsql::params![max_rowid as i64, remaining as i64],
+            )
+            .await
+            .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
         let row = rows
             .next()
             .await
@@ -1192,41 +1740,93 @@ async fn read_new_rows_strict(
         let rowid = row
             .get::<i64>(0)
             .map_err(|error| format!("legacy Hermes state row has no id: {error}"))?;
+        // Columns 21..23 are SQL byte/typeof/budget aggregates — integers only.
+        let measured = row_i64_flag(&row, 21).max(0) as u64;
+        let charge = hermes_page_row_charge(measured);
+        let row_fits_budget = row_i64_flag(&row, 23) != 0;
+        if !row_fits_budget && !items.is_empty() {
+            // SQL returned NULL for every text payload in this row, so defer it
+            // without allocating the value that would cross the page budget.
+            truncated_by_byte_budget = true;
+            break;
+        }
+        let mapped = map_row(rowid, &row, measured)
+            .ok_or_else(|| format!("legacy Hermes state row {rowid} is malformed"))?;
+        page_bytes = page_bytes.saturating_add(charge);
         max_rowid = max_rowid.max(rowid as u64);
-        items.push(
-            map_row(rowid, &row)
-                .ok_or_else(|| format!("legacy Hermes state row {rowid} is malformed"))?,
-        );
+        items.push(mapped);
+        if page_bytes >= MAX_HERMES_PAGE_BYTES {
+            truncated_by_byte_budget = true;
+            break;
+        }
     }
-    Ok(NewRows {
+    if items.len() >= CHUNK_ROWS {
+        truncated_by_byte_budget = true;
+    }
+    Ok(HermesPageRead {
         items,
         new_cursor: StoredCursor {
             position: max_rowid,
             mtime: 0,
             file_id: 0,
         },
+        truncated_by_byte_budget,
     })
 }
 
-fn map_row(rowid: i64, row: &libsql::Row) -> Option<HermesRow> {
+fn row_i64_flag(row: &libsql::Row, idx: i32) -> i64 {
+    row.get::<i64>(idx)
+        .or_else(|_| row.get::<Option<i64>>(idx).map(|value| value.unwrap_or(0)))
+        .or_else(|_| row.get::<f64>(idx).map(|value| value as i64))
+        .unwrap_or(0)
+}
+
+fn row_optional_f64(row: &libsql::Row, idx: i32) -> Option<f64> {
+    row.get::<Option<f64>>(idx).ok().flatten().or_else(|| {
+        row.get::<Option<i64>>(idx)
+            .ok()
+            .flatten()
+            .map(|value| value as f64)
+    })
+}
+
+fn map_row(rowid: i64, row: &libsql::Row, sql_measured_bytes: u64) -> Option<HermesRow> {
+    let sql_value_oversized = row_i64_flag(row, 22) != 0;
+    let session_id = match row.get::<Option<String>>(1).ok().flatten() {
+        Some(id) if !id.is_empty() => id,
+        // Rejected/oversized session_id never materializes the hostile value; use a
+        // deterministic cover identity so the row can advance without payload leakage.
+        _ if sql_value_oversized => format!("hermes.oversized.{rowid}"),
+        _ => return None,
+    };
     Some(HermesRow {
         id: rowid,
-        session_id: row.get::<String>(1).ok()?,
-        role: row.get::<String>(2).unwrap_or_default(),
+        session_id,
+        role: row
+            .get::<Option<String>>(2)
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
         content: row.get::<Option<String>>(3).ok().flatten(),
         reasoning: row.get::<Option<String>>(4).ok().flatten(),
         tool_name: row.get::<Option<String>>(5).ok().flatten(),
         tool_calls: row.get::<Option<String>>(6).ok().flatten(),
-        timestamp: row.get::<Option<f64>>(7).ok().flatten(),
+        timestamp: row_optional_f64(row, 7),
         session_model: row.get::<Option<String>>(8).ok().flatten(),
         parent_session_id: row.get::<Option<String>>(9).ok().flatten(),
         session_cwd: row.get::<Option<String>>(10).ok().flatten(),
-        session_input_tokens: row.get::<Option<i64>>(11).ok().flatten(),
-        session_output_tokens: row.get::<Option<i64>>(12).ok().flatten(),
-        session_cache_read_tokens: row.get::<Option<i64>>(13).ok().flatten(),
-        session_cache_write_tokens: row.get::<Option<i64>>(14).ok().flatten(),
-        session_reasoning_tokens: row.get::<Option<i64>>(15).ok().flatten(),
-        active: row.get::<Option<i64>>(16).ok().flatten().unwrap_or(1),
+        session_source: row.get::<Option<String>>(11).ok().flatten(),
+        session_title: row.get::<Option<String>>(12).ok().flatten(),
+        session_started_at: row_optional_f64(row, 13),
+        session_ended_at: row_optional_f64(row, 14),
+        session_input_tokens: row.get::<Option<i64>>(15).ok().flatten(),
+        session_output_tokens: row.get::<Option<i64>>(16).ok().flatten(),
+        session_cache_read_tokens: row.get::<Option<i64>>(17).ok().flatten(),
+        session_cache_write_tokens: row.get::<Option<i64>>(18).ok().flatten(),
+        session_reasoning_tokens: row.get::<Option<i64>>(19).ok().flatten(),
+        active: row.get::<Option<i64>>(20).ok().flatten().unwrap_or(1),
+        sql_value_oversized,
+        sql_measured_bytes,
     })
 }
 
@@ -1272,31 +1872,47 @@ fn turn_project_locations(
     rows: &[HermesRow],
     project_root: &Path,
     source: &HermesProfileSource,
-) -> HashSet<i64> {
+) -> HashMap<i64, &'static str> {
     let mut by_session: HashMap<&str, Vec<&HermesRow>> = HashMap::new();
     for row in rows {
         by_session.entry(&row.session_id).or_default().push(row);
     }
-    let mut locations = HashSet::new();
+    let mut locations = HashMap::new();
     for session_rows in by_session.into_values() {
         let has_fallback = session_rows
             .iter()
             .any(|row| session_is_candidate_for_project(row, project_root, source));
+        let fallback_provenance = source
+            .legacy_project_pin
+            .as_ref()
+            .map_or("session_cwd", |_| "profile_pin");
         let mut turn = Vec::new();
         for row in session_rows {
             if row.role == "user" && !turn.is_empty() {
-                assign_turn_location(&turn, project_root, has_fallback, &mut locations);
+                assign_turn_location(
+                    &turn,
+                    project_root,
+                    has_fallback,
+                    fallback_provenance,
+                    &mut locations,
+                );
                 turn.clear();
             }
             turn.push(row);
         }
-        assign_turn_location(&turn, project_root, has_fallback, &mut locations);
+        assign_turn_location(
+            &turn,
+            project_root,
+            has_fallback,
+            fallback_provenance,
+            &mut locations,
+        );
     }
     locations
 }
 
 struct DestinationTurnLocations {
-    by_row_id: HashSet<i64>,
+    by_row_id: HashMap<i64, &'static str>,
 }
 
 fn turn_project_locations_for_destinations(
@@ -1311,10 +1927,14 @@ fn turn_project_locations_for_destinations(
     }
     let mut locations = (0..destination_matchers.len())
         .map(|_| DestinationTurnLocations {
-            by_row_id: HashSet::new(),
+            by_row_id: HashMap::new(),
         })
         .collect::<Vec<_>>();
     for session_rows in by_session.into_values() {
+        let fallback_provenance = source
+            .legacy_project_pin
+            .as_ref()
+            .map_or("session_cwd", |_| "profile_pin");
         let fallback_candidates = if let Some(pin) = source.legacy_project_pin.as_ref() {
             vec![pin.clone()]
         } else {
@@ -1342,6 +1962,7 @@ fn turn_project_locations_for_destinations(
                     &turn,
                     destination_matchers,
                     &fallbacks,
+                    fallback_provenance,
                     &mut locations,
                     destination_routes,
                 );
@@ -1353,6 +1974,7 @@ fn turn_project_locations_for_destinations(
             &turn,
             destination_matchers,
             &fallbacks,
+            fallback_provenance,
             &mut locations,
             destination_routes,
         );
@@ -1364,6 +1986,7 @@ fn assign_turn_locations_for_destinations(
     rows: &[&HermesRow],
     destination_matchers: &[ProjectRootMatcher],
     fallbacks: &[bool],
+    fallback_provenance: &'static str,
     locations: &mut [DestinationTurnLocations],
     destination_routes: &mut HashMap<PathBuf, Vec<usize>>,
 ) {
@@ -1373,9 +1996,8 @@ fn assign_turn_locations_for_destinations(
         .flat_map(|row| structured_tool_project_paths(row))
         .collect::<Vec<_>>();
     let mut selected = vec![false; destination_matchers.len()];
-    if explicit_paths.is_empty() {
-        selected.copy_from_slice(fallbacks);
-    } else {
+    let has_explicit_paths = !explicit_paths.is_empty();
+    if has_explicit_paths {
         for path in explicit_paths {
             for destination_index in
                 matching_destinations(&path, destination_matchers, destination_routes)
@@ -1383,10 +2005,19 @@ fn assign_turn_locations_for_destinations(
                 selected[destination_index] = true;
             }
         }
+    } else {
+        selected.copy_from_slice(fallbacks);
     }
+    let provenance = if has_explicit_paths {
+        "tool_project_path"
+    } else {
+        fallback_provenance
+    };
     for (selected, destination) in selected.into_iter().zip(locations) {
         if selected {
-            destination.by_row_id.extend(rows.iter().map(|row| row.id));
+            destination
+                .by_row_id
+                .extend(rows.iter().map(|row| (row.id, provenance)));
         }
     }
 }
@@ -1412,20 +2043,25 @@ fn assign_turn_location(
     rows: &[&HermesRow],
     project_root: &Path,
     has_fallback: bool,
-    locations: &mut HashSet<i64>,
+    fallback_provenance: &'static str,
+    locations: &mut HashMap<i64, &'static str>,
 ) {
     let explicit_paths = rows
         .iter()
         .rev()
         .flat_map(|row| structured_tool_project_paths(row))
         .collect::<Vec<_>>();
-    if (!explicit_paths.is_empty()
+    let explicit = !explicit_paths.is_empty()
         && explicit_paths
             .iter()
-            .any(|path| path_belongs_to_project(path, project_root)))
-        || (explicit_paths.is_empty() && has_fallback)
-    {
-        locations.extend(rows.iter().map(|row| row.id));
+            .any(|path| path_belongs_to_project(path, project_root));
+    if explicit || (explicit_paths.is_empty() && has_fallback) {
+        let provenance = if explicit {
+            "tool_project_path"
+        } else {
+            fallback_provenance
+        };
+        locations.extend(rows.iter().map(|row| (row.id, provenance)));
     }
 }
 
@@ -1514,19 +2150,34 @@ mod observation_tests {
             session_model: Some("model-redacted".to_string()),
             parent_session_id: Some("parent-redacted".to_string()),
             session_cwd: None,
+            session_source: Some("tui".to_string()),
+            session_title: Some("Safe fixture".to_string()),
+            session_started_at: Some(1_750_000_000.0),
+            session_ended_at: Some(1_750_000_001.0),
             session_input_tokens: Some(10),
             session_output_tokens: Some(5),
             session_cache_read_tokens: Some(4),
             session_cache_write_tokens: Some(3),
             session_reasoning_tokens: Some(2),
             active: 1,
+            sql_value_oversized: false,
+            sql_measured_bytes: 0,
         }
     }
 
     fn normalized(row: &HermesRow, start: u64) -> HermesObservationRecord {
         let source = observation_source(row).unwrap();
         let range = ObservationSourceRangeV1::new(start, row.id as u64).unwrap();
-        native_observation_record(row, source, range).unwrap()
+        native_observation_record(row, &fixture_projection(), source, range).unwrap()
+    }
+
+    fn fixture_projection() -> HermesProjectionMetadata {
+        HermesProjectionMetadata {
+            project_path: None,
+            location_path: None,
+            profile: Some("fixture".to_string()),
+            location_provenance: None,
+        }
     }
 
     fn canonical(row: &HermesRow, start: u64) -> CanonicalObservationEnvelopeV1 {
@@ -1572,11 +2223,22 @@ mod observation_tests {
             "session-redacted"
         );
         assert_eq!(
-            envelope.relations().message_id(),
-            Some(envelope.stable_record_id())
+            envelope.relations().message_id().map(ObservationId::as_str),
+            Some("session-redacted:7")
         );
         assert!(envelope.relations().agent_id().is_some());
         assert!(envelope.relations().parent_agent_id().is_some());
+        assert_eq!(
+            envelope
+                .relations()
+                .parent_session_id()
+                .map(SessionId::as_str),
+            Some("parent-redacted")
+        );
+        let relations = serde_json::to_value(envelope.relations()).unwrap();
+        // Hermes has no native thread/turn identifiers; leave those unset.
+        assert!(relations.get("thread_id").is_none());
+        assert!(relations.get("turn_id").is_none());
         assert_eq!(
             envelope.evidence().ordering_domain(),
             ObservationOrderingDomainV1::SqliteRowId
@@ -1585,6 +2247,24 @@ mod observation_tests {
             envelope.evidence().range(),
             ObservationSourceRangeV1::new(0, 7).unwrap()
         );
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Session {
+                project_path: None,
+                location_path: None,
+                transcript_path: None,
+                title: Some(title),
+                started_at: Some(1_750_000_000),
+                ended_at: Some(1_750_000_001),
+                source: Some(source),
+                native_source: Some(native_source),
+                profile: Some(profile),
+                location_provenance: None,
+            } if title == "Safe fixture"
+                && source == "hermes_state_db"
+                && native_source == "tui"
+                && profile == "fixture"
+        )));
         assert!(envelope.facts().iter().any(|fact| matches!(
             fact,
             CanonicalObservationFactV1::Message {
@@ -1627,6 +2307,77 @@ mod observation_tests {
     }
 
     #[test]
+    fn sanitizer_preserves_non_sensitive_v1_message_identity() {
+        let mut row = fixture(7);
+        row.session_id = "20260101_000000_abc123".to_string();
+        let record = normalized(&row, 0);
+        let encoded = serde_json::to_vec(&record.native).unwrap();
+        let parsed = parse_normalized_observation_record_v1(
+            &encoded,
+            record.range,
+            ObservationOrderingDomainV1::SqliteRowId,
+            |native| normalize_native_observation(native, record.range),
+        )
+        .unwrap();
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            record.source,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            record.range,
+            ObservationOrderingDomainV1::SqliteRowId,
+            record.native_record_id,
+        )
+        .unwrap();
+        let outcome = crate::privacy::ClaudeRecordSanitizerV1::observation_v1()
+            .unwrap()
+            .sanitize_parsed(
+                parsed,
+                identity,
+                RetentionClass::new(OBSERVATION_RETENTION).unwrap(),
+            )
+            .unwrap();
+        let crate::privacy::ObservationSanitizationOutcomeV1::Durable { observation, .. } = outcome
+        else {
+            panic!("safe Hermes fixture must remain durable");
+        };
+        let envelope: CanonicalObservationEnvelopeV1 =
+            serde_json::from_value(observation.payload().clone()).unwrap();
+        assert_eq!(
+            envelope.relations().message_id().map(ObservationId::as_str),
+            Some("20260101_000000_abc123:7")
+        );
+    }
+
+    #[tokio::test]
+    async fn projection_drain_projects_v1_message_identity() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = GlobalDb::open_at(&tmp.path().join("sessions.db"))
+            .await
+            .unwrap();
+        let row = fixture(7);
+        let stats = admit_rows(
+            &db,
+            std::slice::from_ref(&row),
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            1,
+            1,
+            |_| Some(fixture_projection()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stats.messages_upserted, 1);
+        drain_hermes_projections(&db, &ObservationScopeV1::Profile)
+            .await
+            .unwrap();
+        assert!(
+            db.get_session_message(PROVIDER, "session-redacted:7")
+                .await
+                .is_some()
+        );
+    }
+
+    #[test]
     fn canonical_identity_and_parent_relation_match_native_evidence() {
         let row = fixture(7);
         let record = normalized(&row, 0);
@@ -1639,6 +2390,9 @@ mod observation_tests {
             envelope.relations().parent_agent_id(),
             Some(&expected_parent)
         );
+        let relations = serde_json::to_value(envelope.relations()).unwrap();
+        assert!(relations.get("thread_id").is_none());
+        assert!(relations.get("turn_id").is_none());
     }
 
     #[test]
@@ -1656,7 +2410,45 @@ mod observation_tests {
     }
 
     #[test]
-    fn tool_message_becomes_typed_result_without_generic_message_blob() {
+    fn empty_assistant_content_keeps_typed_tool_or_reasoning_without_message() {
+        let mut tool_row = fixture(7);
+        tool_row.content = Some(String::new());
+        tool_row.reasoning = None;
+        let tool = canonical(&tool_row, 0);
+        assert!(
+            tool.facts()
+                .iter()
+                .all(|fact| { !matches!(fact, CanonicalObservationFactV1::Message { .. }) })
+        );
+        assert!(tool.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::ToolInvocation {
+                name,
+                ..
+            } if name == "terminal"
+        )));
+
+        let mut reasoning_row = fixture(8);
+        reasoning_row.content = Some(String::new());
+        reasoning_row.tool_calls = None;
+        let reasoning = canonical(&reasoning_row, 0);
+        assert!(
+            reasoning
+                .facts()
+                .iter()
+                .all(|fact| { !matches!(fact, CanonicalObservationFactV1::Message { .. }) })
+        );
+        assert!(reasoning.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Reasoning {
+                visibility: CanonicalReasoningVisibilityV1::Visible,
+                content: Some(Value::String(content)),
+            } if content == "safe redacted reasoning"
+        )));
+    }
+
+    #[test]
+    fn tool_message_preserves_authored_message_and_typed_result() {
         let mut row = fixture(7);
         row.role = "tool".to_string();
         row.reasoning = None;
@@ -1670,12 +2462,15 @@ mod observation_tests {
                 success: None,
             } if content == "safe fixture content"
         )));
-        assert!(
-            !envelope
-                .facts()
-                .iter()
-                .any(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
-        );
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Tool,
+                content: Value::String(content),
+                model: Some(model),
+                timestamp: Some(1_750_000_000),
+            } if content == "safe fixture content" && model == "model-redacted"
+        )));
         assert!(envelope.facts().iter().any(|fact| matches!(
             fact,
             CanonicalObservationFactV1::Reasoning {
@@ -1700,8 +2495,8 @@ mod observation_tests {
         .unwrap();
         let admission = prepare_observation_row(
             &row,
-            true,
-            ObservationScopeV1::Profile,
+            Some(&fixture_projection()),
+            &ObservationScopeV1::Profile,
             generation,
             Some(expected),
             23,
@@ -1731,8 +2526,8 @@ mod observation_tests {
         .unwrap();
         let admission = prepare_observation_row(
             &row,
-            true,
-            ObservationScopeV1::Profile,
+            Some(&fixture_projection()),
+            &ObservationScopeV1::Profile,
             ObservationSourceGenerationV1::new(18).unwrap(),
             Some(expected),
             23,
@@ -1753,8 +2548,8 @@ mod observation_tests {
         row.tool_calls = Some("{not-json".to_string());
         let admission = prepare_observation_row(
             &row,
-            true,
-            ObservationScopeV1::Profile,
+            Some(&fixture_projection()),
+            &ObservationScopeV1::Profile,
             ObservationSourceGenerationV1::new(17).unwrap(),
             None,
             23,
@@ -1771,8 +2566,8 @@ mod observation_tests {
     fn missing_route_is_complete_out_of_scope_coverage() {
         let admission = prepare_observation_row(
             &fixture(7),
-            false,
-            ObservationScopeV1::Profile,
+            None,
+            &ObservationScopeV1::Profile,
             ObservationSourceGenerationV1::new(17).unwrap(),
             None,
             23,
@@ -1791,8 +2586,30 @@ mod observation_tests {
         row.content = Some("x".repeat(MAX_OBSERVATION_RECORD_BYTES));
         let admission = prepare_observation_row(
             &row,
-            true,
-            ObservationScopeV1::Profile,
+            Some(&fixture_projection()),
+            &ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(17).unwrap(),
+            None,
+            23,
+            29,
+        )
+        .unwrap();
+        assert!(matches!(
+            admission.action,
+            HermesAdmissionAction::Cover(ObservationCoverageReason::OversizedFrame)
+        ));
+    }
+
+    #[test]
+    fn sql_preflight_oversized_is_typed_coverage_without_payload() {
+        let mut row = fixture(7);
+        row.content = None;
+        row.sql_value_oversized = true;
+        row.sql_measured_bytes = (MAX_HERMES_VALUE_BYTES as u64).saturating_add(1);
+        let admission = prepare_observation_row(
+            &row,
+            Some(&fixture_projection()),
+            &ObservationScopeV1::Profile,
             ObservationSourceGenerationV1::new(17).unwrap(),
             None,
             23,
@@ -1815,8 +2632,8 @@ mod observation_tests {
         row.tool_calls = Some(nested.to_string());
         let admission = prepare_observation_row(
             &row,
-            true,
-            ObservationScopeV1::Profile,
+            Some(&fixture_projection()),
+            &ObservationScopeV1::Profile,
             ObservationSourceGenerationV1::new(17).unwrap(),
             None,
             23,
@@ -1827,5 +2644,406 @@ mod observation_tests {
             admission.action,
             HermesAdmissionAction::Cover(ObservationCoverageReason::MalformedFrame)
         ));
+    }
+
+    #[test]
+    fn fixture_backed_hermes_tool_call_reaches_canonical_envelope() {
+        // Exact assistant tool-call shape from
+        // tests/transcript_ingest_suite/hermes.rs::write_hermes_profile.
+        // Provider-parser path: native_observation_record → normalize_native_observation.
+        let input: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/provider_normalization/hermes/assistant_tool_call.input.json"
+        ))
+        .expect("Hermes golden input");
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/provider_normalization/hermes/assistant_tool_call.expected_envelope.json"
+        ))
+        .expect("Hermes golden expected envelope");
+        let tool_calls = input["tool_calls"].clone();
+        let mut row = fixture(input["row_id"].as_i64().unwrap());
+        row.session_id = input["session_id"].as_str().unwrap().to_string();
+        row.role = input["role"].as_str().unwrap().to_string();
+        row.content = input["content"].as_str().map(str::to_string);
+        row.reasoning = None;
+        row.tool_name = None;
+        row.tool_calls = Some(tool_calls.to_string());
+        row.timestamp = input["timestamp"].as_f64();
+        row.session_model = input["session_model"].as_str().map(str::to_string);
+        row.parent_session_id = None;
+        row.session_input_tokens = input["session_input_tokens"].as_i64();
+        row.session_output_tokens = input["session_output_tokens"].as_i64();
+        row.session_cache_read_tokens = input["session_cache_read_tokens"].as_i64();
+        row.session_cache_write_tokens = input["session_cache_write_tokens"].as_i64();
+        row.session_reasoning_tokens = input["session_reasoning_tokens"].as_i64();
+
+        let record = normalized(&row, 0);
+        let native: Value = serde_json::from_value(record.native.clone()).unwrap();
+        assert_eq!(native["role"], "assistant");
+        assert_eq!(native["tool_calls"], tool_calls);
+        assert!(native.get("cwd").is_none());
+        assert!(native.get("routing").is_none());
+
+        let envelope = canonical(&row, 0);
+        let actual = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(actual["version"], expected["version"]);
+        assert_eq!(actual["provider"], expected["provider"]);
+        assert_eq!(actual["native_record_kind"], expected["native_record_kind"]);
+        assert_eq!(actual["evidence"], expected["evidence"]);
+        let fact_kinds = actual["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|fact| fact["kind"] != "session")
+            .map(|fact| fact["kind"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let expected_fact_kinds = expected["fact_kinds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|kind| kind.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(fact_kinds, expected_fact_kinds);
+        let relations = actual["relations"].as_object().unwrap();
+        assert_eq!(relations["session_id"], expected["relations"]["session_id"]);
+        assert_eq!(
+            relations.get("agent_id").is_some(),
+            expected["relations"]["agent_id_present"].as_bool().unwrap()
+        );
+        for absent in expected["relations"]["absent"].as_array().unwrap() {
+            assert!(relations.get(absent.as_str().unwrap()).is_none());
+        }
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::ToolInvocation {
+                name,
+                arguments,
+                ..
+            } if name == "terminal"
+                && arguments.get("command").and_then(Value::as_str)
+                    == Some("cargo test billing")
+        )));
+        assert!(
+            envelope
+                .facts()
+                .iter()
+                .all(|fact| !matches!(fact, CanonicalObservationFactV1::Message { .. })),
+            "empty-content Hermes tool-call turn must not synthesize a Message fact"
+        );
+        let encoded = actual.to_string();
+        for required in expected["encoded_must_contain"].as_array().unwrap() {
+            assert!(encoded.contains(required.as_str().unwrap()));
+        }
+        for rejected in expected["encoded_must_not_contain"].as_array().unwrap() {
+            assert!(!encoded.contains(rejected.as_str().unwrap()));
+        }
+        assert!(
+            envelope.facts().iter().all(|fact| {
+                !matches!(fact, CanonicalObservationFactV1::WorkflowLifecycle { .. })
+            }),
+            "Hermes checked-in fixture must not emit WorkflowLifecycle"
+        );
+    }
+
+    #[test]
+    fn hermes_workflow_lookalike_fields_do_not_emit_workflow_lifecycle() {
+        let input: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/provider_normalization/hermes/workflow_lookalike.input.json"
+        ))
+        .expect("Hermes workflow lookalike input");
+        let mut row = fixture(input["row_id"].as_i64().unwrap());
+        row.session_id = input["session_id"].as_str().unwrap().to_string();
+        row.role = input["role"].as_str().unwrap().to_string();
+        row.content = input["content"].as_str().map(str::to_string);
+        row.reasoning = None;
+        row.tool_name = None;
+        row.tool_calls = Some(input["tool_calls"].to_string());
+        row.timestamp = input["timestamp"].as_f64();
+        row.session_model = input["session_model"].as_str().map(str::to_string);
+        row.parent_session_id = None;
+        row.session_input_tokens = input["session_input_tokens"].as_i64();
+        row.session_output_tokens = input["session_output_tokens"].as_i64();
+        row.session_cache_read_tokens = input["session_cache_read_tokens"].as_i64();
+        row.session_cache_write_tokens = input["session_cache_write_tokens"].as_i64();
+        row.session_reasoning_tokens = input["session_reasoning_tokens"].as_i64();
+
+        let record = normalized(&row, 0);
+        let mut native = record.native.clone();
+        if let Some(object) = native.as_object_mut() {
+            for key in ["workflow", "todos", "thread_goal_updated"] {
+                if let Some(value) = input.get(key) {
+                    object.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+        let envelope = normalize_native_observation(native, record.range)
+            .expect("Hermes must ignore unknown workflow lookalike bags");
+        assert!(
+            envelope.facts().iter().all(|fact| {
+                !matches!(fact, CanonicalObservationFactV1::WorkflowLifecycle { .. })
+            }),
+            "Hermes workflow lookalikes must not become WorkflowLifecycle"
+        );
+        let encoded = serde_json::to_string(&envelope).unwrap();
+        for rejected in [
+            "hermes-hostile-task",
+            "todo-hostile-1",
+            "invented todo",
+            "invented goal",
+        ] {
+            assert!(
+                !encoded.contains(rejected),
+                "{rejected} must not survive Hermes normalization"
+            );
+        }
+    }
+
+    /// Hostile `zeroblob` content is rejected by SQL length/typeof before any
+    /// Rust String/Vec materialization of the payload. Mirrors production by
+    /// writing then reopening read-only.
+    #[tokio::test]
+    async fn zeroblob_content_is_covered_without_materializing_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let db = libsql::Builder::new_local(&path).build().await.unwrap();
+            let conn = db.connect().unwrap();
+            conn.execute(
+                "CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY,
+                    model TEXT,
+                    parent_session_id TEXT,
+                    cwd TEXT,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    cache_read_tokens INTEGER,
+                    cache_write_tokens INTEGER,
+                    reasoning_tokens INTEGER
+                )",
+                (),
+            )
+            .await
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT,
+                    tool_name TEXT,
+                    tool_calls TEXT,
+                    timestamp REAL NOT NULL,
+                    reasoning TEXT,
+                    active INTEGER NOT NULL DEFAULT 1
+                )",
+                (),
+            )
+            .await
+            .unwrap();
+            // Generate the hostile value inside SQLite — never as a Rust String/Vec.
+            let hostile_bytes = MAX_HERMES_VALUE_BYTES.saturating_add(1);
+            conn.execute(
+                &format!(
+                    "INSERT INTO sessions (id, model, input_tokens)
+                     VALUES ('sess-zeroblob', 'model', zeroblob({hostile_bytes}))"
+                ),
+                (),
+            )
+            .await
+            .unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO messages (session_id, role, content, timestamp)
+                     VALUES ('sess-zeroblob', 'user', zeroblob({hostile_bytes}), 1.0)"
+                ),
+                (),
+            )
+            .await
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp)
+                 VALUES ('sess-zeroblob', 'assistant', 'safe trailing row', 2.0)",
+                (),
+            )
+            .await
+            .unwrap();
+        }
+
+        let conn = open_read_only_strict(&path).await.unwrap();
+        let message_cols = message_columns(&conn).await.unwrap();
+        let session_cols = table_columns(&conn, "sessions").await.unwrap();
+        let select_sql = select_new_messages_sql(&message_cols, &session_cols);
+        let page = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(page.items[0].sql_value_oversized);
+        assert!(page.items[0].content.is_none());
+        assert!(
+            page.items[0].session_input_tokens.is_none(),
+            "dynamic BLOB in INTEGER column must be nulled in SQL"
+        );
+        assert!(
+            page.items[0].sql_measured_bytes > MAX_HERMES_VALUE_BYTES as u64,
+            "SQL length charge must reflect hostile size without materializing it"
+        );
+        assert!(!page.items[1].sql_value_oversized);
+        assert_eq!(page.items[1].content.as_deref(), Some("safe trailing row"));
+
+        let admission = prepare_observation_row(
+            &page.items[0],
+            Some(&fixture_projection()),
+            &ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(17).unwrap(),
+            None,
+            23,
+            29,
+        )
+        .unwrap();
+        assert!(matches!(
+            admission.action,
+            HermesAdmissionAction::Cover(ObservationCoverageReason::OversizedFrame)
+        ));
+    }
+
+    #[tokio::test]
+    async fn page_byte_budget_stops_collection_before_unbounded_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let db = libsql::Builder::new_local(&path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                model TEXT,
+                parent_session_id TEXT,
+                cwd TEXT,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                cache_read_tokens INTEGER,
+                cache_write_tokens INTEGER,
+                reasoning_tokens INTEGER
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_name TEXT,
+                tool_calls TEXT,
+                timestamp REAL NOT NULL,
+                reasoning TEXT,
+                active INTEGER NOT NULL DEFAULT 1
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, model) VALUES ('sess-page', 'model')",
+            (),
+        )
+        .await
+        .unwrap();
+        // Build three max-sized TEXT payloads inside SQLite. The product path
+        // must gate the second row against the remaining page bytes before
+        // libsql materializes it as a Rust String.
+        let sqlite_blob_bytes = MAX_HERMES_VALUE_BYTES / 2;
+        for index in 0..3 {
+            conn.execute(
+                &format!(
+                    "INSERT INTO messages (session_id, role, content, timestamp)
+                     SELECT 'sess-page', 'user', hex(zeroblob({sqlite_blob_bytes})), ?1"
+                ),
+                libsql::params![f64::from(index)],
+            )
+            .await
+            .unwrap();
+        }
+
+        let message_cols = message_columns(&conn).await.unwrap();
+        let session_cols = table_columns(&conn, "sessions").await.unwrap();
+        let select_sql = select_new_messages_sql(&message_cols, &session_cols);
+        let page = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items.len(),
+            1,
+            "the second max-sized row must be deferred before String materialization"
+        );
+        assert!(page.truncated_by_byte_budget);
+        assert!(page.items.iter().all(|row| {
+            row.content
+                .as_ref()
+                .is_none_or(|c| c.len() <= MAX_HERMES_VALUE_BYTES)
+        }));
+
+        let next = read_new_rows_strict(&conn, &select_sql, page.new_cursor)
+            .await
+            .unwrap();
+        assert_eq!(next.items.len(), 1, "deferred row must resume next page");
+    }
+
+    #[tokio::test]
+    async fn utf8_byte_gate_rejects_multibyte_text_before_materialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let db = libsql::Builder::new_local(&path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, model TEXT, parent_session_id TEXT, cwd TEXT,
+                input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+                cache_write_tokens INTEGER, reasoning_tokens INTEGER
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+                role TEXT NOT NULL, content TEXT, tool_name TEXT, tool_calls TEXT,
+                timestamp REAL NOT NULL, reasoning TEXT, active INTEGER NOT NULL DEFAULT 1
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, model) VALUES ('sess-utf8', 'model')",
+            (),
+        )
+        .await
+        .unwrap();
+        // 600,000 `é` code points are 1,200,000 UTF-8 bytes. SQLite
+        // length(TEXT) would undercount this below the 1 MiB byte ceiling.
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp)
+             SELECT 'sess-utf8', 'user',
+                    replace(hex(zeroblob(600000)), '00', 'é'), 1.0",
+            (),
+        )
+        .await
+        .unwrap();
+
+        let message_cols = message_columns(&conn).await.unwrap();
+        let session_cols = table_columns(&conn, "sessions").await.unwrap();
+        let select_sql = select_new_messages_sql(&message_cols, &session_cols);
+        let page = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert!(page.items[0].sql_value_oversized);
+        assert!(page.items[0].content.is_none());
+        assert!(
+            page.items[0].sql_measured_bytes > MAX_HERMES_VALUE_BYTES as u64,
+            "UTF-8 byte length must drive the typed oversized outcome"
+        );
     }
 }

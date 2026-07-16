@@ -4,19 +4,32 @@
 //! `project_root`, and upserts bounded run/agent summaries into `sessions.db`.
 
 use std::collections::HashSet;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use libsql::params;
 use serde_json::Value;
 
 use crate::accounting::parser::parse_timestamp;
+use crate::application::host_admission::DEFAULT_MAX_RECORDS;
 use crate::global_db::GlobalDb;
 use crate::sessions::shared::ProjectRootMatcher;
+use crate::sessions::snapshot_observation::{
+    MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
+};
+use crate::sessions::source::{
+    MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader, TranscriptDiscoveryBounds,
+    collect_files_with_ext_bounded, path_byte_len,
+};
 use crate::sessions::workflow_index::{
     INGEST_WATERMARK_KEY, WorkflowAgent, WorkflowRun, WorkflowStatus, read_ingest_watermark,
 };
 
 const RESULT_SUMMARY_CAP: usize = 600;
+const MAX_WORKFLOW_RUNS: usize = DEFAULT_MAX_RECORDS;
+const MAX_WORKFLOW_AGENTS: usize = DEFAULT_MAX_RECORDS;
+const MAX_WORKFLOW_JOURNAL_EVENTS: usize = DEFAULT_MAX_RECORDS;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct WorkflowIngestStats {
@@ -128,7 +141,9 @@ pub(crate) async fn ingest_workflow_runs_from(
 /// Discover every workflow run under `projects_dir` by walking
 /// `<slug>/<session_id>/subagents/workflows/<run_id>/`.
 fn discover_runs(projects_dir: &Path) -> Vec<DiscoveredRun> {
+    let bounds = TranscriptDiscoveryBounds::from_discovered_units(MAX_WORKFLOW_RUNS);
     let mut runs = Vec::new();
+    let mut discovery_bytes = 0u64;
     let Ok(slugs) = std::fs::read_dir(projects_dir) else {
         return runs;
     };
@@ -145,11 +160,13 @@ fn discover_runs(projects_dir: &Path) -> Vec<DiscoveredRun> {
             if !session_path.is_dir() {
                 continue;
             }
-            let Some(session_id) = session_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_string)
-            else {
+            let Some(session_name) = session_path.file_name() else {
+                continue;
+            };
+            if path_byte_len(Path::new(session_name)) > bounds.max_path_bytes {
+                continue;
+            }
+            let Some(session_id) = session_name.to_str().map(str::to_string) else {
                 continue;
             };
             let workflows_dir = session_path.join("subagents").join("workflows");
@@ -157,20 +174,37 @@ fn discover_runs(projects_dir: &Path) -> Vec<DiscoveredRun> {
                 continue;
             };
             for run in run_dirs.flatten() {
+                if runs.len() >= bounds.max_files {
+                    return runs;
+                }
                 let agents_dir = run.path();
                 if !agents_dir.is_dir() {
                     continue;
                 }
-                let Some(run_id) = agents_dir
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(str::to_string)
-                else {
+                let Some(run_name) = agents_dir.file_name() else {
+                    continue;
+                };
+                if path_byte_len(Path::new(run_name)) > bounds.max_path_bytes {
+                    continue;
+                }
+                let Some(run_id) = run_name.to_str().map(str::to_string) else {
                     continue;
                 };
                 let meta_path = session_path
                     .join("workflows")
                     .join(format!("{run_id}.json"));
+                let path_bytes = path_byte_len(&agents_dir)
+                    .saturating_add(path_byte_len(&meta_path))
+                    .saturating_add(session_id.len())
+                    .saturating_add(run_id.len());
+                if path_bytes > bounds.max_path_bytes {
+                    continue;
+                }
+                let path_charge = u64::try_from(path_bytes).unwrap_or(u64::MAX);
+                if discovery_bytes.saturating_add(path_charge) > bounds.max_discovery_bytes {
+                    return runs;
+                }
+                discovery_bytes = discovery_bytes.saturating_add(path_charge);
                 runs.push(DiscoveredRun {
                     run_id,
                     parent_session_id: session_id.clone(),
@@ -246,12 +280,10 @@ fn run_cwd(run: &DiscoveredRun) -> Option<PathBuf> {
 /// Absolute paths to the `agent-<id>.jsonl` transcripts in a run directory,
 /// excluding the sibling `.meta.json` files and `journal.jsonl`.
 fn agent_transcripts(agents_dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(agents_dir) else {
-        return Vec::new();
-    };
-    let mut paths: Vec<PathBuf> = entries
-        .flatten()
-        .map(|entry| entry.path())
+    let bounds = TranscriptDiscoveryBounds::from_discovered_units(MAX_WORKFLOW_AGENTS);
+    let mut paths: Vec<PathBuf> = collect_files_with_ext_bounded(agents_dir, "jsonl", 0, bounds)
+        .paths
+        .into_iter()
         .filter(|path| {
             let is_jsonl = path
                 .extension()
@@ -304,7 +336,9 @@ async fn ingest_one_run(
 /// Read and JSON-parse a `workflows/<run_id>.json` file, or `None` when it is
 /// missing or malformed (fail-open — the run is then treated as dir-only).
 fn read_run_meta(path: &Path) -> Option<Value> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = read_snapshot_text_bounded("claude-workflow", path, MAX_SNAPSHOT_METADATA_BYTES)
+        .ok()
+        .flatten()?;
     serde_json::from_str(&text).ok()
 }
 
@@ -525,10 +559,7 @@ fn enrich_agent_from_transcript(agent: &mut WorkflowAgent, agents_dir: &Path) {
         return;
     }
     agent.transcript_path = Some(path.to_string_lossy().to_string());
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return;
-    };
-    let summary = summarize_transcript(&text);
+    let summary = summarize_transcript_file(&path);
     if summary.tokens > 0 {
         agent.tokens = summary.tokens;
     }
@@ -553,35 +584,42 @@ struct TranscriptSummary {
     last_ts: Option<i64>,
 }
 
-/// Sum tokens and read the session id / first+last timestamps from a transcript
-/// body (one JSON object per line). Malformed lines are skipped.
-fn summarize_transcript(body: &str) -> TranscriptSummary {
+fn summarize_transcript_file(path: &Path) -> TranscriptSummary {
+    let Ok(file) = File::open(path) else {
+        return TranscriptSummary::default();
+    };
+    let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
     let mut summary = TranscriptSummary::default();
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-            continue;
-        };
-        if summary.session_id.is_none() {
-            summary.session_id = string_field(&value, "sessionId");
-        }
-        if let Some(ts) = value
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .and_then(parse_timestamp)
-            .and_then(|secs| i64::try_from(secs).ok())
-        {
-            if summary.first_ts.is_none() {
-                summary.first_ts = Some(ts);
+    loop {
+        match frames.next_frame() {
+            Ok(RawJsonlFrame::Eof) | Err(_) => break,
+            Ok(RawJsonlFrame::Complete { .. } | RawJsonlFrame::Partial { .. }) => {
+                if let Ok(value) = serde_json::from_slice::<Value>(frames.record()) {
+                    update_transcript_summary(&mut summary, &value);
+                }
             }
-            summary.last_ts = Some(ts);
+            Ok(RawJsonlFrame::Oversized { .. } | RawJsonlFrame::BudgetExhausted { .. }) => {}
         }
-        summary.tokens = summary.tokens.saturating_add(line_usage_tokens(&value));
     }
     summary
+}
+
+fn update_transcript_summary(summary: &mut TranscriptSummary, value: &Value) {
+    if summary.session_id.is_none() {
+        summary.session_id = string_field(value, "sessionId");
+    }
+    if let Some(ts) = value
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(parse_timestamp)
+        .and_then(|secs| i64::try_from(secs).ok())
+    {
+        if summary.first_ts.is_none() {
+            summary.first_ts = Some(ts);
+        }
+        summary.last_ts = Some(ts);
+    }
+    summary.tokens = summary.tokens.saturating_add(line_usage_tokens(value));
 }
 
 /// Input+output tokens from a transcript line's `message.usage`, or `0` when the
@@ -616,27 +654,37 @@ struct JournalEvent {
 /// journal yields an empty list.
 fn read_journal(agents_dir: &Path) -> Vec<JournalEvent> {
     let path = agents_dir.join("journal.jsonl");
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Ok(file) = File::open(&path) else {
         return Vec::new();
     };
-    parse_journal(&text)
+    let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
+    let mut events = Vec::new();
+    while events.len() < MAX_WORKFLOW_JOURNAL_EVENTS {
+        match frames.next_frame() {
+            Ok(RawJsonlFrame::Eof) | Err(_) => break,
+            Ok(RawJsonlFrame::Complete { .. } | RawJsonlFrame::Partial { .. }) => {
+                if let Ok(value) = serde_json::from_slice::<Value>(frames.record())
+                    && let Some(event) = journal_event(&value)
+                {
+                    events.push(event);
+                }
+            }
+            Ok(RawJsonlFrame::Oversized { .. } | RawJsonlFrame::BudgetExhausted { .. }) => {}
+        }
+    }
+    events
 }
 
-fn parse_journal(body: &str) -> Vec<JournalEvent> {
-    body.lines()
-        .filter_map(|line| {
-            let value: Value = serde_json::from_str(line.trim()).ok()?;
-            let event_type = value.get("type").and_then(Value::as_str)?.to_string();
-            let agent_id = value.get("agentId").and_then(Value::as_str)?.to_string();
-            if agent_id.is_empty() {
-                return None;
-            }
-            Some(JournalEvent {
-                event_type,
-                agent_id,
-            })
-        })
-        .collect()
+fn journal_event(value: &Value) -> Option<JournalEvent> {
+    let event_type = value.get("type").and_then(Value::as_str)?.to_string();
+    let agent_id = value.get("agentId").and_then(Value::as_str)?.to_string();
+    if agent_id.is_empty() {
+        return None;
+    }
+    Some(JournalEvent {
+        event_type,
+        agent_id,
+    })
 }
 
 /// The set of agent ids for a dir-only run: the union of journal-`started`

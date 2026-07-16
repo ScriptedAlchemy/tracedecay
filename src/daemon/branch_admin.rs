@@ -10,6 +10,7 @@ use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 #[cfg(unix)]
 use super::AutomationSchedulerHandle;
+use super::profile_host_admission_replay::ProfileHostAdmissionReplayRegistry;
 use super::{
     DaemonHandshake, DatabaseOwnerRegistry, ProjectServerKey, authority, write_json_rpc_response,
 };
@@ -18,6 +19,32 @@ use super::{
 type AutomationSchedulerHandle = ();
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
+
+#[derive(Clone)]
+pub(super) enum HostAdmissionBrokerState {
+    Available(crate::application::host_admission::SharedHostAdmissionBroker),
+    Unavailable(crate::application::host_admission::HostAdmissionOutcome),
+}
+
+impl HostAdmissionBrokerState {
+    pub(super) fn broker(
+        &self,
+    ) -> Option<&crate::application::host_admission::SharedHostAdmissionBroker> {
+        match self {
+            Self::Available(broker) => Some(broker),
+            Self::Unavailable(_) => None,
+        }
+    }
+
+    pub(super) fn unavailable_outcome(
+        &self,
+    ) -> Option<crate::application::host_admission::HostAdmissionOutcome> {
+        match self {
+            Self::Available(_) => None,
+            Self::Unavailable(outcome) => Some(*outcome),
+        }
+    }
+}
 
 #[cfg(test)]
 type ExternalHolderVerifier = fn(&[PathBuf]) -> Result<()>;
@@ -31,6 +58,13 @@ pub(super) struct StoreAdministration {
     gate: Arc<tokio::sync::Mutex<()>>,
     project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
     global_databases: Arc<tokio::sync::Mutex<HashMap<PathBuf, Arc<crate::global_db::GlobalDb>>>>,
+    host_admission_brokers: Arc<
+        tokio::sync::Mutex<
+            HashMap<PathBuf, crate::application::host_admission::SharedHostAdmissionBroker>,
+        >,
+    >,
+    host_admission_broker_gate: Arc<tokio::sync::Mutex<()>>,
+    profile_host_admission_replay: Arc<ProfileHostAdmissionReplayRegistry>,
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
     #[cfg(test)]
@@ -43,6 +77,9 @@ impl Default for StoreAdministration {
             gate: Arc::new(tokio::sync::Mutex::new(())),
             project_servers: Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default())),
             global_databases: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            host_admission_brokers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            host_admission_broker_gate: Arc::new(tokio::sync::Mutex::new(())),
+            profile_host_admission_replay: Arc::new(ProfileHostAdmissionReplayRegistry::default()),
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             #[cfg(test)]
             external_holder_verifier: None,
@@ -116,6 +153,110 @@ impl StoreAdministration {
             })?;
         self.global_database(&crate::sessions::user_sessions_db_path(profile_root))
             .await
+    }
+
+    pub(super) async fn host_admission_broker(
+        &self,
+        database: &Arc<crate::global_db::GlobalDb>,
+    ) -> Result<HostAdmissionBrokerState> {
+        let path = authority::canonical_identity_path(database.db_path())?;
+        if let Some(broker) = self.host_admission_brokers.lock().await.get(&path).cloned() {
+            self.maybe_ensure_user_profile_host_admission_replay(&path, &broker)
+                .await;
+            return Ok(HostAdmissionBrokerState::Available(broker));
+        }
+
+        // Serialize first-open publication without retaining the broker map
+        // lock across blocking filesystem work.
+        let _open = self.host_admission_broker_gate.lock().await;
+        let state = {
+            let brokers = self.host_admission_brokers.lock().await;
+            if let Some(broker) = brokers.get(&path) {
+                HostAdmissionBrokerState::Available(Arc::clone(broker))
+            } else {
+                drop(brokers);
+                let open_path = path.clone();
+                let opened = tokio::task::spawn_blocking(move || {
+                    crate::application::host_admission::HostAdmissionRuntime::open_for_database(
+                        &open_path,
+                    )
+                })
+                .await;
+                let state = match opened {
+                    Ok(Ok((runtime, _))) => HostAdmissionBrokerState::Available(Arc::new(
+                        crate::application::host_admission::HostAdmissionBroker::new(runtime),
+                    )),
+                    Ok(Err(outcome)) => HostAdmissionBrokerState::Unavailable(outcome),
+                    Err(_) => HostAdmissionBrokerState::Unavailable(
+                        crate::application::host_admission::HostAdmissionOutcome::retained_unavailable(
+                            "spool_runtime_unavailable",
+                        ),
+                    ),
+                };
+                if let HostAdmissionBrokerState::Available(broker) = &state {
+                    self.host_admission_brokers
+                        .lock()
+                        .await
+                        .insert(path.clone(), Arc::clone(broker));
+                }
+                state
+            }
+        };
+        if let Some(broker) = state.broker() {
+            self.maybe_ensure_user_profile_host_admission_replay(&path, broker)
+                .await;
+        }
+        Ok(state)
+    }
+
+    /// Kick the coalesced user-profile replay worker. Never awaits a replay pass.
+    pub(super) async fn ensure_user_profile_host_admission_replay(
+        &self,
+        profile_root: &Path,
+        broker: &crate::application::host_admission::SharedHostAdmissionBroker,
+        broker_path: &Path,
+    ) {
+        self.profile_host_admission_replay
+            .ensure(broker_path, profile_root, broker)
+            .await;
+    }
+
+    async fn maybe_ensure_user_profile_host_admission_replay(
+        &self,
+        broker_path: &Path,
+        broker: &crate::application::host_admission::SharedHostAdmissionBroker,
+    ) {
+        let is_user_sessions = broker_path.file_name().and_then(|name| name.to_str())
+            == Some(crate::sessions::USER_SESSIONS_DB_FILENAME);
+        if !is_user_sessions {
+            return;
+        }
+        let Some(profile_root) = broker_path.parent() else {
+            return;
+        };
+        self.ensure_user_profile_host_admission_replay(profile_root, broker, broker_path)
+            .await;
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_user_profile_host_admission_replay_idle(
+        &self,
+        broker_path: &Path,
+        timeout: std::time::Duration,
+    ) -> bool {
+        self.profile_host_admission_replay
+            .wait_idle(broker_path, timeout)
+            .await
+    }
+
+    pub(super) async fn shutdown_host_admission_replay(&self) {
+        self.profile_host_admission_replay.shutdown().await;
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(super) fn profile_host_admission_replay(&self) -> &Arc<ProfileHostAdmissionReplayRegistry> {
+        &self.profile_host_admission_replay
     }
 
     pub(super) fn automation_schedulers(
@@ -443,6 +584,43 @@ pub(super) async fn write_branch_admin_response(
 mod tests {
     use super::super::{ProjectRouteKey, StoreOwnerKey};
     use super::*;
+
+    #[tokio::test]
+    async fn unavailable_spool_does_not_block_unrelated_database_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let administration = StoreAdministration::default();
+        let blocked_path = temp.path().join("blocked.db");
+        let blocked_database = administration.global_database(&blocked_path).await.unwrap();
+        std::fs::write(
+            temp.path().join(".blocked.db.host-admission"),
+            "not a directory",
+        )
+        .unwrap();
+
+        let blocked = administration
+            .host_admission_broker(&blocked_database)
+            .await
+            .unwrap();
+        let outcome = blocked
+            .unavailable_outcome()
+            .expect("spool open failure must be represented as typed unavailability");
+        assert_eq!(
+            outcome.status,
+            crate::application::host_admission::HostAdmissionStatus::Unavailable
+        );
+        assert!(blocked.broker().is_none());
+
+        let healthy_database = administration
+            .global_database(&temp.path().join("healthy.db"))
+            .await
+            .unwrap();
+        let healthy = administration
+            .host_admission_broker(&healthy_database)
+            .await
+            .unwrap();
+        assert!(healthy.broker().is_some());
+        administration.shutdown_host_admission_replay().await;
+    }
 
     fn owner(graph_db_path: &str) -> StoreOwnerKey {
         StoreOwnerKey {

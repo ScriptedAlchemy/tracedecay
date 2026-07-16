@@ -47,7 +47,7 @@ fn bounded_scan_carries_identity_cursor_generation_and_coverage() {
     assert_eq!(scan.frames.len(), 1);
     assert_eq!(scan.frames[0].offset, 0);
     assert_eq!(scan.frames[0].end_offset, complete.len() as u64);
-    assert_eq!(scan.frames[0].scope_value().unwrap()["type"], "summary");
+    assert_eq!(scan.frames[0].scope_value()["type"], "summary");
     assert_eq!(
         scan.coverage,
         ClaudeFrameCoverage::Deferred {
@@ -160,8 +160,10 @@ fn canonical_mapper_emits_one_conversational_message() {
         file_generation: 42,
         offset: 9,
         session_cwd: Some(Path::new("/project-1")),
+        source_path: None,
         raw_message_id: Some("user-1"),
         raw_tool_event_ids: &[],
+        raw_hook_tool_use_id: None,
     };
 
     let ClaudeRecordDisposition::Message { draft, message } =
@@ -433,8 +435,10 @@ fn record_context(raw_message_id: Option<&str>, offset: u64) -> ClaudeRecordCont
         file_generation: 7,
         offset,
         session_cwd: None,
+        source_path: None,
         raw_message_id,
         raw_tool_event_ids: &[],
+        raw_hook_tool_use_id: None,
     }
 }
 
@@ -641,4 +645,183 @@ fn redacted_marker_ids_do_not_collide() {
     assert_eq!(first.message_id, "sess:7:10");
     assert_eq!(second.message_id, "sess:7:20");
     assert_ne!(first.message_id, second.message_id);
+}
+
+#[test]
+fn claude_checked_in_assistant_fixture_crosses_the_canonical_boundary() {
+    let path = format!(
+        "{}/tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let bytes = std::fs::read(&path).unwrap();
+    let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
+    let parsed = crate::privacy::parse_normalized_observation_record_v1(
+        &bytes,
+        range,
+        tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
+        |native| {
+            let stable = canonical::stable_record_id(&native, "claude-golden-session", 0)?;
+            canonical::normalize(&native, "claude-golden-session", stable, range)
+        },
+    )
+    .unwrap();
+    let envelope = serde_json::from_value::<tracedecay_domain::CanonicalObservationEnvelopeV1>(
+        parsed.value().clone(),
+    )
+    .unwrap();
+    assert_eq!(envelope.provider().as_str(), "claude");
+    assert_eq!(envelope.stable_record_id().as_str(), "msg_claude_1");
+    assert!(envelope.facts().iter().any(|fact| matches!(
+        fact,
+        tracedecay_domain::CanonicalObservationFactV1::Message {
+            content: serde_json::Value::String(text),
+            ..
+        } if text == "The billing pipeline regression is fixed."
+    )));
+    assert!(envelope.facts().iter().any(|fact| matches!(
+        fact,
+        tracedecay_domain::CanonicalObservationFactV1::ToolInvocation { name, .. }
+            if name == "tracedecay_context"
+    )));
+    let rendered = serde_json::to_string(parsed.value()).unwrap();
+    assert!(
+        !rendered.contains("\"type\":\"tool_use\""),
+        "tool_use must not leak into Message/searchable JSON; got typed ToolInvocation instead"
+    );
+    assert!(
+        envelope.facts().iter().all(|fact| {
+            !matches!(
+                fact,
+                tracedecay_domain::CanonicalObservationFactV1::WorkflowLifecycle { .. }
+            )
+        }),
+        "Claude checked-in assistant fixture has no native lifecycle evidence"
+    );
+}
+
+#[test]
+fn claude_checked_in_mixed_blocks_keep_authored_message_and_typed_order() {
+    let bytes = include_bytes!(
+        "../../../tests/fixtures/provider_normalization/claude/assistant_thinking_text_tool_use.input.json"
+    );
+    let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
+    let parsed = crate::privacy::parse_normalized_observation_record_v1(
+        bytes,
+        range,
+        tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
+        |native| {
+            let stable = canonical::stable_record_id(&native, "claude-mixed-session", 0)?;
+            canonical::normalize(&native, "claude-mixed-session", stable, range)
+        },
+    )
+    .unwrap();
+    let envelope = serde_json::from_value::<tracedecay_domain::CanonicalObservationEnvelopeV1>(
+        parsed.value().clone(),
+    )
+    .unwrap();
+    let facts = envelope.facts();
+    assert!(facts.iter().any(|fact| matches!(
+        fact,
+        tracedecay_domain::CanonicalObservationFactV1::Message {
+            content: serde_json::Value::String(text),
+            ..
+        } if text == "The visible provider-authored answer."
+    )));
+    let reasoning_index = facts
+        .iter()
+        .position(|fact| {
+            matches!(
+                fact,
+                tracedecay_domain::CanonicalObservationFactV1::Reasoning {
+                    visibility:
+                        tracedecay_domain::CanonicalReasoningVisibilityV1::Visible,
+                    content: Some(serde_json::Value::String(text)),
+                } if text == "Inspect the parser before editing."
+            )
+        })
+        .expect("typed reasoning fact");
+    let message_index = facts
+        .iter()
+        .position(|fact| {
+            matches!(
+                fact,
+                tracedecay_domain::CanonicalObservationFactV1::Message {
+                    content: serde_json::Value::String(text),
+                    ..
+                } if text == "The visible provider-authored answer."
+            )
+        })
+        .expect("authored message fact");
+    let tool_index = facts
+        .iter()
+        .position(|fact| {
+            matches!(
+                fact,
+                tracedecay_domain::CanonicalObservationFactV1::ToolInvocation {
+                    name,
+                    arguments,
+                    ..
+                } if name == "Read"
+                    && arguments.get("file_path").and_then(serde_json::Value::as_str)
+                        == Some("src/lib.rs")
+            )
+        })
+        .expect("typed tool invocation");
+    assert!(
+        reasoning_index < message_index && message_index < tool_index,
+        "typed and authored facts must retain provider block order"
+    );
+    let rendered = serde_json::to_string(parsed.value()).unwrap();
+    assert!(!rendered.contains("signature-redacted"));
+    assert!(!rendered.contains("\"type\":\"thinking\""));
+    assert!(!rendered.contains("\"type\":\"tool_use\""));
+}
+
+#[test]
+fn claude_workflow_lookalike_emits_no_workflow_lifecycle() {
+    let path = format!(
+        "{}/tests/fixtures/provider_normalization/claude/workflow_lookalike.input.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let bytes = std::fs::read(&path).unwrap();
+    let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
+    let parsed = crate::privacy::parse_normalized_observation_record_v1(
+        &bytes,
+        range,
+        tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
+        |native| {
+            let stable = canonical::stable_record_id(&native, "claude-workflow-lookalike", 0)?;
+            canonical::normalize(&native, "claude-workflow-lookalike", stable, range)
+        },
+    )
+    .expect("Claude workflow lookalike must still normalize as an assistant message");
+    let envelope = serde_json::from_value::<tracedecay_domain::CanonicalObservationEnvelopeV1>(
+        parsed.value().clone(),
+    )
+    .unwrap();
+    assert!(envelope.facts().iter().any(|fact| matches!(
+        fact,
+        tracedecay_domain::CanonicalObservationFactV1::Message { .. }
+    )));
+    assert!(
+        envelope.facts().iter().all(|fact| {
+            !matches!(
+                fact,
+                tracedecay_domain::CanonicalObservationFactV1::WorkflowLifecycle { .. }
+            )
+        }),
+        "Claude workflow/todos/thread_goal lookalikes must not become WorkflowLifecycle"
+    );
+    let encoded = serde_json::to_string(parsed.value()).unwrap();
+    for rejected in [
+        "claude-hostile-task",
+        "todo-hostile-1",
+        "invented todo",
+        "invented goal",
+    ] {
+        assert!(
+            !encoded.contains(rejected),
+            "{rejected} must not survive Claude canonicalization"
+        );
+    }
 }

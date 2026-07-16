@@ -16,9 +16,11 @@ pub use observation::{
 pub use projection::{
     CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ClaudeObservationProjection,
     ClaudeSessionMessageProjection, ObservationProjection, ObservationProjectionStore,
-    ProjectionCheckpoint, ProjectionPersistOutcome, ProjectionProvenance, ProjectionRebuildOutcome,
-    ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V1, SessionMessageProjection,
+    ProjectedObservation, ProjectionCheckpoint, ProjectionPersistOutcome, ProjectionProvenance,
+    ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+    SessionMessageProjection, WorkflowFactProjection, WorkflowFactRecord,
 };
 pub use transcript::{
     ParseOffset, SessionMessageRecord, SessionRecord, TranscriptStore, TranscriptStoreError,

@@ -255,12 +255,24 @@ pub(super) async fn ensure_observation_authority(db: &GlobalDb) -> crate::errors
         .map_err(|error| {
             global_db_operation_error("initialize observation projection schema", error)
         })?;
+    transaction.commit().await.map_err(|error| {
+        global_db_operation_error("commit observation authority schema initialization", error)
+    })?;
+
+    observation_projection::prepare_projection_version_migration(db)
+        .await
+        .map_err(|error| {
+            global_db_operation_error("prepare observation projector upgrade", error)
+        })?;
+
+    let transaction = db.begin_write_transaction().await.map_err(|error| {
+        global_db_operation_error("begin observation authority validation", error)
+    })?;
     ensure_authority_invariants(&transaction).await?;
     validate_authority_schema_contract(&transaction).await?;
-    transaction
-        .commit()
-        .await
-        .map_err(|error| global_db_operation_error("commit observation authority schema", error))
+    transaction.commit().await.map_err(|error| {
+        global_db_operation_error("commit observation authority validation", error)
+    })
 }
 
 impl GlobalDb {

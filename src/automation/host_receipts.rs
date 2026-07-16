@@ -54,6 +54,30 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
+fn protect_route_structural_ids(mut route: HookRouteMetadata) -> Result<HookRouteMetadata> {
+    route.session_id =
+        crate::privacy::protect_optional_sensitive_structural_id(route.session_id.as_deref())
+            .map_err(|_| config_error("invalid host receipt route identity"))?;
+    route.thread_id =
+        crate::privacy::protect_optional_sensitive_structural_id(route.thread_id.as_deref())
+            .map_err(|_| config_error("invalid host receipt route identity"))?;
+    Ok(route)
+}
+
+fn protect_receipt_structural_ids(mut receipt: HookTerminalReceipt) -> Result<HookTerminalReceipt> {
+    receipt.tool_call_id =
+        crate::privacy::protect_optional_sensitive_structural_id(receipt.tool_call_id.as_deref())
+            .map_err(|_| config_error("invalid host receipt identity"))?;
+    receipt.turn_id =
+        crate::privacy::protect_optional_sensitive_structural_id(receipt.turn_id.as_deref())
+            .map_err(|_| config_error("invalid host receipt identity"))?;
+    receipt.transcript_watermark = crate::privacy::protect_optional_sensitive_structural_id(
+        receipt.transcript_watermark.as_deref(),
+    )
+    .map_err(|_| config_error("invalid host receipt identity"))?;
+    Ok(receipt)
+}
+
 fn session_key(route: Option<&HookRouteMetadata>) -> String {
     route
         .and_then(|route| route.session_id.as_deref().or(route.thread_id.as_deref()))
@@ -115,6 +139,8 @@ pub async fn record(
     receipt: HookTerminalReceipt,
 ) -> Result<bool> {
     let root = dashboard_root.to_path_buf();
+    let route = route.map(protect_route_structural_ids).transpose()?;
+    let receipt = protect_receipt_structural_ids(receipt)?;
     tokio::task::spawn_blocking(move || {
         with_locked_state(&root, |state| {
             let session = session_key(route.as_ref());
@@ -151,7 +177,9 @@ pub async fn mark_turn_ingested(
     transcript_watermark: &str,
 ) -> Result<()> {
     let root = dashboard_root.to_path_buf();
-    let watermark = transcript_watermark.to_string();
+    let route = route.map(protect_route_structural_ids).transpose()?;
+    let watermark = crate::privacy::protect_sensitive_structural_id(transcript_watermark)
+        .map_err(|_| config_error("invalid host receipt watermark"))?;
     tokio::task::spawn_blocking(move || {
         with_locked_state(&root, |state| {
             let session = session_key(route.as_ref());
@@ -278,6 +306,42 @@ mod tests {
         }
         let pending = oldest_ready(tmp.path()).await.unwrap().unwrap();
         assert_eq!(pending.pending.session_key, "session-1");
+    }
+
+    #[tokio::test]
+    async fn credential_canary_receipt_join_survives_state_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let raw = ["AKIA", "SYNTHETIC", "CANARY", "5"].concat();
+        let protected = crate::privacy::protect_sensitive_structural_id(&raw).unwrap();
+        let route = Some(pending_route(&raw));
+        let mut terminal = receipt(&raw);
+        terminal.turn_id = Some(raw.clone());
+        terminal.transcript_watermark = Some(raw.clone());
+
+        assert!(record(tmp.path(), route.clone(), terminal).await.unwrap());
+        mark_turn_ingested(tmp.path(), route, &raw).await.unwrap();
+
+        let persisted = std::fs::read_to_string(tmp.path().join(STATE_FILE)).unwrap();
+        assert!(!persisted.contains(&raw));
+        drop(persisted);
+
+        let ready = oldest_ready(tmp.path()).await.unwrap().unwrap();
+        assert_eq!(ready.pending.session_key, protected);
+        assert_eq!(ready.transcript_watermark, protected);
+        let route = ready.pending.route.expect("protected route");
+        assert_eq!(route.session_id.as_deref(), Some(protected.as_str()));
+        assert_eq!(
+            ready.pending.receipt.tool_call_id.as_deref(),
+            Some(protected.as_str())
+        );
+        assert_eq!(
+            ready.pending.receipt.turn_id.as_deref(),
+            Some(protected.as_str())
+        );
+        assert_eq!(
+            ready.pending.receipt.transcript_watermark.as_deref(),
+            Some(protected.as_str())
+        );
     }
 
     fn pending_route(session_id: &str) -> HookRouteMetadata {

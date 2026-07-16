@@ -68,6 +68,47 @@ impl SessionAccumulator {
 
 pub(super) fn accumulate_session_facts(record: &Value, accumulator: &mut SessionAccumulator) {
     append_edited_file_metadata(&mut Map::new(), record, accumulator);
+    if let Ok(envelope) =
+        serde_json::from_value::<tracedecay_domain::CanonicalObservationEnvelopeV1>(record.clone())
+    {
+        for fact in envelope.facts() {
+            match fact {
+                tracedecay_domain::CanonicalObservationFactV1::Git {
+                    evidence_kind: tracedecay_domain::CanonicalGitEvidenceKindV1::FileEdit,
+                    content: Some(native),
+                    ..
+                } => append_edited_file_metadata(&mut Map::new(), native, accumulator),
+                tracedecay_domain::CanonicalObservationFactV1::Git {
+                    evidence_kind: tracedecay_domain::CanonicalGitEvidenceKindV1::PullRequest,
+                    content: Some(native),
+                    ..
+                } => {
+                    let mut link = Map::new();
+                    if let Some(number) = native.get("prNumber").filter(|value| !value.is_null()) {
+                        link.insert("pr_number".to_string(), number.clone());
+                    }
+                    if let Some(url) = native
+                        .get("prUrl")
+                        .and_then(Value::as_str)
+                        .filter(|url| !url.is_empty())
+                    {
+                        link.insert("pr_url".to_string(), Value::String(url.to_string()));
+                    }
+                    if let Some(repo) = native
+                        .get("prRepository")
+                        .and_then(Value::as_str)
+                        .filter(|repo| !repo.is_empty())
+                    {
+                        link.insert("pr_repository".to_string(), Value::String(repo.to_string()));
+                    }
+                    if !link.is_empty() {
+                        accumulator.push_pr_link(Value::Object(link));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Read a record's optional wall-clock timestamp.

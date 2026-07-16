@@ -328,6 +328,28 @@ fn message_search_markdown_goals_view_handles_empty() {
 }
 
 #[test]
+fn goals_mode_maps_existing_filters_without_inventing_session_or_status() {
+    // `recent_session_goals_filtered` accepts provider/project/session/status,
+    // but message_search currently only exposes provider + project_key (+ limit).
+    // parent_session_id remains a relationship filter for FTS mode and must not
+    // be remapped into the goals session_id parameter.
+    let args = json!({
+        "goals": true,
+        "provider": "codex",
+        "project_key": "/tmp/proj",
+        "parent_session_id": "parent-only",
+        "limit": 7
+    });
+    let request = parse_message_search_request(&args).expect("goals mode makes query optional");
+    assert!(request.goals);
+    assert_eq!(request.requested_provider, Some("codex"));
+    assert_eq!(request.project_key, Some("/tmp/proj"));
+    assert_eq!(request.parent_session_id, Some("parent-only"));
+    assert_eq!(request.limit, 7);
+    assert!(request.query.is_empty());
+}
+
+#[test]
 fn message_text_snippet_extracts_readable_content_from_json() {
     let text =
         "[{\"type\":\"tool_result\",\"content\":\"hello world\",\"tool_use_id\":\"toolu_1\"}]";

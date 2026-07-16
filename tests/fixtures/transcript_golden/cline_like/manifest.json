@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "family": "cline_like",
+  "shared_adapter": "src/sessions/cline_like.rs",
+  "notes": [
+    "Cline, Roo Code, and Kilo share one production adapter (ClineLikeSource) with distinct provider ids and storage roots.",
+    "Golden inputs mirror the checked-in write_task / observation_tests shapes — not invented protocol fields.",
+    "Cline-family task JSON is unversioned; ObservationCoverageReason::UnknownVersion is intentionally not emitted (no versioned unsupported schema evidence)."
+  ],
+  "providers": [
+    {
+      "provider": "cline",
+      "extension_id": "saoudrizwan.claude-dev",
+      "storage_roots": [
+        "Code/User/globalStorage/saoudrizwan.claude-dev/tasks"
+      ],
+      "api_history_filenames": ["api_conversation_history.json"]
+    },
+    {
+      "provider": "roo-code",
+      "extension_id": "rooveterinaryinc.roo-cline",
+      "storage_roots": [
+        "Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks"
+      ],
+      "api_history_filenames": [
+        "api_conversation_history.json",
+        "api_messages.json"
+      ]
+    },
+    {
+      "provider": "kilo",
+      "extension_id": "kilocode.kilo-code",
+      "storage_roots": [
+        "Code/User/globalStorage/kilocode.kilo-code/tasks",
+        ".kilocode/cli/global/tasks"
+      ],
+      "api_history_filenames": ["api_conversation_history.json"]
+    }
+  ],
+  "cases": [
+    {
+      "id": "assistant_tool_use",
+      "input": {
+        "api_conversation_history": "input/api_conversation_history.json",
+        "api_messages": "input/api_messages.json",
+        "ui_messages": "input/ui_messages.json",
+        "task_metadata": "input/task_metadata.json"
+      },
+      "expected": "expected/assistant_tool_use.canonical.json",
+      "parser_provenance": "expected/parser_provenance.json"
+    }
+  ]
+}

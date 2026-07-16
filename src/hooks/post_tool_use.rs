@@ -71,6 +71,22 @@ pub(crate) const CODEX_POST_TOOL_USE_SPEC: PostToolUseSpec = PostToolUseSpec {
 /// commands (which produced no-op daemon events), so the two were unified on
 /// the safer skip-empty behavior.
 pub(crate) async fn notify_post_tool_use(spec: &PostToolUseSpec, event_json: &str) {
+    notify_post_tool_use_inner(spec, event_json, None).await;
+}
+
+pub(crate) async fn notify_post_tool_use_with_telemetry(
+    spec: &PostToolUseSpec,
+    event_json: &str,
+    telemetry: &super::analytics::HookTimingSpan,
+) {
+    notify_post_tool_use_inner(spec, event_json, Some(telemetry)).await;
+}
+
+async fn notify_post_tool_use_inner(
+    spec: &PostToolUseSpec,
+    event_json: &str,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) {
     let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
         return;
     };
@@ -93,10 +109,11 @@ pub(crate) async fn notify_post_tool_use(spec: &PostToolUseSpec, event_json: &st
         if rels.is_empty() {
             return;
         }
-        crate::daemon::notify_hook_event(
+        super::notify_hook_event_with_optional_telemetry(
             &root,
             crate::daemon::DaemonHookEvent::post_tool_use_edit(spec.agent, rels, cwd)
                 .with_route(Some(hook_route_metadata_from_parsed(&parsed, &root))),
+            telemetry,
         )
         .await;
     } else if (spec.is_shell_tool)(tool_name) {
@@ -104,7 +121,7 @@ pub(crate) async fn notify_post_tool_use(spec: &PostToolUseSpec, event_json: &st
         if command.is_empty() {
             return;
         }
-        crate::daemon::notify_hook_event(
+        super::notify_hook_event_with_optional_telemetry(
             &root,
             crate::daemon::DaemonHookEvent::post_tool_use_shell(
                 spec.agent,
@@ -112,6 +129,7 @@ pub(crate) async fn notify_post_tool_use(spec: &PostToolUseSpec, event_json: &st
                 cwd,
             )
             .with_route(Some(hook_route_metadata_from_parsed(&parsed, &root))),
+            telemetry,
         )
         .await;
     }

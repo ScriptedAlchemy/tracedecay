@@ -213,13 +213,6 @@ fn str_field<'a>(row: &'a Value, key: &str) -> &'a str {
     row.get(key).and_then(Value::as_str).unwrap_or_default()
 }
 
-/// Strips Windows' verbatim `\\?\` prefix: attribution resolved from a hook
-/// process's `current_dir()` is non-verbatim while `canonicalize()` yields
-/// the extended-length form, and the two must compare equal.
-fn normalize_path_text(path: &str) -> String {
-    path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
-}
-
 #[tokio::test]
 async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_events() {
     let home = tempfile::TempDir::new().expect("temp home");
@@ -277,8 +270,8 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
     }
 
     // Every replay resolved a project root, so every row must land in the
-    // project store file with `project_root` attribution (the user-level
-    // fallback file stays empty).
+    // project store file. Raw project paths stay out of hook timing rows; the
+    // store placement supplies project attribution to the durable bridge.
     let store_rows = read_jsonl_rows(&layout.data_root.join("hook_analytics.jsonl"));
     let hook_invoked: Vec<&Value> = store_rows
         .iter()
@@ -301,10 +294,9 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
             matched.len(),
             hook_invoked
         );
-        assert_eq!(
-            normalize_path_text(str_field(matched[0], "project_root")),
-            normalize_path_text(&root_str),
-            "{}/{} row must carry project attribution",
+        assert!(
+            matched[0].get("project_root").is_none(),
+            "{}/{} row must not persist a raw project path",
             replay.agent,
             replay.hook_name
         );

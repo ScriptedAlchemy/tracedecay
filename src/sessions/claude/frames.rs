@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use tracedecay_domain::ClaudeByteRangeV1;
+use tracedecay_domain::{ClaudeByteRangeV1, ObservationOrderingDomainV1};
 
 use crate::privacy::{
     MAX_OBSERVATION_RECORD_BYTES, ParsedClaudeRecordV1, SanitizedClaudeRecordV1,
-    parse_claude_record_v1,
+    parse_normalized_observation_record_v1, protect_sensitive_structural_id,
 };
 use crate::sessions::shared::StoredCursor;
 use crate::sessions::source::{
@@ -14,6 +14,7 @@ use crate::sessions::source::{
 };
 
 use super::PROVIDER;
+use super::canonical::{normalize, stable_record_id};
 use super::cursor::{claude_cursor_key, claude_observation_source_id, claude_source_id};
 
 /// Stable identity available before the durable cursor lookup.
@@ -75,6 +76,7 @@ pub(crate) struct ClaudeSourceFrame {
     raw_tool_event_ids: Vec<String>,
     raw_hook_tool_use_id: Option<String>,
     raw_logical_parent_uuid: Option<String>,
+    scope_record: Value,
     payload: ClaudeFramePayload,
 }
 
@@ -104,12 +106,8 @@ impl ClaudeSourceFrame {
         }
     }
 
-    pub(super) fn scope_value(&self) -> Option<&Value> {
-        match &self.payload {
-            ClaudeFramePayload::Parsed(record) => Some(record.value()),
-            ClaudeFramePayload::Sanitized(value) => Some(value.payload()),
-            ClaudeFramePayload::Consumed => None,
-        }
+    pub(super) const fn scope_value(&self) -> &Value {
+        &self.scope_record
     }
 
     pub(super) fn raw_message_id(&self) -> Option<&str> {
@@ -146,8 +144,14 @@ pub(crate) struct ClaudeSourceFrameScan {
 }
 
 /// Identify a Claude transcript before loading its durable cursor.
+///
+/// Session identities are privacy-protected here so scan, capture, and
+/// source-cursor lookup/persistence all reuse the same durable key. Public
+/// identifiers are preserved byte-for-byte; credential-shaped stems become
+/// stable `privacy.structural-id.v1.*` digests. The observation source ID is
+/// already an opaque path digest and remains unchanged.
 pub(crate) fn identify_claude_source(path: &Path) -> Option<ClaudeSourceScanIdentity> {
-    let session_id = claude_source_id(path)?;
+    let session_id = protect_sensitive_structural_id(&claude_source_id(path)?).ok()?;
     Some(ClaudeSourceScanIdentity {
         provider: PROVIDER,
         source_id: claude_observation_source_id(path),
@@ -213,7 +217,54 @@ pub(crate) fn try_scan_claude_source_frames_with_resume(
         let Ok(range) = ClaudeByteRangeV1::new(frame.offset, frame.end_offset) else {
             return Ok(None);
         };
-        let Ok(record) = parse_claude_record_v1(&frame.bytes, range) else {
+        let mut raw_message_id = None;
+        let mut raw_tool_event_ids = Vec::new();
+        let mut raw_hook_tool_use_id = None;
+        let mut raw_logical_parent_uuid = None;
+        let mut scope_record = None;
+        let Ok(record) = parse_normalized_observation_record_v1(
+            &frame.bytes,
+            range,
+            ObservationOrderingDomainV1::FileBytes,
+            |native| {
+                raw_message_id = native
+                    .pointer("/message/id")
+                    .and_then(Value::as_str)
+                    .or_else(|| native.get("uuid").and_then(Value::as_str))
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned);
+                raw_tool_event_ids = native
+                    .pointer("/message/content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| {
+                        item.get("id")
+                            .or_else(|| item.get("tool_use_id"))
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .collect();
+                raw_hook_tool_use_id = native
+                    .get("toolUseID")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned);
+                raw_logical_parent_uuid = native
+                    .get("logicalParentUuid")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned);
+                scope_record = Some(serde_json::json!({
+                    "type": native.get("type").cloned().unwrap_or(Value::Null),
+                    "cwd": native.get("cwd").cloned().unwrap_or(Value::Null),
+                }));
+                let stable_record_id =
+                    stable_record_id(&native, &identity.session_id, frame.offset)?;
+                normalize(&native, &identity.session_id, stable_record_id, range)
+            },
+        ) else {
             skipped_frames.push(ClaudeSkippedFrame {
                 offset: frame.offset,
                 end_offset: frame.end_offset,
@@ -226,39 +277,11 @@ pub(crate) fn try_scan_claude_source_frames_with_resume(
             offset: frame.offset,
             end_offset: frame.end_offset,
             resume_fingerprint: frame.resume_fingerprint,
-            raw_message_id: record
-                .value()
-                .pointer("/message/id")
-                .and_then(Value::as_str)
-                .or_else(|| record.value().get("uuid").and_then(Value::as_str))
-                .filter(|id| !id.is_empty())
-                .map(str::to_string),
-            raw_tool_event_ids: record
-                .value()
-                .pointer("/message/content")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|item| {
-                    item.get("id")
-                        .or_else(|| item.get("tool_use_id"))
-                        .and_then(Value::as_str)
-                        .filter(|id| !id.is_empty())
-                        .map(str::to_string)
-                })
-                .collect(),
-            raw_hook_tool_use_id: record
-                .value()
-                .get("toolUseID")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .map(str::to_string),
-            raw_logical_parent_uuid: record
-                .value()
-                .get("logicalParentUuid")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .map(str::to_string),
+            raw_message_id,
+            raw_tool_event_ids,
+            raw_hook_tool_use_id,
+            raw_logical_parent_uuid,
+            scope_record: scope_record.unwrap_or(Value::Null),
             payload: ClaudeFramePayload::Parsed(record),
         });
     }
@@ -293,4 +316,42 @@ pub(crate) fn try_scan_claude_source_frames_with_resume(
         coverage,
         scope: None,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tempfile::TempDir;
+    use tracedecay_domain::CanonicalObservationEnvelopeV1;
+
+    use super::*;
+
+    #[test]
+    fn scanned_claude_frame_crosses_canonical_normalization_boundary() {
+        let temp = TempDir::new().unwrap();
+        let path = temp
+            .path()
+            .join(".claude/projects/fixture/session.fixture.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let native = json!({
+            "type": "user",
+            "sessionId": "session.fixture",
+            "uuid": "message.fixture",
+            "cwd": temp.path(),
+            "message": {"role": "user", "content": "hello"}
+        });
+        std::fs::write(&path, format!("{native}\n")).unwrap();
+
+        let identity = identify_claude_source(&path).unwrap();
+        let mut scan = try_scan_claude_source_frames(identity, StoredCursor::default(), None)
+            .unwrap()
+            .unwrap();
+        let parsed = scan.frames[0].take_parsed_record().unwrap();
+        let envelope =
+            serde_json::from_value::<CanonicalObservationEnvelopeV1>(parsed.value().clone())
+                .unwrap();
+        assert_eq!(envelope.provider().as_str(), "claude");
+        assert_eq!(envelope.stable_record_id().as_str(), "message.fixture");
+        assert_eq!(scan.frames[0].scope_value()["type"], "user");
+    }
 }

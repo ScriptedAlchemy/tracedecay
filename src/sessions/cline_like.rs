@@ -15,48 +15,50 @@
 //! is ingested only when its metadata contains a project/workspace/cwd path that
 //! resolves to the current tracedecay project root.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use serde_json::{Map, Value};
-use tracedecay_domain::{
-    CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
-    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
-    CanonicalWorkflowEvidenceKindV1, ObservationId, ObservationIdentityMaterialV1,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    ProviderId, RetentionClass, SessionId,
-};
-use tracedecay_store::ObservationPersistOutcome;
-use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
-
+use crate::application::host_admission::HostAdmissionFacade;
+#[cfg(test)]
 use crate::application::host_admission::{
-    HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionStatus,
+    HostAdmissionAuthorities, HostAdmissionOutcome, HostAdmissionStatus,
 };
-use crate::application::observation::{
-    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
-};
-use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
+use crate::application::observation::{CaptureObservationRequest, ObservationCancellation};
+use crate::privacy::parse_normalized_observation_record_v1;
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
-    StoredCursor, TranscriptIngestStats, TranscriptLocation, TranscriptLocationMetadataKeys,
-    append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
-    content_storage_text_and_tools, path_belongs_to_project, title_from_messages,
+    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
+    path_belongs_to_project, title_from_messages,
+};
+#[cfg(test)]
+use crate::sessions::snapshot_observation::host_admission_error;
+use crate::sessions::snapshot_observation::{
+    MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionRecord,
+    SnapshotAdmissionRunner, SnapshotCaptureOutcome, bounded_snapshot_input_len,
+    canonical_snapshot_envelope, read_snapshot_text_bounded, snapshot_message_fields,
+    snapshot_source_identity,
 };
 use crate::sessions::source::{
-    ParsedTranscript, SessionDraft, TranscriptIngestError, TranscriptIngestResult,
-    TranscriptSource, read_changed_with_companion,
+    ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds, TranscriptIngestError,
+    TranscriptIngestResult, TranscriptSource, canonical_framed_sha256, read_changed_with_companion,
+};
+use serde_json::{Map, Value};
+use tracedecay_domain::{
+    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceRangeV1,
+    RetentionClass,
 };
 
 /// Cap task-directory scans so a long VS Code globalStorage history cannot
 /// block dashboard startup.
 const MAX_TASK_DIRS_PER_ROOT: usize = 512;
 const MAX_TASKS_PER_PASS: usize = 512;
-const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_METADATA_BYTES: u64 = 256 * 1024;
 const MAX_MESSAGES_PER_TASK: usize = 4_096;
 const MAX_USAGE_EVENTS_PER_TASK: usize = 4_096;
+const TASK_METADATA_FILES: [&str; 3] = ["task_metadata.json", "history_item.json", "history.json"];
+const DELIMITED_NATIVE_MESSAGE_ID_DOMAIN: &[u8] =
+    b"tracedecay.cline-like-delimited-native-message.v2";
 const CLINE_LIKE_LOCATION_KEYS: TranscriptLocationMetadataKeys =
     TranscriptLocationMetadataKeys::new(
         "cline_like_task_cwd",
@@ -117,6 +119,36 @@ impl ClineLikeSnapshotObservationRecord {
             ObservationOrderingDomainV1::SnapshotOrder,
             self.order + 1,
         )?)
+    }
+}
+
+impl SnapshotAdmissionRecord for ClineLikeSnapshotObservationRecord {
+    fn provider(&self) -> &'static str {
+        self.provider
+    }
+
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    fn order(&self) -> u64 {
+        self.order
+    }
+
+    fn capture_request(
+        &self,
+        scope: ObservationScopeV1,
+        generation: ObservationSourceGenerationV1,
+        expected_cursor: Option<ObservationSourceCursorV1>,
+        cancellation: ObservationCancellation,
+    ) -> TranscriptIngestResult<CaptureObservationRequest> {
+        ClineLikeSnapshotObservationRecord::capture_request(
+            self,
+            scope,
+            generation,
+            expected_cursor,
+            cancellation,
+        )
     }
 }
 
@@ -188,14 +220,19 @@ impl TranscriptSource for ClineLikeSource {
         self.provider
     }
 
-    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
+    fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
         for root in &self.storage_roots {
             let remaining = MAX_TASKS_PER_PASS.saturating_sub(out.len());
             if remaining == 0 {
                 break;
             }
-            out.extend(collect_task_api_paths(root).into_iter().take(remaining));
+            out.extend(
+                collect_task_api_paths(root)
+                    .into_iter()
+                    .filter(|path| self.snapshot_location(path, project_root).is_some())
+                    .take(remaining),
+            );
         }
         out
     }
@@ -224,6 +261,32 @@ impl TranscriptSource for ClineLikeSource {
 }
 
 impl ClineLikeSource {
+    fn snapshot_location(&self, path: &Path, project_root: &Path) -> Option<PathBuf> {
+        let metadata = read_task_metadata(self.provider, path.parent()?)?;
+        self.snapshot_location_from_metadata(&metadata, project_root)
+    }
+
+    fn snapshot_location_from_metadata(
+        &self,
+        metadata: &Value,
+        project_root: &Path,
+    ) -> Option<PathBuf> {
+        let paths = metadata_project_paths(metadata);
+        if let Some(roots) = &self.user_registered_roots {
+            if paths
+                .iter()
+                .any(|path| roots.iter().any(|root| path_belongs_to_project(path, root)))
+            {
+                return None;
+            }
+            paths.into_iter().next()
+        } else {
+            paths
+                .into_iter()
+                .find(|path| path_belongs_to_project(path, project_root))
+        }
+    }
+
     fn parse_snapshot(
         &self,
         path: &Path,
@@ -236,35 +299,21 @@ impl ClineLikeSource {
         };
         let ui_path = task_dir.join("ui_messages.json");
         let byte_cap = max_new_bytes
-            .unwrap_or(MAX_SNAPSHOT_BYTES)
-            .min(MAX_SNAPSHOT_BYTES);
+            .unwrap_or(MAX_SNAPSHOT_FILE_BYTES)
+            .min(MAX_SNAPSHOT_FILE_BYTES);
         ensure_bounded_file(self.provider, path, byte_cap)?;
         if ui_path.is_file() {
             ensure_bounded_file(self.provider, &ui_path, byte_cap)?;
         }
-        let Some(changed) = read_changed_with_companion(path, &ui_path, prev) else {
+        let Some(changed) = read_changed_with_companion(path, &ui_path, prev, byte_cap) else {
             return Ok(None);
         };
-        let Some(metadata) = read_task_metadata(task_dir) else {
+        let Some(metadata) = read_task_metadata(self.provider, task_dir) else {
             return Ok(None);
         };
-        let location_cwd = if let Some(roots) = &self.user_registered_roots {
-            let paths = metadata_project_paths(&metadata);
-            if paths
-                .iter()
-                .any(|path| roots.iter().any(|root| path_belongs_to_project(path, root)))
-            {
-                return Ok(None);
-            }
-            let Some(path) = paths.into_iter().next() else {
-                return Ok(None);
-            };
-            path
-        } else {
-            let Some(path) = metadata_project_location(&metadata, project_root) else {
-                return Ok(None);
-            };
-            path
+        let Some(location_cwd) = self.snapshot_location_from_metadata(&metadata, project_root)
+        else {
+            return Ok(None);
         };
 
         let document: Value = match serde_json::from_str(&changed.contents) {
@@ -344,140 +393,41 @@ impl ClineLikeSource {
 ///
 /// This deliberately re-reads complete snapshots and derives a new source generation
 /// from their content hash; it neither consults nor advances legacy parse offsets.
+/// `max_new_bytes` is one logical source-byte budget for the complete sweep.
 pub(crate) async fn capture_cline_like_snapshot_observations(
     facade: &HostAdmissionFacade<'_>,
     source: &ClineLikeSource,
     project_root: &Path,
     scope: ObservationScopeV1,
     max_new_bytes: Option<u64>,
-) -> TranscriptIngestResult<TranscriptIngestStats> {
-    let mut stats = TranscriptIngestStats::default();
-    let mut sessions = BTreeSet::new();
-    for path in source.transcript_paths(project_root) {
-        let Some(parsed) =
-            source.parse_snapshot(&path, StoredCursor::default(), project_root, max_new_bytes)?
-        else {
-            continue;
-        };
-        let generation = ObservationSourceGenerationV1::new(parsed.new_cursor.position.max(1))?;
-        for record in normalize_cline_like_snapshot_observations(source.provider, &parsed.messages)?
-        {
-            let source_identity = snapshot_source_identity(record.provider, &record.session_id)?;
-            let range = ObservationSourceRangeV1::new(record.order, record.order + 1)?;
-            let expected_cursor = facade
-                .get_source_cursor(&source_identity, &scope)
-                .await
-                .map_err(|outcome| host_admission_error(source.provider, outcome))?;
-            if expected_cursor.as_ref().is_some_and(|cursor| {
-                cursor.generation() == generation && cursor.position() >= range.end()
-            }) {
-                continue;
-            }
-            let request = record.capture_request(
-                scope.clone(),
-                generation,
-                expected_cursor.clone(),
-                ObservationCancellation::default(),
-            )?;
-            match facade
-                .capture_observation(request)
-                .await
-                .map_err(|outcome| host_admission_error(source.provider, outcome))?
-            {
-                CaptureObservationOutcome::Persisted { outcome, .. } => {
-                    if matches!(outcome, ObservationPersistOutcome::Committed(_)) {
-                        stats.messages_upserted = stats.messages_upserted.saturating_add(1);
-                    }
-                    sessions.insert(record.session_id);
-                }
-                CaptureObservationOutcome::Rejected { receipt, .. } => {
-                    advance_snapshot_coverage(
-                        facade,
-                        source_identity,
-                        range,
-                        expected_cursor,
-                        scope.clone(),
-                        generation,
-                        ObservationCoverageReason::SanitizerRejected,
-                        receipt,
-                    )
-                    .await?;
-                }
-                CaptureObservationOutcome::Quarantined { receipt, .. } => {
-                    advance_snapshot_coverage(
-                        facade,
-                        source_identity,
-                        range,
-                        expected_cursor,
-                        scope.clone(),
-                        generation,
-                        ObservationCoverageReason::SanitizerQuarantined,
-                        receipt,
-                    )
-                    .await?;
-                }
-            }
-        }
+    cancellation: &ObservationCancellation,
+) -> TranscriptIngestResult<SnapshotCaptureOutcome> {
+    let mut runner = SnapshotAdmissionRunner::new(max_new_bytes);
+    let discovery = source.discover_transcript_paths(
+        project_root,
+        TranscriptDiscoveryBounds::from_discovered_units(MAX_TASKS_PER_PASS),
+    );
+    if discovery.is_truncated() {
+        runner.defer();
     }
-    stats.sessions_upserted = sessions.len() as u64;
-    Ok(stats)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn advance_snapshot_coverage(
-    facade: &HostAdmissionFacade<'_>,
-    source: ObservationSourceIdentityV1,
-    range: ObservationSourceRangeV1,
-    expected_cursor: Option<ObservationSourceCursorV1>,
-    scope: ObservationScopeV1,
-    generation: ObservationSourceGenerationV1,
-    reason: ObservationCoverageReason,
-    receipt: tracedecay_domain::SanitizationReceiptV1,
-) -> TranscriptIngestResult<()> {
-    let provider = match source.provider().as_str() {
-        "cline" => "cline",
-        "roo-code" => "roo-code",
-        "kilo" => "kilo",
-        _ => return Err(TranscriptIngestError::InvalidFrameState { provider: "cline" }),
-    };
-    let advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
-        source,
-        scope,
-        generation,
-        ObservationOrderingDomainV1::SnapshotOrder,
-        expected_cursor,
-        range,
-        reason,
-        receipt,
-    )
-    .map_err(|_| TranscriptIngestError::InvalidFrameState { provider })?;
-    facade
-        .advance_non_durable_source_cursor(advance, ObservationCancellation::default())
-        .await
-        .map(|_| ())
-        .map_err(|outcome| host_admission_error(provider, outcome))
-}
-
-fn host_admission_error(
-    provider: &'static str,
-    outcome: HostAdmissionOutcome,
-) -> TranscriptIngestError {
-    let reason = outcome.reason_code.unwrap_or(match outcome.status {
-        HostAdmissionStatus::Backpressured => "observation_admission_backpressured",
-        HostAdmissionStatus::Unavailable => "observation_authority_unavailable",
-        HostAdmissionStatus::Unknown => "observation_provider_unsupported",
-        HostAdmissionStatus::Degraded => "observation_admission_degraded",
-        HostAdmissionStatus::Supported
-        | HostAdmissionStatus::AcceptedForReplay
-        | HostAdmissionStatus::Committed
-        | HostAdmissionStatus::ExactDuplicate => "observation_admission_incomplete",
-    });
-    TranscriptIngestError::NonDurableRecord {
-        provider,
-        offset: 0,
-        end_offset: 0,
-        reason,
+    for path in discovery.paths {
+        let input_bytes = snapshot_input_bytes(source.provider, &path)?;
+        runner
+            .admit_batch(facade, input_bytes, &scope, cancellation, || {
+                let Some(parsed) =
+                    source.parse_snapshot(&path, StoredCursor::default(), project_root, None)?
+                else {
+                    return Ok(None);
+                };
+                let generation =
+                    ObservationSourceGenerationV1::new(parsed.new_cursor.position.max(1))?;
+                let records =
+                    normalize_cline_like_snapshot_observations(source.provider, &parsed.messages)?;
+                Ok(Some((generation, records)))
+            })
+            .await?;
     }
+    Ok(runner.finish())
 }
 
 fn ensure_bounded_file(
@@ -496,6 +446,27 @@ fn ensure_bounded_file(
         ));
     }
     Ok(())
+}
+
+fn snapshot_input_bytes(provider: &'static str, path: &Path) -> TranscriptIngestResult<u64> {
+    let Some(task_dir) = path.parent() else {
+        return Ok(0);
+    };
+    let primary = bounded_snapshot_input_len(provider, path, MAX_SNAPSHOT_FILE_BYTES)?;
+    let ui = bounded_snapshot_input_len(
+        provider,
+        &task_dir.join("ui_messages.json"),
+        MAX_SNAPSHOT_FILE_BYTES,
+    )?;
+    let metadata = TASK_METADATA_FILES.iter().fold(0_u64, |total, name| {
+        let bytes = std::fs::metadata(task_dir.join(name))
+            .ok()
+            .map(|metadata| metadata.len())
+            .filter(|bytes| *bytes <= MAX_SNAPSHOT_METADATA_BYTES)
+            .unwrap_or(0);
+        total.saturating_add(bytes)
+    });
+    Ok(primary.saturating_add(ui).saturating_add(metadata))
 }
 
 fn non_durable(provider: &'static str, path: &Path, reason: &'static str) -> TranscriptIngestError {
@@ -544,28 +515,17 @@ fn collect_task_api_paths(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn read_task_metadata(task_dir: &Path) -> Option<Value> {
-    for name in ["task_metadata.json", "history_item.json", "history.json"] {
+fn read_task_metadata(provider: &'static str, task_dir: &Path) -> Option<Value> {
+    for name in TASK_METADATA_FILES {
         let path = task_dir.join(name);
-        let Ok(metadata) = std::fs::metadata(&path) else {
-            continue;
-        };
-        if metadata.len() > MAX_METADATA_BYTES {
-            continue;
-        }
-        if let Ok(contents) = std::fs::read_to_string(path)
+        if let Ok(Some(contents)) =
+            read_snapshot_text_bounded(provider, &path, MAX_SNAPSHOT_METADATA_BYTES)
             && let Ok(value) = serde_json::from_str::<Value>(&contents)
         {
             return Some(value);
         }
     }
     None
-}
-
-fn metadata_project_location(metadata: &Value, project_root: &Path) -> Option<PathBuf> {
-    metadata_project_paths(metadata)
-        .into_iter()
-        .find(|path| path_belongs_to_project(path, project_root))
 }
 
 fn metadata_project_paths(value: &Value) -> Vec<PathBuf> {
@@ -621,7 +581,8 @@ fn usage_records(
     if !ui_path.is_file() {
         return Ok(Some(Vec::new()));
     }
-    let Ok(contents) = std::fs::read_to_string(ui_path) else {
+    let Ok(Some(contents)) = read_snapshot_text_bounded(provider, ui_path, MAX_SNAPSHOT_FILE_BYTES)
+    else {
         return Ok(None);
     };
     let document: Value = match serde_json::from_str(&contents) {
@@ -843,24 +804,9 @@ pub(crate) fn normalize_cline_like_snapshot_observations(
                 .metadata_json
                 .as_deref()
                 .and_then(|value| serde_json::from_str::<Value>(value).ok());
-            let payload = serde_json::json!({
-                "provider": provider,
-                "session_id": message.session_id,
-                "message_id": message.message_id,
-                "role": message.role,
-                "timestamp": message.timestamp,
-                "ordinal": message.ordinal,
-                "kind": message.kind,
-                "model": message.model,
-                "text": message.text,
-                "tool_names": message.tool_names,
-                "usage": metadata.as_ref().and_then(|value| value.get("usage")),
-                "reasoning": metadata.as_ref().and_then(|value| value.get("reasoning")),
-                "git": metadata.as_ref().and_then(|value| value.get("git")),
-                "workflow": metadata.as_ref().and_then(|value| value.get("workflow")),
-            })
-            .to_string()
-            .into_bytes();
+            let payload = snapshot_native_payload(provider, message, metadata.as_ref())
+                .to_string()
+                .into_bytes();
             Ok(ClineLikeSnapshotObservationRecord {
                 provider,
                 session_id: message.session_id.clone(),
@@ -870,6 +816,33 @@ pub(crate) fn normalize_cline_like_snapshot_observations(
             })
         })
         .collect()
+}
+
+/// Shape only Cline-family fields evidenced by repository transcript fixtures.
+/// The shared fixture contract exposes `content[].type = "tool_use"` names but
+/// no native lineage, reasoning, structured tool IDs/arguments/results, Git,
+/// or workflow evidence.
+fn snapshot_native_payload(
+    provider: &str,
+    message: &SessionMessageRecord,
+    metadata: Option<&Value>,
+) -> Value {
+    let mut payload = snapshot_message_fields(provider, message);
+    let is_usage = message.kind.as_deref() == Some("usage");
+    if is_usage {
+        payload.remove("role");
+        payload.remove("text");
+        payload.remove("model");
+    } else if let Some(tool_names) = &message.tool_names {
+        payload.insert("tool_names".to_string(), Value::String(tool_names.clone()));
+    }
+    if let Some(usage) = metadata
+        .and_then(|value| value.get("usage"))
+        .filter(|value| value.is_object())
+    {
+        payload.insert("usage".to_string(), usage.clone());
+    }
+    Value::Object(payload)
 }
 
 fn snapshot_capture_request(
@@ -921,120 +894,6 @@ fn snapshot_capture_request(
     })
 }
 
-fn canonical_snapshot_envelope(
-    native: &Value,
-    provider: &str,
-    session_id: &str,
-    message_id: &str,
-    range: ObservationSourceRangeV1,
-) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    let invalid = || ObservationRecordParseErrorV1::NormalizationFailed;
-    let role = match native.get("role").and_then(Value::as_str) {
-        Some("user") => CanonicalMessageRoleV1::User,
-        Some("assistant") => CanonicalMessageRoleV1::Assistant,
-        Some("system") => CanonicalMessageRoleV1::System,
-        Some("tool") => CanonicalMessageRoleV1::Tool,
-        _ => CanonicalMessageRoleV1::Unknown,
-    };
-    let timestamp = native.get("timestamp").and_then(Value::as_i64);
-    let mut facts = Vec::new();
-    if let Some(text) = native.get("text").cloned() {
-        facts.push(CanonicalObservationFactV1::Message {
-            role,
-            content: text,
-            model: native
-                .get("model")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            timestamp,
-        });
-    }
-    for (index, name) in native
-        .get("tool_names")
-        .and_then(Value::as_str)
-        .into_iter()
-        .flat_map(|names| names.split(',').filter(|name| !name.is_empty()))
-        .enumerate()
-    {
-        facts.push(CanonicalObservationFactV1::ToolInvocation {
-            invocation_id: ObservationId::new(format!("{message_id}:tool:{index}"))
-                .map_err(|_| invalid())?,
-            name: name.to_string(),
-            arguments: Value::Null,
-        });
-    }
-    if let Some(usage) = native.get("usage").filter(|value| value.is_object()) {
-        facts.push(CanonicalObservationFactV1::Usage {
-            input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
-            output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
-            cache_read_tokens: usage.get("cache_read_input_tokens").and_then(Value::as_u64),
-            cache_write_tokens: usage
-                .get("cache_creation_input_tokens")
-                .and_then(Value::as_u64),
-            reasoning_tokens: usage.get("reasoning_tokens").and_then(Value::as_u64),
-        });
-    }
-    if let Some(reasoning) = native
-        .get("reasoning")
-        .filter(|value| !value.is_null())
-        .cloned()
-    {
-        facts.push(CanonicalObservationFactV1::Reasoning {
-            visibility: tracedecay_domain::CanonicalReasoningVisibilityV1::Visible,
-            content: Some(reasoning),
-        });
-    }
-    if let Some(git) = native.get("git").filter(|value| !value.is_null()).cloned() {
-        facts.push(CanonicalObservationFactV1::Git {
-            evidence_kind: CanonicalGitEvidenceKindV1::Unknown,
-            reference: None,
-            content: Some(git),
-        });
-    }
-    if let Some(workflow) = native
-        .get("workflow")
-        .filter(|value| !value.is_null())
-        .cloned()
-    {
-        facts.push(CanonicalObservationFactV1::Workflow {
-            evidence_kind: CanonicalWorkflowEvidenceKindV1::Unknown,
-            reference: None,
-            content: Some(workflow),
-        });
-    }
-    let mut evidence =
-        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range);
-    if let Some(sequence) = native.get("ordinal").and_then(Value::as_u64) {
-        evidence = evidence.with_native_sequence(sequence);
-    }
-    if let Some(timestamp) = timestamp {
-        evidence = evidence.with_native_timestamp(timestamp);
-    }
-    CanonicalObservationEnvelopeV1::new(
-        ProviderId::new(provider).map_err(|_| invalid())?,
-        native
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or("message"),
-        ObservationId::new(message_id).map_err(|_| invalid())?,
-        CanonicalObservationRelationsV1::new(SessionId::new(session_id).map_err(|_| invalid())?)
-            .with_message_id(ObservationId::new(message_id).map_err(|_| invalid())?),
-        facts,
-        evidence,
-    )
-    .map_err(|_| invalid())
-}
-
-fn snapshot_source_identity(
-    provider: &'static str,
-    session_id: &str,
-) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
-    Ok(ObservationSourceIdentityV1::for_provider(
-        ProviderId::new(provider)?,
-        SessionId::new(session_id.to_string())?,
-    )?)
-}
-
 fn stable_message_id(
     task_id: &str,
     kind: &str,
@@ -1044,7 +903,14 @@ fn stable_message_id(
     content: &str,
 ) -> String {
     if let Some(native_id) = native_id {
-        return format!("{task_id}:{native_id}");
+        if !task_id.contains(':') && !native_id.contains(':') {
+            return format!("{task_id}:{native_id}");
+        }
+        let digest = canonical_framed_sha256(
+            DELIMITED_NATIVE_MESSAGE_ID_DOMAIN,
+            &[task_id.as_bytes(), native_id.as_bytes()],
+        );
+        return format!("cline-like.message-id.v2.{digest}");
     }
     let native_order = timestamp.map_or_else(|| format!("ordinal-{ordinal}"), |ts| ts.to_string());
     let digest = crate::sessions::source::content_hash64(content);
@@ -1066,7 +932,7 @@ fn session_metadata(provider: &str, location_cwd: Option<&Path>) -> Value {
 }
 
 fn message_metadata(provider: &str, entry: &Value, location_cwd: &Path) -> Value {
-    let mut metadata = serde_json::Map::new();
+    let mut metadata = Map::new();
     metadata.insert(
         "source".to_string(),
         Value::String(format!("{provider}_task_history")),
@@ -1084,6 +950,195 @@ fn message_metadata(provider: &str, entry: &Value, location_cwd: &Path) -> Value
 #[cfg(test)]
 mod observation_tests {
     use super::*;
+
+    #[test]
+    fn snapshot_budget_counts_all_task_input_files_once() {
+        let temp = tempfile::TempDir::new().expect("temp Cline task");
+        let task_dir = temp.path().join("task-1");
+        std::fs::create_dir_all(&task_dir).unwrap();
+        let transcript = task_dir.join("api_conversation_history.json");
+        std::fs::write(&transcript, b"12345").unwrap();
+        std::fs::write(task_dir.join("ui_messages.json"), b"1234").unwrap();
+        std::fs::write(task_dir.join("task_metadata.json"), b"123").unwrap();
+        std::fs::write(task_dir.join("history_item.json"), b"12").unwrap();
+        std::fs::write(task_dir.join("history.json"), b"1").unwrap();
+
+        assert_eq!(snapshot_input_bytes("cline", &transcript).unwrap(), 15);
+    }
+
+    #[test]
+    fn snapshot_discovery_filters_scope_before_spending_byte_budget() {
+        let temp = tempfile::TempDir::new().expect("temp Cline storage");
+        let tasks = temp.path().join("tasks");
+        let project = temp.path().join("project");
+        let other = temp.path().join("other");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        for (task, cwd) in [("relevant", &project), ("unrelated", &other)] {
+            let task_dir = tasks.join(task);
+            std::fs::create_dir_all(&task_dir).unwrap();
+            std::fs::write(task_dir.join("api_messages.json"), b"[]").unwrap();
+            std::fs::write(
+                task_dir.join("task_metadata.json"),
+                serde_json::json!({"cwd": cwd}).to_string(),
+            )
+            .unwrap();
+        }
+        let source = ClineLikeSource {
+            provider: "cline",
+            storage_roots: vec![tasks],
+            user_registered_roots: None,
+        };
+
+        let paths = source.transcript_paths(&project);
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].ends_with("relevant/api_messages.json"));
+    }
+
+    #[tokio::test]
+    async fn byte_budget_charges_once_and_defers_second_before_parse() {
+        let temp = tempfile::TempDir::new().expect("temp Cline storage");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let first_tasks = temp.path().join("first-tasks");
+        let first_task = first_tasks.join("first");
+        std::fs::create_dir_all(&first_task).unwrap();
+        std::fs::write(
+            first_task.join("api_messages.json"),
+            serde_json::json!([{"role": "assistant", "content": "first"}]).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            first_task.join("task_metadata.json"),
+            serde_json::json!({"cwd": project}).to_string(),
+        )
+        .unwrap();
+
+        let second_tasks = temp.path().join("second-tasks");
+        let second_task = second_tasks.join("hostile");
+        std::fs::create_dir_all(&second_task).unwrap();
+        // Malformed JSON that parse_snapshot would reject as non-durable if reached.
+        let hostile = format!("[{}", "x".repeat(256));
+        std::fs::write(second_task.join("api_messages.json"), &hostile).unwrap();
+        std::fs::write(
+            second_task.join("task_metadata.json"),
+            serde_json::json!({"cwd": project}).to_string(),
+        )
+        .unwrap();
+        let source = ClineLikeSource {
+            provider: "cline",
+            storage_roots: vec![first_tasks, second_tasks.clone()],
+            user_registered_roots: None,
+        };
+        let paths = source.transcript_paths(&project);
+        assert_eq!(paths.len(), 2);
+        let first_bytes = snapshot_input_bytes("cline", &paths[0]).unwrap();
+        let second_bytes = snapshot_input_bytes("cline", &paths[1]).unwrap();
+
+        let db = crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
+            .await
+            .expect("open observation db");
+        let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(&db));
+        let cancellation = ObservationCancellation::default();
+
+        let deferred = capture_cline_like_snapshot_observations(
+            &facade,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            Some(first_bytes),
+            &cancellation,
+        )
+        .await
+        .expect("second unit must defer without parsing malformed JSON");
+        assert!(deferred.deferred_by_byte_cap);
+        assert_eq!(deferred.stats.messages_upserted, 1);
+        assert_eq!(deferred.bytes_consumed, first_bytes);
+
+        let second_only = ClineLikeSource {
+            provider: "cline",
+            storage_roots: vec![second_tasks],
+            user_registered_roots: None,
+        };
+        let err = capture_cline_like_snapshot_observations(
+            &facade,
+            &second_only,
+            &project,
+            ObservationScopeV1::Profile,
+            Some(second_bytes),
+            &cancellation,
+        )
+        .await
+        .expect_err("deferred malformed snapshot must remain retryable");
+        assert!(matches!(
+            err,
+            TranscriptIngestError::NonDurableRecord {
+                reason: "malformed snapshot JSON",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_snapshot_capture_does_not_advance_cline_source() {
+        let temp = tempfile::TempDir::new().expect("temp Cline storage");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let task_dir = temp.path().join("tasks").join("cancelled");
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(
+            task_dir.join("api_messages.json"),
+            serde_json::json!([{"role": "assistant", "content": "retry me"}]).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            task_dir.join("task_metadata.json"),
+            serde_json::json!({"cwd": project}).to_string(),
+        )
+        .unwrap();
+        let source = ClineLikeSource {
+            provider: "cline",
+            storage_roots: vec![temp.path().join("tasks")],
+            user_registered_roots: None,
+        };
+        let db = crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
+            .await
+            .expect("open observation db");
+        let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(&db));
+        let cancellation = ObservationCancellation::default();
+        cancellation.cancel();
+
+        let error = capture_cline_like_snapshot_observations(
+            &facade,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            None,
+            &cancellation,
+        )
+        .await
+        .expect_err("pre-cancelled Cline capture must stop before persistence");
+        assert!(matches!(
+            error,
+            TranscriptIngestError::NonDurableRecord {
+                reason: "admission_cancelled",
+                ..
+            }
+        ));
+
+        let retry = capture_cline_like_snapshot_observations(
+            &facade,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .expect("uncancelled retry must capture the same Cline record");
+        assert_eq!(retry.stats.messages_upserted, 1);
+    }
 
     fn message(provider: &str, ordinal: i64) -> SessionMessageRecord {
         SessionMessageRecord {
@@ -1146,6 +1201,39 @@ mod observation_tests {
     }
 
     #[test]
+    fn usage_snapshot_emits_only_the_usage_fact() {
+        let mut usage = message("cline", 1);
+        usage.kind = Some("usage".to_string());
+        usage.text = serde_json::json!({"input_tokens": 777}).to_string();
+        usage.model = None;
+        usage.tool_names = None;
+        usage.metadata_json = Some(serde_json::json!({"usage": {"input_tokens": 777}}).to_string());
+
+        let records = normalize_cline_like_snapshot_observations("cline", &[usage]).unwrap();
+        let range = ObservationSourceRangeV1::new(1, 2).unwrap();
+        let parsed = parse_normalized_observation_record_v1(
+            &records[0].payload,
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            |native| {
+                canonical_snapshot_envelope(
+                    &native,
+                    "cline",
+                    "task-1",
+                    records[0].native_record_id(),
+                    range,
+                )
+            },
+        )
+        .expect("usage snapshot envelope");
+
+        let facts = parsed.value()["facts"].as_array().unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0]["kind"], "usage");
+        assert_eq!(facts[0]["input_tokens"], 777);
+    }
+
+    #[test]
     fn host_admission_failures_preserve_provider_with_bounded_reason_codes() {
         for provider in ["cline", "roo-code", "kilo"] {
             let error = host_admission_error(
@@ -1182,6 +1270,7 @@ mod observation_tests {
             "text": "Redacted response",
             "tool_names": "read_file",
             "usage": {"input_tokens": 12, "output_tokens": 3},
+            // Untyped bags / content-without-visibility must not invent facts.
             "reasoning": "Redacted reasoning",
             "git": {"commit": "redacted"},
             "workflow": {"task": "redacted"},
@@ -1213,12 +1302,326 @@ mod observation_tests {
             canonical["relations"]["message_id"],
             "redacted-task:message"
         );
+        assert!(canonical["relations"].get("thread_id").is_none());
         assert_eq!(canonical["evidence"]["ordering_domain"], "snapshot_order");
         assert_eq!(canonical["evidence"]["range"]["start"], 7);
-        assert_eq!(canonical["facts"].as_array().unwrap().len(), 6);
+        // message + tool_names fallback + usage; no invented reasoning/git/workflow
+        assert_eq!(canonical["facts"].as_array().unwrap().len(), 3);
         let encoded = canonical.to_string();
         assert!(!encoded.contains("must-not-survive"));
         assert!(!encoded.contains("source_path"));
         assert!(!encoded.contains("metadata"));
+        assert!(!encoded.contains("Redacted reasoning"));
+    }
+
+    const GOLDEN_API_HISTORY: &str = include_str!(
+        "../../tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json"
+    );
+    const GOLDEN_API_MESSAGES: &str =
+        include_str!("../../tests/fixtures/transcript_golden/cline_like/input/api_messages.json");
+    const GOLDEN_EXPECTED_ASSISTANT: &str = include_str!(
+        "../../tests/fixtures/transcript_golden/cline_like/expected/assistant_tool_use.canonical.json"
+    );
+    const GOLDEN_PARSER_PROVENANCE: &str = include_str!(
+        "../../tests/fixtures/transcript_golden/cline_like/expected/parser_provenance.json"
+    );
+
+    #[test]
+    fn fixture_backed_tool_use_name_reaches_canonical_facts() {
+        // Checked-in golden input (same shape as write_task). Roo's api_messages.json
+        // twin must stay byte-equivalent to the shared Cline/Kilo history fixture.
+        let history: Value =
+            serde_json::from_str(GOLDEN_API_HISTORY).expect("golden api history JSON");
+        let roo_twin: Value =
+            serde_json::from_str(GOLDEN_API_MESSAGES).expect("golden Roo api_messages JSON");
+        assert_eq!(
+            history, roo_twin,
+            "Roo api_messages.json must mirror the shared Cline-family history shape"
+        );
+        let expected: Value =
+            serde_json::from_str(GOLDEN_EXPECTED_ASSISTANT).expect("golden expected envelope");
+        let provenance: Value =
+            serde_json::from_str(GOLDEN_PARSER_PROVENANCE).expect("golden parser provenance");
+        assert_eq!(
+            provenance["ordering_domain"], "snapshot_order",
+            "parser provenance must declare SnapshotOrder"
+        );
+        assert_eq!(
+            provenance["unknown_version"]["emitted"], false,
+            "Cline-family protocol is unversioned — do not invent UnknownVersion"
+        );
+
+        let entries = history.as_array().expect("history array");
+        let entry = &entries[1];
+        assert_eq!(
+            entry["content"][1]["type"], "tool_use",
+            "golden must evidence content[].type=tool_use parser path"
+        );
+
+        for provider in ["cline", "roo-code", "kilo"] {
+            let api_name = expected["per_provider"][provider]["api_history_filename"]
+                .as_str()
+                .expect("per-provider api filename");
+            let message = message_from_entry(
+                provider,
+                entry,
+                "task-1",
+                Path::new(api_name),
+                1,
+                Path::new("/tmp/project"),
+            )
+            .expect("fixture-backed assistant message");
+            assert_eq!(
+                message.provider, provider,
+                "{provider}: parser must tag provider"
+            );
+            assert_eq!(message.tool_names.as_deref(), Some("read_file"));
+
+            let records = normalize_cline_like_snapshot_observations(provider, &[message]).unwrap();
+            let native: Value = serde_json::from_slice(&records[0].payload).unwrap();
+            assert_eq!(native["provider"], provider);
+            assert_eq!(
+                native["tool_names"],
+                expected["parser_derived_native_payload"]["tool_names"]
+            );
+            for absent in expected["parser_derived_native_payload"]["absent"]
+                .as_array()
+                .expect("absent native keys")
+            {
+                let key = absent.as_str().expect("absent key");
+                assert!(
+                    native.get(key).is_none(),
+                    "{provider}: parser must not invent {key}"
+                );
+            }
+
+            let range = ObservationSourceRangeV1::new(1, 2).unwrap();
+            let parsed = parse_normalized_observation_record_v1(
+                &records[0].payload,
+                range,
+                ObservationOrderingDomainV1::SnapshotOrder,
+                |native| {
+                    canonical_snapshot_envelope(
+                        &native,
+                        provider,
+                        "task-1",
+                        records[0].native_record_id(),
+                        range,
+                    )
+                },
+            )
+            .expect("fixture-backed tool-name envelope");
+            let canonical = parsed.value();
+            assert_eq!(canonical["provider"], provider);
+            assert_eq!(canonical["version"], 1);
+            assert_eq!(
+                canonical["evidence"]["ordering_domain"],
+                expected["assistant_envelope"]["evidence"]["ordering_domain"]
+            );
+            assert_eq!(
+                canonical["evidence"]["native_timestamp"],
+                expected["assistant_envelope"]["evidence"]["native_timestamp"]
+            );
+            for absent in expected["assistant_envelope"]["relations"]["absent"]
+                .as_array()
+                .expect("absent relations")
+            {
+                let key = absent.as_str().expect("relation key");
+                assert!(
+                    canonical["relations"].get(key).is_none(),
+                    "{provider}: {key} must stay absent"
+                );
+            }
+            let encoded = canonical.to_string();
+            for needle in expected["assistant_envelope"]["encoded_must_contain"]
+                .as_array()
+                .expect("must_contain")
+            {
+                let needle = needle.as_str().expect("needle");
+                assert!(
+                    encoded.contains(needle),
+                    "{provider}: envelope missing parser evidence {needle}"
+                );
+            }
+            for needle in expected["assistant_envelope"]["encoded_must_not_contain"]
+                .as_array()
+                .expect("must_not_contain")
+            {
+                let needle = needle.as_str().expect("needle");
+                assert!(
+                    !encoded.contains(needle),
+                    "{provider}: envelope must not contain {needle}"
+                );
+            }
+            assert!(
+                !encoded.contains("\"kind\":\"workflow_lifecycle\""),
+                "{provider}: checked-in tool_use fixture must not emit WorkflowLifecycle"
+            );
+        }
+    }
+
+    #[test]
+    fn hostile_lookalike_fields_remain_absent_for_all_variants() {
+        let entry = serde_json::json!({
+            "role": "assistant",
+            "content": "protocol echo",
+            "requestId": "req-1",
+            "threadId": "hostile-thread",
+            "turnId": "hostile-turn",
+            "agentId": "hostile-agent",
+            "parentAgentId": "hostile-parent-agent",
+            "parentMessageId": "hostile-parent-message",
+            "reasoning": "hostile reasoning",
+            "reasoning_visibility": "visible",
+            "git": {"evidence_kind": "commit", "reference": "hostile-commit"},
+            "workflow": {"evidence_kind": "task", "reference": "hostile-task"},
+            "tool_calls": [{
+                "id": "hostile-call",
+                "name": "hostile_tool",
+                "arguments": {"secret": "hostile-arguments"}
+            }],
+            "tool_result": {
+                "invocation_id": "hostile-call",
+                "content": "hostile-result",
+                "success": true
+            }
+        });
+        for provider in ["cline", "roo-code", "kilo"] {
+            let metadata = message_metadata(provider, &entry, Path::new("/tmp/p"));
+            let message = SessionMessageRecord {
+                provider: provider.to_string(),
+                message_id: format!("{provider}-message"),
+                session_id: "task-9".to_string(),
+                role: "assistant".to_string(),
+                timestamp: Some(1_800_000_000),
+                ordinal: 0,
+                text: "protocol echo".to_string(),
+                kind: Some("message".to_string()),
+                model: None,
+                tool_names: None,
+                source_path: None,
+                source_offset: Some(0),
+                metadata_json: Some(metadata.to_string()),
+            };
+            let records = normalize_cline_like_snapshot_observations(provider, &[message]).unwrap();
+            let native: Value = serde_json::from_slice(&records[0].payload).unwrap();
+            for key in [
+                "thread_id",
+                "turn_id",
+                "agent_id",
+                "parent_agent_id",
+                "parent_message_id",
+                "reasoning_visibility",
+                "reasoning",
+                "git",
+                "workflow",
+                "tool_calls",
+                "tool_result",
+            ] {
+                assert!(
+                    native.get(key).is_none(),
+                    "{provider}: {key} must be absent"
+                );
+            }
+
+            let range = ObservationSourceRangeV1::new(0, 1).unwrap();
+            let parsed = parse_normalized_observation_record_v1(
+                &records[0].payload,
+                range,
+                ObservationOrderingDomainV1::SnapshotOrder,
+                |native| {
+                    canonical_snapshot_envelope(
+                        &native,
+                        provider,
+                        "task-9",
+                        records[0].native_record_id(),
+                        range,
+                    )
+                },
+            )
+            .expect("hostile lookalikes must normalize without invented facts");
+            let canonical = parsed.value();
+            let relations = canonical["relations"].as_object().unwrap();
+            for key in [
+                "thread_id",
+                "turn_id",
+                "agent_id",
+                "parent_agent_id",
+                "parent_message_id",
+            ] {
+                assert!(
+                    relations.get(key).is_none(),
+                    "{provider}: {key} must be absent"
+                );
+            }
+            let encoded = canonical.to_string();
+            for rejected in [
+                "hostile-thread",
+                "hostile-turn",
+                "hostile-agent",
+                "hostile reasoning",
+                "hostile-commit",
+                "hostile-task",
+                "hostile-call",
+                "hostile_tool",
+                "hostile-arguments",
+                "hostile-result",
+            ] {
+                assert!(
+                    !encoded.contains(rejected),
+                    "{provider}: {rejected} must not survive"
+                );
+            }
+            assert!(
+                !encoded.contains("\"kind\":\"workflow_lifecycle\""),
+                "{provider}: workflow lookalike must not emit WorkflowLifecycle"
+            );
+        }
+    }
+
+    #[test]
+    fn native_message_ids_distinguish_delimiter_ambiguous_structural_tuples() {
+        assert_eq!(format!("{}:{}", "a:b", "c"), format!("{}:{}", "a", "b:c"));
+        let left = stable_message_id("a:b", "api-message", Some("c"), Some(1), 0, "ignored");
+        let right = stable_message_id("a", "api-message", Some("b:c"), Some(1), 0, "ignored");
+        assert_ne!(left, right);
+        assert!(
+            left.starts_with("cline-like.message-id.v2.")
+                && right.starts_with("cline-like.message-id.v2.")
+        );
+        assert_eq!(
+            left,
+            stable_message_id("a:b", "api-message", Some("c"), Some(1), 0, "ignored"),
+            "framed IDs must be deterministic for replay"
+        );
+    }
+
+    #[test]
+    fn native_message_ids_remain_unhashed_provider_identity() {
+        let id = stable_message_id(
+            "task-1",
+            "api-message",
+            Some("native-xyz"),
+            Some(1_800_000_000),
+            3,
+            "ignored-for-native",
+        );
+        assert_eq!(id, "task-1:native-xyz");
+    }
+
+    #[test]
+    fn derived_message_ids_preserve_the_v1_public_identity_shape() {
+        let digest = crate::sessions::source::content_hash64("stable body");
+        assert_eq!(
+            stable_message_id(
+                "task-1",
+                "api-message",
+                None,
+                Some(1_800_000_000),
+                3,
+                "stable body",
+            ),
+            format!("task-1:api-message:1800000000:{digest:016x}")
+        );
     }
 }

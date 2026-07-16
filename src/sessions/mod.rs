@@ -15,11 +15,14 @@ pub mod cursor_composer;
 pub mod git_correlation;
 pub mod hermes;
 mod ingest;
+mod ingest_byte_budget;
+mod jsonl_observation_admission;
 pub mod kiro;
 pub mod lcm;
 pub(crate) mod message_noise;
 pub mod providers;
 pub mod shared;
+pub(crate) mod snapshot_observation;
 pub mod source;
 // `pub` (not `pub(crate)`) only so integration tests can reach the three
 // `#[doc(hidden)]` process-safety test helpers; every other item stays

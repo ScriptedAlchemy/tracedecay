@@ -22,6 +22,7 @@ mod message_search_eval_test;
 mod observation_application;
 mod observation_projection;
 mod observation_store;
+mod observation_workflow_projection;
 mod structured_backfill;
 mod transcript_backfill;
 mod transcript_store;

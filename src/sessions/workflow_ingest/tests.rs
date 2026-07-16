@@ -119,6 +119,8 @@ fn roster_extracts_only_workflow_agents() {
 
 #[test]
 fn transcript_tokens_sum_input_and_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agent-test.jsonl");
     let body = concat!(
         r#"{"type":"user","sessionId":"agent-sess","timestamp":"2026-07-04T05:17:34.967Z","message":{"role":"user","content":"hi"}}"#,
         "\n",
@@ -130,7 +132,8 @@ fn transcript_tokens_sum_input_and_output() {
         r#"{"type":"assistant","timestamp":"2026-07-04T05:25:32.232Z","message":{"role":"assistant","usage":{"input_tokens":10,"output_tokens":8,"cache_read_input_tokens":999}}}"#,
         "\n",
     );
-    let summary = summarize_transcript(body);
+    std::fs::write(&path, body).unwrap();
+    let summary = summarize_transcript_file(&path);
     // 100+40 + 10+8 (cache_* excluded).
     assert_eq!(summary.tokens, 158);
     assert_eq!(summary.session_id.as_deref(), Some("agent-sess"));
@@ -146,6 +149,7 @@ fn transcript_tokens_sum_input_and_output() {
 
 #[test]
 fn dir_only_run_is_running_with_journal_roster() {
+    let dir = tempfile::tempdir().unwrap();
     let journal = concat!(
         r#"{"type":"started","agentId":"a1"}"#,
         "\n",
@@ -156,7 +160,8 @@ fn dir_only_run_is_running_with_journal_roster() {
         r#"{"type":"started","agentId":""}"#,
         "\n",
     );
-    let events = parse_journal(journal);
+    std::fs::write(dir.path().join("journal.jsonl"), journal).unwrap();
+    let events = read_journal(dir.path());
     // Empty agentId dropped; three valid events remain.
     assert_eq!(events.len(), 3);
     // a1 has a terminal result -> Completed; a2 only started -> Running.

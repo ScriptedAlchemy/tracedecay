@@ -24,7 +24,7 @@
 //! values their migration derived.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use libsql::{Connection, params};
@@ -35,8 +35,8 @@ use crate::sessions::codex::{CodexTurnUsage, merge_usage_counters};
 use crate::sessions::cursor::TimestampCarry;
 use crate::sessions::shared::usage_counters_from;
 use crate::sessions::source::{
-    MAX_JSONL_RECORD_BYTES, ParsedTranscript, StoredCursor, TranscriptIngestResult,
-    TranscriptSource,
+    MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlFrame, RawJsonlFrameReader, StoredCursor,
+    TranscriptIngestResult, TranscriptSource,
 };
 
 const MARKER_NAME: &str = "transcript_facts_backfill";
@@ -280,7 +280,7 @@ fn derive_line_facts(provider: &str, path: &Path) -> Option<HashMap<i64, LineFac
         .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|duration| i64::try_from(duration.as_secs()).ok());
     let file = std::fs::File::open(path).ok()?;
-    let mut reader = BufReader::new(file);
+    let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
 
     let mut carry = TimestampCarry::new(mtime);
     let mut facts: HashMap<i64, LineFacts> = HashMap::new();
@@ -289,24 +289,22 @@ fn derive_line_facts(provider: &str, path: &Path) -> Option<HashMap<i64, LineFac
     let mut last_assistant_offset: Option<i64> = None;
     let mut codex_turn_usage = CodexTurnUsage::default();
     let mut offset = 0i64;
-    let mut line = String::new();
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => break,
-            Ok(read) => {
-                // A trailing line without a newline was never ingested
-                // (stream_new_jsonl defers partial writes), so skip it.
-                if !line.ends_with('\n') {
-                    break;
-                }
+        match frames.next_frame() {
+            Ok(RawJsonlFrame::Eof | RawJsonlFrame::Partial { .. }) | Err(_) => break,
+            Ok(frame) => {
+                let read = match frame {
+                    RawJsonlFrame::Complete { byte_len }
+                    | RawJsonlFrame::Oversized { byte_len, .. }
+                    | RawJsonlFrame::BudgetExhausted { byte_len, .. } => byte_len,
+                    RawJsonlFrame::Eof | RawJsonlFrame::Partial { .. } => 0,
+                };
                 let line_offset = offset;
-                offset = offset.saturating_add(read as i64);
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
+                offset = offset.saturating_add(i64::try_from(read).unwrap_or(i64::MAX));
+                if !matches!(frame, RawJsonlFrame::Complete { .. }) {
                     continue;
                 }
-                let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+                let Ok(value) = serde_json::from_slice::<Value>(frames.record()) else {
                     continue;
                 };
 

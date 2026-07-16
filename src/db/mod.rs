@@ -17,6 +17,8 @@ mod stats;
 mod tx;
 mod unresolved;
 
+#[cfg(test)]
+pub(crate) use access::DaemonDatabaseScope;
 #[doc(hidden)]
 pub use access::enter_maintenance_database_scope;
 #[cfg(windows)]

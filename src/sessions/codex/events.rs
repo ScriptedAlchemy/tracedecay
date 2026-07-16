@@ -427,7 +427,7 @@ fn rate_limits_snapshot(rate_limits: Option<&Value>) -> Option<Value> {
 
 /// Parse the JSON `arguments` blob carried on a `function_call` (Codex encodes
 /// it as a JSON *string*, occasionally as an inline object).
-fn parse_arguments(arguments: Option<&Value>) -> Option<Value> {
+pub(super) fn parse_arguments(arguments: Option<&Value>) -> Option<Value> {
     match arguments {
         Some(Value::String(raw)) => serde_json::from_str::<Value>(raw).ok(),
         Some(value @ Value::Object(_)) => Some(value.clone()),

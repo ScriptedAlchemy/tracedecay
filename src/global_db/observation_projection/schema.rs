@@ -78,18 +78,30 @@ pub(in super::super) async fn ensure_observation_projection_schema(
         "CREATE TABLE IF NOT EXISTS observation_projection_provenance (
             projector_version TEXT NOT NULL,
             observation_id TEXT NOT NULL,
+            output_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(output_ordinal >= 0),
             receipt_id TEXT NOT NULL,
             output_provider TEXT NOT NULL,
             output_message_id TEXT NOT NULL,
             output_digest TEXT NOT NULL,
             message_created INTEGER NOT NULL CHECK(message_created IN (0, 1)),
-            PRIMARY KEY(projector_version, observation_id),
+            PRIMARY KEY(projector_version, observation_id, output_ordinal),
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );
         CREATE TABLE IF NOT EXISTS observation_projection_checkpoints (
             projector_version TEXT PRIMARY KEY,
             last_sequence INTEGER NOT NULL CHECK(last_sequence >= 0)
+        );
+        CREATE TABLE IF NOT EXISTS observation_projection_migrations (
+            source_projector_version TEXT NOT NULL,
+            target_projector_version TEXT NOT NULL,
+            source_frontier INTEGER NOT NULL CHECK(source_frontier >= 0),
+            migrated_through INTEGER NOT NULL CHECK(
+                migrated_through >= 0 AND migrated_through <= source_frontier
+            ),
+            completed INTEGER NOT NULL CHECK(completed IN (0, 1)),
+            PRIMARY KEY(source_projector_version, target_projector_version),
+            CHECK(completed = 0 OR migrated_through = source_frontier)
         );
         CREATE TABLE IF NOT EXISTS observation_projection_aliases (
             projector_version TEXT NOT NULL,
@@ -107,20 +119,410 @@ pub(in super::super) async fn ensure_observation_projection_schema(
             PRIMARY KEY(projector_version, observation_id),
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
+        );
+        CREATE TABLE IF NOT EXISTS observation_workflow_facts (
+            projector_version TEXT NOT NULL,
+            observation_id TEXT NOT NULL,
+            fact_ordinal INTEGER NOT NULL CHECK(fact_ordinal >= 0),
+            receipt_id TEXT NOT NULL,
+            observation_sequence INTEGER NOT NULL CHECK(observation_sequence > 0),
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            semantic_kind TEXT NOT NULL CHECK(
+                semantic_kind IN ('goal', 'plan', 'todo_list', 'todo_item', 'task')
+            ),
+            provider_reference TEXT,
+            item_id TEXT,
+            parent_reference TEXT,
+            list_reference TEXT,
+            state TEXT,
+            status TEXT,
+            item_order INTEGER CHECK(item_order IS NULL OR item_order >= 0),
+            native_revision TEXT,
+            event_sequence INTEGER CHECK(event_sequence IS NULL OR event_sequence >= 0),
+            source_sequence INTEGER CHECK(source_sequence IS NULL OR source_sequence >= 0),
+            native_timestamp INTEGER,
+            ordering_domain TEXT NOT NULL,
+            content_json TEXT CHECK(content_json IS NULL OR json_valid(content_json)),
+            content_text TEXT NOT NULL,
+            output_digest TEXT NOT NULL,
+            PRIMARY KEY(projector_version, observation_id, fact_ordinal),
+            FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
+            FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
+        );
+        CREATE TABLE IF NOT EXISTS observation_projection_rebuilds (
+            projector_version TEXT PRIMARY KEY,
+            generation TEXT NOT NULL,
+            frontier_sequence INTEGER NOT NULL CHECK(frontier_sequence >= 0),
+            aliases_staged_through INTEGER NOT NULL DEFAULT 0
+                CHECK(aliases_staged_through >= 0),
+            staged_through INTEGER NOT NULL DEFAULT 0 CHECK(staged_through >= 0),
+            projected_rows INTEGER NOT NULL DEFAULT 0 CHECK(projected_rows >= 0),
+            skipped_observations INTEGER NOT NULL DEFAULT 0 CHECK(skipped_observations >= 0),
+            state TEXT NOT NULL CHECK(state IN ('aliasing', 'building', 'ready')),
+            UNIQUE(projector_version, generation)
+        );
+        CREATE TABLE IF NOT EXISTS observation_projection_rebuild_aliases (
+            projector_version TEXT NOT NULL,
+            generation TEXT NOT NULL,
+            observation_id TEXT NOT NULL,
+            output_provider TEXT NOT NULL,
+            output_message_id TEXT NOT NULL,
+            PRIMARY KEY(projector_version, generation, observation_id),
+            FOREIGN KEY(projector_version, generation)
+                REFERENCES observation_projection_rebuilds(projector_version, generation)
+                ON DELETE CASCADE,
+            FOREIGN KEY(observation_id) REFERENCES observations(observation_id)
+        );
+        CREATE TABLE IF NOT EXISTS observation_projection_rebuild_sessions (
+            projector_version TEXT NOT NULL,
+            generation TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            session_json TEXT NOT NULL CHECK(json_valid(session_json)),
+            PRIMARY KEY(projector_version, generation, provider, session_id),
+            FOREIGN KEY(projector_version, generation)
+                REFERENCES observation_projection_rebuilds(projector_version, generation)
+                ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS observation_projection_rebuild_messages (
+            projector_version TEXT NOT NULL,
+            generation TEXT NOT NULL,
+            output_provider TEXT NOT NULL,
+            output_message_id TEXT NOT NULL,
+            message_json TEXT NOT NULL CHECK(json_valid(message_json)),
+            content_hash TEXT NOT NULL,
+            snippet_text TEXT NOT NULL,
+            index_text TEXT NOT NULL,
+            PRIMARY KEY(projector_version, generation, output_provider, output_message_id),
+            FOREIGN KEY(projector_version, generation)
+                REFERENCES observation_projection_rebuilds(projector_version, generation)
+                ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS observation_projection_rebuild_provenance (
+            projector_version TEXT NOT NULL,
+            generation TEXT NOT NULL,
+            observation_id TEXT NOT NULL,
+            output_ordinal INTEGER NOT NULL CHECK(output_ordinal >= 0),
+            receipt_id TEXT NOT NULL,
+            output_provider TEXT NOT NULL,
+            output_message_id TEXT NOT NULL,
+            output_digest TEXT NOT NULL,
+            message_created INTEGER NOT NULL CHECK(message_created IN (0, 1)),
+            PRIMARY KEY(projector_version, generation, observation_id, output_ordinal),
+            FOREIGN KEY(projector_version, generation)
+                REFERENCES observation_projection_rebuilds(projector_version, generation)
+                ON DELETE CASCADE,
+            FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
+            FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
+        );
+        CREATE TABLE IF NOT EXISTS observation_projection_rebuild_dispositions (
+            projector_version TEXT NOT NULL,
+            generation TEXT NOT NULL,
+            observation_id TEXT NOT NULL,
+            receipt_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            PRIMARY KEY(projector_version, generation, observation_id),
+            FOREIGN KEY(projector_version, generation)
+                REFERENCES observation_projection_rebuilds(projector_version, generation)
+                ON DELETE CASCADE,
+            FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
+            FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
+        );
+        CREATE TABLE IF NOT EXISTS observation_projection_rebuild_workflow_facts (
+            projector_version TEXT NOT NULL,
+            generation TEXT NOT NULL,
+            observation_id TEXT NOT NULL,
+            fact_ordinal INTEGER NOT NULL CHECK(fact_ordinal >= 0),
+            receipt_id TEXT NOT NULL,
+            observation_sequence INTEGER NOT NULL CHECK(observation_sequence > 0),
+            provider TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            semantic_kind TEXT NOT NULL CHECK(
+                semantic_kind IN ('goal', 'plan', 'todo_list', 'todo_item', 'task')
+            ),
+            provider_reference TEXT,
+            item_id TEXT,
+            parent_reference TEXT,
+            list_reference TEXT,
+            state TEXT,
+            status TEXT,
+            item_order INTEGER CHECK(item_order IS NULL OR item_order >= 0),
+            native_revision TEXT,
+            event_sequence INTEGER CHECK(event_sequence IS NULL OR event_sequence >= 0),
+            source_sequence INTEGER CHECK(source_sequence IS NULL OR source_sequence >= 0),
+            native_timestamp INTEGER,
+            ordering_domain TEXT NOT NULL,
+            content_json TEXT CHECK(content_json IS NULL OR json_valid(content_json)),
+            content_text TEXT NOT NULL,
+            output_digest TEXT NOT NULL,
+            PRIMARY KEY(projector_version, generation, observation_id, fact_ordinal),
+            FOREIGN KEY(projector_version, generation)
+                REFERENCES observation_projection_rebuilds(projector_version, generation)
+                ON DELETE CASCADE,
+            FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
+            FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );",
     )
     .await?;
+    migrate_projection_rebuild_schema(conn).await?;
     migrate_legacy_projection_output_uniqueness(conn).await?;
+    migrate_projection_multi_output_primary_key(conn).await?;
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_output
          ON observation_projection_provenance
             (projector_version, output_provider, output_message_id);
          CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_global_output
          ON observation_projection_provenance
-            (output_provider, output_message_id, projector_version);",
+            (output_provider, output_message_id, projector_version);
+         CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_query
+         ON observation_workflow_facts
+            (provider, session_id, semantic_kind, status, observation_sequence);
+         CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_item
+         ON observation_workflow_facts
+            (provider, session_id, semantic_kind, item_id, provider_reference,
+             event_sequence, source_sequence, observation_sequence);
+         CREATE INDEX IF NOT EXISTS idx_projection_rebuild_provenance_output
+         ON observation_projection_rebuild_provenance
+            (projector_version, generation, output_provider, output_message_id);
+         CREATE INDEX IF NOT EXISTS idx_projection_rebuild_workflow_goal
+         ON observation_projection_rebuild_workflow_facts
+            (projector_version, generation, provider, session_id, semantic_kind,
+             provider_reference, observation_sequence);",
     )
     .await?;
     Ok(())
+}
+
+const LEGACY_REBUILD_COLUMNS: &[&str] = &[
+    "projector_version",
+    "generation",
+    "frontier_sequence",
+    "staged_through",
+    "projected_rows",
+    "skipped_observations",
+    "state",
+];
+const CURRENT_REBUILD_COLUMNS: &[&str] = &[
+    "projector_version",
+    "generation",
+    "frontier_sequence",
+    "aliases_staged_through",
+    "staged_through",
+    "projected_rows",
+    "skipped_observations",
+    "state",
+];
+const LEGACY_REBUILD_MESSAGE_COLUMNS: &[&str] = &[
+    "projector_version",
+    "generation",
+    "output_provider",
+    "output_message_id",
+    "message_json",
+];
+const CURRENT_REBUILD_MESSAGE_COLUMNS: &[&str] = &[
+    "projector_version",
+    "generation",
+    "output_provider",
+    "output_message_id",
+    "message_json",
+    "content_hash",
+    "snippet_text",
+    "index_text",
+];
+
+async fn migrate_projection_rebuild_schema(conn: &Connection) -> Result<(), libsql::Error> {
+    let rebuild_columns =
+        projection_rebuild_column_names(conn, "observation_projection_rebuilds").await?;
+    let message_columns =
+        projection_rebuild_column_names(conn, "observation_projection_rebuild_messages").await?;
+    let rebuild_is_legacy = columns_match(&rebuild_columns, LEGACY_REBUILD_COLUMNS);
+    let rebuild_columns_are_current = columns_match(&rebuild_columns, CURRENT_REBUILD_COLUMNS);
+    let messages_are_legacy = columns_match(&message_columns, LEGACY_REBUILD_MESSAGE_COLUMNS);
+    let messages_are_current = columns_match(&message_columns, CURRENT_REBUILD_MESSAGE_COLUMNS);
+    if (!rebuild_is_legacy && !rebuild_columns_are_current)
+        || (!messages_are_legacy && !messages_are_current)
+    {
+        return Err(unsupported_projection_rebuild_schema());
+    }
+    let rebuild_supports_aliasing = projection_rebuild_supports_aliasing(conn).await?;
+    let rebuild_requires_replacement = rebuild_is_legacy || !rebuild_supports_aliasing;
+    if !rebuild_requires_replacement && messages_are_current {
+        return Ok(());
+    }
+
+    if messages_are_legacy {
+        // The legacy message staging rows lack the hashes and rendered text
+        // needed for safe activation. Rebuild staging is derived from durable
+        // observations, so discard only this restartable job state.
+        conn.execute_batch(
+            "DELETE FROM observation_projection_rebuild_aliases;
+             DELETE FROM observation_projection_rebuild_sessions;
+             DELETE FROM observation_projection_rebuild_messages;
+             DELETE FROM observation_projection_rebuild_provenance;
+             DELETE FROM observation_projection_rebuild_dispositions;
+             DELETE FROM observation_projection_rebuild_workflow_facts;
+             DELETE FROM observation_projection_rebuilds;
+             DROP TABLE observation_projection_rebuild_messages;",
+        )
+        .await?;
+        if rebuild_requires_replacement {
+            replace_empty_projection_rebuild_root(conn).await?;
+        }
+        create_current_projection_rebuild_messages(conn).await?;
+        return Ok(());
+    }
+
+    let aliases_staged_through = if rebuild_is_legacy {
+        "0"
+    } else {
+        "aliases_staged_through"
+    };
+    conn.execute_batch(&format!(
+        "DROP TABLE IF EXISTS temp.projection_rebuilds_upgrade;
+         DROP TABLE IF EXISTS temp.projection_rebuild_aliases_upgrade;
+         DROP TABLE IF EXISTS temp.projection_rebuild_sessions_upgrade;
+         DROP TABLE IF EXISTS temp.projection_rebuild_messages_upgrade;
+         DROP TABLE IF EXISTS temp.projection_rebuild_provenance_upgrade;
+         DROP TABLE IF EXISTS temp.projection_rebuild_dispositions_upgrade;
+         DROP TABLE IF EXISTS temp.projection_rebuild_workflow_facts_upgrade;
+         CREATE TEMP TABLE projection_rebuilds_upgrade AS
+         SELECT projector_version, generation, frontier_sequence,
+                {aliases_staged_through} AS aliases_staged_through,
+                staged_through, projected_rows, skipped_observations, state
+         FROM observation_projection_rebuilds;
+         CREATE TEMP TABLE projection_rebuild_aliases_upgrade AS
+         SELECT * FROM observation_projection_rebuild_aliases;
+         CREATE TEMP TABLE projection_rebuild_sessions_upgrade AS
+         SELECT * FROM observation_projection_rebuild_sessions;
+         CREATE TEMP TABLE projection_rebuild_messages_upgrade AS
+         SELECT * FROM observation_projection_rebuild_messages;
+         CREATE TEMP TABLE projection_rebuild_provenance_upgrade AS
+         SELECT * FROM observation_projection_rebuild_provenance;
+         CREATE TEMP TABLE projection_rebuild_dispositions_upgrade AS
+         SELECT * FROM observation_projection_rebuild_dispositions;
+         CREATE TEMP TABLE projection_rebuild_workflow_facts_upgrade AS
+         SELECT * FROM observation_projection_rebuild_workflow_facts;
+         DELETE FROM observation_projection_rebuild_aliases;
+         DELETE FROM observation_projection_rebuild_sessions;
+         DELETE FROM observation_projection_rebuild_messages;
+         DELETE FROM observation_projection_rebuild_provenance;
+         DELETE FROM observation_projection_rebuild_dispositions;
+         DELETE FROM observation_projection_rebuild_workflow_facts;
+         DELETE FROM observation_projection_rebuilds;"
+    ))
+    .await?;
+    replace_empty_projection_rebuild_root(conn).await?;
+    conn.execute_batch(
+        "INSERT INTO observation_projection_rebuilds
+         SELECT * FROM projection_rebuilds_upgrade;
+         INSERT INTO observation_projection_rebuild_aliases
+         SELECT * FROM projection_rebuild_aliases_upgrade;
+         INSERT INTO observation_projection_rebuild_sessions
+         SELECT * FROM projection_rebuild_sessions_upgrade;
+         INSERT INTO observation_projection_rebuild_messages
+         SELECT * FROM projection_rebuild_messages_upgrade;
+         INSERT INTO observation_projection_rebuild_provenance
+         SELECT * FROM projection_rebuild_provenance_upgrade;
+         INSERT INTO observation_projection_rebuild_dispositions
+         SELECT * FROM projection_rebuild_dispositions_upgrade;
+         INSERT INTO observation_projection_rebuild_workflow_facts
+         SELECT * FROM projection_rebuild_workflow_facts_upgrade;
+         DROP TABLE projection_rebuilds_upgrade;
+         DROP TABLE projection_rebuild_aliases_upgrade;
+         DROP TABLE projection_rebuild_sessions_upgrade;
+         DROP TABLE projection_rebuild_messages_upgrade;
+         DROP TABLE projection_rebuild_provenance_upgrade;
+         DROP TABLE projection_rebuild_dispositions_upgrade;
+         DROP TABLE projection_rebuild_workflow_facts_upgrade;",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn projection_rebuild_column_names(
+    conn: &Connection,
+    table: &str,
+) -> Result<Vec<String>, libsql::Error> {
+    let mut rows = conn
+        .query(
+            "SELECT name FROM pragma_table_xinfo(?1) ORDER BY cid",
+            params![table],
+        )
+        .await?;
+    let mut columns = Vec::new();
+    while let Some(row) = rows.next().await? {
+        columns.push(row.get::<String>(0)?);
+    }
+    Ok(columns)
+}
+
+fn columns_match(actual: &[String], expected: &[&str]) -> bool {
+    actual
+        .iter()
+        .map(String::as_str)
+        .eq(expected.iter().copied())
+}
+
+async fn projection_rebuild_supports_aliasing(conn: &Connection) -> Result<bool, libsql::Error> {
+    let mut rows = conn
+        .query(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'table' AND name = 'observation_projection_rebuilds'",
+            (),
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Err(unsupported_projection_rebuild_schema());
+    };
+    Ok(row.get::<String>(0)?.contains("'aliasing'"))
+}
+
+async fn replace_empty_projection_rebuild_root(conn: &Connection) -> Result<(), libsql::Error> {
+    conn.execute_batch(
+        "DROP TABLE observation_projection_rebuilds;
+         CREATE TABLE observation_projection_rebuilds (
+            projector_version TEXT PRIMARY KEY,
+            generation TEXT NOT NULL,
+            frontier_sequence INTEGER NOT NULL CHECK(frontier_sequence >= 0),
+            aliases_staged_through INTEGER NOT NULL DEFAULT 0
+                CHECK(aliases_staged_through >= 0),
+            staged_through INTEGER NOT NULL DEFAULT 0 CHECK(staged_through >= 0),
+            projected_rows INTEGER NOT NULL DEFAULT 0 CHECK(projected_rows >= 0),
+            skipped_observations INTEGER NOT NULL DEFAULT 0 CHECK(skipped_observations >= 0),
+            state TEXT NOT NULL CHECK(state IN ('aliasing', 'building', 'ready')),
+            UNIQUE(projector_version, generation)
+         );",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn create_current_projection_rebuild_messages(
+    conn: &Connection,
+) -> Result<(), libsql::Error> {
+    conn.execute_batch(
+        "CREATE TABLE observation_projection_rebuild_messages (
+            projector_version TEXT NOT NULL,
+            generation TEXT NOT NULL,
+            output_provider TEXT NOT NULL,
+            output_message_id TEXT NOT NULL,
+            message_json TEXT NOT NULL CHECK(json_valid(message_json)),
+            content_hash TEXT NOT NULL,
+            snippet_text TEXT NOT NULL,
+            index_text TEXT NOT NULL,
+            PRIMARY KEY(projector_version, generation, output_provider, output_message_id),
+            FOREIGN KEY(projector_version, generation)
+                REFERENCES observation_projection_rebuilds(projector_version, generation)
+                ON DELETE CASCADE
+         );",
+    )
+    .await?;
+    Ok(())
+}
+
+fn unsupported_projection_rebuild_schema() -> libsql::Error {
+    libsql::Error::Misuse("unsupported observation projection rebuild schema".to_string())
 }
 
 async fn has_legacy_projection_output_uniqueness(conn: &Connection) -> Result<bool, libsql::Error> {
@@ -156,6 +558,7 @@ async fn has_legacy_projection_output_uniqueness(conn: &Connection) -> Result<bo
 async fn validate_legacy_projection_provenance_schema(
     conn: &Connection,
 ) -> Result<Vec<String>, libsql::Error> {
+    require_projection_provenance_table(conn).await?;
     let columns_match = legacy_projection_columns_match(conn).await?;
     let foreign_keys_match = legacy_projection_foreign_keys_match(conn).await?;
     let indexes_match = legacy_projection_indexes_match(conn).await?;
@@ -167,6 +570,28 @@ async fn validate_legacy_projection_provenance_schema(
     } else {
         Err(unsupported_legacy_projection_schema())
     }
+}
+
+async fn require_projection_provenance_table(conn: &Connection) -> Result<(), libsql::Error> {
+    let mut objects = conn
+        .query(
+            "SELECT type FROM sqlite_schema
+             WHERE name = 'observation_projection_provenance'",
+            (),
+        )
+        .await?;
+    let object_type = objects
+        .next()
+        .await?
+        .ok_or_else(unsupported_legacy_projection_schema)?
+        .get::<String>(0)?;
+    drop(objects);
+    if object_type != "table" {
+        return Err(libsql::Error::Misuse(format!(
+            "unsupported observation_projection_provenance {object_type}"
+        )));
+    }
+    Ok(())
 }
 
 fn unsupported_legacy_projection_schema() -> libsql::Error {
@@ -368,23 +793,32 @@ async fn migrate_legacy_projection_output_uniqueness(
     let triggers = validate_legacy_projection_provenance_schema(conn).await?;
 
     conn.execute_batch(
-        "DROP TABLE IF EXISTS observation_projection_provenance_without_output_unique;
+        "DROP TRIGGER IF EXISTS projection_provenance_receipt_insert_v1;
+             DROP TRIGGER IF EXISTS projection_provenance_receipt_update_v1;
+             DROP TRIGGER IF EXISTS projection_provenance_message_created_insert_v1;
+             DROP TRIGGER IF EXISTS projection_provenance_message_created_update_v1;
+             DROP TRIGGER IF EXISTS projection_provenance_audit_invalidate_update_v1;
+             DROP TRIGGER IF EXISTS projection_provenance_audit_invalidate_delete_v1;
+             DROP TRIGGER IF EXISTS projection_output_audit_invalidate_update_v1;
+             DROP TRIGGER IF EXISTS projection_output_audit_invalidate_delete_v1;
+             DROP TABLE IF EXISTS observation_projection_provenance_without_output_unique;
              CREATE TABLE observation_projection_provenance_without_output_unique (
                 projector_version TEXT NOT NULL,
                 observation_id TEXT NOT NULL,
+                output_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(output_ordinal >= 0),
                 receipt_id TEXT NOT NULL,
                 output_provider TEXT NOT NULL,
                 output_message_id TEXT NOT NULL,
                 output_digest TEXT NOT NULL,
                 message_created INTEGER NOT NULL CHECK(message_created IN (0, 1)),
-                PRIMARY KEY(projector_version, observation_id),
+                PRIMARY KEY(projector_version, observation_id, output_ordinal),
                 FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
                 FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
              );
              INSERT INTO observation_projection_provenance_without_output_unique
-                (projector_version, observation_id, receipt_id, output_provider,
+                (projector_version, observation_id, output_ordinal, receipt_id, output_provider,
                  output_message_id, output_digest, message_created)
-             SELECT projector_version, observation_id, receipt_id, output_provider,
+             SELECT projector_version, observation_id, 0, receipt_id, output_provider,
                     output_message_id, output_digest, message_created
              FROM observation_projection_provenance;
              DROP TABLE observation_projection_provenance;
@@ -395,5 +829,255 @@ async fn migrate_legacy_projection_output_uniqueness(
     for trigger in triggers {
         conn.execute_batch(&trigger).await?;
     }
+    restore_projection_output_audit_triggers(conn).await?;
     Ok(())
+}
+
+async fn migrate_projection_multi_output_primary_key(
+    conn: &Connection,
+) -> Result<(), libsql::Error> {
+    require_projection_provenance_table(conn).await?;
+    if has_output_ordinal(conn).await? {
+        return Ok(());
+    }
+    if !legacy_projection_columns_match(conn).await?
+        || !legacy_projection_foreign_keys_match(conn).await?
+    {
+        return Err(unsupported_legacy_projection_schema());
+    }
+    let triggers = read_supported_legacy_projection_triggers(conn).await?;
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS projection_provenance_receipt_insert_v1;
+         DROP TRIGGER IF EXISTS projection_provenance_receipt_update_v1;
+         DROP TRIGGER IF EXISTS projection_provenance_message_created_insert_v1;
+         DROP TRIGGER IF EXISTS projection_provenance_message_created_update_v1;
+         DROP TRIGGER IF EXISTS projection_provenance_audit_invalidate_update_v1;
+         DROP TRIGGER IF EXISTS projection_provenance_audit_invalidate_delete_v1;
+         DROP TRIGGER IF EXISTS projection_output_audit_invalidate_update_v1;
+         DROP TRIGGER IF EXISTS projection_output_audit_invalidate_delete_v1;
+         DROP TABLE IF EXISTS observation_projection_provenance_multi_output;
+         CREATE TABLE observation_projection_provenance_multi_output (
+            projector_version TEXT NOT NULL,
+            observation_id TEXT NOT NULL,
+            output_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(output_ordinal >= 0),
+            receipt_id TEXT NOT NULL,
+            output_provider TEXT NOT NULL,
+            output_message_id TEXT NOT NULL,
+            output_digest TEXT NOT NULL,
+            message_created INTEGER NOT NULL CHECK(message_created IN (0, 1)),
+            PRIMARY KEY(projector_version, observation_id, output_ordinal),
+            FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
+            FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
+         );
+         INSERT INTO observation_projection_provenance_multi_output
+            (projector_version, observation_id, output_ordinal, receipt_id, output_provider,
+             output_message_id, output_digest, message_created)
+         SELECT projector_version, observation_id, 0, receipt_id, output_provider,
+                output_message_id, output_digest, message_created
+         FROM observation_projection_provenance;
+         DROP TABLE observation_projection_provenance;
+         ALTER TABLE observation_projection_provenance_multi_output
+            RENAME TO observation_projection_provenance;",
+    )
+    .await?;
+    for trigger in triggers {
+        conn.execute_batch(&trigger).await?;
+    }
+    restore_projection_output_audit_triggers(conn).await?;
+    Ok(())
+}
+
+async fn restore_projection_output_audit_triggers(conn: &Connection) -> Result<(), libsql::Error> {
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS projection_output_audit_invalidate_update_v1
+         AFTER UPDATE ON session_messages
+         WHEN EXISTS (
+            SELECT 1 FROM observation_projection_provenance
+            WHERE projector_version = 'claude-session-message-v3'
+              AND output_provider = OLD.provider
+              AND output_message_id = OLD.message_id
+         ) BEGIN
+            DELETE FROM authority_audit_checkpoints
+            WHERE audit_name = 'observation-authority';
+         END;
+         CREATE TRIGGER IF NOT EXISTS projection_output_audit_invalidate_delete_v1
+         AFTER DELETE ON session_messages
+         WHEN EXISTS (
+            SELECT 1 FROM observation_projection_provenance
+            WHERE projector_version = 'claude-session-message-v3'
+              AND output_provider = OLD.provider
+              AND output_message_id = OLD.message_id
+         ) BEGIN
+            DELETE FROM authority_audit_checkpoints
+            WHERE audit_name = 'observation-authority';
+         END;",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn has_output_ordinal(conn: &Connection) -> Result<bool, libsql::Error> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM pragma_table_xinfo('observation_projection_provenance')
+             WHERE name = 'output_ordinal'",
+            (),
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use libsql::Builder;
+    use tempfile::TempDir;
+
+    use crate::global_db::GlobalDb;
+
+    async fn seed_legacy_rebuild_schema(path: &std::path::Path, legacy_messages: bool) {
+        let database = Builder::new_local(path).build().await.unwrap();
+        let conn = database.connect().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE observation_projection_rebuilds (
+                projector_version TEXT PRIMARY KEY,
+                generation TEXT NOT NULL,
+                frontier_sequence INTEGER NOT NULL CHECK(frontier_sequence >= 0),
+                staged_through INTEGER NOT NULL DEFAULT 0 CHECK(staged_through >= 0),
+                projected_rows INTEGER NOT NULL DEFAULT 0 CHECK(projected_rows >= 0),
+                skipped_observations INTEGER NOT NULL DEFAULT 0 CHECK(skipped_observations >= 0),
+                state TEXT NOT NULL CHECK(state IN ('building', 'ready')),
+                UNIQUE(projector_version, generation)
+             );
+             INSERT INTO observation_projection_rebuilds (
+                projector_version, generation, frontier_sequence, staged_through,
+                projected_rows, skipped_observations, state
+             ) VALUES ('projector-v1', 'generation-v1', 7, 3, 2, 1, 'building');",
+        )
+        .await
+        .unwrap();
+        if legacy_messages {
+            conn.execute_batch(
+                "CREATE TABLE observation_projection_rebuild_messages (
+                    projector_version TEXT NOT NULL,
+                    generation TEXT NOT NULL,
+                    output_provider TEXT NOT NULL,
+                    output_message_id TEXT NOT NULL,
+                    message_json TEXT NOT NULL CHECK(json_valid(message_json)),
+                    PRIMARY KEY(
+                        projector_version, generation, output_provider, output_message_id
+                    ),
+                    FOREIGN KEY(projector_version, generation)
+                        REFERENCES observation_projection_rebuilds(projector_version, generation)
+                        ON DELETE CASCADE
+                 );
+                 INSERT INTO observation_projection_rebuild_messages VALUES (
+                    'projector-v1', 'generation-v1', 'claude', 'message-v1', '{}'
+                 );",
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_rebuild_root_preserves_a_structurally_upgradeable_job() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("global.db");
+        seed_legacy_rebuild_schema(&path, false).await;
+
+        let db = GlobalDb::open_at(&path).await.unwrap();
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT aliases_staged_through, staged_through, state
+                 FROM observation_projection_rebuilds
+                 WHERE projector_version = 'projector-v1'",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 0);
+        assert_eq!(row.get::<i64>(1).unwrap(), 3);
+        assert_eq!(row.get::<String>(2).unwrap(), "building");
+    }
+
+    #[tokio::test]
+    async fn legacy_unrendered_messages_restart_only_projection_rebuild_staging() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("global.db");
+        seed_legacy_rebuild_schema(&path, true).await;
+
+        let db = GlobalDb::open_at(&path).await.unwrap();
+        for table in [
+            "observation_projection_rebuilds",
+            "observation_projection_rebuild_messages",
+        ] {
+            let count = db
+                .conn
+                .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+                .await
+                .unwrap()
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<i64>(0)
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+        db.conn
+            .execute(
+                "INSERT INTO observation_projection_rebuilds (
+                    projector_version, generation, frontier_sequence, state
+                 ) VALUES ('projector-v2', 'generation-v2', 0, 'aliasing')",
+                (),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn later_schema_failure_rolls_back_legacy_rebuild_upgrade() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("global.db");
+        seed_legacy_rebuild_schema(&path, false).await;
+        let database = Builder::new_local(&path).build().await.unwrap();
+        let conn = database.connect().unwrap();
+        conn.execute(
+            "CREATE TABLE observation_projection_provenance (unsupported TEXT)",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        drop(database);
+
+        assert!(GlobalDb::open_at(&path).await.is_none());
+
+        let database = Builder::new_local(&path).build().await.unwrap();
+        let conn = database.connect().unwrap();
+        let mut columns = conn
+            .query(
+                "SELECT name FROM pragma_table_xinfo('observation_projection_rebuilds')
+                 WHERE name = 'aliases_staged_through'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(columns.next().await.unwrap().is_none());
+        drop(columns);
+        let mut rows = conn
+            .query(
+                "SELECT staged_through, state FROM observation_projection_rebuilds
+                 WHERE projector_version = 'projector-v1'",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 3);
+        assert_eq!(row.get::<String>(1).unwrap(), "building");
+    }
 }
