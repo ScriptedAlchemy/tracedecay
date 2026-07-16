@@ -1237,7 +1237,7 @@ impl CompatibilityFactPageV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CompatibilityFactSearchKindV1 {
     Search,
     Probe,

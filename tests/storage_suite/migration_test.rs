@@ -485,7 +485,7 @@ async fn test_create_schema_fresh_db() {
         .await
         .expect("create_schema should succeed");
 
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         2,
@@ -535,7 +535,7 @@ async fn test_create_schema_idempotent() {
         .await
         .expect("second create_schema should succeed");
 
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
 }
 
 /// migrate returns false when already at the latest version.
@@ -549,20 +549,20 @@ async fn test_migrate_already_latest_returns_false() {
         !migrated,
         "migrate should return false when already at latest"
     );
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
 }
 
 #[tokio::test]
 async fn test_migrate_rejects_schema_newer_than_supported() {
     let (conn, _db, _dir) = create_schema_db().await;
-    set_user_version(&conn, 20).await;
+    set_user_version(&conn, 21).await;
 
     let error = migrate(&conn)
         .await
         .expect_err("future schema versions must be rejected");
 
-    assert!(error.to_string().contains("newer than supported v19"));
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert!(error.to_string().contains("newer than supported v20"));
+    assert_eq!(get_user_version(&conn).await, 21);
 }
 
 /// migrate from v0 (completely empty database) applies all migrations to latest.
@@ -581,7 +581,7 @@ async fn test_migrate_from_v0() {
         migrated,
         "migrate should return true when migrations were applied"
     );
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
 
     // All expected tables should exist
     assert!(table_exists(&conn, "nodes").await);
@@ -622,7 +622,7 @@ async fn test_migrate_from_v1() {
         .expect("migrate from v1 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
 
     // V2: metadata table
     assert!(table_exists(&conn, "metadata").await);
@@ -658,7 +658,7 @@ async fn test_migrate_from_v2() {
         .expect("migrate from v2 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
 
     // V3 columns
     assert!(column_exists(&conn, "nodes", "branches").await);
@@ -688,7 +688,7 @@ async fn test_migrate_from_v3() {
         .expect("migrate from v3 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
 
     // V4 columns
     assert!(column_exists(&conn, "nodes", "unsafe_blocks").await);
@@ -716,7 +716,7 @@ async fn test_migrate_from_v4() {
         .expect("migrate from v4 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
 
     assert!(index_exists(&conn, "idx_edges_unique").await);
 }
@@ -846,7 +846,7 @@ async fn test_database_initialize_creates_latest_version() {
         .await
         .expect("Database::initialize should succeed");
 
-    assert_eq!(get_user_version(db.conn()).await, 19);
+    assert_eq!(get_user_version(db.conn()).await, 20);
 }
 
 /// Database::open on an already-current database does not re-migrate.
@@ -898,7 +898,7 @@ async fn test_database_open_migrates_v1_to_latest() {
 
     assert!(migrated, "opening a v1 database should trigger migration");
 
-    assert_eq!(get_user_version(db.conn()).await, 19);
+    assert_eq!(get_user_version(db.conn()).await, 20);
 }
 
 /// After create_schema, all v5 columns on nodes exist.
@@ -1041,7 +1041,7 @@ async fn test_v7_to_latest_upgrade_path() {
     let did_migrate = migrate(&conn).await.unwrap();
     assert!(did_migrate, "expected migrate() to return true");
 
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
 
     let mut rows = conn
         .query(
@@ -1089,7 +1089,7 @@ async fn test_migrate_v16_adds_redundancy_pairs() {
     let migrated = migrate(&conn).await.expect("v16 migration should apply");
 
     assert!(migrated, "expected migrate() to run the v16 addition");
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
     assert!(
         table_exists(&conn, "redundancy_pairs").await,
         "v16 migration should create the redundancy_pairs table"
@@ -1135,7 +1135,7 @@ async fn test_migrate_v18_preserves_memory_and_adds_bounded_relations() {
 
     assert!(migrate(&conn).await.unwrap());
 
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
     assert!(table_exists(&conn, "memory_fact_relations").await);
     assert!(index_exists(&conn, "idx_memory_fact_relations_target").await);
     assert_eq!(
@@ -1293,7 +1293,7 @@ async fn test_v10_to_v11_backfills_and_drops_legacy_memory_tables() {
     let did_migrate = migrate(&conn).await.expect("v10 to v11 should migrate");
 
     assert!(did_migrate);
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
     assert!(!table_exists(&conn, "memory_decisions").await);
     assert!(!table_exists(&conn, "memory_code_areas").await);
     assert!(table_exists(&conn, "memory_facts").await);
@@ -1313,7 +1313,7 @@ async fn test_v11_database_migrates_to_monotonic_v12() {
     let did_migrate = migrate(&conn).await.expect("v11 to v12 should migrate");
 
     assert!(did_migrate);
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
     assert!(table_exists(&conn, "memory_bank_dirty").await);
 }
 
@@ -1736,7 +1736,7 @@ async fn test_v13_drops_archive_columns_with_generated_column_dependency() {
         .await
         .expect("v13 must drop archive columns even with a generated-column dependency");
     assert!(migrated, "expected migrate() to run the v13 cleanup");
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
 
     let columns = column_names(&conn, "memory_facts").await;
     for col in [
@@ -1785,7 +1785,7 @@ async fn test_v14_adds_access_tracking_and_oplog() {
 
     let migrated = migrate(&conn).await.expect("v14 must apply cleanly");
     assert!(migrated, "expected migrate() to run the v14 additions");
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
 
     let columns = column_names(&conn, "memory_facts").await;
     for col in ["access_count", "last_recalled_at"] {
@@ -1811,7 +1811,7 @@ async fn test_v14_adds_access_tracking_and_oplog() {
         .await
         .expect("v14 must be idempotent on an already-upgraded schema");
     assert!(migrated_again);
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
     assert_eq!(
         scalar_i64(&conn, "SELECT COUNT(*) FROM memory_facts").await,
         1
@@ -1844,7 +1844,7 @@ async fn test_v15_compacts_legacy_f64_vectors_without_open_time_vacuum() {
         .await
         .expect("v15 must compact legacy vectors");
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         0,
@@ -1887,7 +1887,7 @@ async fn test_latest_open_defers_incremental_vacuum_repair() {
     )
     .await
     .expect("failed to simulate pre-repair auto_vacuum mode");
-    set_user_version(&conn, 19).await;
+    set_user_version(&conn, 20).await;
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         0,
@@ -1902,7 +1902,7 @@ async fn test_latest_open_defers_incremental_vacuum_repair() {
         !migrated,
         "auto_vacuum repair should not report a schema migration"
     );
-    assert_eq!(get_user_version(&conn).await, 19);
+    assert_eq!(get_user_version(&conn).await, 20);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         0,

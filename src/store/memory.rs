@@ -506,8 +506,9 @@ async fn ensure_referenced_anchors(
     for anchor_id in batch.referenced_anchor_ids() {
         let mut rows = transaction
             .query(
-                "SELECT owner_json FROM retrieval_anchors WHERE anchor_id = ?1",
-                [anchor_id.as_str()],
+                "SELECT 1 FROM retrieval_anchors
+                 WHERE anchor_id = ?1 AND owner_json = ?2",
+                params![anchor_id.as_str(), owner.json.as_str()],
             )
             .await
             .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
@@ -520,9 +521,6 @@ async fn ensure_referenced_anchors(
                 anchor_id: anchor_id.clone(),
             });
         };
-        if row_string(&row, 0, COMMIT_OPERATION)? != owner.json {
-            return Err(FactStoreError::OwnerMismatch);
-        }
     }
     Ok(())
 }

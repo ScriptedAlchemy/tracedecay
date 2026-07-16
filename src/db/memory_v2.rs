@@ -1692,14 +1692,16 @@ async fn backfill_fact_payload(
     .await?;
     mirror_sanitized_legacy(
         conn,
-        legacy.fact_id,
-        content,
-        category_label(category),
-        &tags,
-        &metadata,
-        &entities,
-        &source,
-        access == PayloadAccessState::Redacted,
+        SanitizedLegacyMirror {
+            legacy_fact_id: legacy.fact_id,
+            content,
+            category: category_label(category),
+            tags: &tags,
+            metadata: &metadata,
+            entities: &entities,
+            source: &source,
+            invalidate_vector: access == PayloadAccessState::Redacted,
+        },
     )
     .await?;
     Ok(Ok(()))
@@ -2258,9 +2260,35 @@ async fn purge_memory_v2_fact_inner(
         ],
     )
     .await?;
-    let Some(legacy_fact_id) = legacy_fact_id else {
+    let fact_exists = row_exists(
+        conn,
+        "SELECT 1 FROM memory_v2_facts
+         WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3",
+        params![
+            fact_id.as_str(),
+            owner_key.kind,
+            owner_key.project_id.as_str()
+        ],
+    )
+    .await?;
+    if !fact_exists {
         return Ok(false);
-    };
+    }
+    if legacy_fact_id.is_none()
+        && row_exists(
+            conn,
+            "SELECT 1 FROM memory_v2_legacy_map
+             WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3",
+            params![
+                fact_id.as_str(),
+                owner_key.kind,
+                owner_key.project_id.as_str()
+            ],
+        )
+        .await?
+    {
+        return Ok(false);
+    }
     let current = current_fact_state(conn, owner_key, fact_id).await?;
     if expected_last_event_id.is_some_and(|expected| expected != &current.last_event_id) {
         return Err(db_message(
@@ -2289,7 +2317,9 @@ async fn purge_memory_v2_fact_inner(
     })?;
     insert_event(conn, owner_key, &event, occurred_at.0).await?;
     purge_payload_rows(conn, owner_key, fact_id).await?;
-    purge_legacy_fact(conn, legacy_fact_id).await?;
+    if let Some(legacy_fact_id) = legacy_fact_id {
+        purge_legacy_fact(conn, legacy_fact_id).await?;
+    }
     conn.execute(
         "UPDATE memory_v2_current_facts SET
             payload_access = 'deleted', active_assertion_id = NULL,
@@ -2378,17 +2408,31 @@ async fn purge_legacy_fact(conn: &Connection, legacy_fact_id: i64) -> Result<()>
     Ok(())
 }
 
+struct SanitizedLegacyMirror<'a> {
+    legacy_fact_id: i64,
+    content: &'a str,
+    category: &'a str,
+    tags: &'a [String],
+    metadata: &'a Value,
+    entities: &'a [String],
+    source: &'a str,
+    invalidate_vector: bool,
+}
+
 async fn mirror_sanitized_legacy(
     conn: &Connection,
-    legacy_fact_id: i64,
-    content: &str,
-    category: &str,
-    tags: &[String],
-    metadata: &Value,
-    entities: &[String],
-    source: &str,
-    invalidate_vector: bool,
+    mirror: SanitizedLegacyMirror<'_>,
 ) -> Result<()> {
+    let SanitizedLegacyMirror {
+        legacy_fact_id,
+        content,
+        category,
+        tags,
+        metadata,
+        entities,
+        source,
+        invalidate_vector,
+    } = mirror;
     conn.execute(
         "UPDATE memory_facts SET
             content = ?1, category = ?2, tags = ?3, metadata = ?4, source = ?5,

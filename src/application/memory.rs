@@ -347,9 +347,9 @@ pub mod legacy_compatibility {
 
     use thiserror::Error;
     use tracedecay_domain::{DomainError, FactOwnerV1};
-    use tracedecay_store::{FactWriteBatch, StoredFactV1};
+    use tracedecay_store::{CompatibilityFactV1, FactWriteBatch, StoredFactV1};
 
-    use crate::memory::types::{AddFactRequest, FactRecord, UpdateFactRequest};
+    use crate::memory::types::{AddFactRequest, FactRecord};
 
     #[derive(Debug, Error)]
     pub enum LegacyMemoryCompatibilityError {
@@ -378,12 +378,10 @@ pub mod legacy_compatibility {
             request: AddFactRequest,
         ) -> Result<FactWriteBatch, Self::Error>;
 
-        fn update_request_to_correction_batch(
+        fn project_fact_record(
             &self,
-            request: UpdateFactRequest,
-        ) -> Result<FactWriteBatch, Self::Error>;
-
-        fn project_fact_record(&self, fact: &StoredFactV1) -> Result<FactRecord, Self::Error>;
+            fact: &CompatibilityFactV1,
+        ) -> Result<FactRecord, Self::Error>;
     }
 
     pub fn prepare_add<A: LegacyMemoryCompatibilityAdapter>(
@@ -399,22 +397,6 @@ pub mod legacy_compatibility {
                 source: Box::new(source),
             }
         })?;
-        validate_owner_bound_batch(owner, batch)
-    }
-
-    pub fn prepare_update<A: LegacyMemoryCompatibilityAdapter>(
-        owner: &FactOwnerV1,
-        adapter: &A,
-        request: UpdateFactRequest,
-    ) -> Result<FactWriteBatch, LegacyMemoryCompatibilityError> {
-        owner
-            .validate()
-            .map_err(LegacyMemoryCompatibilityError::InvalidOwner)?;
-        let batch = adapter
-            .update_request_to_correction_batch(request)
-            .map_err(|source| LegacyMemoryCompatibilityError::Adapter {
-                source: Box::new(source),
-            })?;
         validate_owner_bound_batch(owner, batch)
     }
 
@@ -437,13 +419,18 @@ mod tests {
     use std::sync::Mutex;
 
     use tracedecay_domain::{
-        Confidence, FactAssertionId, FactEventId, FactIdentityMaterialV1, FactIdentitySourceV1,
-        FactLineageEventKindV1, PayloadAccessState, ProjectId, RetrievalAnchorId, SourceStoreId,
-        UtcMicros,
+        AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
+        Confidence, CoverageReportV1, EntityId, EntityKind, EntityRef, EvidenceClass,
+        FactAssertionId, FactEventId, FactIdentityMaterialV1, FactIdentitySourceV1,
+        FactLineageEventKindV1, ObservationScopeV1, PayloadAccessState,
+        PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProjectionGenerationId,
+        ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorId, RetrievalAnchorRecordV2Parts,
+        RetrievalAnchorTargetV2, ScopeResolutionId, SourceStoreId, UtcMicros, VectorWatermark,
     };
     use tracedecay_store::{FactCommitReceipt, FactLineageCursor, FactStoreResult};
 
     use super::*;
+    use crate::memory::types::{AddFactRequest, FactRecord, MemoryCategory, UpdateFactRequest};
 
     #[derive(Default)]
     struct FakeAuthority {
@@ -480,6 +467,52 @@ mod tests {
                 .unwrap()
                 .push((owner, anchor_id.clone()));
             Err(EvidenceAnchorResolutionError::Unavailable { anchor_id })
+        }
+    }
+
+    struct StaticEvidenceResolver {
+        record: ResolvedEvidenceAnchorV1,
+    }
+
+    impl EvidenceAnchorResolver for StaticEvidenceResolver {
+        async fn resolve_evidence_anchor(
+            &self,
+            _owner: FactOwnerV1,
+            _anchor_id: RetrievalAnchorId,
+        ) -> Result<ResolvedEvidenceAnchorV1, EvidenceAnchorResolutionError> {
+            Ok(self.record.clone())
+        }
+    }
+
+    struct LegacyBatchAdapter {
+        batch_owner: FactOwnerV1,
+    }
+
+    impl legacy_compatibility::LegacyMemoryCompatibilityAdapter for LegacyBatchAdapter {
+        type Error = std::io::Error;
+
+        fn add_request_to_batch(
+            &self,
+            _request: AddFactRequest,
+        ) -> Result<FactWriteBatch, Self::Error> {
+            Ok(batch(
+                self.batch_owner.clone(),
+                "operation.legacy-compatibility.add",
+            ))
+        }
+
+        fn update_request_to_correction_batch(
+            &self,
+            _request: UpdateFactRequest,
+        ) -> Result<FactWriteBatch, Self::Error> {
+            Ok(batch(
+                self.batch_owner.clone(),
+                "operation.legacy-compatibility.update",
+            ))
+        }
+
+        fn project_fact_record(&self, _fact: &StoredFactV1) -> Result<FactRecord, Self::Error> {
+            Err(std::io::Error::other("not exercised by batch preparation"))
         }
     }
 
@@ -665,6 +698,67 @@ mod tests {
         .unwrap()
     }
 
+    fn profile_anchor() -> RetrievalAnchorRecordV2 {
+        const DIGEST_A: &str =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const DIGEST_B: &str =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+            target: RetrievalAnchorTargetV2::Entity(EntityRef {
+                id: EntityId::new("entity.memory.external").unwrap(),
+                kind: EntityKind::Document,
+            }),
+            owner: ObservationScopeV1::Profile,
+            aliases: vec![],
+            occurred_at: None,
+            ingested_at: UtcMicros(1),
+            evidence_class: EvidenceClass::Observed,
+            source_generation: AnchorSourceGenerationV2::Unknown,
+            projection_generation: ProjectionGenerationId::new("projection.memory.external")
+                .unwrap(),
+            projection_watermark: VectorWatermark::default(),
+            coverage: CoverageReportV1::default(),
+            source_observations: vec![],
+            source_anchors: vec![],
+            authorization: ResolutionAuthorizationV1 {
+                resolved_scope_id: ScopeResolutionId::new("scope.memory.external").unwrap(),
+                privacy_domain_id: PrivacyDomainId::new("privacy.memory.external").unwrap(),
+                access_policy_digest: AccessPolicyDigest::new(DIGEST_A).unwrap(),
+                capability_id: CapabilityId::new("capability.memory.external").unwrap(),
+                canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(DIGEST_B).unwrap(),
+            },
+            payload_access: PayloadAccessState::Eligible,
+            retention_class: RetentionClass::new("retention.memory.external").unwrap(),
+            durability: AnchorDurabilityClass::DurableEvidence,
+        })
+        .unwrap()
+    }
+
+    fn legacy_add_request() -> AddFactRequest {
+        AddFactRequest {
+            content: "legacy conversion fixture".to_owned(),
+            category: MemoryCategory::Project,
+            source: None,
+            tags: vec![],
+            entities: vec![],
+            trust: None,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    fn legacy_update_request() -> UpdateFactRequest {
+        UpdateFactRequest {
+            fact_id: 7,
+            content: None,
+            category: None,
+            tags: None,
+            entities: None,
+            trust: None,
+            source: None,
+            metadata: None,
+        }
+    }
+
     #[tokio::test]
     async fn canonical_batch_is_the_single_write_boundary() {
         let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
@@ -716,6 +810,59 @@ mod tests {
             resolver.requests.lock().unwrap().as_slice(),
             &[(owner(), anchor_id)]
         );
+    }
+
+    #[tokio::test]
+    async fn evidence_resolution_rejects_a_cross_owner_daemon_reply() {
+        let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
+        let record = profile_anchor();
+        let anchor_id = record.anchor_id().clone();
+        let resolver = StaticEvidenceResolver {
+            record: ResolvedEvidenceAnchorV1::new(record).unwrap(),
+        };
+
+        let error = application
+            .resolve_evidence_anchor(&resolver, anchor_id)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            MemoryApplicationError::InvalidAuthorityResult {
+                invariant: "resolved evidence anchor identity and owner"
+            }
+        ));
+    }
+
+    #[test]
+    fn legacy_prepare_add_and_update_preserve_the_explicit_owner_scope() {
+        let adapter = LegacyBatchAdapter {
+            batch_owner: owner(),
+        };
+
+        let add =
+            legacy_compatibility::prepare_add(&owner(), &adapter, legacy_add_request()).unwrap();
+        let update =
+            legacy_compatibility::prepare_update(&owner(), &adapter, legacy_update_request())
+                .unwrap();
+
+        assert_eq!(add.owner(), &owner());
+        assert_eq!(update.owner(), &owner());
+    }
+
+    #[test]
+    fn legacy_prepare_rejects_cross_owner_batches() {
+        let adapter = LegacyBatchAdapter {
+            batch_owner: FactOwnerV1::Profile,
+        };
+
+        let error = legacy_compatibility::prepare_add(&owner(), &adapter, legacy_add_request())
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            legacy_compatibility::LegacyMemoryCompatibilityError::OwnerMismatch { .. }
+        ));
     }
 
     #[tokio::test]

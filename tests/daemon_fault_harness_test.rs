@@ -16,13 +16,14 @@ use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
-    ObservationScopeV1, PayloadReferenceV1, RetentionClass, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId,
+    ObservationScopeV1, PayloadReferenceV1, ProjectionGenerationId, RetentionClass,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_store::{
-    ObservationPersistOutcome, ObservationReplayRequest, ObservationStore, ObservationStoreError,
-    ObservationWrite,
+    AnchoredObservationWrite, ObservationPersistOutcome, ObservationReplayRequest,
+    ObservationStore, ObservationStoreError, ObservationWrite,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
@@ -84,8 +85,19 @@ fn observation(stage: &str) -> DurableClaudeObservationV1 {
     .unwrap()
 }
 
-fn write(stage: &str, observation: DurableClaudeObservationV1) -> ObservationWrite {
-    ObservationWrite::new(observation, None, cursor(stage, 100)).unwrap()
+fn write(stage: &str, observation: DurableClaudeObservationV1) -> AnchoredObservationWrite {
+    let write = ObservationWrite::new(observation, None, cursor(stage, 100)).unwrap();
+    let generation = ProjectionGenerationId::new("projection.daemon-fault.v4").unwrap();
+    let authorization =
+        build_observation_resolution_authorization_v1(write.observation(), "daemon-fault").unwrap();
+    let anchor = build_observation_retrieval_anchor_v2(
+        write.observation(),
+        generation.clone(),
+        UtcMicros(1),
+        authorization,
+    )
+    .unwrap();
+    AnchoredObservationWrite::new(write, anchor, generation).unwrap()
 }
 
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
