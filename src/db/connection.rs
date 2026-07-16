@@ -626,6 +626,34 @@ impl Database {
         transaction.commit().await
     }
 
+    /// Maintenance-only: rebuilds the FTS5 index of a store whose open-time
+    /// integrity validation fails with FTS-only damage, which `open` itself
+    /// rejects before any repair can run. Uses a direct connection that
+    /// bypasses open validation for exactly this one derivable-index rebuild;
+    /// callers must hold the recovery locks and writer authority.
+    pub async fn repair_fts_offline(db_path: &Path, authority: &DatabaseAuthority) -> Result<()> {
+        let _held = authority.hold_for(db_path, "fts repair")?;
+        let db =
+            Builder::new_local(db_path)
+                .build()
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to open database for FTS repair: {e}"),
+                    operation: "repair_fts_offline".to_string(),
+                })?;
+        let conn = db.connect().map_err(|e| TraceDecayError::Database {
+            message: format!("failed to connect for FTS repair: {e}"),
+            operation: "repair_fts_offline".to_string(),
+        })?;
+        conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", ())
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to rebuild FTS index: {e}"),
+                operation: "repair_fts_offline".to_string(),
+            })?;
+        Ok(())
+    }
+
     pub(crate) async fn rebuild_fts_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,

@@ -103,13 +103,18 @@ pub(super) async fn apply(conn: &Connection, db_file_size: u64) -> Result<()> {
     // authority for page-cache and WAL coherence.
     let mmap = GRAPH_STORE_MMAP_SIZE;
     let synchronous = platform_safe_synchronous_mode();
+    // recursive_triggers must be ON: node writes use INSERT OR REPLACE, and
+    // without it REPLACE's implicit conflict-delete skips the nodes_fts
+    // delete trigger, leaving orphaned FTS5 index entries that accumulate
+    // into "malformed inverted index" corruption.
     conn.execute_batch(&format!(
         "PRAGMA mmap_size = {mmap};
          PRAGMA foreign_keys = ON;
          PRAGMA busy_timeout = 120000;
          PRAGMA synchronous = {synchronous};
          PRAGMA cache_size = -{cache_kb};
-         PRAGMA temp_store = MEMORY;",
+         PRAGMA temp_store = MEMORY;
+         PRAGMA recursive_triggers = ON;",
     ))
     .await
     .map_err(|e| TraceDecayError::Database {

@@ -354,24 +354,31 @@ impl TraceDecay {
         };
         if crashed {
             let authority = DatabaseAuthority::for_runtime(&db_path, "crash verification")?;
-            let verification = match Database::open_read_only(&db_path, &authority).await {
-                Ok((db, _)) => db,
-                Err(error) => {
-                    print_corruption_warning(&db_path);
-                    return Err(recovery_required_error(&db_path, error));
+            // FTS-only damage is repairable from the content table on the
+            // writable open below; do not force offline recovery for it. The
+            // read-only open runs its own integrity validation, so the damage
+            // can surface either as its open error or as a problem row here.
+            match Database::open_read_only(&db_path, &authority).await {
+                Ok((verification, _)) => {
+                    let integrity = verification.quick_check_report().await;
+                    verification.close();
+                    match integrity {
+                        Ok(None) => {}
+                        Ok(Some(problem)) if is_fts_only_corruption(&problem) => {}
+                        Ok(Some(problem)) => {
+                            print_corruption_warning(&db_path);
+                            return Err(recovery_required_error(
+                                &db_path,
+                                format!("read-only SQLite quick_check reported: {problem}"),
+                            ));
+                        }
+                        Err(error) => {
+                            print_corruption_warning(&db_path);
+                            return Err(recovery_required_error(&db_path, error));
+                        }
+                    }
                 }
-            };
-            let integrity = verification.quick_check().await;
-            verification.close();
-            match integrity {
-                Ok(true) => {}
-                Ok(false) => {
-                    print_corruption_warning(&db_path);
-                    return Err(recovery_required_error(
-                        &db_path,
-                        "read-only SQLite quick_check did not return ok",
-                    ));
-                }
+                Err(error) if is_fts_only_corruption(&error.to_string()) => {}
                 Err(error) => {
                     print_corruption_warning(&db_path);
                     return Err(recovery_required_error(&db_path, error));
@@ -383,7 +390,24 @@ impl TraceDecay {
         // process may still hold the current DB/WAL/SHM inodes, and deleting
         // them here would split readers and writers across different stores.
         let authority = DatabaseAuthority::for_runtime(&db_path, "open project store")?;
-        let open_result = Database::open(&db_path, &authority).await;
+        let mut open_result = Database::open(&db_path, &authority).await;
+        // Open-time validation fails closed on any corruption, including
+        // FTS-only damage that is fully derivable from the content table.
+        // Rebuild that index under the open's writer authority and retry
+        // once; stores corrupted by a live writer carry no dirty sentinel,
+        // so this repair cannot be gated on the crash path.
+        if let Err(error) = &open_result
+            && is_fts_only_corruption(&error.to_string())
+        {
+            eprintln!("[tracedecay] repairing FTS index after interrupted operation ({error})…");
+            match Database::repair_fts_offline(&db_path, &authority).await {
+                Ok(()) => open_result = Database::open(&db_path, &authority).await,
+                Err(repair_error) => {
+                    print_corruption_warning(&db_path);
+                    return Err(recovery_required_error(&db_path, repair_error));
+                }
+            }
+        }
         let (db, migrated) = match open_result {
             Ok(pair) => pair,
             Err(e) if Database::is_corruption_error(&e) || crashed => {
@@ -396,16 +420,34 @@ impl TraceDecay {
         // If the sentinel was set but the database opened successfully, run a
         // quick integrity check.
         if crashed {
-            match db.quick_check().await {
-                Ok(true) => {
+            let mut integrity = db.quick_check_report().await;
+            // An interrupted bulk load can desync the FTS5 inverted index from
+            // its content table. That damage is fully derivable: rebuild it in
+            // place under the held recovery locks instead of failing closed.
+            if let Ok(Some(problem)) = &integrity
+                && is_fts_only_corruption(problem)
+            {
+                eprintln!(
+                    "[tracedecay] repairing FTS index after interrupted operation ({problem})…"
+                );
+                match db.rebuild_fts().await {
+                    Ok(()) => integrity = db.quick_check_report().await,
+                    Err(error) => {
+                        print_corruption_warning(&db_path);
+                        return Err(recovery_required_error(&db_path, error));
+                    }
+                }
+            }
+            match integrity {
+                Ok(None) => {
                     clear_dirty_sentinel_at(&active_graph_layout.dirty_path);
                     clear_dirty_sentinel_at(&store_layout.dirty_path);
                 }
-                Ok(false) => {
+                Ok(Some(problem)) => {
                     print_corruption_warning(&db_path);
                     return Err(recovery_required_error(
                         &db_path,
-                        "SQLite quick_check did not return ok",
+                        format!("SQLite quick_check reported: {problem}"),
                     ));
                 }
                 Err(e) => {
@@ -1185,6 +1227,14 @@ fn count_tree_files(root: &Path) -> u64 {
             _ => 0,
         })
         .sum()
+}
+
+/// Whether a `PRAGMA quick_check` problem row describes damage confined to the
+/// graph's FTS5 index (e.g. "malformed inverted index for FTS5 table
+/// main.nodes_fts"). Such damage is fully derivable from the content table via
+/// [`crate::db::Database::rebuild_fts`] and never requires offline recovery.
+fn is_fts_only_corruption(problem: &str) -> bool {
+    problem.contains("FTS5 table") && problem.contains("nodes_fts")
 }
 
 fn identity_cutover_conflict(

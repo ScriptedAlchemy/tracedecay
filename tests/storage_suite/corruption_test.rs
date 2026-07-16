@@ -189,6 +189,31 @@ async fn rebuild_fts_restores_search_after_fts_damage() {
     close_db(db).await;
 }
 
+#[tokio::test]
+async fn replacing_nodes_keeps_fts_index_consistent() {
+    let (db, _dir, _path) = setup_db().await;
+
+    // insert_nodes uses INSERT OR REPLACE; without recursive_triggers the
+    // conflict-delete skips the FTS delete trigger and orphans index entries.
+    db.insert_nodes(&[sample_node("a1", "process_data")])
+        .await
+        .unwrap();
+    for round in 0..3 {
+        db.insert_nodes(&[sample_node("a1", &format!("renamed_fn_{round}"))])
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        db.quick_check_report().await.unwrap(),
+        None,
+        "replacing an indexed node must not desync the FTS index"
+    );
+    let results = db.search_nodes("renamed_fn_2", 10).await.unwrap();
+    assert_eq!(results[0].node.id, "a1");
+    close_db(db).await;
+}
+
 // ─── search_nodes self-healing ───────────────────────────────────────────
 
 #[tokio::test]
@@ -515,6 +540,98 @@ async fn open_preserves_corrupt_store_and_dirty_sentinel_for_offline_repair()
         layout.dirty_path.exists(),
         "dirty sentinel must remain until recovery succeeds"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn dirty_open_self_heals_fts_only_corruption()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = ts.store_layout().clone();
+    ts.db()
+        .insert_nodes(&[sample_node("a1", "process_data")])
+        .await?;
+    // Desync the FTS5 inverted index from its content table by gutting the
+    // index's shadow storage, as an interrupted bulk load does.
+    ts.db()
+        .execute_write_batch(
+            "clear FTS corruption fixture",
+            "DELETE FROM nodes_fts_data WHERE id > 10;",
+        )
+        .await?;
+    let report = ts.db().quick_check_report().await?;
+    let problem = report.expect("desynced FTS index must fail quick_check");
+    assert!(
+        problem.contains("nodes_fts"),
+        "expected an FTS-only problem row, got: {problem}"
+    );
+    ts.checkpoint().await?;
+    ts.close();
+    std::fs::write(&layout.dirty_path, "pid=99999\nversion=test")?;
+
+    let ts = TraceDecay::open_with_options(&project_root, open_options)
+        .await
+        .expect("FTS-only damage must self-heal on a writable open");
+    assert!(
+        !layout.dirty_path.exists(),
+        "dirty sentinel must clear after the FTS rebuild"
+    );
+    assert!(
+        ts.db().quick_check_report().await?.is_none(),
+        "store must be intact after the FTS rebuild"
+    );
+    let results = ts.db().search_nodes("process_data", 10).await?;
+    assert_eq!(results[0].node.id, "a1");
+    ts.close();
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_self_heals_fts_corruption_without_dirty_sentinel()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = ts.store_layout().clone();
+    ts.db()
+        .insert_nodes(&[sample_node("a1", "process_data")])
+        .await?;
+    ts.db()
+        .execute_write_batch(
+            "clear FTS corruption fixture",
+            "DELETE FROM nodes_fts_data WHERE id > 10;",
+        )
+        .await?;
+    ts.checkpoint().await?;
+    ts.close();
+    assert!(
+        !layout.dirty_path.exists(),
+        "fixture must model live-writer corruption without a crash sentinel"
+    );
+
+    // A store corrupted by a live writer carries no dirty sentinel; the open
+    // path must still repair derivable FTS damage instead of failing closed.
+    let ts = TraceDecay::open_with_options(&project_root, open_options)
+        .await
+        .expect("FTS-only damage must self-heal without a dirty sentinel");
+    assert!(ts.db().quick_check_report().await?.is_none());
+    let results = ts.db().search_nodes("process_data", 10).await?;
+    assert_eq!(results[0].node.id, "a1");
+    ts.close();
     Ok(())
 }
 
