@@ -37,6 +37,21 @@ Every user-visible operation has one direct typed application entry point. CLI, 
   decision/revision/digest.
 - Translation from provider results into Plan-05-owned explicit query-evidence
   inputs for diagnostics, navigation, impact, and affected-test reads.
+- The one advisory, transport-neutral branch-aware feedback-cycle
+  request/result, orchestration, and finding lifecycle, shipping in PR11 as
+  part of the first PR11–PR13 milestone defined by
+  [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
+  Plan 37 defines the architecture; this crate owns the concrete contract.
+  Producers are composed, not reimplemented: post-edit diagnostics plus Plan 05
+  impact evidence, CI-failure-localization input, ingested GitHub review
+  threads, and concurrent-agent proximity warnings. Each request is one-shot
+  only — no automatic follow-up, fix application, or effect execution.
+  Results carry branch/worktree/commit/generation/content identity, stable
+  finding IDs, [Plan 13](13-research-provenance-and-context-anchors.md)
+  `RetrievalAnchorId`s where durable evidence exists, coverage/state,
+  safe bounded previews, pagination/continuation metadata, and source
+  provenance. Findings translate into Plan 05 explicit query-evidence inputs;
+  this crate creates no second diagnostic or finding store.
 - Direct product operations for capture, search, context, sessions, memory, code, delivery, automation, Doctor, configuration, and workflows.
 - Canonical structural-search, source-outline, and source-rewrite operations
   backed by the PR9 in-process code-intelligence kernel.
@@ -59,6 +74,13 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - Analyzer-provider cache storage, admission, reuse, eviction, invalidation
   execution, or lifecycle; those remain owned by
   [35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
+- GitHub REST/GraphQL identity, comment posting, or adapter packaging;
+  [Plan 27](27-cross-host-agent-plugin-bundles.md) owns read-only GitHub
+  ingestion mechanics. PR17 workflow composition is optional and does not gate
+  the PR11–PR13 advisory cycle.
+- A second diagnostic or finding store, transport bindings, LSP field
+  projection, or host delivery adapters; those remain owned by Plans
+  05/13/21/27/35/37 respectively.
 - Developer plan parsing, Markdown execution, task scheduling, agent orchestration, edit bundles, generated inventories, or compatibility ledgers.
 - JavaScript workflow execution. PR17 workflows are real typed product operations, not developer-plan machinery.
 - Merge, rebase, cherry-pick, branch/tag/ref mutation, history rewriting, or an
@@ -126,6 +148,23 @@ Every user-visible operation has one direct typed application entry point. CLI, 
   identity. Plan 16 is not a PR11 prerequisite.
 - PR11 removes remaining root-level business orchestration by routing adapters
   through the completed application core.
+- PR11 feedback-cycle requests bind project/repository/worktree/branch/ref/HEAD
+  SHA, clean source-generation identity or an explicitly tagged ephemeral
+  overlay, file digest and document version, agent/session/turn identity,
+  changed files/ranges/symbols, the exact trigger, policy/config digests, and
+  deadline/cancellation/budget inputs. Overlay-triggered requests may return
+  immediate session-only findings to the authorized overlay owner; those
+  findings are never durable — they cannot enter capsules, envelopes,
+  checkpoints, receipts, feedback-history records, observations, facts, memory,
+  telemetry payloads, spools, caches, replicas, exports, or ingested GitHub
+  evidence. Durable findings require exact saved-content/clean-generation
+  identity.
+- PR11 feedback-cycle results name exactly one termination reason from Plan
+  37's taxonomy, distinguish new versus pre-existing diagnostics, preserve
+  complete provider-state sets without collapsing unavailable/partial coverage
+  to clean empty results, and expose finding lifecycle state
+  (active/superseded/resolved/cleared) keyed by stable finding IDs plus Plan 13
+  anchors when present.
 - Keep the application's direct dependency graph narrow and feature-minimal.
   Concrete stores, transports, providers, model runtimes, dashboard assets, and
   their build scripts must not enter its normal check or test graph.
@@ -153,3 +192,10 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - A focused application check or test does not compile transport, dashboard,
   provider, or concrete-storage targets, and the legacy root crate's dependency
   fan-in is measurably reduced.
+- PR11 feedback-cycle fixtures cover one-shot advisory semantics, every
+  producer class (post-edit diagnostics/impact, CI-localization input, ingested
+  GitHub review threads, proximity), finding lifecycle transitions, Plan 13
+  anchor attachment, Plan 05 evidence translation without a second store,
+  pagination/continuation metadata, dirty-overlay non-durability, and exact
+  termination reasons for branch/head/content/generation change, duplicate
+  triggers, cancellation, and budget exhaustion.

@@ -37,6 +37,10 @@ Every product surface can run the same bounded query use case and receive determ
 - Immutable query-evidence input types for current diagnostics, code
   navigation, and impact/affected-test hybrid reads bound to exact generation,
   file, symbol, span, producer, and freshness evidence.
+  [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
+  composes these typed inputs into its branch-aware feedback-cycle result and
+  concurrent-agent proximity warnings without this crate importing feedback-
+  cycle, GitHub, or proximity types.
 - Typed Git requests for working-tree, staged, and revision-range diffs plus
   status, history, blame, and hunk lookup. `HunkRef` binds repository identity,
   immutable side anchors or an explicitly captured mutable-state watermark,

@@ -11,6 +11,32 @@ PR 8 replaces fragmented message search and LCM lookup with one temporally corre
 
 This is product retrieval work. It does not implement task filtering, plan execution, a benchmark bureaucracy, or a Search Quality Lab.
 
+## Evidence authority boundary
+
+LCM external payloads and the summary DAG are canonical only for session-linked
+narrative and tool-output context: messages, Turns, sessions, threads, agents,
+and derived summaries over that evidence.
+
+They may reference [Plan 13](13-research-provenance-and-context-anchors.md)
+`RetrievalAnchorId` values and provide bounded drill-down to exact retained
+evidence, but they never become canonical authority or durable storage for:
+
+- GitHub review threads, comments, or replies;
+- CI runs, logs, or artifact excerpts;
+- diagnostics or provider findings;
+- Git snapshots, `HunkRef`, or mutation receipts; or
+- workflow/effect receipts.
+
+A summary cannot replace or hide exact evidence. When a query needs GitHub, CI,
+diagnostic, or Git evidence, resolution goes through Plan 13 anchors and the
+owning store for that evidence class.
+
+Transport `rh_` response handles from
+[Plan 21](21-cli-mcp-tool-surface-and-output-unification.md) are 24-hour,
+project-local output recovery for truncated MCP/CLI responses. They are not
+durable evidence identity and must not be stored as canonical LCM or summary
+sources. [Plan 05](05-query-crate.md) opaque cursors page typed collections only.
+
 ## Source truth
 
 - Every provider observation is an immutable message occurrence with source identity, order, ingest time, valid time when known, scope, and sanitization receipt.
@@ -55,7 +81,23 @@ LCM summaries are immutable derived nodes with exact source anchors, source hori
 
 Publishing a summary atomically commits the node, source edges, content, and anchor manifest. Missing, stale, deleted, redacted, unauthorized, cyclic, or unverifiable sources make the node unavailable for current answers. Corrections publish successor lineage and stale affected descendants; they never rewrite history.
 
-Context assembly may use a summary only when its horizon covers the selected evidence. Exact source text remains retrievable when required by the query or budget permits it.
+Context assembly may use a summary only when its horizon covers the selected evidence. Exact source text remains retrievable when required by the query or budget permits it. Summary drill-down may follow Plan 13 anchors to GitHub, CI, diagnostic, or Git evidence, but the summary node itself never becomes the durable store for those classes.
+
+## Plan 37 reuse without a parallel kernel
+
+[Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md) may reuse
+this plan's session context expansion, temporal modes, ranking fusion, and compact
+context assembly for branch-aware feedback capsules and advisory proximity context.
+That reuse delegates to this sole temporal retrieval kernel through typed
+application requests. Plan 37 must not add a parallel LCM engine, summary store, or
+second hydration path for GitHub, CI, diagnostic, or Git evidence. Those products
+resolve through Plan 13 anchors and their owning stores; Plan 37 binds cycle
+results and capsules to those references instead of copying durable evidence into
+session payloads.
+
+PR13 read-only GitHub and CI ingress does not require
+[Plan 32](32-dynamic-workflow-runtime-and-sdk.md). Plan 32 remains a PR17
+prerequisite only for write-side GitHub comment delivery and workflow effects.
 
 ## Side-effect-free reads and freshness
 
@@ -83,7 +125,10 @@ Compact context contains only the selected Turns, exact supporting evidence, sum
 - concurrent refresh callers share one operation and one terminal receipt;
 - stable pagination rejects changed-watermark cursors;
 - deletion, redaction, retention, authorization, and prompt-injection fixtures fail closed;
-- compact output stays within its budget and preserves anchors and coverage.
+- compact output stays within its budget and preserves anchors and coverage;
+- GitHub, CI, diagnostic, and Git evidence referenced from session context resolve only
+  through Plan 13 anchors, never through LCM payloads, summary nodes, or `rh_` handles;
+- Plan 37 session-context reuse exercises this kernel without a second retrieval engine.
 
 ## PR 8 deliverables
 
@@ -101,4 +146,7 @@ Compact context contains only the selected Turns, exact supporting evidence, sum
 - Raw evidence and summary lineage remain recoverable and temporally correct.
 - Reads are side-effect free; refresh is explicit and daemon-owned.
 - Every result and context bundle is compact, anchored, scoped, and coverage-aware.
+- LCM payloads and summaries remain session-narrative authority only; GitHub, CI,
+  diagnostic, Git, and receipt evidence stay on Plan 13 anchors and owning stores.
+- Plan 37 reuses this kernel for session expansion without a parallel retrieval path.
 - No task-plan filtering, executor dependency, evaluation bureaucracy, or parallel LCM engine remains.

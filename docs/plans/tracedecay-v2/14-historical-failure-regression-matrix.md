@@ -40,13 +40,13 @@ must cover prevention, visible state, retry or recovery, and restart behavior.
 | PR8 | Temporal/LCM reads never repair storage; copies, summaries, supersession, cursors, stale shards, and no-result states remain truthful. |
 | PR9 | Code generations are deterministic; exact identifiers and phrases are not displaced by parse errors, echoes, wrong snapshots, or uncalibrated shard scores; stale, cross-generation, and dirty-overlay diagnostics never publish as current or enter clean generations. |
 | PR10 | Semantic search never substitutes models, crosses privacy domains, recomputes unchanged documents, or shortens lexical results after model failure. |
-| PR11 | Policy, application, settings, catalog, analyzer execution, and analyzer configuration remain authorized, deterministic, idempotent, privacy-safe, and free of alias-local business logic. |
-| PR12 | CLI, MCP, HTTP, output, and the [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) LSP gateway agree on lifecycle, framing, capabilities, protocol/catalog versions, cancellation, schemas, defaults, errors, pagination, formats, and nonzero failure status; notifications cannot satisfy pending responses; a method outside the supported capability set, or one the active analyzer declares unsupported, returns an explicit unavailable outcome rather than a guessed result; `prepareRename`/`rename` candidates never apply through `workspace/applyEdit` or an opaque server command. |
-| PR13 | Hooks stay fast and thin; Scout and host bundles preserve address, privacy, lifecycle ownership, and effects without local query/model/storage work; only clean-generation or saved-content semantic evidence may commit to Scout envelopes, checkpoints, delivery/feedback records, observations, facts, memory, telemetry payloads, spools, caches, replicas, or exports — dirty-overlay or unsaved-secret semantic evidence must return typed suppressed or unavailable state and never durably persist hover, signature, diagnostic, or reference content; conflicting extension claims require safe discovery, explicit replacement confirmation, configuration preservation, and rollback; Claude Code, Cursor desktop, Cursor cloud, and Codex each receive their capability-specific LSP/native-diagnostics/hook delivery path without being forced to a lowest-common-denominator behavior; Hermes and Kiro report hook/MCP/CLI or unavailable paths explicitly and are not assumed to receive full LSP. |
-| PR14 | Dashboard, Doctor, observability, and configuration views use canonical daemon operations, distinguish empty/stale/error/locked/partial, and offer executable recovery; the unqualified Doctor kernel, UI, and remediation consume typed Scout and host finding state emitted by PR13; table-driven direct tests cover the complete canonical semantic-evidence provider state set — unsupported, absent, indexing, stale, cancelled, timed-out, failed, and partial — and none of those states may render as a clean empty result; only supported plus completed plus complete-coverage zero-match may present as clean empty. |
+| PR11 | Policy, application, settings, catalog, analyzer execution, and analyzer configuration remain authorized, deterministic, idempotent, privacy-safe, and free of alias-local business logic. Branch-aware feedback-cycle results ([Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)) never collapse new/pre-existing diagnostics, coverage state, or termination reason into a guessed clean result; post-edit diagnostics-and-impact is the first pillar of the PR11–PR13 read-only/advisory milestone. |
+| PR12 | CLI, MCP, HTTP, output, and the [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) LSP gateway agree on lifecycle, framing, capabilities, protocol/catalog versions, cancellation, schemas, defaults, errors, pagination, formats, and nonzero failure status; notifications cannot satisfy pending responses; a method outside the supported capability set, or one the active analyzer declares unsupported, returns an explicit unavailable outcome rather than a guessed result; `prepareRename`/`rename` candidates never apply through `workspace/applyEdit` or an opaque server command. [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md) gateway and explicit diagnostics-call triggers surface the same typed feedback-cycle findings on LSP/MCP/CLI as the post-edit diagnostics-and-impact pillar. |
+| PR13 | Hooks stay fast and thin; Scout and host bundles preserve address, privacy, lifecycle ownership, and effects without local query/model/storage work; only clean-generation or saved-content semantic evidence may commit to Scout envelopes, checkpoints, feedback records, observations, facts, memory, telemetry payloads, spools, caches, replicas, or exports — dirty-overlay or unsaved-secret semantic evidence must return typed suppressed or unavailable state and never durably persist hover, signature, diagnostic, or reference content; conflicting extension claims require safe discovery, explicit replacement confirmation, configuration preservation, and rollback; Claude Code, Cursor desktop, Cursor cloud, and Codex each receive their capability-specific LSP/native-diagnostics/hook surfacing path without being forced to a lowest-common-denominator behavior; Hermes and Kiro report hook/MCP/CLI or unavailable paths explicitly and are not assumed to receive full LSP. [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md) completes the PR11–PR13 read-only/advisory milestone with all four pillars: post-edit diagnostics+impact (PR11–PR12), CI-failure localization, read-only GitHub review-comment/thread ingestion and symbol-remapped surfacing, and tiered concurrent-agent proximity. TraceDecay never posts, updates, resolves, replies to, or dismisses GitHub comments; no-write attempts for GitHub produce typed suppressed or denied state. GitHub ingestion covers thread/reply lifecycle, bot versus maintainer authorship, edited/deleted/resolved/outdated states, exact versus symbol-remapped stale binding, rate-limit/auth/ETag/restart recovery, and lossless truncation/expansion handle/anchor usage without persisting comment bodies. CI localization carries typed provenance, stale/partial-log states without log content, and never claims CI authority. Proximity fixtures cover exact-match and risk-threshold above/below tiers, advisory-only semantics with freshness/expiry, and never create a lock or schedule. All four pillars surface through LSP, agent hooks, MCP, and CLI when their owning PR ships; no automatic continuation or fix. |
+| PR14 | Dashboard, Doctor, observability, and configuration views use canonical daemon operations, distinguish empty/stale/error/locked/partial, and offer executable recovery; the unqualified Doctor kernel, UI, and remediation consume typed Scout, host finding, GitHub-ingested review-thread, CI-localization, and proximity state emitted by PR13; table-driven direct tests cover the complete canonical semantic-evidence provider state set — unsupported, absent, indexing, stale, cancelled, timed-out, failed, and partial — and none of those states may render as a clean empty result; only supported plus completed plus complete-coverage zero-match may present as clean empty. [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md) dashboard/Doctor surfaces add GitHub-ingested thread states (ingested, remapped, outdated, resolved, deleted, suppressed), CI localization provenance without log payloads, and proximity emitted/suppressed/expired/risk-class states. |
 | PR15 | Explicit repository/worktree/ref and LSP workspace-folder targets never fall back to CWD, first workspace, or active checkout; cross-project results exact-load globally; dirty/stale graph and multi-root diagnostic coverage is explicit. |
 | PR16 | Remote authority, offline replay, cache verification, backup, restore, and failover never admit two writers or hide incomplete coverage; unsaved LSP content, overlays, and analyzer state remain node-local and never enter spools or replicas. |
-| PR17 | Workflow scheduling, history, leases, effects, artifacts, retries, and cancellation share daemon authority and never duplicate observable effects. |
+| PR17 | Workflow scheduling, history, leases, effects, artifacts, retries, and cancellation share daemon authority and never duplicate observable effects. [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md) advisory operations consumed as typed workflow steps are already shipped at PR13; PR17 composes them without becoming first owner and performs no GitHub writes. Workflow effects remain workflow authority only. |
 | PR18 | Rust, TypeScript, and Python SDKs preserve the public contract, cancellation, retries, privacy, and transport-neutral errors. |
 | PR19 | Migration and cutover leave one writer and one canonical route, preserve rollback evidence, reject stale clients, and remove every superseded path. |
 | PR20 | Performance optimization never weakens semantics, authority, privacy, ordering, coverage, durability, or crash/restart correctness and cannot hide tail/resource regressions behind averages. |
@@ -79,16 +79,37 @@ failure class.
   present as clean empty.
 - Scout suites must include a **positive** saved-content/clean-generation
   fixture proving committed semantic evidence remains bound to exact
-  saved-content/clean-generation identity through envelope, checkpoint, delivery
-  receipt, feedback state, telemetry metadata, and every durable spool, cache,
+  saved-content/clean-generation identity through envelope, checkpoint, feedback
+  state, telemetry metadata, and every durable spool, cache,
   replica, and export representation; no sink may drop, substitute, or relabel
   that identity.
 - Scout suites must include a **negative** unsaved-secret dirty-overlay fixture
-  proving no durable envelope, checkpoint, receipt, feedback record,
+  proving no durable envelope, checkpoint, feedback record,
   observation, fact, memory entry, telemetry payload, spool, cache, replica, or
   export contains overlay-derived hover, signature, diagnostic, reference, or
-  implementation source/evidence; durable delivery requests for such evidence
+  implementation source/evidence; durable feedback requests for such evidence
   return typed suppressed or unavailable state.
+- [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
+  suites must cover the exhaustive termination taxonomy (clean, blocked,
+  incomplete coverage, stale/replan required, max iterations, budget
+  exceeded, cancellation, user stop, daemon unavailable), all-four-pillar
+  integration by PR13 (post-edit diagnostics+impact, CI localization,
+  GitHub review-comment/thread ingestion and surfacing, tiered proximity),
+  GitHub thread/reply lifecycle with bot versus maintainer authorship,
+  edited/deleted/resolved/outdated states, exact versus symbol-remapped stale
+  binding, rate-limit/auth/ETag/restart recovery, and no-write attempts that
+  produce typed suppressed or denied state — TraceDecay never posts, updates,
+  resolves, replies to, or dismisses GitHub comments. CI localization fixtures
+  cover typed provenance, stale/partial-log states without log content, and
+  never claim CI authority. Proximity fixtures cover exact-match and
+  risk-threshold above/below tiers, advisory-only semantics, freshness/expiry,
+  and privacy scoping without creating a lock or schedule. Surfaces include
+  LSP, agent hooks, MCP, CLI, and dashboard when their owning PR ships. Dirty
+  overlay and privacy canary fixtures prove unsaved/private source never reaches
+  durable sinks or GitHub. Lossless truncation/expansion handle/anchor
+  fixtures cover auth/expiry/corrupt/missing states without persisting
+  payloads. No automatic continuation or fix; no state collapses to a clean
+  empty result or produces an infinite follow-up loop.
 - Aggregate verification reports failures by product test, without parsing this file or
   generating a second inventory.
 - Removing V1 code cannot remove the last direct test for one of these classes.

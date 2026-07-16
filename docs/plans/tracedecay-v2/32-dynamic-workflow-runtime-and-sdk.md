@@ -90,6 +90,16 @@ workflow operations. Existing Claude-generated workflow scripts may be retained
 only as historical observations or explicit migration evidence; they are not
 executed, translated, imported, or installed by PR17.
 
+[Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s
+already-shipped read-only advisory operations — feedback-cycle findings,
+GitHub-ingested review-thread surfacing, CI-failure localization, and
+proximity warnings — may appear as typed workflow steps composed through this
+same scheduler/history/lease/effect/artifact kernel with the same
+idempotent-effect and receipt guarantees. PR17 is not first availability of
+those capabilities, performs no GitHub writes, and defines no second workflow
+engine, retry loop, or effect authority. Workflow effects remain workflow
+authority only.
+
 ## Acceptance
 
 PR17 is complete when definition validation/versioning, shared scheduling,

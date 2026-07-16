@@ -43,6 +43,17 @@ Every operational and product metric states what was measured, over which popula
   identify the operation kind and privacy-safe outcome only. Patch content,
   paths, commit messages, author identity, and conflict content never enter
   canonical events, aggregates, exports, or drill-down anchors.
+- [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
+  telemetry covers feedback-cycle trigger, termination reason, loop-iteration
+  count, GitHub review-thread ingestion states (ingested, remapped, outdated,
+  resolved, deleted, suppressed — never posted), CI-failure localization
+  states and typed provenance without log content, concurrent-agent proximity
+  warning emission/suppression/expiry/risk class, and
+  truncation/expansion handle/anchor usage and failures without payloads.
+  PR13 emits GitHub/CI/proximity and feedback-cycle events; PR14 completes
+  Observatory/Doctor read models over them. All metrics remain
+  denominator-safe. Telemetry contains no source, diagnostic message, comment
+  body, CI log content, or private session content.
 - Identify scope, capability, operation, result, event and observation time, duration or quantity, unit, producer revision, trace, and privacy classification.
 - Use stable idempotency keys so retries and replay cannot double count.
 - Record terminal outcomes separately from attempts and preserve cancellation, rejection, timeout, partial success, and unknown outcomes.
@@ -157,4 +168,12 @@ decision with collision, ambiguity, maintenance, and privacy review.
   and schema-upgrade fixtures expose partial/unknown coverage and never render
   absence as zero; removed-name and misspelling fixtures support reproducible
   alias/schema analysis without changing dispatch behavior.
+- [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
+  fixtures reconcile GitHub ingestion states (ingested, remapped, outdated,
+  resolved, deleted, suppressed), CI localization provenance without log
+  payloads, proximity emitted/suppressed/expired/risk-class dimensions, and
+  truncation/expansion handle/anchor usage/failure counts with explicit
+  denominators. PR13 emission and PR14 Observatory/Doctor read-model parity
+  fixtures verify the same state labels and coverage semantics across
+  transports; no metric claims a posted GitHub comment.
 - Repository checks reject alternate counter writers, UI-local formulas, and meta-plan instrumentation.

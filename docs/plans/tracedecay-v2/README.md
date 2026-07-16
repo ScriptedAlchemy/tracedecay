@@ -58,6 +58,20 @@ requirements and boundaries, not separate crate-first work queues.
   PR11 daemon-serialized index/commit transactions, and PR12 shared surface
   bindings. They never autonomously mutate branches, worktrees, refs, or
   published history.
+- [The branch-aware feedback cycle, read-only GitHub review-comment
+  ingestion/surfacing, CI-failure localization, and tiered concurrent-agent
+  proximity](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
+  compose the existing semantic-evidence, query, Git
+  ([Plan 36](36-git-aware-change-context-and-index-transactions.md)), temporal
+  retrieval ([Plan 23](23-session-lcm-temporal-retrieval-and-evaluation.md)), Scout, host, and
+  observability owners behind one typed read-only/advisory cycle. PR11–PR13 is
+  the first coherent milestone with all four pillars; PR13 is first availability
+  of GitHub/CI/proximity adapters; PR14 dashboard/Doctor; PR15 multi-root;
+  PR16 remote; PR17 composes already-shipped advisory operations into
+  [Plan 32](32-dynamic-workflow-runtime-and-sdk.md) workflows without GitHub
+  writes. TraceDecay never posts, updates, resolves, replies to, or dismisses
+  GitHub comments. It introduces no second diagnostic store, provider contract,
+  suggestion channel, or executor.
 - Preserve stock Cargo compatibility. Developer-local build wrappers and cache
   layouts are never repository or CI requirements.
 - Use explicit cancellation and typed progress for long operations. Do not add

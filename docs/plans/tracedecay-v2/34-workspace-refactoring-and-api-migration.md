@@ -90,6 +90,11 @@ It does not expose one symbol-aware apply operation that carries a preview acros
   no portable, complete contract for either; an LSP provider may assist
   candidate resolution and post-edit verification but never supplies apply
   authority.
+- [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s
+  branch-aware feedback cycle may surface a rename/refactor candidate as its
+  suggested next action, but this plan's preview/manifest and
+  `EditTransaction` remain the only apply path; the feedback cycle never
+  applies an edit directly.
 
 ## Product surface
 

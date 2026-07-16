@@ -40,7 +40,11 @@ analyzer behind one truthful, local-first protocol boundary for those sessions.
 
 LSP is a daemon-internal semantic-evidence provider and host protocol adapter.
 It is not a second graph, query engine, durable index, edit path, policy
-authority, or universal product API.
+authority, or universal product API. It is also not the universal transport
+for [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
+findings: hooks, read-only ingested GitHub review threads, CI-localization
+input, and concurrent-agent proximity use their own native transports over the
+same daemon/application contracts described there.
 [Plan 09](09-application-crate.md) owns the one typed, transport-neutral
 semantic-evidence/provider contract and canonical provider-result
 identity/compatibility semantics; this plan implements analyzer-backed
@@ -62,6 +66,8 @@ architecture.
   cancellation, deadlines, response ordering, and upstream analyzer lifecycle.
 - Merging current upstream diagnostics with current TraceDecay-managed
   diagnostics without losing source, provenance, freshness, or severity.
+- Field-level LSP projection of [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
+  advisory feedback findings for IDE Problems publication.
 - Exact clean-snapshot diagnostic reuse and isolated unsaved-document overlays.
 - Typed gateway requirements, finding, and engine-state schema consumed by
   [27](27-cross-host-agent-plugin-bundles.md) host plugin projection, PR13
@@ -326,6 +332,33 @@ not forced into fake editor positions.
   without rerunning an analyzer. Cache reuse is observable and is invalidated
   by every identity input listed above.
 
+### Plan 37 feedback finding LSP projection
+
+- Ingested PR review comments, CI-localization findings, and proximity
+  warnings may surface through IDE Problems without becoming analyzer facts.
+  They remain advisory Plan 09/Plan 37 findings projected through this gateway,
+  not upstream compiler or language-server evidence.
+- Each published `Diagnostic` includes: exact UTF-16 range and current
+  enclosing-function mapping when available; `source` naming the producer;
+  stable `code`; `codeDescription.href` to the original review or CI URL only
+  when authorized; `data` carrying stable finding ID plus Plan 13
+  `RetrievalAnchorId`, lifecycle/coverage state, and no full payload;
+  `relatedInformation` with typed locations and bounded messages where the
+  finding references additional sites.
+- Severity is conservative: preserve upstream/analyzer severity where scored;
+  default to Information for unscored review comments and proximity warnings.
+  TraceDecay does not raise severity because several producers agree.
+- Publication is bounded. Full text, diffs, and thread bodies expand only
+  through authorized TraceDecay read operations
+  ([Plan 21](21-cli-mcp-tool-surface-and-output-unification.md)
+  `feedback_get`/`feedback_expand` and Plan 13 anchor resolution), never as
+  hidden LSP payload.
+- Clearing is deterministic: resolution, deletion, head SHA drift, content or
+  generation change, or supersession removes or republishes the prior
+  diagnostic exactly once for that client document version.
+- Dirty-overlay feedback findings remain session-only for the authorized
+  overlay owner and are never published as durable LSP diagnostics.
+
 ## Host plugin projection and coexistence
 
 - [Plan 27](27-cross-host-agent-plugin-bundles.md) owns host plugin packaging,
@@ -556,6 +589,11 @@ not forced into fake editor positions.
 - PR16 remote fixtures keep dirty overlays and analyzer processes node-local,
   fence durable clean-diagnostic publication through the shard authority, and
   never spool or cache unsaved source.
+- Plan 37 feedback-projection fixtures cover ingested PR comments, CI findings,
+  and proximity warnings surfacing through Problems with conservative severity,
+  stable finding/anchor IDs in `data`, bounded `relatedInformation`, authorized
+  `codeDescription.href`, deterministic clear/remap on head/content/generation
+  change, truncation without hidden payload, and dirty-overlay non-durability.
 - Linux, macOS, and Windows fixtures cover URI normalization, UTF-16 positions,
   process lifecycle, command discovery, socket/stdio behavior, path safety, and
   shutdown.

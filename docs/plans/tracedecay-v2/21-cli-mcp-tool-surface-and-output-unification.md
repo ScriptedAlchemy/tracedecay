@@ -135,6 +135,25 @@ composition remain distinct because their evidence and semantics differ.
 memory, LCM, and daemon health views remain distinct evidence domains even when
 their bindings share the dispatcher.
 
+The explicit read-only feedback diagnostics surface binds once here at PR12
+across CLI/MCP/HTTP and at PR13 through host adapters defined by
+[Plan 27](27-cross-host-agent-plugin-bundles.md). Operations are
+`feedback_diagnostics`, `feedback_get`, `feedback_expand`, and
+`feedback_list` — advisory, read-only views over
+[Plan 09](09-application-crate.md)'s PR11 feedback-cycle result and finding
+lifecycle; they are not degraded LSP methods and do not gain duplicate
+transport-specific implementations. CLI/MCP canonical JSON and compact
+Markdown preserve the same semantics, finding IDs, coverage/state, source
+provenance, and continuation metadata. Collections use
+[Plan 05](05-query-crate.md) stable opaque cursors; durable expansion resolves
+[Plan 13](13-research-provenance-and-context-anchors.md)
+`RetrievalAnchorId`s. Oversized transport output uses the existing reversible
+response-handle path (`tracedecay_retrieve`) with explicit original count,
+returned/preview count, handle, expiry, and typed unavailable/budget errors.
+Response handles are never durable finding IDs. Ingested GitHub review threads
+first surface through PR13 host adapters; PR17 optional workflow composition
+does not gate these bindings.
+
 ## Rejected-argument telemetry
 
 The versioned schema registry and dispatcher own one
@@ -195,7 +214,16 @@ Parity is verified from public behavior, not from a generated inventory:
     the same transaction identity, selected hunks, effect class, receipt, and
     typed stale/conflict state;
 12. exercise concurrent index changes, real index-lock contention, preview CAS
-    drift, retry idempotency, and forbidden generic/history-changing requests.
+    drift, retry idempotency, and forbidden generic/history-changing requests;
+13. invoke `feedback_diagnostics`, `feedback_get`, `feedback_expand`, and
+    `feedback_list` through CLI and MCP and compare canonical JSON semantics,
+    then prove compact Markdown preserves finding IDs, coverage/state,
+    continuation cursors, Plan 13 anchor references, and typed
+    unavailable/budget/truncation outcomes;
+14. prove oversized feedback results return reversible `tracedecay_retrieve`
+    handles with original/preview counts and expiry while response handles
+    remain distinct from durable finding IDs; security fixtures prove handles
+    cannot bypass authorization or substitute for anchors.
 
 ## PR 12 deliverables
 
@@ -210,7 +238,10 @@ Parity is verified from public behavior, not from a generated inventory:
 - removal of the `admin_cli` registry and session/analytics handler copies;
 - focused CLI/MCP parity and concurrency tests.
 - exactly `git_preview` and `git_apply` as shared-schema CLI/MCP Git bindings,
-  with preview/CAS enforcement, typed receipts, and stale/conflict parity.
+  with preview/CAS enforcement, typed receipts, and stale/conflict parity;
+- read-only feedback diagnostics bindings (`feedback_diagnostics`,
+  `feedback_get`, `feedback_expand`, `feedback_list`) with Plan 05 cursors,
+  Plan 13 anchor expansion, and `tracedecay_retrieve` truncation handles.
 
 ## Done
 
@@ -224,4 +255,7 @@ Parity is verified from public behavior, not from a generated inventory:
 - Rejected arguments have CLI/MCP/HTTP parity without recording values or private payloads.
 - Git preview/apply Markdown and JSON agree semantically, and no generic Git or
   autonomous ref/history mutation surface exists.
+- Feedback diagnostics CLI/MCP/HTTP bindings agree semantically with host
+  adapter projections at PR13, preserve truncation/cursor/anchor semantics,
+  and never treat response handles as durable finding IDs.
 - No generated surface inventory, plan parser, task editor, or executor is introduced.

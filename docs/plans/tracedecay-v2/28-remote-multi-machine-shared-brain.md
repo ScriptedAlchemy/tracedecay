@@ -78,6 +78,10 @@ diagnostics.
   verified read cache, replica, trace, backup, failover payload, or remote
   analyzer request. A remote analyzer requires an explicit capability, policy
   grant, and privacy disclosure.
+- [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s
+  session-only overlay feedback and concurrent-agent proximity computation
+  stay node-local for the same reason; only durable saved-content feedback
+  and its GitHub delivery are fenced through the shard authority.
 
 ### Backup and failover
 

@@ -63,6 +63,65 @@ These operations use native Git plumbing through a fixed internal adapter. They
 accept typed inputs, never raw flags, preserve Git's path and encoding behavior,
 bound output and traversal, and report unsupported repository states truthfully.
 
+PR9 also defines typed read-only identity for pull-request comparison state and
+review-thread anchoring consumed by
+[Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
+This plan owns identity and remap semantics only. GitHub API ingress, comment
+writes, effect/receipt delivery, and workflow automation remain in their owning
+plans; PR9 does not post, update, resolve, reply to, or dismiss GitHub comments.
+
+#### `PullRequestSnapshot`
+
+A `PullRequestSnapshot` is immutable read-only evidence of one provider pull-request
+comparison at fetch time. It contains:
+
+- provider identity and canonical repository identity;
+- pull-request number or provider id and provider state;
+- base, head, and merge-base object IDs;
+- native diff options used to produce the comparison;
+- changed paths and structured hunks with side, path, old/new path, hunk header,
+  patch digest, and line ranges;
+- `fetched_at` capture time;
+- provider API cursor and/or ETag when available; and
+- truthful state and coverage (`complete`, `partial`, `unavailable`, `conflicted`).
+
+Snapshots are evidence, not mutation authority. They may be retained and referenced
+by [Plan 13](13-research-provenance-and-context-anchors.md) anchors but do not
+replace `RepositorySnapshot`, `HunkRef`, or native Git object identity.
+
+#### `ReviewThreadAnchor` and `CommentAnchor`
+
+`ReviewThreadAnchor` and `CommentAnchor` are read-only identities for a review
+thread, inline review comment, reply, or review-summary comment. Each anchor
+contains:
+
+- provider review, thread, comment, and reply IDs when available;
+- original commit object ID, path, diff side, line, and position at post time;
+- current commit object ID, path, side, line, and position when refreshed;
+- source hunk identity (`HunkRef` or `PullRequestSnapshot` hunk digest), blob
+  object ID, and retained content digest;
+- author identity, review/thread lifecycle state, and canonical URL when
+  authorized; and
+- remap lineage that preserves every prior exact anchor and snapshot reference.
+
+#### Exact-current mapping and remap rules
+
+- **Exact current:** a review location is current only when original anchor
+  coordinates, retained source hunk/blob/content digest, and current coordinates
+  all match exactly.
+- **Diff remap:** when head moves, hunks remap only through explicit native diff
+  correlation against the retained `PullRequestSnapshot` or a successor snapshot.
+  Remapped coordinates alone never upgrade to current.
+- **Symbol remap:** symbol and range joins use generation-matched graph evidence
+  from [Plan 05](05-query-crate.md). Path or line similarity never upgrades
+  mismatched evidence.
+- **Stale/outdated:** a remapped or outdated anchor is never reported as current
+  unless both exact content and anchor coordinates match. Otherwise resolution
+  returns typed stale/outdated state with preserved source history.
+- **No fuzzy upgrade:** TraceDecay never silently refreshes, relocates, or
+  replaces source history. Remapped evidence remains remapped until an exact
+  content-and-anchor match is proven.
+
 ### PR11: daemon-serialized index transactions
 
 PR11 adds exactly three write operations:
@@ -237,13 +296,43 @@ Acceptance requires fixtures and end-to-end tests for:
   retention; and
 - stock-Git differential tests proving candidate index trees and commits match
   native Git, plus property and fault-injection tests proving all-or-nothing
-  mutation and truthful receipts.
+  mutation and truthful receipts;
+- `PullRequestSnapshot` fixtures for base/head/merge-base drift, partial provider
+  coverage, API cursor/ETag replay, and changed-path/hunk ordering parity across
+  Markdown/JSON transports;
+- `ReviewThreadAnchor` and `CommentAnchor` fixtures for original/current commit
+  drift, diff-side moves, reply threading, stale/outdated classification, and
+  proof that remapped coordinates without exact content never report `current`;
+- diff-remap and symbol-remap fixtures proving preserved source history, no fuzzy
+  upgrade, and explicit stale/outdated results when head or generation drifts; and
+- rejection fixtures proving PR9 identity operations remain read-only and never
+  perform GitHub API ingress or comment writes.
+
+## Lossless evidence boundary
+
+Durable Git and PR evidence uses [Plan 13](13-research-provenance-and-context-anchors.md)
+`RetrievalAnchorId` values plus owning store retention for sanitized payloads.
+[Plan 05](05-query-crate.md) opaque cursors page typed collections only; they
+are not durable evidence identity. Transport `rh_` response handles defined by
+[Plan 21](21-cli-mcp-tool-surface-and-output-unification.md) are 24-hour,
+project-local output recovery for truncated MCP/CLI responses and never become
+canonical evidence identity, anchor targets, or durable storage keys. This plan
+does not own response-handle implementation.
+
+PR13 read-only GitHub thread/comment/reply and CI-failure ingress may consume
+PR9 `PullRequestSnapshot` and review-thread identity without
+[Plan 32](32-dynamic-workflow-runtime-and-sdk.md) as a prerequisite. Plan 32
+remains required only for PR17 comment writes, effect receipts, and workflow
+automation that this plan does not own.
 
 ## Acceptance
 
 This plan is complete only when native Git remains the observable authority;
-PR7 provenance is generation-bound; PR9 intelligence is read-only and truthful;
-PR11 exposes only the three daemon-serialized mutations with `HunkRef`
-compare-and-swap; PR12 provides schema-identical CLI/MCP behavior; stale or
-unsupported state fails closed; privacy defaults hold; crash recovery is
-unambiguous; and the full acceptance matrix passes on supported platforms.
+PR7 provenance is generation-bound; PR9 intelligence is read-only and truthful,
+including typed `PullRequestSnapshot`, `ReviewThreadAnchor`, and `CommentAnchor`
+identity with exact-current remap rules and no fuzzy upgrade; PR11 exposes only
+the three daemon-serialized mutations with `HunkRef` compare-and-swap; PR12
+provides schema-identical CLI/MCP behavior; stale or unsupported state fails
+closed; privacy defaults hold; crash recovery is unambiguous; durable evidence
+remains on Plan 13 anchors rather than transport `rh_` handles; and the full
+acceptance matrix passes on supported platforms.

@@ -46,6 +46,9 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
 - A requirement that MCP be installed; the CLI and daemon API are the baseline.
 - Workflow JavaScript, incremental PR-series scripts, Markdown task parsers, rewrite-plan executors, progress ledgers, or generated plan state.
 - Silent emulation of a capability the host cannot support.
+- GitHub REST/GraphQL identity, finding ownership, comment posting, or a
+  second durable finding store; ingestion delegates to the read-only adapter
+  path and Plan 09/Plan 37 advisory findings.
 
 ## Required behavior
 
@@ -102,6 +105,19 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
   tested unavailable path.
 - Never infer unsupported events, lifecycle controls, permissions, or task semantics.
 - Preserve provider-native workflows as observations unless the user explicitly imports them into a TraceDecay product workflow.
+- Host adapters are the delivery mechanics for [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s
+  advisory feedback-cycle result on every host as part of the PR11–PR13
+  milestone. PR13 hook, MCP, and CLI contexts deliver the same typed result;
+  Claude Code receives the full LSP gateway projection defined by
+  [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md); Cursor
+  desktop receives the native-diagnostics adapter projection; non-LSP hosts
+  receive hooks/MCP/CLI paths. This plan owns transport and registration
+  mechanics; Plan 09 owns the result contract and Plan 37 owns the
+  architecture.
+- Existing GitHub PR review comments are ingested through a read-only GitHub
+  adapter/application path at PR13 and surfaced as advisory findings. This
+  plan does not post, update, or resolve GitHub comments and does not claim
+  GitHub API identity, finding ownership, or durable finding storage.
 
 ### Lifecycle safety (PR13)
 
@@ -148,4 +164,11 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
 - MCP-present and CLI-only paths produce equivalent authorized product behavior.
 - Version-skew, missing binary, dead daemon, stale registration, ownership conflict, and partial-install host-conformance fixtures return stable causes without mutation; PR14 Doctor consumes the same finding identities for kernel/UI presentation and remediation orchestration that invokes PR13 lifecycle operations.
 - Cross-host handoff preserves repository/worktree, session, parent/subagent, privacy, and provenance identity.
+- PR13 Plan 37 delivery fixtures prove hook/MCP/CLI, Claude LSP, and Cursor
+  native-diagnostics paths publish semantically equivalent advisory results
+  where capabilities overlap; read-only GitHub ingestion fixtures prove ingested
+  review threads surface without posting; security fixtures prove host
+  processes cannot claim GitHub finding ownership or bypass authorization;
+  truncation/clear/remap fixtures prove host adapters preserve finding IDs,
+  cursors, and dirty-overlay non-durability.
 - Repository checks reject workflow JS, Markdown plan parsers, rewrite executors, copied product catalogs, and host-local durable-state mirrors.

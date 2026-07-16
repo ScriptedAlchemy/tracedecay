@@ -87,6 +87,11 @@ choreography or storage knowledge.
     unavailable with explicit coverage. The gateway never substitutes CWD, the
     first workspace folder, the active checkout, or another folder's analyzer
     or graph generation.
+18. [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s
+    branch-aware feedback cycle and concurrent-agent proximity resolve every
+    repository/worktree/branch target through this same application resolver
+    before PR15 single-root and after PR15 multi-root scope; neither creates a
+    private scope resolver.
 
 ## Acceptance
 
