@@ -69,7 +69,7 @@ fn assert_branch_not_tracked(cg: &TraceDecay, branch: &str) {
 #[tokio::test]
 async fn add_branch_plan_uses_injected_writer_without_direct_fallback() {
     let (cg, dir, _pin) = init_indexed_repo().await;
-    let root = dir.path().to_path_buf();
+    let root = dir.path().canonicalize().expect("canonical repo root");
     let branch = "injected-branch";
     git(&root, &["branch", branch]);
     git(&root, &["switch", branch]);
@@ -110,7 +110,7 @@ async fn add_branch_plan_uses_injected_writer_without_direct_fallback() {
 #[tokio::test]
 async fn add_branch_at_plan_delegates_open_and_sync_without_direct_fallback() {
     let (cg, dir, _pin) = init_indexed_repo().await;
-    let root = dir.path().to_path_buf();
+    let root = dir.path().canonicalize().expect("canonical repo root");
     let branch = "injected-worktree-branch";
     git(&root, &["branch", branch]);
     git(&root, &["switch", branch]);
@@ -155,7 +155,7 @@ async fn add_branch_at_plan_delegates_open_and_sync_without_direct_fallback() {
 #[tokio::test]
 async fn sync_current_branch_deferred_writer_does_not_fall_back_to_direct_sync() {
     let (cg, dir, _pin) = init_indexed_repo().await;
-    let root = dir.path().to_path_buf();
+    let root = dir.path().canonicalize().expect("canonical repo root");
     let branch = crate::branch::current_branch(&root).expect("current branch");
     let observed = Arc::new(Mutex::new(Vec::new()));
     let writer = recording_writer(
@@ -202,7 +202,7 @@ async fn sync_current_branch_deferred_writer_does_not_fall_back_to_direct_sync()
 #[tokio::test]
 async fn sync_current_branch_writer_error_does_not_fall_back_to_direct_sync() {
     let (cg, dir, _pin) = init_indexed_repo().await;
-    let root = dir.path().to_path_buf();
+    let root = dir.path().canonicalize().expect("canonical repo root");
     let branch = crate::branch::current_branch(&root).expect("current branch");
     let observed = Arc::new(Mutex::new(Vec::new()));
     let server = McpServer::new_with_context(

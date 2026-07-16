@@ -2193,7 +2193,11 @@ async fn hook_event_workspace_context_routes_followup_graph_reads() {
                 json!({
                     "agent": "codex",
                     "event": "workspaceOpen",
-                    "cwd": target_project.join("src").to_string_lossy()
+                    "cwd": target_project
+                        .join("src")
+                        .canonicalize()
+                        .expect("target source directory canonicalizes")
+                        .to_string_lossy()
                 }),
             ),
             jsonrpc_request(
@@ -2307,7 +2311,12 @@ async fn search_call_writes_mcp_runtime_analytics_event() {
     let (server, proj_tmp) = setup_savings_project().await;
     let server_handle = server.clone();
     let db_path = locked_global_db_path();
-    let project_path = proj_tmp.path().to_string_lossy().to_string();
+    let project_path = proj_tmp
+        .path()
+        .canonicalize()
+        .expect("project path canonicalizes")
+        .to_string_lossy()
+        .to_string();
 
     let resp = call_tool(
         server,
