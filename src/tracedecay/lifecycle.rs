@@ -379,6 +379,12 @@ impl TraceDecay {
                     }
                 }
                 Err(error) if is_fts_only_corruption(&error.to_string()) => {}
+                // A hot rollback journal from an interrupted writer needs
+                // write access to recover, so the read-only preflight cannot
+                // open it at all. That is normal crash recovery, not damage:
+                // defer to the writable open below, which rolls the journal
+                // back and still runs the post-open quick_check.
+                Err(error) if is_readonly_recovery_block(&error.to_string()) => {}
                 Err(error) => {
                     print_corruption_warning(&db_path);
                     return Err(recovery_required_error(&db_path, error));
@@ -1235,6 +1241,13 @@ fn count_tree_files(root: &Path) -> u64 {
 /// [`crate::db::Database::rebuild_fts`] and never requires offline recovery.
 fn is_fts_only_corruption(problem: &str) -> bool {
     problem.contains("FTS5 table") && problem.contains("nodes_fts")
+}
+
+/// Whether a read-only preflight failure means the store needs ordinary
+/// writable crash recovery (e.g. a hot rollback journal), which a read-only
+/// connection can never perform, rather than actual damage.
+fn is_readonly_recovery_block(problem: &str) -> bool {
+    problem.contains("attempt to write a readonly database")
 }
 
 fn identity_cutover_conflict(
