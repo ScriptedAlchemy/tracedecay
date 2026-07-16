@@ -35,12 +35,11 @@ once, and proves each repeat is a durable no-op.
 
 Current acceptance artifacts must include the nested
 `provider_observation_performance` result and `hook_telemetry_readiness`
-evidence. The two checked-in artifacts remain
-valid only as `historical_stale`: `evidence-index.json` lists both under
-`historical_stale` and has no `current_acceptance`, so the retired-evidence
-validator intentionally does not require fields introduced by the new
-workload. A new artifact becomes current only after a clean attested run emits
-and validates real provider measurements.
+evidence. [evidence-index.json](evidence-index.json) identifies
+[result-2026-07-16-72cf1f50.json](result-2026-07-16-72cf1f50.json) as the
+`current_acceptance`; the two earlier artifacts remain `historical_stale`, so
+the retired-evidence validator intentionally does not require fields introduced
+by the new workload.
 
 The acceptance result embeds hook telemetry readiness as
 `hook-telemetry-baseline-readiness-v1`, not as a measured baseline. It reads the
@@ -105,23 +104,25 @@ the checked historical artifact but the finalization gate requires exactly one
 fully typed current acceptance artifact and rejects unindexed, duplicate, or
 unknown-field results.
 
-The former [acceptance result](result-2026-07-15-0c289212.json) was captured
-from clean commit `0c289212de5429e5d5abf309f6bb27e49f66a64e` with 3 warmups and
-30 independent measured repetitions of 64 records (1,920 records). It is now
-historical because it predates workload schema 3; capture a new clean acceptance
-artifact before using this catalog for regression comparison. The raw artifact
-records the Linux kernel, CPU, memory, Rust/Cargo toolchains, every repetition,
-and the nearest-rank/sample-standard-deviation method.
+The current [acceptance result](result-2026-07-16-72cf1f50.json) was captured
+from clean commit `72cf1f504f77d9461b5bbd760b01cd47f22c36fa` with 3 warmups and
+30 independent measured repetitions of 64 records (30 × 64 = 1,920 records).
+The raw artifact records the Linux kernel, CPU, memory, Rust/Cargo toolchains,
+every repetition, and the nearest-rank/sample-standard-deviation method.
 
-- Pipeline batch latency: p50 323,175,923 ns; p95 336,411,433 ns; p99
-  341,652,217 ns; sample standard deviation 9,804,394 ns.
-- Pipeline throughput: 198.60320836792673 records/s.
-- Timed pipeline CPU: 6,480 ms; peak RSS: 24,704 KiB.
-- Timed process write I/O: 250,552,320 bytes; SQLite database/WAL/SHM growth:
-  112,230,320 bytes across the 30 independent databases.
-- Exact no-op retry plus bounded replay: p50 194,962 ns; p95 217,902 ns; p99
-  224,762 ns; 10 ms CPU total; zero process write bytes, database growth,
-  observation-count change, and coordinator work counters.
+- Pipeline batch latency: p50 633,282,298 ns; p95 656,043,184 ns; p99
+  658,018,841 ns.
+- Pipeline throughput: 100.98092266068652 records/s.
+- Timed pipeline CPU: 12,670 ms; peak RSS: 57,148 KiB.
+- Timed process write I/O: 335,474,688 bytes; SQLite database/WAL/SHM growth:
+  139,806,200 bytes across the 30 independent databases.
+- Exact no-op retry plus bounded replay: p50 211,993 ns; p95 239,203 ns; p99
+  241,013 ns; 10 ms CPU total; zero process write bytes, database growth,
+  observation-count delta, and coordinator work counters.
+- Round-robin fairness: maximum provider turn distance 8.
+
+The former [acceptance result](result-2026-07-15-0c289212.json) remains
+`historical_stale` because it predates workload schema 3.
 
 The [historical result](result-2026-07-15-b05b4cd5.json) was captured from clean
 commit `b05b4cd570ab8e3385604c0fef31902fdc3f1e8b`.
