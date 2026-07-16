@@ -90,7 +90,7 @@ impl DashboardRuntime {
                 project_root.display()
             )));
         }
-        let state = build_selected_project_state(&cg, &self.active).await;
+        let state = build_selected_project_state(&cg, &self.active).await?;
         let mut project_states = self.project_states.write().await;
         if let Some(cached) = project_states.get(project_id).cloned()
             && cached.registry_context == context

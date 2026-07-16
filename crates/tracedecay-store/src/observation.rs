@@ -3,14 +3,15 @@ use std::future::Future;
 
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CanonicalObservationIdV1,
-    CapabilityId, CoverageReportV1, DomainError, DurableObservationV1, EvidenceClass,
-    NativeAliasKindV2, NativeAliasV2, ObservationCollisionOutcomeV1, ObservationContractError,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    PayloadAccessState, PayloadDigestV1, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest,
-    PrivacyDomainId, ProjectionGenerationId, ResolutionAuthorizationV1, RetrievalAnchorId,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
-    SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId, UtcMicros, VectorWatermark,
+    CapabilityId, CoverageReportV1, DomainError, DurableObservationV1, EvidenceAvailabilityV1,
+    EvidenceClass, GenerationBoundRepositoryProvenanceV1, NativeAliasKindV2, NativeAliasV2,
+    ObservationCollisionOutcomeV1, ObservationContractError, ObservationOrderingDomainV1,
+    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadAccessState, PayloadDigestV1,
+    PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectionGenerationId,
+    ResolutionAuthorizationV1, RetrievalAnchorId, RetrievalAnchorRecordV2,
+    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, SanitizationReceiptV1,
+    SanitizerDispositionV1, ScopeResolutionId, UtcMicros, VectorWatermark,
 };
 
 const MAX_REPLAY_LIMIT: usize = 1_000;
@@ -208,6 +209,117 @@ fn validate_retrieval_anchor_binding(
     Ok(())
 }
 
+/// Optional repository evidence captured after observation sanitization.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryProvenanceAttachmentV1 {
+    availability: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    anchor: Option<RetrievalAnchorRecordV2>,
+}
+
+impl RepositoryProvenanceAttachmentV1 {
+    pub fn new(
+        availability: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1>,
+        anchor: Option<RetrievalAnchorRecordV2>,
+    ) -> ObservationStoreResult<Self> {
+        if availability.value().is_some() != anchor.is_some() {
+            return Err(ObservationStoreError::RepositoryProvenanceAvailabilityMismatch);
+        }
+        if let Some(provenance) = availability.value() {
+            provenance
+                .validate()
+                .map_err(ObservationStoreError::RepositoryProvenanceContract)?;
+        }
+        if let Some(anchor) = &anchor {
+            anchor
+                .validate()
+                .map_err(ObservationStoreError::RepositoryProvenanceContract)?;
+        }
+        Ok(Self {
+            availability,
+            anchor,
+        })
+    }
+
+    pub fn unavailable() -> Self {
+        Self {
+            availability: EvidenceAvailabilityV1::Unavailable,
+            anchor: None,
+        }
+    }
+
+    pub fn availability(&self) -> &EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1> {
+        &self.availability
+    }
+
+    pub fn provenance(&self) -> Option<&GenerationBoundRepositoryProvenanceV1> {
+        self.availability.value()
+    }
+
+    pub fn anchor(&self) -> Option<&RetrievalAnchorRecordV2> {
+        self.anchor.as_ref()
+    }
+
+    fn validate_for_observation(
+        &self,
+        observation: &DurableObservationV1,
+        projection_generation: &ProjectionGenerationId,
+    ) -> ObservationStoreResult<()> {
+        let (Some(provenance), Some(anchor)) = (self.availability.value(), self.anchor.as_ref())
+        else {
+            return if self.availability.value().is_none() && self.anchor.is_none() {
+                Ok(())
+            } else {
+                Err(ObservationStoreError::RepositoryProvenanceAvailabilityMismatch)
+            };
+        };
+        provenance
+            .validate()
+            .map_err(ObservationStoreError::RepositoryProvenanceContract)?;
+        anchor
+            .validate()
+            .map_err(ObservationStoreError::RepositoryProvenanceContract)?;
+        let project_id = match observation.scope() {
+            ObservationScopeV1::Project { project_id } => project_id,
+            ObservationScopeV1::Profile => {
+                return Err(ObservationStoreError::RepositoryProvenanceBindingMismatch);
+            }
+        };
+        if provenance.generation_id() != projection_generation
+            || provenance.source_observation() != Some(observation.observation_id())
+            || provenance.capture().project_id() != Some(project_id)
+            || anchor.owner() != observation.scope()
+            || anchor.projection_generation() != projection_generation
+            || anchor.source_observations() != [observation.observation_id().clone()]
+            || !matches!(
+                anchor.source_generation(),
+                AnchorSourceGenerationV2::RepositoryCapture(capture_id)
+                    if capture_id == provenance.capture_id()
+            )
+            || !matches!(
+                anchor.target(),
+                RetrievalAnchorTargetV2::RepositoryCapture {
+                    repository_id,
+                    capture_id,
+                    receipt,
+                } if repository_id == provenance.capture().repository_id()
+                    && capture_id == provenance.capture_id()
+                    && receipt == observation.receipt().receipt()
+            )
+        {
+            return Err(ObservationStoreError::RepositoryProvenanceBindingMismatch);
+        }
+        Ok(())
+    }
+}
+
+impl Default for RepositoryProvenanceAttachmentV1 {
+    fn default() -> Self {
+        Self::unavailable()
+    }
+}
+
 /// One observation write and its stable V2 retrieval anchor.
 ///
 /// Stores commit every part of this value in one authoritative transaction.
@@ -216,6 +328,7 @@ pub struct AnchoredObservationWrite {
     write: ObservationWrite,
     retrieval_anchor: RetrievalAnchorRecordV2,
     projection_generation: ProjectionGenerationId,
+    repository_provenance: RepositoryProvenanceAttachmentV1,
 }
 
 impl AnchoredObservationWrite {
@@ -233,7 +346,20 @@ impl AnchoredObservationWrite {
             write,
             retrieval_anchor,
             projection_generation,
+            repository_provenance: RepositoryProvenanceAttachmentV1::unavailable(),
         })
+    }
+
+    pub fn with_repository_provenance_attachment(
+        mut self,
+        availability: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1>,
+        anchor: Option<RetrievalAnchorRecordV2>,
+    ) -> ObservationStoreResult<Self> {
+        let repository_provenance = RepositoryProvenanceAttachmentV1::new(availability, anchor)?;
+        repository_provenance
+            .validate_for_observation(self.write.observation(), &self.projection_generation)?;
+        self.repository_provenance = repository_provenance;
+        Ok(self)
     }
 
     pub fn write(&self) -> &ObservationWrite {
@@ -264,17 +390,23 @@ impl AnchoredObservationWrite {
         &self.projection_generation
     }
 
+    pub fn repository_provenance_attachment(&self) -> &RepositoryProvenanceAttachmentV1 {
+        &self.repository_provenance
+    }
+
     pub fn into_parts(
         self,
     ) -> (
         ObservationWrite,
         RetrievalAnchorRecordV2,
         ProjectionGenerationId,
+        RepositoryProvenanceAttachmentV1,
     ) {
         (
             self.write,
             self.retrieval_anchor,
             self.projection_generation,
+            self.repository_provenance,
         )
     }
 }
@@ -553,6 +685,7 @@ pub struct ObservationCommitReceipt {
     committed_cursor: ObservationSourceCursorV1,
     retrieval_anchor: Box<RetrievalAnchorRecordV2>,
     projection_generation: ProjectionGenerationId,
+    repository_provenance: RepositoryProvenanceAttachmentV1,
 }
 
 impl ObservationCommitReceipt {
@@ -570,7 +703,18 @@ impl ObservationCommitReceipt {
             committed_cursor,
             retrieval_anchor: Box::new(retrieval_anchor),
             projection_generation,
+            repository_provenance: RepositoryProvenanceAttachmentV1::unavailable(),
         })
+    }
+
+    pub fn with_repository_provenance_attachment(
+        mut self,
+        repository_provenance: RepositoryProvenanceAttachmentV1,
+    ) -> ObservationStoreResult<Self> {
+        repository_provenance
+            .validate_for_observation(&self.observation, &self.projection_generation)?;
+        self.repository_provenance = repository_provenance;
+        Ok(self)
     }
 
     pub fn sequence(&self) -> u64 {
@@ -599,6 +743,10 @@ impl ObservationCommitReceipt {
 
     pub fn projection_generation(&self) -> &ProjectionGenerationId {
         &self.projection_generation
+    }
+
+    pub fn repository_provenance_attachment(&self) -> &RepositoryProvenanceAttachmentV1 {
+        &self.repository_provenance
     }
 }
 
@@ -675,6 +823,10 @@ impl StoredObservation {
 
     pub fn committed_cursor(&self) -> &ObservationSourceCursorV1 {
         self.commit_receipt.committed_cursor()
+    }
+
+    pub fn repository_provenance_attachment(&self) -> &RepositoryProvenanceAttachmentV1 {
+        self.commit_receipt.repository_provenance_attachment()
     }
 
     pub fn retrieval_anchor(&self) -> &RetrievalAnchorRecordV2 {
@@ -762,8 +914,16 @@ pub enum ObservationStoreError {
     RetrievalAnchorOwnerMismatch,
     #[error("retrieval anchor projection generation does not match the store write")]
     RetrievalAnchorProjectionGenerationMismatch,
+    #[error("retrieval anchor identity collided with different authoritative contents")]
+    RetrievalAnchorCollision,
     #[error("retrieval anchor contract validation failed")]
     RetrievalAnchorContract(#[source] DomainError),
+    #[error("repository provenance availability and retrieval anchor disagree")]
+    RepositoryProvenanceAvailabilityMismatch,
+    #[error("repository provenance does not bind to the observation authority")]
+    RepositoryProvenanceBindingMismatch,
+    #[error("repository provenance contract validation failed")]
+    RepositoryProvenanceContract(#[source] DomainError),
     #[error(
         "retrieval anchor alias {alias:?} collided between existing anchor {existing_anchor_id:?} and candidate anchor {candidate_anchor_id:?}"
     )]

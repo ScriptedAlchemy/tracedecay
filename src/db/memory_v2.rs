@@ -1,5 +1,7 @@
 //! Owner-scoped V2 fact lineage schema and bounded legacy backfill.
 
+use std::collections::BTreeSet;
+
 use libsql::{Connection, params};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -7,10 +9,10 @@ use tracedecay_domain::{
     Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId, FactId,
     FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, FactLineageEventV1,
     FactOwnerV1, FactPayloadV1, LegacyFactMappingV1, LegacyHistoryCoverageV1, PayloadAccessState,
-    PayloadReferenceV1, RetentionClass, SanitizerDispositionV1, SourceStoreId, UtcMicros,
+    PayloadReferenceV1, ProvenanceId, RetentionClass, SanitizerDispositionV1, SourceStoreId,
+    UtcMicros,
 };
 
-use super::{DatabaseAuthority, DatabaseAuthorityRole};
 use crate::errors::{Result, TraceDecayError};
 use crate::privacy::{
     MemoryFactSanitizationV1, sanitize_memory_fact_payload, sanitize_provider_metadata_text,
@@ -24,26 +26,12 @@ const RETENTION_CLASS: &str = "legacy-current-snapshot-v1";
 /// Installs only additive storage. Legacy data movement is daemon-authorized
 /// and deliberately absent from bare schema creation and database open.
 pub(crate) async fn create_schema(conn: &Connection, operation: &str) -> Result<()> {
+    conn.execute_batch("PRAGMA secure_delete = ON")
+        .await
+        .map_err(|error| db_error(operation, error))?;
+    super::retrieval_anchor_schema::install_retrieval_anchor_schema(conn, operation).await?;
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS retrieval_anchors (
-            anchor_id TEXT PRIMARY KEY,
-            anchor_json TEXT NOT NULL CHECK(json_valid(anchor_json)),
-            owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
-            projection_generation TEXT NOT NULL
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_retrieval_anchors_owner
-            ON retrieval_anchors(anchor_id, owner_json);
-        CREATE TABLE IF NOT EXISTS retrieval_anchor_aliases (
-            owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
-            alias_kind TEXT NOT NULL,
-            locator_digest TEXT NOT NULL,
-            anchor_id TEXT NOT NULL,
-            PRIMARY KEY(owner_json, alias_kind, locator_digest),
-            UNIQUE(anchor_id, alias_kind, locator_digest),
-            FOREIGN KEY(anchor_id) REFERENCES retrieval_anchors(anchor_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS memory_v2_facts (
+        "CREATE TABLE IF NOT EXISTS memory_v2_facts (
             fact_id TEXT NOT NULL,
             owner_kind TEXT NOT NULL CHECK(owner_kind IN ('profile', 'project')),
             project_id TEXT NOT NULL,
@@ -254,10 +242,17 @@ pub(crate) async fn create_schema(conn: &Connection, operation: &str) -> Result<
             started_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             cutover_completed_at INTEGER,
+            cutover_receipt_json TEXT CHECK(
+                cutover_receipt_json IS NULL OR json_valid(cutover_receipt_json)
+            ),
             PRIMARY KEY(owner_kind, project_id, source_store_id),
             CHECK(
-                (phase = 'cutover_complete' AND cutover_completed_at IS NOT NULL) OR
-                (phase <> 'cutover_complete' AND cutover_completed_at IS NULL)
+                (phase = 'cutover_complete'
+                    AND cutover_completed_at IS NOT NULL
+                    AND cutover_receipt_json IS NOT NULL) OR
+                (phase <> 'cutover_complete'
+                    AND cutover_completed_at IS NULL
+                    AND cutover_receipt_json IS NULL)
             )
         );
 
@@ -266,10 +261,14 @@ pub(crate) async fn create_schema(conn: &Connection, operation: &str) -> Result<
             owner_kind TEXT NOT NULL CHECK(owner_kind IN ('profile', 'project')),
             project_id TEXT NOT NULL,
             owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
+            idempotency_key TEXT NOT NULL,
+            request_digest TEXT NOT NULL,
             request_json TEXT NOT NULL CHECK(json_valid(request_json)),
             evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
             submitted_at INTEGER NOT NULL,
             PRIMARY KEY(proposal_id, owner_kind, project_id),
+            UNIQUE(owner_kind, project_id, idempotency_key),
+            UNIQUE(owner_kind, project_id, request_digest),
             CHECK(
                 (owner_kind = 'profile' AND project_id = '') OR
                 (owner_kind = 'project' AND project_id <> '')
@@ -287,6 +286,7 @@ pub(crate) async fn create_schema(conn: &Connection, operation: &str) -> Result<
             )),
             reviewer_json TEXT CHECK(reviewer_json IS NULL OR json_valid(reviewer_json)),
             validation_json TEXT CHECK(validation_json IS NULL OR json_valid(validation_json)),
+            origin TEXT NOT NULL CHECK(origin IN ('runtime', 'legacy_import')),
             promoted_fact_id TEXT,
             promoted_assertion_id TEXT,
             promoted_event_id TEXT,
@@ -333,30 +333,40 @@ pub(crate) async fn create_schema(conn: &Connection, operation: &str) -> Result<
                     transition_id, proposal_id, owner_kind, project_id
                 )
         );
+        CREATE TABLE IF NOT EXISTS memory_v2_legacy_proposal_map (
+            owner_kind TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            source_store_id TEXT NOT NULL,
+            legacy_proposal_id TEXT NOT NULL,
+            proposal_id TEXT NOT NULL,
+            history_coverage TEXT NOT NULL CHECK(history_coverage IN ('complete', 'unknown')),
+            import_receipt_json TEXT NOT NULL CHECK(json_valid(import_receipt_json)),
+            imported_at INTEGER NOT NULL,
+            PRIMARY KEY(owner_kind, project_id, source_store_id, legacy_proposal_id),
+            UNIQUE(proposal_id, owner_kind, project_id, source_store_id),
+            FOREIGN KEY(proposal_id, owner_kind, project_id)
+                REFERENCES memory_v2_proposals(proposal_id, owner_kind, project_id)
+        );
 
         CREATE INDEX IF NOT EXISTS idx_memory_v2_assertions_fact
             ON memory_v2_assertions(fact_id, owner_kind, project_id, asserted_at);
         CREATE INDEX IF NOT EXISTS idx_memory_v2_events_fact
             ON memory_v2_lineage_events(fact_id, owner_kind, project_id, event_sequence);
+        CREATE INDEX IF NOT EXISTS idx_memory_v2_events_as_of
+            ON memory_v2_lineage_events(
+                fact_id, owner_kind, project_id, occurred_at, event_id
+            );
+        CREATE INDEX IF NOT EXISTS idx_memory_v2_current_page
+            ON memory_v2_current_facts(owner_kind, project_id, fact_id);
+        CREATE INDEX IF NOT EXISTS idx_memory_v2_evidence_anchor
+            ON memory_v2_evidence(anchor_id, owner_json);
         CREATE INDEX IF NOT EXISTS idx_memory_v2_map_fact
             ON memory_v2_legacy_map(fact_id, owner_kind, project_id);
+        CREATE INDEX IF NOT EXISTS idx_memory_v2_proposal_list
+            ON memory_v2_proposal_current(
+                owner_kind, project_id, state, updated_at, proposal_id
+            );
 
-        CREATE TRIGGER IF NOT EXISTS retrieval_anchors_no_update
-        BEFORE UPDATE ON retrieval_anchors BEGIN
-            SELECT RAISE(ABORT, 'retrieval anchors are immutable');
-        END;
-        CREATE TRIGGER IF NOT EXISTS retrieval_anchors_no_delete
-        BEFORE DELETE ON retrieval_anchors BEGIN
-            SELECT RAISE(ABORT, 'retrieval anchors are immutable');
-        END;
-        CREATE TRIGGER IF NOT EXISTS retrieval_anchor_aliases_no_update
-        BEFORE UPDATE ON retrieval_anchor_aliases BEGIN
-            SELECT RAISE(ABORT, 'retrieval anchor aliases are immutable');
-        END;
-        CREATE TRIGGER IF NOT EXISTS retrieval_anchor_aliases_no_delete
-        BEFORE DELETE ON retrieval_anchor_aliases BEGIN
-            SELECT RAISE(ABORT, 'retrieval anchor aliases are immutable');
-        END;
         CREATE TRIGGER IF NOT EXISTS memory_v2_facts_no_update
         BEFORE UPDATE ON memory_v2_facts BEGIN
             SELECT RAISE(ABORT, 'memory_v2 fact identities are immutable');
@@ -440,14 +450,377 @@ pub(crate) async fn create_schema(conn: &Connection, operation: &str) -> Result<
         CREATE TRIGGER IF NOT EXISTS memory_v2_proposal_transitions_no_delete
         BEFORE DELETE ON memory_v2_proposal_transitions BEGIN
             SELECT RAISE(ABORT, 'memory_v2 proposal transitions are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS memory_v2_legacy_proposal_map_no_update
+        BEFORE UPDATE ON memory_v2_legacy_proposal_map BEGIN
+            SELECT RAISE(ABORT, 'memory_v2 legacy proposal mappings are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS memory_v2_legacy_proposal_map_no_delete
+        BEFORE DELETE ON memory_v2_legacy_proposal_map BEGIN
+            SELECT RAISE(ABORT, 'memory_v2 legacy proposal mappings are immutable');
         END;",
     )
     .await
     .map_err(|error| db_error(operation, error))?;
+    install_v20_integrity_triggers(conn, operation).await?;
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Upgrades the v19 PR7 storage shape without starting a legacy-data
+/// backfill.  The caller owns the enclosing exclusive migration transaction.
+pub(super) async fn upgrade_v20_schema(conn: &Connection, operation: &str) -> Result<()> {
+    create_schema(conn, operation).await?;
+
+    add_column_if_missing(
+        conn,
+        "memory_v2_backfill_progress",
+        "cutover_receipt_json",
+        "cutover_receipt_json TEXT",
+        operation,
+    )
+    .await?;
+    conn.execute(
+        "UPDATE memory_v2_backfill_progress SET cutover_receipt_json = json_object(
+            'kind', 'legacy_v19_cutover',
+            'owner_kind', owner_kind,
+            'project_id', project_id,
+            'source_store_id', source_store_id,
+            'feedback_frontier', feedback_frontier,
+            'oplog_frontier', oplog_frontier,
+            'fact_frontier', fact_frontier,
+            'completed_at', cutover_completed_at
+         )
+         WHERE phase = 'cutover_complete' AND cutover_receipt_json IS NULL",
+        (),
+    )
+    .await
+    .map_err(|error| db_error(operation, error))?;
+
+    add_column_if_missing(
+        conn,
+        "memory_v2_proposals",
+        "idempotency_key",
+        "idempotency_key TEXT",
+        operation,
+    )
+    .await?;
+    add_column_if_missing(
+        conn,
+        "memory_v2_proposals",
+        "request_digest",
+        "request_digest TEXT",
+        operation,
+    )
+    .await?;
+    add_column_if_missing(
+        conn,
+        "memory_v2_proposal_transitions",
+        "origin",
+        "origin TEXT NOT NULL DEFAULT 'runtime'",
+        operation,
+    )
+    .await?;
+
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS memory_v2_proposals_no_update;
+         DROP TRIGGER IF EXISTS memory_v2_proposal_transitions_no_update;",
+    )
+    .await
+    .map_err(|error| db_error(operation, error))?;
+    conn.execute(
+        "UPDATE memory_v2_proposals
+         SET idempotency_key = 'legacy-v19:' || proposal_id
+         WHERE idempotency_key IS NULL OR length(idempotency_key) = 0",
+        (),
+    )
+    .await
+    .map_err(|error| db_error(operation, error))?;
+    conn.execute(
+        "UPDATE memory_v2_proposals
+         SET request_digest = 'legacy-v19:' || proposal_id
+         WHERE request_digest IS NULL OR length(request_digest) = 0",
+        (),
+    )
+    .await
+    .map_err(|error| db_error(operation, error))?;
+    conn.execute(
+        "UPDATE memory_v2_proposal_transitions
+         SET origin = 'legacy_import'
+         WHERE origin IS NULL OR origin NOT IN ('runtime', 'legacy_import')",
+        (),
+    )
+    .await
+    .map_err(|error| db_error(operation, error))?;
+    create_schema(conn, operation).await?;
+
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_v2_proposals_owner_idempotency
+             ON memory_v2_proposals(owner_kind, project_id, idempotency_key);
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_v2_proposals_owner_request_digest
+             ON memory_v2_proposals(owner_kind, project_id, request_digest);",
+    )
+    .await
+    .map_err(|error| db_error(operation, error))?;
+
+    scrub_payload_bearing_assertion_headers(conn, operation).await
+}
+
+async fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+    operation: &str,
+) -> Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM pragma_table_xinfo(?1) WHERE name = ?2 COLLATE NOCASE",
+            params![table, column],
+        )
+        .await
+        .map_err(|error| db_error(operation, error))?;
+    if rows
+        .next()
+        .await
+        .map_err(|error| db_error(operation, error))?
+        .is_some()
+    {
+        return Ok(false);
+    }
+    drop(rows);
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {definition};"))
+        .await
+        .map_err(|error| db_error(operation, error))?;
+    Ok(true)
+}
+
+async fn install_v20_integrity_triggers(conn: &Connection, operation: &str) -> Result<()> {
+    let has_cutover_receipt = table_has_column(
+        conn,
+        "memory_v2_backfill_progress",
+        "cutover_receipt_json",
+        operation,
+    )
+    .await?;
+    let has_proposal_keys =
+        table_has_column(conn, "memory_v2_proposals", "idempotency_key", operation).await?
+            && table_has_column(conn, "memory_v2_proposals", "request_digest", operation).await?;
+    let has_transition_origin =
+        table_has_column(conn, "memory_v2_proposal_transitions", "origin", operation).await?;
+    if !has_cutover_receipt && !has_proposal_keys && !has_transition_origin {
+        return Ok(());
+    }
+    let mut schema = String::new();
+    if has_proposal_keys {
+        schema.push_str(
+            "CREATE TRIGGER IF NOT EXISTS memory_v2_proposals_require_keys
+             BEFORE INSERT ON memory_v2_proposals
+             WHEN NEW.idempotency_key IS NULL OR length(NEW.idempotency_key) = 0
+               OR NEW.request_digest IS NULL OR length(NEW.request_digest) = 0
+             BEGIN
+                 SELECT RAISE(ABORT, 'memory_v2 proposals require idempotency and request digests');
+             END;",
+        );
+    }
+    if has_transition_origin {
+        schema.push_str(
+            "CREATE TRIGGER IF NOT EXISTS memory_v2_proposal_transitions_require_origin
+             BEFORE INSERT ON memory_v2_proposal_transitions
+             WHEN NEW.origin NOT IN ('runtime', 'legacy_import')
+             BEGIN
+                 SELECT RAISE(ABORT, 'memory_v2 proposal transition origin is invalid');
+             END;",
+        );
+    }
+    if has_cutover_receipt {
+        schema.push_str(
+            "CREATE TRIGGER IF NOT EXISTS memory_v2_backfill_progress_cutover_receipt_insert
+             BEFORE INSERT ON memory_v2_backfill_progress
+             WHEN (
+                 NEW.phase = 'cutover_complete'
+                 AND (
+                     NEW.cutover_completed_at IS NULL
+                     OR NEW.cutover_receipt_json IS NULL
+                     OR json_valid(NEW.cutover_receipt_json) = 0
+                 )
+             ) OR (
+                 NEW.phase <> 'cutover_complete'
+                 AND (
+                     NEW.cutover_completed_at IS NOT NULL
+                     OR NEW.cutover_receipt_json IS NOT NULL
+                 )
+             )
+             BEGIN
+                 SELECT RAISE(ABORT, 'memory_v2 cutover receipt does not match phase');
+             END;
+             CREATE TRIGGER IF NOT EXISTS memory_v2_backfill_progress_cutover_receipt_update
+             BEFORE UPDATE ON memory_v2_backfill_progress
+             WHEN (
+                 NEW.phase = 'cutover_complete'
+                 AND (
+                     NEW.cutover_completed_at IS NULL
+                     OR NEW.cutover_receipt_json IS NULL
+                     OR json_valid(NEW.cutover_receipt_json) = 0
+                 )
+             ) OR (
+                 NEW.phase <> 'cutover_complete'
+                 AND (
+                     NEW.cutover_completed_at IS NOT NULL
+                     OR NEW.cutover_receipt_json IS NOT NULL
+                 )
+             )
+             BEGIN
+                 SELECT RAISE(ABORT, 'memory_v2 cutover receipt does not match phase');
+             END;",
+        );
+    }
+    if schema.is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch(&schema)
+        .await
+        .map(|_| ())
+        .map_err(|error| db_error(operation, error))
+}
+
+async fn table_has_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    operation: &str,
+) -> Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM pragma_table_xinfo(?1) WHERE name = ?2 COLLATE NOCASE",
+            params![table, column],
+        )
+        .await
+        .map_err(|error| db_error(operation, error))?;
+    rows.next()
+        .await
+        .map(|row| row.is_some())
+        .map_err(|error| db_error(operation, error))
+}
+
+async fn scrub_payload_bearing_assertion_headers(conn: &Connection, operation: &str) -> Result<()> {
+    struct HeaderRow {
+        assertion_id: String,
+        fact_id: String,
+        owner_kind: String,
+        project_id: String,
+        owner_json: String,
+        kind_json: String,
+        payload_reference_json: String,
+        asserted_at: i64,
+        actor_id: Option<String>,
+    }
+
+    let mut rows = conn
+        .query(
+            "SELECT assertion_id, fact_id, owner_kind, project_id, owner_json,
+                    kind_json, payload_reference_json, asserted_at, actor_id
+             FROM memory_v2_assertions
+             WHERE json_type(assertion_header_json, '$.payload') IS NOT NULL
+                OR json_type(assertion_header_json, '$.content') IS NOT NULL",
+            (),
+        )
+        .await
+        .map_err(|error| db_error(operation, error))?;
+    let mut headers = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| db_error(operation, error))?
+    {
+        headers.push(HeaderRow {
+            assertion_id: row.get(0).map_err(|error| db_error(operation, error))?,
+            fact_id: row.get(1).map_err(|error| db_error(operation, error))?,
+            owner_kind: row.get(2).map_err(|error| db_error(operation, error))?,
+            project_id: row.get(3).map_err(|error| db_error(operation, error))?,
+            owner_json: row.get(4).map_err(|error| db_error(operation, error))?,
+            kind_json: row.get(5).map_err(|error| db_error(operation, error))?,
+            payload_reference_json: row.get(6).map_err(|error| db_error(operation, error))?,
+            asserted_at: row.get(7).map_err(|error| db_error(operation, error))?,
+            actor_id: row.get(8).map_err(|error| db_error(operation, error))?,
+        });
+    }
+    drop(rows);
+    if headers.is_empty() {
+        return Ok(());
+    }
+
+    conn.execute_batch("DROP TRIGGER IF EXISTS memory_v2_assertions_no_update;")
+        .await
+        .map_err(|error| db_error(operation, error))?;
+    for header in headers {
+        let owner = serde_json::from_str::<Value>(&header.owner_json)
+            .map_err(|_| db_message(operation, "legacy assertion owner is not valid JSON"))?;
+        let kind = serde_json::from_str::<Value>(&header.kind_json)
+            .map_err(|_| db_message(operation, "legacy assertion kind is not valid JSON"))?;
+        let payload_reference = serde_json::from_str::<Value>(&header.payload_reference_json)
+            .map_err(|_| db_message(operation, "legacy payload reference is not valid JSON"))?;
+        let mut evidence_rows = conn
+            .query(
+                "SELECT evidence.evidence_json
+                 FROM memory_v2_assertion_evidence AS binding
+                 JOIN memory_v2_evidence AS evidence
+                   ON evidence.evidence_id = binding.evidence_id
+                  AND evidence.fact_id = binding.fact_id
+                  AND evidence.owner_kind = binding.owner_kind
+                  AND evidence.project_id = binding.project_id
+                 WHERE binding.assertion_id = ?1 AND binding.fact_id = ?2
+                   AND binding.owner_kind = ?3 AND binding.project_id = ?4
+                ORDER BY binding.ordinal",
+                params![
+                    header.assertion_id.as_str(),
+                    header.fact_id.as_str(),
+                    header.owner_kind.as_str(),
+                    header.project_id.as_str()
+                ],
+            )
+            .await
+            .map_err(|error| db_error(operation, error))?;
+        let mut evidence = Vec::new();
+        while let Some(row) = evidence_rows
+            .next()
+            .await
+            .map_err(|error| db_error(operation, error))?
+        {
+            let encoded: String = row.get(0).map_err(|error| db_error(operation, error))?;
+            evidence.push(serde_json::from_str::<Value>(&encoded).map_err(|_| {
+                db_message(operation, "legacy assertion evidence is not valid JSON")
+            })?);
+        }
+        drop(evidence_rows);
+        let canonical = json!({
+            "assertion_id": &header.assertion_id,
+            "fact_id": &header.fact_id,
+            "owner": owner,
+            "kind": kind,
+            "payload_reference": payload_reference,
+            "evidence": evidence,
+            "asserted_at": header.asserted_at,
+            "actor_id": header.actor_id.as_deref(),
+        });
+        conn.execute(
+            "UPDATE memory_v2_assertions SET assertion_header_json = ?1
+             WHERE assertion_id = ?2 AND fact_id = ?3
+               AND owner_kind = ?4 AND project_id = ?5",
+            params![
+                json_text(&canonical)?,
+                header.assertion_id,
+                header.fact_id,
+                header.owner_kind,
+                header.project_id
+            ],
+        )
+        .await
+        .map_err(|error| db_error(operation, error))?;
+    }
+    create_schema(conn, operation).await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct CapturedMemoryV2Frontiers {
     pub(crate) feedback: i64,
     pub(crate) oplog: i64,
@@ -458,6 +831,44 @@ pub(crate) struct CapturedMemoryV2Frontiers {
 pub(crate) enum MemoryV2BackfillBatchOutcome {
     Advanced { processed: usize },
     AwaitingCutover,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct MemoryV2CutoverReceipt {
+    receipt_id: ProvenanceId,
+    owner: FactOwnerV1,
+    source_store_id: SourceStoreId,
+    frontiers: CapturedMemoryV2Frontiers,
+    dual_write_activated_at: UtcMicros,
+}
+
+impl MemoryV2CutoverReceipt {
+    pub(crate) fn new(
+        receipt_id: ProvenanceId,
+        owner: FactOwnerV1,
+        source_store_id: SourceStoreId,
+        frontiers: CapturedMemoryV2Frontiers,
+        dual_write_activated_at: UtcMicros,
+    ) -> Result<Self> {
+        receipt_id
+            .validate()
+            .map_err(|_| db_message(OPERATION, "cutover receipt identity is invalid"))?;
+        validate_scope(&owner, &source_store_id)?;
+        validate_frontiers(frontiers)?;
+        Ok(Self {
+            receipt_id,
+            owner,
+            source_store_id,
+            frontiers,
+            dual_write_activated_at,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MemoryV2CutoverOutcome {
+    TailPending(CapturedMemoryV2Frontiers),
+    Complete,
 }
 
 #[derive(Clone)]
@@ -476,6 +887,14 @@ struct Progress {
     oplog_cursor: i64,
     fact_cursor: i64,
     started_at: i64,
+}
+
+struct CurrentFactState {
+    access: PayloadAccessState,
+    last_event_id: FactEventId,
+    active_assertion_id: Option<FactAssertionId>,
+    active_kind: Option<FactAssertionKindV1>,
+    active_payload_reference: Option<PayloadReferenceV1>,
 }
 
 struct LegacyFeedback {
@@ -516,13 +935,12 @@ struct StoredAssertionHeaderV1<'a> {
     actor_id: Option<&'a tracedecay_domain::ActorId>,
 }
 
-pub(crate) async fn load_or_capture_memory_v2_frontiers(
+pub(super) async fn load_or_capture_memory_v2_frontiers(
     conn: &Connection,
-    authority: &DatabaseAuthority,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
 ) -> Result<CapturedMemoryV2Frontiers> {
-    validate_scope(authority, owner, source_store_id)?;
+    validate_scope(owner, source_store_id)?;
     begin(conn, "memory_v2_capture_frontiers").await?;
     let result = async {
         let owner_key = owner_key(owner)?;
@@ -586,15 +1004,14 @@ pub(crate) async fn load_or_capture_memory_v2_frontiers(
 
 /// Processes at most one bounded source-table batch. Captured frontiers are
 /// immutable job identity: retries with shifted frontiers fail closed.
-pub(crate) async fn backfill_memory_v2_batch(
+pub(super) async fn backfill_memory_v2_batch(
     conn: &Connection,
-    authority: &DatabaseAuthority,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
     frontiers: CapturedMemoryV2Frontiers,
     batch_size: i64,
 ) -> Result<MemoryV2BackfillBatchOutcome> {
-    validate_scope(authority, owner, source_store_id)?;
+    validate_scope(owner, source_store_id)?;
     if !(1..=MAX_BATCH_SIZE).contains(&batch_size) {
         return Err(db_message(
             OPERATION,
@@ -656,20 +1073,140 @@ pub(crate) async fn backfill_memory_v2_batch(
     finish_transaction(conn, result, OPERATION).await
 }
 
+pub(super) async fn finalize_memory_v2_cutover(
+    conn: &Connection,
+    receipt: &MemoryV2CutoverReceipt,
+) -> Result<MemoryV2CutoverOutcome> {
+    validate_scope(&receipt.owner, &receipt.source_store_id)?;
+    let owner = owner_key(&receipt.owner)?;
+    let receipt_json = json_text(receipt)?;
+    begin(conn, "memory_v2_cutover").await?;
+    let result = async {
+        let mut rows = conn
+            .query(
+                "SELECT phase, feedback_frontier, oplog_frontier, fact_frontier,
+                        cutover_receipt_json
+                 FROM memory_v2_backfill_progress
+                 WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3",
+                params![
+                    owner.kind,
+                    owner.project_id.as_str(),
+                    receipt.source_store_id.as_str()
+                ],
+            )
+            .await
+            .map_err(|error| db_error("memory_v2_cutover", error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| db_error("memory_v2_cutover", error))?
+            .ok_or_else(|| db_message("memory_v2_cutover", "backfill progress is missing"))?;
+        let phase = row
+            .get::<String>(0)
+            .map_err(|error| db_error("memory_v2_cutover", error))?;
+        let stored = CapturedMemoryV2Frontiers {
+            feedback: row
+                .get(1)
+                .map_err(|error| db_error("memory_v2_cutover", error))?,
+            oplog: row
+                .get(2)
+                .map_err(|error| db_error("memory_v2_cutover", error))?,
+            facts: row
+                .get(3)
+                .map_err(|error| db_error("memory_v2_cutover", error))?,
+        };
+        if phase == "cutover_complete" {
+            let existing = row
+                .get::<String>(4)
+                .map_err(|error| db_error("memory_v2_cutover", error))?;
+            canonical_replay(existing, &receipt_json, "cutover receipt")?;
+            return Ok(MemoryV2CutoverOutcome::Complete);
+        }
+        if phase != "awaiting_cutover" {
+            return Err(db_message(
+                "memory_v2_cutover",
+                "backfill has not reached its captured frontier",
+            ));
+        }
+        let tail = CapturedMemoryV2Frontiers {
+            feedback: scalar_i64(
+                conn,
+                "SELECT COALESCE(MAX(event_id), 0) FROM memory_feedback_events",
+            )
+            .await?,
+            oplog: scalar_i64(conn, "SELECT COALESCE(MAX(id), 0) FROM memory_oplog").await?,
+            facts: scalar_i64(conn, "SELECT COALESCE(MAX(fact_id), 0) FROM memory_facts").await?,
+        };
+        if tail.feedback > stored.feedback || tail.oplog > stored.oplog || tail.facts > stored.facts
+        {
+            let advanced = CapturedMemoryV2Frontiers {
+                feedback: tail.feedback.max(stored.feedback),
+                oplog: tail.oplog.max(stored.oplog),
+                facts: tail.facts.max(stored.facts),
+            };
+            conn.execute(
+                "UPDATE memory_v2_backfill_progress SET
+                    phase = 'feedback', feedback_frontier = ?1, oplog_frontier = ?2,
+                    fact_frontier = ?3, fact_cursor = 0, updated_at = ?4
+                 WHERE owner_kind = ?5 AND project_id = ?6 AND source_store_id = ?7",
+                params![
+                    advanced.feedback,
+                    advanced.oplog,
+                    advanced.facts,
+                    now_micros()?,
+                    owner.kind,
+                    owner.project_id.as_str(),
+                    receipt.source_store_id.as_str()
+                ],
+            )
+            .await
+            .map_err(|error| db_error("memory_v2_cutover", error))?;
+            return Ok(MemoryV2CutoverOutcome::TailPending(advanced));
+        }
+        if receipt.frontiers != stored {
+            return Err(db_message(
+                "memory_v2_cutover",
+                "cutover receipt does not bind the drained frontier",
+            ));
+        }
+        conn.execute(
+            "UPDATE memory_v2_backfill_progress SET
+                phase = 'cutover_complete', cutover_completed_at = ?1,
+                cutover_receipt_json = ?2, updated_at = ?1
+             WHERE owner_kind = ?3 AND project_id = ?4 AND source_store_id = ?5",
+            params![
+                receipt.dual_write_activated_at.0,
+                receipt_json,
+                owner.kind,
+                owner.project_id.as_str(),
+                receipt.source_store_id.as_str()
+            ],
+        )
+        .await
+        .map_err(|error| db_error("memory_v2_cutover", error))?;
+        Ok(MemoryV2CutoverOutcome::Complete)
+    }
+    .await;
+    finish_transaction(conn, result, "memory_v2_cutover").await
+}
+
 /// Purges payload, FTS, and vector material for one exact owner/store/fact.
 /// Immutable identity, assertion headers, mapping, and typed lineage remain.
-pub(crate) async fn purge_memory_v2_fact(
+pub(super) async fn purge_memory_v2_fact(
     conn: &Connection,
-    authority: &DatabaseAuthority,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
     fact_id: &FactId,
+    expected_last_event_id: &FactEventId,
     occurred_at: UtcMicros,
 ) -> Result<bool> {
-    validate_scope(authority, owner, source_store_id)?;
+    validate_scope(owner, source_store_id)?;
     fact_id
         .validate()
         .map_err(|_| db_message("memory_v2_purge", "fact identity is invalid"))?;
+    conn.execute_batch("PRAGMA secure_delete = ON")
+        .await
+        .map_err(|error| db_error("memory_v2_purge", error))?;
     let owner_key = owner_key(owner)?;
     begin(conn, "memory_v2_purge").await?;
     let result = purge_memory_v2_fact_inner(
@@ -678,10 +1215,17 @@ pub(crate) async fn purge_memory_v2_fact(
         &owner_key,
         source_store_id,
         fact_id,
+        Some(expected_last_event_id),
         occurred_at,
     )
     .await;
-    finish_transaction(conn, result, "memory_v2_purge").await
+    let purged = finish_transaction(conn, result, "memory_v2_purge").await?;
+    if purged {
+        conn.execute_batch("PRAGMA incremental_vacuum(64)")
+            .await
+            .map_err(|error| db_error("memory_v2_purge", error))?;
+    }
+    Ok(purged)
 }
 
 async fn backfill_feedback_batch(
@@ -860,11 +1404,47 @@ async fn backfill_oplog_batch(
                     owner_key,
                     source_store_id,
                     &fact_id,
+                    None,
                     occurred_at,
                 )
                 .await?;
             }
-            "add" | "update" | "feedback" | "curate" => {}
+            "add" | "update" => {
+                insert_quarantine(
+                    conn,
+                    owner_key,
+                    source_store_id,
+                    "memory_oplog",
+                    item.id,
+                    "mutation_requires_snapshot_replay",
+                    progress.started_at,
+                )
+                .await?;
+            }
+            "feedback" => {
+                insert_quarantine(
+                    conn,
+                    owner_key,
+                    source_store_id,
+                    "memory_oplog",
+                    item.id,
+                    "feedback_detail_withheld",
+                    progress.started_at,
+                )
+                .await?;
+            }
+            "curate" => {
+                insert_quarantine(
+                    conn,
+                    owner_key,
+                    source_store_id,
+                    "memory_oplog",
+                    item.id,
+                    "curation_detail_withheld",
+                    progress.started_at,
+                )
+                .await?;
+            }
             _ => {
                 insert_quarantine(
                     conn,
@@ -1039,10 +1619,24 @@ async fn backfill_fact_payload(
     ) else {
         return Ok(Err("sanitized_fact_contract_invalid"));
     };
+    let payload_reference = fact_payload
+        .payload_reference()
+        .map_err(|_| db_message(OPERATION, "typed payload reference construction failed"))?;
+    let current = current_fact_state(conn, owner_key, fact_id).await?;
+    let assertion_kind = match current.active_assertion_id.as_ref() {
+        Some(_) if current.active_payload_reference.as_ref() == Some(&payload_reference) => current
+            .active_kind
+            .clone()
+            .ok_or_else(|| db_message(OPERATION, "active assertion kind is missing"))?,
+        Some(active) => FactAssertionKindV1::Correction {
+            supersedes: active.clone(),
+        },
+        None => FactAssertionKindV1::LegacyImport,
+    };
     let Ok(assertion) = FactAssertionV1::new(
         fact_id.clone(),
         owner.clone(),
-        FactAssertionKindV1::LegacyImport,
+        assertion_kind,
         fact_payload,
         Vec::new(),
         asserted_at,
@@ -1069,25 +1663,30 @@ async fn backfill_fact_payload(
             return Ok(Err("durable_receipt_disposition_invalid"));
         }
     };
-    let access_event = FactLineageEventV1::new(
-        fact_id.clone(),
-        owner.clone(),
-        FactLineageEventKindV1::PayloadAccessChanged {
-            previous: PayloadAccessState::Unavailable,
-            current: access,
-        },
-        asserted_at,
-        None,
-    )
-    .map_err(|_| db_message(OPERATION, "typed payload access event construction failed"))?;
-    insert_event(conn, owner_key, &access_event, recorded_at).await?;
+    let last_event_id = if current.access == access {
+        assertion_event.event_id().clone()
+    } else {
+        let access_event = FactLineageEventV1::new(
+            fact_id.clone(),
+            owner.clone(),
+            FactLineageEventKindV1::PayloadAccessChanged {
+                previous: current.access,
+                current: access,
+            },
+            asserted_at,
+            None,
+        )
+        .map_err(|_| db_message(OPERATION, "typed payload access event construction failed"))?;
+        insert_event(conn, owner_key, &access_event, recorded_at).await?;
+        access_event.event_id().clone()
+    };
     update_current(
         conn,
         owner_key,
         fact_id,
         Some((assertion.assertion_id(), access)),
         Some(trust.as_f64()),
-        access_event.event_id(),
+        &last_event_id,
         asserted_at.0,
     )
     .await?;
@@ -1098,6 +1697,7 @@ async fn backfill_fact_payload(
         category_label(category),
         &tags,
         &metadata,
+        &entities,
         &source,
         access == PayloadAccessState::Redacted,
     )
@@ -1310,8 +1910,9 @@ async fn insert_assertion(
         )
         .await
         .map_err(|error| db_error(OPERATION, error))?;
-        insert_assertion_supersession(conn, owner, assertion).await?;
     }
+    insert_assertion_supersession(conn, owner, assertion).await?;
+    insert_assertion_evidence(conn, owner, assertion).await?;
     let payload_json = json_text(assertion.payload())?;
     if let Some(existing) = optional_string(
         conn,
@@ -1351,22 +1952,152 @@ async fn insert_assertion_supersession(
         FactAssertionKindV1::Merge { supersedes } => supersedes.iter().collect(),
         FactAssertionKindV1::Initial | FactAssertionKindV1::LegacyImport => Vec::new(),
     };
-    for (ordinal, superseded_id) in superseded.into_iter().enumerate() {
-        conn.execute(
-            "INSERT INTO memory_v2_assertion_supersession(
-                assertion_id, fact_id, owner_kind, project_id, superseded_assertion_id, ordinal
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+    for (ordinal, superseded_id) in superseded.iter().enumerate() {
+        let existing = optional_string(
+            conn,
+            "SELECT superseded_assertion_id
+             FROM memory_v2_assertion_supersession
+             WHERE assertion_id = ?1 AND fact_id = ?2
+               AND owner_kind = ?3 AND project_id = ?4 AND ordinal = ?5",
             params![
                 assertion.assertion_id().as_str(),
                 assertion.fact_id().as_str(),
                 owner.kind,
                 owner.project_id.as_str(),
-                superseded_id.as_str(),
                 ordinal as i64
             ],
         )
-        .await
-        .map_err(|error| db_error(OPERATION, error))?;
+        .await?;
+        if let Some(existing) = existing {
+            canonical_replay(existing, superseded_id.as_str(), "assertion supersession")?;
+        } else {
+            conn.execute(
+                "INSERT INTO memory_v2_assertion_supersession(
+                    assertion_id, fact_id, owner_kind, project_id,
+                    superseded_assertion_id, ordinal
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    assertion.assertion_id().as_str(),
+                    assertion.fact_id().as_str(),
+                    owner.kind,
+                    owner.project_id.as_str(),
+                    superseded_id.as_str(),
+                    ordinal as i64
+                ],
+            )
+            .await
+            .map_err(|error| db_error(OPERATION, error))?;
+        }
+    }
+    let child_count = scalar_i64_params(
+        conn,
+        "SELECT COUNT(*) FROM memory_v2_assertion_supersession
+         WHERE assertion_id = ?1 AND fact_id = ?2
+           AND owner_kind = ?3 AND project_id = ?4",
+        params![
+            assertion.assertion_id().as_str(),
+            assertion.fact_id().as_str(),
+            owner.kind,
+            owner.project_id.as_str()
+        ],
+    )
+    .await?;
+    if child_count != superseded.len() as i64 {
+        return Err(db_message(
+            OPERATION,
+            "assertion supersession child collision",
+        ));
+    }
+    Ok(())
+}
+
+async fn insert_assertion_evidence(
+    conn: &Connection,
+    owner: &OwnerKey,
+    assertion: &FactAssertionV1,
+) -> Result<()> {
+    for (ordinal, evidence) in assertion.evidence().iter().enumerate() {
+        let evidence_json = json_text(evidence)?;
+        if let Some(existing) = optional_string(
+            conn,
+            "SELECT evidence_json FROM memory_v2_evidence WHERE evidence_id = ?1",
+            params![evidence.evidence_id().as_str()],
+        )
+        .await?
+        {
+            canonical_replay(existing, &evidence_json, "fact evidence")?;
+        } else {
+            conn.execute(
+                "INSERT INTO memory_v2_evidence(
+                    evidence_id, fact_id, owner_kind, project_id,
+                    owner_json, anchor_id, evidence_json
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    evidence.evidence_id().as_str(),
+                    evidence.fact_id().as_str(),
+                    owner.kind,
+                    owner.project_id.as_str(),
+                    owner.json.as_str(),
+                    evidence.anchor_id().as_str(),
+                    evidence_json
+                ],
+            )
+            .await
+            .map_err(|error| db_error(OPERATION, error))?;
+        }
+        let existing = optional_string(
+            conn,
+            "SELECT evidence_id FROM memory_v2_assertion_evidence
+             WHERE assertion_id = ?1 AND fact_id = ?2
+               AND owner_kind = ?3 AND project_id = ?4 AND ordinal = ?5",
+            params![
+                assertion.assertion_id().as_str(),
+                assertion.fact_id().as_str(),
+                owner.kind,
+                owner.project_id.as_str(),
+                ordinal as i64
+            ],
+        )
+        .await?;
+        if let Some(existing) = existing {
+            canonical_replay(
+                existing,
+                evidence.evidence_id().as_str(),
+                "assertion evidence",
+            )?;
+        } else {
+            conn.execute(
+                "INSERT INTO memory_v2_assertion_evidence(
+                    assertion_id, evidence_id, fact_id, owner_kind, project_id, ordinal
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    assertion.assertion_id().as_str(),
+                    evidence.evidence_id().as_str(),
+                    assertion.fact_id().as_str(),
+                    owner.kind,
+                    owner.project_id.as_str(),
+                    ordinal as i64
+                ],
+            )
+            .await
+            .map_err(|error| db_error(OPERATION, error))?;
+        }
+    }
+    let child_count = scalar_i64_params(
+        conn,
+        "SELECT COUNT(*) FROM memory_v2_assertion_evidence
+         WHERE assertion_id = ?1 AND fact_id = ?2
+           AND owner_kind = ?3 AND project_id = ?4",
+        params![
+            assertion.assertion_id().as_str(),
+            assertion.fact_id().as_str(),
+            owner.kind,
+            owner.project_id.as_str()
+        ],
+    )
+    .await?;
+    if child_count != assertion.evidence().len() as i64 {
+        return Err(db_message(OPERATION, "assertion evidence child collision"));
     }
     Ok(())
 }
@@ -1465,7 +2196,7 @@ async fn quarantine_fact(
     )
     .await?;
     purge_payload_rows(conn, owner_key, fact_id).await?;
-    let previous = current_payload_access(conn, owner_key, fact_id).await?;
+    let previous = current_fact_state(conn, owner_key, fact_id).await?.access;
     let event_id =
         if previous != PayloadAccessState::Deleted && previous != PayloadAccessState::Quarantined {
             let event = FactLineageEventV1::new(
@@ -1511,6 +2242,7 @@ async fn purge_memory_v2_fact_inner(
     owner_key: &OwnerKey,
     source_store_id: &SourceStoreId,
     fact_id: &FactId,
+    expected_last_event_id: Option<&FactEventId>,
     occurred_at: UtcMicros,
 ) -> Result<bool> {
     let legacy_fact_id = optional_i64(
@@ -1529,15 +2261,21 @@ async fn purge_memory_v2_fact_inner(
     let Some(legacy_fact_id) = legacy_fact_id else {
         return Ok(false);
     };
-    let previous = current_payload_access(conn, owner_key, fact_id).await?;
-    if previous == PayloadAccessState::Deleted {
+    let current = current_fact_state(conn, owner_key, fact_id).await?;
+    if expected_last_event_id.is_some_and(|expected| expected != &current.last_event_id) {
+        return Err(db_message(
+            "memory_v2_purge",
+            "fact lineage changed before payload purge",
+        ));
+    }
+    if current.access == PayloadAccessState::Deleted {
         return Ok(false);
     }
     let event = FactLineageEventV1::new(
         fact_id.clone(),
         owner.clone(),
         FactLineageEventKindV1::PayloadAccessChanged {
-            previous,
+            previous: current.access,
             current: PayloadAccessState::Deleted,
         },
         occurred_at,
@@ -1647,6 +2385,7 @@ async fn mirror_sanitized_legacy(
     category: &str,
     tags: &[String],
     metadata: &Value,
+    entities: &[String],
     source: &str,
     invalidate_vector: bool,
 ) -> Result<()> {
@@ -1667,6 +2406,7 @@ async fn mirror_sanitized_legacy(
     )
     .await
     .map_err(|error| db_error(OPERATION, error))?;
+    rewrite_legacy_entity_links(conn, legacy_fact_id, entities).await?;
     if invalidate_vector {
         conn.execute(
             "INSERT INTO memory_bank_dirty(bank_name, updated_at)
@@ -1680,6 +2420,89 @@ async fn mirror_sanitized_legacy(
         conn.execute("DELETE FROM memory_banks", ())
             .await
             .map_err(|error| db_error(OPERATION, error))?;
+    }
+    Ok(())
+}
+
+async fn rewrite_legacy_entity_links(
+    conn: &Connection,
+    legacy_fact_id: i64,
+    entities: &[String],
+) -> Result<()> {
+    let mut rows = conn
+        .query(
+            "SELECT entity_id FROM memory_fact_entities WHERE fact_id = ?1",
+            params![legacy_fact_id],
+        )
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    let mut old_ids = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| db_error(OPERATION, error))?
+    {
+        old_ids.push(
+            row.get::<i64>(0)
+                .map_err(|error| db_error(OPERATION, error))?,
+        );
+    }
+    conn.execute(
+        "DELETE FROM memory_fact_entities WHERE fact_id = ?1",
+        params![legacy_fact_id],
+    )
+    .await
+    .map_err(|error| db_error(OPERATION, error))?;
+    let mut seen = BTreeSet::new();
+    for entity in entities {
+        let name = crate::memory::entities::normalize_entity(entity);
+        let normalized = name.to_ascii_lowercase();
+        if normalized.is_empty() || !seen.insert(normalized.clone()) {
+            continue;
+        }
+        let entity_id = if let Some(id) = optional_i64(
+            conn,
+            "SELECT entity_id FROM memory_entities WHERE normalized_name = ?1",
+            params![normalized.as_str()],
+        )
+        .await?
+        {
+            id
+        } else {
+            conn.execute(
+                "INSERT INTO memory_entities(
+                    name, normalized_name, entity_type, aliases, created_at, updated_at
+                 ) VALUES(?1, ?2, 'unknown', '[]', ?3, ?3)",
+                params![name.as_str(), normalized.as_str(), current_timestamp()],
+            )
+            .await
+            .map_err(|error| db_error(OPERATION, error))?;
+            optional_i64(
+                conn,
+                "SELECT entity_id FROM memory_entities WHERE normalized_name = ?1",
+                params![normalized.as_str()],
+            )
+            .await?
+            .ok_or_else(|| db_message(OPERATION, "sanitized entity insert was not visible"))?
+        };
+        conn.execute(
+            "INSERT INTO memory_fact_entities(fact_id, entity_id) VALUES(?1, ?2)",
+            params![legacy_fact_id, entity_id],
+        )
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    }
+    for entity_id in old_ids {
+        conn.execute(
+            "DELETE FROM memory_entities
+             WHERE entity_id = ?1
+               AND NOT EXISTS(
+                   SELECT 1 FROM memory_fact_entities WHERE entity_id = ?1
+               )",
+            params![entity_id],
+        )
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
     }
     Ok(())
 }
@@ -1871,20 +2694,66 @@ async fn insert_quarantine(
     Ok(())
 }
 
-async fn current_payload_access(
+async fn current_fact_state(
     conn: &Connection,
     owner: &OwnerKey,
     fact_id: &FactId,
-) -> Result<PayloadAccessState> {
-    let value = optional_string(
-        conn,
-        "SELECT payload_access FROM memory_v2_current_facts
-         WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3",
-        params![fact_id.as_str(), owner.kind, owner.project_id.as_str()],
+) -> Result<CurrentFactState> {
+    let mut rows = conn
+        .query(
+            "SELECT current.payload_access, current.last_event_id,
+                current.active_assertion_id, assertion.kind_json,
+                assertion.payload_reference_json
+         FROM memory_v2_current_facts current
+         LEFT JOIN memory_v2_assertions assertion
+           ON assertion.assertion_id = current.active_assertion_id
+          AND assertion.fact_id = current.fact_id
+          AND assertion.owner_kind = current.owner_kind
+          AND assertion.project_id = current.project_id
+         WHERE current.fact_id = ?1
+           AND current.owner_kind = ?2 AND current.project_id = ?3",
+            params![fact_id.as_str(), owner.kind, owner.project_id.as_str()],
+        )
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| db_error(OPERATION, error))?
+        .ok_or_else(|| db_message(OPERATION, "current fact projection is missing"))?;
+    let access = row
+        .get::<String>(0)
+        .map_err(|error| db_error(OPERATION, error))?;
+    let event_id = FactEventId::new(
+        row.get::<String>(1)
+            .map_err(|error| db_error(OPERATION, error))?,
     )
-    .await?
-    .ok_or_else(|| db_message(OPERATION, "current fact projection is missing"))?;
-    parse_payload_access(&value)
+    .map_err(|_| db_message(OPERATION, "stored last event identity is invalid"))?;
+    let active_assertion_id = row
+        .get::<Option<String>>(2)
+        .map_err(|error| db_error(OPERATION, error))?
+        .map(FactAssertionId::new)
+        .transpose()
+        .map_err(|_| db_message(OPERATION, "stored active assertion identity is invalid"))?;
+    let active_kind = row
+        .get::<Option<String>>(3)
+        .map_err(|error| db_error(OPERATION, error))?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(|_| db_message(OPERATION, "stored assertion kind is invalid"))?;
+    let active_payload_reference = row
+        .get::<Option<String>>(4)
+        .map_err(|error| db_error(OPERATION, error))?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(|_| db_message(OPERATION, "stored payload reference is invalid"))?;
+    Ok(CurrentFactState {
+        access: parse_payload_access(&access)?,
+        last_event_id: event_id,
+        active_assertion_id,
+        active_kind,
+        active_payload_reference,
+    })
 }
 
 async fn load_legacy_entities(conn: &Connection, legacy_fact_id: i64) -> Result<Vec<String>> {
@@ -1923,20 +2792,7 @@ fn owner_key(owner: &FactOwnerV1) -> Result<OwnerKey> {
     })
 }
 
-fn validate_scope(
-    authority: &DatabaseAuthority,
-    owner: &FactOwnerV1,
-    source_store_id: &SourceStoreId,
-) -> Result<()> {
-    if !matches!(
-        authority.role(),
-        DatabaseAuthorityRole::Daemon | DatabaseAuthorityRole::Test
-    ) {
-        return Err(db_message(
-            OPERATION,
-            "memory backfill and purge require fenced daemon authority",
-        ));
-    }
+fn validate_scope(owner: &FactOwnerV1, source_store_id: &SourceStoreId) -> Result<()> {
     owner
         .validate()
         .map_err(|_| db_message(OPERATION, "fact owner is invalid"))?;
@@ -1944,6 +2800,17 @@ fn validate_scope(
         .validate()
         .map_err(|_| db_message(OPERATION, "source store identity is invalid"))?;
     Ok(())
+}
+
+fn validate_frontiers(frontiers: CapturedMemoryV2Frontiers) -> Result<()> {
+    if frontiers.feedback < 0 || frontiers.oplog < 0 || frontiers.facts < 0 {
+        Err(db_message(
+            OPERATION,
+            "backfill frontier cannot be negative",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn parse_category(value: &str) -> std::result::Result<tracedecay_domain::FactCategoryV1, ()> {
@@ -2042,12 +2909,21 @@ async fn begin(conn: &Connection, operation: &str) -> Result<()> {
 
 async fn finish_transaction<T>(conn: &Connection, result: Result<T>, operation: &str) -> Result<T> {
     match result {
-        Ok(value) => {
-            conn.execute_batch("COMMIT")
-                .await
-                .map_err(|error| db_error(operation, error))?;
-            Ok(value)
-        }
+        Ok(value) => match conn.execute_batch("COMMIT").await {
+            Ok(_) => Ok(value),
+            Err(commit_error) => {
+                let rollback = conn.execute_batch("ROLLBACK").await;
+                let cleanup = if rollback.is_ok() {
+                    "rollback completed"
+                } else {
+                    "rollback failed; writer connection must be retired"
+                };
+                Err(db_message(
+                    operation,
+                    format!("commit failed ({cleanup}): {commit_error}"),
+                ))
+            }
+        },
         Err(error) => {
             let _ = conn.execute_batch("ROLLBACK").await;
             Err(error)
@@ -2056,8 +2932,16 @@ async fn finish_transaction<T>(conn: &Connection, result: Result<T>, operation: 
 }
 
 async fn scalar_i64(conn: &Connection, sql: &str) -> Result<i64> {
+    scalar_i64_params(conn, sql, ()).await
+}
+
+async fn scalar_i64_params(
+    conn: &Connection,
+    sql: &str,
+    params: impl libsql::params::IntoParams,
+) -> Result<i64> {
     let mut rows = conn
-        .query(sql, ())
+        .query(sql, params)
         .await
         .map_err(|error| db_error(OPERATION, error))?;
     rows.next()
@@ -2138,17 +3022,16 @@ mod tests {
 
     use super::*;
 
-    async fn database() -> (Connection, libsql::Database, TempDir, DatabaseAuthority) {
+    async fn database() -> (Connection, libsql::Database, TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("memory-v2.db");
-        let authority = DatabaseAuthority::acquire_test(&path, "memory-v2-test").unwrap();
         let db = Builder::new_local(&path).build().await.unwrap();
         let conn = db.connect().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;")
             .await
             .unwrap();
         crate::db::migrations::create_schema(&conn).await.unwrap();
-        (conn, db, dir, authority)
+        (conn, db, dir)
     }
 
     fn owner() -> FactOwnerV1 {
@@ -2163,14 +3046,13 @@ mod tests {
 
     async fn run_to_frontier(
         conn: &Connection,
-        authority: &DatabaseAuthority,
         owner: &FactOwnerV1,
         source: &SourceStoreId,
         frontiers: CapturedMemoryV2Frontiers,
         batch_size: i64,
     ) {
         for _ in 0..32 {
-            if backfill_memory_v2_batch(conn, authority, owner, source, frontiers, batch_size)
+            if backfill_memory_v2_batch(conn, owner, source, frontiers, batch_size)
                 .await
                 .unwrap()
                 == MemoryV2BackfillBatchOutcome::AwaitingCutover
@@ -2187,7 +3069,7 @@ mod tests {
 
     #[tokio::test]
     async fn schema_install_does_not_start_unowned_backfill() {
-        let (conn, _db, _dir, _authority) = database().await;
+        let (conn, _db, _dir) = database().await;
         assert_eq!(
             scalar(&conn, "SELECT COUNT(*) FROM memory_v2_backfill_progress").await,
             0
@@ -2209,7 +3091,7 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_backfill_resumes_with_fixed_frontiers_and_unknown_history() {
-        let (conn, db, _dir, authority) = database().await;
+        let (conn, db, _dir) = database().await;
         for id in 1..=3 {
             conn.execute(
                 "INSERT INTO memory_facts(
@@ -2223,11 +3105,11 @@ mod tests {
         }
         let owner = owner();
         let source = source_store_id();
-        let frontiers = load_or_capture_memory_v2_frontiers(&conn, &authority, &owner, &source)
+        let frontiers = load_or_capture_memory_v2_frontiers(&conn, &owner, &source)
             .await
             .unwrap();
         assert_eq!(
-            backfill_memory_v2_batch(&conn, &authority, &owner, &source, frontiers, 1)
+            backfill_memory_v2_batch(&conn, &owner, &source, frontiers, 1)
                 .await
                 .unwrap(),
             MemoryV2BackfillBatchOutcome::Advanced { processed: 0 }
@@ -2238,7 +3120,7 @@ mod tests {
             .execute_batch("PRAGMA foreign_keys = ON")
             .await
             .unwrap();
-        run_to_frontier(&restarted, &authority, &owner, &source, frontiers, 1).await;
+        run_to_frontier(&restarted, &owner, &source, frontiers, 1).await;
         assert_eq!(
             scalar(&restarted, "SELECT COUNT(*) FROM memory_v2_legacy_map").await,
             3
@@ -2276,7 +3158,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_and_secret_rows_quarantine_and_advance_without_raw_payload() {
-        let (conn, _db, _dir, authority) = database().await;
+        let (conn, _db, _dir) = database().await;
         conn.execute(
             "INSERT INTO memory_facts(
                 fact_id, content, category, tags, trust_score, source, metadata,
@@ -2292,10 +3174,10 @@ mod tests {
         .unwrap();
         let owner = owner();
         let source = source_store_id();
-        let frontiers = load_or_capture_memory_v2_frontiers(&conn, &authority, &owner, &source)
+        let frontiers = load_or_capture_memory_v2_frontiers(&conn, &owner, &source)
             .await
             .unwrap();
-        run_to_frontier(&conn, &authority, &owner, &source, frontiers, 1).await;
+        run_to_frontier(&conn, &owner, &source, frontiers, 1).await;
         assert_eq!(
             scalar(&conn, "SELECT COUNT(*) FROM memory_v2_legacy_quarantine").await,
             2
@@ -2323,7 +3205,7 @@ mod tests {
 
     #[tokio::test]
     async fn purge_is_owner_store_fact_scoped_and_clears_payload_fts_and_vectors() {
-        let (conn, _db, _dir, authority) = database().await;
+        let (conn, _db, _dir) = database().await;
         conn.execute(
             "INSERT INTO memory_facts(
                 fact_id, content, category, tags, trust_score, source, metadata,
@@ -2336,10 +3218,10 @@ mod tests {
         .unwrap();
         let owner = owner();
         let source = source_store_id();
-        let frontiers = load_or_capture_memory_v2_frontiers(&conn, &authority, &owner, &source)
+        let frontiers = load_or_capture_memory_v2_frontiers(&conn, &owner, &source)
             .await
             .unwrap();
-        run_to_frontier(&conn, &authority, &owner, &source, frontiers, 4).await;
+        run_to_frontier(&conn, &owner, &source, frontiers, 4).await;
         let fact_id = FactId::derive(
             &FactIdentityMaterialV1::new(
                 owner.clone(),
@@ -2351,25 +3233,46 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        let owner_key = owner_key(&owner).unwrap();
+        let expected = current_fact_state(&conn, &owner_key, &fact_id)
+            .await
+            .unwrap()
+            .last_event_id;
         assert!(
             purge_memory_v2_fact(
                 &conn,
-                &authority,
                 &owner,
                 &source,
                 &fact_id,
+                &expected,
                 UtcMicros(20_000_000),
             )
             .await
             .unwrap()
         );
         assert!(
-            !purge_memory_v2_fact(
+            purge_memory_v2_fact(
                 &conn,
-                &authority,
                 &owner,
                 &source,
                 &fact_id,
+                &expected,
+                UtcMicros(20_000_000),
+            )
+            .await
+            .is_err()
+        );
+        let deleted = current_fact_state(&conn, &owner_key, &fact_id)
+            .await
+            .unwrap()
+            .last_event_id;
+        assert!(
+            !purge_memory_v2_fact(
+                &conn,
+                &owner,
+                &source,
+                &fact_id,
+                &deleted,
                 UtcMicros(20_000_000),
             )
             .await

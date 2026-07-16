@@ -222,6 +222,37 @@ pub(super) const TABLES: &[Table] = &[
         ]
     ),
     table!(
+        "observation_repository_provenance",
+        [
+            column("observation_id", "TEXT", false, None, 1),
+            column("availability_json", "TEXT", true, None, 0),
+            column("capture_json", "TEXT", false, None, 0),
+            column("retrieval_anchor_id", "TEXT", false, None, 0),
+            column("owner_json", "TEXT", false, None, 0),
+        ],
+        [
+            foreign_key(
+                "observation_id",
+                "observations",
+                "observation_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "retrieval_anchor_id",
+                "retrieval_anchors",
+                "anchor_id",
+                "NO ACTION"
+            ),
+            foreign_key_sequence(
+                "owner_json",
+                "retrieval_anchors",
+                "owner_json",
+                "NO ACTION",
+                1
+            ),
+        ]
+    ),
+    table!(
         "retrieval_anchor_aliases",
         [
             column("owner_json", "TEXT", true, None, 1),
@@ -229,12 +260,16 @@ pub(super) const TABLES: &[Table] = &[
             column("locator_digest", "TEXT", true, None, 3),
             column("anchor_id", "TEXT", true, None, 0),
         ],
-        [foreign_key(
-            "anchor_id",
-            "retrieval_anchors",
-            "anchor_id",
-            "NO ACTION"
-        )]
+        [
+            foreign_key("anchor_id", "retrieval_anchors", "anchor_id", "NO ACTION"),
+            foreign_key_sequence(
+                "owner_json",
+                "retrieval_anchors",
+                "owner_json",
+                "NO ACTION",
+                1
+            ),
+        ]
     ),
     table!(
         "source_cursors",
@@ -738,11 +773,25 @@ pub(super) const INDEXES: &[Index] = &[
         columns: &["observation_id"],
     },
     Index {
+        table: "retrieval_anchors",
+        name: Some("idx_retrieval_anchors_owner"),
+        unique: true,
+        origin: "c",
+        columns: &["anchor_id", "owner_json"],
+    },
+    Index {
         table: "observation_retrieval_anchors",
         name: None,
         unique: true,
         origin: "u",
         columns: &["anchor_id"],
+    },
+    Index {
+        table: "observation_repository_provenance",
+        name: None,
+        unique: true,
+        origin: "u",
+        columns: &["retrieval_anchor_id"],
     },
     Index {
         table: "retrieval_anchor_aliases",

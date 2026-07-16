@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+use tracedecay_domain::{FactOwnerV1, ProjectId};
 
 use crate::automation::memory_digest::refresh_memory_digest_after_memory_change;
 use crate::db::Database;
@@ -38,6 +39,7 @@ pub(super) struct TargetMemoryDb<'a> {
     db: TargetMemoryDbHandle<'a>,
     pub(super) project_root: PathBuf,
     pub(super) user_scope: bool,
+    owner: FactOwnerV1,
 }
 
 impl TargetMemoryDb<'_> {
@@ -51,6 +53,10 @@ impl TargetMemoryDb<'_> {
     pub(super) fn conn(&self) -> &libsql::Connection {
         self.db().conn()
     }
+
+    pub(super) fn owner(&self) -> &FactOwnerV1 {
+        &self.owner
+    }
 }
 
 fn requests_user_memory(args: &Value) -> bool {
@@ -62,7 +68,24 @@ async fn open_user_memory_target(profile_root: &Path) -> Result<TargetMemoryDb<'
         db: TargetMemoryDbHandle::Owned(Box::new(open_user_memory_db(profile_root).await?)),
         project_root: profile_root.to_path_buf(),
         user_scope: true,
+        owner: FactOwnerV1::Profile,
     })
+}
+
+fn project_memory_owner(project_id: &str) -> Result<FactOwnerV1> {
+    let project_id = ProjectId::new(project_id.to_owned())
+        .map_err(|error| config_error(format!("invalid project memory owner: {error}")))?;
+    Ok(FactOwnerV1::Project { project_id })
+}
+
+fn active_project_memory_owner(cg: &TraceDecay) -> Result<FactOwnerV1> {
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .ok_or_else(|| config_error("active project has no authoritative project_id"))?;
+    project_memory_owner(project_id)
 }
 
 fn rendered_fact_store(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
@@ -104,6 +127,7 @@ pub(super) async fn open_target_memory_db<'a>(
             db,
             project_root: cg.project_root().to_path_buf(),
             user_scope: false,
+            owner: active_project_memory_owner(cg)?,
         });
     };
     let profile_root = profile_root_for_global_db(global_db, allow_default_registry_fallback)?;
@@ -132,6 +156,7 @@ pub(super) async fn open_target_memory_db<'a>(
         db: TargetMemoryDbHandle::Owned(Box::new(db)),
         project_root: PathBuf::from(context.project.display_root),
         user_scope: false,
+        owner: project_memory_owner(&context.project.project_id)?,
     })
 }
 
@@ -600,6 +625,11 @@ pub(super) async fn handle_fact_feedback(
     global_db: Option<&GlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
+    if project_selector_present(&args, &["project_path"]) {
+        return Err(config_error(
+            "cross-project fact_feedback writes are not supported; omit project_selector to write the active project",
+        ));
+    }
     let note = args
         .get("note")
         .or_else(|| args.get("reason"))
@@ -777,6 +807,35 @@ mod tests {
 
         assert!(matches!(target.db, TargetMemoryDbHandle::Active(_)));
         assert!(std::ptr::eq(target.conn(), cg.db().conn()));
+        assert_eq!(
+            target.owner(),
+            &project_memory_owner(cg.store_layout().identity.project_id.as_deref().unwrap(),)
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn feedback_rejects_cross_project_write_before_opening_a_store() {
+        let (_tmp, cg, fact_id) = seeded_memory().await;
+
+        let error = handle_fact_feedback(
+            &cg,
+            json!({
+                "fact_id": fact_id,
+                "action": "helpful",
+                "project_id": "another_project",
+            }),
+            None,
+            true,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TraceDecayError::Config { ref message }
+                if message.contains("cross-project fact_feedback writes")
+        ));
     }
 
     #[tokio::test]
@@ -798,6 +857,7 @@ mod tests {
             db: TargetMemoryDbHandle::Active(cg.db()),
             project_root: cg.project_root().to_path_buf(),
             user_scope: true,
+            owner: active_project_memory_owner(&cg).unwrap(),
         };
 
         let result = tokio::time::timeout(
@@ -824,6 +884,7 @@ mod tests {
             db: TargetMemoryDbHandle::Active(cg.db()),
             project_root: cg.project_root().to_path_buf(),
             user_scope: true,
+            owner: active_project_memory_owner(&cg).unwrap(),
         };
 
         tokio::time::timeout(
@@ -859,6 +920,7 @@ mod tests {
             db: TargetMemoryDbHandle::Active(cg.db()),
             project_root: cg.project_root().to_path_buf(),
             user_scope: true,
+            owner: active_project_memory_owner(&cg).unwrap(),
         };
         let mut add = Box::pin(handle_fact_store_for_target(
             json!({ "action": "add", "content": "concurrent fact" }),

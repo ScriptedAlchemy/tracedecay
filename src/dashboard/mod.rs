@@ -75,6 +75,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{GlobalDb, GlobalDbReadConnection};
 use crate::storage::StorageMode;
 use crate::tracedecay::TraceDecay;
+use tracedecay_domain::{FactOwnerV1, ProjectId};
 
 /// Default port for `tracedecay dashboard` (chosen to avoid common dev-server
 /// defaults; override with `--port`).
@@ -85,6 +86,8 @@ pub(crate) type AutomationSchedulerReconciler = Arc<dyn Fn() + Send + Sync + 'st
 pub(crate) struct DashboardState {
     /// Registered project id for profile-backed stores, when known.
     pub(crate) project_id: Option<String>,
+    /// Immutable authoritative owner for every memory operation served here.
+    pub(crate) memory_owner: FactOwnerV1,
     /// Active code-graph database. This can be branch-specific.
     pub(crate) graph_conn: libsql::Connection,
     /// Keeps every project-database authority alive as long as cloned raw
@@ -288,6 +291,23 @@ pub(crate) async fn resolve_project_memory_store(
     })
 }
 
+/// Resolves the immutable fact owner from the validated project layout.
+///
+/// Dashboard routes must never infer ownership from a path, label, or
+/// optional display field after construction.
+pub(crate) fn project_memory_owner(cg: &TraceDecay) -> Result<FactOwnerV1> {
+    let raw = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .ok_or_else(|| config_error("project dashboard has no registered project id"))?;
+    let project_id = ProjectId::new(raw).map_err(|error| {
+        config_error(format!("project dashboard has invalid project id: {error}"))
+    })?;
+    Ok(FactOwnerV1::Project { project_id })
+}
+
 async fn build_state_inner(
     cg: &TraceDecay,
     retained_project_session_db: Option<Arc<GlobalDb>>,
@@ -296,8 +316,9 @@ async fn build_state_inner(
     warm_token_counts: bool,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
-) -> DashboardState {
+) -> Result<DashboardState> {
     let (mem_conn, mem_db_path, mem_db) = resolve_project_memory_store(cg).await;
+    let memory_owner = project_memory_owner(cg)?;
     let lcm = resolve_lcm_store(
         cg,
         retained_project_session_db.clone(),
@@ -330,6 +351,7 @@ async fn build_state_inner(
         .unwrap_or_default();
     let state = DashboardState {
         project_id: cg.store_layout().identity.project_id.clone(),
+        memory_owner,
         graph_conn: cg.dashboard_connection(),
         _database_guards: std::iter::once(cg.dashboard_database_guard())
             .chain(std::iter::once(mem_db.clone()))
@@ -365,13 +387,13 @@ async fn build_state_inner(
     if warm_token_counts {
         token_count::spawn_warm(state.clone());
     }
-    state
+    Ok(state)
 }
 
 /// Builds the dashboard state shared by the CLI `run` path and the
 /// `tracedecay_dashboard` MCP tool.
 #[allow(dead_code)]
-pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
+pub(crate) async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
     build_state_inner(
         cg,
         None,
@@ -389,7 +411,7 @@ pub(crate) async fn build_state_with_automation_reconciler(
     retained_project_session_db: Option<Arc<GlobalDb>>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
-) -> DashboardState {
+) -> Result<DashboardState> {
     build_state_inner(
         cg,
         retained_project_session_db,
@@ -408,7 +430,7 @@ pub(crate) async fn build_state_with_automation_reconciler(
 pub(crate) async fn build_selected_project_state(
     cg: &TraceDecay,
     active: &DashboardState,
-) -> DashboardState {
+) -> Result<DashboardState> {
     build_state_inner(
         cg,
         None,
@@ -587,7 +609,7 @@ where
         None,
         direct_dashboard_automation_writer(),
     )
-    .await;
+    .await?;
     if options.start_session_catch_up {
         if let Some(db) = state.lcm_db.as_ref() {
             spawn_session_catch_up_ingest(
@@ -1089,6 +1111,31 @@ async fn plugins_list() -> Json<Value> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod authority_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn project_memory_owner_uses_validated_store_identity() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
+            .expect("fixture source");
+        let cg = TraceDecay::init(project.path())
+            .await
+            .expect("project init");
+        let raw = cg
+            .store_layout()
+            .identity
+            .project_id
+            .as_deref()
+            .expect("registered project id");
+        let expected = ProjectId::new(raw).expect("validated project id");
+
+        assert_eq!(
+            project_memory_owner(&cg).expect("project memory owner"),
+            FactOwnerV1::Project {
+                project_id: expected,
+            }
+        );
+    }
 
     #[tokio::test]
     async fn retained_project_session_authority_is_reused_exactly() {

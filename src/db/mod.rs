@@ -11,6 +11,7 @@ mod metadata;
 pub mod migrations;
 mod nodes;
 mod redundancy_pairs;
+pub(crate) mod retrieval_anchor_schema;
 mod rows;
 mod search;
 mod sql;
@@ -34,5 +35,9 @@ pub(crate) use connection::{
     DatabaseWriterConnection, platform_safe_journal_mode, platform_safe_synchronous_mode,
 };
 pub use fingerprints::StoredFingerprint;
+pub(crate) use memory_v2::{
+    CapturedMemoryV2Frontiers, MemoryV2BackfillBatchOutcome, MemoryV2CutoverOutcome,
+    MemoryV2CutoverReceipt,
+};
 pub use redundancy_pairs::{RedundancyPairRow, RedundancyPairWrite};
 pub use search::DependencyImportUse;

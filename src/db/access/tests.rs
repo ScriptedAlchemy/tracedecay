@@ -764,6 +764,23 @@ fn daemon_authority_inherits_live_election_scope() {
 }
 
 #[test]
+fn retained_daemon_authority_requires_a_live_scope_for_writes() {
+    let _lock = SCOPE_TEST_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("projects/project/tracedecay.db");
+    let scope = enter_daemon_database_scope(temp.path(), 8, "write-scope").unwrap();
+    let authority = DatabaseAuthority::acquire_daemon(&path, "write scope").unwrap();
+
+    authority.require_active_write_scope("write scope").unwrap();
+    drop(scope);
+
+    let error = authority
+        .require_active_write_scope("write after scope drop")
+        .unwrap_err();
+    assert!(error.to_string().contains("active daemon"));
+}
+
+#[test]
 fn sole_daemon_scope_authorizes_only_legacy_repo_local_database() {
     let _lock = SCOPE_TEST_LOCK.lock().unwrap();
     let profile = tempfile::tempdir().unwrap();

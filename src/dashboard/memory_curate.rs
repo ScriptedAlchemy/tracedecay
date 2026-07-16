@@ -124,11 +124,12 @@ impl Default for MemoryCurateOptions {
 
 /// Minimal dashboard state over the project memory store — no LCM store,
 /// savings DB, or token-count cache warmup (those belong to the server).
-async fn cli_state(cg: &TraceDecay) -> DashboardState {
+async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
     let (mem_conn, mem_db_path, mem_db) = super::resolve_project_memory_store(cg).await;
     let store_layout = cg.store_layout();
-    DashboardState {
+    Ok(DashboardState {
         project_id: store_layout.identity.project_id.clone(),
+        memory_owner: super::project_memory_owner(cg)?,
         graph_conn: cg.dashboard_connection(),
         _database_guards: std::iter::once(cg.dashboard_database_guard())
             .chain(std::iter::once(mem_db.clone()))
@@ -158,7 +159,7 @@ async fn cli_state(cg: &TraceDecay) -> DashboardState {
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
         automation_scheduler_reconciler: None,
         automation_writer: super::direct_dashboard_automation_writer(),
-    }
+    })
 }
 
 fn user_state(
@@ -171,6 +172,7 @@ fn user_state(
     let mem_db = Arc::new(memory_db.clone());
     DashboardState {
         project_id: None,
+        memory_owner: tracedecay_domain::FactOwnerV1::Profile,
         graph_conn: conn.clone(),
         _database_guards: vec![mem_db.clone()],
         graph_db_path: memory_db_path.display().to_string(),
@@ -203,7 +205,7 @@ fn user_state(
 
 /// Runs the curate verb and returns the JSON report printed by the CLI.
 pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -> Result<Value> {
-    let state = cli_state(cg).await;
+    let state = cli_state(cg).await?;
     run_memory_curate_with_state(&state, options).await
 }
 

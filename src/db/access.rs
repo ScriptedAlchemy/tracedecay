@@ -266,6 +266,39 @@ impl DatabaseAuthority {
         self.inner.role
     }
 
+    /// Verifies that the authority retained by an open database still has an
+    /// active runtime scope before it can start a mutation.
+    ///
+    /// Holding an authority keeps the operating-system writer lease alive, but
+    /// it must not let a clone of a daemon-owned `Database` outlive the daemon
+    /// election or an exclusive maintenance scope. Test authorities remain the
+    /// explicit fixture escape hatch.
+    pub(crate) fn require_active_write_scope(&self, intent: &str) -> Result<()> {
+        if self.inner.role == DatabaseAuthorityRole::Test {
+            return Ok(());
+        }
+
+        let active = match exact_scoped_runtime_role(&self.inner.identity.profile_root, intent)? {
+            Some(role) => role,
+            None => scoped_runtime_role(&self.inner.identity, intent)?.ok_or_else(|| {
+                access_error(
+                    intent,
+                    &self.inner.identity.database_path,
+                    "database write requires an active daemon or exclusive maintenance scope",
+                )
+            })?,
+        };
+        if active == self.inner.role {
+            return Ok(());
+        }
+
+        Err(access_error(
+            intent,
+            &self.inner.identity.database_path,
+            "active database scope does not match the retained write authority",
+        ))
+    }
+
     pub fn token(&self) -> &str {
         &self.inner.token
     }

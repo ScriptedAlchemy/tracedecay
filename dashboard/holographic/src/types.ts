@@ -709,6 +709,9 @@ export interface FactProposalRecord {
   validation_reason?: string | null;
   validation?: unknown;
   reviewer?: string | null;
+  /** Canonical PR7 fact identity; never coerce this to the legacy numeric id. */
+  applied_canonical_fact_id?: string | null;
+  /** Legacy numeric mapping, retained only when a persisted mapping exists. */
   applied_fact_id?: number | null;
   apply_outcome?: unknown;
   created_at: number;

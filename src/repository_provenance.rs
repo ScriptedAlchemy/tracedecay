@@ -1,27 +1,124 @@
 //! Bounded, read-only repository provenance capture.
 //!
-//! This adapter deliberately exposes no generic Git command surface. It reads
-//! identity and immutable object evidence through `gix`, and uses one fixed
-//! porcelain-status probe for the working-state classification that `gix`
-//! cannot provide with this crate's current feature set.
+//! This adapter deliberately exposes no generic Git command surface, object
+//! traversal, index inspection, or worktree-status probing. It reads only
+//! bounded repository/worktree/HEAD/ref/remote identity through `gix`; PR9
+//! owns status, diff, history, blame, and hunk intelligence.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    CommitId, EvidenceAvailabilityV1, PrivacyDomainBoundLocatorDigest, ProjectId, RefId,
-    RepositoryDirtyStateV1, RepositoryEvidenceV1, RepositoryId, RepositoryProvenanceV1, TreeId,
-    UtcMicros, WorktreeId,
+    AnchorDurabilityClass, AnchorSourceGenerationV2, CommitId, CoverageReportV1,
+    DurableObservationV1, EvidenceAvailabilityV1, EvidenceClass,
+    GenerationBoundRepositoryProvenanceV1, PayloadAccessState, PrivacyDomainBoundLocatorDigest,
+    ProjectId, ProjectionGenerationId, RefId, RepositoryEvidenceV1, RepositoryId,
+    RepositoryProvenanceV1, ResolutionAuthorizationV1, RetrievalAnchorRecordV2,
+    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, UtcMicros, VectorWatermark, WorktreeId,
 };
 
-const STATUS_OUTPUT_LIMIT_BYTES: usize = 256 * 1024;
-const STATUS_TIMEOUT: Duration = Duration::from_secs(2);
-const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const MAX_REMOTE_IDENTITY_BYTES: usize = 8 * 1024;
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// Owned, authoritative repository identity supplied by daemon admission.
+///
+/// The project identity comes from the sanitized observation scope, never
+/// from this path-bearing context or mutable Git metadata.
+#[derive(Clone)]
+pub(crate) struct RepositoryProvenanceAdmissionContext {
+    project_root: PathBuf,
+    repository_id: RepositoryId,
+    worktree_id: Option<WorktreeId>,
+    privacy_domain_key: [u8; 32],
+}
+
+impl RepositoryProvenanceAdmissionContext {
+    pub(crate) fn new(
+        project_root: PathBuf,
+        repository_id: RepositoryId,
+        worktree_id: Option<WorktreeId>,
+        privacy_domain_key: [u8; 32],
+    ) -> Self {
+        Self {
+            project_root,
+            repository_id,
+            worktree_id,
+            privacy_domain_key,
+        }
+    }
+
+    /// Capture only after the observation has crossed the privacy boundary.
+    pub(crate) fn capture_after_sanitization(
+        &self,
+        observation: &DurableObservationV1,
+        projection_generation: &ProjectionGenerationId,
+        ingested_at: UtcMicros,
+        authorization: ResolutionAuthorizationV1,
+    ) -> PreparedRepositoryProvenanceV1 {
+        let ObservationProjectId::Known(project_id) =
+            ObservationProjectId::from_observation(observation)
+        else {
+            return PreparedRepositoryProvenanceV1::unavailable();
+        };
+        let captured = capture_repository_provenance(&RepositoryProvenanceProbeRequest::new(
+            &self.project_root,
+            &self.repository_id,
+            Some(project_id),
+            self.worktree_id.as_ref(),
+            &self.privacy_domain_key,
+            ingested_at,
+        ));
+        prepare_generation_binding(
+            captured,
+            observation,
+            projection_generation,
+            ingested_at,
+            authorization,
+        )
+    }
+}
+
+enum ObservationProjectId<'a> {
+    Known(&'a ProjectId),
+    Unavailable,
+}
+
+impl<'a> ObservationProjectId<'a> {
+    fn from_observation(observation: &'a DurableObservationV1) -> Self {
+        match observation.scope() {
+            tracedecay_domain::ObservationScopeV1::Project { project_id } => {
+                Self::Known(project_id)
+            }
+            tracedecay_domain::ObservationScopeV1::Profile => Self::Unavailable,
+        }
+    }
+}
+
+/// Atomic-writer attachment prepared at the post-sanitization boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PreparedRepositoryProvenanceV1 {
+    availability: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1>,
+    anchor: Option<RetrievalAnchorRecordV2>,
+}
+
+impl PreparedRepositoryProvenanceV1 {
+    pub(crate) const fn unavailable() -> Self {
+        Self {
+            availability: EvidenceAvailabilityV1::Unavailable,
+            anchor: None,
+        }
+    }
+
+    pub(crate) fn availability(
+        &self,
+    ) -> &EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1> {
+        &self.availability
+    }
+
+    pub(crate) fn anchor(&self) -> Option<&RetrievalAnchorRecordV2> {
+        self.anchor.as_ref()
+    }
+}
 
 /// Authoritative identities and privacy material supplied by the admission boundary.
 pub(crate) struct RepositoryProvenanceProbeRequest<'a> {
@@ -54,20 +151,8 @@ impl<'a> RepositoryProvenanceProbeRequest<'a> {
 }
 
 /// Fixed native-Git provenance probe. It never writes the index or object store.
-pub(crate) struct NativeRepositoryProvenanceProbe {
-    status_bounds: StatusProbeBounds,
-}
-
-impl Default for NativeRepositoryProvenanceProbe {
-    fn default() -> Self {
-        Self {
-            status_bounds: StatusProbeBounds {
-                max_output_bytes: STATUS_OUTPUT_LIMIT_BYTES,
-                timeout: STATUS_TIMEOUT,
-            },
-        }
-    }
-}
+#[derive(Default)]
+pub(crate) struct NativeRepositoryProvenanceProbe;
 
 impl NativeRepositoryProvenanceProbe {
     pub(crate) fn capture(
@@ -113,14 +198,12 @@ impl NativeRepositoryProvenanceProbe {
         };
 
         let head = observe_head(&repo);
-        let status = fixed_status_probe(&canonical_root, self.status_bounds);
-        let index_tree = observe_index_tree(&repo, &head.tree, &status);
         let Ok(evidence) = RepositoryEvidenceV1::new(
             head.attached_ref,
             head.commit,
-            index_tree,
+            EvidenceAvailabilityV1::Unknown,
             EvidenceAvailabilityV1::Known(path_identity_digest),
-            status.dirty_state,
+            EvidenceAvailabilityV1::Unknown,
         ) else {
             return EvidenceAvailabilityV1::Unavailable;
         };
@@ -149,17 +232,93 @@ pub(crate) fn capture_repository_provenance(
     NativeRepositoryProvenanceProbe::default().capture(request)
 }
 
-#[derive(Clone, Copy)]
-struct StatusProbeBounds {
-    max_output_bytes: usize,
-    timeout: Duration,
+fn prepare_generation_binding(
+    captured: EvidenceAvailabilityV1<RepositoryProvenanceV1>,
+    observation: &DurableObservationV1,
+    projection_generation: &ProjectionGenerationId,
+    ingested_at: UtcMicros,
+    authorization: ResolutionAuthorizationV1,
+) -> PreparedRepositoryProvenanceV1 {
+    let availability = match captured {
+        EvidenceAvailabilityV1::Known(capture) => {
+            bind_capture(capture, observation, projection_generation, false)
+        }
+        EvidenceAvailabilityV1::PartiallyReadable(capture) => {
+            bind_capture(capture, observation, projection_generation, true)
+        }
+        EvidenceAvailabilityV1::Missing => EvidenceAvailabilityV1::Missing,
+        EvidenceAvailabilityV1::Unborn => EvidenceAvailabilityV1::Unborn,
+        EvidenceAvailabilityV1::Detached => EvidenceAvailabilityV1::Detached,
+        EvidenceAvailabilityV1::Conflicted => EvidenceAvailabilityV1::Conflicted,
+        EvidenceAvailabilityV1::Unsupported => EvidenceAvailabilityV1::Unsupported,
+        EvidenceAvailabilityV1::Unavailable => EvidenceAvailabilityV1::Unavailable,
+        EvidenceAvailabilityV1::Unknown => EvidenceAvailabilityV1::Unknown,
+    };
+    let Some(binding) = availability.value() else {
+        return PreparedRepositoryProvenanceV1 {
+            availability,
+            anchor: None,
+        };
+    };
+    let capture = binding.capture();
+    let target = RetrievalAnchorTargetV2::RepositoryCapture {
+        repository_id: capture.repository_id().clone(),
+        capture_id: binding.capture_id().clone(),
+        receipt: observation.receipt().receipt().clone(),
+    };
+    let anchor = RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+        target,
+        owner: observation.scope().clone(),
+        aliases: vec![],
+        occurred_at: None,
+        ingested_at,
+        evidence_class: EvidenceClass::Observed,
+        source_generation: AnchorSourceGenerationV2::RepositoryCapture(
+            binding.capture_id().clone(),
+        ),
+        projection_generation: projection_generation.clone(),
+        projection_watermark: VectorWatermark::default(),
+        coverage: CoverageReportV1::default(),
+        source_observations: vec![observation.observation_id().clone()],
+        source_anchors: vec![],
+        authorization,
+        payload_access: PayloadAccessState::Eligible,
+        retention_class: observation.retention_class().clone(),
+        durability: AnchorDurabilityClass::DurableEvidence,
+    });
+    match anchor {
+        Ok(anchor) => PreparedRepositoryProvenanceV1 {
+            availability,
+            anchor: Some(anchor),
+        },
+        Err(_) => PreparedRepositoryProvenanceV1::unavailable(),
+    }
+}
+
+fn bind_capture(
+    capture: RepositoryProvenanceV1,
+    observation: &DurableObservationV1,
+    projection_generation: &ProjectionGenerationId,
+    partially_readable: bool,
+) -> EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1> {
+    let Ok(binding) = GenerationBoundRepositoryProvenanceV1::new(
+        projection_generation.clone(),
+        capture,
+        Some(observation.observation_id().clone()),
+    ) else {
+        return EvidenceAvailabilityV1::Unavailable;
+    };
+    if partially_readable {
+        EvidenceAvailabilityV1::PartiallyReadable(binding)
+    } else {
+        EvidenceAvailabilityV1::Known(binding)
+    }
 }
 
 #[derive(Debug)]
 struct HeadObservation {
     attached_ref: EvidenceAvailabilityV1<RefId>,
     commit: EvidenceAvailabilityV1<CommitId>,
-    tree: EvidenceAvailabilityV1<TreeId>,
 }
 
 fn observe_head(repo: &gix::Repository) -> HeadObservation {
@@ -167,7 +326,6 @@ fn observe_head(repo: &gix::Repository) -> HeadObservation {
         return HeadObservation {
             attached_ref: EvidenceAvailabilityV1::Unavailable,
             commit: EvidenceAvailabilityV1::Unavailable,
-            tree: EvidenceAvailabilityV1::Unavailable,
         };
     };
     let attached_ref = if head.is_detached() {
@@ -185,231 +343,20 @@ fn observe_head(repo: &gix::Repository) -> HeadObservation {
         return HeadObservation {
             attached_ref,
             commit: EvidenceAvailabilityV1::Unborn,
-            tree: EvidenceAvailabilityV1::Unborn,
         };
     }
 
-    let Ok(commit) = repo.head_commit() else {
-        return HeadObservation {
-            attached_ref,
-            commit: EvidenceAvailabilityV1::Unavailable,
-            tree: EvidenceAvailabilityV1::Unavailable,
-        };
-    };
-    let commit_id = CommitId::new(commit.id().to_hex().to_string()).map_or(
-        EvidenceAvailabilityV1::Unknown,
-        EvidenceAvailabilityV1::Known,
-    );
-    let tree = commit
-        .tree_id()
+    let commit_id = head
+        .id()
         .ok()
-        .and_then(|id| TreeId::new(id.to_hex().to_string()).ok())
+        .and_then(|id| CommitId::new(id.to_hex().to_string()).ok())
         .map_or(
-            EvidenceAvailabilityV1::Unavailable,
+            EvidenceAvailabilityV1::Unknown,
             EvidenceAvailabilityV1::Known,
         );
     HeadObservation {
         attached_ref,
         commit: commit_id,
-        tree,
-    }
-}
-
-fn observe_index_tree(
-    repo: &gix::Repository,
-    head_tree: &EvidenceAvailabilityV1<TreeId>,
-    status: &StatusObservation,
-) -> EvidenceAvailabilityV1<TreeId> {
-    let index = match repo.try_index() {
-        Ok(Some(index)) => index,
-        Ok(None) => return EvidenceAvailabilityV1::Missing,
-        Err(_) => return EvidenceAvailabilityV1::Unavailable,
-    };
-    if index.entries().iter().any(|entry| entry.stage_raw() != 0) || status.conflicted {
-        return EvidenceAvailabilityV1::Conflicted;
-    }
-    match (head_tree, status.index_matches_head) {
-        (EvidenceAvailabilityV1::Known(tree), Some(true)) => {
-            EvidenceAvailabilityV1::Known(tree.clone())
-        }
-        (EvidenceAvailabilityV1::Unborn, _) => EvidenceAvailabilityV1::Unborn,
-        (EvidenceAvailabilityV1::Unavailable, _) => EvidenceAvailabilityV1::Unavailable,
-        (EvidenceAvailabilityV1::Unknown, _) => EvidenceAvailabilityV1::Unknown,
-        (_, Some(false)) => EvidenceAvailabilityV1::Unsupported,
-        _ => EvidenceAvailabilityV1::Unknown,
-    }
-}
-
-#[derive(Debug)]
-struct StatusObservation {
-    dirty_state: EvidenceAvailabilityV1<RepositoryDirtyStateV1>,
-    index_matches_head: Option<bool>,
-    conflicted: bool,
-}
-
-impl StatusObservation {
-    fn unavailable() -> Self {
-        Self {
-            dirty_state: EvidenceAvailabilityV1::Unavailable,
-            index_matches_head: None,
-            conflicted: false,
-        }
-    }
-}
-
-fn fixed_status_probe(project_root: &Path, bounds: StatusProbeBounds) -> StatusObservation {
-    let mut command = Command::new(crate::git::git_program());
-    command
-        .args([
-            "--no-optional-locks",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.untrackedCache=false",
-            "status",
-            "--porcelain=v2",
-            "-z",
-            "--untracked-files=normal",
-            "--ignore-submodules=none",
-            "--",
-        ])
-        .current_dir(project_root)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let Ok(mut child) = command.spawn() else {
-        return StatusObservation::unavailable();
-    };
-    let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return StatusObservation::unavailable();
-    };
-    let max_output_bytes = bounds.max_output_bytes.max(1);
-    let reader = thread::spawn(move || read_bounded(stdout, max_output_bytes));
-    let deadline = Instant::now() + bounds.timeout;
-    let mut timed_out = false;
-    let mut wait_failed = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() >= deadline => {
-                timed_out = true;
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            Ok(None) => thread::sleep(STATUS_POLL_INTERVAL),
-            Err(_) => {
-                wait_failed = true;
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-        }
-    };
-    let Ok(output) = reader.join() else {
-        return StatusObservation::unavailable();
-    };
-    let Ok(output) = output else {
-        return StatusObservation::unavailable();
-    };
-    if wait_failed {
-        return StatusObservation::unavailable();
-    }
-    if timed_out || output.truncated {
-        return partial_status(&output.bytes);
-    }
-    if !status.is_some_and(|status| status.success()) {
-        return StatusObservation::unavailable();
-    }
-    complete_status(&output.bytes)
-}
-
-struct BoundedOutput {
-    bytes: Vec<u8>,
-    truncated: bool,
-}
-
-fn read_bounded(mut reader: impl Read, max_output_bytes: usize) -> std::io::Result<BoundedOutput> {
-    let mut bytes = Vec::with_capacity(max_output_bytes.min(8 * 1024));
-    let mut truncated = false;
-    let mut chunk = [0_u8; 8 * 1024];
-    loop {
-        let read = reader.read(&mut chunk)?;
-        if read == 0 {
-            break;
-        }
-        let remaining = max_output_bytes.saturating_sub(bytes.len());
-        let retained = remaining.min(read);
-        bytes.extend_from_slice(&chunk[..retained]);
-        truncated |= retained < read;
-    }
-    Ok(BoundedOutput { bytes, truncated })
-}
-
-#[derive(Clone, Copy)]
-struct PorcelainSummary {
-    dirty: bool,
-    conflicted: bool,
-    staged: bool,
-}
-
-fn summarize_porcelain(bytes: &[u8]) -> PorcelainSummary {
-    let mut summary = PorcelainSummary {
-        dirty: !bytes.is_empty(),
-        conflicted: false,
-        staged: false,
-    };
-    for record in bytes
-        .split(|byte| *byte == 0)
-        .filter(|record| !record.is_empty())
-    {
-        if record.starts_with(b"u ") {
-            summary.conflicted = true;
-            summary.staged = true;
-        } else if (record.starts_with(b"1 ") || record.starts_with(b"2 "))
-            && record.get(2).is_some_and(|state| *state != b'.')
-        {
-            summary.staged = true;
-        }
-    }
-    summary
-}
-
-fn complete_status(bytes: &[u8]) -> StatusObservation {
-    let summary = summarize_porcelain(bytes);
-    let state = if summary.conflicted {
-        RepositoryDirtyStateV1::Conflicted
-    } else if summary.dirty {
-        RepositoryDirtyStateV1::Dirty
-    } else {
-        RepositoryDirtyStateV1::Clean
-    };
-    StatusObservation {
-        dirty_state: EvidenceAvailabilityV1::Known(state),
-        index_matches_head: Some(!summary.staged),
-        conflicted: summary.conflicted,
-    }
-}
-
-fn partial_status(bytes: &[u8]) -> StatusObservation {
-    if bytes.is_empty() {
-        return StatusObservation::unavailable();
-    }
-    let summary = summarize_porcelain(bytes);
-    let state = if summary.conflicted {
-        RepositoryDirtyStateV1::Conflicted
-    } else {
-        RepositoryDirtyStateV1::Dirty
-    };
-    StatusObservation {
-        dirty_state: EvidenceAvailabilityV1::PartiallyReadable(state),
-        index_matches_head: None,
-        conflicted: summary.conflicted,
     }
 }
 
@@ -423,7 +370,11 @@ fn credential_free_remote_identity(repo: &gix::Repository) -> Option<Vec<u8>> {
         .config_snapshot()
         .string("remote.origin.url")?
         .to_string();
-    normalize_remote_without_credentials(&remote).map(String::into_bytes)
+    if remote.len() > MAX_REMOTE_IDENTITY_BYTES {
+        return None;
+    }
+    let normalized = normalize_remote_without_credentials(&remote)?;
+    (normalized.len() <= MAX_REMOTE_IDENTITY_BYTES).then_some(normalized.into_bytes())
 }
 
 fn normalize_remote_without_credentials(remote: &str) -> Option<String> {
@@ -485,7 +436,7 @@ fn hash_frame(hasher: &mut Sha256, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::process::Output;
+    use std::process::{Command, Output};
 
     use tempfile::TempDir;
 
@@ -557,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn clean_capture_has_exact_head_ref_index_and_private_locator_evidence() {
+    fn identity_capture_keeps_head_ref_and_private_locator_evidence() {
         let fixture = GitFixture::new();
         fixture.commit("initial");
         fixture.git(&[
@@ -578,12 +529,12 @@ mod tests {
         ));
         assert!(matches!(
             capture.evidence().index_tree(),
-            EvidenceAvailabilityV1::Known(_)
+            EvidenceAvailabilityV1::Unknown
         ));
-        assert_eq!(
+        assert!(matches!(
             capture.evidence().dirty_state(),
-            &EvidenceAvailabilityV1::Known(RepositoryDirtyStateV1::Clean)
-        );
+            EvidenceAvailabilityV1::Unknown
+        ));
         let encoded = serde_json::to_string(&capture).unwrap();
         assert!(!encoded.contains("alice"));
         assert!(!encoded.contains("top-secret"));
@@ -631,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn conflicted_index_and_worktree_are_explicit() {
+    fn conflicted_worktree_stays_unknown_without_a_status_probe() {
         let fixture = GitFixture::new();
         fixture.commit("base");
         fixture.git(&["checkout", "-q", "-b", "side"]);
@@ -646,53 +597,10 @@ mod tests {
         assert!(!merge.status.success());
 
         let capture = fixture.capture();
-        assert_eq!(
-            capture.evidence().dirty_state(),
-            &EvidenceAvailabilityV1::Known(RepositoryDirtyStateV1::Conflicted)
-        );
         assert!(matches!(
-            capture.evidence().index_tree(),
-            EvidenceAvailabilityV1::Conflicted
-        ));
-    }
-
-    #[test]
-    fn changed_index_is_typed_unsupported_without_materializing_a_tree() {
-        let fixture = GitFixture::new();
-        fixture.commit("base");
-        fs::write(fixture.path().join("tracked.txt"), "staged").unwrap();
-        fixture.git(&["add", "--", "tracked.txt"]);
-
-        let capture = fixture.capture();
-        assert_eq!(
             capture.evidence().dirty_state(),
-            &EvidenceAvailabilityV1::Known(RepositoryDirtyStateV1::Dirty)
-        );
-        assert!(matches!(
-            capture.evidence().index_tree(),
-            EvidenceAvailabilityV1::Unsupported
+            EvidenceAvailabilityV1::Unknown
         ));
-    }
-
-    #[test]
-    fn output_cap_reports_partial_without_claiming_an_index_tree() {
-        let fixture = GitFixture::new();
-        fixture.commit("base");
-        fs::write(fixture.path().join("untracked.txt"), "dirty").unwrap();
-        let probe = NativeRepositoryProvenanceProbe {
-            status_bounds: StatusProbeBounds {
-                max_output_bytes: 1,
-                timeout: STATUS_TIMEOUT,
-            },
-        };
-        let capture = match fixture.capture_with(&probe) {
-            EvidenceAvailabilityV1::Known(capture) => capture,
-            other => panic!("expected known capture, got {other:?}"),
-        };
-        assert_eq!(
-            capture.evidence().dirty_state(),
-            &EvidenceAvailabilityV1::PartiallyReadable(RepositoryDirtyStateV1::Dirty)
-        );
         assert!(matches!(
             capture.evidence().index_tree(),
             EvidenceAvailabilityV1::Unknown
@@ -700,17 +608,23 @@ mod tests {
     }
 
     #[test]
-    fn capture_does_not_write_the_index_or_object_database() {
+    fn oversized_remote_is_omitted_from_the_bounded_identity_frame() {
         let fixture = GitFixture::new();
         fixture.commit("base");
-        let git_dir = fixture.path().join(".git");
-        let index_before = fs::read(git_dir.join("index")).unwrap();
-        let objects_before = object_files(&git_dir.join("objects"));
+        let remote = format!(
+            "https://example.invalid/{}",
+            "x".repeat(MAX_REMOTE_IDENTITY_BYTES)
+        );
+        fixture.git(&["remote", "add", "origin", &remote]);
 
-        let _ = fixture.capture();
-
-        assert_eq!(fs::read(git_dir.join("index")).unwrap(), index_before);
-        assert_eq!(object_files(&git_dir.join("objects")), objects_before);
+        let oversized = fixture.capture();
+        fixture.git(&["remote", "remove", "origin"]);
+        let without_remote = fixture.capture();
+        assert_eq!(
+            oversized.evidence().path_identity_digest(),
+            without_remote.evidence().path_identity_digest(),
+            "oversized remote values must be treated as unavailable rather than retained"
+        );
     }
 
     #[test]
@@ -726,34 +640,6 @@ mod tests {
             normalize_remote_without_credentials("git@example.com:Owner/Repo.git").unwrap(),
             "ssh://example.com/Owner/Repo"
         );
-    }
-
-    fn object_files(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-        fn visit(root: &Path, path: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
-            for entry in fs::read_dir(path).unwrap() {
-                let entry = entry.unwrap();
-                let path = entry.path();
-                if path.is_dir() {
-                    visit(root, &path, files);
-                } else if path.is_file() {
-                    files.push((
-                        path.strip_prefix(root).unwrap().to_path_buf(),
-                        fs::read(path).unwrap(),
-                    ));
-                }
-            }
-        }
-        let mut files = Vec::new();
-        visit(root, root, &mut files);
-        files.sort_by(|left, right| left.0.cmp(&right.0));
-        files
-    }
-
-    #[test]
-    fn bounded_reader_discards_excess_bytes_without_growing_the_retained_buffer() {
-        let output = read_bounded(&b"abcdef"[..], 3).unwrap();
-        assert_eq!(output.bytes, b"abc");
-        assert!(output.truncated);
     }
 
     #[test]

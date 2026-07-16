@@ -123,7 +123,7 @@ pub(super) async fn handle_dashboard(
                 automation_scheduler_reconciler,
                 automation_writer,
             )
-            .await;
+            .await?;
 
             let app = router(state);
             let (listener, addr) = bind_dashboard(&host, port).await?;

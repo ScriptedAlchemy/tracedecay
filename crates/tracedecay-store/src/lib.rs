@@ -11,13 +11,15 @@ pub mod transcript;
 
 pub use memory::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitConflict, FactCommitOutcome, FactCommitReceipt,
-    FactCurrentQuery, FactLineageCursor, FactLineageQuery, FactStore, FactStoreError,
-    FactStoreResult, FactWriteBatch, LegacyFactQuery, RetrievalAnchorQuery, StoredFactV1,
+    FactCurrentQuery, FactLineageCursor, FactLineageQuery, FactProposalPromotionStateV1,
+    FactProposalStore, FactProposalStoreError, FactStore, FactStoreError, FactStoreResult,
+    FactWriteBatch, LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome,
+    RetrievalAnchorQuery, StoredFactV1,
 };
 pub use observation::{
     AnchoredObservationWrite, ObservationCommitReceipt, ObservationPersistOutcome,
     ObservationProjectionStatus, ObservationReplayRequest, ObservationStore, ObservationStoreError,
-    ObservationStoreResult, ObservationWrite, StoredObservation,
+    ObservationStoreResult, ObservationWrite, RepositoryProvenanceAttachmentV1, StoredObservation,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 pub use projection::{

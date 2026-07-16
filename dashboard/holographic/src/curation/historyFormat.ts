@@ -63,7 +63,8 @@ export function factProposalDetail(proposal: FactProposalRecord): string {
   const category = proposal.add_fact_request?.category
     ? ` · category=${proposal.add_fact_request.category}`
     : "";
-  const factId = proposal.applied_fact_id ? ` · fact=${proposal.applied_fact_id}` : "";
+  const appliedFactId = proposal.applied_fact_id ?? proposal.applied_canonical_fact_id;
+  const factId = appliedFactId == null ? "" : ` · fact=${appliedFactId}`;
   return `${proposal.run_id}${category}${tagsText}${factId}`;
 }
 

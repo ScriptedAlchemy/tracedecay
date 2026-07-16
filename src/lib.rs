@@ -58,7 +58,6 @@ mod path_tree;
 pub mod privacy;
 pub mod project_registry;
 pub mod redundancy;
-#[allow(dead_code)]
 mod repository_provenance;
 pub mod resolution;
 pub mod retention;

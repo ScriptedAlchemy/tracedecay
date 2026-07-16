@@ -3,14 +3,19 @@ use std::error::Error;
 use std::future::Future;
 
 use tracedecay_domain::{
-    Confidence, DomainError, FactAssertionId, FactAssertionV1, FactEventId, FactId,
-    FactIdentityMaterialV1, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1,
-    LegacyFactMappingV1, PayloadAccessState, RetrievalAnchorId, RetrievalAnchorRecordV2,
-    SourceStoreId, UtcMicros,
+    ActorId, Confidence, DomainError, EntityRef, FactAssertionId, FactAssertionV1, FactEventId,
+    FactEvidenceRelationV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
+    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, LegacyFactMappingV1,
+    LegacyHistoryCoverageV1, PayloadAccessState, ProvenanceId, RetrievalAnchorId,
+    RetrievalAnchorRecordV2, SourceStoreId, UtcMicros, VectorWatermark,
 };
 
 const MAX_CURRENT_LIMIT: usize = 1_000;
 const MAX_LINEAGE_LIMIT: usize = 1_000;
+const MAX_COMPATIBILITY_SEARCH_BYTES: usize = 4 * 1024;
+const MAX_COMPATIBILITY_REASON_BYTES: usize = 4 * 1024;
+const MAX_COMPATIBILITY_VECTOR_DIMENSIONS: u32 = 16_384;
+const MAX_COMPATIBILITY_VECTOR_BYTES: usize = 64 * 1024;
 
 /// One validated, atomic append to a fact's authoritative lineage.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -774,6 +779,838 @@ pub trait FactStore: Send + Sync {
         &self,
         query: RetrievalAnchorQuery,
     ) -> impl Future<Output = FactStoreResult<Option<RetrievalAnchorRecordV2>>> + Send;
+}
+
+/// Authoritative proposal states from which an interrupted promotion may resume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FactProposalPromotionStateV1 {
+    PendingApproval,
+    Applying,
+}
+
+/// One compare-and-swap request whose proposal transition and fact batch must
+/// commit in the same authority transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromoteFactProposal {
+    proposal_id: ProvenanceId,
+    owner: FactOwnerV1,
+    expected_state: FactProposalPromotionStateV1,
+    reviewer: Option<ActorId>,
+    batch: FactWriteBatch,
+}
+
+impl PromoteFactProposal {
+    pub fn new(
+        proposal_id: ProvenanceId,
+        owner: FactOwnerV1,
+        expected_state: FactProposalPromotionStateV1,
+        reviewer: Option<ActorId>,
+        batch: FactWriteBatch,
+    ) -> FactStoreResult<Self> {
+        proposal_id.validate()?;
+        owner.validate()?;
+        if let Some(reviewer) = &reviewer {
+            reviewer.validate()?;
+        }
+        if batch.owner() != &owner {
+            return Err(FactStoreError::OwnerMismatch);
+        }
+        Ok(Self {
+            proposal_id,
+            owner,
+            expected_state,
+            reviewer,
+            batch,
+        })
+    }
+
+    pub fn proposal_id(&self) -> &ProvenanceId {
+        &self.proposal_id
+    }
+
+    pub fn owner(&self) -> &FactOwnerV1 {
+        &self.owner
+    }
+
+    pub fn expected_state(&self) -> FactProposalPromotionStateV1 {
+        self.expected_state
+    }
+
+    pub fn reviewer(&self) -> Option<&ActorId> {
+        self.reviewer.as_ref()
+    }
+
+    pub fn batch(&self) -> &FactWriteBatch {
+        &self.batch
+    }
+
+    pub fn into_batch(self) -> FactWriteBatch {
+        self.batch
+    }
+}
+
+/// Result of one atomic proposal CAS and fact append.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromoteFactProposalOutcome {
+    proposal_id: ProvenanceId,
+    previous_state: FactProposalPromotionStateV1,
+    commit: FactCommitOutcome,
+}
+
+impl PromoteFactProposalOutcome {
+    pub fn new(
+        proposal_id: ProvenanceId,
+        previous_state: FactProposalPromotionStateV1,
+        commit: FactCommitOutcome,
+    ) -> Result<Self, DomainError> {
+        proposal_id.validate()?;
+        Ok(Self {
+            proposal_id,
+            previous_state,
+            commit,
+        })
+    }
+
+    pub fn proposal_id(&self) -> &ProvenanceId {
+        &self.proposal_id
+    }
+
+    pub fn previous_state(&self) -> FactProposalPromotionStateV1 {
+        self.previous_state
+    }
+
+    pub fn commit(&self) -> &FactCommitOutcome {
+        &self.commit
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FactProposalStoreError {
+    #[error("fact authority operation failed")]
+    Store(#[from] FactStoreError),
+    #[error("fact proposal {proposal_id} state changed before promotion")]
+    ProposalStateConflict {
+        proposal_id: ProvenanceId,
+        expected: FactProposalPromotionStateV1,
+        actual: Option<FactProposalPromotionStateV1>,
+    },
+    #[error("fact proposal storage operation {operation} failed")]
+    Storage {
+        operation: &'static str,
+        #[source]
+        source: Box<dyn Error + Send + Sync>,
+    },
+}
+
+/// Owner-bound compound authority for atomically promoting one proposal.
+pub trait FactProposalStore: FactStore {
+    fn promote_fact_proposal(
+        &self,
+        promotion: PromoteFactProposal,
+    ) -> impl Future<Output = Result<PromoteFactProposalOutcome, FactProposalStoreError>> + Send;
+}
+
+/// Stable, owner-bound identifier used by V1-compatible fact surfaces.  It is
+/// deliberately the canonical fact identity rather than a process-local row
+/// number; an optional [`LegacyFactMappingV1`] carries a historical `i64` only
+/// where the authoritative migration reconstructed one.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CompatibilityFactIdV1 {
+    owner: FactOwnerV1,
+    fact_id: FactId,
+}
+
+impl CompatibilityFactIdV1 {
+    pub fn new(owner: FactOwnerV1, fact_id: FactId) -> FactStoreResult<Self> {
+        owner.validate()?;
+        validate_owned_fact_id(&fact_id, &owner)?;
+        Ok(Self { owner, fact_id })
+    }
+
+    pub fn from_legacy_mapping(mapping: &LegacyFactMappingV1) -> FactStoreResult<Self> {
+        Self::new(mapping.owner().clone(), mapping.fact_id().clone())
+    }
+
+    pub fn owner(&self) -> &FactOwnerV1 {
+        &self.owner
+    }
+
+    pub fn fact_id(&self) -> &FactId {
+        &self.fact_id
+    }
+}
+
+/// Owner-bound forward/reverse compatibility mapping.  The optional legacy
+/// mapping is the sole source of a legacy integer identifier; callers must not
+/// coerce or hash canonical identifiers into one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompatibilityFactMappingV1 {
+    compatibility_id: CompatibilityFactIdV1,
+    legacy_mapping: Option<LegacyFactMappingV1>,
+}
+
+impl CompatibilityFactMappingV1 {
+    pub fn new(
+        compatibility_id: CompatibilityFactIdV1,
+        legacy_mapping: Option<LegacyFactMappingV1>,
+    ) -> FactStoreResult<Self> {
+        if let Some(mapping) = &legacy_mapping {
+            if mapping.owner() != compatibility_id.owner() {
+                return Err(FactStoreError::OwnerMismatch);
+            }
+            if mapping.fact_id() != compatibility_id.fact_id() {
+                return Err(FactStoreError::FactMismatch);
+            }
+        }
+        Ok(Self {
+            compatibility_id,
+            legacy_mapping,
+        })
+    }
+
+    pub fn compatibility_id(&self) -> &CompatibilityFactIdV1 {
+        &self.compatibility_id
+    }
+
+    pub fn owner(&self) -> &FactOwnerV1 {
+        self.compatibility_id.owner()
+    }
+
+    pub fn fact_id(&self) -> &FactId {
+        self.compatibility_id.fact_id()
+    }
+
+    pub fn legacy_mapping(&self) -> Option<&LegacyFactMappingV1> {
+        self.legacy_mapping.as_ref()
+    }
+
+    pub fn legacy_fact_id(&self) -> Option<i64> {
+        self.legacy_mapping
+            .as_ref()
+            .map(LegacyFactMappingV1::legacy_fact_id)
+    }
+
+    pub fn history_coverage(&self) -> Option<LegacyHistoryCoverageV1> {
+        self.legacy_mapping
+            .as_ref()
+            .map(LegacyFactMappingV1::history_coverage)
+    }
+}
+
+/// Typed source provenance for a compatibility projection.  Canonical sources
+/// contain only sanitized domain identifiers; `Unknown` is explicit for legacy
+/// history that cannot be reconstructed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompatibilityFactSourceV1 {
+    Canonical(FactIdentitySourceV1),
+    Unknown,
+}
+
+impl CompatibilityFactSourceV1 {
+    fn validate_for_owner(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
+        if let Self::Canonical(source) = self {
+            FactIdentityMaterialV1::new(owner.clone(), source.clone())?;
+        }
+        Ok(())
+    }
+}
+
+/// Counters and timestamps V1 clients expose.  They are non-negative by type
+/// and stay separate from the immutable fact payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompatibilityFactTelemetryV1 {
+    retrieval_count: u64,
+    access_count: u64,
+    helpful_count: u64,
+    unhelpful_count: u64,
+    created_at: UtcMicros,
+    updated_at: UtcMicros,
+    last_retrieved_at: Option<UtcMicros>,
+    last_recalled_at: Option<UtcMicros>,
+    last_feedback_at: Option<UtcMicros>,
+}
+
+impl CompatibilityFactTelemetryV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        retrieval_count: u64,
+        access_count: u64,
+        helpful_count: u64,
+        unhelpful_count: u64,
+        created_at: UtcMicros,
+        updated_at: UtcMicros,
+        last_retrieved_at: Option<UtcMicros>,
+        last_recalled_at: Option<UtcMicros>,
+        last_feedback_at: Option<UtcMicros>,
+    ) -> FactStoreResult<Self> {
+        if updated_at < created_at
+            || last_retrieved_at.is_some_and(|value| value < created_at)
+            || last_recalled_at.is_some_and(|value| value < created_at)
+            || last_feedback_at.is_some_and(|value| value < created_at)
+        {
+            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                field: "compatibility fact telemetry timestamps",
+            }));
+        }
+        Ok(Self {
+            retrieval_count,
+            access_count,
+            helpful_count,
+            unhelpful_count,
+            created_at,
+            updated_at,
+            last_retrieved_at,
+            last_recalled_at,
+            last_feedback_at,
+        })
+    }
+
+    pub fn retrieval_count(&self) -> u64 {
+        self.retrieval_count
+    }
+    pub fn access_count(&self) -> u64 {
+        self.access_count
+    }
+    pub fn helpful_count(&self) -> u64 {
+        self.helpful_count
+    }
+    pub fn unhelpful_count(&self) -> u64 {
+        self.unhelpful_count
+    }
+    pub fn created_at(&self) -> UtcMicros {
+        self.created_at
+    }
+    pub fn updated_at(&self) -> UtcMicros {
+        self.updated_at
+    }
+    pub fn last_retrieved_at(&self) -> Option<UtcMicros> {
+        self.last_retrieved_at
+    }
+    pub fn last_recalled_at(&self) -> Option<UtcMicros> {
+        self.last_recalled_at
+    }
+    pub fn last_feedback_at(&self) -> Option<UtcMicros> {
+        self.last_feedback_at
+    }
+}
+
+/// V1-shaped projection of one canonical fact.  `StoredFactV1` keeps access
+/// state and the sanitized [`FactPayloadV1`] together so adapters cannot expose
+/// deleted or un-sanitized payload fields accidentally.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompatibilityFactV1 {
+    fact: StoredFactV1,
+    mapping: CompatibilityFactMappingV1,
+    source: CompatibilityFactSourceV1,
+    telemetry: CompatibilityFactTelemetryV1,
+}
+
+impl CompatibilityFactV1 {
+    pub fn new(
+        fact: StoredFactV1,
+        mapping: CompatibilityFactMappingV1,
+        source: CompatibilityFactSourceV1,
+        telemetry: CompatibilityFactTelemetryV1,
+    ) -> FactStoreResult<Self> {
+        if fact.owner() != mapping.owner() {
+            return Err(FactStoreError::OwnerMismatch);
+        }
+        if fact.fact_id() != mapping.fact_id() {
+            return Err(FactStoreError::FactMismatch);
+        }
+        if let Some(legacy) = fact.legacy_mapping() {
+            if mapping.legacy_mapping() != Some(legacy) {
+                return Err(FactStoreError::FactMismatch);
+            }
+        }
+        source.validate_for_owner(fact.owner())?;
+        if let CompatibilityFactSourceV1::Canonical(identity_source) = &source {
+            let material =
+                FactIdentityMaterialV1::new(fact.owner().clone(), identity_source.clone())?;
+            if FactId::derive(&material)? != *fact.fact_id() {
+                return Err(FactStoreError::FactMismatch);
+            }
+        }
+        Ok(Self {
+            fact,
+            mapping,
+            source,
+            telemetry,
+        })
+    }
+
+    pub fn validate_for_owner(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
+        if self.owner() != owner {
+            return Err(FactStoreError::OwnerMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn fact(&self) -> &StoredFactV1 {
+        &self.fact
+    }
+    pub fn owner(&self) -> &FactOwnerV1 {
+        self.fact.owner()
+    }
+    pub fn fact_id(&self) -> &FactId {
+        self.fact.fact_id()
+    }
+    pub fn mapping(&self) -> &CompatibilityFactMappingV1 {
+        &self.mapping
+    }
+    pub fn legacy_fact_id(&self) -> Option<i64> {
+        self.mapping.legacy_fact_id()
+    }
+    pub fn source(&self) -> &CompatibilityFactSourceV1 {
+        &self.source
+    }
+    pub fn telemetry(&self) -> &CompatibilityFactTelemetryV1 {
+        &self.telemetry
+    }
+    pub fn payload(&self) -> Option<&FactPayloadV1> {
+        self.fact.payload()
+    }
+}
+
+/// A bounded, deterministic compatibility list page.  Facts are sorted by
+/// canonical `FactId` ascending, which makes the cursor stable across rebuilds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompatibilityFactPageV1 {
+    owner: FactOwnerV1,
+    facts: Vec<CompatibilityFactV1>,
+    next_after_fact_id: Option<FactId>,
+}
+
+impl CompatibilityFactPageV1 {
+    pub fn new(
+        owner: FactOwnerV1,
+        facts: Vec<CompatibilityFactV1>,
+        next_after_fact_id: Option<FactId>,
+    ) -> FactStoreResult<Self> {
+        owner.validate()?;
+        if facts.len() > MAX_CURRENT_LIMIT {
+            return Err(FactStoreError::InvalidQueryLimit {
+                limit: facts.len(),
+                max: MAX_CURRENT_LIMIT,
+            });
+        }
+        let mut previous: Option<&FactId> = None;
+        for fact in &facts {
+            fact.validate_for_owner(&owner)?;
+            if previous.is_some_and(|value| value >= fact.fact_id()) {
+                return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                    field: "compatibility fact page order",
+                }));
+            }
+            previous = Some(fact.fact_id());
+        }
+        if let Some(cursor) = &next_after_fact_id {
+            validate_owned_fact_id(cursor, &owner)?;
+            if previous.is_some_and(|last| cursor <= last) {
+                return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                    field: "compatibility fact page cursor",
+                }));
+            }
+        }
+        Ok(Self {
+            owner,
+            facts,
+            next_after_fact_id,
+        })
+    }
+
+    pub fn validate_for_owner(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
+        if &self.owner != owner {
+            return Err(FactStoreError::OwnerMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn owner(&self) -> &FactOwnerV1 {
+        &self.owner
+    }
+    pub fn facts(&self) -> &[CompatibilityFactV1] {
+        &self.facts
+    }
+    pub fn next_after_fact_id(&self) -> Option<&FactId> {
+        self.next_after_fact_id.as_ref()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompatibilityFactSearchKindV1 {
+    Search,
+    Probe,
+    Related { fact_id: FactId },
+    Reason { fact_id: FactId },
+}
+
+impl CompatibilityFactSearchKindV1 {
+    fn validate_for_owner(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
+        if let Self::Related { fact_id } | Self::Reason { fact_id } = self {
+            validate_owned_fact_id(fact_id, owner)?;
+        }
+        Ok(())
+    }
+}
+
+/// Bounded request for search, probe, related, or reason retrieval.  Search
+/// results must use deterministic score/fact-ID ordering in the response DTO.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompatibilityFactSearchQuery {
+    owner: FactOwnerV1,
+    kind: CompatibilityFactSearchKindV1,
+    query: Option<String>,
+    after_fact_id: Option<FactId>,
+    limit: usize,
+}
+
+impl CompatibilityFactSearchQuery {
+    pub fn new(
+        owner: FactOwnerV1,
+        kind: CompatibilityFactSearchKindV1,
+        query: Option<String>,
+        after_fact_id: Option<FactId>,
+        limit: usize,
+    ) -> FactStoreResult<Self> {
+        owner.validate()?;
+        kind.validate_for_owner(&owner)?;
+        if let Some(query) = &query {
+            if query.trim().is_empty() || query.len() > MAX_COMPATIBILITY_SEARCH_BYTES {
+                return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                    field: "compatibility fact search query",
+                }));
+            }
+        } else if matches!(
+            kind,
+            CompatibilityFactSearchKindV1::Search | CompatibilityFactSearchKindV1::Probe
+        ) {
+            return Err(FactStoreError::Contract(DomainError::Empty {
+                field: "compatibility fact search query",
+            }));
+        }
+        if let Some(cursor) = &after_fact_id {
+            validate_owned_fact_id(cursor, &owner)?;
+        }
+        validate_limit(limit, MAX_CURRENT_LIMIT)?;
+        Ok(Self {
+            owner,
+            kind,
+            query,
+            after_fact_id,
+            limit,
+        })
+    }
+
+    pub fn owner(&self) -> &FactOwnerV1 {
+        &self.owner
+    }
+    pub fn kind(&self) -> CompatibilityFactSearchKindV1 {
+        self.kind.clone()
+    }
+    pub fn query(&self) -> Option<&str> {
+        self.query.as_deref()
+    }
+    pub fn after_fact_id(&self) -> Option<&FactId> {
+        self.after_fact_id.as_ref()
+    }
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+}
+
+/// One scored compatibility search result.  Scores are fixed-point millionths,
+/// avoiding non-deterministic floating point ordering at the transport edge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompatibilityFactSearchHitV1 {
+    fact: CompatibilityFactV1,
+    score_millionths: u32,
+}
+
+impl CompatibilityFactSearchHitV1 {
+    pub fn new(fact: CompatibilityFactV1, score_millionths: u32) -> FactStoreResult<Self> {
+        if score_millionths > 1_000_000 {
+            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                field: "compatibility fact search score",
+            }));
+        }
+        Ok(Self {
+            fact,
+            score_millionths,
+        })
+    }
+
+    pub fn fact(&self) -> &CompatibilityFactV1 {
+        &self.fact
+    }
+    pub fn score_millionths(&self) -> u32 {
+        self.score_millionths
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompatibilityFactSearchPageV1 {
+    owner: FactOwnerV1,
+    hits: Vec<CompatibilityFactSearchHitV1>,
+    next_after_fact_id: Option<FactId>,
+}
+
+impl CompatibilityFactSearchPageV1 {
+    pub fn new(
+        owner: FactOwnerV1,
+        hits: Vec<CompatibilityFactSearchHitV1>,
+        next_after_fact_id: Option<FactId>,
+    ) -> FactStoreResult<Self> {
+        owner.validate()?;
+        if hits.len() > MAX_CURRENT_LIMIT {
+            return Err(FactStoreError::InvalidQueryLimit {
+                limit: hits.len(),
+                max: MAX_CURRENT_LIMIT,
+            });
+        }
+        let mut previous: Option<&CompatibilityFactSearchHitV1> = None;
+        for hit in &hits {
+            hit.fact().validate_for_owner(&owner)?;
+            if previous.is_some_and(|value| {
+                value.score_millionths() < hit.score_millionths()
+                    || (value.score_millionths() == hit.score_millionths()
+                        && value.fact().fact_id() >= hit.fact().fact_id())
+            }) {
+                return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                    field: "compatibility fact search order",
+                }));
+            }
+            previous = Some(hit);
+        }
+        if let Some(cursor) = &next_after_fact_id {
+            validate_owned_fact_id(cursor, &owner)?;
+        }
+        Ok(Self {
+            owner,
+            hits,
+            next_after_fact_id,
+        })
+    }
+
+    pub fn validate_for_owner(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
+        if &self.owner != owner {
+            return Err(FactStoreError::OwnerMismatch);
+        }
+        Ok(())
+    }
+    pub fn owner(&self) -> &FactOwnerV1 {
+        &self.owner
+    }
+    pub fn hits(&self) -> &[CompatibilityFactSearchHitV1] {
+        &self.hits
+    }
+    pub fn next_after_fact_id(&self) -> Option<&FactId> {
+        self.next_after_fact_id.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompatibilityFactHistoryV1 {
+    owner: FactOwnerV1,
+    fact_id: FactId,
+    events: Vec<FactLineageEventV1>,
+    next_after: Option<FactLineageCursor>,
+}
+
+impl CompatibilityFactHistoryV1 {
+    pub fn new(
+        owner: FactOwnerV1,
+        fact_id: FactId,
+        events: Vec<FactLineageEventV1>,
+        next_after: Option<FactLineageCursor>,
+    ) -> FactStoreResult<Self> {
+        owner.validate()?;
+        validate_owned_fact_id(&fact_id, &owner)?;
+        if events.len() > MAX_LINEAGE_LIMIT {
+            return Err(FactStoreError::InvalidQueryLimit {
+                limit: events.len(),
+                max: MAX_LINEAGE_LIMIT,
+            });
+        }
+        let mut previous: Option<&FactLineageEventV1> = None;
+        for event in &events {
+            if event.owner() != &owner {
+                return Err(FactStoreError::OwnerMismatch);
+            }
+            if event.fact_id() != &fact_id {
+                return Err(FactStoreError::FactMismatch);
+            }
+            if previous.is_some_and(|value| {
+                (value.occurred_at(), value.event_id()) >= (event.occurred_at(), event.event_id())
+            }) {
+                return Err(FactStoreError::EventsOutOfOrder);
+            }
+            previous = Some(event);
+        }
+        Ok(Self {
+            owner,
+            fact_id,
+            events,
+            next_after,
+        })
+    }
+
+    pub fn validate_for_owner(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
+        if &self.owner != owner {
+            return Err(FactStoreError::OwnerMismatch);
+        }
+        Ok(())
+    }
+    pub fn owner(&self) -> &FactOwnerV1 {
+        &self.owner
+    }
+    pub fn fact_id(&self) -> &FactId {
+        &self.fact_id
+    }
+    pub fn events(&self) -> &[FactLineageEventV1] {
+        &self.events
+    }
+    pub fn next_after(&self) -> Option<&FactLineageCursor> {
+        self.next_after.as_ref()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompatibilityProjectionStateV1 {
+    Ready,
+    Rebuilding,
+    Stale,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompatibilityFactStatusV1 {
+    owner: FactOwnerV1,
+    fact_id: Option<FactId>,
+    payload_access: Option<PayloadAccessState>,
+    projection_state: CompatibilityProjectionStateV1,
+    projected_as_of: Option<UtcMicros>,
+    vector_watermark: Option<VectorWatermark>,
+}
+
+impl CompatibilityFactStatusV1 {
+    pub fn new(
+        owner: FactOwnerV1,
+        fact_id: Option<FactId>,
+        payload_access: Option<PayloadAccessState>,
+        projection_state: CompatibilityProjectionStateV1,
+        projected_as_of: Option<UtcMicros>,
+        vector_watermark: Option<VectorWatermark>,
+    ) -> FactStoreResult<Self> {
+        owner.validate()?;
+        if let Some(fact_id) = &fact_id {
+            validate_owned_fact_id(fact_id, &owner)?;
+        }
+        Ok(Self {
+            owner,
+            fact_id,
+            payload_access,
+            projection_state,
+            projected_as_of,
+            vector_watermark,
+        })
+    }
+
+    pub fn validate_for_owner(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
+        if &self.owner != owner {
+            return Err(FactStoreError::OwnerMismatch);
+        }
+        Ok(())
+    }
+    pub fn owner(&self) -> &FactOwnerV1 {
+        &self.owner
+    }
+    pub fn fact_id(&self) -> Option<&FactId> {
+        self.fact_id.as_ref()
+    }
+    pub fn payload_access(&self) -> Option<PayloadAccessState> {
+        self.payload_access
+    }
+    pub fn projection_state(&self) -> CompatibilityProjectionStateV1 {
+        self.projection_state
+    }
+    pub fn projected_as_of(&self) -> Option<UtcMicros> {
+        self.projected_as_of
+    }
+    pub fn vector_watermark(&self) -> Option<&VectorWatermark> {
+        self.vector_watermark.as_ref()
+    }
+}
+
+/// Bounded detail projection used for V1 `get`, history, status, and dashboard
+/// inspection without exposing a database row or arbitrary JSON transport.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompatibilityFactInspectionV1 {
+    fact: CompatibilityFactV1,
+    history: CompatibilityFactHistoryV1,
+    anchors: Vec<RetrievalAnchorRecordV2>,
+    status: CompatibilityFactStatusV1,
+}
+
+impl CompatibilityFactInspectionV1 {
+    pub fn new(
+        fact: CompatibilityFactV1,
+        history: CompatibilityFactHistoryV1,
+        anchors: Vec<RetrievalAnchorRecordV2>,
+        status: CompatibilityFactStatusV1,
+    ) -> FactStoreResult<Self> {
+        history.validate_for_owner(fact.owner())?;
+        status.validate_for_owner(fact.owner())?;
+        if history.fact_id() != fact.fact_id()
+            || status.fact_id().is_some_and(|id| id != fact.fact_id())
+        {
+            return Err(FactStoreError::FactMismatch);
+        }
+        if anchors.len() > MAX_LINEAGE_LIMIT {
+            return Err(FactStoreError::InvalidQueryLimit {
+                limit: anchors.len(),
+                max: MAX_LINEAGE_LIMIT,
+            });
+        }
+        let mut previous: Option<&RetrievalAnchorId> = None;
+        for anchor in &anchors {
+            anchor.validate()?;
+            if FactOwnerV1::from(anchor.owner().clone()) != *fact.owner() {
+                return Err(FactStoreError::OwnerMismatch);
+            }
+            if previous.is_some_and(|id| id >= anchor.anchor_id()) {
+                return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                    field: "compatibility fact inspection anchors",
+                }));
+            }
+            previous = Some(anchor.anchor_id());
+        }
+        Ok(Self {
+            fact,
+            history,
+            anchors,
+            status,
+        })
+    }
+
+    pub fn validate_for_owner(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
+        self.fact.validate_for_owner(owner)
+    }
+    pub fn owner(&self) -> &FactOwnerV1 {
+        self.fact.owner()
+    }
+    pub fn fact(&self) -> &CompatibilityFactV1 {
+        &self.fact
+    }
+    pub fn history(&self) -> &CompatibilityFactHistoryV1 {
+        &self.history
+    }
+    pub fn anchors(&self) -> &[RetrievalAnchorRecordV2] {
+        &self.anchors
+    }
+    pub fn status(&self) -> &CompatibilityFactStatusV1 {
+        &self.status
+    }
 }
 
 #[cfg(test)]

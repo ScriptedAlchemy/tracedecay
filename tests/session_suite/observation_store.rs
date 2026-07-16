@@ -7,11 +7,11 @@ use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
-    NativeAliasV2, ObservationCollisionOutcomeV1, ObservationId, ObservationIdentityMaterialV1,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
+    EvidenceAvailabilityV1, NativeAliasV2, ObservationCollisionOutcomeV1, ObservationId,
+    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId,
+    RetentionClass, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionId, UtcMicros,
 };
@@ -62,6 +62,17 @@ fn observation_in_generation(
     receipt_id: &str,
     body: &str,
 ) -> DurableClaudeObservationV1 {
+    observation_in_scope(generation, start, end, receipt_id, body, scope())
+}
+
+fn observation_in_scope(
+    generation: u64,
+    start: u64,
+    end: u64,
+    receipt_id: &str,
+    body: &str,
+    scope: ObservationScopeV1,
+) -> DurableClaudeObservationV1 {
     let payload = json!({
         "kind": "assistant_message",
         "body": body,
@@ -80,7 +91,7 @@ fn observation_in_generation(
     .unwrap();
     let identity = ClaudeObservationIdentityMaterialV1::new(
         source(),
-        scope(),
+        scope,
         ClaudeFileGenerationV1::new(generation).unwrap(),
         ClaudeByteRangeV1::new(start, end).unwrap(),
     )
@@ -99,7 +110,13 @@ fn write(
     observation: DurableClaudeObservationV1,
     expected_cursor: Option<ClaudeSourceCursorV1>,
 ) -> AnchoredObservationWrite {
-    let next_cursor = cursor(observation.identity().position().end());
+    let next_cursor = ClaudeSourceCursorV1::new(
+        observation.source().clone(),
+        observation.scope().clone(),
+        observation.identity().generation(),
+        observation.identity().position().end(),
+    )
+    .unwrap();
     anchored_write(ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap())
 }
 
@@ -507,6 +524,11 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
     assert_eq!(stored.observation(), &candidate);
     assert_eq!(stored.sanitization_receipt(), candidate.receipt());
     assert_eq!(stored.committed_cursor(), &expected_cursor);
+    assert!(matches!(
+        stored.repository_provenance_attachment().availability(),
+        EvidenceAvailabilityV1::Unavailable
+    ));
+    assert!(stored.repository_provenance_attachment().anchor().is_none());
     assert_eq!(
         stored.projection_status(),
         ObservationProjectionStatus::Queued
@@ -575,8 +597,8 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
     let deltas = table_deltas(&before, &user_table_counts(&tmp).await);
     assert_eq!(
         deltas.len(),
-        6,
-        "one receipt, observation, anchor, binding, cursor, and queue row must commit: {deltas:?}"
+        7,
+        "receipt, observation, anchors, provenance, cursor, and queue must commit: {deltas:?}"
     );
     assert!(
         deltas.values().all(|delta| *delta == 1),
@@ -589,6 +611,7 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
     );
     assert_eq!(deltas.get("retrieval_anchors"), Some(&1));
     assert_eq!(deltas.get("observation_retrieval_anchors"), Some(&1));
+    assert_eq!(deltas.get("observation_repository_provenance"), Some(&1));
 }
 
 #[tokio::test]
@@ -682,6 +705,10 @@ async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
         "projection.legacy-observation-import.v1"
     );
     assert_eq!(stored.retrieval_anchor().ingested_at(), UtcMicros(0));
+    assert!(matches!(
+        stored.repository_provenance_attachment().availability(),
+        EvidenceAvailabilityV1::Unknown
+    ));
     assert_eq!(
         stored.projection_status(),
         ObservationProjectionStatus::Queued
@@ -713,6 +740,68 @@ async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
         columns.push(row.get::<String>(0).unwrap());
     }
     assert!(!columns.iter().any(|name| name == "idempotency_key"));
+    let mut rows = verify_conn
+        .query(
+            "SELECT migration FROM global_schema_migrations
+             WHERE migration IN (?1, ?2)
+             ORDER BY migration",
+            libsql::params![
+                "observation-repository-provenance-v1",
+                "observation-retrieval-anchors-v2"
+            ],
+        )
+        .await
+        .unwrap();
+    let mut migration_markers = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        migration_markers.push(row.get::<String>(0).unwrap());
+    }
+    assert_eq!(
+        migration_markers,
+        vec![
+            "observation-repository-provenance-v1".to_owned(),
+            "observation-retrieval-anchors-v2".to_owned(),
+        ],
+        "an existing global database must record both resumable anchor upgrades"
+    );
+    let mut rows = verify_conn
+        .query(
+            "SELECT name FROM sqlite_master
+             WHERE type IN ('table', 'trigger')
+               AND name IN (
+                   'observation_repository_provenance',
+                   'observation_repository_provenance_immutable_update',
+                   'observation_repository_provenance_immutable_delete'
+               )
+             ORDER BY name",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut provenance_schema = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        provenance_schema.push(row.get::<String>(0).unwrap());
+    }
+    assert_eq!(
+        provenance_schema,
+        vec![
+            "observation_repository_provenance".to_owned(),
+            "observation_repository_provenance_immutable_delete".to_owned(),
+            "observation_repository_provenance_immutable_update".to_owned(),
+        ]
+    );
+    assert!(
+        verify_conn
+            .execute(
+                "UPDATE observation_repository_provenance
+                 SET availability_json = availability_json
+                 WHERE observation_id = ?1",
+                libsql::params![original.observation_id().as_str()],
+            )
+            .await
+            .is_err(),
+        "an upgraded provenance attachment must be immutable"
+    );
     let mut rows = verify_conn
         .query(
             "SELECT sequence FROM observations WHERE observation_id = ?1",
@@ -796,7 +885,7 @@ async fn retrieval_anchor_alias_collision_is_typed_and_rolls_back_the_candidate(
     let second_write = provider_write(second.clone(), None);
     let alias = second_write.retrieval_anchor().aliases()[0].clone();
     let second_anchor_id = second_write.retrieval_anchor_id().clone();
-    let (first_write, first_anchor, first_generation) = provider_write(first, None).into_parts();
+    let (first_write, first_anchor, first_generation, _) = provider_write(first, None).into_parts();
     let first_anchor = anchor_with_aliases(&first_anchor, vec![alias.clone()]);
     let first_anchor_id = first_anchor.anchor_id().clone();
     store
@@ -1475,6 +1564,7 @@ async fn every_observation_statement_failure_rolls_back_the_authoritative_transa
         ("observation", "observations"),
         ("anchor", "retrieval_anchors"),
         ("anchor_binding", "observation_retrieval_anchors"),
+        ("repository_provenance", "observation_repository_provenance"),
         ("cursor", "source_cursors"),
         ("enqueue", "projection_queue"),
     ] {
@@ -1587,7 +1677,7 @@ async fn concurrent_exact_retry_commits_one_sequence_and_returns_one_duplicate()
     assert_eq!(replay[0].sequence(), committed.sequence());
     assert_eq!(replay[0].observation(), &candidate);
     let deltas = table_deltas(&counts_before, &user_table_counts(&tmp).await);
-    assert_eq!(deltas.len(), 6);
+    assert_eq!(deltas.len(), 7);
     assert!(deltas.values().all(|delta| *delta == 1));
 }
 
@@ -1751,7 +1841,7 @@ async fn cross_provider_duplicate_conflict_reorder_non_durable_malformed_frame_a
             "{provider}"
         );
         let commit_deltas = table_deltas(&counts_before_commit, &counts_after_commit);
-        assert_eq!(commit_deltas.len(), 4, "{provider}: {commit_deltas:?}");
+        assert_eq!(commit_deltas.len(), 8, "{provider}: {commit_deltas:?}");
         assert!(
             commit_deltas.values().all(|delta| *delta == 1),
             "{provider}: {commit_deltas:?}"

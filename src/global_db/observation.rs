@@ -2,10 +2,10 @@ use std::collections::BTreeSet;
 
 use libsql::{Connection, params};
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ObservationCollisionOutcomeV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectionGenerationId,
-    RetrievalAnchorRecordV2, RetrievalAnchorTargetV2, SanitizationReceiptV1, UtcMicros,
-    classify_observation_collision,
+    CanonicalObservationIdV1, EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1,
+    ObservationCollisionOutcomeV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceIdentityV1, ProjectionGenerationId, RetrievalAnchorRecordV2,
+    RetrievalAnchorTargetV2, SanitizationReceiptV1, UtcMicros, classify_observation_collision,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
@@ -13,14 +13,15 @@ use tracedecay_store::observation::{
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationCommitReceipt, ObservationPersistOutcome,
     ObservationProjectionStatus, ObservationReplayRequest, ObservationStoreError,
-    ObservationStoreResult, StoredObservation, build_observation_resolution_authorization_v1,
-    build_observation_retrieval_anchor_v2,
+    ObservationStoreResult, RepositoryProvenanceAttachmentV1, StoredObservation,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
 use super::{GlobalDb, global_db_operation_error, global_db_operation_message};
 
 const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical-autoincrement";
 const OBSERVATION_ANCHOR_SCHEMA_MIGRATION: &str = "observation-retrieval-anchors-v2";
+const OBSERVATION_PROVENANCE_SCHEMA_MIGRATION: &str = "observation-repository-provenance-v1";
 const LEGACY_OBSERVATION_PROJECTION_GENERATION: &str = "projection.legacy-observation-import.v1";
 const OBSERVATION_SCHEMA_OPERATION: &str = "migrate observation authority schema";
 
@@ -57,11 +58,11 @@ async fn observation_columns(conn: &Connection) -> crate::errors::Result<BTreeSe
     Ok(columns)
 }
 
-async fn migration_recorded(conn: &Connection) -> crate::errors::Result<bool> {
+async fn migration_recorded(conn: &Connection, migration: &str) -> crate::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM global_schema_migrations WHERE migration = ?1",
-            params![OBSERVATION_SCHEMA_MIGRATION],
+            params![migration],
         )
         .await
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
@@ -100,7 +101,7 @@ async fn migrate_observation_schema(
         columns.contains("idempotency_key"),
     )
     .await?;
-    let recorded = migration_recorded(conn).await?;
+    let recorded = migration_recorded(conn, OBSERVATION_SCHEMA_MIGRATION).await?;
     if !table_preexisted || (recorded && columns == required) {
         conn.execute(
             "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
@@ -307,8 +308,64 @@ async fn backfill_observation_retrieval_anchors(conn: &Connection) -> crate::err
     .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
 }
 
+async fn backfill_observation_repository_provenance(
+    conn: &Connection,
+) -> crate::errors::Result<()> {
+    let availability_json = serde_json::to_string(
+        RepositoryProvenanceAttachmentV1::new(EvidenceAvailabilityV1::Unknown, None)
+            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
+            .availability(),
+    )
+    .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO observation_repository_provenance (
+            observation_id, availability_json, capture_json, retrieval_anchor_id, owner_json
+         )
+         SELECT observation_id, ?1, NULL, NULL, NULL FROM observations",
+        params![availability_json],
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    let mut rows = conn
+        .query(
+            "SELECT observation.observation_id
+             FROM observations AS observation
+             LEFT JOIN observation_repository_provenance AS provenance
+               ON provenance.observation_id = observation.observation_id
+             WHERE provenance.observation_id IS NULL
+             LIMIT 1",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    if rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
+        .is_some()
+    {
+        return Err(global_db_operation_message(
+            OBSERVATION_SCHEMA_OPERATION,
+            "repository provenance backfill left an observation without an attachment",
+        ));
+    }
+    drop(rows);
+    conn.execute(
+        "INSERT OR REPLACE INTO global_schema_migrations(migration) VALUES (?1)",
+        params![OBSERVATION_PROVENANCE_SCHEMA_MIGRATION],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
+}
+
 pub(super) async fn ensure_observation_schema(conn: &Connection) -> crate::errors::Result<()> {
     let table_preexisted = observation_table_exists(conn).await?;
+    crate::db::retrieval_anchor_schema::install_retrieval_anchor_schema(
+        conn,
+        OBSERVATION_SCHEMA_OPERATION,
+    )
+    .await?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS global_schema_migrations (
             migration TEXT PRIMARY KEY
@@ -328,35 +385,24 @@ pub(super) async fn ensure_observation_schema(conn: &Connection) -> crate::error
             committed_cursor_json TEXT NOT NULL,
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );
-        CREATE TABLE IF NOT EXISTS retrieval_anchors (
-            anchor_id TEXT PRIMARY KEY,
-            anchor_json TEXT NOT NULL CHECK(json_valid(anchor_json)),
-            owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
-            projection_generation TEXT NOT NULL
-        );
         CREATE TABLE IF NOT EXISTS observation_retrieval_anchors (
             observation_id TEXT PRIMARY KEY,
             anchor_id TEXT NOT NULL UNIQUE,
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
             FOREIGN KEY(anchor_id) REFERENCES retrieval_anchors(anchor_id)
         );
-        CREATE TABLE IF NOT EXISTS retrieval_anchor_aliases (
-            owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
-            alias_kind TEXT NOT NULL,
-            locator_digest TEXT NOT NULL,
-            anchor_id TEXT NOT NULL,
-            PRIMARY KEY(owner_json, alias_kind, locator_digest),
-            UNIQUE(anchor_id, alias_kind, locator_digest),
-            FOREIGN KEY(anchor_id) REFERENCES retrieval_anchors(anchor_id)
+        CREATE TABLE IF NOT EXISTS observation_repository_provenance (
+            observation_id TEXT PRIMARY KEY,
+            availability_json TEXT NOT NULL CHECK(json_valid(availability_json)),
+            capture_json TEXT CHECK(capture_json IS NULL OR json_valid(capture_json)),
+            retrieval_anchor_id TEXT UNIQUE,
+            owner_json TEXT CHECK(owner_json IS NULL OR json_valid(owner_json)),
+            CHECK((capture_json IS NULL) = (retrieval_anchor_id IS NULL)),
+            CHECK((owner_json IS NULL) = (retrieval_anchor_id IS NULL)),
+            FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
+            FOREIGN KEY(retrieval_anchor_id, owner_json)
+                REFERENCES retrieval_anchors(anchor_id, owner_json)
         );
-        CREATE TRIGGER IF NOT EXISTS retrieval_anchors_immutable_update
-        BEFORE UPDATE ON retrieval_anchors BEGIN
-            SELECT RAISE(ABORT, 'retrieval anchors are immutable');
-        END;
-        CREATE TRIGGER IF NOT EXISTS retrieval_anchors_immutable_delete
-        BEFORE DELETE ON retrieval_anchors BEGIN
-            SELECT RAISE(ABORT, 'retrieval anchors are immutable');
-        END;
         CREATE TRIGGER IF NOT EXISTS observation_retrieval_anchors_immutable_update
         BEFORE UPDATE ON observation_retrieval_anchors BEGIN
             SELECT RAISE(ABORT, 'observation retrieval anchor bindings are immutable');
@@ -365,13 +411,13 @@ pub(super) async fn ensure_observation_schema(conn: &Connection) -> crate::error
         BEFORE DELETE ON observation_retrieval_anchors BEGIN
             SELECT RAISE(ABORT, 'observation retrieval anchor bindings are immutable');
         END;
-        CREATE TRIGGER IF NOT EXISTS retrieval_anchor_aliases_immutable_update
-        BEFORE UPDATE ON retrieval_anchor_aliases BEGIN
-            SELECT RAISE(ABORT, 'retrieval anchor aliases are immutable');
+        CREATE TRIGGER IF NOT EXISTS observation_repository_provenance_immutable_update
+        BEFORE UPDATE ON observation_repository_provenance BEGIN
+            SELECT RAISE(ABORT, 'observation repository provenance is immutable');
         END;
-        CREATE TRIGGER IF NOT EXISTS retrieval_anchor_aliases_immutable_delete
-        BEFORE DELETE ON retrieval_anchor_aliases BEGIN
-            SELECT RAISE(ABORT, 'retrieval anchor aliases are immutable');
+        CREATE TRIGGER IF NOT EXISTS observation_repository_provenance_immutable_delete
+        BEFORE DELETE ON observation_repository_provenance BEGIN
+            SELECT RAISE(ABORT, 'observation repository provenance is immutable');
         END;
         CREATE TABLE IF NOT EXISTS source_cursors (
             source_json TEXT NOT NULL,
@@ -409,7 +455,8 @@ pub(super) async fn ensure_observation_schema(conn: &Connection) -> crate::error
     .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
     migrate_source_cursor_advances_schema(conn).await?;
     migrate_observation_schema(conn, table_preexisted).await?;
-    backfill_observation_retrieval_anchors(conn).await
+    backfill_observation_retrieval_anchors(conn).await?;
+    backfill_observation_repository_provenance(conn).await
 }
 
 fn storage(
@@ -526,9 +573,8 @@ fn encode_json_string<T: serde::Serialize>(
     }
 }
 
-async fn persist_observation_retrieval_anchor(
+async fn persist_retrieval_anchor(
     conn: &Connection,
-    observation_id: &CanonicalObservationIdV1,
     candidate: &RetrievalAnchorRecordV2,
 ) -> ObservationStoreResult<(RetrievalAnchorRecordV2, ProjectionGenerationId)> {
     let anchor_json = encode(candidate, "encode retrieval anchor")?;
@@ -572,47 +618,13 @@ async fn persist_observation_retrieval_anchor(
     let stored: RetrievalAnchorRecordV2 = decode(&stored_json, "decode retrieval anchor")?;
     let projection_generation = ProjectionGenerationId::new(stored_projection_generation)
         .map_err(ObservationStoreError::RetrievalAnchorContract)?;
-    if stored.anchor_id() != candidate.anchor_id()
+    if stored != *candidate
+        || stored.anchor_id() != candidate.anchor_id()
         || stored.owner() != candidate.owner()
         || stored_owner_json != encode(stored.owner(), "verify retrieval anchor owner")?
         || stored.projection_generation() != &projection_generation
-        || !matches!(
-            stored.target(),
-            RetrievalAnchorTargetV2::ExactObservation(target) if target == observation_id
-        )
     {
-        return Err(ObservationStoreError::RetrievalAnchorObservationMismatch);
-    }
-
-    conn.execute(
-        "INSERT OR IGNORE INTO observation_retrieval_anchors (observation_id, anchor_id)
-         VALUES (?1, ?2)",
-        params![observation_id.as_str(), stored.anchor_id().as_str()],
-    )
-    .await
-    .map_err(|error| storage("bind observation retrieval anchor", error))?;
-    let mut rows = conn
-        .query(
-            "SELECT anchor_id FROM observation_retrieval_anchors WHERE observation_id = ?1",
-            params![observation_id.as_str()],
-        )
-        .await
-        .map_err(|error| storage("verify observation retrieval anchor", error))?;
-    let bound_anchor_id = rows
-        .next()
-        .await
-        .map_err(|error| storage("verify observation retrieval anchor", error))?
-        .ok_or_else(|| {
-            storage_message(
-                "verify observation retrieval anchor",
-                "observation anchor binding disappeared",
-            )
-        })?
-        .get::<String>(0)
-        .map_err(|error| storage("verify observation retrieval anchor", error))?;
-    drop(rows);
-    if bound_anchor_id != stored.anchor_id().as_str() {
-        return Err(ObservationStoreError::RetrievalAnchorObservationMismatch);
+        return Err(ObservationStoreError::RetrievalAnchorCollision);
     }
 
     for alias in stored.aliases() {
@@ -675,6 +687,118 @@ async fn persist_observation_retrieval_anchor(
     Ok((stored, projection_generation))
 }
 
+async fn persist_observation_retrieval_anchor(
+    conn: &Connection,
+    observation_id: &CanonicalObservationIdV1,
+    candidate: &RetrievalAnchorRecordV2,
+) -> ObservationStoreResult<(RetrievalAnchorRecordV2, ProjectionGenerationId)> {
+    if !matches!(
+        candidate.target(),
+        RetrievalAnchorTargetV2::ExactObservation(target) if target == observation_id
+    ) {
+        return Err(ObservationStoreError::RetrievalAnchorObservationMismatch);
+    }
+    let (stored, projection_generation) = persist_retrieval_anchor(conn, candidate).await?;
+    conn.execute(
+        "INSERT OR IGNORE INTO observation_retrieval_anchors (observation_id, anchor_id)
+         VALUES (?1, ?2)",
+        params![observation_id.as_str(), stored.anchor_id().as_str()],
+    )
+    .await
+    .map_err(|error| storage("bind observation retrieval anchor", error))?;
+    let mut rows = conn
+        .query(
+            "SELECT anchor_id FROM observation_retrieval_anchors WHERE observation_id = ?1",
+            params![observation_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage("verify observation retrieval anchor", error))?;
+    let bound_anchor_id = rows
+        .next()
+        .await
+        .map_err(|error| storage("verify observation retrieval anchor", error))?
+        .ok_or_else(|| {
+            storage_message(
+                "verify observation retrieval anchor",
+                "observation anchor binding disappeared",
+            )
+        })?
+        .get::<String>(0)
+        .map_err(|error| storage("verify observation retrieval anchor", error))?;
+    if bound_anchor_id != stored.anchor_id().as_str() {
+        return Err(ObservationStoreError::RetrievalAnchorObservationMismatch);
+    }
+    Ok((stored, projection_generation))
+}
+
+async fn persist_repository_provenance_attachment(
+    conn: &Connection,
+    observation_id: &CanonicalObservationIdV1,
+    candidate: &RepositoryProvenanceAttachmentV1,
+) -> ObservationStoreResult<RepositoryProvenanceAttachmentV1> {
+    let stored_anchor = match candidate.anchor() {
+        Some(candidate_anchor) => {
+            let (stored_anchor, _) = persist_retrieval_anchor(conn, candidate_anchor).await?;
+            if &stored_anchor != candidate_anchor {
+                return Err(ObservationStoreError::RetrievalAnchorCollision);
+            }
+            Some(stored_anchor)
+        }
+        None => None,
+    };
+    let stored =
+        RepositoryProvenanceAttachmentV1::new(candidate.availability().clone(), stored_anchor)?;
+    let availability_json = encode(
+        stored.availability(),
+        "encode repository provenance availability",
+    )?;
+    let capture_json = stored
+        .provenance()
+        .map(|capture| encode(capture, "encode repository provenance capture"))
+        .transpose()?;
+    let owner_json = stored
+        .anchor()
+        .map(|anchor| encode(anchor.owner(), "encode repository provenance owner"))
+        .transpose()?;
+    conn.execute(
+        "INSERT INTO observation_repository_provenance (
+            observation_id, availability_json, capture_json, retrieval_anchor_id, owner_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            observation_id.as_str(),
+            availability_json.as_str(),
+            capture_json.as_deref(),
+            stored.anchor().map(|anchor| anchor.anchor_id().as_str()),
+            owner_json.as_deref(),
+        ],
+    )
+    .await
+    .map_err(|error| storage("persist observation repository provenance", error))?;
+    Ok(stored)
+}
+
+fn decode_repository_provenance_attachment(
+    availability_json: &str,
+    capture_json: Option<&str>,
+    anchor_json: Option<&str>,
+    operation: &'static str,
+) -> ObservationStoreResult<RepositoryProvenanceAttachmentV1> {
+    let availability: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1> =
+        decode(availability_json, operation)?;
+    let capture = capture_json
+        .map(|capture| decode::<GenerationBoundRepositoryProvenanceV1>(capture, operation))
+        .transpose()?;
+    if availability.value() != capture.as_ref() {
+        return Err(ObservationStoreError::RepositoryProvenanceBindingMismatch);
+    }
+    RepositoryProvenanceAttachmentV1::new(
+        availability,
+        anchor_json
+            .map(|anchor| decode::<RetrievalAnchorRecordV2>(anchor, operation))
+            .transpose()?,
+    )
+}
+
 fn decode_sequence(value: i64, operation: &'static str) -> ObservationStoreResult<u64> {
     u64::try_from(value).map_err(|_| storage_message(operation, "negative observation sequence"))
 }
@@ -713,14 +837,33 @@ async fn read_observation_row(
     let projection_generation = row
         .get::<String>(4)
         .map_err(|error| storage(operation, error))?;
-    Ok(Some(ObservationCommitReceipt::new(
-        sequence,
-        decode(&observation_json, operation)?,
-        decode(&cursor_json, operation)?,
-        decode(&anchor_json, operation)?,
-        ProjectionGenerationId::new(projection_generation)
-            .map_err(ObservationStoreError::RetrievalAnchorContract)?,
-    )?))
+    let repository_availability_json = row
+        .get::<String>(5)
+        .map_err(|error| storage(operation, error))?;
+    let repository_capture_json = row
+        .get::<Option<String>>(6)
+        .map_err(|error| storage(operation, error))?;
+    let repository_anchor_json = row
+        .get::<Option<String>>(7)
+        .map_err(|error| storage(operation, error))?;
+    Ok(Some(
+        ObservationCommitReceipt::new(
+            sequence,
+            decode(&observation_json, operation)?,
+            decode(&cursor_json, operation)?,
+            decode(&anchor_json, operation)?,
+            ProjectionGenerationId::new(projection_generation)
+                .map_err(ObservationStoreError::RetrievalAnchorContract)?,
+        )?
+        .with_repository_provenance_attachment(
+            decode_repository_provenance_attachment(
+                &repository_availability_json,
+                repository_capture_json.as_deref(),
+                repository_anchor_json.as_deref(),
+                operation,
+            )?,
+        )?,
+    ))
 }
 
 async fn read_by_observation_id(
@@ -731,11 +874,16 @@ async fn read_by_observation_id(
         conn,
         "SELECT observation.sequence, observation.observation_json,
                 observation.committed_cursor_json, anchor.anchor_json,
-                anchor.projection_generation
+                anchor.projection_generation, repository.availability_json,
+                repository.capture_json, repository_anchor.anchor_json
          FROM observations AS observation
          JOIN observation_retrieval_anchors AS binding
            ON binding.observation_id = observation.observation_id
          JOIN retrieval_anchors AS anchor ON anchor.anchor_id = binding.anchor_id
+         JOIN observation_repository_provenance AS repository
+           ON repository.observation_id = observation.observation_id
+         LEFT JOIN retrieval_anchors AS repository_anchor
+           ON repository_anchor.anchor_id = repository.retrieval_anchor_id
          WHERE observation.observation_id = ?1",
         observation_id.as_str(),
         "read observation",
@@ -1083,13 +1231,20 @@ impl GlobalDb {
             write.retrieval_anchor(),
         )
         .await?;
+        let repository_provenance = persist_repository_provenance_attachment(
+            &transaction,
+            candidate.observation_id(),
+            write.repository_provenance_attachment(),
+        )
+        .await?;
         let committed = ObservationCommitReceipt::new(
             sequence,
             candidate.clone(),
             write.next_cursor().clone(),
             retrieval_anchor,
             projection_generation,
-        )?;
+        )?
+        .with_repository_provenance_attachment(repository_provenance)?;
 
         write_cursor(&transaction, &source_json, &scope_json, &cursor_json).await?;
         transaction
@@ -1194,7 +1349,8 @@ impl GlobalDb {
             .query(
                 "SELECT observations.sequence, observations.observation_json,
                         observations.committed_cursor_json, anchor.anchor_json,
-                        anchor.projection_generation,
+                        anchor.projection_generation, repository.availability_json,
+                        repository.capture_json, repository_anchor.anchor_json,
                         EXISTS(
                             SELECT 1 FROM projection_queue
                             WHERE projection_queue.observation_id = observations.observation_id
@@ -1203,6 +1359,10 @@ impl GlobalDb {
                  JOIN observation_retrieval_anchors AS binding
                    ON binding.observation_id = observations.observation_id
                  JOIN retrieval_anchors AS anchor ON anchor.anchor_id = binding.anchor_id
+                 JOIN observation_repository_provenance AS repository
+                   ON repository.observation_id = observations.observation_id
+                 LEFT JOIN retrieval_anchors AS repository_anchor
+                   ON repository_anchor.anchor_id = repository.retrieval_anchor_id
                  WHERE sequence > ?1 ORDER BY sequence ASC LIMIT ?2",
                 params![after_sequence, limit],
             )
@@ -1231,22 +1391,40 @@ impl GlobalDb {
             let projection_generation = row
                 .get::<String>(4)
                 .map_err(|error| storage("replay observations", error))?;
+            let repository_availability_json = row
+                .get::<String>(5)
+                .map_err(|error| storage("replay observations", error))?;
+            let repository_capture_json = row
+                .get::<Option<String>>(6)
+                .map_err(|error| storage("replay observations", error))?;
+            let repository_anchor_json = row
+                .get::<Option<String>>(7)
+                .map_err(|error| storage("replay observations", error))?;
             let projection_status = match row
-                .get::<i64>(5)
+                .get::<i64>(8)
                 .map_err(|error| storage("replay observations", error))?
             {
                 0 => ObservationProjectionStatus::NotQueued,
                 _ => ObservationProjectionStatus::Queued,
             };
-            observations.push(StoredObservation::from_commit_receipt(
-                ObservationCommitReceipt::new(
-                    sequence,
-                    decode(&observation_json, "decode replayed observation")?,
-                    decode(&committed_cursor_json, "decode replayed observation cursor")?,
-                    decode(&anchor_json, "decode replayed observation anchor")?,
-                    ProjectionGenerationId::new(projection_generation)
-                        .map_err(ObservationStoreError::RetrievalAnchorContract)?,
+            let receipt = ObservationCommitReceipt::new(
+                sequence,
+                decode(&observation_json, "decode replayed observation")?,
+                decode(&committed_cursor_json, "decode replayed observation cursor")?,
+                decode(&anchor_json, "decode replayed observation anchor")?,
+                ProjectionGenerationId::new(projection_generation)
+                    .map_err(ObservationStoreError::RetrievalAnchorContract)?,
+            )?
+            .with_repository_provenance_attachment(
+                decode_repository_provenance_attachment(
+                    &repository_availability_json,
+                    repository_capture_json.as_deref(),
+                    repository_anchor_json.as_deref(),
+                    "decode replayed repository provenance",
                 )?,
+            )?;
+            observations.push(StoredObservation::from_commit_receipt(
+                receipt,
                 projection_status,
             ));
         }

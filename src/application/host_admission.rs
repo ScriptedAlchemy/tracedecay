@@ -18,6 +18,7 @@ use crate::application::observation::{
 };
 use crate::global_db::GlobalDb;
 use crate::privacy::RecordSanitizerV1;
+use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
 use crate::store::observation::GlobalDbObservationStore;
 
 mod durability;
@@ -592,6 +593,7 @@ pub struct HostAdmissionAuthorities<'a> {
     project: Option<&'a GlobalDb>,
     project_id: Option<ProjectId>,
     profile: Option<&'a GlobalDb>,
+    repository_provenance: Option<RepositoryProvenanceAdmissionContext>,
 }
 
 impl<'a> HostAdmissionAuthorities<'a> {
@@ -600,6 +602,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
             project: Some(project),
             project_id: Some(project_id),
             profile: None,
+            repository_provenance: None,
         }
     }
 
@@ -608,12 +611,22 @@ impl<'a> HostAdmissionAuthorities<'a> {
             project: None,
             project_id: None,
             profile: Some(profile),
+            repository_provenance: None,
         }
     }
 
     #[must_use]
     pub const fn with_profile(mut self, profile: &'a GlobalDb) -> Self {
         self.profile = Some(profile);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_repository_provenance(
+        mut self,
+        repository_provenance: RepositoryProvenanceAdmissionContext,
+    ) -> Self {
+        self.repository_provenance = Some(repository_provenance);
         self
     }
 
@@ -693,7 +706,9 @@ impl<'a> HostAdmissionFacade<'a> {
     ) -> Result<CaptureObservationOutcome, HostAdmissionOutcome> {
         let application = self.application(request.provider(), request.scope())?;
         application
-            .capture_observation(request)
+            .capture_observation(
+                request.with_repository_provenance(self.authorities.repository_provenance.clone()),
+            )
             .await
             .map_err(|error| classify_error(&error))
     }

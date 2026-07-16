@@ -4,10 +4,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use libsql::{Builder, Connection, OpenFlags, Transaction, TransactionBehavior};
+use tracedecay_domain::{FactEventId, FactId, FactOwnerV1, SourceStoreId, UtcMicros};
 
 use crate::errors::{Result, TraceDecayError};
 
-use super::{DatabaseAuthority, migrations};
+use super::{
+    CapturedMemoryV2Frontiers, DatabaseAuthority, MemoryV2BackfillBatchOutcome,
+    MemoryV2CutoverOutcome, MemoryV2CutoverReceipt, memory_v2, migrations,
+};
 
 mod integrity;
 mod pragmas;
@@ -131,6 +135,7 @@ impl Database {
     /// migrations were applied during initialization.
     pub async fn initialize(db_path: &Path, authority: &DatabaseAuthority) -> Result<(Self, bool)> {
         let authority = authority.hold_for(db_path, "initialize")?;
+        authority.require_active_write_scope("initialize")?;
         let exclusive_maintenance = authority.role() == super::DatabaseAuthorityRole::Maintenance;
         let slot = database_slot(authority.database_identity_key());
         let mut open = slot.lock().await;
@@ -209,6 +214,7 @@ impl Database {
     /// migrations were applied during open.
     pub async fn open(db_path: &Path, authority: &DatabaseAuthority) -> Result<(Self, bool)> {
         let authority = authority.hold_for(db_path, "open")?;
+        authority.require_active_write_scope("open")?;
         let exclusive_maintenance = authority.role() == super::DatabaseAuthorityRole::Maintenance;
         let slot = database_slot(authority.database_identity_key());
         let mut open = slot.lock().await;
@@ -361,10 +367,15 @@ impl Database {
         self.inner.writer.lock().await
     }
 
+    fn require_active_write_scope(&self, operation: &str) -> Result<()> {
+        self.inner._authority.require_active_write_scope(operation)
+    }
+
     pub(super) async fn open_writer_connection_unguarded(
         &self,
         operation: &str,
     ) -> Result<Connection> {
+        self.require_active_write_scope(operation)?;
         let conn = self
             .inner
             .db
@@ -400,6 +411,65 @@ impl Database {
                 .writer_connection("memory store writer capability")
                 .await?,
         })
+    }
+
+    pub(crate) async fn load_or_capture_memory_v2_frontiers(
+        &self,
+        owner: &FactOwnerV1,
+        source_store_id: &SourceStoreId,
+    ) -> Result<CapturedMemoryV2Frontiers> {
+        let writer = self
+            .writer_connection("capture memory v2 backfill frontiers")
+            .await?;
+        memory_v2::load_or_capture_memory_v2_frontiers(&writer.conn, owner, source_store_id).await
+    }
+
+    pub(crate) async fn backfill_memory_v2_batch(
+        &self,
+        owner: &FactOwnerV1,
+        source_store_id: &SourceStoreId,
+        frontiers: CapturedMemoryV2Frontiers,
+        batch_size: i64,
+    ) -> Result<MemoryV2BackfillBatchOutcome> {
+        let writer = self
+            .writer_connection("backfill one memory v2 batch")
+            .await?;
+        memory_v2::backfill_memory_v2_batch(
+            &writer.conn,
+            owner,
+            source_store_id,
+            frontiers,
+            batch_size,
+        )
+        .await
+    }
+
+    pub(crate) async fn finalize_memory_v2_cutover(
+        &self,
+        receipt: &MemoryV2CutoverReceipt,
+    ) -> Result<MemoryV2CutoverOutcome> {
+        let writer = self.writer_connection("finalize memory v2 cutover").await?;
+        memory_v2::finalize_memory_v2_cutover(&writer.conn, receipt).await
+    }
+
+    pub(crate) async fn purge_memory_v2_fact(
+        &self,
+        owner: &FactOwnerV1,
+        source_store_id: &SourceStoreId,
+        fact_id: &FactId,
+        expected_last_event_id: &FactEventId,
+        occurred_at: UtcMicros,
+    ) -> Result<bool> {
+        let writer = self.writer_connection("purge memory v2 fact").await?;
+        memory_v2::purge_memory_v2_fact(
+            &writer.conn,
+            owner,
+            source_store_id,
+            fact_id,
+            expected_last_event_id,
+            occurred_at,
+        )
+        .await
     }
 
     /// Starts a query-only snapshot on a separate connection that cannot join
@@ -461,6 +531,7 @@ impl Database {
     /// This ensures all committed transactions are merged into the main DB
     /// before the process exits, preventing a stale WAL file on next startup.
     pub async fn checkpoint(&self) -> Result<()> {
+        self.require_active_write_scope("checkpoint")?;
         let _writer = self.writer().await;
         self.checkpoint_unguarded().await
     }
@@ -514,6 +585,7 @@ impl Database {
     /// checkpoints cannot leave the destination with a partially copied
     /// B-tree. The destination must not already exist.
     pub async fn snapshot_to(&self, destination: &Path) -> Result<()> {
+        self.require_active_write_scope("snapshot_to")?;
         let _writer = self.writer().await;
         self.snapshot_to_unguarded(destination).await
     }
@@ -633,6 +705,7 @@ impl Database {
     /// callers must hold the recovery locks and writer authority.
     pub async fn repair_fts_offline(db_path: &Path, authority: &DatabaseAuthority) -> Result<()> {
         let _held = authority.hold_for(db_path, "fts repair")?;
+        _held.require_active_write_scope("fts repair")?;
         let db =
             Builder::new_local(db_path)
                 .build()
@@ -888,6 +961,25 @@ mod tests {
         assert!(second.inner.writer.try_lock().is_err());
         drop(first_writer);
         assert!(second.inner.writer.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn retained_daemon_database_refuses_writes_after_scope_drops() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("projects/project/tracedecay.db");
+        let scope = crate::db::enter_daemon_database_scope(temp.path(), 9, "writer-scope").unwrap();
+        let authority = DatabaseAuthority::acquire_daemon(&path, "writer-scope").unwrap();
+        let (database, _) = Database::initialize(&path, &authority).await.unwrap();
+        let retained = database.clone();
+        drop(scope);
+
+        match retained
+            .begin_write_transaction("write after scope drop")
+            .await
+        {
+            Ok(_) => panic!("retained database began a write after its scope dropped"),
+            Err(error) => assert!(error.to_string().contains("active daemon")),
+        }
     }
 
     #[tokio::test]

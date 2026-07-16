@@ -16,7 +16,7 @@ use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 19;
+const LATEST_VERSION: u32 = 20;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &Connection) -> Result<u32> {
@@ -400,6 +400,7 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         17 => migrate_v17(conn).await,
         18 => migrate_v18(conn).await,
         19 => migrate_v19(conn).await,
+        20 => migrate_v20(conn).await,
         _ => Err(TraceDecayError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
@@ -411,6 +412,13 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
 /// purgeable payloads, and resumable legacy projection backfill state.
 async fn migrate_v19(conn: &Connection) -> Result<()> {
     super::memory_v2::create_schema(conn, "migrate_v19").await
+}
+
+/// v20: completes the PR7 owner-bound memory contract for databases that
+/// already received the additive v19 tables. This remains schema-only: legacy
+/// projection backfill and cutover stay daemon-authorized runtime actions.
+async fn migrate_v20(conn: &Connection) -> Result<()> {
+    super::memory_v2::upgrade_v20_schema(conn, "migrate_v20").await
 }
 
 /// Compatibility marker after v12 was exposed on the PR stack.

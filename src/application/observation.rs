@@ -20,6 +20,7 @@ use crate::privacy::{
     ObservationSanitizationOutcomeV1, ParsedObservationRecordV1, PrivacySanitizerError,
     RecordSanitizerV1, SanitizationFindingV1, SanitizedObservationRecordV1,
 };
+use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
 
 /// Cloneable, operation-local cancellation shared by application adapters.
 #[derive(Clone, Debug, Default)]
@@ -53,6 +54,7 @@ pub struct CaptureObservationRequest {
     resume_checkpoint: Option<(u64, u64)>,
     retention_class: RetentionClass,
     cancellation: ObservationCancellation,
+    repository_provenance: Option<RepositoryProvenanceAdmissionContext>,
 }
 
 impl CaptureObservationRequest {
@@ -77,6 +79,7 @@ impl CaptureObservationRequest {
             resume_checkpoint: None,
             retention_class,
             cancellation,
+            repository_provenance: None,
         })
     }
 
@@ -91,6 +94,14 @@ impl CaptureObservationRequest {
     #[must_use]
     pub fn with_resume_checkpoint(mut self, file_identity: u64, resume_fingerprint: u64) -> Self {
         self.resume_checkpoint = Some((file_identity, resume_fingerprint));
+        self
+    }
+
+    pub(crate) fn with_repository_provenance(
+        mut self,
+        repository_provenance: Option<RepositoryProvenanceAdmissionContext>,
+    ) -> Self {
+        self.repository_provenance = repository_provenance;
         self
     }
 }
@@ -296,6 +307,7 @@ impl<S: ObservationStore> ObservationApplication<S> {
             resume_checkpoint,
             retention_class,
             cancellation,
+            repository_provenance,
         } = request;
         if cancellation.is_cancelled() {
             return Err(ObservationApplicationError::Cancelled);
@@ -327,20 +339,36 @@ impl<S: ObservationStore> ObservationApplication<S> {
                 let projection_generation =
                     ProjectionGenerationId::new(SESSION_MESSAGE_PROJECTOR_VERSION)
                         .map_err(ObservationStoreError::RetrievalAnchorContract)?;
+                let ingested_at = observation_ingested_at();
                 let authorization = build_observation_resolution_authorization_v1(
                     &observation,
                     "observation-capture.v1",
                 )?;
+                let repository_provenance = repository_provenance.map_or_else(
+                    crate::repository_provenance::PreparedRepositoryProvenanceV1::unavailable,
+                    |context| {
+                        context.capture_after_sanitization(
+                            &observation,
+                            &projection_generation,
+                            ingested_at,
+                            authorization.clone(),
+                        )
+                    },
+                );
                 let retrieval_anchor = build_observation_retrieval_anchor_v2(
                     &observation,
                     projection_generation.clone(),
-                    observation_ingested_at(),
+                    ingested_at,
                     authorization,
                 )?;
                 let write = AnchoredObservationWrite::new(
                     ObservationWrite::new(*observation, expected_cursor, next_cursor)?,
                     retrieval_anchor,
                     projection_generation,
+                )?
+                .with_repository_provenance_attachment(
+                    repository_provenance.availability().clone(),
+                    repository_provenance.anchor().cloned(),
                 )?;
                 if cancellation.is_cancelled() {
                     return Err(ObservationApplicationError::Cancelled);
@@ -463,12 +491,16 @@ impl<S: ObservationStore> ObservationApplication<S> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::process::Command;
     use std::sync::Mutex;
 
     use serde_json::{Value, json};
+    use tempfile::TempDir;
     use tracedecay_domain::{
-        ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeSourceIdentityV1, ObservationScopeV1,
-        ProjectId, SessionId,
+        ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeSourceIdentityV1, EvidenceAvailabilityV1,
+        ObservationScopeV1, ProjectId, RepositoryId, RetrievalAnchorTargetV2, SessionId,
+        WorktreeId,
     };
     use tracedecay_store::observation::{
         CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
@@ -503,7 +535,8 @@ mod tests {
                     stored.commit_receipt().clone(),
                 ));
             }
-            let (write, retrieval_anchor, projection_generation) = write.into_parts();
+            let (write, retrieval_anchor, projection_generation, repository_provenance) =
+                write.into_parts();
             let sequence = u64::try_from(observations.len()).unwrap() + 1;
             let observation = write.observation().clone();
             let cursor = write.next_cursor().clone();
@@ -513,7 +546,8 @@ mod tests {
                 cursor.clone(),
                 retrieval_anchor,
                 projection_generation,
-            )?;
+            )?
+            .with_repository_provenance_attachment(repository_provenance)?;
             let mut cursors = self.source_cursors.lock().unwrap();
             cursors.retain(|existing| {
                 existing.source() != cursor.source() || existing.scope() != cursor.scope()
@@ -780,9 +814,71 @@ mod tests {
         assert!(!page.has_more());
         assert_eq!(page.next_after_sequence(), None);
         assert_eq!(page.observations().len(), 1);
+        assert!(matches!(
+            page.observations()[0]
+                .repository_provenance_attachment()
+                .availability(),
+            EvidenceAvailabilityV1::Unavailable
+        ));
         let payload = page.observations()[0].observation().payload().to_string();
         assert!(!payload.contains(secret));
         assert!(payload.contains("TraceDecay redacted"));
+    }
+
+    #[tokio::test]
+    async fn repository_provenance_is_bound_to_the_sanitized_observation_write() {
+        let repository = TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new(crate::git::git_program())
+                .args(args)
+                .current_dir(repository.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "TraceDecay Test"]);
+        git(&["config", "user.email", "tracedecay@example.invalid"]);
+        fs::write(repository.path().join("tracked.txt"), "content").unwrap();
+        git(&["add", "--", "tracked.txt"]);
+        git(&["commit", "-q", "-m", "initial"]);
+
+        let application = application();
+        let request = request(&json!({
+            "type": "user",
+            "message": { "role": "user", "content": "repository evidence" },
+            "api_key": "sk-repository-provenance-secret-1234567890"
+        }))
+        .with_repository_provenance(Some(RepositoryProvenanceAdmissionContext::new(
+            repository.path().to_path_buf(),
+            RepositoryId::new("repository.application-test").unwrap(),
+            Some(WorktreeId::new("worktree.application-test").unwrap()),
+            [0x5a; 32],
+        )));
+        let outcome = application.capture_observation(request).await.unwrap();
+        let CaptureObservationOutcome::Persisted { outcome, .. } = outcome else {
+            panic!("repository observation must persist");
+        };
+        let attachment = outcome.receipt().repository_provenance_attachment();
+        let EvidenceAvailabilityV1::Known(provenance) = attachment.availability() else {
+            panic!("repository provenance must be known");
+        };
+        assert_eq!(
+            provenance.source_observation(),
+            Some(outcome.receipt().observation().observation_id())
+        );
+        assert!(matches!(
+            attachment.anchor().map(|anchor| anchor.target()),
+            Some(RetrievalAnchorTargetV2::RepositoryCapture { capture_id, .. })
+                if capture_id == provenance.capture_id()
+        ));
+        let encoded = serde_json::to_string(attachment).unwrap();
+        assert!(!encoded.contains(repository.path().to_string_lossy().as_ref()));
+        assert!(!encoded.contains("sk-repository-provenance-secret"));
     }
 
     #[test]

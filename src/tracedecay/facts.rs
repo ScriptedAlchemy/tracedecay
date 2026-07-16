@@ -10,6 +10,7 @@ use crate::memory::types::{
     FeedbackRequest, FeedbackResult, MemoryCategory, MemoryFeedbackFunnel, MemoryRepairStats,
     MemoryStatus, SearchFactsRequest, TrustHistoryEntry, UpdateFactRequest,
 };
+use tracedecay_domain::{FactOwnerV1, ProjectId};
 
 use super::TraceDecay;
 
@@ -31,7 +32,26 @@ fn fact_ids(facts: &[FactRecord]) -> Vec<i64> {
     facts.iter().map(|fact| fact.fact_id).collect()
 }
 
+fn project_memory_owner_from_layout_id(project_id: Option<&str>) -> Result<FactOwnerV1> {
+    let project_id = project_id.ok_or_else(|| TraceDecayError::Config {
+        message: "active project has no authoritative project_id for memory".to_string(),
+    })?;
+    let project_id =
+        ProjectId::new(project_id.to_owned()).map_err(|error| TraceDecayError::Config {
+            message: format!("invalid authoritative project_id for memory: {error}"),
+        })?;
+    Ok(FactOwnerV1::Project { project_id })
+}
+
 impl TraceDecay {
+    /// Returns the only project-memory owner accepted by core routes.
+    ///
+    /// The ID is supplied by the resolved store layout, never reconstructed
+    /// from a filesystem path or a caller-provided display label.
+    pub(crate) fn project_memory_owner(&self) -> Result<FactOwnerV1> {
+        project_memory_owner_from_layout_id(self.store_layout.identity.project_id.as_deref())
+    }
+
     /// Add a fact to the holographic memory store. The outcome carries the
     /// stored (or pre-existing) fact plus a write-time diff report
     /// (near-duplicate / possible-conflict / secret rejection).
@@ -400,6 +420,12 @@ mod tests {
 
     use super::*;
     use crate::db::DatabaseAuthority;
+
+    #[test]
+    fn project_memory_owner_requires_a_valid_authoritative_layout_id() {
+        assert!(project_memory_owner_from_layout_id(None).is_err());
+        assert!(project_memory_owner_from_layout_id(Some("")).is_err());
+    }
 
     #[tokio::test]
     async fn separate_memory_handles_serialize_mutations() {
