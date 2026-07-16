@@ -293,7 +293,6 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
     create_holographic_memory_schema(conn, "create_schema").await?;
     super::memory_v2::create_schema(conn, "create_schema").await?;
     set_version(conn, LATEST_VERSION).await?;
-    super::memory_v2::resume_backfill(conn).await?;
     Ok(())
 }
 
@@ -326,7 +325,6 @@ async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result
         });
     }
     if current == LATEST_VERSION {
-        super::memory_v2::resume_backfill(conn).await?;
         repair_incremental_auto_vacuum(conn, "migrate", exclusive_maintenance).await?;
         return Ok(false);
     }
@@ -357,7 +355,6 @@ async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result
                     message: format!("failed to commit migrations: {e}"),
                     operation: "migrate".to_string(),
                 })?;
-            super::memory_v2::resume_backfill(conn).await?;
             repair_incremental_auto_vacuum(conn, "migrate", exclusive_maintenance).await?;
             Ok(true)
         }

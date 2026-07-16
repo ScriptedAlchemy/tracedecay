@@ -13,9 +13,9 @@ use tempfile::TempDir;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
-    ObservationScopeV1, PayloadReferenceV1, RetentionClass, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, ProjectionGenerationId, UtcMicros,
+    ObservationScopeV1, PayloadReferenceV1, ProjectionGenerationId, RetentionClass,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_store::observation::ObservationCoverageV1;
 use tracedecay_store::{
@@ -3845,8 +3845,8 @@ async fn persist_migration_observation(
         authorization,
     )
     .unwrap();
-    let write = AnchoredObservationWrite::new(write, retrieval_anchor, projection_generation)
-        .unwrap();
+    let write =
+        AnchoredObservationWrite::new(write, retrieval_anchor, projection_generation).unwrap();
     assert!(matches!(
         GlobalDbObservationStore::new(db)
             .persist_observation(write)

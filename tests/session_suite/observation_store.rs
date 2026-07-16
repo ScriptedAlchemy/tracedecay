@@ -7,12 +7,13 @@ use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
-    ObservationCollisionOutcomeV1, ObservationId, ObservationIdentityMaterialV1,
+    NativeAliasV2, ObservationCollisionOutcomeV1, ObservationId, ObservationIdentityMaterialV1,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    PayloadReferenceV1, ProviderId, RetentionClass, SanitizationReceiptId,
+    PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass,
+    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, ProjectionGenerationId, UtcMicros,
+    SessionId, UtcMicros,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, NonDurableFrameReason, ObservationCoverageV1, ObservationCursorAdvance,
@@ -103,6 +104,10 @@ fn write(
 }
 
 fn anchored_write(write: ObservationWrite) -> AnchoredObservationWrite {
+    anchored_write_at(write, UtcMicros(1))
+}
+
+fn anchored_write_at(write: ObservationWrite, ingested_at: UtcMicros) -> AnchoredObservationWrite {
     let projection_generation =
         ProjectionGenerationId::new(SESSION_MESSAGE_PROJECTOR_VERSION).unwrap();
     let authorization = build_observation_resolution_authorization_v1(
@@ -113,11 +118,36 @@ fn anchored_write(write: ObservationWrite) -> AnchoredObservationWrite {
     let retrieval_anchor = build_observation_retrieval_anchor_v2(
         write.observation(),
         projection_generation.clone(),
-        UtcMicros(1),
+        ingested_at,
         authorization,
     )
     .unwrap();
     AnchoredObservationWrite::new(write, retrieval_anchor, projection_generation).unwrap()
+}
+
+fn anchor_with_aliases(
+    anchor: &RetrievalAnchorRecordV2,
+    aliases: Vec<NativeAliasV2>,
+) -> RetrievalAnchorRecordV2 {
+    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+        target: anchor.target().clone(),
+        owner: anchor.owner().clone(),
+        aliases,
+        occurred_at: anchor.occurred_at(),
+        ingested_at: anchor.ingested_at(),
+        evidence_class: anchor.evidence_class(),
+        source_generation: anchor.source_generation().clone(),
+        projection_generation: anchor.projection_generation().clone(),
+        projection_watermark: anchor.projection_watermark().clone(),
+        coverage: anchor.coverage().clone(),
+        source_observations: anchor.source_observations().to_vec(),
+        source_anchors: anchor.source_anchors().to_vec(),
+        authorization: anchor.authorization().clone(),
+        payload_access: anchor.payload_access(),
+        retention_class: anchor.retention_class().clone(),
+        durability: anchor.durability().clone(),
+    })
+    .unwrap()
 }
 
 const CROSS_PROVIDERS: &[&str] = &[
@@ -457,6 +487,10 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
     assert_eq!(receipt.sanitization_receipt(), candidate.receipt());
     assert_eq!(receipt.committed_cursor(), &expected_cursor);
     assert_eq!(
+        receipt.projection_generation().as_str(),
+        SESSION_MESSAGE_PROJECTOR_VERSION
+    );
+    assert_eq!(
         store
             .get_source_cursor(candidate.source(), candidate.scope())
             .await
@@ -516,12 +550,33 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
             .is_err(),
         "immutable observations must reject deletes"
     );
+    assert!(
+        raw_conn
+            .execute(
+                "UPDATE retrieval_anchors SET projection_generation = 'projection.mutated' \
+                 WHERE anchor_id = ?1",
+                libsql::params![receipt.retrieval_anchor_id().as_str()],
+            )
+            .await
+            .is_err(),
+        "stable retrieval anchors must reject updates"
+    );
+    assert!(
+        raw_conn
+            .execute(
+                "DELETE FROM observation_retrieval_anchors WHERE observation_id = ?1",
+                libsql::params![candidate.observation_id().as_str()],
+            )
+            .await
+            .is_err(),
+        "observation retrieval anchor bindings must reject deletes"
+    );
 
     let deltas = table_deltas(&before, &user_table_counts(&tmp).await);
     assert_eq!(
         deltas.len(),
-        4,
-        "one receipt, observation, cursor, and queue row must be the only committed rows: {deltas:?}"
+        6,
+        "one receipt, observation, anchor, binding, cursor, and queue row must commit: {deltas:?}"
     );
     assert!(
         deltas.values().all(|delta| *delta == 1),
@@ -532,6 +587,8 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
         Some(&1),
         "the commit must enqueue exactly one unique projection job"
     );
+    assert_eq!(deltas.get("retrieval_anchors"), Some(&1));
+    assert_eq!(deltas.get("observation_retrieval_anchors"), Some(&1));
 }
 
 #[tokio::test]
@@ -621,6 +678,11 @@ async fn legacy_idempotency_column_rows_migrate_before_reads_and_writes() {
     assert_eq!(stored.observation(), &original);
     assert_eq!(stored.committed_cursor(), &original_cursor);
     assert_eq!(
+        stored.projection_generation().as_str(),
+        "projection.legacy-observation-import.v1"
+    );
+    assert_eq!(stored.retrieval_anchor().ingested_at(), UtcMicros(0));
+    assert_eq!(
         stored.projection_status(),
         ObservationProjectionStatus::Queued
     );
@@ -682,8 +744,11 @@ async fn exact_duplicate_returns_original_receipt_without_mutating_cursor_or_sto
         .unwrap();
     let counts_before = user_table_counts(&tmp).await;
 
+    let duplicate_write =
+        ObservationWrite::new(candidate, None, original_receipt.committed_cursor().clone())
+            .unwrap();
     let duplicate = store
-        .persist_observation(write(candidate, None))
+        .persist_observation(anchored_write_at(duplicate_write, UtcMicros(2)))
         .await
         .unwrap();
     let duplicate_receipt = match duplicate {
@@ -701,6 +766,67 @@ async fn exact_duplicate_returns_original_receipt_without_mutating_cursor_or_sto
             .await
             .unwrap(),
         cursor_before
+    );
+    assert_eq!(user_table_counts(&tmp).await, counts_before);
+}
+
+#[tokio::test]
+async fn retrieval_anchor_alias_collision_is_typed_and_rolls_back_the_candidate() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let first = native_observation(
+        1,
+        1,
+        2,
+        "receipt.alias.first",
+        "native.alias.first",
+        "first payload",
+    );
+    let second = provider_observation(ProviderObservationFixture {
+        provider: "cursor",
+        session_id: "session.alias.second",
+        generation: 1,
+        start: 1,
+        end: 2,
+        receipt_id: "receipt.alias.second",
+        native_record_id: "native.alias.second",
+        body: "second payload",
+    });
+    let second_write = provider_write(second.clone(), None);
+    let alias = second_write.retrieval_anchor().aliases()[0].clone();
+    let second_anchor_id = second_write.retrieval_anchor_id().clone();
+    let (first_write, first_anchor, first_generation) = provider_write(first, None).into_parts();
+    let first_anchor = anchor_with_aliases(&first_anchor, vec![alias.clone()]);
+    let first_anchor_id = first_anchor.anchor_id().clone();
+    store
+        .persist_observation(
+            AnchoredObservationWrite::new(first_write, first_anchor, first_generation).unwrap(),
+        )
+        .await
+        .unwrap();
+    let counts_before = user_table_counts(&tmp).await;
+
+    let error = store
+        .persist_observation(second_write)
+        .await
+        .expect_err("an owner-scoped native alias must identify one anchor");
+    assert!(matches!(
+        error,
+        ObservationStoreError::RetrievalAnchorAliasCollision {
+            alias: collided,
+            existing_anchor_id,
+            candidate_anchor_id,
+        } if collided.as_ref() == &alias
+            && existing_anchor_id.as_ref() == &first_anchor_id
+            && candidate_anchor_id.as_ref() == &second_anchor_id
+    ));
+    assert!(
+        store
+            .get_observation(second.observation_id())
+            .await
+            .unwrap()
+            .is_none()
     );
     assert_eq!(user_table_counts(&tmp).await, counts_before);
 }
@@ -1347,6 +1473,8 @@ async fn every_observation_statement_failure_rolls_back_the_authoritative_transa
     for (stage, table) in [
         ("receipt", "sanitization_receipts"),
         ("observation", "observations"),
+        ("anchor", "retrieval_anchors"),
+        ("anchor_binding", "observation_retrieval_anchors"),
         ("cursor", "source_cursors"),
         ("enqueue", "projection_queue"),
     ] {
@@ -1459,7 +1587,7 @@ async fn concurrent_exact_retry_commits_one_sequence_and_returns_one_duplicate()
     assert_eq!(replay[0].sequence(), committed.sequence());
     assert_eq!(replay[0].observation(), &candidate);
     let deltas = table_deltas(&counts_before, &user_table_counts(&tmp).await);
-    assert_eq!(deltas.len(), 4);
+    assert_eq!(deltas.len(), 6);
     assert!(deltas.values().all(|delta| *delta == 1));
 }
 

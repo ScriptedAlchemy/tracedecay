@@ -513,9 +513,12 @@ async fn test_create_schema_fresh_db() {
     assert!(table_exists(&conn, "memory_v2_assertion_payloads").await);
     assert!(table_exists(&conn, "memory_v2_evidence").await);
     assert!(table_exists(&conn, "memory_v2_lineage_events").await);
-    assert!(table_exists(&conn, "memory_v2_retrieval_anchors").await);
+    assert!(table_exists(&conn, "retrieval_anchors").await);
     assert!(table_exists(&conn, "memory_v2_legacy_map").await);
     assert!(table_exists(&conn, "memory_v2_backfill_progress").await);
+    assert!(table_exists(&conn, "memory_v2_proposals").await);
+    assert!(table_exists(&conn, "memory_v2_proposal_transitions").await);
+    assert!(table_exists(&conn, "memory_v2_proposal_current").await);
     assert!(table_exists(&conn, "redundancy_pairs").await);
     assert!(index_exists(&conn, "idx_redundancy_pairs_node_b").await);
 }

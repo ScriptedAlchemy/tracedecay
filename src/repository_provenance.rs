@@ -21,6 +21,7 @@ use tracedecay_domain::{
 const STATUS_OUTPUT_LIMIT_BYTES: usize = 256 * 1024;
 const STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 /// Authoritative identities and privacy material supplied by the admission boundary.
 pub(crate) struct RepositoryProvenanceProbeRequest<'a> {
@@ -71,7 +72,7 @@ impl Default for NativeRepositoryProvenanceProbe {
 impl NativeRepositoryProvenanceProbe {
     pub(crate) fn capture(
         &self,
-        request: RepositoryProvenanceProbeRequest<'_>,
+        request: &RepositoryProvenanceProbeRequest<'_>,
     ) -> EvidenceAvailabilityV1<RepositoryProvenanceV1> {
         let Ok(repo) = gix::discover(request.project_root) else {
             return EvidenceAvailabilityV1::Unavailable;
@@ -143,7 +144,7 @@ impl NativeRepositoryProvenanceProbe {
 }
 
 pub(crate) fn capture_repository_provenance(
-    request: RepositoryProvenanceProbeRequest<'_>,
+    request: &RepositoryProvenanceProbeRequest<'_>,
 ) -> EvidenceAvailabilityV1<RepositoryProvenanceV1> {
     NativeRepositoryProvenanceProbe::default().capture(request)
 }
@@ -469,10 +470,9 @@ fn privacy_bound_digest(
     }
     let digest = hasher.finalize();
     let mut encoded = String::with_capacity(64);
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     for byte in digest {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        encoded.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
     }
     PrivacyDomainBoundLocatorDigest::new(format!("sha256:{encoded}")).ok()
 }
@@ -538,7 +538,7 @@ mod tests {
             let repository_id = RepositoryId::new("repository.fixture").unwrap();
             let project_id = ProjectId::new("project.fixture").unwrap();
             let worktree_id = WorktreeId::new("worktree.fixture").unwrap();
-            probe.capture(RepositoryProvenanceProbeRequest::new(
+            probe.capture(&RepositoryProvenanceProbeRequest::new(
                 self.path(),
                 &repository_id,
                 Some(&project_id),
@@ -760,7 +760,7 @@ mod tests {
     fn non_repository_is_typed_unavailable() {
         let root = TempDir::new().unwrap();
         let repository_id = RepositoryId::new("repository.fixture").unwrap();
-        let result = capture_repository_provenance(RepositoryProvenanceProbeRequest::new(
+        let result = capture_repository_provenance(&RepositoryProvenanceProbeRequest::new(
             root.path(),
             &repository_id,
             None,

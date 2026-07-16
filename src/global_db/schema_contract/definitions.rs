@@ -196,6 +196,47 @@ pub(super) const TABLES: &[Table] = &[
         )]
     ),
     table!(
+        "retrieval_anchors",
+        [
+            column("anchor_id", "TEXT", false, None, 1),
+            column("anchor_json", "TEXT", true, None, 0),
+            column("owner_json", "TEXT", true, None, 0),
+            column("projection_generation", "TEXT", true, None, 0),
+        ],
+        []
+    ),
+    table!(
+        "observation_retrieval_anchors",
+        [
+            column("observation_id", "TEXT", false, None, 1),
+            column("anchor_id", "TEXT", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "observation_id",
+                "observations",
+                "observation_id",
+                "NO ACTION"
+            ),
+            foreign_key("anchor_id", "retrieval_anchors", "anchor_id", "NO ACTION"),
+        ]
+    ),
+    table!(
+        "retrieval_anchor_aliases",
+        [
+            column("owner_json", "TEXT", true, None, 1),
+            column("alias_kind", "TEXT", true, None, 2),
+            column("locator_digest", "TEXT", true, None, 3),
+            column("anchor_id", "TEXT", true, None, 0),
+        ],
+        [foreign_key(
+            "anchor_id",
+            "retrieval_anchors",
+            "anchor_id",
+            "NO ACTION"
+        )]
+    ),
+    table!(
         "source_cursors",
         [
             column("source_json", "TEXT", true, None, 1),
@@ -270,6 +311,7 @@ pub(super) const TABLES: &[Table] = &[
             column("output_message_id", "TEXT", true, None, 0),
             column("output_digest", "TEXT", true, None, 0),
             column("message_created", "INTEGER", true, None, 0),
+            column("retrieval_anchor_id", "TEXT", false, None, 0),
         ],
         [
             foreign_key(
@@ -282,6 +324,12 @@ pub(super) const TABLES: &[Table] = &[
                 "receipt_id",
                 "sanitization_receipts",
                 "receipt_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "retrieval_anchor_id",
+                "retrieval_anchors",
+                "anchor_id",
                 "NO ACTION"
             ),
         ]
@@ -369,6 +417,7 @@ pub(super) const TABLES: &[Table] = &[
             column("content_json", "TEXT", false, None, 0),
             column("content_text", "TEXT", true, None, 0),
             column("output_digest", "TEXT", true, None, 0),
+            column("retrieval_anchor_id", "TEXT", false, None, 0),
         ],
         [
             foreign_key(
@@ -381,6 +430,12 @@ pub(super) const TABLES: &[Table] = &[
                 "receipt_id",
                 "sanitization_receipts",
                 "receipt_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "retrieval_anchor_id",
+                "retrieval_anchors",
+                "anchor_id",
                 "NO ACTION"
             ),
         ]
@@ -495,6 +550,7 @@ pub(super) const TABLES: &[Table] = &[
             column("output_message_id", "TEXT", true, None, 0),
             column("output_digest", "TEXT", true, None, 0),
             column("message_created", "INTEGER", true, None, 0),
+            column("retrieval_anchor_id", "TEXT", false, None, 0),
         ],
         [
             foreign_key(
@@ -520,6 +576,12 @@ pub(super) const TABLES: &[Table] = &[
                 "receipt_id",
                 "sanitization_receipts",
                 "receipt_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "retrieval_anchor_id",
+                "retrieval_anchors",
+                "anchor_id",
                 "NO ACTION"
             ),
         ]
@@ -588,6 +650,7 @@ pub(super) const TABLES: &[Table] = &[
             column("content_json", "TEXT", false, None, 0),
             column("content_text", "TEXT", true, None, 0),
             column("output_digest", "TEXT", true, None, 0),
+            column("retrieval_anchor_id", "TEXT", false, None, 0),
         ],
         [
             foreign_key(
@@ -613,6 +676,12 @@ pub(super) const TABLES: &[Table] = &[
                 "receipt_id",
                 "sanitization_receipts",
                 "receipt_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "retrieval_anchor_id",
+                "retrieval_anchors",
+                "anchor_id",
                 "NO ACTION"
             ),
         ]
@@ -667,6 +736,20 @@ pub(super) const INDEXES: &[Index] = &[
         unique: true,
         origin: "u",
         columns: &["observation_id"],
+    },
+    Index {
+        table: "observation_retrieval_anchors",
+        name: None,
+        unique: true,
+        origin: "u",
+        columns: &["anchor_id"],
+    },
+    Index {
+        table: "retrieval_anchor_aliases",
+        name: None,
+        unique: true,
+        origin: "u",
+        columns: &["anchor_id", "alias_kind", "locator_digest"],
     },
     Index {
         table: "projection_queue",

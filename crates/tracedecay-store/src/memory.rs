@@ -4,8 +4,9 @@ use std::future::Future;
 
 use tracedecay_domain::{
     Confidence, DomainError, FactAssertionId, FactAssertionV1, FactEventId, FactId,
-    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, LegacyFactMappingV1,
-    PayloadAccessState, RetrievalAnchorId, RetrievalAnchorRecordV2, SourceStoreId, UtcMicros,
+    FactIdentityMaterialV1, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1,
+    LegacyFactMappingV1, PayloadAccessState, RetrievalAnchorId, RetrievalAnchorRecordV2,
+    SourceStoreId, UtcMicros,
 };
 
 const MAX_CURRENT_LIMIT: usize = 1_000;
@@ -16,6 +17,7 @@ const MAX_LINEAGE_LIMIT: usize = 1_000;
 pub struct FactWriteBatch {
     fact_id: FactId,
     owner: FactOwnerV1,
+    identity_material: Option<FactIdentityMaterialV1>,
     assertion: Option<FactAssertionV1>,
     events: Vec<FactLineageEventV1>,
     new_anchors: Vec<RetrievalAnchorRecordV2>,
@@ -133,6 +135,7 @@ impl FactWriteBatch {
         Ok(Self {
             fact_id,
             owner,
+            identity_material: None,
             assertion,
             events,
             new_anchors,
@@ -148,6 +151,26 @@ impl FactWriteBatch {
 
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
+    }
+
+    /// Supplies the deterministic identity source when this batch may create
+    /// the fact. Later batches may omit it because the authority already owns
+    /// the immutable identity material.
+    pub fn with_identity_material(
+        mut self,
+        identity_material: FactIdentityMaterialV1,
+    ) -> FactStoreResult<Self> {
+        if identity_material.owner() != &self.owner
+            || FactId::derive(&identity_material)? != self.fact_id
+        {
+            return Err(FactStoreError::FactMismatch);
+        }
+        self.identity_material = Some(identity_material);
+        Ok(self)
+    }
+
+    pub fn identity_material(&self) -> Option<&FactIdentityMaterialV1> {
+        self.identity_material.as_ref()
     }
 
     pub fn assertion(&self) -> Option<&FactAssertionV1> {
@@ -180,6 +203,7 @@ impl FactWriteBatch {
     ) -> (
         FactId,
         FactOwnerV1,
+        Option<FactIdentityMaterialV1>,
         Option<FactAssertionV1>,
         Vec<FactLineageEventV1>,
         Vec<RetrievalAnchorRecordV2>,
@@ -190,6 +214,7 @@ impl FactWriteBatch {
         (
             self.fact_id,
             self.owner,
+            self.identity_material,
             self.assertion,
             self.events,
             self.new_anchors,
@@ -1035,6 +1060,36 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, FactStoreError::DuplicateEventId { .. }));
+    }
+
+    #[test]
+    fn creation_identity_material_must_derive_the_batch_fact() {
+        let owner = FactOwnerV1::Profile;
+        let fact_id = fact_id(owner.clone(), "operation.identity.expected");
+        let event = payload_event(fact_id.clone(), owner.clone(), 1);
+        let batch = FactWriteBatch::new(
+            fact_id,
+            owner.clone(),
+            None,
+            vec![event],
+            vec![],
+            vec![],
+            None,
+            None,
+        )
+        .unwrap();
+        let unrelated = FactIdentityMaterialV1::new(
+            owner,
+            FactIdentitySourceV1::Application {
+                operation_id: id("operation.identity.unrelated"),
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            batch.with_identity_material(unrelated),
+            Err(FactStoreError::FactMismatch)
+        ));
     }
 
     #[test]

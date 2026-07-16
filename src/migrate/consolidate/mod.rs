@@ -1305,7 +1305,11 @@ async fn retire_legacy_registry_owners(
         let registered_common = destination.get::<String>(1).map_err(|error| {
             config_error(format!("invalid destination git common dir: {error}"))
         })?;
-        if registered_root != canonical_root
+        // Live registration may legitimately redirect a linked-worktree root
+        // to the primary checkout; repository identity is the common dir.
+        let registered_root_in_family = registered_root == canonical_root
+            || same_path(Path::new(&registered_common), &ledger.git_common_dir);
+        if !registered_root_in_family
             || registered_common.is_empty()
             || !same_path(Path::new(&registered_common), &ledger.git_common_dir)
         {
@@ -1374,11 +1378,24 @@ async fn retire_legacy_registry_owners(
             ));
         }
 
+        // Registry rows for the repository family are keyed by the shared git
+        // common dir, not by one checkout path: worktree registrations
+        // redirect canonical_root to the primary checkout, so a consolidation
+        // driven from a linked worktree must retire and verify owners by
+        // repository identity. Rows outside this consolidation's trio (e.g.
+        // further legacy shards awaiting their own pass) are left untouched.
         let canonical_common = GlobalDb::canonical_project_key(&ledger.git_common_dir);
         let mut rows = conn
             .query(
-                "SELECT project_id FROM code_projects WHERE canonical_root=?1 ORDER BY project_id",
-                params![canonical_root.as_str()],
+                "SELECT project_id FROM code_projects
+                 WHERE git_common_dir=?1 AND project_id IN (?2, ?3, ?4)
+                 ORDER BY project_id",
+                params![
+                    canonical_common.as_str(),
+                    ledger.source_project_id.as_str(),
+                    ledger.target_project_id.as_str(),
+                    ledger.destination_project_id.as_str()
+                ],
             )
             .await
             .map_err(|error| {
@@ -1394,31 +1411,22 @@ async fn retire_legacy_registry_owners(
                 config_error(format!("invalid canonical owner registry row: {error}"))
             })?);
         }
-        let allowed = BTreeSet::from([
-            ledger.source_project_id.clone(),
-            ledger.target_project_id.clone(),
-            ledger.destination_project_id.clone(),
-        ]);
-        if owners.iter().any(|owner| !allowed.contains(owner))
-            || !owners.contains(&ledger.destination_project_id)
-        {
+        if !owners.contains(&ledger.destination_project_id) {
             return Err(config_error(format!(
                 "canonical root has unexpected registry owners: {owners:?}"
             )));
         }
 
         // Old project IDs can have been rebound to another repository. Match
-        // the full consolidation identity so those moved rows survive.
+        // the repository identity so those moved rows survive.
         let deleted = conn
             .execute(
                 "DELETE FROM code_projects
                  WHERE project_id IN (?1, ?2)
-                   AND canonical_root=?3
-                   AND git_common_dir=?4",
+                   AND git_common_dir=?3",
                 params![
                     ledger.source_project_id.as_str(),
                     ledger.target_project_id.as_str(),
-                    canonical_root.as_str(),
                     canonical_common.as_str()
                 ],
             )
@@ -1429,8 +1437,15 @@ async fn retire_legacy_registry_owners(
 
         let mut rows = conn
             .query(
-                "SELECT project_id FROM code_projects WHERE canonical_root=?1 ORDER BY project_id",
-                params![canonical_root.as_str()],
+                "SELECT project_id FROM code_projects
+                 WHERE git_common_dir=?1 AND project_id IN (?2, ?3, ?4)
+                 ORDER BY project_id",
+                params![
+                    canonical_common.as_str(),
+                    ledger.source_project_id.as_str(),
+                    ledger.target_project_id.as_str(),
+                    ledger.destination_project_id.as_str()
+                ],
             )
             .await
             .map_err(|error| {

@@ -9,9 +9,9 @@ use tracedecay_domain::{
     CanonicalWorkflowSemanticKindV1, ComponentVersion, DurableObservationV1, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadReferenceV1, ProviderId, RetentionClass,
-    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
-    SensitivityV1, SessionId, ProjectionGenerationId, UtcMicros,
+    ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId,
+    RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+    SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,

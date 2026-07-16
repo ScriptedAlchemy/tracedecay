@@ -16,8 +16,7 @@ use tracedecay_domain::{
     derive_exact_observation_anchor_id,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
-    ObservationPersistOutcome,
+    AnchoredObservationWrite, CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationPersistOutcome,
     ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,
     ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
     SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
@@ -678,6 +677,28 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
     assert_eq!(provenance[0].4, "claude");
     assert_eq!(provenance[0].5, "message-atomic");
     assert!(PayloadDigestV1::new(provenance[0].6.clone()).is_ok());
+
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    assert!(
+        raw_conn
+            .execute(
+                "UPDATE observation_projection_provenance
+                 SET retrieval_anchor_id = NULL
+                 WHERE projector_version = ?1 AND observation_id = ?2",
+                libsql::params![
+                    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                    candidate.observation_id().as_str()
+                ],
+            )
+            .await
+            .is_err()
+    );
+    drop(raw_conn);
+    drop(raw_db);
 
     let before = projection_counts(&tmp).await;
     let replay = store

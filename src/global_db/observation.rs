@@ -349,6 +349,30 @@ pub(super) async fn ensure_observation_schema(conn: &Connection) -> crate::error
             UNIQUE(anchor_id, alias_kind, locator_digest),
             FOREIGN KEY(anchor_id) REFERENCES retrieval_anchors(anchor_id)
         );
+        CREATE TRIGGER IF NOT EXISTS retrieval_anchors_immutable_update
+        BEFORE UPDATE ON retrieval_anchors BEGIN
+            SELECT RAISE(ABORT, 'retrieval anchors are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS retrieval_anchors_immutable_delete
+        BEFORE DELETE ON retrieval_anchors BEGIN
+            SELECT RAISE(ABORT, 'retrieval anchors are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS observation_retrieval_anchors_immutable_update
+        BEFORE UPDATE ON observation_retrieval_anchors BEGIN
+            SELECT RAISE(ABORT, 'observation retrieval anchor bindings are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS observation_retrieval_anchors_immutable_delete
+        BEFORE DELETE ON observation_retrieval_anchors BEGIN
+            SELECT RAISE(ABORT, 'observation retrieval anchor bindings are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS retrieval_anchor_aliases_immutable_update
+        BEFORE UPDATE ON retrieval_anchor_aliases BEGIN
+            SELECT RAISE(ABORT, 'retrieval anchor aliases are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS retrieval_anchor_aliases_immutable_delete
+        BEFORE DELETE ON retrieval_anchor_aliases BEGIN
+            SELECT RAISE(ABORT, 'retrieval anchor aliases are immutable');
+        END;
         CREATE TABLE IF NOT EXISTS source_cursors (
             source_json TEXT NOT NULL,
             scope_json TEXT NOT NULL,
@@ -941,9 +965,6 @@ impl GlobalDb {
         if let Some(existing) =
             read_by_observation_id(&transaction, candidate.observation_id()).await?
         {
-            if existing.retrieval_anchor_id() != write.retrieval_anchor_id() {
-                return Err(ObservationStoreError::RetrievalAnchorObservationMismatch);
-            }
             let existing_observation = existing.observation();
             let outcome = classify_observation_collision(existing_observation, candidate);
             return match outcome {
