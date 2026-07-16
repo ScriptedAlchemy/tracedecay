@@ -176,6 +176,16 @@ pub(super) async fn repair_committed_source_cursors(
                     &stored,
                 )
                 .await? => {}
+            Some(stored)
+                if stored.generation() == candidate.cursor.generation()
+                    && stored.ordering_domain() == candidate.cursor.ordering_domain()
+                    && stored.position() > candidate.cursor.position() =>
+            {
+                // Older builds could advance this derived frontier without a
+                // durable coverage receipt. Rewind to the last canonical
+                // observation so replay can safely reconstruct the suffix.
+                write_source_cursor(conn, &candidate).await?;
+            }
             Some(_) => {
                 return Err(authority_violation(
                     "source cursor cannot be reconciled with the latest committed observation",

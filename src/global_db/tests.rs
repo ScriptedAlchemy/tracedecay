@@ -1123,6 +1123,53 @@ async fn schema_reensure_preserves_valid_nondurable_cursor_progress() {
 }
 
 #[tokio::test]
+async fn schema_reensure_rewinds_unreceipted_cursor_progress() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let (_, committed_cursor) = seed_observation(&db.conn, 1, "unreceipted-progress").await;
+    let advanced_cursor = ClaudeSourceCursorV1::new(
+        committed_cursor.source().clone(),
+        committed_cursor.scope().clone(),
+        committed_cursor.generation(),
+        committed_cursor.byte_offset() + 50,
+    )
+    .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+             VALUES (?1, ?2, ?3)",
+            params![
+                serde_json::to_string(advanced_cursor.source()).unwrap(),
+                serde_json::to_string(advanced_cursor.scope()).unwrap(),
+                serde_json::to_string(&advanced_cursor).unwrap()
+            ],
+        )
+        .await
+        .unwrap();
+    require_schema_reensure(&db).await;
+    drop(db);
+
+    let reopened = GlobalDb::open_at(&db_path).await.unwrap();
+    let mut rows = reopened
+        .conn
+        .query("SELECT cursor_json FROM source_cursors", ())
+        .await
+        .unwrap();
+    let cursor_json = rows
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<String>(0)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<ClaudeSourceCursorV1>(&cursor_json).unwrap(),
+        committed_cursor
+    );
+}
+
+#[tokio::test]
 async fn schema_reensure_repairs_a_stale_present_committed_source_cursor() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
