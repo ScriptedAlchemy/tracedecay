@@ -4,10 +4,16 @@
 //! Connection ownership, transaction boundaries, recovery policy, and storage
 //! resolution remain with the application crate's authoritative store adapter.
 
+pub mod memory;
 pub mod observation;
 pub mod projection;
 pub mod transcript;
 
+pub use memory::{
+    CurrentFactsQuery, FactAsOfQuery, FactCommitConflict, FactCommitOutcome, FactCommitReceipt,
+    FactLineageQuery, FactStore, FactStoreError, FactStoreResult, FactWriteBatch, LegacyFactQuery,
+    StoredFactV1,
+};
 pub use observation::{
     ObservationCommitReceipt, ObservationPersistOutcome, ObservationProjectionStatus,
     ObservationReplayRequest, ObservationStore, ObservationStoreError, ObservationStoreResult,

@@ -386,6 +386,9 @@ where
     if targets.is_empty() {
         return Ok(Vec::new());
     }
+    let own_uid = std::fs::metadata("/proc/self")
+        .map(|meta| meta.uid())
+        .unwrap_or(u32::MAX);
 
     let mut holders = Vec::new();
     for entry in std::fs::read_dir(proc_root)? {
@@ -408,6 +411,16 @@ where
         let fds = match std::fs::read_dir(process_root.join("fd")) {
             Ok(fds) => fds,
             Err(error) if process_disappeared(&error) => continue,
+            // Another user's processes (init, system daemons) always deny fd
+            // inspection and can never be this user's TraceDecay agent hosts;
+            // treating them as unprovable would block every offline
+            // consolidation. A same-uid process that denies stays fatal.
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && std::fs::metadata(&process_root).is_ok_and(|meta| meta.uid() != own_uid) =>
+            {
+                continue;
+            }
             Err(error) => return Err(error),
         };
         let mut paths = BTreeSet::new();
@@ -428,6 +441,10 @@ where
             let metadata = match std::fs::metadata(fd.path()) {
                 Ok(metadata) => metadata,
                 Err(error) if process_disappeared(&error) => continue,
+                // A descriptor whose target denies stat (e.g. another security
+                // context's tty or namespace object) cannot be one of this
+                // user's store files, which are always stat-able by owner.
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => continue,
                 Err(error) => return Err(error),
             };
             if let Some(matched) = targets.get(&(metadata.dev(), metadata.ino())) {

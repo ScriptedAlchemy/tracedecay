@@ -176,7 +176,9 @@ pub enum PayloadAccessState {
     Redacted,
     Quarantined,
     RetentionExpired,
+    Deleted,
     Unavailable,
+    Ambiguous,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -4,6 +4,7 @@
 //! modules remain directly addressable while all existing
 //! `tracedecay_domain::research::Type` imports continue to resolve.
 
+pub mod anchor;
 pub mod canonical;
 pub mod coverage;
 pub mod error;
@@ -17,6 +18,7 @@ pub mod subjects;
 pub mod time;
 pub mod watermark;
 
+pub use anchor::*;
 pub use canonical::*;
 pub use coverage::*;
 pub use error::*;
