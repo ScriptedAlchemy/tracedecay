@@ -6,17 +6,17 @@ cursor, replay, and projection contract while preserving provider-native facts.
 
 ## Current branch status
 
-The current branch contains the host-neutral integration catalog, the remaining
+The current branch completes the host-neutral integration catalog, the remaining
 provider adapters, bounded daemon host admission, fair provider scheduling,
 atomic projection and staged bounded rebuild, typed hook telemetry, and
 executable native host fixtures. Focused direct tests cover catalog completeness,
 provider replay and no-op behavior, admission failure and lifecycle cases,
 projection convergence, cancellation, and telemetry-fixture readiness.
 
-PR6 is not complete until the remaining correctness review is closed, the full
-Linux, Windows, all-feature, Clippy, and workspace gates pass, and a clean
-attested provider-observation benchmark creates the current acceptance artifact.
-The benchmark index intentionally has no `current_acceptance` until that run.
+The correctness review is closed. Linux workspace tests, native and Windows
+all-feature Clippy gates, formatting, and direct fixture tests pass. The clean
+attested provider-observation benchmark at commit `00d3d73a` is the indexed
+current acceptance artifact. PR6 is complete; PR7 is next.
 
 ## Product slice
 
