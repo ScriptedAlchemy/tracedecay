@@ -3,8 +3,9 @@ use std::future::Future;
 
 use serde_json::Value;
 use tracedecay_domain::{
-    CanonicalObservationIdV1, CanonicalWorkflowSemanticKindV1, DurableObservationV1,
-    ObservationContractError, PayloadDigestV1, PayloadReferenceV1,
+    CanonicalObservationIdV1, CanonicalWorkflowSemanticKindV1, DomainError, DurableObservationV1,
+    ObservationContractError, PayloadDigestV1, PayloadReferenceV1, RetrievalAnchorId,
+    SanitizationReceiptRefV1, derive_exact_observation_anchor_id,
 };
 
 use crate::{SessionMessageRecord, SessionRecord};
@@ -12,35 +13,44 @@ use crate::{SessionMessageRecord, SessionRecord};
 pub const SESSION_MESSAGE_PROJECTOR_VERSION_V1: &str = "claude-session-message-v1";
 pub const SESSION_MESSAGE_PROJECTOR_VERSION_V2: &str = "claude-session-message-v2";
 pub const SESSION_MESSAGE_PROJECTOR_VERSION_V3: &str = "claude-session-message-v3";
-pub const SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION_V3;
+pub const SESSION_MESSAGE_PROJECTOR_VERSION_V4: &str = "claude-session-message-v4";
+pub const SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION_V4;
 pub const CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION;
 
 /// Immutable provenance for one observation-derived searchable message row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectionProvenance {
     observation_id: CanonicalObservationIdV1,
-    receipt_id: String,
+    retrieval_anchor_id: RetrievalAnchorId,
+    receipt: SanitizationReceiptRefV1,
 }
 
 impl ProjectionProvenance {
-    fn for_observation(observation: &DurableObservationV1) -> Self {
-        Self {
+    fn for_observation(observation: &DurableObservationV1) -> ProjectionStoreResult<Self> {
+        Ok(Self {
             observation_id: observation.observation_id().clone(),
-            receipt_id: observation
-                .receipt()
-                .receipt()
-                .receipt_id()
-                .as_str()
-                .to_string(),
-        }
+            retrieval_anchor_id: derive_exact_observation_anchor_id(
+                observation.scope(),
+                observation.observation_id(),
+            )?,
+            receipt: observation.receipt().receipt().clone(),
+        })
     }
 
     pub fn observation_id(&self) -> &CanonicalObservationIdV1 {
         &self.observation_id
     }
 
+    pub fn retrieval_anchor_id(&self) -> &RetrievalAnchorId {
+        &self.retrieval_anchor_id
+    }
+
+    pub fn receipt(&self) -> &SanitizationReceiptRefV1 {
+        &self.receipt
+    }
+
     pub fn receipt_id(&self) -> &str {
-        &self.receipt_id
+        self.receipt.receipt_id().as_str()
     }
 
     pub fn projector_version(&self) -> &'static str {
@@ -143,7 +153,7 @@ impl ObservationProjection {
         Ok(SessionMessageProjection {
             session,
             message,
-            provenance: ProjectionProvenance::for_observation(observation),
+            provenance: ProjectionProvenance::for_observation(observation)?,
             output_digest,
             output_ordinal,
         })
@@ -304,7 +314,7 @@ impl WorkflowFactProjection {
         Ok(Self {
             session,
             fact,
-            provenance: ProjectionProvenance::for_observation(observation),
+            provenance: ProjectionProvenance::for_observation(observation)?,
             output_digest,
         })
     }
@@ -466,6 +476,8 @@ pub enum ProjectionStoreError {
     InvalidRebuildFrontier { frontier: u64, committed: u64 },
     #[error("observation contract validation failed")]
     Contract(#[source] ObservationContractError),
+    #[error("projection anchor contract validation failed")]
+    Anchor(#[from] DomainError),
     #[error("projection storage operation {operation} failed")]
     Storage {
         operation: &'static str,

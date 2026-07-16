@@ -12,14 +12,16 @@ use tracedecay_domain::{
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     PayloadReferenceV1, ProviderId, RetentionClass, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId,
+    SessionId, ProjectionGenerationId, UtcMicros,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, NonDurableFrameReason, ObservationCoverageV1, ObservationCursorAdvance,
 };
 use tracedecay_store::{
-    ObservationPersistOutcome, ObservationProjectionStatus, ObservationReplayRequest,
-    ObservationStore, ObservationStoreError, ObservationWrite,
+    AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStatus,
+    ObservationReplayRequest, ObservationStore, ObservationStoreError, ObservationWrite,
+    SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor_v2,
 };
 
 use crate::common::{isolated_lcm_db_path, open_lcm_db};
@@ -95,9 +97,27 @@ fn observation_in_generation(
 fn write(
     observation: DurableClaudeObservationV1,
     expected_cursor: Option<ClaudeSourceCursorV1>,
-) -> ObservationWrite {
+) -> AnchoredObservationWrite {
     let next_cursor = cursor(observation.identity().position().end());
-    ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap()
+    anchored_write(ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap())
+}
+
+fn anchored_write(write: ObservationWrite) -> AnchoredObservationWrite {
+    let projection_generation =
+        ProjectionGenerationId::new(SESSION_MESSAGE_PROJECTOR_VERSION).unwrap();
+    let authorization = build_observation_resolution_authorization_v1(
+        write.observation(),
+        "observation-store-test.v1",
+    )
+    .unwrap();
+    let retrieval_anchor = build_observation_retrieval_anchor_v2(
+        write.observation(),
+        projection_generation.clone(),
+        UtcMicros(1),
+        authorization,
+    )
+    .unwrap();
+    AnchoredObservationWrite::new(write, retrieval_anchor, projection_generation).unwrap()
 }
 
 const CROSS_PROVIDERS: &[&str] = &[
@@ -221,14 +241,14 @@ fn provider_observation(fixture: ProviderObservationFixture<'_>) -> DurableClaud
 fn native_write(
     observation: DurableClaudeObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
-) -> ObservationWrite {
+) -> AnchoredObservationWrite {
     provider_write(observation, expected_cursor)
 }
 
 fn provider_write(
     observation: DurableClaudeObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
-) -> ObservationWrite {
+) -> AnchoredObservationWrite {
     let generation = observation.identity().generation().generation_id();
     let position = observation.identity().position().end();
     let next_cursor = ObservationSourceCursorV1::for_ordering(
@@ -239,7 +259,7 @@ fn provider_write(
         position,
     )
     .unwrap();
-    ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap()
+    anchored_write(ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap())
 }
 
 fn provider_malformed_advance(

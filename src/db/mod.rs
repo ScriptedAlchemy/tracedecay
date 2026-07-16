@@ -6,6 +6,7 @@ mod edges;
 mod files;
 mod fingerprints;
 mod maintenance;
+mod memory_v2;
 mod metadata;
 pub mod migrations;
 mod nodes;

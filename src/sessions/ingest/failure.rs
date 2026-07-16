@@ -477,6 +477,7 @@ pub(crate) fn classify_claude_observation_failure(
         Projection::OutputCollision { .. } => permanent("observation_projection_output_collision"),
         Projection::ProvenanceCollision => permanent("observation_projection_provenance_collision"),
         Projection::Contract(_) => permanent("observation_projection_contract_invalid"),
+        Projection::Anchor(_) => permanent("observation_projection_anchor_invalid"),
         Projection::SequenceOverflow(_) => permanent("observation_projection_sequence_overflow"),
         Projection::NotQueued => permanent("observation_projection_not_queued"),
         Projection::ObservationNotFound => permanent("observation_projection_source_missing"),

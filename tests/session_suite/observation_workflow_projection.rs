@@ -11,11 +11,13 @@ use tracedecay_domain::{
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, PayloadReferenceV1, ProviderId, RetentionClass,
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
-    SensitivityV1, SessionId,
+    SensitivityV1, SessionId, ProjectionGenerationId, UtcMicros,
 };
 use tracedecay_store::{
-    ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    ProjectionPersistOutcome, ProjectionStoreError,
+    AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
+    ObservationStore, ObservationWrite, ProjectionPersistOutcome, ProjectionStoreError,
+    SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor_v2,
 };
 
 use crate::common::{global_message, isolated_lcm_db_path, open_lcm_db};
@@ -144,7 +146,7 @@ fn observation(
 fn write(
     observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
-) -> ObservationWrite {
+) -> AnchoredObservationWrite {
     let identity = observation.identity();
     let next_cursor = ObservationSourceCursorV1::for_ordering(
         observation.source().clone(),
@@ -154,7 +156,22 @@ fn write(
         identity.position().end(),
     )
     .unwrap();
-    ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap()
+    let write = ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap();
+    let projection_generation =
+        ProjectionGenerationId::new(SESSION_MESSAGE_PROJECTOR_VERSION).unwrap();
+    let authorization = build_observation_resolution_authorization_v1(
+        write.observation(),
+        "observation-workflow-test.v1",
+    )
+    .unwrap();
+    let retrieval_anchor = build_observation_retrieval_anchor_v2(
+        write.observation(),
+        projection_generation.clone(),
+        UtcMicros(1),
+        authorization,
+    )
+    .unwrap();
+    AnchoredObservationWrite::new(write, retrieval_anchor, projection_generation).unwrap()
 }
 
 async fn persist_and_project(

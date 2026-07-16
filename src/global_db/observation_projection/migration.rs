@@ -2,6 +2,7 @@ use libsql::{Connection, params};
 use tracedecay_store::{
     ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
     SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V4,
 };
 
 use super::super::GlobalDb;
@@ -30,7 +31,7 @@ pub(in crate::global_db) async fn prepare_projection_version_migration(
     if SESSION_MESSAGE_PROJECTOR_VERSION == SESSION_MESSAGE_PROJECTOR_VERSION_V1 {
         return Ok(());
     }
-    if SESSION_MESSAGE_PROJECTOR_VERSION != SESSION_MESSAGE_PROJECTOR_VERSION_V3 {
+    if SESSION_MESSAGE_PROJECTOR_VERSION != SESSION_MESSAGE_PROJECTOR_VERSION_V4 {
         return Err(storage_message(
             "prepare projection version migration",
             "current projector version has no registered migration",
@@ -425,9 +426,14 @@ async fn read_predecessor_frontier(
                     SELECT 1 FROM observation_projection_checkpoints
                     WHERE projector_version = ?1
                 ))
-             ORDER BY CASE projector_version WHEN ?1 THEN 0 ELSE 1 END
+                OR (projector_version = ?3 AND NOT EXISTS (
+                    SELECT 1 FROM observation_projection_checkpoints
+                    WHERE projector_version = ?1 OR projector_version = ?2
+                ))
+             ORDER BY CASE projector_version WHEN ?1 THEN 0 WHEN ?2 THEN 1 ELSE 2 END
              LIMIT 1",
             params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V1
             ],

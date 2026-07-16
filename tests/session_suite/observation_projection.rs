@@ -10,15 +10,18 @@ use tracedecay_domain::{
     ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1, DurableObservationV1,
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadDigestV1, PayloadReferenceV1, ProviderId, RetentionClass,
-    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
-    SensitivityV1, SessionId,
+    ObservationSourceRangeV1, PayloadDigestV1, PayloadReferenceV1, ProjectionGenerationId,
+    ProviderId, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
+    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
+    derive_exact_observation_anchor_id,
 };
 use tracedecay_store::{
-    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationPersistOutcome,
+    AnchoredObservationWrite, CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+    ObservationPersistOutcome,
     ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,
     ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
 use crate::common::{isolated_lcm_db_path, open_lcm_db};
@@ -155,14 +158,14 @@ fn canonical_observation_at(
     .unwrap()
 }
 
-fn canonical_write(observation: DurableObservationV1) -> ObservationWrite {
+fn canonical_write(observation: DurableObservationV1) -> AnchoredObservationWrite {
     canonical_write_with_cursor(observation, None)
 }
 
 fn canonical_write_with_cursor(
     observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
-) -> ObservationWrite {
+) -> AnchoredObservationWrite {
     let identity = observation.identity();
     let next_cursor = ObservationSourceCursorV1::for_ordering(
         observation.source().clone(),
@@ -172,19 +175,34 @@ fn canonical_write_with_cursor(
         identity.position().end(),
     )
     .unwrap();
-    ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap()
+    anchored_write(ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap())
+}
+
+fn anchored_write(write: ObservationWrite) -> AnchoredObservationWrite {
+    let generation = ProjectionGenerationId::new("projection.observation-test.v4").unwrap();
+    let authorization =
+        build_observation_resolution_authorization_v1(write.observation(), "projection-test")
+            .unwrap();
+    let anchor = build_observation_retrieval_anchor_v2(
+        write.observation(),
+        generation.clone(),
+        UtcMicros(1),
+        authorization,
+    )
+    .unwrap();
+    AnchoredObservationWrite::new(write, anchor, generation).unwrap()
 }
 
 fn write(
     observation: DurableClaudeObservationV1,
     expected_cursor: Option<ClaudeSourceCursorV1>,
-) -> ObservationWrite {
+) -> AnchoredObservationWrite {
     let next_cursor = cursor_in_generation(
         observation.source().session_id().as_str(),
         observation.identity().generation().file_id(),
         observation.identity().position().end(),
     );
-    ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap()
+    anchored_write(ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap())
 }
 
 async fn persist(
@@ -315,7 +333,7 @@ async fn v3_projection_persists_stable_multi_output_ordinals() {
              FROM observation_projection_provenance
              WHERE projector_version = ?1
              ORDER BY output_ordinal",
-            libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+            libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
         )
         .await
         .unwrap();
@@ -472,7 +490,7 @@ async fn projection_counts(tmp: &TempDir) -> (i64, i64, i64, i64, i64, i64) {
 
 async fn projection_provenance_rows(
     tmp: &TempDir,
-) -> Vec<(String, String, String, String, String, String)> {
+) -> Vec<(String, String, String, String, String, String, String)> {
     let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
         .build()
         .await
@@ -480,8 +498,8 @@ async fn projection_provenance_rows(
     let conn = db.connect().unwrap();
     let mut rows = conn
         .query(
-            "SELECT projector_version, observation_id, receipt_id, output_provider,
-                    output_message_id, output_digest
+            "SELECT projector_version, observation_id, retrieval_anchor_id, receipt_id,
+                    output_provider, output_message_id, output_digest
              FROM observation_projection_provenance
              ORDER BY observation_id",
             (),
@@ -497,6 +515,7 @@ async fn projection_provenance_rows(
             row.get(3).unwrap(),
             row.get(4).unwrap(),
             row.get(5).unwrap(),
+            row.get(6).unwrap(),
         ));
     }
     provenance
@@ -567,8 +586,10 @@ async fn projection_ownership_rows(tmp: &TempDir) -> Vec<i64> {
     ownership
 }
 
-fn projection_output_ids(rows: &[(String, String, String, String, String, String)]) -> Vec<String> {
-    let mut ids = rows.iter().map(|row| row.4.clone()).collect::<Vec<_>>();
+fn projection_output_ids(
+    rows: &[(String, String, String, String, String, String, String)],
+) -> Vec<String> {
+    let mut ids = rows.iter().map(|row| row.5.clone()).collect::<Vec<_>>();
     ids.sort();
     ids
 }
@@ -647,10 +668,16 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
     assert_eq!(provenance.len(), 1);
     assert_eq!(provenance[0].0, CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION);
     assert_eq!(provenance[0].1, candidate.observation_id().as_str());
-    assert_eq!(provenance[0].2, "receipt.atomic-projection");
-    assert_eq!(provenance[0].3, "claude");
-    assert_eq!(provenance[0].4, "message-atomic");
-    assert!(PayloadDigestV1::new(provenance[0].5.clone()).is_ok());
+    assert_eq!(
+        provenance[0].2,
+        derive_exact_observation_anchor_id(candidate.scope(), candidate.observation_id())
+            .unwrap()
+            .as_str()
+    );
+    assert_eq!(provenance[0].3, "receipt.atomic-projection");
+    assert_eq!(provenance[0].4, "claude");
+    assert_eq!(provenance[0].5, "message-atomic");
+    assert!(PayloadDigestV1::new(provenance[0].6.clone()).is_ok());
 
     let before = projection_counts(&tmp).await;
     let replay = store
@@ -1841,7 +1868,8 @@ async fn durable_projection_alias_survives_rebuild_without_rewriting_observation
 
     drain_projection_queue(&store).await;
     let provenance = projection_provenance_rows(&tmp).await;
-    assert_eq!(provenance[0].4, "consolidated/source/message-alias");
+    assert_eq!(provenance[0].5, "consolidated/source/message-alias");
+    let anchor_id = provenance[0].2.clone();
     assert_eq!(table_count(&tmp, "observation_projection_aliases").await, 1);
     assert_eq!(
         store
@@ -1858,7 +1886,8 @@ async fn durable_projection_alias_survives_rebuild_without_rewriting_observation
     assert_eq!(table_count(&tmp, "observation_projection_aliases").await, 1);
     drain_projection_queue(&store).await;
     let provenance = projection_provenance_rows(&tmp).await;
-    assert_eq!(provenance[0].4, "consolidated/source/message-alias");
+    assert_eq!(provenance[0].2, anchor_id);
+    assert_eq!(provenance[0].5, "consolidated/source/message-alias");
     assert_eq!(projected_message_texts(&tmp).await.len(), 1);
 }
 
@@ -1937,7 +1966,7 @@ async fn v2_projection_survives_restart_safe_v3_migration_and_rollback() {
              WHERE projector_version = ?2",
             libsql::params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2,
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
             ],
         )
         .await
@@ -1948,7 +1977,7 @@ async fn v2_projection_survives_restart_safe_v3_migration_and_rollback() {
              WHERE projector_version = ?2",
             libsql::params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2,
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
             ],
         )
         .await
@@ -1989,7 +2018,7 @@ async fn v2_projection_survives_restart_safe_v3_migration_and_rollback() {
     let raw_conn = raw_db.connect().unwrap();
     for version in [
         SESSION_MESSAGE_PROJECTOR_VERSION_V2,
-        SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+        SESSION_MESSAGE_PROJECTOR_VERSION_V4,
     ] {
         let mut rows = raw_conn
             .query(
@@ -2014,14 +2043,14 @@ async fn v2_projection_survives_restart_safe_v3_migration_and_rollback() {
     raw_conn
         .execute(
             "DELETE FROM observation_projection_provenance WHERE projector_version = ?1",
-            libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+            libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
         )
         .await
         .unwrap();
     raw_conn
         .execute(
             "DELETE FROM observation_projection_checkpoints WHERE projector_version = ?1",
-            libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+            libsql::params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
         )
         .await
         .unwrap();

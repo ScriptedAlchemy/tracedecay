@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1, derive_memory_id};
 use crate::research::{
@@ -15,7 +15,9 @@ pub enum LegacyHistoryCoverageV1 {
     Unknown,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+const MAX_LINEAGE_EVIDENCE_REFS: usize = 256;
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LegacyFactMappingV1 {
     owner: FactOwnerV1,
@@ -38,6 +40,7 @@ impl LegacyFactMappingV1 {
         owner.validate()?;
         source_store_id.validate()?;
         fact_id.validate()?;
+        fact_id.validate_owner(&owner)?;
         if legacy_fact_id <= 0 {
             return Err(DomainError::NonCanonical {
                 field: "legacy fact id",
@@ -90,6 +93,35 @@ impl LegacyFactMappingV1 {
     }
 }
 
+impl<'de> Deserialize<'de> for LegacyFactMappingV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            owner: FactOwnerV1,
+            source_store_id: SourceStoreId,
+            legacy_fact_id: i64,
+            fact_id: FactId,
+            history_coverage: LegacyHistoryCoverageV1,
+            migrated_at: UtcMicros,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(
+            wire.owner,
+            wire.source_store_id,
+            wire.legacy_fact_id,
+            wire.fact_id,
+            wire.history_coverage,
+            wire.migrated_at,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FactCurationActionV1 {
@@ -125,8 +157,8 @@ pub enum FactLineageEventKindV1 {
 }
 
 impl FactLineageEventKindV1 {
-    fn validate(&self, fact_id: &FactId) -> Result<(), DomainError> {
-        match self {
+    fn canonicalized(mut self, fact_id: &FactId, owner: &FactOwnerV1) -> Result<Self, DomainError> {
+        match &mut self {
             Self::AssertionRecorded { assertion_id } => assertion_id.validate(),
             Self::TrustChanged {
                 previous,
@@ -138,7 +170,7 @@ impl FactLineageEventKindV1 {
                         field: "fact trust transition",
                     });
                 }
-                validate_evidence_ids(evidence_ids)
+                canonicalize_evidence_ids(evidence_ids)
             }
             Self::Curated {
                 action,
@@ -149,18 +181,24 @@ impl FactLineageEventKindV1 {
                     | FactCurationActionV1::SupersededBy { fact_id: related }
                     | FactCurationActionV1::MergedInto { fact_id: related } => {
                         related.validate()?;
+                        related.validate_owner(owner)?;
                         if related == fact_id {
                             return Err(DomainError::SelfSupersession);
                         }
                     }
                     FactCurationActionV1::Retained | FactCurationActionV1::Forgotten => {}
                 }
-                validate_evidence_ids(evidence_ids)
+                canonicalize_evidence_ids(evidence_ids)
             }
             Self::PayloadAccessChanged { previous, current } => {
                 if previous == current {
                     return Err(DomainError::NonCanonical {
                         field: "fact payload access transition",
+                    });
+                }
+                if *previous == PayloadAccessState::Deleted {
+                    return Err(DomainError::NonCanonical {
+                        field: "terminal fact payload deletion",
                     });
                 }
                 Ok(())
@@ -171,13 +209,19 @@ impl FactLineageEventKindV1 {
                         field: "legacy mapping fact",
                     });
                 }
+                if mapping.owner() != owner {
+                    return Err(DomainError::UnknownReference {
+                        field: "legacy mapping owner",
+                    });
+                }
                 Ok(())
             }
-        }
+        }?;
+        Ok(self)
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FactLineageEventV1 {
     event_id: FactEventId,
@@ -207,7 +251,8 @@ impl FactLineageEventV1 {
     ) -> Result<Self, DomainError> {
         fact_id.validate()?;
         owner.validate()?;
-        kind.validate(&fact_id)?;
+        fact_id.validate_owner(&owner)?;
+        let kind = kind.canonicalized(&fact_id, &owner)?;
         if let Some(actor_id) = &actor_id {
             actor_id.validate()?;
         }
@@ -256,9 +301,48 @@ impl FactLineageEventV1 {
     }
 }
 
-fn validate_evidence_ids(evidence_ids: &[FactEvidenceId]) -> Result<(), DomainError> {
+impl<'de> Deserialize<'de> for FactLineageEventV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            event_id: FactEventId,
+            fact_id: FactId,
+            owner: FactOwnerV1,
+            kind: FactLineageEventKindV1,
+            occurred_at: UtcMicros,
+            actor_id: Option<ActorId>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let claimed_id = wire.event_id;
+        let event = Self::new(
+            wire.fact_id,
+            wire.owner,
+            wire.kind,
+            wire.occurred_at,
+            wire.actor_id,
+        )
+        .map_err(serde::de::Error::custom)?;
+        if claimed_id != event.event_id {
+            return Err(serde::de::Error::custom(DomainError::DigestMismatch));
+        }
+        Ok(event)
+    }
+}
+
+fn canonicalize_evidence_ids(evidence_ids: &mut [FactEvidenceId]) -> Result<(), DomainError> {
+    if evidence_ids.len() > MAX_LINEAGE_EVIDENCE_REFS {
+        return Err(DomainError::NonCanonical {
+            field: "fact event evidence",
+        });
+    }
+    evidence_ids.sort_unstable();
     let mut seen = BTreeSet::new();
-    for evidence_id in evidence_ids {
+    for evidence_id in evidence_ids.iter() {
         evidence_id.validate()?;
         if !seen.insert(evidence_id) {
             return Err(DomainError::DuplicateId {
@@ -363,6 +447,9 @@ mod tests {
             UtcMicros(30),
         )
         .unwrap();
+        let mut mapping_wire = serde_json::to_value(&mapping).unwrap();
+        mapping_wire["fact_id"] = serde_json::json!("fact.v1.forged");
+        assert!(serde_json::from_value::<LegacyFactMappingV1>(mapping_wire).is_err());
         let event = FactLineageEventV1::new(
             fact_id,
             FactOwnerV1::Profile,
@@ -376,5 +463,71 @@ mod tests {
             FactLineageEventKindV1::LegacyImported { mapping }
                 if mapping.history_coverage() == LegacyHistoryCoverageV1::Unknown
         ));
+    }
+
+    #[test]
+    fn lineage_wire_rejects_tampered_identity() {
+        let event = FactLineageEventV1::new(
+            fact_id("operation.wire"),
+            FactOwnerV1::Profile,
+            FactLineageEventKindV1::PayloadAccessChanged {
+                previous: PayloadAccessState::Eligible,
+                current: PayloadAccessState::Deleted,
+            },
+            UtcMicros(20),
+            None,
+        )
+        .unwrap();
+        let mut wire = serde_json::to_value(event).unwrap();
+        wire["event_id"] = serde_json::json!("fact-event.v1.forged");
+
+        assert!(serde_json::from_value::<FactLineageEventV1>(wire).is_err());
+    }
+
+    #[test]
+    fn deletion_is_terminal() {
+        let result = FactLineageEventV1::new(
+            fact_id("operation.deleted"),
+            FactOwnerV1::Profile,
+            FactLineageEventKindV1::PayloadAccessChanged {
+                previous: PayloadAccessState::Deleted,
+                current: PayloadAccessState::Eligible,
+            },
+            UtcMicros(21),
+            None,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn lineage_evidence_order_is_canonical() {
+        let fact_id = fact_id("operation.evidence-order");
+        let first = FactLineageEventV1::new(
+            fact_id.clone(),
+            FactOwnerV1::Profile,
+            FactLineageEventKindV1::TrustChanged {
+                previous: Confidence::new(0.4).unwrap(),
+                current: Confidence::new(0.8).unwrap(),
+                evidence_ids: vec![id("evidence.b"), id("evidence.a")],
+            },
+            UtcMicros(22),
+            None,
+        )
+        .unwrap();
+        let second = FactLineageEventV1::new(
+            fact_id,
+            FactOwnerV1::Profile,
+            FactLineageEventKindV1::TrustChanged {
+                previous: Confidence::new(0.4).unwrap(),
+                current: Confidence::new(0.8).unwrap(),
+                evidence_ids: vec![id("evidence.a"), id("evidence.b")],
+            },
+            UtcMicros(22),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(first, second);
     }
 }

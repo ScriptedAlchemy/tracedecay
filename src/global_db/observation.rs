@@ -3,21 +3,25 @@ use std::collections::BTreeSet;
 use libsql::{Connection, params};
 use tracedecay_domain::{
     CanonicalObservationIdV1, ObservationCollisionOutcomeV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceIdentityV1, SanitizationReceiptV1,
+    ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectionGenerationId,
+    RetrievalAnchorRecordV2, RetrievalAnchorTargetV2, SanitizationReceiptV1, UtcMicros,
     classify_observation_collision,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
 };
 use tracedecay_store::{
-    ObservationCommitReceipt, ObservationPersistOutcome, ObservationProjectionStatus,
-    ObservationReplayRequest, ObservationStoreError, ObservationStoreResult, ObservationWrite,
-    StoredObservation,
+    AnchoredObservationWrite, ObservationCommitReceipt, ObservationPersistOutcome,
+    ObservationProjectionStatus, ObservationReplayRequest, ObservationStoreError,
+    ObservationStoreResult, StoredObservation, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor_v2,
 };
 
 use super::{GlobalDb, global_db_operation_error, global_db_operation_message};
 
 const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical-autoincrement";
+const OBSERVATION_ANCHOR_SCHEMA_MIGRATION: &str = "observation-retrieval-anchors-v2";
+const LEGACY_OBSERVATION_PROJECTION_GENERATION: &str = "projection.legacy-observation-import.v1";
 const OBSERVATION_SCHEMA_OPERATION: &str = "migrate observation authority schema";
 
 async fn observation_table_exists(conn: &Connection) -> crate::errors::Result<bool> {
@@ -222,6 +226,87 @@ async fn migrate_source_cursor_advances_schema(conn: &Connection) -> crate::erro
     .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
 }
 
+async fn backfill_observation_retrieval_anchors(conn: &Connection) -> crate::errors::Result<()> {
+    let mut rows = conn
+        .query(
+            "SELECT observation.observation_json, observation.receipt_id,
+                    receipt.receipt_json
+             FROM observations AS observation
+             LEFT JOIN sanitization_receipts AS receipt
+               ON receipt.receipt_id = observation.receipt_id
+             LEFT JOIN observation_retrieval_anchors AS anchor
+               ON anchor.observation_id = observation.observation_id
+             WHERE anchor.observation_id IS NULL
+             ORDER BY observation.sequence",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    let mut legacy_rows = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
+    {
+        legacy_rows.push((
+            row.get::<String>(0)
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?,
+            row.get::<String>(1)
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?,
+            row.get::<Option<String>>(2)
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?,
+        ));
+    }
+    drop(rows);
+
+    for (observation_json, receipt_id, receipt_json) in legacy_rows {
+        let receipt_json = receipt_json.ok_or_else(|| {
+            global_db_operation_message(
+                OBSERVATION_SCHEMA_OPERATION,
+                "legacy observation receipt is unavailable for anchor backfill",
+            )
+        })?;
+        let observation: tracedecay_domain::DurableObservationV1 =
+            serde_json::from_str(&observation_json)
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        let receipt: SanitizationReceiptV1 = serde_json::from_str(&receipt_json)
+            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        if observation.receipt() != &receipt
+            || observation.receipt().receipt().receipt_id().as_str() != receipt_id
+        {
+            return Err(global_db_operation_message(
+                OBSERVATION_SCHEMA_OPERATION,
+                "legacy observation receipt does not validate for anchor backfill",
+            ));
+        }
+        let projection_generation =
+            ProjectionGenerationId::new(LEGACY_OBSERVATION_PROJECTION_GENERATION)
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        let authorization = build_observation_resolution_authorization_v1(
+            &observation,
+            "legacy-observation-import.v1",
+        )
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        let anchor = build_observation_retrieval_anchor_v2(
+            &observation,
+            projection_generation,
+            UtcMicros(0),
+            authorization,
+        )
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        persist_observation_retrieval_anchor(conn, observation.observation_id(), &anchor)
+            .await
+            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+    }
+    conn.execute(
+        "INSERT OR REPLACE INTO global_schema_migrations(migration) VALUES (?1)",
+        params![OBSERVATION_ANCHOR_SCHEMA_MIGRATION],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
+}
+
 pub(super) async fn ensure_observation_schema(conn: &Connection) -> crate::errors::Result<()> {
     let table_preexisted = observation_table_exists(conn).await?;
     conn.execute_batch(
@@ -242,6 +327,27 @@ pub(super) async fn ensure_observation_schema(conn: &Connection) -> crate::error
             observation_json TEXT NOT NULL,
             committed_cursor_json TEXT NOT NULL,
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
+        );
+        CREATE TABLE IF NOT EXISTS retrieval_anchors (
+            anchor_id TEXT PRIMARY KEY,
+            anchor_json TEXT NOT NULL CHECK(json_valid(anchor_json)),
+            owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
+            projection_generation TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS observation_retrieval_anchors (
+            observation_id TEXT PRIMARY KEY,
+            anchor_id TEXT NOT NULL UNIQUE,
+            FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
+            FOREIGN KEY(anchor_id) REFERENCES retrieval_anchors(anchor_id)
+        );
+        CREATE TABLE IF NOT EXISTS retrieval_anchor_aliases (
+            owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
+            alias_kind TEXT NOT NULL,
+            locator_digest TEXT NOT NULL,
+            anchor_id TEXT NOT NULL,
+            PRIMARY KEY(owner_json, alias_kind, locator_digest),
+            UNIQUE(anchor_id, alias_kind, locator_digest),
+            FOREIGN KEY(anchor_id) REFERENCES retrieval_anchors(anchor_id)
         );
         CREATE TABLE IF NOT EXISTS source_cursors (
             source_json TEXT NOT NULL,
@@ -278,7 +384,8 @@ pub(super) async fn ensure_observation_schema(conn: &Connection) -> crate::error
     .await
     .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
     migrate_source_cursor_advances_schema(conn).await?;
-    migrate_observation_schema(conn, table_preexisted).await
+    migrate_observation_schema(conn, table_preexisted).await?;
+    backfill_observation_retrieval_anchors(conn).await
 }
 
 fn storage(
@@ -385,6 +492,165 @@ fn decode<T: serde::de::DeserializeOwned>(
     serde_json::from_str(value).map_err(|error| storage(operation, error))
 }
 
+fn encode_json_string<T: serde::Serialize>(
+    value: &T,
+    operation: &'static str,
+) -> ObservationStoreResult<String> {
+    match serde_json::to_value(value).map_err(|error| storage(operation, error))? {
+        serde_json::Value::String(value) => Ok(value),
+        _ => Err(storage_message(operation, "encoded value is not a string")),
+    }
+}
+
+async fn persist_observation_retrieval_anchor(
+    conn: &Connection,
+    observation_id: &CanonicalObservationIdV1,
+    candidate: &RetrievalAnchorRecordV2,
+) -> ObservationStoreResult<(RetrievalAnchorRecordV2, ProjectionGenerationId)> {
+    let anchor_json = encode(candidate, "encode retrieval anchor")?;
+    let owner_json = encode(candidate.owner(), "encode retrieval anchor owner")?;
+    conn.execute(
+        "INSERT OR IGNORE INTO retrieval_anchors (
+            anchor_id, anchor_json, owner_json, projection_generation
+         ) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            candidate.anchor_id().as_str(),
+            anchor_json.as_str(),
+            owner_json.as_str(),
+            candidate.projection_generation().as_str(),
+        ],
+    )
+    .await
+    .map_err(|error| storage("insert retrieval anchor", error))?;
+    let mut rows = conn
+        .query(
+            "SELECT anchor_json, owner_json, projection_generation
+             FROM retrieval_anchors WHERE anchor_id = ?1",
+            params![candidate.anchor_id().as_str()],
+        )
+        .await
+        .map_err(|error| storage("read retrieval anchor", error))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| storage("read retrieval anchor", error))?
+        .ok_or_else(|| storage_message("read retrieval anchor", "anchor insert disappeared"))?;
+    let stored_json = row
+        .get::<String>(0)
+        .map_err(|error| storage("read retrieval anchor", error))?;
+    let stored_owner_json = row
+        .get::<String>(1)
+        .map_err(|error| storage("read retrieval anchor", error))?;
+    let stored_projection_generation = row
+        .get::<String>(2)
+        .map_err(|error| storage("read retrieval anchor", error))?;
+    drop(rows);
+    let stored: RetrievalAnchorRecordV2 = decode(&stored_json, "decode retrieval anchor")?;
+    let projection_generation = ProjectionGenerationId::new(stored_projection_generation)
+        .map_err(ObservationStoreError::RetrievalAnchorContract)?;
+    if stored.anchor_id() != candidate.anchor_id()
+        || stored.owner() != candidate.owner()
+        || stored_owner_json != encode(stored.owner(), "verify retrieval anchor owner")?
+        || stored.projection_generation() != &projection_generation
+        || !matches!(
+            stored.target(),
+            RetrievalAnchorTargetV2::ExactObservation(target) if target == observation_id
+        )
+    {
+        return Err(ObservationStoreError::RetrievalAnchorObservationMismatch);
+    }
+
+    conn.execute(
+        "INSERT OR IGNORE INTO observation_retrieval_anchors (observation_id, anchor_id)
+         VALUES (?1, ?2)",
+        params![observation_id.as_str(), stored.anchor_id().as_str()],
+    )
+    .await
+    .map_err(|error| storage("bind observation retrieval anchor", error))?;
+    let mut rows = conn
+        .query(
+            "SELECT anchor_id FROM observation_retrieval_anchors WHERE observation_id = ?1",
+            params![observation_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage("verify observation retrieval anchor", error))?;
+    let bound_anchor_id = rows
+        .next()
+        .await
+        .map_err(|error| storage("verify observation retrieval anchor", error))?
+        .ok_or_else(|| {
+            storage_message(
+                "verify observation retrieval anchor",
+                "observation anchor binding disappeared",
+            )
+        })?
+        .get::<String>(0)
+        .map_err(|error| storage("verify observation retrieval anchor", error))?;
+    drop(rows);
+    if bound_anchor_id != stored.anchor_id().as_str() {
+        return Err(ObservationStoreError::RetrievalAnchorObservationMismatch);
+    }
+
+    for alias in stored.aliases() {
+        let alias_kind = encode_json_string(&alias.kind(), "encode retrieval anchor alias kind")?;
+        let locator_digest = encode_json_string(
+            alias.locator_digest(),
+            "encode retrieval anchor alias digest",
+        )?;
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO retrieval_anchor_aliases (
+                    owner_json, alias_kind, locator_digest, anchor_id
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    stored_owner_json.as_str(),
+                    alias_kind.as_str(),
+                    locator_digest.as_str(),
+                    stored.anchor_id().as_str(),
+                ],
+            )
+            .await
+            .map_err(|error| storage("insert retrieval anchor alias", error))?;
+        if inserted == 0 {
+            let mut rows = conn
+                .query(
+                    "SELECT anchor_id FROM retrieval_anchor_aliases
+                     WHERE owner_json = ?1 AND alias_kind = ?2 AND locator_digest = ?3",
+                    params![
+                        stored_owner_json.as_str(),
+                        alias_kind.as_str(),
+                        locator_digest.as_str(),
+                    ],
+                )
+                .await
+                .map_err(|error| storage("read retrieval anchor alias", error))?;
+            let existing_anchor_id = rows
+                .next()
+                .await
+                .map_err(|error| storage("read retrieval anchor alias", error))?
+                .ok_or_else(|| {
+                    storage_message(
+                        "read retrieval anchor alias",
+                        "alias conflict row disappeared",
+                    )
+                })?
+                .get::<String>(0)
+                .map_err(|error| storage("read retrieval anchor alias", error))?;
+            if existing_anchor_id != stored.anchor_id().as_str() {
+                return Err(ObservationStoreError::RetrievalAnchorAliasCollision {
+                    alias: Box::new(alias.clone()),
+                    existing_anchor_id: Box::new(
+                        tracedecay_domain::RetrievalAnchorId::new(existing_anchor_id)
+                            .map_err(ObservationStoreError::RetrievalAnchorContract)?,
+                    ),
+                    candidate_anchor_id: Box::new(stored.anchor_id().clone()),
+                });
+            }
+        }
+    }
+    Ok((stored, projection_generation))
+}
+
 fn decode_sequence(value: i64, operation: &'static str) -> ObservationStoreResult<u64> {
     u64::try_from(value).map_err(|_| storage_message(operation, "negative observation sequence"))
 }
@@ -417,11 +683,20 @@ async fn read_observation_row(
     let cursor_json = row
         .get::<String>(2)
         .map_err(|error| storage(operation, error))?;
+    let anchor_json = row
+        .get::<String>(3)
+        .map_err(|error| storage(operation, error))?;
+    let projection_generation = row
+        .get::<String>(4)
+        .map_err(|error| storage(operation, error))?;
     Ok(Some(ObservationCommitReceipt::new(
         sequence,
         decode(&observation_json, operation)?,
         decode(&cursor_json, operation)?,
-    )))
+        decode(&anchor_json, operation)?,
+        ProjectionGenerationId::new(projection_generation)
+            .map_err(ObservationStoreError::RetrievalAnchorContract)?,
+    )?))
 }
 
 async fn read_by_observation_id(
@@ -430,8 +705,14 @@ async fn read_by_observation_id(
 ) -> ObservationStoreResult<Option<ObservationCommitReceipt>> {
     read_observation_row(
         conn,
-        "SELECT sequence, observation_json, committed_cursor_json
-         FROM observations WHERE observation_id = ?1",
+        "SELECT observation.sequence, observation.observation_json,
+                observation.committed_cursor_json, anchor.anchor_json,
+                anchor.projection_generation
+         FROM observations AS observation
+         JOIN observation_retrieval_anchors AS binding
+           ON binding.observation_id = observation.observation_id
+         JOIN retrieval_anchors AS anchor ON anchor.anchor_id = binding.anchor_id
+         WHERE observation.observation_id = ?1",
         observation_id.as_str(),
         "read observation",
     )
@@ -650,7 +931,7 @@ async fn read_projection_status(
 impl GlobalDb {
     pub(crate) async fn persist_observation_result(
         &self,
-        write: ObservationWrite,
+        write: AnchoredObservationWrite,
     ) -> ObservationStoreResult<ObservationPersistOutcome> {
         let transaction = self
             .begin_write_transaction()
@@ -660,6 +941,9 @@ impl GlobalDb {
         if let Some(existing) =
             read_by_observation_id(&transaction, candidate.observation_id()).await?
         {
+            if existing.retrieval_anchor_id() != write.retrieval_anchor_id() {
+                return Err(ObservationStoreError::RetrievalAnchorObservationMismatch);
+            }
             let existing_observation = existing.observation();
             let outcome = classify_observation_collision(existing_observation, candidate);
             return match outcome {
@@ -714,7 +998,9 @@ impl GlobalDb {
                             existing.sequence(),
                             candidate.clone(),
                             write.next_cursor().clone(),
-                        ),
+                            existing.retrieval_anchor().clone(),
+                            existing.projection_generation().clone(),
+                        )?,
                     ))
                 }
                 ObservationCollisionOutcomeV1::IdentityCollision => {
@@ -770,8 +1056,19 @@ impl GlobalDb {
             transaction.last_insert_rowid(),
             "insert immutable observation",
         )?;
-        let committed =
-            ObservationCommitReceipt::new(sequence, candidate.clone(), write.next_cursor().clone());
+        let (retrieval_anchor, projection_generation) = persist_observation_retrieval_anchor(
+            &transaction,
+            candidate.observation_id(),
+            write.retrieval_anchor(),
+        )
+        .await?;
+        let committed = ObservationCommitReceipt::new(
+            sequence,
+            candidate.clone(),
+            write.next_cursor().clone(),
+            retrieval_anchor,
+            projection_generation,
+        )?;
 
         write_cursor(&transaction, &source_json, &scope_json, &cursor_json).await?;
         transaction
@@ -875,12 +1172,16 @@ impl GlobalDb {
             .conn
             .query(
                 "SELECT observations.sequence, observations.observation_json,
-                        observations.committed_cursor_json,
+                        observations.committed_cursor_json, anchor.anchor_json,
+                        anchor.projection_generation,
                         EXISTS(
                             SELECT 1 FROM projection_queue
                             WHERE projection_queue.observation_id = observations.observation_id
                         )
                  FROM observations
+                 JOIN observation_retrieval_anchors AS binding
+                   ON binding.observation_id = observations.observation_id
+                 JOIN retrieval_anchors AS anchor ON anchor.anchor_id = binding.anchor_id
                  WHERE sequence > ?1 ORDER BY sequence ASC LIMIT ?2",
                 params![after_sequence, limit],
             )
@@ -903,8 +1204,14 @@ impl GlobalDb {
             let committed_cursor_json = row
                 .get::<String>(2)
                 .map_err(|error| storage("replay observations", error))?;
+            let anchor_json = row
+                .get::<String>(3)
+                .map_err(|error| storage("replay observations", error))?;
+            let projection_generation = row
+                .get::<String>(4)
+                .map_err(|error| storage("replay observations", error))?;
             let projection_status = match row
-                .get::<i64>(3)
+                .get::<i64>(5)
                 .map_err(|error| storage("replay observations", error))?
             {
                 0 => ObservationProjectionStatus::NotQueued,
@@ -915,7 +1222,10 @@ impl GlobalDb {
                     sequence,
                     decode(&observation_json, "decode replayed observation")?,
                     decode(&committed_cursor_json, "decode replayed observation cursor")?,
-                ),
+                    decode(&anchor_json, "decode replayed observation anchor")?,
+                    ProjectionGenerationId::new(projection_generation)
+                        .map_err(ObservationStoreError::RetrievalAnchorContract)?,
+                )?,
                 projection_status,
             ));
         }

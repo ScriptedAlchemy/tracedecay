@@ -84,6 +84,7 @@ pub(in super::super) async fn ensure_observation_projection_schema(
             output_message_id TEXT NOT NULL,
             output_digest TEXT NOT NULL,
             message_created INTEGER NOT NULL CHECK(message_created IN (0, 1)),
+            retrieval_anchor_id TEXT REFERENCES retrieval_anchors(anchor_id),
             PRIMARY KEY(projector_version, observation_id, output_ordinal),
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
@@ -146,6 +147,7 @@ pub(in super::super) async fn ensure_observation_projection_schema(
             content_json TEXT CHECK(content_json IS NULL OR json_valid(content_json)),
             content_text TEXT NOT NULL,
             output_digest TEXT NOT NULL,
+            retrieval_anchor_id TEXT REFERENCES retrieval_anchors(anchor_id),
             PRIMARY KEY(projector_version, observation_id, fact_ordinal),
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
@@ -209,6 +211,7 @@ pub(in super::super) async fn ensure_observation_projection_schema(
             output_message_id TEXT NOT NULL,
             output_digest TEXT NOT NULL,
             message_created INTEGER NOT NULL CHECK(message_created IN (0, 1)),
+            retrieval_anchor_id TEXT REFERENCES retrieval_anchors(anchor_id),
             PRIMARY KEY(projector_version, generation, observation_id, output_ordinal),
             FOREIGN KEY(projector_version, generation)
                 REFERENCES observation_projection_rebuilds(projector_version, generation)
@@ -256,6 +259,7 @@ pub(in super::super) async fn ensure_observation_projection_schema(
             content_json TEXT CHECK(content_json IS NULL OR json_valid(content_json)),
             content_text TEXT NOT NULL,
             output_digest TEXT NOT NULL,
+            retrieval_anchor_id TEXT REFERENCES retrieval_anchors(anchor_id),
             PRIMARY KEY(projector_version, generation, observation_id, fact_ordinal),
             FOREIGN KEY(projector_version, generation)
                 REFERENCES observation_projection_rebuilds(projector_version, generation)
@@ -268,6 +272,7 @@ pub(in super::super) async fn ensure_observation_projection_schema(
     migrate_projection_rebuild_schema(conn).await?;
     migrate_legacy_projection_output_uniqueness(conn).await?;
     migrate_projection_multi_output_primary_key(conn).await?;
+    ensure_projection_anchor_columns(conn).await?;
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_output
          ON observation_projection_provenance
@@ -291,7 +296,30 @@ pub(in super::super) async fn ensure_observation_projection_schema(
              provider_reference, observation_sequence);",
     )
     .await?;
+    ensure_v4_projection_binding_triggers(conn).await
+}
+
+async fn ensure_projection_anchor_columns(conn: &Connection) -> Result<(), libsql::Error> {
+    for table in [
+        "observation_projection_provenance",
+        "observation_workflow_facts",
+        "observation_projection_rebuild_provenance",
+        "observation_projection_rebuild_workflow_facts",
+    ] {
+        let ddl = format!(
+            "ALTER TABLE {table} ADD COLUMN retrieval_anchor_id TEXT \
+             REFERENCES retrieval_anchors(anchor_id)"
+        );
+        super::super::ensure_table_columns(conn, table, &[("retrieval_anchor_id", ddl.as_str())])
+            .await?;
+    }
     Ok(())
+}
+
+async fn ensure_v4_projection_binding_triggers(conn: &Connection) -> Result<(), libsql::Error> {
+    conn.execute_batch(include_str!("projection_v4_binding_triggers.sql"))
+        .await
+        .map(|_| ())
 }
 
 const LEGACY_REBUILD_COLUMNS: &[&str] = &[
@@ -893,7 +921,7 @@ async fn restore_projection_output_audit_triggers(conn: &Connection) -> Result<(
          AFTER UPDATE ON session_messages
          WHEN EXISTS (
             SELECT 1 FROM observation_projection_provenance
-            WHERE projector_version = 'claude-session-message-v3'
+            WHERE projector_version = 'claude-session-message-v4'
               AND output_provider = OLD.provider
               AND output_message_id = OLD.message_id
          ) BEGIN
@@ -904,7 +932,7 @@ async fn restore_projection_output_audit_triggers(conn: &Connection) -> Result<(
          AFTER DELETE ON session_messages
          WHEN EXISTS (
             SELECT 1 FROM observation_projection_provenance
-            WHERE projector_version = 'claude-session-message-v3'
+            WHERE projector_version = 'claude-session-message-v4'
               AND output_provider = OLD.provider
               AND output_message_id = OLD.message_id
          ) BEGIN

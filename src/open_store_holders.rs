@@ -386,9 +386,6 @@ where
     if targets.is_empty() {
         return Ok(Vec::new());
     }
-    let own_uid = std::fs::metadata("/proc/self")
-        .map(|meta| meta.uid())
-        .unwrap_or(u32::MAX);
 
     let mut holders = Vec::new();
     for entry in std::fs::read_dir(proc_root)? {
@@ -411,16 +408,13 @@ where
         let fds = match std::fs::read_dir(process_root.join("fd")) {
             Ok(fds) => fds,
             Err(error) if process_disappeared(&error) => continue,
-            // Another user's processes (init, system daemons) always deny fd
-            // inspection and can never be this user's TraceDecay agent hosts;
-            // treating them as unprovable would block every offline
-            // consolidation. A same-uid process that denies stays fatal.
-            Err(error)
-                if error.kind() == io::ErrorKind::PermissionDenied
-                    && std::fs::metadata(&process_root).is_ok_and(|meta| meta.uid() != own_uid) =>
-            {
-                continue;
-            }
+            // Processes that deny fd inspection are other users' processes or
+            // hardened (non-dumpable) same-user binaries such as sd-pam,
+            // ssh-agent, or Electron sandboxes. TraceDecay store writers are
+            // always ordinary same-user tracedecay processes, which stay
+            // inspectable; treating uninspectable bystanders as unprovable
+            // would block every offline consolidation on a desktop host.
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => continue,
             Err(error) => return Err(error),
         };
         let mut paths = BTreeSet::new();

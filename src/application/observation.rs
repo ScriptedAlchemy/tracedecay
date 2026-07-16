@@ -1,15 +1,19 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 use tracedecay_domain::{
     CanonicalObservationIdV1, ObservationContractError, ObservationIdentityMaterialV1,
-    ObservationSourceCursorV1, RetentionClass, SanitizationReceiptV1,
+    ObservationSourceCursorV1, ProjectionGenerationId, RetentionClass, SanitizationReceiptV1,
+    UtcMicros,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
-    ObservationPersistOutcome, ObservationProjectionStatus, ObservationReplayRequest,
-    ObservationStore, ObservationStoreError, ObservationWrite, StoredObservation,
+    AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStatus,
+    ObservationReplayRequest, ObservationStore, ObservationStoreError, ObservationWrite,
+    SESSION_MESSAGE_PROJECTOR_VERSION, StoredObservation,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
 use crate::privacy::{
@@ -93,6 +97,14 @@ impl CaptureObservationRequest {
 
 pub type CaptureClaudeObservationRequest = CaptureObservationRequest;
 pub type CaptureClaudeObservationRequestError = CaptureObservationRequestError;
+
+fn observation_ingested_at() -> UtcMicros {
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
+}
 
 pub struct GetObservationRequest {
     observation_id: CanonicalObservationIdV1,
@@ -312,7 +324,24 @@ impl<S: ObservationStore> ObservationApplication<S> {
                     next_cursor =
                         next_cursor.with_resume_checkpoint(file_identity, resume_fingerprint);
                 }
-                let write = ObservationWrite::new(*observation, expected_cursor, next_cursor)?;
+                let projection_generation =
+                    ProjectionGenerationId::new(SESSION_MESSAGE_PROJECTOR_VERSION)
+                        .map_err(ObservationStoreError::RetrievalAnchorContract)?;
+                let authorization = build_observation_resolution_authorization_v1(
+                    &observation,
+                    "observation-capture.v1",
+                )?;
+                let retrieval_anchor = build_observation_retrieval_anchor_v2(
+                    &observation,
+                    projection_generation.clone(),
+                    observation_ingested_at(),
+                    authorization,
+                )?;
+                let write = AnchoredObservationWrite::new(
+                    ObservationWrite::new(*observation, expected_cursor, next_cursor)?,
+                    retrieval_anchor,
+                    projection_generation,
+                )?;
                 if cancellation.is_cancelled() {
                     return Err(ObservationApplicationError::Cancelled);
                 }
@@ -464,35 +493,35 @@ mod tests {
     impl ObservationStore for FakeStore {
         async fn persist_observation(
             &self,
-            write: ObservationWrite,
+            write: AnchoredObservationWrite,
         ) -> ObservationStoreResult<ObservationPersistOutcome> {
             let mut observations = self.observations.lock().unwrap();
             if let Some(stored) = observations.iter().find(|stored| {
                 stored.observation().observation_id() == write.observation().observation_id()
             }) {
                 return Ok(ObservationPersistOutcome::ExactDuplicate(
-                    ObservationCommitReceipt::new(
-                        stored.sequence(),
-                        stored.observation().clone(),
-                        stored.committed_cursor().clone(),
-                    ),
+                    stored.commit_receipt().clone(),
                 ));
             }
+            let (write, retrieval_anchor, projection_generation) = write.into_parts();
             let sequence = u64::try_from(observations.len()).unwrap() + 1;
             let observation = write.observation().clone();
             let cursor = write.next_cursor().clone();
-            let receipt =
-                ObservationCommitReceipt::new(sequence, observation.clone(), cursor.clone());
+            let receipt = ObservationCommitReceipt::new(
+                sequence,
+                observation.clone(),
+                cursor.clone(),
+                retrieval_anchor,
+                projection_generation,
+            )?;
             let mut cursors = self.source_cursors.lock().unwrap();
             cursors.retain(|existing| {
                 existing.source() != cursor.source() || existing.scope() != cursor.scope()
             });
             cursors.push(cursor.clone());
             drop(cursors);
-            observations.push(StoredObservation::new(
-                sequence,
-                observation,
-                cursor,
+            observations.push(StoredObservation::from_commit_receipt(
+                receipt.clone(),
                 ObservationProjectionStatus::Queued,
             ));
             if let Some(cancellation) = self.cancel_on_persist.lock().unwrap().take() {
@@ -831,8 +860,11 @@ mod tests {
                 stored.sequence(),
                 stored.observation().clone(),
                 stored.committed_cursor().clone(),
+                stored.retrieval_anchor().clone(),
+                stored.projection_generation().clone(),
                 ObservationProjectionStatus::NotQueued,
-            );
+            )
+            .unwrap();
         }
 
         let duplicate = application
@@ -921,8 +953,11 @@ mod tests {
                         sequence,
                         seed.observation().clone(),
                         seed.committed_cursor().clone(),
+                        seed.retrieval_anchor().clone(),
+                        seed.projection_generation().clone(),
                         seed.projection_status(),
                     )
+                    .unwrap()
                 })
                 .collect();
         }

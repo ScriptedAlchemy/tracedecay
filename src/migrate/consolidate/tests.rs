@@ -15,12 +15,13 @@ use tracedecay_domain::{
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
     ObservationScopeV1, PayloadReferenceV1, RetentionClass, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId,
+    SessionId, ProjectionGenerationId, UtcMicros,
 };
 use tracedecay_store::observation::ObservationCoverageV1;
 use tracedecay_store::{
-    ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    SESSION_MESSAGE_PROJECTOR_VERSION,
+    AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
+    ObservationStore, ObservationWrite, SESSION_MESSAGE_PROJECTOR_VERSION,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
 use super::*;
@@ -3830,6 +3831,22 @@ async fn persist_migration_observation(
     )
     .unwrap();
     let write = ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap();
+    let projection_generation =
+        ProjectionGenerationId::new(SESSION_MESSAGE_PROJECTOR_VERSION).unwrap();
+    let authorization = build_observation_resolution_authorization_v1(
+        write.observation(),
+        "observation-migration-test.v1",
+    )
+    .unwrap();
+    let retrieval_anchor = build_observation_retrieval_anchor_v2(
+        write.observation(),
+        projection_generation.clone(),
+        UtcMicros(1),
+        authorization,
+    )
+    .unwrap();
+    let write = AnchoredObservationWrite::new(write, retrieval_anchor, projection_generation)
+        .unwrap();
     assert!(matches!(
         GlobalDbObservationStore::new(db)
             .persist_observation(write)

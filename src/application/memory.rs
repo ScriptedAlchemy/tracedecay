@@ -1,549 +1,498 @@
-//! Typed memory mutations shared by transport and storage adapters.
+//! Canonical memory use cases over the append-only fact authority.
 
-use std::collections::BTreeSet;
+use std::error::Error;
 use std::future::Future;
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    DomainError, FactAssertionId, FactEventId, FactOwnerV1, PayloadAccessState,
+    ActorId, DomainError, FactId, FactLineageEventV1, FactOwnerV1, ProvenanceId,
+    RetrievalAnchorRecordV2,
 };
-use tracedecay_store::FactCommitConflict;
-
-use crate::memory::types::{
-    AddFactDiff, AddFactDiffKind, AddFactOutcome, AddFactRequest, FactRecord, FeedbackRequest,
-    FeedbackResult, MemoryRepairStats, UpdateFactRequest,
+use tracedecay_store::{
+    CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome, FactCurrentQuery, FactLineageQuery,
+    FactStore, FactStoreError, FactWriteBatch, LegacyFactQuery, RetrievalAnchorQuery, StoredFactV1,
 };
 
-pub const MAX_DERIVED_REPAIR_BATCH: usize = 500;
-
+/// Authoritative proposal states from which an interrupted promotion may resume.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MemoryMutationKind {
-    Add,
-    Correction,
-    Deletion,
-    Feedback,
-    RetrievalCounters,
-    DerivedRepair,
+pub enum FactProposalPromotionStateV1 {
+    PendingApproval,
+    Applying,
 }
 
-/// One application-level memory mutation. Every command carries its canonical
-/// owner; adapters must not infer ownership from a database path or transport.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
-pub enum MemoryMutationCommand {
-    Add {
-        owner: FactOwnerV1,
-        request: AddFactRequest,
-    },
-    Correct {
-        owner: FactOwnerV1,
-        request: UpdateFactRequest,
-        supersedes: FactAssertionId,
-        expected_last_event_id: Option<FactEventId>,
-    },
-    Delete {
-        owner: FactOwnerV1,
-        fact_id: i64,
-        expected_last_event_id: Option<FactEventId>,
-    },
-    Feedback {
-        owner: FactOwnerV1,
-        request: FeedbackRequest,
-        expected_last_event_id: Option<FactEventId>,
-    },
-    RecordRetrieval {
-        owner: FactOwnerV1,
-        fact_ids: Vec<i64>,
-        recall: bool,
-    },
-    RepairDerived {
-        owner: FactOwnerV1,
-        max_missing_vectors: usize,
-        max_dirty_banks: usize,
-    },
+/// One compare-and-swap request whose proposal transition and fact batch must
+/// commit in the same authority transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromoteFactProposal {
+    proposal_id: ProvenanceId,
+    owner: FactOwnerV1,
+    expected_state: FactProposalPromotionStateV1,
+    reviewer: Option<ActorId>,
+    batch: FactWriteBatch,
 }
 
-impl MemoryMutationCommand {
+impl PromoteFactProposal {
+    pub fn new(
+        proposal_id: ProvenanceId,
+        owner: FactOwnerV1,
+        expected_state: FactProposalPromotionStateV1,
+        reviewer: Option<ActorId>,
+        batch: FactWriteBatch,
+    ) -> Result<Self, MemoryApplicationError> {
+        proposal_id.validate()?;
+        owner.validate()?;
+        if let Some(reviewer) = &reviewer {
+            reviewer.validate()?;
+        }
+        if batch.owner() != &owner {
+            let request_owner = batch.owner().clone();
+            return Err(MemoryApplicationError::OwnerMismatch {
+                scope: owner,
+                request_owner,
+            });
+        }
+        Ok(Self {
+            proposal_id,
+            owner,
+            expected_state,
+            reviewer,
+            batch,
+        })
+    }
+
+    pub fn proposal_id(&self) -> &ProvenanceId {
+        &self.proposal_id
+    }
+
     pub fn owner(&self) -> &FactOwnerV1 {
-        match self {
-            Self::Add { owner, .. }
-            | Self::Correct { owner, .. }
-            | Self::Delete { owner, .. }
-            | Self::Feedback { owner, .. }
-            | Self::RecordRetrieval { owner, .. }
-            | Self::RepairDerived { owner, .. } => owner,
-        }
+        &self.owner
     }
 
-    const fn kind(&self) -> MemoryMutationKind {
-        match self {
-            Self::Add { .. } => MemoryMutationKind::Add,
-            Self::Correct { .. } => MemoryMutationKind::Correction,
-            Self::Delete { .. } => MemoryMutationKind::Deletion,
-            Self::Feedback { .. } => MemoryMutationKind::Feedback,
-            Self::RecordRetrieval { .. } => MemoryMutationKind::RetrievalCounters,
-            Self::RepairDerived { .. } => MemoryMutationKind::DerivedRepair,
-        }
+    pub fn expected_state(&self) -> FactProposalPromotionStateV1 {
+        self.expected_state
+    }
+
+    pub fn reviewer(&self) -> Option<&ActorId> {
+        self.reviewer.as_ref()
+    }
+
+    pub fn batch(&self) -> &FactWriteBatch {
+        &self.batch
+    }
+
+    pub fn into_batch(self) -> FactWriteBatch {
+        self.batch
     }
 }
 
-/// Compatibility projection after an immutable correction assertion is
-/// appended. `assertion_id` must differ from `superseded_assertion_id`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MemoryCorrectionResult {
-    pub fact: FactRecord,
-    pub superseded_assertion_id: FactAssertionId,
-    pub assertion_id: FactAssertionId,
+/// Result of the authority transaction. A conflict outcome leaves the proposal
+/// at `previous_state`; committed/replayed outcomes atomically promote it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromoteFactProposalOutcome {
+    proposal_id: ProvenanceId,
+    previous_state: FactProposalPromotionStateV1,
+    commit: FactCommitOutcome,
 }
 
-/// Deletion is a lineage tombstone, not destruction of the fact identity.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MemoryDeletionResult {
-    pub fact_id: i64,
-    pub payload_access: PayloadAccessState,
-    pub event_id: FactEventId,
-}
+impl PromoteFactProposalOutcome {
+    pub fn new(
+        proposal_id: ProvenanceId,
+        previous_state: FactProposalPromotionStateV1,
+        commit: FactCommitOutcome,
+    ) -> Result<Self, DomainError> {
+        proposal_id.validate()?;
+        Ok(Self {
+            proposal_id,
+            previous_state,
+            commit,
+        })
+    }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MemoryFeedbackEventResult {
-    pub feedback: FeedbackResult,
-    pub event_id: FactEventId,
-}
+    pub fn proposal_id(&self) -> &ProvenanceId {
+        &self.proposal_id
+    }
 
-/// Counts committed by one transaction. Retrieval counts preserve duplicate
-/// hits; recall counts at most once per distinct fact.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MemoryRetrievalCounterResult {
-    pub fact_count: usize,
-    pub retrieval_increments: usize,
-    pub recall_increments: usize,
-}
+    pub fn previous_state(&self) -> FactProposalPromotionStateV1 {
+        self.previous_state
+    }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
-pub enum MemoryMutationResult {
-    Added(AddFactOutcome),
-    Corrected(MemoryCorrectionResult),
-    Deleted(MemoryDeletionResult),
-    FeedbackRecorded(MemoryFeedbackEventResult),
-    RetrievalRecorded(MemoryRetrievalCounterResult),
-    DerivedRepaired(MemoryRepairStats),
-}
-
-impl MemoryMutationResult {
-    const fn kind(&self) -> MemoryMutationKind {
-        match self {
-            Self::Added(_) => MemoryMutationKind::Add,
-            Self::Corrected(_) => MemoryMutationKind::Correction,
-            Self::Deleted(_) => MemoryMutationKind::Deletion,
-            Self::FeedbackRecorded(_) => MemoryMutationKind::Feedback,
-            Self::RetrievalRecorded(_) => MemoryMutationKind::RetrievalCounters,
-            Self::DerivedRepaired(_) => MemoryMutationKind::DerivedRepair,
-        }
+    pub fn commit(&self) -> &FactCommitOutcome {
+        &self.commit
     }
 }
 
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum MemoryWriterError {
-    #[error("memory lineage is stale")]
-    Stale {
-        expected: Option<FactEventId>,
-        actual: Option<FactEventId>,
+#[derive(Debug, Error)]
+pub enum MemoryAuthorityError {
+    #[error("fact authority operation failed")]
+    Store(#[from] FactStoreError),
+    #[error("fact proposal {proposal_id} state changed before promotion")]
+    ProposalStateConflict {
+        proposal_id: ProvenanceId,
+        expected: FactProposalPromotionStateV1,
+        actual: Option<FactProposalPromotionStateV1>,
     },
-    #[error("memory commit conflicted: {0:?}")]
-    Conflict(FactCommitConflict),
-    #[error("memory writer operation {operation} failed: {message}")]
+    #[error("memory authority operation {operation} failed")]
     Storage {
         operation: &'static str,
-        message: String,
+        #[source]
+        source: Box<dyn Error + Send + Sync>,
     },
 }
 
-/// Single authoritative write call implemented by a daemon or local adapter.
-/// The port owns transaction boundaries and never exposes its connection or store.
-pub trait MemoryWriterPort: Send + Sync {
-    fn write_memory(
+/// The canonical fact store plus the one compound authority operation that is
+/// intentionally wider than `FactStore::commit_fact`.
+pub trait MemoryAuthorityPort: FactStore {
+    fn promote_fact_proposal(
         &self,
-        command: MemoryMutationCommand,
-    ) -> impl Future<Output = Result<MemoryMutationResult, MemoryWriterError>> + Send;
+        promotion: PromoteFactProposal,
+    ) -> impl Future<Output = Result<PromoteFactProposalOutcome, MemoryAuthorityError>> + Send;
 }
 
-#[derive(Clone, Debug, Error, PartialEq)]
-pub enum MemoryMutationError {
+#[derive(Debug, Error)]
+pub enum MemoryApplicationError {
     #[error("memory owner is invalid")]
     InvalidOwner(#[from] DomainError),
-    #[error("memory command owner does not match the service scope")]
+    #[error("memory request owner does not match the application scope")]
     OwnerMismatch {
         scope: FactOwnerV1,
-        command_owner: FactOwnerV1,
+        request_owner: FactOwnerV1,
     },
-    #[error("memory command field {field} is invalid")]
-    InvalidCommand { field: &'static str },
-    #[error("memory lineage is stale")]
-    Stale {
-        expected: Option<FactEventId>,
-        actual: Option<FactEventId>,
-    },
-    #[error("memory commit conflicted: {0:?}")]
-    Conflict(FactCommitConflict),
-    #[error("memory content was rejected as secret-like")]
-    RejectedSecretLike { diff: AddFactDiff },
-    #[error("memory writer operation {operation} failed: {message}")]
-    Storage {
-        operation: &'static str,
-        message: String,
-    },
-    #[error("memory writer returned a result that violates {invariant}")]
-    InvalidWriterResult { invariant: &'static str },
+    #[error("fact store operation failed")]
+    Store(#[from] FactStoreError),
+    #[error("memory authority operation failed")]
+    Authority(#[from] MemoryAuthorityError),
+    #[error("memory authority returned a result violating {invariant}")]
+    InvalidAuthorityResult { invariant: &'static str },
 }
 
-impl From<MemoryWriterError> for MemoryMutationError {
-    fn from(error: MemoryWriterError) -> Self {
-        match error {
-            MemoryWriterError::Stale { expected, actual } => Self::Stale { expected, actual },
-            MemoryWriterError::Conflict(conflict) => Self::Conflict(conflict),
-            MemoryWriterError::Storage { operation, message } => {
-                Self::Storage { operation, message }
-            }
-        }
-    }
+/// Owner-bound application service. Paths, connections, legacy integer IDs,
+/// and transport payloads never enter this boundary.
+pub struct MemoryApplication<A> {
+    owner: FactOwnerV1,
+    authority: A,
 }
 
-/// Transport-neutral mutation policy bound to one authoritative owner.
-pub struct MemoryMutationService<W> {
-    scope: FactOwnerV1,
-    writer: W,
-}
-
-impl<W: MemoryWriterPort> MemoryMutationService<W> {
-    pub fn new(scope: FactOwnerV1, writer: W) -> Result<Self, MemoryMutationError> {
-        scope.validate()?;
-        Ok(Self { scope, writer })
+impl<A: MemoryAuthorityPort> MemoryApplication<A> {
+    pub fn new(owner: FactOwnerV1, authority: A) -> Result<Self, MemoryApplicationError> {
+        owner.validate()?;
+        Ok(Self { owner, authority })
     }
 
-    pub fn scope(&self) -> &FactOwnerV1 {
-        &self.scope
+    pub fn owner(&self) -> &FactOwnerV1 {
+        &self.owner
     }
 
-    /// Validates command ownership and bounds, then performs exactly one
-    /// authoritative port call. Result validation cannot cause another write.
-    pub async fn execute(
+    pub async fn commit_fact(
         &self,
-        command: MemoryMutationCommand,
-    ) -> Result<MemoryMutationResult, MemoryMutationError> {
-        command.owner().validate()?;
-        if command.owner() != &self.scope {
-            return Err(MemoryMutationError::OwnerMismatch {
-                scope: self.scope.clone(),
-                command_owner: command.owner().clone(),
+        batch: FactWriteBatch,
+    ) -> Result<FactCommitOutcome, MemoryApplicationError> {
+        self.ensure_owner(batch.owner())?;
+        let expected_fact_id = batch.fact_id().clone();
+        let outcome = self.authority.commit_fact(batch).await?;
+        validate_commit_outcome(&self.owner, &expected_fact_id, &outcome)?;
+        Ok(outcome)
+    }
+
+    pub async fn promote_fact_proposal(
+        &self,
+        promotion: PromoteFactProposal,
+    ) -> Result<PromoteFactProposalOutcome, MemoryApplicationError> {
+        self.ensure_owner(promotion.owner())?;
+        let proposal_id = promotion.proposal_id().clone();
+        let previous_state = promotion.expected_state();
+        let fact_id = promotion.batch().fact_id().clone();
+        let outcome = self.authority.promote_fact_proposal(promotion).await?;
+        if outcome.proposal_id() != &proposal_id || outcome.previous_state() != previous_state {
+            return Err(MemoryApplicationError::InvalidAuthorityResult {
+                invariant: "proposal CAS identity",
             });
         }
-        validate_command(&command)?;
-        let expectation = MutationExpectation::from_command(&command);
-        let result = self.writer.write_memory(command).await?;
-        validate_result(&expectation, &result)?;
-        if let MemoryMutationResult::Added(outcome) = &result
-            && outcome.diff.diff == AddFactDiffKind::RejectedSecretLike
+        validate_commit_outcome(&self.owner, &fact_id, outcome.commit())?;
+        Ok(outcome)
+    }
+
+    pub async fn query_current_facts(
+        &self,
+        query: CurrentFactsQuery,
+    ) -> Result<Vec<StoredFactV1>, MemoryApplicationError> {
+        self.ensure_owner(query.owner())?;
+        let facts = self.authority.query_current_facts(query).await?;
+        validate_current_facts(&self.owner, &facts)?;
+        Ok(facts)
+    }
+
+    pub async fn query_fact_as_of(
+        &self,
+        query: FactAsOfQuery,
+    ) -> Result<Option<StoredFactV1>, MemoryApplicationError> {
+        self.ensure_owner(query.owner())?;
+        let fact_id = query.fact_id().clone();
+        let fact = self.authority.query_fact_as_of(query).await?;
+        if let Some(fact) = &fact
+            && (fact.owner() != &self.owner || fact.fact_id() != &fact_id)
         {
-            return Err(MemoryMutationError::RejectedSecretLike {
-                diff: outcome.diff.clone(),
+            return Err(MemoryApplicationError::InvalidAuthorityResult {
+                invariant: "as-of fact identity",
             });
         }
-        Ok(result)
+        Ok(fact)
+    }
+
+    pub async fn query_fact_current(
+        &self,
+        query: FactCurrentQuery,
+    ) -> Result<Option<StoredFactV1>, MemoryApplicationError> {
+        self.ensure_owner(query.owner())?;
+        let fact_id = query.fact_id().clone();
+        let fact = self.authority.query_fact_current(query).await?;
+        if let Some(fact) = &fact
+            && (fact.owner() != &self.owner || fact.fact_id() != &fact_id)
+        {
+            return Err(MemoryApplicationError::InvalidAuthorityResult {
+                invariant: "current fact identity",
+            });
+        }
+        Ok(fact)
+    }
+
+    pub async fn query_fact_lineage(
+        &self,
+        query: FactLineageQuery,
+    ) -> Result<Vec<FactLineageEventV1>, MemoryApplicationError> {
+        self.ensure_owner(query.owner())?;
+        let fact_id = query.fact_id().clone();
+        let events = self.authority.query_fact_lineage(query).await?;
+        validate_lineage(&self.owner, &fact_id, &events)?;
+        Ok(events)
+    }
+
+    pub async fn resolve_legacy_fact(
+        &self,
+        query: LegacyFactQuery,
+    ) -> Result<Option<FactId>, MemoryApplicationError> {
+        self.ensure_owner(query.owner())?;
+        Ok(self.authority.resolve_legacy_fact(query).await?)
+    }
+
+    pub async fn get_retrieval_anchor(
+        &self,
+        query: RetrievalAnchorQuery,
+    ) -> Result<Option<RetrievalAnchorRecordV2>, MemoryApplicationError> {
+        self.ensure_owner(query.owner())?;
+        let anchor_id = query.anchor_id().clone();
+        let anchor = self.authority.get_retrieval_anchor(query).await?;
+        if let Some(anchor) = &anchor
+            && (anchor.anchor_id() != &anchor_id
+                || FactOwnerV1::from(anchor.owner().clone()) != self.owner)
+        {
+            return Err(MemoryApplicationError::InvalidAuthorityResult {
+                invariant: "retrieval anchor identity",
+            });
+        }
+        Ok(anchor)
+    }
+
+    fn ensure_owner(&self, request_owner: &FactOwnerV1) -> Result<(), MemoryApplicationError> {
+        request_owner.validate()?;
+        if request_owner != &self.owner {
+            return Err(MemoryApplicationError::OwnerMismatch {
+                scope: self.owner.clone(),
+                request_owner: request_owner.clone(),
+            });
+        }
+        Ok(())
     }
 }
 
-#[derive(Clone, Debug)]
-enum MutationExpectation {
-    Add,
-    Correction {
-        fact_id: i64,
-        supersedes: FactAssertionId,
-    },
-    Deletion {
-        fact_id: i64,
-    },
-    Feedback {
-        fact_id: i64,
-    },
-    RetrievalCounters {
-        distinct_facts: usize,
-        retrieval_increments: usize,
-        recall_increments: usize,
-    },
-    DerivedRepair {
-        max_missing_vectors: usize,
-        max_dirty_banks: usize,
-    },
-}
-
-impl MutationExpectation {
-    fn from_command(command: &MemoryMutationCommand) -> Self {
-        match command {
-            MemoryMutationCommand::Add { .. } => Self::Add,
-            MemoryMutationCommand::Correct {
-                request,
-                supersedes,
-                ..
-            } => Self::Correction {
-                fact_id: request.fact_id,
-                supersedes: supersedes.clone(),
-            },
-            MemoryMutationCommand::Delete { fact_id, .. } => Self::Deletion { fact_id: *fact_id },
-            MemoryMutationCommand::Feedback { request, .. } => Self::Feedback {
-                fact_id: request.fact_id,
-            },
-            MemoryMutationCommand::RecordRetrieval {
-                fact_ids, recall, ..
-            } => Self::RetrievalCounters {
-                distinct_facts: fact_ids.iter().copied().collect::<BTreeSet<_>>().len(),
-                retrieval_increments: fact_ids.len(),
-                recall_increments: if *recall {
-                    fact_ids.iter().copied().collect::<BTreeSet<_>>().len()
-                } else {
-                    0
-                },
-            },
-            MemoryMutationCommand::RepairDerived {
-                max_missing_vectors,
-                max_dirty_banks,
-                ..
-            } => Self::DerivedRepair {
-                max_missing_vectors: *max_missing_vectors,
-                max_dirty_banks: *max_dirty_banks,
-            },
+fn validate_commit_outcome(
+    owner: &FactOwnerV1,
+    fact_id: &FactId,
+    outcome: &FactCommitOutcome,
+) -> Result<(), MemoryApplicationError> {
+    let receipt = match outcome {
+        FactCommitOutcome::Committed(receipt) | FactCommitOutcome::IdempotentReplay(receipt) => {
+            Some(receipt)
         }
-    }
-
-    const fn kind(&self) -> MemoryMutationKind {
-        match self {
-            Self::Add => MemoryMutationKind::Add,
-            Self::Correction { .. } => MemoryMutationKind::Correction,
-            Self::Deletion { .. } => MemoryMutationKind::Deletion,
-            Self::Feedback { .. } => MemoryMutationKind::Feedback,
-            Self::RetrievalCounters { .. } => MemoryMutationKind::RetrievalCounters,
-            Self::DerivedRepair { .. } => MemoryMutationKind::DerivedRepair,
+        FactCommitOutcome::Conflict(_) => None,
+        _ => {
+            return Err(MemoryApplicationError::InvalidAuthorityResult {
+                invariant: "recognized fact commit outcome",
+            });
         }
-    }
-}
-
-fn validate_command(command: &MemoryMutationCommand) -> Result<(), MemoryMutationError> {
-    match command {
-        MemoryMutationCommand::Add { request, .. } => {
-            if request.content.trim().is_empty() {
-                return Err(MemoryMutationError::InvalidCommand {
-                    field: "add_fact.content",
-                });
-            }
-        }
-        MemoryMutationCommand::Correct {
-            request,
-            supersedes,
-            expected_last_event_id,
-            ..
-        } => {
-            validate_fact_id(request.fact_id, "correction.fact_id")?;
-            supersedes.validate()?;
-            if let Some(event_id) = expected_last_event_id {
-                event_id.validate()?;
-            }
-            if request.content.is_none()
-                && request.category.is_none()
-                && request.tags.is_none()
-                && request.entities.is_none()
-                && request.trust.is_none()
-                && request.source.is_none()
-                && request.metadata.is_none()
-            {
-                return Err(MemoryMutationError::InvalidCommand {
-                    field: "correction.change",
-                });
-            }
-        }
-        MemoryMutationCommand::Delete {
-            fact_id,
-            expected_last_event_id,
-            ..
-        } => {
-            validate_fact_id(*fact_id, "deletion.fact_id")?;
-            if let Some(event_id) = expected_last_event_id {
-                event_id.validate()?;
-            }
-        }
-        MemoryMutationCommand::Feedback {
-            request,
-            expected_last_event_id,
-            ..
-        } => {
-            validate_fact_id(request.fact_id, "feedback.fact_id")?;
-            if let Some(event_id) = expected_last_event_id {
-                event_id.validate()?;
-            }
-        }
-        MemoryMutationCommand::RecordRetrieval { fact_ids, .. } => {
-            if fact_ids.iter().any(|fact_id| *fact_id <= 0) {
-                return Err(MemoryMutationError::InvalidCommand {
-                    field: "retrieval.fact_ids",
-                });
-            }
-        }
-        MemoryMutationCommand::RepairDerived {
-            max_missing_vectors,
-            max_dirty_banks,
-            ..
-        } => {
-            validate_repair_bound(*max_missing_vectors, "repair.max_missing_vectors")?;
-            validate_repair_bound(*max_dirty_banks, "repair.max_dirty_banks")?;
-        }
-    }
-    Ok(())
-}
-
-fn validate_fact_id(fact_id: i64, field: &'static str) -> Result<(), MemoryMutationError> {
-    if fact_id <= 0 {
-        return Err(MemoryMutationError::InvalidCommand { field });
-    }
-    Ok(())
-}
-
-fn validate_repair_bound(value: usize, field: &'static str) -> Result<(), MemoryMutationError> {
-    if !(1..=MAX_DERIVED_REPAIR_BATCH).contains(&value) {
-        return Err(MemoryMutationError::InvalidCommand { field });
-    }
-    Ok(())
-}
-
-fn validate_result(
-    expectation: &MutationExpectation,
-    result: &MemoryMutationResult,
-) -> Result<(), MemoryMutationError> {
-    if expectation.kind() != result.kind() {
-        return Err(MemoryMutationError::InvalidWriterResult {
-            invariant: "command/result kind",
+    };
+    if receipt.is_some_and(|receipt| receipt.owner() != owner || receipt.fact_id() != fact_id) {
+        return Err(MemoryApplicationError::InvalidAuthorityResult {
+            invariant: "fact commit identity",
         });
     }
-    match (expectation, result) {
-        (MutationExpectation::Add, MemoryMutationResult::Added(outcome)) => {
-            let rejected = outcome.diff.diff == AddFactDiffKind::RejectedSecretLike;
-            if rejected != outcome.fact.is_none() {
-                return Err(MemoryMutationError::InvalidWriterResult {
-                    invariant: "secret rejection payload",
-                });
-            }
-        }
-        (
-            MutationExpectation::Correction {
-                fact_id,
-                supersedes,
-            },
-            MemoryMutationResult::Corrected(corrected),
-        ) => {
-            if corrected.fact.fact_id != *fact_id
-                || &corrected.superseded_assertion_id != supersedes
-                || corrected.assertion_id == corrected.superseded_assertion_id
-            {
-                return Err(MemoryMutationError::InvalidWriterResult {
-                    invariant: "append-only correction lineage",
-                });
-            }
-        }
-        (MutationExpectation::Deletion { fact_id }, MemoryMutationResult::Deleted(deleted)) => {
-            if deleted.fact_id != *fact_id || deleted.payload_access != PayloadAccessState::Deleted
-            {
-                return Err(MemoryMutationError::InvalidWriterResult {
-                    invariant: "deletion tombstone lineage",
-                });
-            }
-        }
-        (
-            MutationExpectation::Feedback { fact_id },
-            MemoryMutationResult::FeedbackRecorded(recorded),
-        ) => {
-            if recorded.feedback.fact_id != *fact_id {
-                return Err(MemoryMutationError::InvalidWriterResult {
-                    invariant: "feedback fact identity",
-                });
-            }
-        }
-        (
-            MutationExpectation::RetrievalCounters {
-                distinct_facts,
-                retrieval_increments,
-                recall_increments,
-            },
-            MemoryMutationResult::RetrievalRecorded(recorded),
-        ) => {
-            if recorded.fact_count != *distinct_facts
-                || recorded.retrieval_increments != *retrieval_increments
-                || recorded.recall_increments != *recall_increments
-            {
-                return Err(MemoryMutationError::InvalidWriterResult {
-                    invariant: "combined retrieval counters",
-                });
-            }
-        }
-        (
-            MutationExpectation::DerivedRepair {
-                max_missing_vectors,
-                max_dirty_banks,
-            },
-            MemoryMutationResult::DerivedRepaired(repaired),
-        ) => {
-            if repaired.missing_vectors_repaired > *max_missing_vectors
-                || repaired.banks_rebuilt > *max_dirty_banks
-            {
-                return Err(MemoryMutationError::InvalidWriterResult {
-                    invariant: "derived repair bounds",
-                });
-            }
-        }
-        _ => unreachable!("command and result kinds were checked above"),
+    Ok(())
+}
+
+fn validate_current_facts(
+    owner: &FactOwnerV1,
+    facts: &[StoredFactV1],
+) -> Result<(), MemoryApplicationError> {
+    if facts.iter().any(|fact| fact.owner() != owner)
+        || facts
+            .windows(2)
+            .any(|pair| pair[0].fact_id() >= pair[1].fact_id())
+    {
+        return Err(MemoryApplicationError::InvalidAuthorityResult {
+            invariant: "current fact owner and ordering",
+        });
     }
     Ok(())
+}
+
+fn validate_lineage(
+    owner: &FactOwnerV1,
+    fact_id: &FactId,
+    events: &[FactLineageEventV1],
+) -> Result<(), MemoryApplicationError> {
+    if events
+        .iter()
+        .any(|event| event.owner() != owner || event.fact_id() != fact_id)
+        || events.windows(2).any(|pair| {
+            (pair[0].occurred_at(), pair[0].event_id())
+                >= (pair[1].occurred_at(), pair[1].event_id())
+        })
+    {
+        return Err(MemoryApplicationError::InvalidAuthorityResult {
+            invariant: "fact lineage owner and ordering",
+        });
+    }
+    Ok(())
+}
+
+/// Explicit quarantine for the V1 mutable/i64 API. Implementations translate
+/// compatibility DTOs into canonical batches or projections before invoking
+/// [`MemoryApplication`]; they are never an authoritative persistence port.
+pub mod legacy_compatibility {
+    use tracedecay_store::{FactWriteBatch, StoredFactV1};
+
+    use crate::memory::types::{AddFactRequest, FactRecord, UpdateFactRequest};
+
+    pub trait LegacyMemoryCompatibilityAdapter {
+        type Error;
+
+        fn add_request_to_batch(
+            &self,
+            request: AddFactRequest,
+        ) -> Result<FactWriteBatch, Self::Error>;
+
+        fn update_request_to_correction_batch(
+            &self,
+            request: UpdateFactRequest,
+        ) -> Result<FactWriteBatch, Self::Error>;
+
+        fn project_fact_record(&self, fact: &StoredFactV1) -> Result<FactRecord, Self::Error>;
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    use serde_json::json;
-    use tracedecay_domain::{ProjectId, research::DomainError};
+    use tracedecay_domain::{
+        Confidence, FactAssertionId, FactEventId, FactIdentityMaterialV1, FactIdentitySourceV1,
+        FactLineageEventKindV1, PayloadAccessState, ProjectId, RetrievalAnchorId, SourceStoreId,
+        UtcMicros,
+    };
+    use tracedecay_store::{FactCommitReceipt, FactStoreResult};
 
     use super::*;
-    use crate::memory::types::{AddFactDiff, FactRecord, FeedbackAction, MemoryCategory};
 
     #[derive(Default)]
-    struct FakeWriterPort {
-        calls: Mutex<Vec<MemoryMutationCommand>>,
-        responses: Mutex<VecDeque<Result<MemoryMutationResult, MemoryWriterError>>>,
+    struct FakeAuthority {
+        committed: Mutex<Vec<FactWriteBatch>>,
+        promotions: Mutex<Vec<PromoteFactProposal>>,
+        current_queries: Mutex<Vec<CurrentFactsQuery>>,
+        current_fact_queries: Mutex<Vec<FactCurrentQuery>>,
+        as_of_queries: Mutex<Vec<FactAsOfQuery>>,
+        lineage_queries: Mutex<Vec<FactLineageQuery>>,
+        legacy_queries: Mutex<Vec<LegacyFactQuery>>,
+        anchor_queries: Mutex<Vec<RetrievalAnchorId>>,
     }
 
-    impl FakeWriterPort {
-        fn with_response(response: Result<MemoryMutationResult, MemoryWriterError>) -> Self {
-            Self {
-                calls: Mutex::new(Vec::new()),
-                responses: Mutex::new(VecDeque::from([response])),
-            }
+    impl FactStore for FakeAuthority {
+        async fn commit_fact(&self, batch: FactWriteBatch) -> FactStoreResult<FactCommitOutcome> {
+            let outcome = committed_outcome(&batch);
+            self.committed.lock().unwrap().push(batch);
+            Ok(outcome)
         }
 
-        fn push_response(&self, response: Result<MemoryMutationResult, MemoryWriterError>) {
-            self.responses.lock().unwrap().push_back(response);
-        }
-    }
-
-    impl MemoryWriterPort for FakeWriterPort {
-        async fn write_memory(
+        async fn query_current_facts(
             &self,
-            command: MemoryMutationCommand,
-        ) -> Result<MemoryMutationResult, MemoryWriterError> {
-            self.calls.lock().unwrap().push(command);
-            self.responses
+            query: CurrentFactsQuery,
+        ) -> FactStoreResult<Vec<StoredFactV1>> {
+            self.current_queries.lock().unwrap().push(query);
+            Ok(Vec::new())
+        }
+
+        async fn query_fact_as_of(
+            &self,
+            query: FactAsOfQuery,
+        ) -> FactStoreResult<Option<StoredFactV1>> {
+            self.as_of_queries.lock().unwrap().push(query);
+            Ok(None)
+        }
+
+        async fn query_fact_current(
+            &self,
+            query: FactCurrentQuery,
+        ) -> FactStoreResult<Option<StoredFactV1>> {
+            self.current_fact_queries.lock().unwrap().push(query);
+            Ok(None)
+        }
+
+        async fn query_fact_lineage(
+            &self,
+            query: FactLineageQuery,
+        ) -> FactStoreResult<Vec<FactLineageEventV1>> {
+            self.lineage_queries.lock().unwrap().push(query);
+            Ok(Vec::new())
+        }
+
+        async fn resolve_legacy_fact(
+            &self,
+            query: LegacyFactQuery,
+        ) -> FactStoreResult<Option<FactId>> {
+            self.legacy_queries.lock().unwrap().push(query);
+            Ok(None)
+        }
+
+        async fn get_retrieval_anchor(
+            &self,
+            query: RetrievalAnchorQuery,
+        ) -> FactStoreResult<Option<RetrievalAnchorRecordV2>> {
+            self.anchor_queries
                 .lock()
                 .unwrap()
-                .pop_front()
-                .expect("fake response")
+                .push(query.anchor_id().clone());
+            Ok(None)
+        }
+    }
+
+    impl MemoryAuthorityPort for FakeAuthority {
+        async fn promote_fact_proposal(
+            &self,
+            promotion: PromoteFactProposal,
+        ) -> Result<PromoteFactProposalOutcome, MemoryAuthorityError> {
+            let outcome = committed_outcome(promotion.batch());
+            let result = PromoteFactProposalOutcome::new(
+                promotion.proposal_id().clone(),
+                promotion.expected_state(),
+                outcome,
+            )
+            .map_err(FactStoreError::from)?;
+            self.promotions.lock().unwrap().push(promotion);
+            Ok(result)
+        }
+    }
+
+    fn owner() -> FactOwnerV1 {
+        FactOwnerV1::Project {
+            project_id: ProjectId::new("project.memory.application").unwrap(),
         }
     }
 
@@ -554,335 +503,231 @@ mod tests {
         T::try_from(value.to_owned()).unwrap()
     }
 
-    fn project_owner() -> FactOwnerV1 {
-        FactOwnerV1::Project {
-            project_id: ProjectId::new("project.memory.application").unwrap(),
-        }
+    fn fact_id(owner: FactOwnerV1, operation: &str) -> FactId {
+        FactId::derive(
+            &FactIdentityMaterialV1::new(
+                owner,
+                FactIdentitySourceV1::Application {
+                    operation_id: id(operation),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap()
     }
 
-    fn add_request(content: &str) -> AddFactRequest {
-        AddFactRequest {
-            content: content.to_owned(),
-            category: MemoryCategory::Project,
-            source: Some("test".to_owned()),
-            tags: vec!["memory".to_owned()],
-            entities: vec!["TraceDecay".to_owned()],
-            trust: Some(0.9),
-            metadata: json!({}),
-        }
-    }
-
-    fn fact_record(fact_id: i64, content: &str) -> FactRecord {
-        FactRecord {
-            fact_id,
-            content: content.to_owned(),
-            category: MemoryCategory::Project,
-            tags: vec![],
-            entities: vec![],
-            trust_score: 0.9,
-            source: Some("test".to_owned()),
-            retrieval_count: 0,
-            access_count: 0,
-            helpful_count: 0,
-            unhelpful_count: 0,
-            created_at: 1,
-            updated_at: 1,
-            last_retrieved_at: None,
-            last_recalled_at: None,
-            last_feedback_at: None,
-            metadata: json!({}),
-        }
-    }
-
-    fn stored_add(fact_id: i64) -> MemoryMutationResult {
-        MemoryMutationResult::Added(AddFactOutcome {
-            fact: Some(fact_record(fact_id, "daemon is the only writer")),
-            diff: AddFactDiff::plain_add(),
-        })
-    }
-
-    #[tokio::test]
-    async fn owner_is_propagated_through_one_atomic_port_call() {
-        let owner = project_owner();
-        let service = MemoryMutationService::new(
+    fn batch(owner: FactOwnerV1, operation: &str) -> FactWriteBatch {
+        let fact_id = fact_id(owner.clone(), operation);
+        let event = FactLineageEventV1::new(
+            fact_id.clone(),
             owner.clone(),
-            FakeWriterPort::with_response(Ok(stored_add(7))),
-        )
-        .unwrap();
-        service
-            .execute(MemoryMutationCommand::Add {
-                owner: owner.clone(),
-                request: add_request("daemon is the only writer"),
-            })
-            .await
-            .unwrap();
-
-        let calls = service.writer.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].owner(), &owner);
-    }
-
-    #[tokio::test]
-    async fn owner_mismatch_fails_before_the_port() {
-        let service = MemoryMutationService::new(
-            project_owner(),
-            FakeWriterPort::with_response(Ok(stored_add(7))),
-        )
-        .unwrap();
-        let error = service
-            .execute(MemoryMutationCommand::Add {
-                owner: FactOwnerV1::Profile,
-                request: add_request("profile fact"),
-            })
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, MemoryMutationError::OwnerMismatch { .. }));
-        assert!(service.writer.calls.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn stale_and_conflict_errors_propagate_without_retry() {
-        let expected = id::<FactEventId>("event.expected");
-        let actual = id::<FactEventId>("event.actual");
-        let port = FakeWriterPort::with_response(Err(MemoryWriterError::Stale {
-            expected: Some(expected.clone()),
-            actual: Some(actual.clone()),
-        }));
-        port.push_response(Err(MemoryWriterError::Conflict(
-            FactCommitConflict::IdentityCollision {
-                kind: "fact",
-                id: "fact.collision".to_owned(),
+            FactLineageEventKindV1::PayloadAccessChanged {
+                previous: PayloadAccessState::Eligible,
+                current: PayloadAccessState::Deleted,
             },
-        )));
-        let service = MemoryMutationService::new(project_owner(), port).unwrap();
-        let command = || MemoryMutationCommand::Delete {
-            owner: project_owner(),
-            fact_id: 7,
-            expected_last_event_id: Some(expected.clone()),
-        };
+            UtcMicros(1),
+            None,
+        )
+        .unwrap();
+        FactWriteBatch::new(
+            fact_id,
+            owner,
+            None,
+            vec![event],
+            vec![],
+            vec![],
+            None,
+            None,
+        )
+        .unwrap()
+    }
 
-        assert_eq!(
-            service.execute(command()).await.unwrap_err(),
-            MemoryMutationError::Stale {
-                expected: Some(expected),
-                actual: Some(actual),
-            }
-        );
-        assert!(matches!(
-            service.execute(command()).await.unwrap_err(),
-            MemoryMutationError::Conflict(FactCommitConflict::IdentityCollision { .. })
-        ));
-        assert_eq!(service.writer.calls.lock().unwrap().len(), 2);
+    fn committed_outcome(batch: &FactWriteBatch) -> FactCommitOutcome {
+        let event_ids: Vec<FactEventId> = batch
+            .events()
+            .iter()
+            .map(|event| event.event_id().clone())
+            .collect();
+        let last_event_id = event_ids.last().unwrap().clone();
+        let active_assertion_id: Option<FactAssertionId> = batch
+            .assertion()
+            .map(|assertion| assertion.assertion_id().clone());
+        FactCommitOutcome::Committed(
+            FactCommitReceipt::new(
+                batch.fact_id().clone(),
+                batch.owner().clone(),
+                event_ids,
+                last_event_id,
+                active_assertion_id,
+            )
+            .unwrap(),
+        )
     }
 
     #[tokio::test]
-    async fn secret_rejection_is_mapped_to_a_typed_error() {
-        let diff = AddFactDiff {
-            diff: AddFactDiffKind::RejectedSecretLike,
-            closest_fact_id: None,
-            similarity: None,
-            reason: Some("secret-like".to_owned()),
-        };
-        let service = MemoryMutationService::new(
-            project_owner(),
-            FakeWriterPort::with_response(Ok(MemoryMutationResult::Added(AddFactOutcome {
-                fact: None,
-                diff: diff.clone(),
-            }))),
-        )
-        .unwrap();
+    async fn canonical_batch_is_the_single_write_boundary() {
+        let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
+        let write = batch(owner(), "operation.memory.commit");
+        let expected_fact_id = write.fact_id().clone();
 
-        assert_eq!(
-            service
-                .execute(MemoryMutationCommand::Add {
-                    owner: project_owner(),
-                    request: add_request("looks sensitive"),
-                })
-                .await
-                .unwrap_err(),
-            MemoryMutationError::RejectedSecretLike { diff }
-        );
-        assert_eq!(service.writer.calls.lock().unwrap().len(), 1);
+        let outcome = application.commit_fact(write).await.unwrap();
+
+        assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
+        let committed = application.authority.committed.lock().unwrap();
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].fact_id(), &expected_fact_id);
     }
 
     #[tokio::test]
-    async fn correction_appends_a_new_assertion_instead_of_updating_in_place() {
-        let superseded = id::<FactAssertionId>("assertion.old");
-        let correction = id::<FactAssertionId>("assertion.correction");
-        let result = MemoryCorrectionResult {
-            fact: fact_record(7, "corrected payload"),
-            superseded_assertion_id: superseded.clone(),
-            assertion_id: correction.clone(),
-        };
-        let service = MemoryMutationService::new(
-            project_owner(),
-            FakeWriterPort::with_response(Ok(MemoryMutationResult::Corrected(result.clone()))),
-        )
-        .unwrap();
-        let outcome = service
-            .execute(MemoryMutationCommand::Correct {
-                owner: project_owner(),
-                request: UpdateFactRequest {
-                    fact_id: 7,
-                    content: Some("corrected payload".to_owned()),
-                    category: None,
-                    tags: None,
-                    entities: None,
-                    trust: None,
-                    source: None,
-                    metadata: None,
-                },
-                supersedes: superseded,
-                expected_last_event_id: None,
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(outcome, MemoryMutationResult::Corrected(result));
-        assert_ne!(correction, id::<FactAssertionId>("assertion.old"));
-        assert_eq!(service.writer.calls.lock().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn deletion_requires_a_deleted_payload_tombstone() {
-        let event_id = id::<FactEventId>("event.deleted");
-        let deleted = MemoryDeletionResult {
-            fact_id: 7,
-            payload_access: PayloadAccessState::Deleted,
-            event_id,
-        };
-        let service = MemoryMutationService::new(
-            project_owner(),
-            FakeWriterPort::with_response(Ok(MemoryMutationResult::Deleted(deleted.clone()))),
-        )
-        .unwrap();
-
-        assert_eq!(
-            service
-                .execute(MemoryMutationCommand::Delete {
-                    owner: project_owner(),
-                    fact_id: 7,
-                    expected_last_event_id: None,
-                })
-                .await
-                .unwrap(),
-            MemoryMutationResult::Deleted(deleted)
-        );
-    }
-
-    #[tokio::test]
-    async fn feedback_is_a_lineage_event() {
-        let feedback = FeedbackResult {
-            event_id: 3,
-            fact_id: 7,
-            action: FeedbackAction::Helpful,
-            old_trust: 0.5,
-            new_trust: 0.6,
-            trust_delta: 0.1,
-            helpful_count: 1,
-            unhelpful_count: 0,
-        };
-        let recorded = MemoryFeedbackEventResult {
-            feedback,
-            event_id: id("event.feedback"),
-        };
-        let service = MemoryMutationService::new(
-            project_owner(),
-            FakeWriterPort::with_response(Ok(MemoryMutationResult::FeedbackRecorded(
-                recorded.clone(),
-            ))),
-        )
-        .unwrap();
-
-        assert_eq!(
-            service
-                .execute(MemoryMutationCommand::Feedback {
-                    owner: project_owner(),
-                    request: FeedbackRequest {
-                        fact_id: 7,
-                        action: FeedbackAction::Helpful,
-                        source: None,
-                        note: None,
-                    },
-                    expected_last_event_id: None,
-                })
-                .await
-                .unwrap(),
-            MemoryMutationResult::FeedbackRecorded(recorded)
-        );
-    }
-
-    #[tokio::test]
-    async fn retrieval_and_recall_counters_share_one_atomic_call() {
-        let service = MemoryMutationService::new(
-            project_owner(),
-            FakeWriterPort::with_response(Ok(MemoryMutationResult::RetrievalRecorded(
-                MemoryRetrievalCounterResult {
-                    fact_count: 2,
-                    retrieval_increments: 3,
-                    recall_increments: 2,
-                },
-            ))),
-        )
-        .unwrap();
-        service
-            .execute(MemoryMutationCommand::RecordRetrieval {
-                owner: project_owner(),
-                fact_ids: vec![7, 7, 8],
-                recall: true,
-            })
-            .await
-            .unwrap();
-
-        let calls = service.writer.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert!(matches!(
-            &calls[0],
-            MemoryMutationCommand::RecordRetrieval {
-                fact_ids,
-                recall: true,
-                ..
-            } if fact_ids == &[7, 7, 8]
-        ));
-    }
-
-    #[tokio::test]
-    async fn derived_repair_is_bounded_before_and_after_the_port() {
-        let service = MemoryMutationService::new(
-            project_owner(),
-            FakeWriterPort::with_response(Ok(MemoryMutationResult::DerivedRepaired(
-                MemoryRepairStats {
-                    missing_vectors_repaired: MAX_DERIVED_REPAIR_BATCH,
-                    banks_rebuilt: 1,
-                },
-            ))),
-        )
-        .unwrap();
-        let invalid = service
-            .execute(MemoryMutationCommand::RepairDerived {
-                owner: project_owner(),
-                max_missing_vectors: MAX_DERIVED_REPAIR_BATCH + 1,
-                max_dirty_banks: 1,
-            })
+    async fn owner_mismatch_is_rejected_before_authority_access() {
+        let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
+        let error = application
+            .commit_fact(batch(FactOwnerV1::Profile, "operation.profile.commit"))
             .await
             .unwrap_err();
-        assert!(matches!(
-            invalid,
-            MemoryMutationError::InvalidCommand {
-                field: "repair.max_missing_vectors"
-            }
-        ));
-        assert!(service.writer.calls.lock().unwrap().is_empty());
 
-        service
-            .execute(MemoryMutationCommand::RepairDerived {
-                owner: project_owner(),
-                max_missing_vectors: MAX_DERIVED_REPAIR_BATCH,
-                max_dirty_banks: 1,
-            })
+        assert!(matches!(
+            error,
+            MemoryApplicationError::OwnerMismatch { .. }
+        ));
+        assert!(application.authority.committed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_owner_mismatch_is_rejected_before_authority_access() {
+        let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
+        let query = CurrentFactsQuery::new(FactOwnerV1::Profile, None, 10).unwrap();
+
+        let error = application.query_current_facts(query).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            MemoryApplicationError::OwnerMismatch { .. }
+        ));
+        assert!(
+            application
+                .authority
+                .current_queries
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn proposal_cas_and_batch_commit_are_one_authority_operation() {
+        let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
+        let promotion = PromoteFactProposal::new(
+            id("proposal.memory.1"),
+            owner(),
+            FactProposalPromotionStateV1::PendingApproval,
+            Some(id("actor.reviewer")),
+            batch(owner(), "operation.proposal.promote"),
+        )
+        .unwrap();
+
+        let outcome = application.promote_fact_proposal(promotion).await.unwrap();
+
+        assert!(matches!(outcome.commit(), FactCommitOutcome::Committed(_)));
+        assert_eq!(application.authority.promotions.lock().unwrap().len(), 1);
+        assert!(application.authority.committed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn typed_queries_propagate_without_identity_loss() {
+        let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
+        let fact_id = fact_id(owner(), "operation.memory.query");
+        let current = CurrentFactsQuery::new(owner(), None, 10).unwrap();
+        let current_fact = FactCurrentQuery::new(owner(), fact_id.clone()).unwrap();
+        let as_of = FactAsOfQuery::new(owner(), fact_id.clone(), UtcMicros(5)).unwrap();
+        let lineage = FactLineageQuery::new(owner(), fact_id, None, 10).unwrap();
+        let legacy = LegacyFactQuery::new(owner(), id::<SourceStoreId>("store.legacy"), 7).unwrap();
+        let anchor_id = id::<RetrievalAnchorId>("anchor.memory.query");
+        let anchor_query = RetrievalAnchorQuery::new(owner(), anchor_id.clone()).unwrap();
+
+        assert!(
+            application
+                .query_current_facts(current)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            application
+                .query_fact_current(current_fact)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(application.query_fact_as_of(as_of).await.unwrap().is_none());
+        assert!(
+            application
+                .query_fact_lineage(lineage)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            application
+                .resolve_legacy_fact(legacy)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let anchor: Option<RetrievalAnchorRecordV2> = application
+            .get_retrieval_anchor(anchor_query)
             .await
             .unwrap();
-        assert_eq!(service.writer.calls.lock().unwrap().len(), 1);
+        assert!(anchor.is_none());
+
+        assert_eq!(
+            application.authority.current_queries.lock().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            application
+                .authority
+                .current_fact_queries
+                .lock()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(application.authority.as_of_queries.lock().unwrap().len(), 1);
+        assert_eq!(
+            application.authority.lineage_queries.lock().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            application.authority.legacy_queries.lock().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            application
+                .authority
+                .anchor_queries
+                .lock()
+                .unwrap()
+                .as_slice(),
+            &[anchor_id]
+        );
+    }
+
+    #[test]
+    fn stored_fact_fixture_remains_canonical() {
+        let fact_id = fact_id(owner(), "operation.memory.fixture");
+        let stored = StoredFactV1::new(
+            fact_id.clone(),
+            owner(),
+            None,
+            PayloadAccessState::Deleted,
+            Confidence::new(0.5).unwrap(),
+            id("assertion.fixture"),
+            id("event.fixture"),
+            None,
+            UtcMicros(2),
+        )
+        .unwrap();
+        assert_eq!(stored.fact_id(), &fact_id);
     }
 }

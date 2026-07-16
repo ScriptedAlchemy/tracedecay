@@ -10,9 +10,11 @@ mod parse;
 mod sanitize;
 mod structural_id;
 
-pub(crate) use detect::sanitize_provider_metadata_text;
 pub use detect::{
     DetectionConfidenceV1, PrivacyDetectorV1, SanitizationActionV1, SanitizationFindingV1,
+};
+pub(crate) use detect::{
+    MemoryFactSanitizationV1, sanitize_memory_fact_payload, sanitize_provider_metadata_text,
 };
 pub use parse::{
     ClaudeRecordParseErrorV1, MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1,

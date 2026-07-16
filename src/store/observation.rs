@@ -3,8 +3,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
-    ObservationPersistOutcome, ObservationProjectionStore, ObservationReplayRequest,
-    ObservationStore, ObservationStoreResult, ObservationWrite, ProjectionCheckpoint,
+    AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
+    ObservationReplayRequest, ObservationStore, ObservationStoreResult, ProjectionCheckpoint,
     ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionStoreResult, StoredObservation,
 };
 
@@ -24,7 +24,7 @@ impl<'a> GlobalDbObservationStore<'a> {
 impl ObservationStore for GlobalDbObservationStore<'_> {
     async fn persist_observation(
         &self,
-        write: ObservationWrite,
+        write: AnchoredObservationWrite,
     ) -> ObservationStoreResult<ObservationPersistOutcome> {
         self.db.persist_observation_result(write).await
     }

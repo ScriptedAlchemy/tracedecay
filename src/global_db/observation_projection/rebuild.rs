@@ -802,11 +802,13 @@ async fn ensure_staged_output_baseline(
     if cross_owned {
         conn.execute(
             "INSERT OR IGNORE INTO observation_projection_rebuild_provenance (
-                projector_version, generation, observation_id, output_ordinal, receipt_id,
-                output_provider, output_message_id, output_digest, message_created
+                projector_version, generation, observation_id, output_ordinal,
+                retrieval_anchor_id, receipt_id, output_provider, output_message_id,
+                output_digest, message_created
              )
-             SELECT projector_version, ?2, observation_id, output_ordinal, receipt_id,
-                    output_provider, output_message_id, output_digest, message_created
+             SELECT projector_version, ?2, observation_id, output_ordinal,
+                    retrieval_anchor_id, receipt_id, output_provider, output_message_id,
+                    output_digest, message_created
              FROM observation_projection_provenance
              WHERE projector_version = ?1 AND output_provider = ?3 AND output_message_id = ?4",
             params![
@@ -893,14 +895,15 @@ async fn stage_rebuild_provenance(
     let message = projection.message();
     conn.execute(
         "INSERT OR IGNORE INTO observation_projection_rebuild_provenance (
-            projector_version, generation, observation_id, output_ordinal, receipt_id,
-            output_provider, output_message_id, output_digest, message_created
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            projector_version, generation, observation_id, output_ordinal, retrieval_anchor_id,
+            receipt_id, output_provider, output_message_id, output_digest, message_created
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             SESSION_MESSAGE_PROJECTOR_VERSION,
             generation,
             provenance.observation_id().as_str(),
             i64::from(projection.output_ordinal()),
+            provenance.retrieval_anchor_id().as_str(),
             provenance.receipt_id(),
             message.provider.as_str(),
             message.message_id.as_str(),
@@ -912,7 +915,8 @@ async fn stage_rebuild_provenance(
     .map_err(|error| storage("stage projection provenance", error))?;
     let mut rows = conn
         .query(
-            "SELECT receipt_id, output_provider, output_message_id, output_digest
+            "SELECT retrieval_anchor_id, receipt_id, output_provider, output_message_id,
+                    output_digest
              FROM observation_projection_rebuild_provenance
              WHERE projector_version = ?1 AND generation = ?2
                AND observation_id = ?3 AND output_ordinal = ?4",
@@ -939,8 +943,11 @@ async fn stage_rebuild_provenance(
             .map_err(|error| storage("verify staged projection provenance", error))?,
         row.get::<String>(3)
             .map_err(|error| storage("verify staged projection provenance", error))?,
+        row.get::<String>(4)
+            .map_err(|error| storage("verify staged projection provenance", error))?,
     );
     let expected = (
+        provenance.retrieval_anchor_id().as_str().to_owned(),
         provenance.receipt_id().to_owned(),
         message.provider.clone(),
         message.message_id.clone(),
@@ -1536,7 +1543,8 @@ async fn activate_rebuild_provenance(
               AND active.observation_id = staged.observation_id
               AND active.output_ordinal = staged.output_ordinal
              WHERE staged.projector_version = ?1 AND staged.generation = ?2
-               AND (active.receipt_id <> staged.receipt_id
+               AND (active.retrieval_anchor_id <> staged.retrieval_anchor_id
+                 OR active.receipt_id <> staged.receipt_id
                  OR active.output_provider <> staged.output_provider
                  OR active.output_message_id <> staged.output_message_id
                  OR active.output_digest <> staged.output_digest)
@@ -1556,12 +1564,12 @@ async fn activate_rebuild_provenance(
     drop(conflicts);
     conn.execute(
         "INSERT OR IGNORE INTO observation_projection_provenance (
-            projector_version, observation_id, output_ordinal, receipt_id,
-            output_provider, output_message_id, output_digest, message_created
+            projector_version, observation_id, output_ordinal, retrieval_anchor_id,
+            receipt_id, output_provider, output_message_id, output_digest, message_created
          )
          SELECT staged.projector_version, staged.observation_id, staged.output_ordinal,
-                staged.receipt_id, staged.output_provider, staged.output_message_id,
-                staged.output_digest, staged.message_created
+                staged.retrieval_anchor_id, staged.receipt_id, staged.output_provider,
+                staged.output_message_id, staged.output_digest, staged.message_created
          FROM observation_projection_rebuild_provenance AS staged
          WHERE staged.projector_version = ?1 AND staged.generation = ?2",
         params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
@@ -1583,16 +1591,16 @@ async fn activate_rebuild_workflow_facts(
 ) -> ProjectionStoreResult<()> {
     conn.execute(
         "INSERT INTO observation_workflow_facts (
-            projector_version, observation_id, fact_ordinal, receipt_id, observation_sequence,
-            provider, session_id, semantic_kind, provider_reference, item_id, parent_reference,
-            list_reference, state, status, item_order, native_revision, event_sequence,
-            source_sequence, native_timestamp, ordering_domain, content_json, content_text,
-            output_digest
+            projector_version, observation_id, fact_ordinal, retrieval_anchor_id, receipt_id,
+            observation_sequence, provider, session_id, semantic_kind, provider_reference, item_id,
+            parent_reference, list_reference, state, status, item_order, native_revision,
+            event_sequence, source_sequence, native_timestamp, ordering_domain, content_json,
+            content_text, output_digest
          )
-         SELECT projector_version, observation_id, fact_ordinal, receipt_id,
-                observation_sequence, provider, session_id, semantic_kind, provider_reference,
-                item_id, parent_reference, list_reference, state, status, item_order,
-                native_revision, event_sequence, source_sequence, native_timestamp,
+         SELECT projector_version, observation_id, fact_ordinal, retrieval_anchor_id,
+                receipt_id, observation_sequence, provider, session_id, semantic_kind,
+                provider_reference, item_id, parent_reference, list_reference, state, status,
+                item_order, native_revision, event_sequence, source_sequence, native_timestamp,
                 ordering_domain, content_json, content_text, output_digest
          FROM observation_projection_rebuild_workflow_facts
          WHERE projector_version = ?1 AND generation = ?2",

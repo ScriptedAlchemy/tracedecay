@@ -15,6 +15,10 @@ const MAX_FACT_CONTENT_BYTES: usize = 64 * 1024;
 const MAX_FACT_METADATA_BYTES: usize = 64 * 1024;
 const MAX_FACT_LABELS: usize = 64;
 const MAX_FACT_LABEL_BYTES: usize = 512;
+const MAX_FACT_EVIDENCE_REFS: usize = 256;
+const MAX_ASSERTION_SUPERSEDES: usize = 256;
+const FACT_ID_NAMESPACE: &str = "fact.v1";
+const FACT_OWNER_NAMESPACE: &str = "fact-owner.v1";
 
 /// Canonical storage owner. A profile owner denotes the one resolved user
 /// profile; project facts carry their immutable project identity explicitly.
@@ -135,8 +139,47 @@ impl FactId {
     pub fn derive(material: &FactIdentityMaterialV1) -> Result<Self, DomainError> {
         material.owner.validate()?;
         material.source.validate()?;
-        Self::new(derive_memory_id("fact.v1", material)?)
+        let owner_binding = memory_id_suffix(
+            FACT_OWNER_NAMESPACE,
+            &derive_memory_id(FACT_OWNER_NAMESPACE, material.owner())?,
+        )?;
+        let identity = memory_id_suffix(
+            FACT_ID_NAMESPACE,
+            &derive_memory_id(FACT_ID_NAMESPACE, material)?,
+        )?;
+        Self::new(format!("{FACT_ID_NAMESPACE}.{owner_binding}.{identity}"))
     }
+
+    /// Verify that this identity belongs to the supplied canonical owner.
+    pub fn validate_owner(&self, owner: &FactOwnerV1) -> Result<(), DomainError> {
+        validate_fact_owner(self, owner)
+    }
+}
+
+fn validate_fact_owner(fact_id: &FactId, owner: &FactOwnerV1) -> Result<(), DomainError> {
+    fact_id.validate()?;
+    owner.validate()?;
+    let encoded = fact_id
+        .as_str()
+        .strip_prefix(&format!("{FACT_ID_NAMESPACE}."))
+        .ok_or(DomainError::NonCanonical {
+            field: "fact identity",
+        })?;
+    let (claimed_owner, identity) = encoded.split_once('.').ok_or(DomainError::NonCanonical {
+        field: "fact identity",
+    })?;
+    validate_sha256_hex(claimed_owner, "fact owner binding")?;
+    validate_sha256_hex(identity, "fact identity")?;
+    let expected_owner = memory_id_suffix(
+        FACT_OWNER_NAMESPACE,
+        &derive_memory_id(FACT_OWNER_NAMESPACE, owner)?,
+    )?;
+    if claimed_owner != expected_owner {
+        return Err(DomainError::UnknownReference {
+            field: "fact owner binding",
+        });
+    }
+    Ok(())
 }
 
 /// Receipt-bound payload for one immutable assertion.
@@ -178,8 +221,8 @@ impl FactPayloadV1 {
     pub fn new(
         content: String,
         category: FactCategoryV1,
-        tags: Vec<String>,
-        entities: Vec<String>,
+        mut tags: Vec<String>,
+        mut entities: Vec<String>,
         metadata: Value,
         receipt: SanitizationReceiptV1,
         retention_class: RetentionClass,
@@ -187,6 +230,8 @@ impl FactPayloadV1 {
         validate_content(&content)?;
         validate_labels(&tags, "fact tags")?;
         validate_labels(&entities, "fact entities")?;
+        tags.sort_unstable();
+        entities.sort_unstable();
         let metadata_bytes = crate::research::canonical_json_bytes(&metadata)?;
         if metadata_bytes.len() > MAX_FACT_METADATA_BYTES {
             return Err(DomainError::NonCanonical {
@@ -298,7 +343,7 @@ pub enum FactEvidenceRelationV1 {
     Corrects,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FactEvidenceRefV1 {
     evidence_id: FactEvidenceId,
@@ -374,6 +419,39 @@ impl FactEvidenceRefV1 {
     }
 }
 
+impl<'de> Deserialize<'de> for FactEvidenceRefV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            evidence_id: FactEvidenceId,
+            fact_id: FactId,
+            anchor_id: RetrievalAnchorId,
+            relation: FactEvidenceRelationV1,
+            evidence_class: EvidenceClass,
+            confidence: Confidence,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let claimed_id = wire.evidence_id;
+        let evidence = Self::new(
+            wire.fact_id,
+            wire.anchor_id,
+            wire.relation,
+            wire.evidence_class,
+            wire.confidence,
+        )
+        .map_err(serde::de::Error::custom)?;
+        if claimed_id != evidence.evidence_id {
+            return Err(serde::de::Error::custom(DomainError::DigestMismatch));
+        }
+        Ok(evidence)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FactAssertionKindV1 {
@@ -384,8 +462,8 @@ pub enum FactAssertionKindV1 {
 }
 
 impl FactAssertionKindV1 {
-    fn validate(&self) -> Result<(), DomainError> {
-        match self {
+    fn canonicalized(mut self) -> Result<Self, DomainError> {
+        match &mut self {
             Self::Correction { supersedes } => supersedes.validate(),
             Self::Merge { supersedes } => {
                 if supersedes.is_empty() {
@@ -393,6 +471,12 @@ impl FactAssertionKindV1 {
                         field: "merged assertions",
                     });
                 }
+                if supersedes.len() > MAX_ASSERTION_SUPERSEDES {
+                    return Err(DomainError::NonCanonical {
+                        field: "merged assertions",
+                    });
+                }
+                supersedes.sort_unstable();
                 validate_unique(supersedes.iter(), "merged assertions")?;
                 for assertion_id in supersedes {
                     assertion_id.validate()?;
@@ -400,11 +484,12 @@ impl FactAssertionKindV1 {
                 Ok(())
             }
             Self::Initial | Self::LegacyImport => Ok(()),
-        }
+        }?;
+        Ok(self)
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FactAssertionV1 {
     assertion_id: FactAssertionId,
@@ -435,13 +520,19 @@ impl FactAssertionV1 {
         owner: FactOwnerV1,
         kind: FactAssertionKindV1,
         payload: FactPayloadV1,
-        evidence: Vec<FactEvidenceRefV1>,
+        mut evidence: Vec<FactEvidenceRefV1>,
         asserted_at: UtcMicros,
         actor_id: Option<ActorId>,
     ) -> Result<Self, DomainError> {
         fact_id.validate()?;
         owner.validate()?;
-        kind.validate()?;
+        fact_id.validate_owner(&owner)?;
+        let kind = kind.canonicalized()?;
+        if evidence.len() > MAX_FACT_EVIDENCE_REFS {
+            return Err(DomainError::NonCanonical {
+                field: "fact assertion evidence",
+            });
+        }
         if let Some(actor_id) = &actor_id {
             actor_id.validate()?;
         }
@@ -452,6 +543,7 @@ impl FactAssertionV1 {
                 });
             }
         }
+        evidence.sort_unstable_by(|left, right| left.evidence_id.cmp(&right.evidence_id));
         validate_unique(
             evidence.iter().map(FactEvidenceRefV1::evidence_id),
             "fact assertion evidence",
@@ -525,6 +617,43 @@ impl FactAssertionV1 {
     }
 }
 
+impl<'de> Deserialize<'de> for FactAssertionV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            assertion_id: FactAssertionId,
+            fact_id: FactId,
+            owner: FactOwnerV1,
+            kind: FactAssertionKindV1,
+            payload: FactPayloadV1,
+            evidence: Vec<FactEvidenceRefV1>,
+            asserted_at: UtcMicros,
+            actor_id: Option<ActorId>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let claimed_id = wire.assertion_id;
+        let assertion = Self::new(
+            wire.fact_id,
+            wire.owner,
+            wire.kind,
+            wire.payload,
+            wire.evidence,
+            wire.asserted_at,
+            wire.actor_id,
+        )
+        .map_err(serde::de::Error::custom)?;
+        if claimed_id != assertion.assertion_id {
+            return Err(serde::de::Error::custom(DomainError::DigestMismatch));
+        }
+        Ok(assertion)
+    }
+}
+
 fn validate_content(content: &str) -> Result<(), DomainError> {
     if content.trim().is_empty() || content.len() > MAX_FACT_CONTENT_BYTES {
         return Err(DomainError::NonCanonical {
@@ -557,6 +686,26 @@ fn validate_unique<'a, T: 'a + Ord>(
     let mut seen = BTreeSet::new();
     if values.into_iter().any(|value| !seen.insert(value)) {
         return Err(DomainError::DuplicateId { field });
+    }
+    Ok(())
+}
+
+fn memory_id_suffix(namespace: &'static str, value: &str) -> Result<String, DomainError> {
+    value
+        .strip_prefix(&format!("{namespace}."))
+        .map(str::to_owned)
+        .ok_or(DomainError::NonCanonical {
+            field: "memory identity",
+        })
+}
+
+fn validate_sha256_hex(value: &str, field: &'static str) -> Result<(), DomainError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(DomainError::NonCanonical { field });
     }
     Ok(())
 }
@@ -596,7 +745,7 @@ mod tests {
         let material = json!({
             "content": "The daemon is the only writer.",
             "category": "project",
-            "tags": ["database", "daemon"],
+            "tags": ["daemon", "database"],
             "entities": ["TraceDecay"],
             "metadata": {"source": "fixture"},
         });
@@ -614,7 +763,7 @@ mod tests {
         FactPayloadV1::new(
             "The daemon is the only writer.".to_owned(),
             FactCategoryV1::Project,
-            vec!["database".to_owned(), "daemon".to_owned()],
+            vec!["daemon".to_owned(), "database".to_owned()],
             vec!["TraceDecay".to_owned()],
             json!({"source": "fixture"}),
             receipt,
@@ -753,6 +902,85 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn identity_bearing_wire_values_reject_tampering() {
+        let owner = FactOwnerV1::Profile;
+        let fact_id = fact_id(owner.clone(), "operation.wire");
+        let evidence = FactEvidenceRefV1::new(
+            fact_id.clone(),
+            id("retrieval.wire"),
+            FactEvidenceRelationV1::Supports,
+            EvidenceClass::Observed,
+            Confidence::new(1.0).unwrap(),
+        )
+        .unwrap();
+        let mut evidence_wire = serde_json::to_value(&evidence).unwrap();
+        evidence_wire["evidence_id"] = json!("fact-evidence.v1.forged");
+        assert!(serde_json::from_value::<FactEvidenceRefV1>(evidence_wire).is_err());
+
+        let assertion = FactAssertionV1::new(
+            fact_id,
+            owner,
+            FactAssertionKindV1::Initial,
+            payload(),
+            vec![evidence],
+            UtcMicros(10),
+            None,
+        )
+        .unwrap();
+        let mut assertion_wire = serde_json::to_value(&assertion).unwrap();
+        assertion_wire["assertion_id"] = json!("fact-assertion.v1.forged");
+        assert!(serde_json::from_value::<FactAssertionV1>(assertion_wire).is_err());
+
+        let mut owner_wire = serde_json::to_value(&assertion).unwrap();
+        owner_wire["owner"] = json!({"kind": "project", "project_id": "project.other"});
+        assert!(serde_json::from_value::<FactAssertionV1>(owner_wire).is_err());
+    }
+
+    #[test]
+    fn assertion_set_order_is_canonical() {
+        let owner = FactOwnerV1::Profile;
+        let fact_id = fact_id(owner.clone(), "operation.order");
+        let first_evidence = FactEvidenceRefV1::new(
+            fact_id.clone(),
+            id("retrieval.order.a"),
+            FactEvidenceRelationV1::Supports,
+            EvidenceClass::Observed,
+            Confidence::new(1.0).unwrap(),
+        )
+        .unwrap();
+        let second_evidence = FactEvidenceRefV1::new(
+            fact_id.clone(),
+            id("retrieval.order.b"),
+            FactEvidenceRelationV1::Supports,
+            EvidenceClass::Observed,
+            Confidence::new(1.0).unwrap(),
+        )
+        .unwrap();
+        let first = FactAssertionV1::new(
+            fact_id.clone(),
+            owner.clone(),
+            FactAssertionKindV1::Initial,
+            payload(),
+            vec![first_evidence.clone(), second_evidence.clone()],
+            UtcMicros(10),
+            None,
+        )
+        .unwrap();
+        let second = FactAssertionV1::new(
+            fact_id,
+            owner,
+            FactAssertionKindV1::Initial,
+            payload(),
+            vec![second_evidence, first_evidence],
+            UtcMicros(10),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(first, second);
     }
 
     #[test]

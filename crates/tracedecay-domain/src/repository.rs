@@ -69,7 +69,7 @@ pub enum RepositoryDirtyStateV1 {
 }
 
 /// Bounded repository facts captured by the daemon/application boundary.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryEvidenceV1 {
     attached_ref: EvidenceAvailabilityV1<RefId>,
@@ -77,6 +77,33 @@ pub struct RepositoryEvidenceV1 {
     index_tree: EvidenceAvailabilityV1<TreeId>,
     path_identity_digest: EvidenceAvailabilityV1<PrivacyDomainBoundLocatorDigest>,
     dirty_state: EvidenceAvailabilityV1<RepositoryDirtyStateV1>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepositoryEvidenceWireV1 {
+    attached_ref: EvidenceAvailabilityV1<RefId>,
+    head_commit: EvidenceAvailabilityV1<CommitId>,
+    index_tree: EvidenceAvailabilityV1<TreeId>,
+    path_identity_digest: EvidenceAvailabilityV1<PrivacyDomainBoundLocatorDigest>,
+    dirty_state: EvidenceAvailabilityV1<RepositoryDirtyStateV1>,
+}
+
+impl<'de> Deserialize<'de> for RepositoryEvidenceV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = RepositoryEvidenceWireV1::deserialize(deserializer)?;
+        Self::new(
+            wire.attached_ref,
+            wire.head_commit,
+            wire.index_tree,
+            wire.path_identity_digest,
+            wire.dirty_state,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl RepositoryEvidenceV1 {
@@ -470,6 +497,14 @@ mod tests {
             round_trip.index_tree(),
             &EvidenceAvailabilityV1::Unavailable
         );
+    }
+
+    #[test]
+    fn standalone_evidence_deserialization_rejects_noncanonical_git_object_ids() {
+        let mut value = serde_json::to_value(evidence()).unwrap();
+        value["head_commit"]["value"] = Value::String("0123456789abcdef".into());
+
+        assert!(serde_json::from_value::<RepositoryEvidenceV1>(value).is_err());
     }
 
     #[test]

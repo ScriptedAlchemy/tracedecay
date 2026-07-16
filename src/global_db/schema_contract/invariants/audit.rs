@@ -310,6 +310,7 @@ impl ProjectionAliasRow {
 }
 
 struct ProjectionProvenanceRow {
+    retrieval_anchor_id: String,
     receipt_id: String,
     output_provider: String,
     output_message_id: String,
@@ -325,7 +326,7 @@ impl ProjectionProvenanceRow {
     ) -> crate::errors::Result<Option<Self>> {
         let mut rows = conn
             .query(
-                "SELECT receipt_id, output_provider, output_message_id,
+                "SELECT retrieval_anchor_id, receipt_id, output_provider, output_message_id,
                         output_digest, message_created
                  FROM observation_projection_provenance
                  WHERE projector_version = ?1 AND observation_id = ?2
@@ -346,20 +347,23 @@ impl ProjectionProvenanceRow {
             return Ok(None);
         };
         Ok(Some(Self {
-            receipt_id: row
+            retrieval_anchor_id: row
                 .get(0)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            output_provider: row
+            receipt_id: row
                 .get(1)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            output_message_id: row
+            output_provider: row
                 .get(2)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            output_digest: row
+            output_message_id: row
                 .get(3)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?,
-            message_created: row
+            output_digest: row
                 .get(4)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            message_created: row
+                .get(5)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?,
         }))
     }
@@ -466,7 +470,8 @@ fn validate_provenance_row(
 ) -> crate::errors::Result<()> {
     let provenance = projection.provenance();
     let message = projection.message();
-    if actual.receipt_id != provenance.receipt_id()
+    if actual.retrieval_anchor_id != provenance.retrieval_anchor_id().as_str()
+        || actual.receipt_id != provenance.receipt_id()
         || actual.output_provider != message.provider
         || actual.output_message_id != message.message_id
         || actual.output_digest != projection.output_digest().as_str()

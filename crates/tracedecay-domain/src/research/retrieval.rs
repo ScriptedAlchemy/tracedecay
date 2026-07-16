@@ -37,7 +37,7 @@ use super::watermark::VectorWatermark;
 ///     };
 /// }
 /// ```
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct PrivacyDomainBoundLocatorDigest(LocatorDigest);
 
@@ -82,6 +82,8 @@ impl TryFrom<&str> for PrivacyDomainBoundLocatorDigest {
 ///     };
 /// }
 /// ```
+/// Compatibility-only target shape for the V1 research-manifest wire format.
+/// New authoritative anchors use `RetrievalAnchorTarget`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(transparent)]
 pub struct SanitizedOutputDigest(ManifestDigest);
@@ -119,7 +121,7 @@ impl TryFrom<&str> for SanitizedOutputDigest {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-pub enum RetrievalAnchorTargetV1 {
+pub enum RetrievalAnchorCompatibilityTargetV1 {
     Entity(EntityRef),
     Query(QueryId),
     SourcePosition {
@@ -131,6 +133,9 @@ pub enum RetrievalAnchorTargetV1 {
         sanitized_output_digest: SanitizedOutputDigest,
     },
 }
+
+/// Source-compatible name for the legacy research-manifest target.
+pub type RetrievalAnchorTargetV1 = RetrievalAnchorCompatibilityTargetV1;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -189,10 +194,14 @@ pub enum AnchorDurabilityClass {
     Archived,
 }
 
-/// Immutable, safe-metadata resolver record for one retrieval anchor.
+/// Compatibility-only V1 research-manifest record.
+///
+/// This is not the authoritative persisted anchor model. New storage and
+/// application code use `RetrievalAnchorRecord`, whose identity is derived by
+/// the domain rather than supplied by a caller.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct RetrievalAnchorRecordV1 {
+pub struct RetrievalAnchorCompatibilityRecordV1 {
     pub anchor_id: RetrievalAnchorId,
     pub target: RetrievalAnchorTargetV1,
     pub target_kind: EntityKind,
@@ -217,6 +226,9 @@ pub struct RetrievalAnchorRecordV1 {
     pub created_at: UtcMicros,
     pub durability: AnchorDurabilityClass,
 }
+
+/// Source-compatible name for the legacy research-manifest record.
+pub type RetrievalAnchorRecordV1 = RetrievalAnchorCompatibilityRecordV1;
 
 impl RetrievalAnchorRecordV1 {
     pub fn validate(&self) -> Result<(), DomainError> {

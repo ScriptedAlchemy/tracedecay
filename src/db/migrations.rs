@@ -16,7 +16,7 @@ use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 18;
+const LATEST_VERSION: u32 = 19;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &Connection) -> Result<u32> {
@@ -291,7 +291,9 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
         })?;
 
     create_holographic_memory_schema(conn, "create_schema").await?;
+    super::memory_v2::create_schema(conn, "create_schema").await?;
     set_version(conn, LATEST_VERSION).await?;
+    super::memory_v2::resume_backfill(conn).await?;
     Ok(())
 }
 
@@ -315,11 +317,16 @@ pub(crate) async fn migrate_with_exclusive_maintenance(conn: &Connection) -> Res
 
 async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result<bool> {
     let current = get_version(conn).await?;
-    debug_assert!(
-        current <= LATEST_VERSION,
-        "database version {current} is ahead of code version {LATEST_VERSION}"
-    );
-    if current >= LATEST_VERSION {
+    if current > LATEST_VERSION {
+        return Err(TraceDecayError::Database {
+            message: format!(
+                "database schema v{current} is newer than supported v{LATEST_VERSION}"
+            ),
+            operation: "migrate".to_string(),
+        });
+    }
+    if current == LATEST_VERSION {
+        super::memory_v2::resume_backfill(conn).await?;
         repair_incremental_auto_vacuum(conn, "migrate", exclusive_maintenance).await?;
         return Ok(false);
     }
@@ -350,6 +357,7 @@ async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result
                     message: format!("failed to commit migrations: {e}"),
                     operation: "migrate".to_string(),
                 })?;
+            super::memory_v2::resume_backfill(conn).await?;
             repair_incremental_auto_vacuum(conn, "migrate", exclusive_maintenance).await?;
             Ok(true)
         }
@@ -394,11 +402,18 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         16 => migrate_v16(conn).await,
         17 => migrate_v17(conn).await,
         18 => migrate_v18(conn).await,
+        19 => migrate_v19(conn).await,
         _ => Err(TraceDecayError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
         }),
     }
+}
+
+/// v19: additive typed fact identity, immutable assertion/evidence/lineage,
+/// purgeable payloads, and resumable legacy projection backfill state.
+async fn migrate_v19(conn: &Connection) -> Result<()> {
+    super::memory_v2::create_schema(conn, "migrate_v19").await
 }
 
 /// Compatibility marker after v12 was exposed on the PR stack.

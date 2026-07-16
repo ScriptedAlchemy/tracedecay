@@ -11,26 +11,26 @@ use super::state::{
 
 const LIVE_WORKFLOW_FACT_INSERT: &str = "WITH ignored_generation(generation) AS (VALUES (?2))
      INSERT INTO observation_workflow_facts (
-        projector_version, observation_id, fact_ordinal, receipt_id, observation_sequence,
-        provider, session_id, semantic_kind, provider_reference, item_id, parent_reference,
-        list_reference, state, status, item_order, native_revision, event_sequence,
-        source_sequence, native_timestamp, ordering_domain, content_json, content_text,
-        output_digest
+        projector_version, observation_id, fact_ordinal, retrieval_anchor_id, receipt_id,
+        observation_sequence, provider, session_id, semantic_kind, provider_reference, item_id,
+        parent_reference, list_reference, state, status, item_order, native_revision,
+        event_sequence, source_sequence, native_timestamp, ordering_domain, content_json,
+        content_text, output_digest
      ) VALUES (
         ?1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-        ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24
+        ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
      ) ON CONFLICT DO NOTHING";
 
 const STAGED_WORKFLOW_FACT_INSERT: &str =
     "INSERT OR IGNORE INTO observation_projection_rebuild_workflow_facts (
-        projector_version, generation, observation_id, fact_ordinal, receipt_id,
-        observation_sequence, provider, session_id, semantic_kind, provider_reference,
-        item_id, parent_reference, list_reference, state, status, item_order,
-        native_revision, event_sequence, source_sequence, native_timestamp,
+        projector_version, generation, observation_id, fact_ordinal, retrieval_anchor_id,
+        receipt_id, observation_sequence, provider, session_id, semantic_kind,
+        provider_reference, item_id, parent_reference, list_reference, state, status,
+        item_order, native_revision, event_sequence, source_sequence, native_timestamp,
         ordering_domain, content_json, content_text, output_digest
      ) VALUES (
         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-        ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24
+        ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
      )";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,6 +174,7 @@ pub(super) async fn write_workflow_fact_transition(
             target.generation(),
             provenance.observation_id().as_str(),
             i64::from(fact.fact_ordinal),
+            provenance.retrieval_anchor_id().as_str(),
             provenance.receipt_id(),
             transition.observation_sequence(),
             projection.session().provider.as_str(),

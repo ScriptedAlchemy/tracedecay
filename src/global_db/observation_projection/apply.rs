@@ -1517,6 +1517,7 @@ fn workflow_content_json(
 
 #[derive(PartialEq, Eq)]
 struct StoredWorkflowFact {
+    retrieval_anchor_id: String,
     receipt_id: String,
     observation_sequence: i64,
     provider: String,
@@ -1563,7 +1564,8 @@ async fn verify_workflow_fact(
     drop(sequence_rows);
     let mut rows = conn
         .query(
-            "SELECT receipt_id, observation_sequence, provider, session_id, semantic_kind,
+            "SELECT retrieval_anchor_id, receipt_id, observation_sequence, provider, session_id,
+                    semantic_kind,
                     provider_reference, item_id, parent_reference, list_reference, state, status,
                     item_order, native_revision, event_sequence, source_sequence,
                     native_timestamp, ordering_domain, content_json, content_text, output_digest
@@ -1591,28 +1593,30 @@ async fn verify_workflow_fact(
         };
     }
     let actual = StoredWorkflowFact {
-        receipt_id: cell!(0, String),
-        observation_sequence: cell!(1, i64),
-        provider: cell!(2, String),
-        session_id: cell!(3, String),
-        semantic_kind: cell!(4, String),
-        provider_reference: cell!(5, Option<String>),
-        item_id: cell!(6, Option<String>),
-        parent_reference: cell!(7, Option<String>),
-        list_reference: cell!(8, Option<String>),
-        state: cell!(9, Option<String>),
-        status: cell!(10, Option<String>),
-        item_order: cell!(11, Option<i64>),
-        native_revision: cell!(12, Option<String>),
-        event_sequence: cell!(13, Option<i64>),
-        source_sequence: cell!(14, Option<i64>),
-        native_timestamp: cell!(15, Option<i64>),
-        ordering_domain: cell!(16, String),
-        content_json: cell!(17, Option<String>),
-        content_text: cell!(18, String),
-        output_digest: cell!(19, String),
+        retrieval_anchor_id: cell!(0, String),
+        receipt_id: cell!(1, String),
+        observation_sequence: cell!(2, i64),
+        provider: cell!(3, String),
+        session_id: cell!(4, String),
+        semantic_kind: cell!(5, String),
+        provider_reference: cell!(6, Option<String>),
+        item_id: cell!(7, Option<String>),
+        parent_reference: cell!(8, Option<String>),
+        list_reference: cell!(9, Option<String>),
+        state: cell!(10, Option<String>),
+        status: cell!(11, Option<String>),
+        item_order: cell!(12, Option<i64>),
+        native_revision: cell!(13, Option<String>),
+        event_sequence: cell!(14, Option<i64>),
+        source_sequence: cell!(15, Option<i64>),
+        native_timestamp: cell!(16, Option<i64>),
+        ordering_domain: cell!(17, String),
+        content_json: cell!(18, Option<String>),
+        content_text: cell!(19, String),
+        output_digest: cell!(20, String),
     };
     let expected = StoredWorkflowFact {
+        retrieval_anchor_id: provenance.retrieval_anchor_id().as_str().to_owned(),
         receipt_id: provenance.receipt_id().to_owned(),
         observation_sequence: sequence,
         provider: session.provider.clone(),
@@ -1680,7 +1684,8 @@ pub(super) async fn verify_provenance(
     let message = projection.message();
     let mut rows = conn
         .query(
-            "SELECT receipt_id, output_provider, output_message_id, output_digest
+            "SELECT retrieval_anchor_id, receipt_id, output_provider, output_message_id,
+                    output_digest
              FROM observation_projection_provenance
              WHERE projector_version = ?1 AND observation_id = ?2
                AND output_ordinal = ?3",
@@ -1708,8 +1713,11 @@ pub(super) async fn verify_provenance(
             .map_err(|error| storage("verify projection provenance", error))?,
         row.get::<String>(3)
             .map_err(|error| storage("verify projection provenance", error))?,
+        row.get::<String>(4)
+            .map_err(|error| storage("verify projection provenance", error))?,
     );
     let expected = (
+        provenance.retrieval_anchor_id().as_str().to_string(),
         provenance.receipt_id().to_string(),
         message.provider.clone(),
         message.message_id.clone(),
@@ -1733,14 +1741,15 @@ async fn apply_provenance(
     let inserted = conn
         .execute(
             "INSERT INTO observation_projection_provenance
-            (projector_version, observation_id, output_ordinal, receipt_id, output_provider,
-             output_message_id, output_digest, message_created)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            (projector_version, observation_id, output_ordinal, retrieval_anchor_id, receipt_id,
+             output_provider, output_message_id, output_digest, message_created)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT DO NOTHING",
             params![
                 provenance.projector_version(),
                 provenance.observation_id().as_str(),
                 projection.output_ordinal(),
+                provenance.retrieval_anchor_id().as_str(),
                 provenance.receipt_id(),
                 message.provider.as_str(),
                 message.message_id.as_str(),

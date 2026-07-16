@@ -2,10 +2,15 @@ use std::error::Error;
 use std::future::Future;
 
 use tracedecay_domain::{
-    CanonicalObservationIdV1, DurableObservationV1, ObservationCollisionOutcomeV1,
-    ObservationContractError, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadDigestV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CanonicalObservationIdV1,
+    CapabilityId, CoverageReportV1, DomainError, DurableObservationV1, EvidenceClass,
+    NativeAliasKindV2, NativeAliasV2, ObservationCollisionOutcomeV1, ObservationContractError,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadAccessState, PayloadDigestV1, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest,
+    PrivacyDomainId, ProjectionGenerationId, ResolutionAuthorizationV1, RetrievalAnchorId,
+    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId, UtcMicros, VectorWatermark,
 };
 
 const MAX_REPLAY_LIMIT: usize = 1_000;
@@ -89,6 +94,188 @@ impl ObservationWrite {
         ObservationSourceCursorV1,
     ) {
         (self.observation, self.expected_cursor, self.next_cursor)
+    }
+}
+
+/// Derives an owner-bound authorization snapshot when ingress has no richer policy object.
+pub fn build_observation_resolution_authorization_v1(
+    observation: &DurableObservationV1,
+    authority_namespace: &str,
+) -> ObservationStoreResult<ResolutionAuthorizationV1> {
+    let access_policy_digest = PayloadReferenceV1::for_payload(&serde_json::json!({
+        "domain": "tracedecay.observation-anchor.authorization.v1",
+        "authority": authority_namespace,
+    }))
+    .map_err(ObservationStoreError::Contract)?
+    .digest()
+    .as_str()
+    .to_owned();
+    let canonical_request_digest = PayloadReferenceV1::for_payload(&serde_json::json!({
+        "domain": "tracedecay.observation-anchor.request.v1",
+        "authority": authority_namespace,
+        "owner": observation.scope(),
+        "observation_id": observation.observation_id(),
+    }))
+    .map_err(ObservationStoreError::Contract)?
+    .digest()
+    .as_str()
+    .to_owned();
+    Ok(ResolutionAuthorizationV1 {
+        resolved_scope_id: ScopeResolutionId::new(format!("scope.{authority_namespace}"))
+            .map_err(ObservationStoreError::RetrievalAnchorContract)?,
+        privacy_domain_id: PrivacyDomainId::new(format!("privacy.{authority_namespace}"))
+            .map_err(ObservationStoreError::RetrievalAnchorContract)?,
+        access_policy_digest: AccessPolicyDigest::new(access_policy_digest)
+            .map_err(ObservationStoreError::RetrievalAnchorContract)?,
+        capability_id: CapabilityId::new(format!("capability.{authority_namespace}"))
+            .map_err(ObservationStoreError::RetrievalAnchorContract)?,
+        canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(canonical_request_digest)
+            .map_err(ObservationStoreError::RetrievalAnchorContract)?,
+    })
+}
+
+/// Builds the canonical stable anchor for one retained sanitized observation.
+pub fn build_observation_retrieval_anchor_v2(
+    observation: &DurableObservationV1,
+    projection_generation: ProjectionGenerationId,
+    ingested_at: UtcMicros,
+    authorization: ResolutionAuthorizationV1,
+) -> ObservationStoreResult<RetrievalAnchorRecordV2> {
+    let aliases = observation
+        .identity()
+        .native_record_id()
+        .map(|native_record_id| {
+            let locator = serde_json::json!({
+                "owner": observation.scope(),
+                "provider": observation.source().provider(),
+                "session_id": observation.source().session_id(),
+                "native_record_id": native_record_id,
+            });
+            let digest = PayloadReferenceV1::for_payload(&locator)
+                .map_err(ObservationStoreError::Contract)?
+                .digest()
+                .as_str()
+                .to_owned();
+            let locator_digest = PrivacyDomainBoundLocatorDigest::new(digest)
+                .map_err(ObservationStoreError::RetrievalAnchorContract)?;
+            NativeAliasV2::new(NativeAliasKindV2::ProviderRecord, locator_digest)
+                .map_err(ObservationStoreError::RetrievalAnchorContract)
+        })
+        .transpose()?
+        .into_iter()
+        .collect();
+    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+        target: RetrievalAnchorTargetV2::ExactObservation(observation.observation_id().clone()),
+        owner: observation.scope().clone(),
+        aliases,
+        occurred_at: None,
+        ingested_at,
+        evidence_class: EvidenceClass::Observed,
+        source_generation: AnchorSourceGenerationV2::Observation(
+            observation.identity().generation(),
+        ),
+        projection_generation,
+        projection_watermark: VectorWatermark::default(),
+        coverage: CoverageReportV1::default(),
+        source_observations: vec![observation.observation_id().clone()],
+        source_anchors: vec![],
+        authorization,
+        payload_access: PayloadAccessState::Eligible,
+        retention_class: observation.retention_class().clone(),
+        durability: AnchorDurabilityClass::DurableEvidence,
+    })
+    .map_err(ObservationStoreError::RetrievalAnchorContract)
+}
+
+fn validate_retrieval_anchor_binding(
+    observation: &DurableObservationV1,
+    retrieval_anchor: &RetrievalAnchorRecordV2,
+    projection_generation: &ProjectionGenerationId,
+) -> ObservationStoreResult<()> {
+    if !matches!(
+        retrieval_anchor.target(),
+        RetrievalAnchorTargetV2::ExactObservation(observation_id)
+            if observation_id == observation.observation_id()
+    ) {
+        return Err(ObservationStoreError::RetrievalAnchorObservationMismatch);
+    }
+    if retrieval_anchor.owner() != observation.scope() {
+        return Err(ObservationStoreError::RetrievalAnchorOwnerMismatch);
+    }
+    if retrieval_anchor.projection_generation() != projection_generation {
+        return Err(ObservationStoreError::RetrievalAnchorProjectionGenerationMismatch);
+    }
+    Ok(())
+}
+
+/// One observation write and its stable V2 retrieval anchor.
+///
+/// Stores commit every part of this value in one authoritative transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnchoredObservationWrite {
+    write: ObservationWrite,
+    retrieval_anchor: RetrievalAnchorRecordV2,
+    projection_generation: ProjectionGenerationId,
+}
+
+impl AnchoredObservationWrite {
+    pub fn new(
+        write: ObservationWrite,
+        retrieval_anchor: RetrievalAnchorRecordV2,
+        projection_generation: ProjectionGenerationId,
+    ) -> ObservationStoreResult<Self> {
+        validate_retrieval_anchor_binding(
+            write.observation(),
+            &retrieval_anchor,
+            &projection_generation,
+        )?;
+        Ok(Self {
+            write,
+            retrieval_anchor,
+            projection_generation,
+        })
+    }
+
+    pub fn write(&self) -> &ObservationWrite {
+        &self.write
+    }
+
+    pub fn observation(&self) -> &DurableObservationV1 {
+        self.write.observation()
+    }
+
+    pub fn expected_cursor(&self) -> Option<&ObservationSourceCursorV1> {
+        self.write.expected_cursor()
+    }
+
+    pub fn next_cursor(&self) -> &ObservationSourceCursorV1 {
+        self.write.next_cursor()
+    }
+
+    pub fn retrieval_anchor(&self) -> &RetrievalAnchorRecordV2 {
+        &self.retrieval_anchor
+    }
+
+    pub fn retrieval_anchor_id(&self) -> &RetrievalAnchorId {
+        self.retrieval_anchor.anchor_id()
+    }
+
+    pub fn projection_generation(&self) -> &ProjectionGenerationId {
+        &self.projection_generation
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        ObservationWrite,
+        RetrievalAnchorRecordV2,
+        ProjectionGenerationId,
+    ) {
+        (
+            self.write,
+            self.retrieval_anchor,
+            self.projection_generation,
+        )
     }
 }
 
@@ -364,6 +551,8 @@ pub struct ObservationCommitReceipt {
     sequence: u64,
     observation: Box<DurableObservationV1>,
     committed_cursor: ObservationSourceCursorV1,
+    retrieval_anchor: Box<RetrievalAnchorRecordV2>,
+    projection_generation: ProjectionGenerationId,
 }
 
 impl ObservationCommitReceipt {
@@ -371,12 +560,17 @@ impl ObservationCommitReceipt {
         sequence: u64,
         observation: DurableObservationV1,
         committed_cursor: ObservationSourceCursorV1,
-    ) -> Self {
-        Self {
+        retrieval_anchor: RetrievalAnchorRecordV2,
+        projection_generation: ProjectionGenerationId,
+    ) -> ObservationStoreResult<Self> {
+        validate_retrieval_anchor_binding(&observation, &retrieval_anchor, &projection_generation)?;
+        Ok(Self {
             sequence,
             observation: Box::new(observation),
             committed_cursor,
-        }
+            retrieval_anchor: Box::new(retrieval_anchor),
+            projection_generation,
+        })
     }
 
     pub fn sequence(&self) -> u64 {
@@ -393,6 +587,18 @@ impl ObservationCommitReceipt {
 
     pub fn committed_cursor(&self) -> &ObservationSourceCursorV1 {
         &self.committed_cursor
+    }
+
+    pub fn retrieval_anchor(&self) -> &RetrievalAnchorRecordV2 {
+        self.retrieval_anchor.as_ref()
+    }
+
+    pub fn retrieval_anchor_id(&self) -> &RetrievalAnchorId {
+        self.retrieval_anchor.anchor_id()
+    }
+
+    pub fn projection_generation(&self) -> &ProjectionGenerationId {
+        &self.projection_generation
     }
 }
 
@@ -425,12 +631,20 @@ impl StoredObservation {
         sequence: u64,
         observation: DurableObservationV1,
         committed_cursor: ObservationSourceCursorV1,
+        retrieval_anchor: RetrievalAnchorRecordV2,
+        projection_generation: ProjectionGenerationId,
         projection_status: ObservationProjectionStatus,
-    ) -> Self {
-        Self::from_commit_receipt(
-            ObservationCommitReceipt::new(sequence, observation, committed_cursor),
+    ) -> ObservationStoreResult<Self> {
+        Ok(Self::from_commit_receipt(
+            ObservationCommitReceipt::new(
+                sequence,
+                observation,
+                committed_cursor,
+                retrieval_anchor,
+                projection_generation,
+            )?,
             projection_status,
-        )
+        ))
     }
 
     pub fn from_commit_receipt(
@@ -461,6 +675,18 @@ impl StoredObservation {
 
     pub fn committed_cursor(&self) -> &ObservationSourceCursorV1 {
         self.commit_receipt.committed_cursor()
+    }
+
+    pub fn retrieval_anchor(&self) -> &RetrievalAnchorRecordV2 {
+        self.commit_receipt.retrieval_anchor()
+    }
+
+    pub fn retrieval_anchor_id(&self) -> &RetrievalAnchorId {
+        self.commit_receipt.retrieval_anchor_id()
+    }
+
+    pub fn projection_generation(&self) -> &ProjectionGenerationId {
+        self.commit_receipt.projection_generation()
     }
 
     pub fn projection_status(&self) -> ObservationProjectionStatus {
@@ -530,6 +756,22 @@ pub enum ObservationStoreError {
     },
     #[error("sanitization receipt identifier collided with different contents")]
     SanitizationReceiptCollision,
+    #[error("retrieval anchor does not target the persisted observation")]
+    RetrievalAnchorObservationMismatch,
+    #[error("retrieval anchor owner does not match the persisted observation scope")]
+    RetrievalAnchorOwnerMismatch,
+    #[error("retrieval anchor projection generation does not match the store write")]
+    RetrievalAnchorProjectionGenerationMismatch,
+    #[error("retrieval anchor contract validation failed")]
+    RetrievalAnchorContract(#[source] DomainError),
+    #[error(
+        "retrieval anchor alias {alias:?} collided between existing anchor {existing_anchor_id:?} and candidate anchor {candidate_anchor_id:?}"
+    )]
+    RetrievalAnchorAliasCollision {
+        alias: Box<NativeAliasV2>,
+        existing_anchor_id: Box<RetrievalAnchorId>,
+        candidate_anchor_id: Box<RetrievalAnchorId>,
+    },
     #[error("replay limit {limit} must be between 1 and {max}")]
     InvalidReplayLimit { limit: usize, max: usize },
     #[error("observation contract validation failed")]
@@ -544,11 +786,11 @@ pub enum ObservationStoreError {
 
 pub type ObservationStoreResult<T> = Result<T, ObservationStoreError>;
 
-/// Authoritative persistence boundary for sanitized observations.
+/// Authoritative persistence boundary for sanitized observations and their stable anchors.
 pub trait ObservationStore: Send + Sync {
     fn persist_observation(
         &self,
-        write: ObservationWrite,
+        write: AnchoredObservationWrite,
     ) -> impl Future<Output = ObservationStoreResult<ObservationPersistOutcome>> + Send;
 
     fn get_source_cursor(
@@ -571,4 +813,245 @@ pub trait ObservationStore: Send + Sync {
         &self,
         request: ObservationReplayRequest,
     ) -> impl Future<Output = ObservationStoreResult<Vec<StoredObservation>>> + Send;
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tracedecay_domain::{
+        AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
+        ComponentVersion, CoverageReportV1, EvidenceClass, NativeAliasKindV2, ObservationId,
+        ObservationIdentityMaterialV1, PayloadAccessState, PayloadReferenceV1,
+        PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId,
+        ResolutionAuthorizationV1, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
+        SanitizationReceiptRefV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1,
+        SessionId, UtcMicros, VectorWatermark,
+    };
+
+    use super::*;
+
+    const DIGEST_A: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_B: &str =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn projection_generation() -> ProjectionGenerationId {
+        ProjectionGenerationId::new("projection.observation-anchor.v4").unwrap()
+    }
+
+    fn observation(seed: &str, scope: ObservationScopeV1) -> DurableObservationV1 {
+        let provider = ProviderId::new("provider.fixture").unwrap();
+        let session_id = SessionId::new(format!("session.{seed}")).unwrap();
+        let source = ObservationSourceIdentityV1::for_provider(provider, session_id).unwrap();
+        let generation = ObservationSourceGenerationV1::new(7).unwrap();
+        let range = ObservationSourceRangeV1::new(0, 1).unwrap();
+        let record_id = ObservationId::new(format!("record.{seed}")).unwrap();
+        let payload = json!({"kind": "assistant_message", "body": seed});
+        let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new(format!("receipt.{seed}")).unwrap(),
+                ComponentVersion::new("sanitizer.fixture.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(payload_reference),
+        )
+        .unwrap();
+        DurableObservationV1::new(
+            ObservationIdentityMaterialV1::for_native_record(
+                source,
+                scope,
+                generation,
+                range,
+                ObservationOrderingDomainV1::SqliteRowId,
+                record_id,
+            )
+            .unwrap(),
+            receipt,
+            tracedecay_domain::RetentionClass::new("retention.fixture").unwrap(),
+            payload,
+        )
+        .unwrap()
+    }
+
+    fn write(observation: DurableObservationV1) -> ObservationWrite {
+        let identity = observation.identity();
+        let next_cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            identity.generation(),
+            identity.ordering_domain(),
+            identity.position().end(),
+        )
+        .unwrap();
+        ObservationWrite::new(observation, None, next_cursor).unwrap()
+    }
+
+    fn authorization() -> ResolutionAuthorizationV1 {
+        ResolutionAuthorizationV1 {
+            resolved_scope_id: ScopeResolutionId::new("scope.fixture").unwrap(),
+            privacy_domain_id: PrivacyDomainId::new("privacy.fixture").unwrap(),
+            access_policy_digest: AccessPolicyDigest::new(DIGEST_A).unwrap(),
+            capability_id: CapabilityId::new("capability.fixture").unwrap(),
+            canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(DIGEST_B).unwrap(),
+        }
+    }
+
+    fn anchor(
+        observation: &DurableObservationV1,
+        owner: ObservationScopeV1,
+        aliases: Vec<NativeAliasV2>,
+        ingested_at: i64,
+    ) -> RetrievalAnchorRecordV2 {
+        RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+            target: RetrievalAnchorTargetV2::ExactObservation(observation.observation_id().clone()),
+            owner,
+            aliases,
+            occurred_at: None,
+            ingested_at: UtcMicros(ingested_at),
+            evidence_class: EvidenceClass::Observed,
+            source_generation: AnchorSourceGenerationV2::Observation(
+                observation.identity().generation(),
+            ),
+            projection_generation: projection_generation(),
+            projection_watermark: VectorWatermark::default(),
+            coverage: CoverageReportV1::default(),
+            source_observations: vec![observation.observation_id().clone()],
+            source_anchors: vec![],
+            authorization: authorization(),
+            payload_access: PayloadAccessState::Eligible,
+            retention_class: tracedecay_domain::RetentionClass::new("retention.fixture").unwrap(),
+            durability: AnchorDurabilityClass::DurableEvidence,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn anchored_write_and_replay_receipt_keep_the_original_anchor() {
+        let observation = observation("replay", ObservationScopeV1::Profile);
+        let original_anchor = anchor(&observation, ObservationScopeV1::Profile, vec![], 1);
+        let replay_anchor = anchor(&observation, ObservationScopeV1::Profile, vec![], 99);
+        assert_eq!(original_anchor.anchor_id(), replay_anchor.anchor_id());
+        assert_ne!(original_anchor, replay_anchor);
+
+        let anchored = AnchoredObservationWrite::new(
+            write(observation.clone()),
+            replay_anchor,
+            projection_generation(),
+        )
+        .unwrap();
+        assert_eq!(anchored.observation(), &observation);
+        assert_eq!(
+            anchored.retrieval_anchor().anchor_id(),
+            original_anchor.anchor_id()
+        );
+
+        let receipt = ObservationCommitReceipt::new(
+            1,
+            observation,
+            anchored.next_cursor().clone(),
+            original_anchor.clone(),
+            projection_generation(),
+        )
+        .unwrap();
+        let replay = ObservationPersistOutcome::ExactDuplicate(receipt);
+        assert_eq!(replay.receipt().retrieval_anchor(), &original_anchor);
+        assert_eq!(
+            replay.receipt().projection_generation(),
+            &projection_generation()
+        );
+    }
+
+    #[test]
+    fn anchored_write_rejects_identity_owner_and_projection_mismatches() {
+        let candidate = observation("candidate", ObservationScopeV1::Profile);
+        let other = observation("other", ObservationScopeV1::Profile);
+        assert!(matches!(
+            AnchoredObservationWrite::new(
+                write(candidate.clone()),
+                anchor(&other, ObservationScopeV1::Profile, vec![], 1),
+                projection_generation(),
+            ),
+            Err(ObservationStoreError::RetrievalAnchorObservationMismatch)
+        ));
+
+        let project_owner = ObservationScopeV1::Project {
+            project_id: ProjectId::new("project.fixture").unwrap(),
+        };
+        assert!(matches!(
+            AnchoredObservationWrite::new(
+                write(candidate.clone()),
+                anchor(&candidate, project_owner, vec![], 1),
+                projection_generation(),
+            ),
+            Err(ObservationStoreError::RetrievalAnchorOwnerMismatch)
+        ));
+
+        assert!(matches!(
+            AnchoredObservationWrite::new(
+                write(candidate.clone()),
+                anchor(&candidate, ObservationScopeV1::Profile, vec![], 1),
+                ProjectionGenerationId::new("projection.wrong").unwrap(),
+            ),
+            Err(ObservationStoreError::RetrievalAnchorProjectionGenerationMismatch)
+        ));
+    }
+
+    #[test]
+    fn commit_receipt_rejects_a_partial_mismatched_aggregate() {
+        let candidate = observation("rollback", ObservationScopeV1::Profile);
+        let other = observation("rollback-other", ObservationScopeV1::Profile);
+        let next_cursor = write(candidate.clone()).next_cursor().clone();
+        assert!(matches!(
+            ObservationCommitReceipt::new(
+                1,
+                candidate,
+                next_cursor,
+                anchor(&other, ObservationScopeV1::Profile, vec![], 1),
+                projection_generation(),
+            ),
+            Err(ObservationStoreError::RetrievalAnchorObservationMismatch)
+        ));
+    }
+
+    #[test]
+    fn alias_collision_is_typed_without_a_partial_commit_receipt() {
+        let alias = NativeAliasV2::new(
+            NativeAliasKindV2::ProviderRecord,
+            PrivacyDomainBoundLocatorDigest::new(DIGEST_A).unwrap(),
+        )
+        .unwrap();
+        let first_observation = observation("alias-first", ObservationScopeV1::Profile);
+        let second_observation = observation("alias-second", ObservationScopeV1::Profile);
+        let first = anchor(
+            &first_observation,
+            ObservationScopeV1::Profile,
+            vec![alias.clone()],
+            1,
+        );
+        let second = anchor(
+            &second_observation,
+            ObservationScopeV1::Profile,
+            vec![alias.clone()],
+            2,
+        );
+        let result: ObservationStoreResult<ObservationPersistOutcome> =
+            Err(ObservationStoreError::RetrievalAnchorAliasCollision {
+                alias: Box::new(alias.clone()),
+                existing_anchor_id: Box::new(first.anchor_id().clone()),
+                candidate_anchor_id: Box::new(second.anchor_id().clone()),
+            });
+        assert!(matches!(
+            result,
+            Err(ObservationStoreError::RetrievalAnchorAliasCollision {
+                alias: collided,
+                existing_anchor_id,
+                candidate_anchor_id,
+            }) if collided.as_ref() == &alias
+                && existing_anchor_id.as_ref() == first.anchor_id()
+                && candidate_anchor_id.as_ref() == second.anchor_id()
+        ));
+    }
 }

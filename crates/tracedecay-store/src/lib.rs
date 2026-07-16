@@ -11,13 +11,14 @@ pub mod transcript;
 
 pub use memory::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitConflict, FactCommitOutcome, FactCommitReceipt,
-    FactLineageQuery, FactStore, FactStoreError, FactStoreResult, FactWriteBatch, LegacyFactQuery,
-    StoredFactV1,
+    FactCurrentQuery, FactLineageCursor, FactLineageQuery, FactStore, FactStoreError,
+    FactStoreResult, FactWriteBatch, LegacyFactQuery, RetrievalAnchorQuery, StoredFactV1,
 };
 pub use observation::{
-    ObservationCommitReceipt, ObservationPersistOutcome, ObservationProjectionStatus,
-    ObservationReplayRequest, ObservationStore, ObservationStoreError, ObservationStoreResult,
-    ObservationWrite, StoredObservation,
+    AnchoredObservationWrite, ObservationCommitReceipt, ObservationPersistOutcome,
+    ObservationProjectionStatus, ObservationReplayRequest, ObservationStore, ObservationStoreError,
+    ObservationStoreResult, ObservationWrite, StoredObservation,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 pub use projection::{
     CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ClaudeObservationProjection,
@@ -26,7 +27,8 @@ pub use projection::{
     ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
     SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V3,
-    SessionMessageProjection, WorkflowFactProjection, WorkflowFactRecord,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V4, SessionMessageProjection, WorkflowFactProjection,
+    WorkflowFactRecord,
 };
 pub use transcript::{
     ParseOffset, SessionMessageRecord, SessionRecord, TranscriptStore, TranscriptStoreError,

@@ -23,6 +23,9 @@ use super::time::{TimeInterval, UtcMicros};
 use super::watermark::VectorWatermark;
 
 const RETRIEVAL_ANCHOR_V2_ID_DOMAIN: &str = "tracedecay.retrieval-anchor.v2";
+const MAX_ANCHOR_ALIASES: usize = 64;
+const MAX_ANCHOR_SOURCE_OBSERVATIONS: usize = 256;
+const MAX_ANCHOR_SOURCE_ANCHORS: usize = 256;
 
 /// Meaning of a privacy-domain-safe native locator digest.
 ///
@@ -40,7 +43,7 @@ pub enum NativeAliasKindV2 {
     Path,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct NativeAliasV2 {
     kind: NativeAliasKindV2,
@@ -91,7 +94,7 @@ impl<'de> Deserialize<'de> for NativeAliasV2 {
 
 /// Immutable retrieval target. Mutable Git routing names are aliases, never
 /// target identities.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(
     tag = "kind",
     content = "target",
@@ -119,6 +122,9 @@ pub enum RetrievalAnchorTargetV2 {
         receipt: SanitizationReceiptRefV1,
     },
 }
+
+/// Canonical target type for authoritative retrieval anchors.
+pub type RetrievalAnchorTarget = RetrievalAnchorTargetV2;
 
 impl RetrievalAnchorTargetV2 {
     pub fn validate(&self) -> Result<(), DomainError> {
@@ -169,6 +175,79 @@ impl RetrievalAnchorTargetV2 {
                 | Self::ExactRepositoryBlob { .. }
                 | Self::RepositoryCapture { .. }
         )
+    }
+}
+
+impl<'de> Deserialize<'de> for RetrievalAnchorTargetV2 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(
+            tag = "kind",
+            content = "target",
+            rename_all = "snake_case",
+            deny_unknown_fields
+        )]
+        enum Wire {
+            ExactObservation(CanonicalObservationIdV1),
+            Entity(EntityRef),
+            ExactRepositoryCommit {
+                repository_id: RepositoryId,
+                commit_id: CommitId,
+            },
+            ExactRepositoryTree {
+                repository_id: RepositoryId,
+                tree_id: TreeId,
+            },
+            ExactRepositoryBlob {
+                repository_id: RepositoryId,
+                blob_id: BlobId,
+            },
+            RepositoryCapture {
+                repository_id: RepositoryId,
+                capture_id: RepositoryCaptureId,
+                receipt: SanitizationReceiptRefV1,
+            },
+        }
+
+        let target = match Wire::deserialize(deserializer)? {
+            Wire::ExactObservation(observation_id) => Self::ExactObservation(observation_id),
+            Wire::Entity(entity) => Self::Entity(entity),
+            Wire::ExactRepositoryCommit {
+                repository_id,
+                commit_id,
+            } => Self::ExactRepositoryCommit {
+                repository_id,
+                commit_id,
+            },
+            Wire::ExactRepositoryTree {
+                repository_id,
+                tree_id,
+            } => Self::ExactRepositoryTree {
+                repository_id,
+                tree_id,
+            },
+            Wire::ExactRepositoryBlob {
+                repository_id,
+                blob_id,
+            } => Self::ExactRepositoryBlob {
+                repository_id,
+                blob_id,
+            },
+            Wire::RepositoryCapture {
+                repository_id,
+                capture_id,
+                receipt,
+            } => Self::RepositoryCapture {
+                repository_id,
+                capture_id,
+                receipt,
+            },
+        };
+        target.validate().map_err(serde::de::Error::custom)?;
+        Ok(target)
     }
 }
 
@@ -334,8 +413,20 @@ pub struct RetrievalAnchorRecordV2 {
     durability: AnchorDurabilityClass,
 }
 
+/// Canonical authoritative retrieval-anchor record.
+///
+/// `RetrievalAnchorRecordV1` remains only as the compatibility representation
+/// for existing research-manifest callers.
+pub type RetrievalAnchorRecord = RetrievalAnchorRecordV2;
+
 impl RetrievalAnchorRecordV2 {
-    pub fn new(parts: RetrievalAnchorRecordV2Parts) -> Result<Self, DomainError> {
+    pub fn new(mut parts: RetrievalAnchorRecordV2Parts) -> Result<Self, DomainError> {
+        validate_collection_bounds(&parts)?;
+        parts.aliases.sort_unstable_by(|left, right| {
+            (left.locator_digest(), left.kind()).cmp(&(right.locator_digest(), right.kind()))
+        });
+        parts.source_observations.sort_unstable();
+        parts.source_anchors.sort_unstable();
         let anchor_id = derive_anchor_id(&parts.owner, &parts.target)?;
         let record = Self {
             anchor_id,
@@ -481,6 +572,20 @@ impl RetrievalAnchorRecordV2 {
     }
 }
 
+/// Derive the canonical retrieval anchor for one durable observation.
+///
+/// Projection generations and rebuild watermarks are deliberately excluded:
+/// rebuilding a view must never re-key its source observation.
+pub fn derive_exact_observation_anchor_id(
+    owner: &ObservationScopeV1,
+    observation_id: &CanonicalObservationIdV1,
+) -> Result<RetrievalAnchorId, DomainError> {
+    derive_anchor_id(
+        owner,
+        &RetrievalAnchorTargetV2::ExactObservation(observation_id.clone()),
+    )
+}
+
 impl<'de> Deserialize<'de> for RetrievalAnchorRecordV2 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -575,13 +680,31 @@ fn validate_git_object_id(value: &str, field: &'static str) -> Result<(), Domain
 }
 
 fn ensure_unique_aliases(aliases: &[NativeAliasV2]) -> Result<(), DomainError> {
-    if aliases.iter().enumerate().any(|(index, alias)| {
-        aliases[..index]
-            .iter()
-            .any(|prior| prior.locator_digest == alias.locator_digest)
-    }) {
-        return Err(DomainError::DuplicateId {
+    let mut seen = BTreeSet::new();
+    for alias in aliases {
+        if !seen.insert(alias.locator_digest()) {
+            return Err(DomainError::DuplicateId {
+                field: "retrieval anchor aliases",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_collection_bounds(parts: &RetrievalAnchorRecordV2Parts) -> Result<(), DomainError> {
+    if parts.aliases.len() > MAX_ANCHOR_ALIASES {
+        return Err(DomainError::NonCanonical {
             field: "retrieval anchor aliases",
+        });
+    }
+    if parts.source_observations.len() > MAX_ANCHOR_SOURCE_OBSERVATIONS {
+        return Err(DomainError::NonCanonical {
+            field: "retrieval anchor source observations",
+        });
+    }
+    if parts.source_anchors.len() > MAX_ANCHOR_SOURCE_ANCHORS {
+        return Err(DomainError::NonCanonical {
+            field: "retrieval anchor source lineage",
         });
     }
     Ok(())
@@ -713,6 +836,24 @@ mod tests {
     }
 
     #[test]
+    fn exact_observation_anchor_identity_ignores_projection_generation() {
+        let observation_id = observation('a');
+        let owner = owner("project.fixture");
+        let expected = derive_exact_observation_anchor_id(&owner, &observation_id).unwrap();
+        let mut parts = record_parts(
+            RetrievalAnchorTargetV2::ExactObservation(observation_id.clone()),
+            owner.clone(),
+        );
+        parts.source_observations = vec![observation_id];
+        let first = RetrievalAnchorRecordV2::new(parts.clone()).unwrap();
+        parts.projection_generation = ProjectionGenerationId::new("projection.rebuilt").unwrap();
+        let rebuilt = RetrievalAnchorRecordV2::new(parts).unwrap();
+
+        assert_eq!(first.anchor_id(), &expected);
+        assert_eq!(rebuilt.anchor_id(), &expected);
+    }
+
+    #[test]
     fn owner_is_part_of_anchor_identity() {
         let first = RetrievalAnchorRecordV2::new(record_parts(
             entity_target("document.fixture"),
@@ -813,6 +954,86 @@ mod tests {
                 field: "retrieval anchor commit"
             }
         );
+    }
+
+    #[test]
+    fn standalone_target_deserialization_enforces_git_identity() {
+        let wire = json!({
+            "kind": "exact_repository_commit",
+            "target": {
+                "repository_id": "repository.fixture",
+                "commit_id": "not-a-git-object"
+            }
+        });
+
+        assert!(serde_json::from_value::<RetrievalAnchorTargetV2>(wire).is_err());
+    }
+
+    #[test]
+    fn record_canonicalizes_and_bounds_source_collections() {
+        let owner = owner("project.fixture");
+        let alias_a = NativeAliasV2::new(
+            NativeAliasKindV2::Path,
+            PrivacyDomainBoundLocatorDigest::new(DIGEST_A).unwrap(),
+        )
+        .unwrap();
+        let alias_b = NativeAliasV2::new(
+            NativeAliasKindV2::Ref,
+            PrivacyDomainBoundLocatorDigest::new(DIGEST_B).unwrap(),
+        )
+        .unwrap();
+        let source_a = AnchorLineageRefV2::new(
+            AnchorProvenanceRelationV2::Observed,
+            RetrievalAnchorId::new("retrieval.a").unwrap(),
+            owner.clone(),
+        )
+        .unwrap();
+        let source_b = AnchorLineageRefV2::new(
+            AnchorProvenanceRelationV2::Observed,
+            RetrievalAnchorId::new("retrieval.b").unwrap(),
+            owner.clone(),
+        )
+        .unwrap();
+        let mut parts = record_parts(entity_target("document.fixture"), owner.clone());
+        parts.aliases = vec![alias_b.clone(), alias_a.clone()];
+        parts.source_observations = vec![observation('b'), observation('a')];
+        parts.source_anchors = vec![source_b.clone(), source_a.clone()];
+        let record = RetrievalAnchorRecordV2::new(parts).unwrap();
+
+        assert_eq!(record.aliases(), &[alias_a.clone(), alias_b]);
+        assert_eq!(
+            record.source_observations(),
+            &[observation('a'), observation('b')]
+        );
+        assert_eq!(record.source_anchors(), &[source_a, source_b.clone()]);
+
+        let mut aliases = record_parts(entity_target("document.aliases"), owner.clone());
+        aliases.aliases = vec![alias_a; MAX_ANCHOR_ALIASES + 1];
+        assert!(matches!(
+            RetrievalAnchorRecordV2::new(aliases),
+            Err(DomainError::NonCanonical {
+                field: "retrieval anchor aliases"
+            })
+        ));
+
+        let mut observations = record_parts(entity_target("document.observations"), owner.clone());
+        observations.source_observations =
+            vec![observation('a'); MAX_ANCHOR_SOURCE_OBSERVATIONS + 1];
+        assert!(matches!(
+            RetrievalAnchorRecordV2::new(observations),
+            Err(DomainError::NonCanonical {
+                field: "retrieval anchor source observations"
+            })
+        ));
+
+        let mut lineage = record_parts(entity_target("document.lineage"), owner);
+        lineage.source_anchors = vec![source_b; MAX_ANCHOR_SOURCE_ANCHORS + 1];
+        assert!(matches!(
+            RetrievalAnchorRecordV2::new(lineage),
+            Err(DomainError::NonCanonical {
+                field: "retrieval anchor source lineage"
+            })
+        ));
     }
 
     #[test]

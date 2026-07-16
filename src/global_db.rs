@@ -5341,7 +5341,7 @@ impl GlobalDb {
                 w.ordering_domain, w.content_json, w.content_text
              FROM observation_workflow_facts w
              JOIN sessions s ON s.provider = w.provider AND s.session_id = w.session_id
-             WHERE w.projector_version = 'claude-session-message-v3'"
+             WHERE w.projector_version = 'claude-session-message-v4'"
             .to_owned();
         let mut query_params = Vec::new();
         if let Some(provider) = provider {
@@ -5478,7 +5478,7 @@ impl GlobalDb {
                            ORDER BY w.observation_sequence DESC, w.fact_ordinal DESC
                        ) AS goal_rank
                 FROM observation_workflow_facts w
-                WHERE w.projector_version = 'claude-session-message-v3'
+                WHERE w.projector_version = 'claude-session-message-v4'
                   AND w.semantic_kind = 'goal'"
             .to_owned();
         let mut query_params = Vec::new();
@@ -5560,7 +5560,7 @@ impl GlobalDb {
                )
                AND NOT EXISTS (
                    SELECT 1 FROM observation_workflow_facts w
-                   WHERE w.projector_version = 'claude-session-message-v3'
+                   WHERE w.projector_version = 'claude-session-message-v4'
                      AND w.provider = m.provider
                      AND w.session_id = m.session_id
                      AND w.semantic_kind = 'goal'

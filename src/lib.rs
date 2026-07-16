@@ -58,6 +58,7 @@ mod path_tree;
 pub mod privacy;
 pub mod project_registry;
 pub mod redundancy;
+mod repository_provenance;
 pub mod resolution;
 pub mod retention;
 pub mod runtime_identity;

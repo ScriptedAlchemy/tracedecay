@@ -2,7 +2,12 @@ use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_domain::{
+    ComponentVersion, PayloadReferenceV1, SanitizationReceiptId, SanitizationReceiptRefV1,
+    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+};
 
 use super::detector_kernel::{
     CredentialPattern, CredentialPatternKind, CredentialPatternProfile, JsonPathSegment,
@@ -16,6 +21,8 @@ const REDACTED_ASSIGNMENT: &str = "[TraceDecay redacted: credential assignment]"
 const REDACTED_PRIVATE_KEY: &str = "[TraceDecay redacted: private key]";
 const REDACTED_ENTROPY: &str = "[TraceDecay redacted: high-entropy token]";
 const REDACTED_SENSITIVE_FIELD: &str = "[TraceDecay redacted: sensitive field]";
+const MEMORY_FACT_SANITIZER_VERSION_V1: &str = "privacy.memory-fact.v1";
+const MEMORY_FACT_RECEIPT_DOMAIN_V1: &[u8] = b"tracedecay.privacy.memory-fact.receipt.v1\0";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PrivacyDetectorV1 {
     ExactCredential,
@@ -90,6 +97,16 @@ impl SanitizationFindingV1 {
 pub(crate) enum DetectionError {
     #[error("privacy detector initialization failed")]
     Initialization,
+    #[error("privacy sanitizer receipt construction failed")]
+    Receipt,
+}
+
+pub(crate) enum MemoryFactSanitizationV1 {
+    Durable {
+        payload: Value,
+        receipt: SanitizationReceiptV1,
+    },
+    Quarantined,
 }
 
 pub(crate) struct DetectionResult {
@@ -195,6 +212,87 @@ pub(crate) fn sanitize_provider_metadata_text(text: &str) -> Option<String> {
         return None;
     }
     result.payload.as_str().map(str::to_owned)
+}
+
+/// Sanitizes one structured legacy fact payload and binds durable output to
+/// an exact content reference. Raw input is never included in errors or the
+/// receipt identifier. Quarantine deliberately carries no payload or receipt.
+pub(crate) fn sanitize_memory_fact_payload(
+    payload: Value,
+) -> Result<MemoryFactSanitizationV1, DetectionError> {
+    let sensitive_keys = [
+        "access_token",
+        "api_key",
+        "api_token",
+        "authorization",
+        "auth_token",
+        "bearer_token",
+        "client_secret",
+        "credential",
+        "id_token",
+        "password",
+        "passphrase",
+        "passwd",
+        "private_key",
+        "refresh_token",
+        "secret",
+        "secret_key",
+        "session_token",
+        "token",
+        "x_api_key",
+    ]
+    .into_iter()
+    .map(normalize_key)
+    .collect();
+    let detected = redact_sensitive_values(payload, &sensitive_keys)?;
+    if !detected.quarantine_findings.is_empty() {
+        return Ok(MemoryFactSanitizationV1::Quarantined);
+    }
+
+    let disposition = if detected.findings.is_empty() {
+        SanitizerDispositionV1::Accepted
+    } else {
+        SanitizerDispositionV1::Redacted
+    };
+    let sensitivity = if detected.findings.is_empty() {
+        SensitivityV1::NonSensitive
+    } else {
+        SensitivityV1::Secret
+    };
+    let payload_reference =
+        PayloadReferenceV1::for_payload(&detected.payload).map_err(|_| DetectionError::Receipt)?;
+    let sanitizer_version = ComponentVersion::new(MEMORY_FACT_SANITIZER_VERSION_V1)
+        .map_err(|_| DetectionError::Receipt)?;
+    let mut hasher = Sha256::new();
+    for value in [
+        MEMORY_FACT_RECEIPT_DOMAIN_V1,
+        sanitizer_version.as_str().as_bytes(),
+        disposition.as_str().as_bytes(),
+        sensitivity.as_str().as_bytes(),
+        payload_reference.digest().as_str().as_bytes(),
+        &payload_reference.byte_len().to_be_bytes(),
+    ] {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value);
+    }
+    let receipt_id = SanitizationReceiptId::new(format!(
+        "memory-fact-receipt.v1.{}",
+        hex::encode(hasher.finalize())
+    ))
+    .map_err(|_| DetectionError::Receipt)?;
+    let receipt_ref = SanitizationReceiptRefV1::new(receipt_id, sanitizer_version)
+        .map_err(|_| DetectionError::Receipt)?;
+    let receipt = SanitizationReceiptV1::new(
+        receipt_ref,
+        disposition,
+        sensitivity,
+        Some(payload_reference),
+    )
+    .map_err(|_| DetectionError::Receipt)?;
+    Ok(MemoryFactSanitizationV1::Durable {
+        payload: detected.payload,
+        receipt,
+    })
 }
 
 fn redact_text(

@@ -53,7 +53,12 @@ pub(super) fn database_lock_root(database_path: &Path, fallback_parent: &Path) -
 
 fn profile_project_root(database_path: &Path) -> Option<&Path> {
     let parent = database_path.parent()?;
-    let data_root = if parent.file_name().is_some_and(|name| name == "branches") {
+    // Branch graphs and staged consolidation inputs live one level below
+    // their project data root and share its profile authority scope.
+    let data_root = if parent
+        .file_name()
+        .is_some_and(|name| name == "branches" || name == ".consolidation-input")
+    {
         parent.parent()?
     } else {
         parent

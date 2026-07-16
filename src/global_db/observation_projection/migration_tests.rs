@@ -5,14 +5,17 @@ use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, ComponentVersion, DurableObservationV1, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadReferenceV1, ProjectId, ProviderId, RetentionClass,
+    ObservationSourceRangeV1, PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProviderId,
+    RetentionClass,
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
-    SensitivityV1, SessionId,
+    SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_store::{
-    ObservationProjectionStore, ObservationStore, ObservationWrite, ProjectionPersistOutcome,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V1, SESSION_MESSAGE_PROJECTOR_VERSION_V2,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+    AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
+    ProjectionPersistOutcome, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V4, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor_v2,
 };
 
 use crate::global_db::GlobalDb;
@@ -170,14 +173,14 @@ fn checked_in_codex_session_boundary(index: usize) -> DurableObservationV1 {
     )
 }
 
-fn write(observation: DurableObservationV1) -> ObservationWrite {
+fn write(observation: DurableObservationV1) -> AnchoredObservationWrite {
     write_after(observation, None)
 }
 
 fn write_after(
     observation: DurableObservationV1,
     previous_cursor: Option<ObservationSourceCursorV1>,
-) -> ObservationWrite {
+) -> AnchoredObservationWrite {
     let identity = observation.identity();
     let next_cursor = ObservationSourceCursorV1::for_ordering(
         observation.source().clone(),
@@ -187,7 +190,19 @@ fn write_after(
         identity.position().end(),
     )
     .unwrap();
-    ObservationWrite::new(observation, previous_cursor, next_cursor).unwrap()
+    let write = ObservationWrite::new(observation, previous_cursor, next_cursor).unwrap();
+    let generation = ProjectionGenerationId::new("projection.migration-test.v4").unwrap();
+    let authorization =
+        build_observation_resolution_authorization_v1(write.observation(), "migration-test")
+            .unwrap();
+    let anchor = build_observation_retrieval_anchor_v2(
+        write.observation(),
+        generation.clone(),
+        UtcMicros(1),
+        authorization,
+    )
+    .unwrap();
+    AnchoredObservationWrite::new(write, anchor, generation).unwrap()
 }
 
 fn cursor_after(observation: &DurableObservationV1) -> ObservationSourceCursorV1 {
@@ -338,7 +353,7 @@ async fn seed_v1_legacy_claude_projection(
             "SELECT output_digest FROM observation_projection_provenance
              WHERE projector_version = ?1 AND observation_id = ?2",
             params![
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
                 observation_id.as_str()
             ],
         )
@@ -382,7 +397,7 @@ async fn seed_v1_legacy_claude_projection(
              WHERE projector_version = ?2 AND observation_id = ?3",
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V1,
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
                 observation_id.as_str()
             ],
         )
@@ -394,7 +409,7 @@ async fn seed_v1_legacy_claude_projection(
              WHERE projector_version = ?2",
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V1,
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
             ],
         )
         .await
@@ -431,7 +446,7 @@ async fn v1_upgrade_adopts_legacy_claude_source_path_and_preserves_ownership() {
                  WHERE source_projector_version = ?2
                    AND target_projector_version = ?1)",
             params![
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V1,
                 LEGACY_CLAUDE_MESSAGE_ID,
                 seed.observation_id.as_str()
@@ -493,7 +508,7 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
                 (SELECT last_sequence FROM observation_projection_checkpoints
                  WHERE projector_version = ?1),
                 (SELECT COUNT(*) FROM projection_queue)",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
         )
         .await
         .unwrap();
@@ -539,7 +554,7 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
              WHERE projector_version = ?2",
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2,
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
             ],
         )
         .await
@@ -550,7 +565,7 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
              WHERE projector_version = ?2",
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2,
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
             ],
         )
         .await
@@ -561,7 +576,7 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
              WHERE projector_version = ?2",
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2,
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
             ],
         )
         .await
@@ -598,7 +613,7 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
             "INSERT INTO observation_projection_checkpoints (
                 projector_version, last_sequence
              ) VALUES (?1, 900)",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
         )
         .await
         .unwrap();
@@ -626,7 +641,7 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
                 (SELECT last_sequence FROM observation_projection_checkpoints
                  WHERE projector_version = ?1)",
             params![
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2
             ],
         )
@@ -665,7 +680,7 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
                 (SELECT COUNT(*) FROM projection_queue),
                 (SELECT last_sequence FROM observation_projection_checkpoints
                  WHERE projector_version = ?1)",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
         )
         .await
         .unwrap();
@@ -708,7 +723,7 @@ async fn v2_upgrade_preserves_changed_generation_lineage_and_future_supersession
              WHERE projector_version = ?2",
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2,
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
             ],
         )
         .await
@@ -719,7 +734,7 @@ async fn v2_upgrade_preserves_changed_generation_lineage_and_future_supersession
              WHERE projector_version = ?2",
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2,
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
             ],
         )
         .await
@@ -743,7 +758,7 @@ async fn v2_upgrade_preserves_changed_generation_lineage_and_future_supersession
                  WHERE projector_version = ?2)",
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2,
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
             ],
         )
         .await
@@ -815,7 +830,7 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
              WHERE projector_version = ?2",
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2,
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
             ],
         )
         .await
@@ -826,7 +841,7 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
              WHERE projector_version = ?2",
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2,
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
             ],
         )
         .await
@@ -836,7 +851,7 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
             "INSERT INTO observation_projection_checkpoints (
                 projector_version, last_sequence
              ) VALUES (?1, 900)",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
         )
         .await
         .unwrap();
@@ -859,7 +874,7 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
                  WHERE source_projector_version = ?2
                    AND target_projector_version = ?1)",
             params![
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2
             ],
         )
@@ -892,7 +907,7 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
                  WHERE source_projector_version = ?2
                    AND target_projector_version = ?1)",
             params![
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2
             ],
         )
@@ -926,7 +941,7 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
                  WHERE source_projector_version = ?2
                    AND target_projector_version = ?1)",
             params![
-                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V2
             ],
         )
@@ -944,4 +959,94 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
 
     let converged = GlobalDb::try_open_at(&db_path).await.unwrap().unwrap();
     converged.audit_observation_authority().await.unwrap();
+}
+
+#[tokio::test]
+async fn v3_upgrade_backfills_v4_anchor_provenance_without_rekeying() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let store = GlobalDbObservationStore::new(&db);
+    let observation = checked_in_v2_observations().remove(0);
+    let observation_id = observation.observation_id().clone();
+    store.persist_observation(write(observation)).await.unwrap();
+    let queued = store.next_queued_observation().await.unwrap().unwrap();
+    assert!(matches!(
+        store.project_observation(&queued).await.unwrap(),
+        ProjectionPersistOutcome::Projected(_)
+    ));
+    let canonical_anchor_id: String = db
+        .conn
+        .query(
+            "SELECT anchor_id FROM observation_retrieval_anchors WHERE observation_id = ?1",
+            params![observation_id.as_str()],
+        )
+        .await
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE observation_projection_provenance
+             SET projector_version = ?1, retrieval_anchor_id = NULL
+             WHERE projector_version = ?2",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
+            ],
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE observation_projection_aliases SET projector_version = ?1
+             WHERE projector_version = ?2",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
+            ],
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE observation_projection_checkpoints SET projector_version = ?1
+             WHERE projector_version = ?2",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
+            ],
+        )
+        .await
+        .unwrap();
+    drop(db);
+
+    let reopened = GlobalDb::try_open_at(&db_path).await.unwrap().unwrap();
+    reopened.audit_observation_authority().await.unwrap();
+    let mut rows = reopened
+        .conn
+        .query(
+            "SELECT
+                (SELECT retrieval_anchor_id FROM observation_projection_provenance
+                 WHERE projector_version = ?1 AND observation_id = ?3),
+                (SELECT retrieval_anchor_id IS NULL FROM observation_projection_provenance
+                 WHERE projector_version = ?2 AND observation_id = ?3),
+                (SELECT completed FROM observation_projection_migrations
+                 WHERE source_projector_version = ?2 AND target_projector_version = ?1)",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V3,
+                observation_id.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), canonical_anchor_id);
+    assert_eq!(row.get::<i64>(1).unwrap(), 1);
+    assert_eq!(row.get::<i64>(2).unwrap(), 1);
 }

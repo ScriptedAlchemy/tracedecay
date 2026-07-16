@@ -1,11 +1,11 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::future::Future;
 
 use tracedecay_domain::{
     Confidence, DomainError, FactAssertionId, FactAssertionV1, FactEventId, FactId,
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, LegacyFactMappingV1,
-    PayloadAccessState, RetrievalAnchorId, RetrievalAnchorRecordV1, SourceStoreId, UtcMicros,
+    PayloadAccessState, RetrievalAnchorId, RetrievalAnchorRecordV2, SourceStoreId, UtcMicros,
 };
 
 const MAX_CURRENT_LIMIT: usize = 1_000;
@@ -18,7 +18,7 @@ pub struct FactWriteBatch {
     owner: FactOwnerV1,
     assertion: Option<FactAssertionV1>,
     events: Vec<FactLineageEventV1>,
-    new_anchors: Vec<RetrievalAnchorRecordV1>,
+    new_anchors: Vec<RetrievalAnchorRecordV2>,
     referenced_anchor_ids: Vec<RetrievalAnchorId>,
     legacy_mapping: Option<LegacyFactMappingV1>,
     expected_last_event_id: Option<FactEventId>,
@@ -31,13 +31,14 @@ impl FactWriteBatch {
         owner: FactOwnerV1,
         assertion: Option<FactAssertionV1>,
         events: Vec<FactLineageEventV1>,
-        new_anchors: Vec<RetrievalAnchorRecordV1>,
+        new_anchors: Vec<RetrievalAnchorRecordV2>,
         referenced_anchor_ids: Vec<RetrievalAnchorId>,
         legacy_mapping: Option<LegacyFactMappingV1>,
         expected_last_event_id: Option<FactEventId>,
     ) -> FactStoreResult<Self> {
         fact_id.validate()?;
         owner.validate()?;
+        validate_owned_fact_id(&fact_id, &owner)?;
         if let Some(event_id) = &expected_last_event_id {
             event_id.validate()?;
         }
@@ -109,12 +110,16 @@ impl FactWriteBatch {
         }
         for anchor in &new_anchors {
             anchor.validate()?;
-            if !available_anchor_ids.insert(&anchor.anchor_id) {
+            if FactOwnerV1::from(anchor.owner().clone()) != owner {
+                return Err(FactStoreError::OwnerMismatch);
+            }
+            if !available_anchor_ids.insert(anchor.anchor_id()) {
                 return Err(FactStoreError::DuplicateAnchorId {
-                    anchor_id: anchor.anchor_id.clone(),
+                    anchor_id: anchor.anchor_id().clone(),
                 });
             }
         }
+        validate_anchor_lineage(&new_anchors, &referenced_anchor_ids)?;
         if let Some(assertion) = &assertion {
             for evidence in assertion.evidence() {
                 if !available_anchor_ids.contains(evidence.anchor_id()) {
@@ -153,7 +158,7 @@ impl FactWriteBatch {
         &self.events
     }
 
-    pub fn new_anchors(&self) -> &[RetrievalAnchorRecordV1] {
+    pub fn new_anchors(&self) -> &[RetrievalAnchorRecordV2] {
         &self.new_anchors
     }
 
@@ -177,7 +182,7 @@ impl FactWriteBatch {
         FactOwnerV1,
         Option<FactAssertionV1>,
         Vec<FactLineageEventV1>,
-        Vec<RetrievalAnchorRecordV1>,
+        Vec<RetrievalAnchorRecordV2>,
         Vec<RetrievalAnchorId>,
         Option<LegacyFactMappingV1>,
         Option<FactEventId>,
@@ -193,6 +198,49 @@ impl FactWriteBatch {
             self.expected_last_event_id,
         )
     }
+}
+
+fn validate_anchor_lineage(
+    new_anchors: &[RetrievalAnchorRecordV2],
+    referenced_anchor_ids: &[RetrievalAnchorId],
+) -> FactStoreResult<()> {
+    let referenced = referenced_anchor_ids.iter().collect::<BTreeSet<_>>();
+    let anchors = new_anchors
+        .iter()
+        .map(|anchor| (anchor.anchor_id().clone(), anchor))
+        .collect::<BTreeMap<_, _>>();
+
+    for anchor in new_anchors {
+        for source in anchor.source_anchors() {
+            if !referenced.contains(source.anchor_id()) && !anchors.contains_key(source.anchor_id())
+            {
+                return Err(FactStoreError::MissingAnchorLineageSource {
+                    anchor_id: source.anchor_id().clone(),
+                });
+            }
+        }
+    }
+
+    let mut remaining = anchors.keys().cloned().collect::<BTreeSet<_>>();
+    while !remaining.is_empty() {
+        let removable = remaining
+            .iter()
+            .find(|anchor_id| {
+                anchors[*anchor_id]
+                    .source_anchors()
+                    .iter()
+                    .all(|source| !remaining.contains(source.anchor_id()))
+            })
+            .cloned();
+        let Some(anchor_id) = removable else {
+            let Some(anchor_id) = remaining.first().cloned() else {
+                break;
+            };
+            return Err(FactStoreError::CyclicAnchorLineage { anchor_id });
+        };
+        remaining.remove(&anchor_id);
+    }
+    Ok(())
 }
 
 /// Deterministic current or as-of projection of one fact's lineage.
@@ -224,6 +272,7 @@ impl StoredFactV1 {
     ) -> FactStoreResult<Self> {
         fact_id.validate()?;
         owner.validate()?;
+        validate_owned_fact_id(&fact_id, &owner)?;
         active_assertion_id.validate()?;
         last_event_id.validate()?;
         if payload.is_some() != (payload_access == PayloadAccessState::Eligible) {
@@ -295,6 +344,30 @@ pub struct CurrentFactsQuery {
     limit: usize,
 }
 
+/// One current fact, authorized by its canonical owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FactCurrentQuery {
+    owner: FactOwnerV1,
+    fact_id: FactId,
+}
+
+impl FactCurrentQuery {
+    pub fn new(owner: FactOwnerV1, fact_id: FactId) -> FactStoreResult<Self> {
+        owner.validate()?;
+        fact_id.validate()?;
+        validate_owned_fact_id(&fact_id, &owner)?;
+        Ok(Self { owner, fact_id })
+    }
+
+    pub fn owner(&self) -> &FactOwnerV1 {
+        &self.owner
+    }
+
+    pub fn fact_id(&self) -> &FactId {
+        &self.fact_id
+    }
+}
+
 impl CurrentFactsQuery {
     pub fn new(
         owner: FactOwnerV1,
@@ -304,6 +377,7 @@ impl CurrentFactsQuery {
         owner.validate()?;
         if let Some(fact_id) = &after_fact_id {
             fact_id.validate()?;
+            validate_owned_fact_id(fact_id, &owner)?;
         }
         validate_limit(limit, MAX_CURRENT_LIMIT)?;
         Ok(Self {
@@ -338,6 +412,7 @@ impl FactAsOfQuery {
     pub fn new(owner: FactOwnerV1, fact_id: FactId, as_of: UtcMicros) -> FactStoreResult<Self> {
         owner.validate()?;
         fact_id.validate()?;
+        validate_owned_fact_id(&fact_id, &owner)?;
         Ok(Self {
             owner,
             fact_id,
@@ -358,12 +433,37 @@ impl FactAsOfQuery {
     }
 }
 
+/// Exclusive cursor for lineage ordered by `(occurred_at, FactEventId)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FactLineageCursor {
+    occurred_at: UtcMicros,
+    event_id: FactEventId,
+}
+
+impl FactLineageCursor {
+    pub fn new(occurred_at: UtcMicros, event_id: FactEventId) -> FactStoreResult<Self> {
+        event_id.validate()?;
+        Ok(Self {
+            occurred_at,
+            event_id,
+        })
+    }
+
+    pub fn occurred_at(&self) -> UtcMicros {
+        self.occurred_at
+    }
+
+    pub fn event_id(&self) -> &FactEventId {
+        &self.event_id
+    }
+}
+
 /// Page of lineage events ordered by `(occurred_at, FactEventId)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FactLineageQuery {
     owner: FactOwnerV1,
     fact_id: FactId,
-    after_event_id: Option<FactEventId>,
+    after: Option<FactLineageCursor>,
     limit: usize,
 }
 
@@ -404,25 +504,28 @@ impl LegacyFactQuery {
     pub fn legacy_fact_id(&self) -> i64 {
         self.legacy_fact_id
     }
+
+    /// Validate the canonical result returned for this legacy lookup.
+    pub fn validate_resolved_fact_id(&self, fact_id: &FactId) -> FactStoreResult<()> {
+        validate_owned_fact_id(fact_id, &self.owner)
+    }
 }
 
 impl FactLineageQuery {
     pub fn new(
         owner: FactOwnerV1,
         fact_id: FactId,
-        after_event_id: Option<FactEventId>,
+        after: Option<FactLineageCursor>,
         limit: usize,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
         fact_id.validate()?;
-        if let Some(event_id) = &after_event_id {
-            event_id.validate()?;
-        }
+        validate_owned_fact_id(&fact_id, &owner)?;
         validate_limit(limit, MAX_LINEAGE_LIMIT)?;
         Ok(Self {
             owner,
             fact_id,
-            after_event_id,
+            after,
             limit,
         })
     }
@@ -435,12 +538,35 @@ impl FactLineageQuery {
         &self.fact_id
     }
 
-    pub fn after_event_id(&self) -> Option<&FactEventId> {
-        self.after_event_id.as_ref()
+    pub fn after(&self) -> Option<&FactLineageCursor> {
+        self.after.as_ref()
     }
 
     pub fn limit(&self) -> usize {
         self.limit
+    }
+}
+
+/// Owner-authorized lookup for a stable retrieval anchor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetrievalAnchorQuery {
+    owner: FactOwnerV1,
+    anchor_id: RetrievalAnchorId,
+}
+
+impl RetrievalAnchorQuery {
+    pub fn new(owner: FactOwnerV1, anchor_id: RetrievalAnchorId) -> FactStoreResult<Self> {
+        owner.validate()?;
+        anchor_id.validate()?;
+        Ok(Self { owner, anchor_id })
+    }
+
+    pub fn owner(&self) -> &FactOwnerV1 {
+        &self.owner
+    }
+
+    pub fn anchor_id(&self) -> &RetrievalAnchorId {
+        &self.anchor_id
     }
 }
 
@@ -449,6 +575,12 @@ fn validate_limit(limit: usize, max: usize) -> FactStoreResult<()> {
         return Err(FactStoreError::InvalidQueryLimit { limit, max });
     }
     Ok(())
+}
+
+fn validate_owned_fact_id(fact_id: &FactId, owner: &FactOwnerV1) -> FactStoreResult<()> {
+    fact_id
+        .validate_owner(owner)
+        .map_err(|_| FactStoreError::OwnerMismatch)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -470,6 +602,7 @@ impl FactCommitReceipt {
     ) -> FactStoreResult<Self> {
         fact_id.validate()?;
         owner.validate()?;
+        validate_owned_fact_id(&fact_id, &owner)?;
         last_event_id.validate()?;
         if committed_event_ids.is_empty() || committed_event_ids.last() != Some(&last_event_id) {
             return Err(FactStoreError::InvalidCommitReceipt);
@@ -556,6 +689,10 @@ pub enum FactStoreError {
     DuplicateAnchorId { anchor_id: RetrievalAnchorId },
     #[error("fact evidence references unavailable retrieval anchor {anchor_id}")]
     MissingEvidenceAnchor { anchor_id: RetrievalAnchorId },
+    #[error("retrieval anchor lineage references unavailable anchor {anchor_id}")]
+    MissingAnchorLineageSource { anchor_id: RetrievalAnchorId },
+    #[error("retrieval anchor lineage contains a cycle at {anchor_id}")]
+    CyclicAnchorLineage { anchor_id: RetrievalAnchorId },
     #[error("fact projection payload presence disagrees with its access state")]
     PayloadAccessMismatch,
     #[error("legacy fact id {legacy_fact_id} must be positive")]
@@ -588,6 +725,11 @@ pub trait FactStore: Send + Sync {
         query: CurrentFactsQuery,
     ) -> impl Future<Output = FactStoreResult<Vec<StoredFactV1>>> + Send;
 
+    fn query_fact_current(
+        &self,
+        query: FactCurrentQuery,
+    ) -> impl Future<Output = FactStoreResult<Option<StoredFactV1>>> + Send;
+
     fn query_fact_as_of(
         &self,
         query: FactAsOfQuery,
@@ -605,18 +747,23 @@ pub trait FactStore: Send + Sync {
 
     fn get_retrieval_anchor(
         &self,
-        anchor_id: &RetrievalAnchorId,
-    ) -> impl Future<Output = FactStoreResult<Option<RetrievalAnchorRecordV1>>> + Send;
+        query: RetrievalAnchorQuery,
+    ) -> impl Future<Output = FactStoreResult<Option<RetrievalAnchorRecordV2>>> + Send;
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
     use tracedecay_domain::{
-        ComponentVersion, EvidenceClass, FactAssertionKindV1, FactCategoryV1, FactEvidenceRefV1,
-        FactEvidenceRelationV1, FactIdentityMaterialV1, FactIdentitySourceV1, PayloadReferenceV1,
-        ProvenanceId, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
-        SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+        AccessPolicyDigest, AnchorDurabilityClass, AnchorLineageRefV2, AnchorProvenanceRelationV2,
+        AnchorSourceGenerationV2, CapabilityId, ComponentVersion, CoverageReportV1, EntityId,
+        EntityKind, EntityRef, EvidenceClass, FactAssertionKindV1, FactCategoryV1,
+        FactEvidenceRefV1, FactEvidenceRelationV1, FactIdentityMaterialV1, FactIdentitySourceV1,
+        ObservationScopeV1, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
+        ProjectionGenerationId, ProvenanceId, ResolutionAuthorizationV1, RetentionClass,
+        RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, SanitizationReceiptId,
+        SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId,
+        SensitivityV1, VectorWatermark,
     };
 
     use super::*;
@@ -686,19 +833,59 @@ mod tests {
         .unwrap()
     }
 
+    fn anchor(entity_id: &str, source_anchors: Vec<AnchorLineageRefV2>) -> RetrievalAnchorRecordV2 {
+        const DIGEST_A: &str =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const DIGEST_B: &str =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+            target: RetrievalAnchorTargetV2::Entity(EntityRef {
+                id: EntityId::new(entity_id).unwrap(),
+                kind: EntityKind::Document,
+            }),
+            owner: ObservationScopeV1::Profile,
+            aliases: vec![],
+            occurred_at: None,
+            ingested_at: UtcMicros(1),
+            evidence_class: EvidenceClass::Observed,
+            source_generation: AnchorSourceGenerationV2::Unknown,
+            projection_generation: ProjectionGenerationId::new("projection.fixture").unwrap(),
+            projection_watermark: VectorWatermark::default(),
+            coverage: CoverageReportV1::default(),
+            source_observations: vec![],
+            source_anchors,
+            authorization: ResolutionAuthorizationV1 {
+                resolved_scope_id: ScopeResolutionId::new("scope.fixture").unwrap(),
+                privacy_domain_id: PrivacyDomainId::new("privacy.fixture").unwrap(),
+                access_policy_digest: AccessPolicyDigest::new(DIGEST_A).unwrap(),
+                capability_id: CapabilityId::new("capability.fixture").unwrap(),
+                canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(DIGEST_B).unwrap(),
+            },
+            payload_access: PayloadAccessState::Eligible,
+            retention_class: RetentionClass::new("retention.fixture").unwrap(),
+            durability: AnchorDurabilityClass::DurableEvidence,
+        })
+        .unwrap()
+    }
+
+    fn anchor_source(anchor_id: RetrievalAnchorId) -> AnchorLineageRefV2 {
+        AnchorLineageRefV2::new(
+            AnchorProvenanceRelationV2::DerivedFrom,
+            anchor_id,
+            ObservationScopeV1::Profile,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn batch_rejects_owner_mismatch() {
         let fact_id = fact_id(FactOwnerV1::Profile, "operation.owner");
-        let event = payload_event(
-            fact_id.clone(),
+        let event = payload_event(fact_id.clone(), FactOwnerV1::Profile, 1);
+        let error = FactWriteBatch::new(
+            fact_id,
             FactOwnerV1::Project {
                 project_id: id("project.other"),
             },
-            1,
-        );
-        let error = FactWriteBatch::new(
-            fact_id,
-            FactOwnerV1::Profile,
             None,
             vec![event],
             vec![],
@@ -708,6 +895,77 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, FactStoreError::OwnerMismatch));
+    }
+
+    #[test]
+    fn batch_rejects_missing_and_cyclic_anchor_lineage() {
+        let owner = FactOwnerV1::Profile;
+        let fact_id = fact_id(owner.clone(), "operation.anchor-lineage");
+        let event = payload_event(fact_id.clone(), owner.clone(), 1);
+        let missing_id: RetrievalAnchorId = id("retrieval.missing-source");
+        let missing = anchor("entity.missing", vec![anchor_source(missing_id.clone())]);
+        let error = FactWriteBatch::new(
+            fact_id.clone(),
+            owner.clone(),
+            None,
+            vec![event.clone()],
+            vec![missing],
+            vec![],
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            FactStoreError::MissingAnchorLineageSource { anchor_id }
+                if anchor_id == missing_id
+        ));
+
+        let base_a = anchor("entity.cycle.a", vec![]);
+        let base_b = anchor("entity.cycle.b", vec![]);
+        let cycle_a = anchor(
+            "entity.cycle.a",
+            vec![anchor_source(base_b.anchor_id().clone())],
+        );
+        let cycle_b = anchor(
+            "entity.cycle.b",
+            vec![anchor_source(base_a.anchor_id().clone())],
+        );
+        let error = FactWriteBatch::new(
+            fact_id,
+            owner,
+            None,
+            vec![event],
+            vec![cycle_a, cycle_b],
+            vec![],
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, FactStoreError::CyclicAnchorLineage { .. }));
+    }
+
+    #[test]
+    fn batch_accepts_order_independent_acyclic_anchor_lineage() {
+        let owner = FactOwnerV1::Profile;
+        let fact_id = fact_id(owner.clone(), "operation.anchor-dag");
+        let root = anchor("entity.dag.root", vec![]);
+        let child = anchor(
+            "entity.dag.child",
+            vec![anchor_source(root.anchor_id().clone())],
+        );
+
+        FactWriteBatch::new(
+            fact_id.clone(),
+            owner.clone(),
+            None,
+            vec![payload_event(fact_id, owner, 1)],
+            vec![child, root],
+            vec![],
+            None,
+            None,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -782,9 +1040,9 @@ mod tests {
     #[test]
     fn tombstone_rejects_payload() {
         let owner = FactOwnerV1::Profile;
-        let fact_id = fact_id(owner.clone(), "operation.tombstone");
+        let tombstone_fact_id = fact_id(owner.clone(), "operation.tombstone");
         let error = StoredFactV1::new(
-            fact_id,
+            tombstone_fact_id,
             owner,
             Some(payload()),
             PayloadAccessState::Deleted,
@@ -827,6 +1085,63 @@ mod tests {
         assert!(matches!(
             LegacyFactQuery::new(FactOwnerV1::Profile, id("store.v1"), 0),
             Err(FactStoreError::InvalidLegacyFactId { .. })
+        ));
+    }
+
+    #[test]
+    fn projections_queries_and_receipts_reject_cross_owner_fact_ids() {
+        let profile_fact_id = fact_id(FactOwnerV1::Profile, "operation.cross-owner");
+        let project_owner = FactOwnerV1::Project {
+            project_id: id("project.other"),
+        };
+
+        assert!(matches!(
+            StoredFactV1::new(
+                profile_fact_id.clone(),
+                project_owner.clone(),
+                None,
+                PayloadAccessState::Deleted,
+                Confidence::new(1.0).unwrap(),
+                id("assertion.fixture"),
+                id("event.fixture"),
+                None,
+                UtcMicros(2),
+            ),
+            Err(FactStoreError::OwnerMismatch)
+        ));
+        assert!(matches!(
+            CurrentFactsQuery::new(project_owner.clone(), Some(profile_fact_id.clone()), 10,),
+            Err(FactStoreError::OwnerMismatch)
+        ));
+        assert!(matches!(
+            FactCurrentQuery::new(project_owner.clone(), profile_fact_id.clone()),
+            Err(FactStoreError::OwnerMismatch)
+        ));
+        assert!(matches!(
+            FactAsOfQuery::new(project_owner.clone(), profile_fact_id.clone(), UtcMicros(2),),
+            Err(FactStoreError::OwnerMismatch)
+        ));
+        assert!(matches!(
+            FactLineageQuery::new(project_owner.clone(), profile_fact_id.clone(), None, 10,),
+            Err(FactStoreError::OwnerMismatch)
+        ));
+
+        let legacy = LegacyFactQuery::new(project_owner.clone(), id("store.v1"), 7).unwrap();
+        assert!(matches!(
+            legacy.validate_resolved_fact_id(&profile_fact_id),
+            Err(FactStoreError::OwnerMismatch)
+        ));
+
+        let event_id: FactEventId = id("event.fixture");
+        assert!(matches!(
+            FactCommitReceipt::new(
+                profile_fact_id,
+                project_owner,
+                vec![event_id.clone()],
+                event_id,
+                None,
+            ),
+            Err(FactStoreError::OwnerMismatch)
         ));
     }
 }
