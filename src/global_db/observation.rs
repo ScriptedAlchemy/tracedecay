@@ -5,7 +5,8 @@ use tracedecay_domain::{
     CanonicalObservationIdV1, EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1,
     ObservationCollisionOutcomeV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceIdentityV1, ProjectionGenerationId, RetrievalAnchorRecordV2,
-    RetrievalAnchorTargetV2, SanitizationReceiptV1, UtcMicros, classify_observation_collision,
+    RetrievalAnchorId, RetrievalAnchorTargetV2, SanitizationReceiptV1, UtcMicros,
+    classify_observation_collision,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
@@ -891,6 +892,44 @@ async fn read_by_observation_id(
     .await
 }
 
+async fn read_observation_id_for_retrieval_anchor(
+    conn: &Connection,
+    anchor_id: &RetrievalAnchorId,
+) -> ObservationStoreResult<Option<CanonicalObservationIdV1>> {
+    let mut rows = conn
+        .query(
+            "SELECT observation_id FROM observation_retrieval_anchors
+             WHERE anchor_id = ?1
+             UNION
+             SELECT observation_id FROM observation_repository_provenance
+             WHERE retrieval_anchor_id = ?1",
+            params![anchor_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage("read retrieval anchor observation binding", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read retrieval anchor observation binding", error))?
+    else {
+        return Ok(None);
+    };
+    let observation_id = row
+        .get::<String>(0)
+        .map_err(|error| storage("read retrieval anchor observation binding", error))?;
+    if rows
+        .next()
+        .await
+        .map_err(|error| storage("read retrieval anchor observation binding", error))?
+        .is_some()
+    {
+        return Err(ObservationStoreError::RetrievalAnchorCollision);
+    }
+    CanonicalObservationIdV1::new(observation_id)
+        .map(Some)
+        .map_err(ObservationStoreError::RetrievalAnchorContract)
+}
+
 async fn read_cursor(
     conn: &Connection,
     source_json: &str,
@@ -1169,6 +1208,9 @@ impl GlobalDb {
                             write.next_cursor().clone(),
                             existing.retrieval_anchor().clone(),
                             existing.projection_generation().clone(),
+                        )?
+                        .with_repository_provenance_attachment(
+                            existing.repository_provenance_attachment().clone(),
                         )?,
                     ))
                 }
@@ -1326,6 +1368,59 @@ impl GlobalDb {
             receipt,
             projection_status,
         )))
+    }
+
+    /// Resolve an immutable observation-owned anchor without exposing the
+    /// database handle to fact-materialization callers.
+    pub(crate) async fn resolve_observation_evidence_anchor(
+        &self,
+        owner: &ObservationScopeV1,
+        anchor_id: &RetrievalAnchorId,
+    ) -> ObservationStoreResult<Option<RetrievalAnchorRecordV2>> {
+        anchor_id
+            .validate()
+            .map_err(ObservationStoreError::RetrievalAnchorContract)?;
+        owner
+            .validate()
+            .map_err(|_| ObservationStoreError::RetrievalAnchorOwnerMismatch)?;
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage("begin evidence anchor read snapshot", error))?;
+        let Some(observation_id) =
+            read_observation_id_for_retrieval_anchor(&snapshot, anchor_id).await?
+        else {
+            return Ok(None);
+        };
+        let receipt = read_by_observation_id(&snapshot, &observation_id)
+            .await?
+            .ok_or_else(|| {
+                storage_message(
+                    "resolve evidence anchor",
+                    "retrieval anchor binding has no canonical observation",
+                )
+            })?;
+        let record = if receipt.retrieval_anchor().anchor_id() == anchor_id {
+            receipt.retrieval_anchor().clone()
+        } else if let Some(record) = receipt
+            .repository_provenance_attachment()
+            .anchor()
+            .filter(|record| record.anchor_id() == anchor_id)
+        {
+            record.clone()
+        } else {
+            return Err(ObservationStoreError::RetrievalAnchorCollision);
+        };
+        record
+            .validate()
+            .map_err(ObservationStoreError::RetrievalAnchorContract)?;
+        if receipt.observation().scope() != owner || record.owner() != owner {
+            return Err(ObservationStoreError::RetrievalAnchorOwnerMismatch);
+        }
+        if record.projection_generation() != receipt.projection_generation() {
+            return Err(ObservationStoreError::RetrievalAnchorProjectionGenerationMismatch);
+        }
+        Ok(Some(record))
     }
 
     pub(crate) async fn replay_observations_result(

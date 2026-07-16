@@ -19,6 +19,12 @@ use tracedecay_domain::{
 
 const MAX_REMOTE_IDENTITY_BYTES: usize = 8 * 1024;
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+const PROJECT_PRIVACY_DOMAIN_SALT_NAMESPACE: &[u8] =
+    b"tracedecay.repository-provenance.project-domain-salt.v1\0";
+const REPOSITORY_ADMISSION_ID_NAMESPACE: &[u8] =
+    b"tracedecay.repository-provenance.repository-id.v1\0";
+const WORKTREE_ADMISSION_ID_NAMESPACE: &[u8] =
+    b"tracedecay.repository-provenance.worktree-id.v1\0";
 
 /// Owned, authoritative repository identity supplied by daemon admission.
 ///
@@ -29,7 +35,8 @@ pub(crate) struct RepositoryProvenanceAdmissionContext {
     project_root: PathBuf,
     repository_id: RepositoryId,
     worktree_id: Option<WorktreeId>,
-    privacy_domain_key: [u8; 32],
+    /// A deterministic project-domain salt, not a secret or credential.
+    privacy_domain_salt: [u8; 32],
 }
 
 impl RepositoryProvenanceAdmissionContext {
@@ -37,14 +44,71 @@ impl RepositoryProvenanceAdmissionContext {
         project_root: PathBuf,
         repository_id: RepositoryId,
         worktree_id: Option<WorktreeId>,
-        privacy_domain_key: [u8; 32],
+        privacy_domain_salt: [u8; 32],
     ) -> Self {
         Self {
             project_root,
             repository_id,
             worktree_id,
-            privacy_domain_key,
+            privacy_domain_salt,
         }
+    }
+
+    /// Construct only from the daemon-authoritative project marker and typed
+    /// project identity. The marker is an identity authority, never evidence.
+    pub(crate) fn from_authoritative_project_marker(
+        project_root: &Path,
+        project_id: &ProjectId,
+        marker: &crate::storage::RepositoryIdentityMarker,
+    ) -> Option<Self> {
+        if marker.schema_version != crate::storage::REPOSITORY_IDENTITY_SCHEMA_VERSION
+            || marker.project_id != project_id.as_str()
+        {
+            return None;
+        }
+        let common_dir = Path::new(&marker.git_common_dir);
+        if !common_dir.is_absolute() {
+            return None;
+        }
+        let (canonical_root, root_is_partial) = canonical_path(project_root);
+        let (canonical_common_dir, common_dir_is_partial) = canonical_path(common_dir);
+        if root_is_partial
+            || common_dir_is_partial
+            || !canonical_root.is_absolute()
+            || !canonical_common_dir.is_absolute()
+        {
+            return None;
+        }
+
+        let privacy_domain_salt = derive_project_privacy_domain_salt(project_id);
+        let repository_id = RepositoryId::new(format!(
+            "repository.{}",
+            opaque_admission_identifier(
+                &privacy_domain_salt,
+                REPOSITORY_ADMISSION_ID_NAMESPACE,
+                &[crate::os_str_bytes::native_os_str_bytes(
+                    canonical_common_dir.as_os_str(),
+                )],
+            ),
+        ))
+        .ok()?;
+        let worktree_id = WorktreeId::new(format!(
+            "worktree.{}",
+            opaque_admission_identifier(
+                &privacy_domain_salt,
+                WORKTREE_ADMISSION_ID_NAMESPACE,
+                &[crate::os_str_bytes::native_os_str_bytes(
+                    canonical_root.as_os_str(),
+                )],
+            ),
+        ))
+        .ok()?;
+        Some(Self::new(
+            canonical_root,
+            repository_id,
+            Some(worktree_id),
+            privacy_domain_salt,
+        ))
     }
 
     /// Capture only after the observation has crossed the privacy boundary.
@@ -65,7 +129,7 @@ impl RepositoryProvenanceAdmissionContext {
             &self.repository_id,
             Some(project_id),
             self.worktree_id.as_ref(),
-            &self.privacy_domain_key,
+            &self.privacy_domain_salt,
             ingested_at,
         ));
         prepare_generation_binding(
@@ -126,7 +190,7 @@ pub(crate) struct RepositoryProvenanceProbeRequest<'a> {
     repository_id: &'a RepositoryId,
     project_id: Option<&'a ProjectId>,
     worktree_id: Option<&'a WorktreeId>,
-    privacy_domain_key: &'a [u8; 32],
+    privacy_domain_salt: &'a [u8; 32],
     captured_at: UtcMicros,
 }
 
@@ -136,7 +200,7 @@ impl<'a> RepositoryProvenanceProbeRequest<'a> {
         repository_id: &'a RepositoryId,
         project_id: Option<&'a ProjectId>,
         worktree_id: Option<&'a WorktreeId>,
-        privacy_domain_key: &'a [u8; 32],
+        privacy_domain_salt: &'a [u8; 32],
         captured_at: UtcMicros,
     ) -> Self {
         Self {
@@ -144,7 +208,7 @@ impl<'a> RepositoryProvenanceProbeRequest<'a> {
             repository_id,
             project_id,
             worktree_id,
-            privacy_domain_key,
+            privacy_domain_salt,
             captured_at,
         }
     }
@@ -175,7 +239,7 @@ impl NativeRepositoryProvenanceProbe {
         let remote_identity = credential_free_remote_identity(&repo);
 
         let Some(canonical_root_digest) = privacy_bound_digest(
-            request.privacy_domain_key,
+            request.privacy_domain_salt,
             b"repository-canonical-root-v1",
             &[crate::os_str_bytes::native_os_str_bytes(
                 canonical_root.as_os_str(),
@@ -190,7 +254,7 @@ impl NativeRepositoryProvenanceProbe {
             remote_identity.unwrap_or_else(|| b"<remote-unavailable>".to_vec()),
         ];
         let Some(path_identity_digest) = privacy_bound_digest(
-            request.privacy_domain_key,
+            request.privacy_domain_salt,
             b"repository-path-identity-v1",
             &path_frames,
         ) else {
@@ -348,7 +412,6 @@ fn observe_head(repo: &gix::Repository) -> HeadObservation {
 
     let commit_id = head
         .id()
-        .ok()
         .and_then(|id| CommitId::new(id.to_hex().to_string()).ok())
         .map_or(
             EvidenceAvailabilityV1::Unknown,
@@ -408,24 +471,49 @@ fn normalize_remote_without_credentials(remote: &str) -> Option<String> {
 }
 
 fn privacy_bound_digest(
-    privacy_domain_key: &[u8; 32],
+    privacy_domain_salt: &[u8; 32],
     domain: &[u8],
     frames: &[Vec<u8>],
 ) -> Option<PrivacyDomainBoundLocatorDigest> {
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay-privacy-bound-locator-v1\0");
-    hash_frame(&mut hasher, privacy_domain_key);
+    hash_frame(&mut hasher, privacy_domain_salt);
     hash_frame(&mut hasher, domain);
     for frame in frames {
         hash_frame(&mut hasher, frame);
     }
-    let digest = hasher.finalize();
-    let mut encoded = String::with_capacity(64);
-    for byte in digest {
+    PrivacyDomainBoundLocatorDigest::new(format!("sha256:{}", hex_digest(hasher.finalize()))).ok()
+}
+
+fn derive_project_privacy_domain_salt(project_id: &ProjectId) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(PROJECT_PRIVACY_DOMAIN_SALT_NAMESPACE);
+    hash_frame(&mut hasher, project_id.as_str().as_bytes());
+    hasher.finalize().into()
+}
+
+fn opaque_admission_identifier(
+    privacy_domain_salt: &[u8; 32],
+    namespace: &[u8],
+    frames: &[Vec<u8>],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(namespace);
+    hash_frame(&mut hasher, privacy_domain_salt);
+    for frame in frames {
+        hash_frame(&mut hasher, frame);
+    }
+    hex_digest(hasher.finalize())
+}
+
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    let bytes = bytes.as_ref();
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for &byte in bytes {
         encoded.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
         encoded.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
     }
-    PrivacyDomainBoundLocatorDigest::new(format!("sha256:{encoded}")).ok()
+    encoded
 }
 
 fn hash_frame(hasher: &mut Sha256, bytes: &[u8]) {
@@ -442,7 +530,7 @@ mod tests {
 
     use super::*;
 
-    const PRIVACY_KEY: [u8; 32] = [0x5a; 32];
+    const PRIVACY_DOMAIN_SALT: [u8; 32] = [0x5a; 32];
 
     struct GitFixture {
         root: TempDir,
@@ -494,7 +582,7 @@ mod tests {
                 &repository_id,
                 Some(&project_id),
                 Some(&worktree_id),
-                &PRIVACY_KEY,
+                &PRIVACY_DOMAIN_SALT,
                 UtcMicros(123),
             ))
         }
@@ -643,6 +731,82 @@ mod tests {
     }
 
     #[test]
+    fn admission_context_is_deterministic_separated_and_path_private() {
+        let root = TempDir::new().unwrap();
+        let alternate_root = TempDir::new().unwrap();
+        let common_dir = TempDir::new().unwrap();
+        let project = ProjectId::new("project.provenance-admission").unwrap();
+        let marker = crate::storage::RepositoryIdentityMarker {
+            schema_version: crate::storage::REPOSITORY_IDENTITY_SCHEMA_VERSION,
+            project_id: project.as_str().to_owned(),
+            git_common_dir: common_dir.path().to_string_lossy().to_string(),
+        };
+
+        let first = RepositoryProvenanceAdmissionContext::from_authoritative_project_marker(
+            root.path(),
+            &project,
+            &marker,
+        )
+        .unwrap();
+        let repeated = RepositoryProvenanceAdmissionContext::from_authoritative_project_marker(
+            root.path(),
+            &project,
+            &marker,
+        )
+        .unwrap();
+        let alternate_worktree =
+            RepositoryProvenanceAdmissionContext::from_authoritative_project_marker(
+                alternate_root.path(),
+                &project,
+                &marker,
+            )
+            .unwrap();
+        assert_eq!(first.repository_id, repeated.repository_id);
+        assert_eq!(first.worktree_id, repeated.worktree_id);
+        assert_eq!(first.privacy_domain_salt, repeated.privacy_domain_salt);
+        assert_eq!(first.repository_id, alternate_worktree.repository_id);
+        assert_ne!(first.worktree_id, alternate_worktree.worktree_id);
+
+        let other_project = ProjectId::new("project.provenance-other").unwrap();
+        let other_marker = crate::storage::RepositoryIdentityMarker {
+            project_id: other_project.as_str().to_owned(),
+            ..marker.clone()
+        };
+        let separated = RepositoryProvenanceAdmissionContext::from_authoritative_project_marker(
+            root.path(),
+            &other_project,
+            &other_marker,
+        )
+        .unwrap();
+        assert_ne!(first.privacy_domain_salt, separated.privacy_domain_salt);
+        assert_ne!(first.repository_id, separated.repository_id);
+        assert_ne!(first.worktree_id, separated.worktree_id);
+        assert!(
+            !first
+                .repository_id
+                .as_str()
+                .contains(root.path().to_string_lossy().as_ref())
+        );
+        assert!(
+            !first
+                .worktree_id
+                .as_ref()
+                .unwrap()
+                .as_str()
+                .contains(root.path().to_string_lossy().as_ref())
+        );
+
+        assert!(
+            RepositoryProvenanceAdmissionContext::from_authoritative_project_marker(
+                root.path(),
+                &project,
+                &other_marker,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn non_repository_is_typed_unavailable() {
         let root = TempDir::new().unwrap();
         let repository_id = RepositoryId::new("repository.fixture").unwrap();
@@ -651,7 +815,7 @@ mod tests {
             &repository_id,
             None,
             None,
-            &PRIVACY_KEY,
+            &PRIVACY_DOMAIN_SALT,
             UtcMicros(123),
         ));
         assert!(matches!(result, EvidenceAvailabilityV1::Unavailable));

@@ -1342,6 +1342,7 @@ async fn session_fact_proposals_never_mutate_applied_records() {
         validation_reason: None,
         validation: None,
         reviewer: Some("dashboard".to_string()),
+        applied_canonical_fact_id: None,
         applied_fact_id: Some(42),
         apply_outcome: None,
         created_at: 1_000,

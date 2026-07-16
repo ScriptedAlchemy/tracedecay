@@ -472,6 +472,135 @@ async fn create_v10_schema_for_v11_tests(conn: &Connection) {
     set_user_version(conn, 10).await;
 }
 
+/// Creates the released v19 PR7 tables that v20 extends in place. Keep this
+/// fixture narrow: the forward migration must work without replaying older
+/// migration history or starting a legacy-data backfill.
+async fn create_v19_memory_schema_for_v20_test(conn: &Connection) {
+    conn.execute_batch(
+        "CREATE TABLE retrieval_anchors (
+            anchor_id TEXT PRIMARY KEY,
+            anchor_json TEXT NOT NULL,
+            owner_json TEXT NOT NULL,
+            projection_generation TEXT NOT NULL
+         );
+         CREATE TABLE retrieval_anchor_aliases (
+            owner_json TEXT NOT NULL,
+            alias_kind TEXT NOT NULL,
+            locator_digest TEXT NOT NULL,
+            anchor_id TEXT NOT NULL,
+            PRIMARY KEY(owner_json, alias_kind, locator_digest),
+            UNIQUE(anchor_id, alias_kind, locator_digest),
+            FOREIGN KEY(anchor_id) REFERENCES retrieval_anchors(anchor_id)
+         );
+         INSERT INTO retrieval_anchors(
+            anchor_id, anchor_json, owner_json, projection_generation
+         ) VALUES ('anchor.v19', '{}', '{}', 'v19');
+         INSERT INTO retrieval_anchor_aliases(
+            owner_json, alias_kind, locator_digest, anchor_id
+         ) VALUES ('{}', 'fixture', 'digest.v19', 'anchor.v19');
+
+         CREATE TABLE memory_v2_assertions (
+            assertion_id TEXT NOT NULL,
+            fact_id TEXT NOT NULL,
+            owner_kind TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            owner_json TEXT NOT NULL,
+            assertion_header_json TEXT NOT NULL,
+            kind_json TEXT NOT NULL,
+            payload_reference_json TEXT NOT NULL,
+            receipt_json TEXT NOT NULL,
+            asserted_at INTEGER NOT NULL,
+            actor_id TEXT,
+            PRIMARY KEY(assertion_id, fact_id, owner_kind, project_id)
+         );
+         INSERT INTO memory_v2_assertions(
+            assertion_id, fact_id, owner_kind, project_id, owner_json,
+            assertion_header_json, kind_json, payload_reference_json,
+            receipt_json, asserted_at, actor_id
+         ) VALUES(
+            'assertion.v19', 'fact.v19', 'profile', '', '{}',
+            '{\"payload\":{\"content\":\"v19-header-secret-canary\"}}',
+            '{}', '{}', '{}', 100, NULL
+         );
+
+         CREATE TABLE memory_v2_backfill_progress (
+            owner_kind TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            owner_json TEXT NOT NULL,
+            source_store_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            feedback_frontier INTEGER NOT NULL,
+            oplog_frontier INTEGER NOT NULL,
+            fact_frontier INTEGER NOT NULL,
+            feedback_cursor INTEGER NOT NULL DEFAULT 0,
+            oplog_cursor INTEGER NOT NULL DEFAULT 0,
+            fact_cursor INTEGER NOT NULL DEFAULT 0,
+            started_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            cutover_completed_at INTEGER,
+            PRIMARY KEY(owner_kind, project_id, source_store_id),
+            CHECK(
+                (phase = 'cutover_complete' AND cutover_completed_at IS NOT NULL) OR
+                (phase <> 'cutover_complete' AND cutover_completed_at IS NULL)
+            )
+         );
+         INSERT INTO memory_v2_backfill_progress(
+            owner_kind, project_id, owner_json, source_store_id, phase,
+            feedback_frontier, oplog_frontier, fact_frontier,
+            feedback_cursor, oplog_cursor, fact_cursor,
+            started_at, updated_at, cutover_completed_at
+         ) VALUES(
+            'profile', '', '{}', 'source.v19', 'cutover_complete',
+            3, 4, 5, 3, 4, 5, 100, 100, 100
+         );
+
+         CREATE TABLE memory_v2_proposals (
+            proposal_id TEXT NOT NULL,
+            owner_kind TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            owner_json TEXT NOT NULL,
+            request_json TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            submitted_at INTEGER NOT NULL,
+            PRIMARY KEY(proposal_id, owner_kind, project_id)
+         );
+         INSERT INTO memory_v2_proposals(
+            proposal_id, owner_kind, project_id, owner_json,
+            request_json, evidence_json, submitted_at
+         ) VALUES ('proposal.v19', 'profile', '', '{}', '{}', '[]', 100);
+
+         CREATE TABLE memory_v2_proposal_transitions (
+            transition_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            transition_id TEXT NOT NULL,
+            proposal_id TEXT NOT NULL,
+            owner_kind TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            previous_state TEXT,
+            current_state TEXT NOT NULL,
+            reviewer_json TEXT,
+            validation_json TEXT,
+            promoted_fact_id TEXT,
+            promoted_assertion_id TEXT,
+            promoted_event_id TEXT,
+            transition_json TEXT NOT NULL,
+            occurred_at INTEGER NOT NULL,
+            UNIQUE(transition_id, proposal_id, owner_kind, project_id)
+         );
+         INSERT INTO memory_v2_proposal_transitions(
+            transition_id, proposal_id, owner_kind, project_id,
+            previous_state, current_state, reviewer_json, validation_json,
+            promoted_fact_id, promoted_assertion_id, promoted_event_id,
+            transition_json, occurred_at
+         ) VALUES(
+            'transition.v19', 'proposal.v19', 'profile', '',
+            NULL, 'pending', NULL, NULL, NULL, NULL, NULL, '{}', 100
+         );",
+    )
+    .await
+    .expect("failed to create v19 PR7 memory fixture");
+    set_user_version(conn, 19).await;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -550,6 +679,118 @@ async fn test_migrate_already_latest_returns_false() {
         "migrate should return false when already at latest"
     );
     assert_eq!(get_user_version(&conn).await, 20);
+}
+
+#[tokio::test]
+async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_contract() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_v19_memory_schema_for_v20_test(&conn).await;
+
+    assert!(
+        migrate(&conn)
+            .await
+            .expect("v19 PR7 schema should migrate to v20")
+    );
+    assert_eq!(get_user_version(&conn).await, 20);
+    assert!(column_exists(&conn, "memory_v2_backfill_progress", "cutover_receipt_json").await);
+    assert!(column_exists(&conn, "memory_v2_proposals", "idempotency_key").await);
+    assert!(column_exists(&conn, "memory_v2_proposals", "request_digest").await);
+    assert!(column_exists(&conn, "memory_v2_proposal_transitions", "origin").await);
+    assert!(index_exists(&conn, "idx_memory_v2_events_as_of").await);
+    assert!(index_exists(&conn, "idx_memory_v2_current_page").await);
+    assert!(index_exists(&conn, "idx_memory_v2_evidence_anchor").await);
+    assert!(index_exists(&conn, "idx_memory_v2_proposal_list").await);
+
+    let mut rows = conn
+        .query(
+            "SELECT cutover_receipt_json FROM memory_v2_backfill_progress",
+            (),
+        )
+        .await
+        .expect("read migrated cutover receipt");
+    let receipt: String = rows
+        .next()
+        .await
+        .expect("read migrated cutover receipt row")
+        .expect("migrated cutover receipt row")
+        .get(0)
+        .expect("decode migrated cutover receipt");
+    assert!(receipt.contains("legacy_v19_cutover"));
+
+    let mut rows = conn
+        .query(
+            "SELECT idempotency_key, request_digest FROM memory_v2_proposals
+             WHERE proposal_id = 'proposal.v19'",
+            (),
+        )
+        .await
+        .expect("read migrated proposal keys");
+    let row = rows
+        .next()
+        .await
+        .expect("read migrated proposal key row")
+        .expect("migrated proposal key row");
+    let idempotency_key: String = row.get(0).expect("decode idempotency key");
+    let request_digest: String = row.get(1).expect("decode request digest");
+    assert_eq!(idempotency_key, "legacy-v19:proposal.v19");
+    assert_eq!(request_digest, "legacy-v19:proposal.v19");
+
+    let mut rows = conn
+        .query(
+            "SELECT origin FROM memory_v2_proposal_transitions
+             WHERE transition_id = 'transition.v19'",
+            (),
+        )
+        .await
+        .expect("read migrated transition origin");
+    let origin: String = rows
+        .next()
+        .await
+        .expect("read migrated transition origin row")
+        .expect("migrated transition origin row")
+        .get(0)
+        .expect("decode migrated transition origin");
+    assert_eq!(origin, "legacy_import");
+
+    let mut rows = conn
+        .query(
+            "SELECT assertion_header_json FROM memory_v2_assertions
+             WHERE assertion_id = 'assertion.v19'",
+            (),
+        )
+        .await
+        .expect("read migrated assertion header");
+    let header: String = rows
+        .next()
+        .await
+        .expect("read migrated assertion header row")
+        .expect("migrated assertion header row")
+        .get(0)
+        .expect("decode migrated assertion header");
+    assert!(!header.contains("v19-header-secret-canary"));
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&header)
+            .expect("migrated assertion header JSON")
+            .get("payload")
+            .is_none()
+    );
+
+    assert!(
+        conn.execute(
+            "INSERT INTO retrieval_anchor_aliases(
+                owner_json, alias_kind, locator_digest, anchor_id
+             ) VALUES ('{\"other\":true}', 'fixture', 'other-digest', 'anchor.v19')",
+            (),
+        )
+        .await
+        .is_err(),
+        "v20 must bind aliases to the exact anchor owner"
+    );
+    assert!(
+        !migrate(&conn)
+            .await
+            .expect("replaying v20 migration should be a no-op")
+    );
 }
 
 #[tokio::test]

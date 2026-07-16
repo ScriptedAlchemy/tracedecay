@@ -347,7 +347,7 @@ pub mod legacy_compatibility {
 
     use thiserror::Error;
     use tracedecay_domain::{DomainError, FactOwnerV1};
-    use tracedecay_store::{CompatibilityFactV1, FactWriteBatch, StoredFactV1};
+    use tracedecay_store::{FactWriteBatch, StoredFactV1};
 
     use crate::memory::types::{AddFactRequest, FactRecord};
 
@@ -378,10 +378,7 @@ pub mod legacy_compatibility {
             request: AddFactRequest,
         ) -> Result<FactWriteBatch, Self::Error>;
 
-        fn project_fact_record(
-            &self,
-            fact: &CompatibilityFactV1,
-        ) -> Result<FactRecord, Self::Error>;
+        fn project_fact_record(&self, fact: &StoredFactV1) -> Result<FactRecord, Self::Error>;
     }
 
     pub fn prepare_add<A: LegacyMemoryCompatibilityAdapter>(
@@ -430,7 +427,7 @@ mod tests {
     use tracedecay_store::{FactCommitReceipt, FactLineageCursor, FactStoreResult};
 
     use super::*;
-    use crate::memory::types::{AddFactRequest, FactRecord, MemoryCategory, UpdateFactRequest};
+    use crate::memory::types::{AddFactRequest, FactRecord, MemoryCategory};
 
     #[derive(Default)]
     struct FakeAuthority {
@@ -501,14 +498,21 @@ mod tests {
             ))
         }
 
-        fn update_request_to_correction_batch(
+        fn project_fact_record(&self, _fact: &StoredFactV1) -> Result<FactRecord, Self::Error> {
+            Err(std::io::Error::other("not exercised by batch preparation"))
+        }
+    }
+
+    struct FailingLegacyBatchAdapter;
+
+    impl legacy_compatibility::LegacyMemoryCompatibilityAdapter for FailingLegacyBatchAdapter {
+        type Error = std::io::Error;
+
+        fn add_request_to_batch(
             &self,
-            _request: UpdateFactRequest,
+            _request: AddFactRequest,
         ) -> Result<FactWriteBatch, Self::Error> {
-            Ok(batch(
-                self.batch_owner.clone(),
-                "operation.legacy-compatibility.update",
-            ))
+            Err(std::io::Error::other("sanitization rejected fixture"))
         }
 
         fn project_fact_record(&self, _fact: &StoredFactV1) -> Result<FactRecord, Self::Error> {
@@ -746,19 +750,6 @@ mod tests {
         }
     }
 
-    fn legacy_update_request() -> UpdateFactRequest {
-        UpdateFactRequest {
-            fact_id: 7,
-            content: None,
-            category: None,
-            tags: None,
-            entities: None,
-            trust: None,
-            source: None,
-            metadata: None,
-        }
-    }
-
     #[tokio::test]
     async fn canonical_batch_is_the_single_write_boundary() {
         let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
@@ -835,19 +826,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_prepare_add_and_update_preserve_the_explicit_owner_scope() {
+    fn legacy_prepare_add_preserves_the_explicit_owner_scope() {
         let adapter = LegacyBatchAdapter {
             batch_owner: owner(),
         };
 
         let add =
             legacy_compatibility::prepare_add(&owner(), &adapter, legacy_add_request()).unwrap();
-        let update =
-            legacy_compatibility::prepare_update(&owner(), &adapter, legacy_update_request())
-                .unwrap();
 
         assert_eq!(add.owner(), &owner());
-        assert_eq!(update.owner(), &owner());
     }
 
     #[test]
@@ -862,6 +849,21 @@ mod tests {
         assert!(matches!(
             error,
             legacy_compatibility::LegacyMemoryCompatibilityError::OwnerMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn legacy_prepare_preserves_typed_adapter_failures() {
+        let error = legacy_compatibility::prepare_add(
+            &owner(),
+            &FailingLegacyBatchAdapter,
+            legacy_add_request(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            legacy_compatibility::LegacyMemoryCompatibilityError::Adapter { .. }
         ));
     }
 

@@ -102,6 +102,7 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
                     validation_reason: None,
                     validation: None,
                     reviewer: Some("dashboard-test".to_string()),
+                    applied_canonical_fact_id: None,
                     applied_fact_id: Some(103),
                     apply_outcome: None,
                     created_at: 1_700_000_400,

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use crate::application::observation::ObservationCancellation;
 use crate::global_db::GlobalDb;
+use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::source::TranscriptSource;
 use crate::sessions::{
@@ -88,10 +89,21 @@ pub(crate) async fn ingest_project_sources_for_provider(
     let scope = ObservationScopeV1::Project {
         project_id: canonical_project_id.clone(),
     };
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-        db,
-        canonical_project_id.clone(),
-    ));
+    let repository_provenance = crate::storage::read_repository_identity_marker(project_root)
+        .ok()
+        .flatten()
+        .and_then(|marker| {
+            RepositoryProvenanceAdmissionContext::from_authoritative_project_marker(
+                project_root,
+                &canonical_project_id,
+                &marker,
+            )
+        });
+    let mut authorities = HostAdmissionAuthorities::for_project(db, canonical_project_id.clone());
+    if let Some(repository_provenance) = repository_provenance {
+        authorities = authorities.with_repository_provenance(repository_provenance);
+    }
+    let facade = HostAdmissionFacade::new(authorities);
     let cancellation = ObservationCancellation::default();
     let provider_byte_cap = default_ingest_pass_bounds().bytes_per_unit;
     let mut provider_runs = ProviderRunFold::default();

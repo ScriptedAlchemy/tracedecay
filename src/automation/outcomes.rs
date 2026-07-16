@@ -522,6 +522,7 @@ mod tests {
             validation_reason: None,
             validation: None,
             reviewer: Some("dashboard".to_string()),
+            applied_canonical_fact_id: None,
             applied_fact_id: Some(fact_id),
             apply_outcome: None,
             created_at: applied_at,

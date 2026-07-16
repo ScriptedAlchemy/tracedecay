@@ -206,6 +206,7 @@ mod tests {
             validation_reason: None,
             validation: None,
             reviewer: None,
+            applied_canonical_fact_id: None,
             applied_fact_id: None,
             apply_outcome: None,
             created_at: 1,

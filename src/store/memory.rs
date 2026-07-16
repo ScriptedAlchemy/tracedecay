@@ -277,7 +277,7 @@ async fn commit_fact_tx(
             wrote: false,
         });
     }
-    ensure_append_order(transaction, owner, batch, actual_last.as_ref()).await?;
+    ensure_append_order(transaction, &owner, batch, actual_last.as_ref()).await?;
 
     ensure_fact_identity(transaction, &owner, batch).await?;
     ensure_referenced_anchors(transaction, &owner, batch).await?;
@@ -512,7 +512,7 @@ async fn ensure_referenced_anchors(
             )
             .await
             .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-        let Some(row) = rows
+        let Some(_row) = rows
             .next()
             .await
             .map_err(|error| storage_error(COMMIT_OPERATION, error))?
@@ -1711,13 +1711,23 @@ async fn query_fact_as_of_tx(
         .last_event_id
         .clone()
         .ok_or(FactStoreError::EmptyBatch)?;
-    let payload = match projection.access {
-        PayloadAccessState::Eligible => Some(
-            load_assertion_payload_tx(snapshot, &owner, query.fact_id(), &active_assertion_id)
-                .await?
-                .ok_or(FactStoreError::PayloadAccessMismatch)?,
-        ),
-        _ => None,
+    let (payload, payload_access) = match projection.access {
+        PayloadAccessState::Eligible => match load_assertion_payload_tx(
+            snapshot,
+            &owner,
+            query.fact_id(),
+            &active_assertion_id,
+        )
+        .await?
+        {
+            Some(payload) => (Some(payload), PayloadAccessState::Eligible),
+            // A later deletion physically erases the payload and FTS/vector
+            // copies. Do not resurrect that data merely because an as-of
+            // projection predates the deletion event; retain the lineage but
+            // make the unavailable payload explicit.
+            None => (None, PayloadAccessState::Unavailable),
+        },
+        access => (None, access),
     };
     let mapping = load_current_legacy_mapping_tx(snapshot, &owner, query.owner(), query.fact_id())
         .await?
@@ -1726,7 +1736,7 @@ async fn query_fact_as_of_tx(
         query.fact_id().clone(),
         query.owner().clone(),
         payload,
-        projection.access,
+        payload_access,
         projection.trust,
         active_assertion_id,
         last_event_id,
@@ -2091,7 +2101,6 @@ fn proposal_state_label(state: FactProposalPromotionStateV1) -> &'static str {
     match state {
         FactProposalPromotionStateV1::PendingApproval => "pending",
         FactProposalPromotionStateV1::Applying => "applying",
-        _ => unreachable!("non-exhaustive proposal state is not promotable"),
     }
 }
 
@@ -2130,5 +2139,11 @@ fn promotion_transition_json(
 
 fn proposal_transition_id(transition_json: &str) -> String {
     let digest = Sha256::digest(transition_json.as_bytes());
-    format!("proposal-transition:{digest:x}")
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut id = String::from("proposal-transition:");
+    for byte in digest {
+        id.push(char::from(HEX[usize::from(byte >> 4)]));
+        id.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    id
 }

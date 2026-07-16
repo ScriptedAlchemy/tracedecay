@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_domain::{
-    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectId,
+    FactOwnerV1, ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
+    ProjectId, RetrievalAnchorId,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
@@ -15,6 +16,9 @@ use tracedecay_store::{
 use crate::application::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureObservationOutcome, CaptureObservationRequest,
     ObservationApplication, ObservationApplicationError, ObservationCancellation,
+};
+use crate::application::memory::{
+    EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchorV1,
 };
 use crate::global_db::GlobalDb;
 use crate::privacy::RecordSanitizerV1;
@@ -829,6 +833,59 @@ impl<'a> HostAdmissionFacade<'a> {
             )
         })?;
         Ok(GlobalDbObservationStore::new(db))
+    }
+}
+
+impl EvidenceAnchorResolver for HostAdmissionFacade<'_> {
+    async fn resolve_evidence_anchor(
+        &self,
+        owner: FactOwnerV1,
+        anchor_id: RetrievalAnchorId,
+    ) -> Result<ResolvedEvidenceAnchorV1, EvidenceAnchorResolutionError> {
+        owner
+            .validate()
+            .map_err(|error| EvidenceAnchorResolutionError::Authority {
+                operation: "validate evidence anchor owner",
+                source: Box::new(error),
+            })?;
+        anchor_id
+            .validate()
+            .map_err(|error| EvidenceAnchorResolutionError::Authority {
+                operation: "validate evidence anchor identifier",
+                source: Box::new(error),
+            })?;
+        let scope = ObservationScopeV1::from(owner);
+        self.authorities.validate_scope(&scope).map_err(|outcome| {
+            EvidenceAnchorResolutionError::Authority {
+                operation: "validate evidence anchor authority scope",
+                source: Box::new(std::io::Error::other(
+                    outcome.reason_code.unwrap_or("authority_unavailable"),
+                )),
+            }
+        })?;
+        let db = self
+            .authorities
+            .get(host_scope(&scope))
+            .ok_or_else(|| EvidenceAnchorResolutionError::Authority {
+                operation: "resolve evidence anchor authority",
+                source: Box::new(std::io::Error::other("authority_unavailable")),
+            })?;
+        let record = db
+            .resolve_observation_evidence_anchor(&scope, &anchor_id)
+            .await
+            .map_err(|error| EvidenceAnchorResolutionError::Authority {
+                operation: "resolve observation evidence anchor",
+                source: Box::new(error),
+            })?
+            .ok_or_else(|| EvidenceAnchorResolutionError::Unavailable {
+                anchor_id: anchor_id.clone(),
+            })?;
+        ResolvedEvidenceAnchorV1::new(record).map_err(|error| {
+            EvidenceAnchorResolutionError::Authority {
+                operation: "validate resolved observation evidence anchor",
+                source: Box::new(error),
+            }
+        })
     }
 }
 

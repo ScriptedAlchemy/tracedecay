@@ -60,6 +60,10 @@ pub struct FactProposalRecord {
     pub validation: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer: Option<String>,
+    /// Canonical PR7 identity for the fact applied by this proposal. This is
+    /// never derived from or coerced into the legacy numeric mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_canonical_fact_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_fact_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -264,6 +268,7 @@ pub async fn record_session_fact_proposals(
             validation_reason: None,
             validation,
             reviewer: None,
+            applied_canonical_fact_id: None,
             applied_fact_id: None,
             apply_outcome: None,
             created_at: now,
@@ -290,6 +295,7 @@ pub async fn record_session_fact_proposals(
                 .map(ToOwned::to_owned),
             validation: value.get("validation").cloned(),
             reviewer: Some("validator".to_string()),
+            applied_canonical_fact_id: None,
             applied_fact_id: None,
             apply_outcome: None,
             created_at: now,

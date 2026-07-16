@@ -863,6 +863,7 @@ fn automation_outcomes_endpoint_reports_applied_fact_trajectories() {
                 validation_reason: None,
                 validation: None,
                 reviewer: Some("dashboard".to_string()),
+                applied_canonical_fact_id: None,
                 applied_fact_id: Some(fact_id),
                 apply_outcome: None,
                 created_at: 1_700_000_000,

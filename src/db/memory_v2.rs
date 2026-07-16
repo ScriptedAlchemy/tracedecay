@@ -512,7 +512,7 @@ pub(super) async fn upgrade_v20_schema(conn: &Connection, operation: &str) -> Re
         operation,
     )
     .await?;
-    add_column_if_missing(
+    let transition_origin_added = add_column_if_missing(
         conn,
         "memory_v2_proposal_transitions",
         "origin",
@@ -543,14 +543,16 @@ pub(super) async fn upgrade_v20_schema(conn: &Connection, operation: &str) -> Re
     )
     .await
     .map_err(|error| db_error(operation, error))?;
-    conn.execute(
+    let transition_origin_backfill = if transition_origin_added {
+        "UPDATE memory_v2_proposal_transitions SET origin = 'legacy_import'"
+    } else {
         "UPDATE memory_v2_proposal_transitions
          SET origin = 'legacy_import'
-         WHERE origin IS NULL OR origin NOT IN ('runtime', 'legacy_import')",
-        (),
-    )
-    .await
-    .map_err(|error| db_error(operation, error))?;
+         WHERE origin IS NULL OR origin NOT IN ('runtime', 'legacy_import')"
+    };
+    conn.execute(transition_origin_backfill, ())
+        .await
+        .map_err(|error| db_error(operation, error))?;
     create_schema(conn, operation).await?;
 
     conn.execute_batch(
@@ -2339,6 +2341,12 @@ async fn purge_memory_v2_fact_inner(
 }
 
 async fn purge_payload_rows(conn: &Connection, owner: &OwnerKey, fact_id: &FactId) -> Result<()> {
+    // Backfill quarantine reaches this helper without passing through the
+    // public purge entrypoint, so set the deletion policy at every destructive
+    // payload path.
+    conn.execute_batch("PRAGMA secure_delete = ON")
+        .await
+        .map_err(|error| db_error("memory_v2_purge", error))?;
     conn.execute(
         "DELETE FROM memory_v2_assertion_vectors
          WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3",
@@ -3358,6 +3366,125 @@ mod tests {
             )
             .await,
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn purge_clears_runtime_fact_payload_without_a_legacy_mapping() {
+        let (conn, _db, _dir) = database().await;
+        let owner = owner();
+        let owner_key = owner_key(&owner).unwrap();
+        let material = FactIdentityMaterialV1::new(
+            owner.clone(),
+            FactIdentitySourceV1::Application {
+                operation_id: ProvenanceId::new("memory-v2.runtime-purge").unwrap(),
+            },
+        )
+        .unwrap();
+        let fact_id = FactId::derive(&material).unwrap();
+        let identity_json = json_text(&material).unwrap();
+        insert_fact_identity(&conn, &owner_key, &fact_id, &identity_json, 10)
+            .await
+            .unwrap();
+        let initial = FactLineageEventV1::new(
+            fact_id.clone(),
+            owner.clone(),
+            FactLineageEventKindV1::PayloadAccessChanged {
+                previous: PayloadAccessState::Unavailable,
+                current: PayloadAccessState::Eligible,
+            },
+            UtcMicros(10),
+            None,
+        )
+        .unwrap();
+        insert_event(&conn, &owner_key, &initial, 10).await.unwrap();
+        ensure_current(&conn, &owner_key, &fact_id, initial.event_id(), 10)
+            .await
+            .unwrap();
+        conn.execute(
+            "INSERT INTO memory_v2_assertions(
+                assertion_id, fact_id, owner_kind, project_id, owner_json,
+                assertion_header_json, kind_json, payload_reference_json,
+                receipt_json, asserted_at, actor_id
+             ) VALUES(
+                'assertion.runtime-purge', ?1, ?2, ?3, ?4,
+                '{\"assertion_id\":\"assertion.runtime-purge\"}', '{}', '{}', '{}', 10, NULL
+             )",
+            params![
+                fact_id.as_str(),
+                owner_key.kind,
+                owner_key.project_id.as_str(),
+                owner_key.json.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_v2_assertion_payloads(
+                assertion_id, fact_id, owner_kind, project_id, payload_json, content
+             ) VALUES(
+                'assertion.runtime-purge', ?1, ?2, ?3,
+                '{\"content\":\"runtime-purge-canary\"}', 'runtime-purge-canary'
+             )",
+            params![
+                fact_id.as_str(),
+                owner_key.kind,
+                owner_key.project_id.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_v2_assertion_vectors(
+                assertion_id, fact_id, owner_kind, project_id, vector, algebra, dimensions, precision
+             ) VALUES(
+                'assertion.runtime-purge', ?1, ?2, ?3, x'0102', 'fixture', 2, 'f32'
+             )",
+            params![
+                fact_id.as_str(),
+                owner_key.kind,
+                owner_key.project_id.as_str()
+            ],
+        )
+        .await
+        .unwrap();
+
+        let source = source_store_id();
+        assert!(
+            purge_memory_v2_fact(
+                &conn,
+                &owner,
+                &source,
+                &fact_id,
+                initial.event_id(),
+                UtcMicros(20),
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            scalar(&conn, "SELECT COUNT(*) FROM memory_v2_assertion_payloads").await,
+            0
+        );
+        assert_eq!(
+            scalar(&conn, "SELECT COUNT(*) FROM memory_v2_assertion_vectors").await,
+            0
+        );
+        assert_eq!(
+            scalar(
+                &conn,
+                "SELECT COUNT(*) FROM memory_v2_assertion_payloads_fts
+                 WHERE memory_v2_assertion_payloads_fts MATCH 'runtime-purge-canary'"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            current_fact_state(&conn, &owner_key, &fact_id)
+                .await
+                .unwrap()
+                .access,
+            PayloadAccessState::Deleted
         );
     }
 }
