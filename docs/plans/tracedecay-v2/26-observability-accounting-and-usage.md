@@ -44,16 +44,25 @@ Every operational and product metric states what was measured, over which popula
   paths, commit messages, author identity, and conflict content never enter
   canonical events, aggregates, exports, or drill-down anchors.
 - [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
-  telemetry covers feedback-cycle trigger, termination reason, loop-iteration
-  count, GitHub review-thread ingestion states (ingested, remapped, outdated,
-  resolved, deleted, suppressed — never posted), CI-failure localization
-  states and typed provenance without log content, concurrent-agent proximity
-  warning emission/suppression/expiry/risk class, and
-  truncation/expansion handle/anchor usage and failures without payloads.
-  PR13 emits GitHub/CI/proximity and feedback-cycle events; PR14 completes
-  Observatory/Doctor read models over them. All metrics remain
-  denominator-safe. Telemetry contains no source, diagnostic message, comment
-  body, CI log content, or private session content.
+  telemetry is staged by owning PR: PR11 emits feedback-cycle trigger identity,
+  evaluation stage, per-trigger terminal reason, budget-exceeded state,
+  duplicate-trigger dedupe, suppression, and stage/total latency; PR12 emits
+  CLI/MCP/HTTP/LSP delivery, truncation, and expansion state without payloads;
+  PR13 emits GitHub ingest/remap/thread lifecycle
+  (ingested, remapped, outdated, resolved, deleted, suppressed),
+  CI-failure localization states and typed provenance without log content,
+  concurrent-agent proximity warning emission/suppression/expiry/risk class,
+  host-adapter delivery state, and truncation/expansion handle/anchor usage
+  and failures without payloads; PR14 owns Observatory/Doctor read models and
+  dashboard projections over those events. GitHub ingestion lifecycle and
+  provider outcomes remain two separate exhaustive sets — lifecycle states
+  never include posted, updated, resolved-as-write, dismissed, or replied;
+  provider outcomes follow the Plan 35 set (unsupported, absent, indexing,
+  stale, cancelled, timed-out, failed, partial versus supported plus completed
+  plus complete-coverage zero-findings) with unavailable and denied where
+  coverage or authorization blocks surfacing. All metrics remain
+  denominator-safe. Telemetry contains no source, path, diagnostic message,
+  comment body, CI log content, or private session content.
 - Identify scope, capability, operation, result, event and observation time, duration or quantity, unit, producer revision, trace, and privacy classification.
 - Use stable idempotency keys so retries and replay cannot double count.
 - Record terminal outcomes separately from attempts and preserve cancellation, rejection, timeout, partial success, and unknown outcomes.
@@ -169,11 +178,18 @@ decision with collision, ambiguity, maintenance, and privacy review.
   absence as zero; removed-name and misspelling fixtures support reproducible
   alias/schema analysis without changing dispatch behavior.
 - [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
-  fixtures reconcile GitHub ingestion states (ingested, remapped, outdated,
-  resolved, deleted, suppressed), CI localization provenance without log
-  payloads, proximity emitted/suppressed/expired/risk-class dimensions, and
-  truncation/expansion handle/anchor usage/failure counts with explicit
-  denominators. PR13 emission and PR14 Observatory/Doctor read-model parity
-  fixtures verify the same state labels and coverage semantics across
-  transports; no metric claims a posted GitHub comment.
+  fixtures reconcile staged emission: PR11 cycle trigger/stage/terminal/budget/
+  dedupe/latency events; PR12 CLI/MCP/HTTP/LSP delivery/truncation/expansion
+  events; PR13 GitHub lifecycle (ingested, remapped, outdated, resolved,
+  deleted, suppressed), CI localization provenance without log payloads,
+  proximity emitted/suppressed/expired/risk-class dimensions, and host-adapter
+  state; PR14 Observatory/Doctor read-model parity across transports. Table-driven
+  fixtures cover the two separate exhaustive state sets — GitHub ingestion
+  lifecycle and provider outcomes (unsupported, absent, indexing, stale,
+  cancelled, timed-out, failed, partial versus supported plus completed plus
+  complete-coverage zero-findings) plus unavailable and denied outcomes, and
+  LSP projection lifecycle/outcome labels consistent with Plans 37 and 35.
+  Truncation/expansion handle/anchor usage and failure counts carry explicit
+  denominators; no metric claims a posted, updated, resolved-as-write,
+  dismissed, or replied GitHub comment.
 - Repository checks reject alternate counter writers, UI-local formulas, and meta-plan instrumentation.

@@ -100,10 +100,10 @@ GitHub, applies a fix, or continues an agent automatically.
   rather than copied source or a second durable finding model.
 - The read-only GitHub PR review ingestion architecture: the typed ingest
   contract (repository/PR/thread/comment identity, author class, diff/symbol
-  remap, and lifecycle state — §4), the staleness rule for remapped findings,
-  and the absolute non-write boundary. GitHub REST/GraphQL is read-only
-  ingress; TraceDecay is never a GitHub write client anywhere in this
-  architecture.
+  remap, item/thread lifecycle state, and ingress provider outcome — §4), the
+  staleness rule for remapped findings, and the absolute non-write boundary.
+  GitHub REST/GraphQL is read-only ingress; TraceDecay is never a GitHub write
+  client anywhere in this architecture.
 - The CI-failure localization typed input contract (§5) and the mapping from a
   reported failure to symbol/branch-generation/caller evidence and rerun
   hints, without claiming CI authority.
@@ -221,7 +221,8 @@ GitHub, applies a fix, or continues an agent automatically.
   completed+complete-coverage zero-findings versus unsupported, absent,
   indexing, stale, cancelled, timed-out, failed, and partial — with none
   collapsing to a clean empty result; affected callers/files/tests from
-  Plan 05; semantic risks; read-only GitHub-ingested findings; CI-failure
+  Plan 05; semantic risks; read-only GitHub-ingested findings with orthogonal
+  item/thread lifecycle and ingress provider outcome (§4); CI-failure
   localization findings; concurrent-agent proximity (§3); an inert suggested
   next action; and an exact termination reason (§2).
 
@@ -283,8 +284,9 @@ GitHub, applies a fix, or continues an agent automatically.
 - **Immediate tier:** exact same file/range/symbol qualifying conflicts emit
   immediately, without waiting on a risk-threshold evaluation.
 - **Threshold tier:** same package/crate, shared callers/dependencies/tests,
-  incompatible branch/worktree state, and overlapping planned effects emit
-  only when a typed, configurable proximity risk threshold is met. Below that
+  incompatible branch/worktree state, and overlapping planned workspace
+  changes emit only when a typed, configurable proximity risk threshold is
+  met. Below that
   threshold, the daemon stays silent — silence is a normal, expected outcome,
   not a missing feature.
 - Risk-threshold inputs are typed and explicit: overlap/blast-radius size,
@@ -329,12 +331,15 @@ GitHub, applies a fix, or continues an agent automatically.
     [Plan 13](13-research-provenance-and-context-anchors.md) anchor — never
     the raw body copied into a second durable representation;
   - review state (e.g. approved, changes-requested, commented);
-  - resolved, outdated, edited, and deleted state;
+  - exactly one **item/thread lifecycle** value from the exhaustive typed
+    set in the next bullet — never conflated with ingress provider outcome;
+  - exactly one **ingress provider outcome** value from the exhaustive typed
+    set in the bullet after that — never conflated with item/thread lifecycle;
   - path, side, original line, current line, and commit for both the
     original and (when remapped) current position;
-  - the comment/thread URL; and
-  - API cursor, ETag, `fetched_at`, rate-limit state, permission state, and
-    ingestion coverage.
+  - the comment/thread URL when authorized and safe to retain; and
+  - API cursor, ETag, `fetched_at`, rate-limit metadata, permission state,
+    and ingestion coverage.
 - Diff and symbol remap to the current branch uses
   [Plan 36](36-git-aware-change-context-and-index-transactions.md)'s
   repository/commit-snapshot identity and
@@ -342,18 +347,42 @@ GitHub, applies a fix, or continues an agent automatically.
   available by PR9. Remap never rewrites source thread history: the original
   ingested review thread remains exactly as observed, and remap produces a
   derived, anchored projection alongside it.
-- A remapped finding remains `stale`/`outdated` unless the remap proves an
-  exact content-and-anchor match to the current branch state. Path or line
-  similarity alone never upgrades a remapped finding to current; only an
-  exact match clears the stale flag.
-- TraceDecay never comments from a dirty overlay, a stale head SHA, an
-  unmappable non-diff line, incomplete coverage presented as clean, or
+- **Item/thread lifecycle** is exhaustive, typed, and orthogonal to ingress
+  provider outcome. Each ingested item carries exactly one lifecycle value
+  describing the review comment, thread, or reply as observed or remapped:
+  - `current` — active on the current branch with a provable exact
+    content-and-anchor remap match;
+  - `outdated` — GitHub-marked outdated or remap cannot prove an exact current
+    binding (path or line similarity alone never upgrades to `current`);
+  - `resolved` — the thread or review item is resolved on GitHub;
+  - `edited` — body or metadata edited since the retained anchor was issued;
+  - `deleted` — the comment, reply, or thread is deleted on GitHub.
+  No lifecycle value represents a TraceDecay outbound action, a posted comment,
+  or an ingress fetch result.
+- **Ingress provider outcome** is exhaustive, typed, and orthogonal to
+  item/thread lifecycle. Each fetch, refresh, or expansion attempt names
+  exactly one outcome aligned with [Plan 09](09-application-crate.md) and
+  [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) canonical
+  provider semantics:
+  - `complete` — supported fetch successfully completed with complete
+    coverage;
+  - `partial` — some items or pages returned but coverage is incomplete;
+  - `unavailable` — provider, endpoint, or daemon unavailable;
+  - `denied` — authorization or permission denied for the requested scope;
+  - `rate_limited` — GitHub rate limit or quota prevented complete fetch;
+  - `stale` — cached ETag, cursor, or head-SHA drift makes the retained
+    snapshot stale relative to the current repository state;
+  - `failed` — fetch failed for a reason not covered above.
+  Lifecycle and provider outcome are never collapsed: for example, a
+  `complete` fetch may return items in any lifecycle state, and an item in
+  `current` lifecycle may be surfaced under a `partial`, `stale`, or
+  `unavailable` ingress outcome when refresh or expansion fails.
+- TraceDecay never surfaces a finding from a dirty overlay, a stale head SHA,
+  an unmappable non-diff line, incomplete coverage presented as clean, or
   unauthorized/private evidence — because there is no comment path, these
-  conditions instead produce a typed `suppressed` or `unavailable` ingestion
-  state for the affected finding rather than a fabricated current result.
-- Ingestion lifecycle states are exhaustive and typed: `ingested`,
-  `remapped`, `outdated`, `resolved`, `deleted`, and `suppressed`. No state in
-  this list, nor any future one, represents a posted comment.
+  conditions instead produce the exact typed ingress provider outcome
+  (`partial`, `unavailable`, `denied`, or `failed`) and never fabricate a
+  `complete`/`current` pair.
 - Semantic surfacing expands an ingested finding with callers, implementations,
   affected tests, branch diagnostics, and CI evidence (§5) rather than
   rendering a bare copied comment body.
@@ -370,8 +399,8 @@ GitHub, applies a fix, or continues an agent automatically.
   [Plan 13](13-research-provenance-and-context-anchors.md) retrieval anchor
   for the log; an excerpt digest; parser identity and version; event time;
   failure kind, file, line, and test; a confidence value; coverage; explicit
-  stale, partial, and unavailable states; and permissions, rate limits, and
-  retention for the underlying log/artifact.
+  stale, partial, unavailable, and denied states; and permissions, rate
+  limits, and retention for the underlying log/artifact.
 - Rerun hints and any other suggested next action from this pillar are inert
   per §2: TraceDecay never triggers a rerun, never re-executes CI, and never
   schedules a retry.
@@ -402,30 +431,42 @@ GitHub, applies a fix, or continues an agent automatically.
   cycle-result sections each surface must expose and the LSP projection
   contract those owners implement.
 - **LSP projection contract** (implemented by
-  [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)):
+  [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md); must match
+  Plan 35's Plan 37 feedback-finding projection exactly):
   - `Diagnostic.range` binds to the current function/symbol after remap, not
     the original PR/CI coordinate.
   - `Diagnostic.source` is `github-review`, `tracedecay-ci`, or
     `tracedecay-proximity` for these three pillars, distinct from Plan 35's
     existing diagnostic sources for the post-edit pillar.
   - `Diagnostic.code` is a stable finding-code identifier.
-  - `Diagnostic.codeDescription.href` is the original GitHub or CI URL, never
-    a TraceDecay-internal link.
+  - `Diagnostic.codeDescription.href` is the original GitHub or CI URL only
+    when authorized and safe to expose; otherwise the field is omitted
+    entirely — never a TraceDecay-internal link and never an
+    unauthorized/private URL.
   - `Diagnostic.data` carries only the stable finding ID, the
     [Plan 13](13-research-provenance-and-context-anchors.md)
-    `RetrievalAnchorId`, and lifecycle state — never a large payload. Full
-    thread/log/proximity evidence is retrieved through the anchor (§8), not
-    embedded in the diagnostic.
-  - `Diagnostic.relatedInformation` carries replies and related locations
-    (other comments in a thread, related CI failure sites, or other
-    proximity-conflicting ranges) as pointers, not copied bodies.
+    `RetrievalAnchorId`, item/thread lifecycle state, ingress provider
+    outcome, and coverage — never a large payload, thread body, reply text,
+    or log excerpt. Full GitHub thread/reply text, CI logs, and proximity
+    evidence expand only through authorized Plan 21 `feedback_get` /
+    `feedback_expand` and Plan 13 anchor resolution (§8), not embedded in
+    the diagnostic.
+  - `Diagnostic.relatedInformation` carries only valid LSP Locations (`uri` +
+    `range`) plus bounded messages for co-located related sites (another
+    comment anchor-mapped to a workspace location, a related CI failure site,
+    or a proximity-conflicting range). It never carries pointer-only reply
+    records, anchor IDs without a resolvable Location, or copied thread/reply
+    bodies. GitHub replies and full thread context are retrieved through
+    authorized anchor / `feedback_expand` operations, not through
+    `relatedInformation`.
   - Severity is conservative: it mirrors the source's own classification
     (a CI failure keeps its reported severity; a GitHub review comment or a
     proximity note never exceeds an advisory severity) — this projection
     never fabricates a severity the underlying evidence does not support.
   - Clearing and removal are deterministic on thread resolution, comment
-    deletion, or head-SHA change that invalidates the remap, following the
-    same "clear or republish exactly once" rule
+    deletion, head-SHA or content/generation change that invalidates the
+    remap, or supersession, following the same "clear or republish exactly
+    once" rule
     [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) already
     requires for other diagnostic sources.
 
@@ -456,7 +497,7 @@ GitHub, applies a fix, or continues an agent automatically.
   [Plan 32](32-dynamic-workflow-runtime-and-sdk.md)'s shared
   scheduler/history/lease/effect/artifact kernel. PR17 introduces no first
   availability of any capability defined here, no new external effect, and
-  no GitHub write — workflow effects in that composition remain workflow
+  no GitHub write — workflow composition in that kernel remains workflow
   authority only, never a new GitHub write path.
 - Acceptance for this milestone requires one integration fixture (§9) that
   exercises a single branch/PR scenario and proves all four pillars produce
@@ -495,7 +536,7 @@ GitHub, applies a fix, or continues an agent automatically.
   reporting that it did.
 - LCM/session narrative summaries may help retrieve session-linked narrative
   about a finding, but never replace canonical GitHub thread, CI, diagnostic,
-  branch/commit, or effect evidence as the authoritative record. Every
+  or branch/commit evidence as the authoritative record. Every
   narrative summary that touches this cycle's evidence retains exact source
   lineage and exact expansion back to the canonical anchor, exactly as
   [Plan 23](23-session-lcm-temporal-retrieval-and-evaluation.md)'s summary-DAG
@@ -572,24 +613,35 @@ PR6 boundary.
   ingestion/surfacing, and concurrent-agent proximity are all available and
   mutually consistent by the end of PR13, and that the same evidence renders
   correctly on hook, MCP, LSP, dashboard (once PR14 ships), and CLI surfaces.
-- **GitHub ingestion fixtures** cover: `ingested`, `remapped`, `outdated`,
-  `resolved`, `deleted`, and `suppressed` lifecycle states; bot-versus-maintainer
-  author-class reporting without invented trust; edited/deleted/resolved/
-  outdated source-thread states; exact-match versus symbol-remapped-but-stale
-  binding after a head-SHA change; rate-limit, auth-failure, ETag-reuse, and
-  daemon-restart recovery; and that every attempted write path (post, update,
-  resolve, dismiss, reply) is rejected before any GitHub call, producing a
-  typed `suppressed` or `denied` state rather than any partial write. Fixtures
-  also prove remap never mutates the original ingested thread record.
+- **GitHub ingestion fixtures** cover the two orthogonal typed dimensions
+  from §4:
+  - **Item/thread lifecycle:** `current`, `outdated`, `resolved`, `edited`,
+    and `deleted` — including GitHub-native resolved/edited/deleted states and
+    exact-match versus symbol-remapped-but-`outdated` binding after a head-SHA
+    change.
+  - **Ingress provider outcome:** `complete`, `partial`, `unavailable`,
+    `denied`, `rate_limited`, `stale`, and `failed` — including rate-limit,
+    auth-failure, ETag-reuse, head-SHA drift, and daemon-restart recovery.
+  - A **lifecycle × provider-outcome matrix** exercises every lifecycle
+    value under each relevant provider outcome (for example, `current` under
+    `complete`, `outdated` under `stale`, `deleted` under `complete`, and
+    `resolved` under `denied`) and proves the dimensions are never collapsed
+    into one field or inferred from silence.
+  - Bot-versus-maintainer author-class reporting without invented trust;
+    remap never mutates the original ingested thread record; and every
+    attempted GitHub write operation is rejected before any outbound GitHub
+    call, producing a typed `denied` ingress outcome rather than any partial
+    write.
 - **CI-localization fixtures** map a structured failure to symbol/branch
   generation/callers and a targeted rerun hint using the typed input contract
-  (§5), including stale, partial, and unavailable log/artifact states without
-  ever exposing raw log content outside its retained anchor, and prove the
-  cycle never claims to have executed, retried, or influenced CI.
+  (§5), including stale, partial, unavailable, and denied log/artifact states
+  without ever exposing raw log content outside its retained anchor, and prove
+  the cycle never claims to have executed, retried, or influenced CI.
 - **Proximity fixtures** cover the immediate tier (exact same
   file/range/symbol) and the threshold tier (same package/crate, shared
   callers/dependencies/tests, incompatible branch/worktree state, overlapping
-  planned effects) both above and below the configured risk threshold,
+  planned workspace changes) both above and below the configured risk
+  threshold,
   proving below-threshold silence is a normal outcome. Fixtures also prove
   advisory-only semantics, `observed_at`/`expires_at` freshness, suppression/
   dedupe, and privacy scoping across sessions/agents without creating a lock
@@ -599,24 +651,32 @@ PR6 boundary.
   spool/cache/replica/export representation unchanged; a 24-hour response
   handle is never substituted for that identity and its expiry is independent
   of the anchor's lifecycle; authorization is rechecked on every anchor/
-  payload/handle expansion even when the caller already holds the ID; and
-  expired, missing, redacted, and corrupt evidence return safe typed
-  tombstones rather than a silent empty result. Restart-stability fixtures
-  prove cursors and anchors remain valid and resumable across a daemon
-  restart.
+  payload/handle expansion even when the caller already holds the ID; GitHub
+  thread/reply bodies expand only through authorized anchor /
+  `feedback_expand` and return the exact retained-source payload with coverage
+  metadata; and expired, missing, redacted, and corrupt evidence return safe
+  typed tombstones rather than a silent empty result. Restart-stability
+  fixtures prove cursors and anchors remain valid and resumable across a
+  daemon restart.
 - **Overlay/privacy canary fixtures** prove unsaved, dirty, or private source
   never reaches a durable finding, payload, LCM node, cache, replica, export,
   or any GitHub-bound evidence, matching the positive/negative contract
   already required by
   [Plan 22](22-incremental-context-scout-and-suggestion-envelopes.md).
-- **LSP projection fixtures** prove `Diagnostic.range` binds to the current
-  function/symbol after remap; `source` is exactly `github-review`,
-  `tracedecay-ci`, or `tracedecay-proximity` for these three pillars;
-  `codeDescription.href` is the original external URL; `data` never carries a
-  large payload; `relatedInformation` carries replies/related locations as
-  pointers; severity never exceeds what the source evidence supports; and
-  resolution, deletion, or a head-SHA change that invalidates a remap clears
-  or republishes the diagnostic exactly once.
+- **LSP projection fixtures** prove the Plan 35/§6 contract exactly:
+  `Diagnostic.range` binds to the current function/symbol after remap;
+  `source` is exactly `github-review`, `tracedecay-ci`, or
+  `tracedecay-proximity` for these three pillars; `data` carries stable
+  finding ID, `RetrievalAnchorId`, item/thread lifecycle, ingress provider
+  outcome, and coverage — never a large payload; `codeDescription.href` is
+  present only when authorized and safe and is omitted otherwise;
+  `relatedInformation` contains only valid LSP Locations plus bounded
+  messages and never pointer-only reply records or copied bodies; GitHub
+  replies and full thread text expand only through authorized anchor /
+  `feedback_expand`; severity never exceeds what the source evidence supports;
+  and resolution, deletion, head-SHA/content/generation change that
+  invalidates a remap, or supersession clears or republishes the diagnostic
+  exactly once.
 - [Plan 14](14-historical-failure-regression-matrix.md) names this plan's
   PR11–PR17 rows before any owning PR is considered complete.
 

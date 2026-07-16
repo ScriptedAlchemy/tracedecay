@@ -46,10 +46,11 @@ regression discovered by an earlier slice.
   provider conflicts, analyzer duplication avoidance across hosts, bridge
   reconnect, and analyzer crash/recovery.
 - Measure [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
-  edit-to-durable-feedback latency per delivery adapter (LSP, hook, explicit
-  diagnostics call), feedback-cycle loop-iteration counts against budget,
-  GitHub comment-delivery latency, and concurrent-agent proximity computation
-  cost.
+  one-shot per-trigger stage and total latency, budget consumption,
+  dedupe/suppression, terminal outcome, bounded-render/truncation/expansion
+  behavior, edit-to-durable-feedback latency per delivery adapter (LSP, hook,
+  explicit diagnostics call), GitHub ingest/remap/surface latency, CI
+  localization latency, and concurrent-agent proximity computation cost.
 - Report peak and steady memory, CPU time/utilization, database and generation
   bytes, temporary space, bytes read/written, and write amplification.
 - Separate queue, lock, I/O, parse, projection, model, merge, hydration, and

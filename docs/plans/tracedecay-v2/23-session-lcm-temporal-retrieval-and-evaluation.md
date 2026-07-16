@@ -96,8 +96,11 @@ results and capsules to those references instead of copying durable evidence int
 session payloads.
 
 PR13 read-only GitHub and CI ingress does not require
-[Plan 32](32-dynamic-workflow-runtime-and-sdk.md). Plan 32 remains a PR17
-prerequisite only for write-side GitHub comment delivery and workflow effects.
+[Plan 32](32-dynamic-workflow-runtime-and-sdk.md). Plan 32 at PR17 may
+optionally compose already-shipped read-only operations in workflows through
+[Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md); it
+never enables a GitHub write path. LCM and summary payloads remain
+session-narrative authority only with no write-side GitHub path.
 
 ## Side-effect-free reads and freshness
 

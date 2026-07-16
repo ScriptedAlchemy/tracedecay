@@ -66,9 +66,11 @@ bound output and traversal, and report unsupported repository states truthfully.
 PR9 also defines typed read-only identity for pull-request comparison state and
 review-thread anchoring consumed by
 [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
-This plan owns identity and remap semantics only. GitHub API ingress, comment
-writes, effect/receipt delivery, and workflow automation remain in their owning
-plans; PR9 does not post, update, resolve, reply to, or dismiss GitHub comments.
+This plan owns read-only identity and remap semantics only. GitHub API
+ingress, review-thread ingestion, bounded surfacing, and external URL display
+remain in [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
+and [Plan 27](27-cross-host-agent-plugin-bundles.md); PR9 does not post,
+update, resolve, reply to, or dismiss GitHub comments now or at PR17.
 
 #### `PullRequestSnapshot`
 
@@ -305,8 +307,9 @@ Acceptance requires fixtures and end-to-end tests for:
   proof that remapped coordinates without exact content never report `current`;
 - diff-remap and symbol-remap fixtures proving preserved source history, no fuzzy
   upgrade, and explicit stale/outdated results when head or generation drifts; and
-- rejection fixtures proving PR9 identity operations remain read-only and never
-  perform GitHub API ingress or comment writes.
+- rejection fixtures proving PR9 identity operations remain read-only identity
+  and remap only and never perform GitHub API ingress or comment writes now or
+  at PR17.
 
 ## Lossless evidence boundary
 
@@ -322,8 +325,8 @@ does not own response-handle implementation.
 PR13 read-only GitHub thread/comment/reply and CI-failure ingress may consume
 PR9 `PullRequestSnapshot` and review-thread identity without
 [Plan 32](32-dynamic-workflow-runtime-and-sdk.md) as a prerequisite. Plan 32
-remains required only for PR17 comment writes, effect receipts, and workflow
-automation that this plan does not own.
+at PR17 may optionally compose already-shipped read-only operations; it does
+not introduce comment writes, effect receipts, or any GitHub write path.
 
 ## Acceptance
 

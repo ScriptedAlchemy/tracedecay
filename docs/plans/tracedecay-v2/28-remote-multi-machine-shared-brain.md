@@ -80,8 +80,9 @@ diagnostics.
   grant, and privacy disclosure.
 - [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s
   session-only overlay feedback and concurrent-agent proximity computation
-  stay node-local for the same reason; only durable saved-content feedback
-  and its GitHub delivery are fenced through the shard authority.
+  stay node-local for the same reason; only durable saved-content feedback,
+  GitHub-ingested review evidence, and CI-localization evidence are fenced
+  through the shard authority. No GitHub write path exists at any stage.
 
 ### Backup and failover
 
@@ -117,3 +118,25 @@ diagnostics.
   including partial, stale, unknown, and unavailable states; PR18 SDK
   conformance proves the same values when SDK bindings ship.
 - Negative tests prove no client, hook, cache, replica, or offline path opens an authority database or uses a network filesystem.
+- [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
+  PR16 fixtures prove unsaved dirty overlays and concurrent-agent proximity
+  computation stay node-local and never enter the remote offline-capture spool,
+  verified read cache, replica, trace, backup, or failover payload.
+- Plan 37 PR16 fixtures prove durable saved-content feedback,
+  GitHub-ingested review-thread/comment/reply evidence, and CI-localization
+  evidence are fenced through the owning shard authority and never travel
+  through overlay or proximity paths.
+- Plan 37 PR16 restart, failover, and promotion fixtures preserve fenced
+  feedback and ingested-evidence watermarks, tombstones, and authority epochs
+  without republishing stale cached state as current.
+- Plan 37 PR16 retention, deletion, authorization, and privacy-policy change
+  fixtures on fenced evidence fail closed; possessing a remote cache handle or
+  replica manifest never bypasses recheck.
+- Plan 37 PR16 fixtures report remote partial, stale, unknown, and unavailable
+  coverage identically on every PR16 surface without inventing local durability.
+- Plan 37 PR16 negative fixtures prove unsaved LSP content, dirty-overlay
+  diagnostics, and session-only overlay feedback never become remote durable
+  records.
+- Plan 37 PR16 acceptance reuses the remote offline-capture spool boundary
+  defined above; the PR6 daemon host-admission spool and the PR16 remote
+  offline-capture spool remain distinct products with separate scope.
