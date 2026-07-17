@@ -18,7 +18,6 @@ use serde_json::{Value, json};
 use crate::application::host_admission::{
     HostAdmissionOutcome, HostAdmissionStatus, TerminalReason, is_wire_oversized_io_error,
 };
-use crate::application::memory::MemoryApplication;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::mcp::project_route::{
@@ -35,7 +34,6 @@ use crate::sessions::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
 };
-use crate::store::DatabaseFactStore;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use super::hook_events::{self, HookAgent, HookEventPlan};
@@ -2248,7 +2246,7 @@ impl McpServer {
         }
         let profile_root = crate::storage::default_profile_root().ok()?;
         let owner = cg.project_memory_owner().ok()?;
-        let memory = MemoryApplication::new(owner, DatabaseFactStore::new(cg.db())).ok()?;
+        let memory = crate::tracedecay::facts::memory_application_for_db(owner, cg.db()).ok()?;
         crate::automation::staged_notice::maybe_automation_staged_notice(
             &memory,
             &cg.store_layout().dashboard_root,
@@ -3622,12 +3620,11 @@ impl McpServer {
             None
         };
         let mut handler_arguments = route_cache.apply_to_tool_arguments(tool_name, arguments);
-        if let Some(map) = handler_arguments.as_object_mut() {
-            if crate::analytics::is_skill_view_tool(tool_name)
-                && let Some(request_id) = json_rpc_request_id_string(&id)
-            {
-                map.insert("__mcp_request_id".to_string(), json!(request_id));
-            }
+        if crate::analytics::is_skill_view_tool(tool_name)
+            && let Some(request_id) = json_rpc_request_id_string(&id)
+            && let Some(map) = handler_arguments.as_object_mut()
+        {
+            map.insert("__mcp_request_id".to_string(), json!(request_id));
         }
         inject_trusted_memory_request_id(tool_name, &id, &mut handler_arguments);
 
@@ -4206,7 +4203,9 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
 }
 
 fn inject_trusted_memory_request_id(tool_name: &str, id: &Value, arguments: &mut Value) {
-    if !memory_call_requires_operation_context(tool_name, arguments) {
+    // The memory handler module owns the action taxonomy; the dispatcher only
+    // queries whether this call needs a daemon-issued replay identity.
+    if !super::tools::memory_needs_operation_context(tool_name, arguments) {
         return;
     }
     let Some(map) = arguments.as_object_mut() else {
@@ -4218,19 +4217,6 @@ fn inject_trusted_memory_request_id(tool_name: &str, id: &Value, arguments: &mut
     map.remove("__mcp_request_id");
     if let Some(request_id) = json_rpc_request_id_string(id) {
         map.insert("__mcp_request_id".to_string(), json!(request_id));
-    }
-}
-
-/// Mutations and locally-accounted retrievals both write canonical memory
-/// events, so both need a daemon-issued replay identity.
-fn memory_call_requires_operation_context(tool_name: &str, arguments: &Value) -> bool {
-    match tool_name {
-        "tracedecay_fact_feedback" => true,
-        "tracedecay_fact_store" => matches!(
-            arguments.get("action").and_then(Value::as_str),
-            Some("add" | "update" | "remove" | "search" | "probe" | "related" | "reason" | "list")
-        ),
-        _ => false,
     }
 }
 

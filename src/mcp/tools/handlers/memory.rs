@@ -312,9 +312,80 @@ fn feedback_history_repair_payload(progress: CompatibilityFeedbackRepairProgress
     })
 }
 
-fn action_writes_memory(action: &str) -> bool {
-    matches!(action, "add" | "update" | "remove")
+/// Canonical taxonomy of `tracedecay_fact_store` wire actions.
+///
+/// This table is the single source of truth for action capabilities: the
+/// handler gates cross-project writes and untracked read variants through it,
+/// and the generic MCP dispatcher reaches it via [`needs_operation_context`]
+/// instead of hardcoding action names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FactStoreAction {
+    Add,
+    Update,
+    Remove,
+    Search,
+    Probe,
+    Related,
+    Reason,
+    List,
+    Contradict,
+    Get,
 }
+
+impl FactStoreAction {
+    fn parse(action: &str) -> Option<Self> {
+        Some(match action {
+            "add" => Self::Add,
+            "update" => Self::Update,
+            "remove" => Self::Remove,
+            "search" => Self::Search,
+            "probe" => Self::Probe,
+            "related" => Self::Related,
+            "reason" => Self::Reason,
+            "list" => Self::List,
+            "contradict" => Self::Contradict,
+            "get" => Self::Get,
+            _ => return None,
+        })
+    }
+
+    /// Actions that mutate canonical memory facts.
+    fn writes(self) -> bool {
+        matches!(self, Self::Add | Self::Update | Self::Remove)
+    }
+
+    /// Actions with an untracked read variant for cross-project dispatch
+    /// (retrieval accounting stays local to the owning project).
+    fn has_untracked(self) -> bool {
+        matches!(
+            self,
+            Self::Search | Self::Probe | Self::Related | Self::Reason | Self::List
+        )
+    }
+
+    /// Mutations and locally-accounted retrievals both write canonical
+    /// memory events, so both need a daemon-issued replay identity.
+    fn needs_context(self) -> bool {
+        self.writes() || self.has_untracked()
+    }
+}
+
+/// Whether a memory tool call needs a daemon-issued operation context: a
+/// trusted replay identity the MCP server derives from the JSON-RPC envelope
+/// id. The generic dispatcher queries this capability so the action taxonomy
+/// stays owned by this module.
+pub(crate) fn needs_operation_context(tool_name: &str, arguments: &Value) -> bool {
+    match tool_name {
+        "tracedecay_fact_feedback" => true,
+        "tracedecay_fact_store" => arguments
+            .get("action")
+            .and_then(Value::as_str)
+            .and_then(FactStoreAction::parse)
+            .is_some_and(FactStoreAction::needs_context),
+        _ => false,
+    }
+}
+
 async fn update_trust(
     args: &Value,
     memory: &MemoryApplication<DatabaseFactStore<'_>>,
@@ -342,7 +413,8 @@ pub(super) async fn handle_fact_store(
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
     let cross_project_selector = project_selector_present(&args, &["project_path"]);
-    if action_writes_memory(action) && cross_project_selector {
+    if FactStoreAction::parse(action).is_some_and(FactStoreAction::writes) && cross_project_selector
+    {
         return Err(config_error(
             "cross-project fact_store writes are not supported; omit project_selector to write the active project",
         ));
@@ -358,10 +430,12 @@ async fn handle_fact_store_for_target(
     target_memory: TargetMemoryDb<'_>,
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
+    let action_kind = FactStoreAction::parse(action)
+        .ok_or_else(|| config_error(format!("unknown fact_store action: {action}")))?;
     let memory = memory_application(&target_memory)?;
     let mut refresh_digest = false;
-    let out = match action {
-        "add" => {
+    let out = match action_kind {
+        FactStoreAction::Add => {
             let request = AddFactRequest {
                 content: required_str(&args, "content")?.to_string(),
                 category: optional_category(&args)?.unwrap_or(MemoryCategory::General),
@@ -395,7 +469,7 @@ async fn handle_fact_store_for_target(
                 "reason": outcome.diff.reason,
             })
         }
-        "search" => {
+        FactStoreAction::Search => {
             let request = SearchFactsRequest {
                 query: required_str(&args, "query")?.to_string(),
                 category: optional_category(&args)?,
@@ -417,7 +491,7 @@ async fn handle_fact_store_for_target(
             let count = facts.len();
             results_envelope(action, &json!(facts), count)
         }
-        "probe" => {
+        FactStoreAction::Probe => {
             let request = SearchFactsRequest {
                 query: required_str(&args, "entity")?.to_owned(),
                 category: optional_category(&args)?,
@@ -439,7 +513,7 @@ async fn handle_fact_store_for_target(
             let count = facts.len();
             results_envelope(action, &json!(facts), count)
         }
-        "related" => {
+        FactStoreAction::Related => {
             let request = SearchFactsRequest {
                 query: required_str(&args, "entity")?.to_owned(),
                 category: optional_category(&args)?,
@@ -461,7 +535,7 @@ async fn handle_fact_store_for_target(
             let count = facts.len();
             results_envelope(action, &json!(facts), count)
         }
-        "reason" => {
+        FactStoreAction::Reason => {
             let entities = request_entities(&args);
             let category = optional_category(&args)?;
             let min_trust = optional_f64(&args, "min_trust");
@@ -485,7 +559,7 @@ async fn handle_fact_store_for_target(
             let count = facts.len();
             results_envelope(action, &json!(facts), count)
         }
-        "contradict" => {
+        FactStoreAction::Contradict => {
             let threshold = optional_f64(&args, "threshold").unwrap_or(0.3);
             let limit = limit(&args);
             let facts = memory
@@ -495,7 +569,7 @@ async fn handle_fact_store_for_target(
             let count = facts.len();
             results_envelope(action, &json!(facts), count)
         }
-        "get" => {
+        FactStoreAction::Get => {
             let id = fact_id(&args)?;
             let fact = memory
                 .get_fact_v1(id)
@@ -514,7 +588,7 @@ async fn handle_fact_store_for_target(
                 "count": 1,
             })
         }
-        "update" => {
+        FactStoreAction::Update => {
             let id = fact_id(&args)?;
             let content = args
                 .get("content")
@@ -560,7 +634,7 @@ async fn handle_fact_store_for_target(
                 }),
             }
         }
-        "remove" => {
+        FactStoreAction::Remove => {
             let id = fact_id(&args)?;
             let removed = memory
                 .remove_fact_v1(
@@ -572,7 +646,7 @@ async fn handle_fact_store_for_target(
             refresh_digest = removed;
             json!({ "action": action, "removed": removed, "count": usize::from(removed) })
         }
-        "list" => {
+        FactStoreAction::List => {
             let category = optional_category(&args)?;
             let min_trust = optional_f64(&args, "min_trust");
             let limit = limit(&args);
@@ -594,7 +668,6 @@ async fn handle_fact_store_for_target(
             let count = facts.len();
             results_envelope(action, &json!(facts), count)
         }
-        other => return Err(config_error(format!("unknown fact_store action: {other}"))),
     };
     if refresh_digest && !target_memory.user_scope {
         refresh_target_memory_digest(&memory, &target_memory).await;

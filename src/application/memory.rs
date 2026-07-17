@@ -351,6 +351,10 @@ fn sanitize_add_fact_request(
     mut request: AddFactRequest,
 ) -> Result<Option<AddFactRequest>, MemoryApplicationError> {
     strip_reserved_automation_run_id(&mut request.metadata);
+    // The canonical payload sorts labels before hashing; the sanitizer receipt
+    // is computed over this wire, so it must see the same canonical order.
+    request.tags.sort_unstable();
+    request.entities.sort_unstable();
     if detect_secret_like(request.content.trim()).is_some() {
         return Ok(None);
     }
@@ -383,6 +387,13 @@ fn sanitize_update_fact_request(
 ) -> Result<Option<UpdateFactRequest>, MemoryApplicationError> {
     if let Some(metadata) = request.metadata.as_mut() {
         strip_reserved_automation_run_id(metadata);
+    }
+    // Match the canonical payload's sorted label order (see the add path).
+    if let Some(tags) = request.tags.as_mut() {
+        tags.sort_unstable();
+    }
+    if let Some(entities) = request.entities.as_mut() {
+        entities.sort_unstable();
     }
     if request
         .content
@@ -2089,11 +2100,14 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         fact_id: i64,
     ) -> Result<Option<FactRecord>, MemoryApplicationError> {
         let target = self.legacy_compatibility_target(fact_id)?;
-        self.get_compatibility_fact(target)
-            .await?
-            .as_ref()
-            .map(|fact| compatibility_projection_record(&self.compatibility_scope, fact))
-            .transpose()
+        match self.get_compatibility_fact(target).await? {
+            // A removed or otherwise unavailable fact reads as absent under
+            // the V1 contract; only reachable payloads project to records.
+            None | Some(CompatibilityFactProjectionV1::Unavailable(_)) => Ok(None),
+            Some(projection) => {
+                compatibility_projection_record(&self.compatibility_scope, &projection).map(Some)
+            }
+        }
     }
 
     pub async fn update_fact_v1(
