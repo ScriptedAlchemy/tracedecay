@@ -738,6 +738,30 @@ pub fn get_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {
     response_to_json(response)
 }
 
+/// Polls `condition` until it returns `Some(value)` or `deadline` passes,
+/// sleeping `interval` between unsuccessful attempts. Panics with the
+/// message produced by `describe` if the deadline elapses first.
+///
+/// This is the canonical shape for the "compute state, check it, sleep and
+/// retry, assert on timeout" idiom used throughout the integration suites.
+/// Callers that need a fixed cadence between samples (rather than an
+/// immediate first check) can perform the delay inside `condition` itself
+/// and pass `Duration::ZERO` as `interval`.
+pub fn poll_until<T>(
+    deadline: Instant,
+    interval: Duration,
+    mut condition: impl FnMut() -> Option<T>,
+    describe: impl Fn() -> String,
+) -> T {
+    loop {
+        if let Some(value) = condition() {
+            return value;
+        }
+        assert!(Instant::now() < deadline, "{}", describe());
+        std::thread::sleep(interval);
+    }
+}
+
 pub async fn wait_for_dashboard(agent: &ureq::Agent, base_url: &str) {
     let probe = format!("{base_url}/api/capabilities");
     // Poll until the server both accepts the connection AND returns a real

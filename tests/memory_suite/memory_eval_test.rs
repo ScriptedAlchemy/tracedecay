@@ -16,6 +16,7 @@
 
 use crate::common;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -563,29 +564,39 @@ fn wait_for_seeded_fact_cutover(fixture: &Fixture, seeded: usize) {
         return;
     }
     let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let output = run_ok(
-            fixture,
-            &["tool", "memory_status", "--args", r#"{"format":"json"}"#],
-        );
-        let status: Value = serde_json::from_slice(&output.stdout)
-            .unwrap_or_else(|e| panic!("memory_status output was not JSON: {e}"));
-        let memory = &status["memory"];
-        let fact_count = memory["fact_count"].as_u64().unwrap_or(0) as usize;
-        let backfill_complete = memory["legacy_backfill_complete"]
-            .as_bool()
-            .unwrap_or(false);
-        if fact_count >= seeded && backfill_complete {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "seeded legacy facts never finished the memory_v2 cutover \
-             ({fact_count}/{seeded} canonical facts, backfill_complete={backfill_complete}); \
-             last status: {memory}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    let last_memory = RefCell::new(Value::Null);
+    common::poll_until(
+        deadline,
+        Duration::from_millis(100),
+        || {
+            let output = run_ok(
+                fixture,
+                &["tool", "memory_status", "--args", r#"{"format":"json"}"#],
+            );
+            let status: Value = serde_json::from_slice(&output.stdout)
+                .unwrap_or_else(|e| panic!("memory_status output was not JSON: {e}"));
+            let memory = status["memory"].clone();
+            let fact_count = memory["fact_count"].as_u64().unwrap_or(0) as usize;
+            let backfill_complete = memory["legacy_backfill_complete"]
+                .as_bool()
+                .unwrap_or(false);
+            let done = fact_count >= seeded && backfill_complete;
+            *last_memory.borrow_mut() = memory;
+            done.then_some(())
+        },
+        || {
+            let memory = last_memory.borrow().clone();
+            let fact_count = memory["fact_count"].as_u64().unwrap_or(0);
+            let backfill_complete = memory["legacy_backfill_complete"]
+                .as_bool()
+                .unwrap_or(false);
+            format!(
+                "seeded legacy facts never finished the memory_v2 cutover \
+                 ({fact_count}/{seeded} canonical facts, backfill_complete={backfill_complete}); \
+                 last status: {memory}"
+            )
+        },
+    );
 }
 
 struct StepResult {

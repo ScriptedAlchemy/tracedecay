@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::MetadataExt;
@@ -390,20 +391,23 @@ pub(super) fn storage_snapshot(db_path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 /// byte-stability assertions measure only the window under test instead of
 /// racing the owner's own startup writes.
 pub(super) fn wait_for_quiescent_storage(db_path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    let mut previous = storage_snapshot(db_path);
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        let current = storage_snapshot(db_path);
-        if current == previous {
-            return current;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "project storage never became quiescent under the owner daemon"
-        );
-        previous = current;
-    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let previous = RefCell::new(storage_snapshot(db_path));
+    common::poll_until(
+        deadline,
+        Duration::ZERO,
+        || {
+            std::thread::sleep(Duration::from_millis(250));
+            let current = storage_snapshot(db_path);
+            if current == *previous.borrow() {
+                Some(current)
+            } else {
+                *previous.borrow_mut() = current;
+                None
+            }
+        },
+        || "project storage never became quiescent under the owner daemon".to_string(),
+    )
 }
 
 pub(super) fn daemon_authority_record(home: &Path) -> Value {
