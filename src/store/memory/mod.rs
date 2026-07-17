@@ -83,8 +83,6 @@ pub(crate) use repair::{COMPATIBILITY_REPAIR_BANK_BATCH, COMPATIBILITY_REPAIR_VE
 #[cfg(test)]
 use crate::db::MemoryV2FeedbackHistoryRepairBatchOutcome;
 #[cfg(test)]
-use crud::DEFAULT_TRUST;
-#[cfg(test)]
 use envelope::compatibility_lookup_operation_receipt_tx;
 #[cfg(test)]
 use libsql::params;
@@ -94,8 +92,6 @@ use primitives::{
 };
 #[cfg(test)]
 use repair::{compatibility_receipt_feedback_history_repair, compatibility_repair_request_digest};
-#[cfg(test)]
-use serde_json::json;
 #[cfg(test)]
 use tracedecay_domain::SourceStoreId;
 #[cfg(test)]
