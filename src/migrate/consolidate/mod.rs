@@ -1123,22 +1123,47 @@ pub(crate) async fn retire_applied_input_manifests(
         }
         applied.push((ledger_path, ledger));
     }
+    // Index every project id consumed as a source or target by an applied
+    // ledger in a single pass, keyed by (canonicalized git_common_dir,
+    // project_id). `applied` is ordered by ledger filename (which encodes
+    // migration id, not a real timestamp), so no chronological ordering is
+    // available or consulted here: this index only records whether some
+    // *other* applied ledger's source or target lines up with a given
+    // ledger's destination, regardless of which one applied "first".
+    let mut consumers: BTreeMap<(PathBuf, String), Vec<&str>> = BTreeMap::new();
+    for (_, other) in &applied {
+        let git_common_dir = crate::lifecycle_lease::canonical_or_original(&other.git_common_dir);
+        consumers
+            .entry((git_common_dir.clone(), other.source_project_id.clone()))
+            .or_default()
+            .push(other.migration_id.as_str());
+        consumers
+            .entry((git_common_dir, other.target_project_id.clone()))
+            .or_default()
+            .push(other.migration_id.as_str());
+    }
     for (ledger_path, ledger) in &applied {
-        // A destination that later became the source or target of another
-        // applied consolidation of the same repository was consolidated
-        // forward: its markers now identify the newer destination, so this
-        // ledger can no longer validate — and no longer needs to. Its inputs
-        // were retired when it applied; leave the ledger as audit history.
-        let superseded = applied.iter().any(|(_, later)| {
-            later.migration_id != ledger.migration_id
-                && same_path(&later.git_common_dir, &ledger.git_common_dir)
-                && (later.source_project_id == ledger.destination_project_id
-                    || later.target_project_id == ledger.destination_project_id)
-        });
+        // A destination consumed as the source or target of another applied
+        // consolidation of the same repository was consolidated forward: its
+        // markers now identify the newer destination, so this ledger can no
+        // longer validate — and no longer needs to. Its inputs were retired
+        // when it applied; leave the ledger as audit history. This match is
+        // keyed strictly on project-id linkage, not on application order, so
+        // a forward-then-back pair (A's destination feeding B and B's
+        // destination feeding A) can legitimately mark both as superseded;
+        // that is a property of the data, not an ordering bug.
+        let git_common_dir = crate::lifecycle_lease::canonical_or_original(&ledger.git_common_dir);
+        let superseded = consumers
+            .get(&(git_common_dir, ledger.destination_project_id.clone()))
+            .is_some_and(|migration_ids| {
+                migration_ids
+                    .iter()
+                    .any(|migration_id| *migration_id != ledger.migration_id)
+            });
         if superseded {
-            eprintln!(
-                "[tracedecay] consolidation ledger '{}' superseded by a later consolidation; skipping retirement validation",
-                ledger_path.display()
+            tracing::warn!(
+                ledger_path = %ledger_path.display(),
+                "consolidation ledger superseded by another applied consolidation; skipping retirement validation"
             );
             continue;
         }
