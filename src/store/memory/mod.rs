@@ -78,8 +78,6 @@ mod repair;
 mod scoring;
 mod search;
 
-pub(crate) use repair::{COMPATIBILITY_REPAIR_BANK_BATCH, COMPATIBILITY_REPAIR_VECTOR_BATCH};
-
 #[cfg(test)]
 use crate::db::MemoryV2FeedbackHistoryRepairBatchOutcome;
 #[cfg(test)]
