@@ -13,12 +13,12 @@ use tracedecay_store::{
     ProjectionPersistOutcome,
 };
 
+use crate::application::memory::{
+    EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchorV1,
+};
 use crate::application::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureObservationOutcome, CaptureObservationRequest,
     ObservationApplication, ObservationApplicationError, ObservationCancellation,
-};
-use crate::application::memory::{
-    EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchorV1,
 };
 use crate::global_db::GlobalDb;
 use crate::privacy::RecordSanitizerV1;
@@ -863,13 +863,12 @@ impl EvidenceAnchorResolver for HostAdmissionFacade<'_> {
                 )),
             }
         })?;
-        let db = self
-            .authorities
-            .get(host_scope(&scope))
-            .ok_or_else(|| EvidenceAnchorResolutionError::Authority {
+        let db = self.authorities.get(host_scope(&scope)).ok_or_else(|| {
+            EvidenceAnchorResolutionError::Authority {
                 operation: "resolve evidence anchor authority",
                 source: Box::new(std::io::Error::other("authority_unavailable")),
-            })?;
+            }
+        })?;
         let record = db
             .resolve_observation_evidence_anchor(&scope, &anchor_id)
             .await

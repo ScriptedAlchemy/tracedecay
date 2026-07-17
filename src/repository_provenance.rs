@@ -23,8 +23,7 @@ const PROJECT_PRIVACY_DOMAIN_SALT_NAMESPACE: &[u8] =
     b"tracedecay.repository-provenance.project-domain-salt.v1\0";
 const REPOSITORY_ADMISSION_ID_NAMESPACE: &[u8] =
     b"tracedecay.repository-provenance.repository-id.v1\0";
-const WORKTREE_ADMISSION_ID_NAMESPACE: &[u8] =
-    b"tracedecay.repository-provenance.worktree-id.v1\0";
+const WORKTREE_ADMISSION_ID_NAMESPACE: &[u8] = b"tracedecay.repository-provenance.worktree-id.v1\0";
 
 /// Owned, authoritative repository identity supplied by daemon admission.
 ///
@@ -33,6 +32,7 @@ const WORKTREE_ADMISSION_ID_NAMESPACE: &[u8] =
 #[derive(Clone)]
 pub(crate) struct RepositoryProvenanceAdmissionContext {
     project_root: PathBuf,
+    project_id: ProjectId,
     repository_id: RepositoryId,
     worktree_id: Option<WorktreeId>,
     /// A deterministic project-domain salt, not a secret or credential.
@@ -42,12 +42,14 @@ pub(crate) struct RepositoryProvenanceAdmissionContext {
 impl RepositoryProvenanceAdmissionContext {
     pub(crate) fn new(
         project_root: PathBuf,
+        project_id: ProjectId,
         repository_id: RepositoryId,
         worktree_id: Option<WorktreeId>,
         privacy_domain_salt: [u8; 32],
     ) -> Self {
         Self {
             project_root,
+            project_id,
             repository_id,
             worktree_id,
             privacy_domain_salt,
@@ -105,6 +107,7 @@ impl RepositoryProvenanceAdmissionContext {
         .ok()?;
         Some(Self::new(
             canonical_root,
+            project_id.clone(),
             repository_id,
             Some(worktree_id),
             privacy_domain_salt,
@@ -119,15 +122,18 @@ impl RepositoryProvenanceAdmissionContext {
         ingested_at: UtcMicros,
         authorization: ResolutionAuthorizationV1,
     ) -> PreparedRepositoryProvenanceV1 {
-        let ObservationProjectId::Known(project_id) =
+        let ObservationProjectId::Known(observation_project_id) =
             ObservationProjectId::from_observation(observation)
         else {
             return PreparedRepositoryProvenanceV1::unavailable();
         };
+        if observation_project_id != &self.project_id {
+            return PreparedRepositoryProvenanceV1::unavailable();
+        }
         let captured = capture_repository_provenance(&RepositoryProvenanceProbeRequest::new(
             &self.project_root,
             &self.repository_id,
-            Some(project_id),
+            Some(&self.project_id),
             self.worktree_id.as_ref(),
             &self.privacy_domain_salt,
             ingested_at,
@@ -786,6 +792,12 @@ mod tests {
                 .repository_id
                 .as_str()
                 .contains(root.path().to_string_lossy().as_ref())
+        );
+        assert!(
+            !first
+                .repository_id
+                .as_str()
+                .contains(common_dir.path().to_string_lossy().as_ref())
         );
         assert!(
             !first

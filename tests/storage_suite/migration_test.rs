@@ -594,11 +594,90 @@ async fn create_v19_memory_schema_for_v20_test(conn: &Connection) {
          ) VALUES(
             'transition.v19', 'proposal.v19', 'profile', '',
             NULL, 'pending', NULL, NULL, NULL, NULL, NULL, '{}', 100
+         );
+         CREATE TABLE memory_v2_proposal_current (
+            proposal_id TEXT NOT NULL,
+            owner_kind TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            last_transition_id TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(proposal_id, owner_kind, project_id),
+            FOREIGN KEY(proposal_id, owner_kind, project_id)
+                REFERENCES memory_v2_proposals(proposal_id, owner_kind, project_id),
+            FOREIGN KEY(last_transition_id, proposal_id, owner_kind, project_id)
+                REFERENCES memory_v2_proposal_transitions(
+                    transition_id, proposal_id, owner_kind, project_id
+                )
+         );
+         INSERT INTO memory_v2_proposal_current(
+            proposal_id, owner_kind, project_id, state, revision,
+            last_transition_id, updated_at
+         ) VALUES(
+            'proposal.v19', 'profile', '', 'pending', 0, 'transition.v19', 100
          );",
     )
     .await
     .expect("failed to create v19 PR7 memory fixture");
     set_user_version(conn, 19).await;
+}
+
+/// Creates the V20 current projection shape so V21's additive compatibility
+/// fields are tested against an already-dogfooded database.
+async fn create_v20_current_projection_for_v21_test(conn: &Connection) {
+    conn.execute_batch(
+        "CREATE TABLE memory_v2_facts (
+            fact_id TEXT NOT NULL,
+            owner_kind TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            owner_json TEXT NOT NULL,
+            identity_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(fact_id, owner_kind, project_id)
+         );
+         CREATE TABLE memory_v2_lineage_events (
+            event_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            fact_id TEXT NOT NULL,
+            owner_kind TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            event_json TEXT NOT NULL,
+            occurred_at INTEGER NOT NULL,
+            recorded_at INTEGER NOT NULL,
+            UNIQUE(event_id, fact_id, owner_kind, project_id),
+            FOREIGN KEY(fact_id, owner_kind, project_id)
+                REFERENCES memory_v2_facts(fact_id, owner_kind, project_id)
+         );
+         CREATE TABLE memory_v2_current_facts (
+            fact_id TEXT NOT NULL,
+            owner_kind TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            payload_access TEXT NOT NULL,
+            trust_score REAL,
+            active_assertion_id TEXT,
+            last_event_id TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(fact_id, owner_kind, project_id),
+            FOREIGN KEY(fact_id, owner_kind, project_id)
+                REFERENCES memory_v2_facts(fact_id, owner_kind, project_id),
+            FOREIGN KEY(last_event_id, fact_id, owner_kind, project_id)
+                REFERENCES memory_v2_lineage_events(event_id, fact_id, owner_kind, project_id)
+         );
+         INSERT INTO memory_v2_facts(
+            fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+         ) VALUES ('fact.v20', 'profile', '', '{}', '{}', 100);
+         INSERT INTO memory_v2_lineage_events(
+            event_id, fact_id, owner_kind, project_id, event_json, occurred_at, recorded_at
+         ) VALUES ('event.v20', 'fact.v20', 'profile', '', '{}', 110, 110);
+         INSERT INTO memory_v2_current_facts(
+            fact_id, owner_kind, project_id, payload_access, trust_score,
+            active_assertion_id, last_event_id, updated_at
+         ) VALUES ('fact.v20', 'profile', '', 'eligible', 0.5, NULL, 'event.v20', 110);",
+    )
+    .await
+    .expect("failed to create v20 current projection fixture");
+    set_user_version(conn, 20).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -614,7 +693,7 @@ async fn test_create_schema_fresh_db() {
         .await
         .expect("create_schema should succeed");
 
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         2,
@@ -650,6 +729,14 @@ async fn test_create_schema_fresh_db() {
     assert!(table_exists(&conn, "memory_v2_proposal_current").await);
     assert!(table_exists(&conn, "redundancy_pairs").await);
     assert!(index_exists(&conn, "idx_redundancy_pairs_node_b").await);
+    assert!(column_exists(&conn, "memory_v2_current_facts", "retrieval_count").await);
+    assert!(column_exists(&conn, "memory_v2_current_facts", "access_count").await);
+    assert!(column_exists(&conn, "memory_v2_current_facts", "helpful_count").await);
+    assert!(column_exists(&conn, "memory_v2_current_facts", "unhelpful_count").await);
+    assert!(column_exists(&conn, "memory_v2_current_facts", "projection_state").await);
+    assert!(column_exists(&conn, "memory_v2_current_facts", "vector_watermark_json").await);
+    assert!(index_exists(&conn, "idx_memory_v2_current_compatibility_search").await);
+    assert!(index_exists(&conn, "idx_memory_v2_current_projection_state").await);
 }
 
 /// create_schema is idempotent — calling it twice does not error.
@@ -664,7 +751,7 @@ async fn test_create_schema_idempotent() {
         .await
         .expect("second create_schema should succeed");
 
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
 }
 
 /// migrate returns false when already at the latest version.
@@ -678,20 +765,20 @@ async fn test_migrate_already_latest_returns_false() {
         !migrated,
         "migrate should return false when already at latest"
     );
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
 }
 
 #[tokio::test]
-async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_contract() {
+async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_v21_contracts() {
     let (conn, _db, _dir) = create_raw_db().await;
     create_v19_memory_schema_for_v20_test(&conn).await;
 
     assert!(
         migrate(&conn)
             .await
-            .expect("v19 PR7 schema should migrate to v20")
+            .expect("v19 PR7 schema should migrate through v20 and v21")
     );
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
     assert!(column_exists(&conn, "memory_v2_backfill_progress", "cutover_receipt_json").await);
     assert!(column_exists(&conn, "memory_v2_proposals", "idempotency_key").await);
     assert!(column_exists(&conn, "memory_v2_proposals", "request_digest").await);
@@ -700,6 +787,8 @@ async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_contract() 
     assert!(index_exists(&conn, "idx_memory_v2_current_page").await);
     assert!(index_exists(&conn, "idx_memory_v2_evidence_anchor").await);
     assert!(index_exists(&conn, "idx_memory_v2_proposal_list").await);
+    assert!(column_exists(&conn, "memory_v2_current_facts", "projection_state").await);
+    assert!(index_exists(&conn, "idx_memory_v2_current_compatibility_search").await);
 
     let mut rows = conn
         .query(
@@ -754,6 +843,55 @@ async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_contract() 
 
     let mut rows = conn
         .query(
+            "SELECT state, last_transition_id FROM memory_v2_proposal_current
+             WHERE proposal_id = 'proposal.v19'",
+            (),
+        )
+        .await
+        .expect("read rebuilt proposal current state");
+    let row = rows
+        .next()
+        .await
+        .expect("read rebuilt proposal current state row")
+        .expect("rebuilt proposal current state row");
+    let state: String = row.get(0).expect("decode rebuilt proposal state");
+    let last_transition_id: String = row.get(1).expect("decode rebuilt transition id");
+    assert_eq!(state, "pending");
+    assert_eq!(last_transition_id, "transition.v19");
+
+    conn.execute_batch(
+        "INSERT INTO memory_v2_facts(
+            fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+         ) VALUES ('fact.assertionless', 'profile', '', '{}', '{}', 101);
+         INSERT INTO memory_v2_lineage_events(
+            event_id, fact_id, owner_kind, project_id, event_json, occurred_at, recorded_at
+         ) VALUES ('event.assertionless', 'fact.assertionless', 'profile', '', '{}', 101, 101);",
+    )
+    .await
+    .expect("create assertion-less promotion receipt records");
+    conn.execute_batch(
+        "INSERT INTO memory_v2_proposal_transitions(
+            transition_id, proposal_id, owner_kind, project_id,
+            previous_state, current_state, reviewer_json, validation_json,
+            origin, promoted_fact_id, promoted_assertion_id, promoted_event_id,
+            transition_json, occurred_at
+         ) VALUES(
+            'transition.assertionless', 'proposal.v19', 'profile', '',
+            'pending', 'applied', NULL, NULL,
+            'runtime', 'fact.assertionless', NULL, 'event.assertionless',
+            '{}', 101
+         );",
+    )
+    .await
+    .expect("v20 must permit an applied assertion-less fact batch");
+    assert_eq!(
+        scalar_i64(&conn, "SELECT COUNT(*) FROM pragma_foreign_key_check").await,
+        0,
+        "the rebuilt proposal projection must retain valid foreign keys"
+    );
+
+    let mut rows = conn
+        .query(
             "SELECT assertion_header_json FROM memory_v2_assertions
              WHERE assertion_id = 'assertion.v19'",
             (),
@@ -789,21 +927,145 @@ async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_contract() 
     assert!(
         !migrate(&conn)
             .await
-            .expect("replaying v20 migration should be a no-op")
+            .expect("replaying the v20/v21 migration chain should be a no-op")
     );
+}
+
+#[tokio::test]
+async fn test_migrate_v20_current_projection_adds_v21_compatibility_state() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_v20_current_projection_for_v21_test(&conn).await;
+
+    assert!(
+        migrate(&conn)
+            .await
+            .expect("v20 current projection should migrate to v21")
+    );
+    assert_eq!(get_user_version(&conn).await, 21);
+    for column in [
+        "retrieval_count",
+        "access_count",
+        "helpful_count",
+        "unhelpful_count",
+        "last_retrieved_at",
+        "last_recalled_at",
+        "last_feedback_at",
+        "projection_state",
+        "vector_watermark_json",
+    ] {
+        assert!(
+            column_exists(&conn, "memory_v2_current_facts", column).await,
+            "v21 current projection must contain {column}"
+        );
+    }
+    assert!(index_exists(&conn, "idx_memory_v2_current_compatibility_search").await);
+    assert!(index_exists(&conn, "idx_memory_v2_current_projection_state").await);
+
+    let mut rows = conn
+        .query(
+            "SELECT retrieval_count, access_count, helpful_count, unhelpful_count,
+                    last_retrieved_at, last_recalled_at, last_feedback_at,
+                    projection_state, vector_watermark_json
+             FROM memory_v2_current_facts WHERE fact_id = 'fact.v20'",
+            (),
+        )
+        .await
+        .expect("read migrated V21 current projection");
+    let row = rows
+        .next()
+        .await
+        .expect("read V21 current projection row")
+        .expect("V21 current projection row");
+    for index in 0..4 {
+        assert_eq!(
+            row.get::<i64>(index).expect("decode V21 telemetry counter"),
+            0
+        );
+    }
+    for index in 4..7 {
+        assert_eq!(
+            row.get::<Option<i64>>(index)
+                .expect("decode V21 telemetry timestamp"),
+            None
+        );
+    }
+    assert_eq!(
+        row.get::<String>(7).expect("decode V21 projection state"),
+        "unavailable"
+    );
+    assert_eq!(
+        row.get::<Option<String>>(8)
+            .expect("decode V21 vector watermark"),
+        None
+    );
+    assert!(
+        conn.execute(
+            "UPDATE memory_v2_current_facts
+             SET retrieval_count = -1 WHERE fact_id = 'fact.v20'",
+            (),
+        )
+        .await
+        .is_err(),
+        "V21 telemetry counters must stay non-negative"
+    );
+    assert!(
+        conn.execute(
+            "UPDATE memory_v2_current_facts
+             SET projection_state = 'invented' WHERE fact_id = 'fact.v20'",
+            (),
+        )
+        .await
+        .is_err(),
+        "V21 projection state must remain a closed lifecycle"
+    );
+    assert!(
+        conn.execute(
+            "UPDATE memory_v2_current_facts
+             SET vector_watermark_json = 'not-json' WHERE fact_id = 'fact.v20'",
+            (),
+        )
+        .await
+        .is_err(),
+        "V21 vector watermark must be JSON when present"
+    );
+    assert!(
+        !migrate(&conn)
+            .await
+            .expect("replaying V21 migration should be a no-op")
+    );
+}
+
+#[tokio::test]
+async fn test_migrate_v20_proposal_rebuild_rolls_back_atomically() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_v19_memory_schema_for_v20_test(&conn).await;
+    conn.execute_batch("CREATE TABLE memory_v2_proposal_current_v19 (sentinel TEXT NOT NULL);")
+        .await
+        .expect("create a deterministic rebuild collision");
+
+    migrate(&conn)
+        .await
+        .expect_err("a rebuild collision must fail the v20 migration");
+
+    assert_eq!(get_user_version(&conn).await, 19);
+    assert!(table_exists(&conn, "memory_v2_proposal_current").await);
+    assert!(table_exists(&conn, "memory_v2_proposal_transitions").await);
+    assert!(!column_exists(&conn, "memory_v2_proposal_transitions", "origin").await);
+    assert!(!column_exists(&conn, "memory_v2_proposals", "idempotency_key").await);
+    assert!(!column_exists(&conn, "memory_v2_proposals", "request_digest").await);
 }
 
 #[tokio::test]
 async fn test_migrate_rejects_schema_newer_than_supported() {
     let (conn, _db, _dir) = create_schema_db().await;
-    set_user_version(&conn, 21).await;
+    set_user_version(&conn, 22).await;
 
     let error = migrate(&conn)
         .await
         .expect_err("future schema versions must be rejected");
 
-    assert!(error.to_string().contains("newer than supported v20"));
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert!(error.to_string().contains("newer than supported v21"));
+    assert_eq!(get_user_version(&conn).await, 22);
 }
 
 /// migrate from v0 (completely empty database) applies all migrations to latest.
@@ -822,7 +1084,7 @@ async fn test_migrate_from_v0() {
         migrated,
         "migrate should return true when migrations were applied"
     );
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
 
     // All expected tables should exist
     assert!(table_exists(&conn, "nodes").await);
@@ -863,7 +1125,7 @@ async fn test_migrate_from_v1() {
         .expect("migrate from v1 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
 
     // V2: metadata table
     assert!(table_exists(&conn, "metadata").await);
@@ -899,7 +1161,7 @@ async fn test_migrate_from_v2() {
         .expect("migrate from v2 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
 
     // V3 columns
     assert!(column_exists(&conn, "nodes", "branches").await);
@@ -929,7 +1191,7 @@ async fn test_migrate_from_v3() {
         .expect("migrate from v3 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
 
     // V4 columns
     assert!(column_exists(&conn, "nodes", "unsafe_blocks").await);
@@ -957,7 +1219,7 @@ async fn test_migrate_from_v4() {
         .expect("migrate from v4 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
 
     assert!(index_exists(&conn, "idx_edges_unique").await);
 }
@@ -1087,7 +1349,7 @@ async fn test_database_initialize_creates_latest_version() {
         .await
         .expect("Database::initialize should succeed");
 
-    assert_eq!(get_user_version(db.conn()).await, 20);
+    assert_eq!(get_user_version(db.conn()).await, 21);
 }
 
 /// Database::open on an already-current database does not re-migrate.
@@ -1139,7 +1401,7 @@ async fn test_database_open_migrates_v1_to_latest() {
 
     assert!(migrated, "opening a v1 database should trigger migration");
 
-    assert_eq!(get_user_version(db.conn()).await, 20);
+    assert_eq!(get_user_version(db.conn()).await, 21);
 }
 
 /// After create_schema, all v5 columns on nodes exist.
@@ -1282,7 +1544,7 @@ async fn test_v7_to_latest_upgrade_path() {
     let did_migrate = migrate(&conn).await.unwrap();
     assert!(did_migrate, "expected migrate() to return true");
 
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
 
     let mut rows = conn
         .query(
@@ -1330,7 +1592,7 @@ async fn test_migrate_v16_adds_redundancy_pairs() {
     let migrated = migrate(&conn).await.expect("v16 migration should apply");
 
     assert!(migrated, "expected migrate() to run the v16 addition");
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
     assert!(
         table_exists(&conn, "redundancy_pairs").await,
         "v16 migration should create the redundancy_pairs table"
@@ -1376,7 +1638,7 @@ async fn test_migrate_v18_preserves_memory_and_adds_bounded_relations() {
 
     assert!(migrate(&conn).await.unwrap());
 
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
     assert!(table_exists(&conn, "memory_fact_relations").await);
     assert!(index_exists(&conn, "idx_memory_fact_relations_target").await);
     assert_eq!(
@@ -1534,7 +1796,7 @@ async fn test_v10_to_v11_backfills_and_drops_legacy_memory_tables() {
     let did_migrate = migrate(&conn).await.expect("v10 to v11 should migrate");
 
     assert!(did_migrate);
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
     assert!(!table_exists(&conn, "memory_decisions").await);
     assert!(!table_exists(&conn, "memory_code_areas").await);
     assert!(table_exists(&conn, "memory_facts").await);
@@ -1554,7 +1816,7 @@ async fn test_v11_database_migrates_to_monotonic_v12() {
     let did_migrate = migrate(&conn).await.expect("v11 to v12 should migrate");
 
     assert!(did_migrate);
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
     assert!(table_exists(&conn, "memory_bank_dirty").await);
 }
 
@@ -1977,7 +2239,7 @@ async fn test_v13_drops_archive_columns_with_generated_column_dependency() {
         .await
         .expect("v13 must drop archive columns even with a generated-column dependency");
     assert!(migrated, "expected migrate() to run the v13 cleanup");
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
 
     let columns = column_names(&conn, "memory_facts").await;
     for col in [
@@ -2026,7 +2288,7 @@ async fn test_v14_adds_access_tracking_and_oplog() {
 
     let migrated = migrate(&conn).await.expect("v14 must apply cleanly");
     assert!(migrated, "expected migrate() to run the v14 additions");
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
 
     let columns = column_names(&conn, "memory_facts").await;
     for col in ["access_count", "last_recalled_at"] {
@@ -2052,7 +2314,7 @@ async fn test_v14_adds_access_tracking_and_oplog() {
         .await
         .expect("v14 must be idempotent on an already-upgraded schema");
     assert!(migrated_again);
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
     assert_eq!(
         scalar_i64(&conn, "SELECT COUNT(*) FROM memory_facts").await,
         1
@@ -2085,7 +2347,7 @@ async fn test_v15_compacts_legacy_f64_vectors_without_open_time_vacuum() {
         .await
         .expect("v15 must compact legacy vectors");
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         0,
@@ -2128,7 +2390,7 @@ async fn test_latest_open_defers_incremental_vacuum_repair() {
     )
     .await
     .expect("failed to simulate pre-repair auto_vacuum mode");
-    set_user_version(&conn, 20).await;
+    set_user_version(&conn, 21).await;
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         0,
@@ -2143,7 +2405,7 @@ async fn test_latest_open_defers_incremental_vacuum_repair() {
         !migrated,
         "auto_vacuum repair should not report a schema migration"
     );
-    assert_eq!(get_user_version(&conn).await, 20);
+    assert_eq!(get_user_version(&conn).await, 21);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         0,

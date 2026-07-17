@@ -1,29 +1,56 @@
 //! Database-backed authority for append-only facts, evidence, and provenance.
 
 use std::error::Error;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::Database;
 use libsql::{Transaction, params};
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId, FactId,
-    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, LegacyFactMappingV1,
-    PayloadAccessState, ProvenanceId, RetrievalAnchorId, RetrievalAnchorRecordV2, UtcMicros,
+    ActorId, Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1,
+    FactCategoryV1, FactCurationActionV1, FactEventId, FactEvidenceId, FactId,
+    FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, FactLineageEventV1,
+    FactOwnerV1, FactPayloadV1, LegacyFactMappingV1, PayloadAccessState, ProvenanceId,
+    RetentionClass, RetrievalAnchorId, RetrievalAnchorRecordV2, SanitizerDispositionV1,
+    SourceStoreId, UtcMicros, VectorWatermark,
 };
 use tracedecay_store::{
-    CurrentFactsQuery, FactAsOfQuery, FactCommitConflict, FactCommitOutcome, FactCommitReceipt,
-    FactCurrentQuery, FactLineageQuery, FactProposalPromotionStateV1, FactProposalStore,
-    FactProposalStoreError, FactStore, FactStoreError, FactStoreResult, FactWriteBatch,
-    LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery,
-    StoredFactV1,
+    CompatibilityFactAddCommandV1, CompatibilityFactAddDispositionV1,
+    CompatibilityFactAddOutcomeV1, CompatibilityFactAvailabilityV1,
+    CompatibilityFactContradictionPageV1, CompatibilityFactContradictionQueryV1,
+    CompatibilityFactFeedbackActionV1, CompatibilityFactFeedbackCommandV1,
+    CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryQueryV1,
+    CompatibilityFactHistoryV1, CompatibilityFactIdV1, CompatibilityFactInspectionV1,
+    CompatibilityFactListQueryV1, CompatibilityFactMappingV1, CompatibilityFactPageV1,
+    CompatibilityFactProjectionV1, CompatibilityFactProposalImportReceiptV1,
+    CompatibilityFactProposalImportV1, CompatibilityFactProposalPageV1,
+    CompatibilityFactProposalPromotionV1, CompatibilityFactProposalRecordV1,
+    CompatibilityFactProposalRevisionV1, CompatibilityFactProposalStateV1,
+    CompatibilityFactRemoveCommandV1, CompatibilityFactRemoveOutcomeV1,
+    CompatibilityFactRetrievalCommandV1, CompatibilityFactSearchCursorV1,
+    CompatibilityFactSearchHitV1, CompatibilityFactSearchKindV1, CompatibilityFactSearchPageV1,
+    CompatibilityFactSearchQuery, CompatibilityFactSearchScoresV1, CompatibilityFactSourceV1,
+    CompatibilityFactStatusV1, CompatibilityFactTargetV1, CompatibilityFactTelemetryV1,
+    CompatibilityFactUnavailableV1, CompatibilityFactUpdateCommandV1,
+    CompatibilityFactUpdateOutcomeV1, CompatibilityFactV1, CompatibilityMemoryAlgebraV1,
+    CompatibilityMemoryFeedbackFunnelV1, CompatibilityMemoryRepairStatsV1,
+    CompatibilityMemoryStatusV1, CompatibilityProjectionStateV1, CurrentFactsQuery,
+    FactAsOfQuery, FactCommitConflict, FactCommitOutcome, FactCommitReceipt,
+    FactCompatibilityResult, FactCompatibilityStore, FactCompatibilityStoreError,
+    FactCurrentQuery, FactLineageCursor, FactLineageQuery, FactProposalPromotionStateV1,
+    FactProposalStore, FactProposalStoreError, FactStore, FactStoreError, FactStoreResult,
+    FactWriteBatch, LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome,
+    RetrievalAnchorQuery, StoredFactV1,
 };
 
 const COMMIT_OPERATION: &str = "commit canonical memory fact";
 const QUERY_OPERATION: &str = "query canonical memory facts";
 const PROMOTE_OPERATION: &str = "promote canonical memory proposal";
 const DEFAULT_TRUST: f64 = 0.5;
+const COMPATIBILITY_RETENTION_CLASS: &str = "compatibility-runtime-v1";
+const COMPATIBILITY_SOURCE_STORE: &str = "compatibility-runtime-v1";
 
 /// Canonical fact authority over one already-open, authority-bound database.
 ///
@@ -73,6 +100,30 @@ impl<'a> DatabaseFactStore<'a> {
     }
 }
 
+async fn finish_read_snapshot<T>(
+    snapshot: Transaction,
+    result: FactStoreResult<T>,
+) -> FactStoreResult<T> {
+    match result {
+        Ok(value) => {
+            snapshot
+                .commit()
+                .await
+                .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+            Ok(value)
+        }
+        Err(error) => match snapshot.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(storage_error(
+                QUERY_OPERATION,
+                std::io::Error::other(format!(
+                    "{error}; read snapshot rollback also failed: {rollback}"
+                )),
+            )),
+        },
+    }
+}
+
 impl FactStore for DatabaseFactStore<'_> {
     async fn commit_fact(&self, batch: FactWriteBatch) -> FactStoreResult<FactCommitOutcome> {
         self.commit_batch(&batch).await
@@ -87,7 +138,8 @@ impl FactStore for DatabaseFactStore<'_> {
             .begin_isolated_read_snapshot(QUERY_OPERATION)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        query_current_facts_tx(&snapshot, &query).await
+        let result = query_current_facts_tx(&snapshot, &query).await;
+        finish_read_snapshot(snapshot, result).await
     }
 
     async fn query_fact_current(
@@ -99,7 +151,8 @@ impl FactStore for DatabaseFactStore<'_> {
             .begin_isolated_read_snapshot(QUERY_OPERATION)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        query_fact_current_tx(&snapshot, query.owner(), query.fact_id()).await
+        let result = query_fact_current_tx(&snapshot, query.owner(), query.fact_id()).await;
+        finish_read_snapshot(snapshot, result).await
     }
 
     async fn query_fact_as_of(
@@ -111,7 +164,8 @@ impl FactStore for DatabaseFactStore<'_> {
             .begin_isolated_read_snapshot(QUERY_OPERATION)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        query_fact_as_of_tx(&snapshot, &query).await
+        let result = query_fact_as_of_tx(&snapshot, &query).await;
+        finish_read_snapshot(snapshot, result).await
     }
 
     async fn query_fact_lineage(
@@ -123,7 +177,8 @@ impl FactStore for DatabaseFactStore<'_> {
             .begin_isolated_read_snapshot(QUERY_OPERATION)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        query_fact_lineage_tx(&snapshot, &query).await
+        let result = query_fact_lineage_tx(&snapshot, &query).await;
+        finish_read_snapshot(snapshot, result).await
     }
 
     async fn resolve_legacy_fact(&self, query: LegacyFactQuery) -> FactStoreResult<Option<FactId>> {
@@ -132,7 +187,8 @@ impl FactStore for DatabaseFactStore<'_> {
             .begin_isolated_read_snapshot(QUERY_OPERATION)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        resolve_legacy_fact_tx(&snapshot, &query).await
+        let result = resolve_legacy_fact_tx(&snapshot, &query).await;
+        finish_read_snapshot(snapshot, result).await
     }
 
     async fn get_retrieval_anchor(
@@ -144,7 +200,8 @@ impl FactStore for DatabaseFactStore<'_> {
             .begin_isolated_read_snapshot(QUERY_OPERATION)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        get_retrieval_anchor_tx(&snapshot, &query).await
+        let result = get_retrieval_anchor_tx(&snapshot, &query).await;
+        finish_read_snapshot(snapshot, result).await
     }
 }
 
@@ -289,6 +346,9 @@ async fn commit_fact_tx(
     }
     if let Some(mapping) = batch.legacy_mapping() {
         insert_legacy_mapping(transaction, &owner, mapping).await?;
+    }
+    for event in batch.events() {
+        ensure_event_references(transaction, &owner, event).await?;
     }
     for event in batch.events() {
         insert_event(transaction, &owner, event).await?;
@@ -907,17 +967,20 @@ async fn assertion_matches(
         )
         .await
         .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-    let Some(row) = payload
+    let payload_row = payload
         .next()
         .await
-        .map_err(|error| storage_error(QUERY_OPERATION, error))?
-    else {
-        return Ok(false);
+        .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+    drop(payload);
+    let payload_matches = match payload_row {
+        Some(row) => {
+            row_string(&row, 0, QUERY_OPERATION)?
+                == to_json(assertion.payload(), "serialize assertion payload")?
+                && row_string(&row, 1, QUERY_OPERATION)? == assertion.payload().content()
+        }
+        None => payload_is_purged_projection(transaction, owner, assertion.fact_id()).await?,
     };
-    if row_string(&row, 0, QUERY_OPERATION)?
-        != to_json(assertion.payload(), "serialize assertion payload")?
-        || row_string(&row, 1, QUERY_OPERATION)? != assertion.payload().content()
-    {
+    if !payload_matches {
         return Ok(false);
     }
 
@@ -965,6 +1028,45 @@ async fn assertion_matches(
         })
         .collect::<FactStoreResult<Vec<_>>>()?;
     Ok(stored_evidence == expected_evidence)
+}
+
+async fn payload_is_purged_projection(
+    transaction: &Transaction,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+) -> FactStoreResult<bool> {
+    let mut rows = transaction
+        .query(
+            "SELECT current_facts.payload_access
+             FROM memory_v2_current_facts AS current_facts
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = current_facts.fact_id
+              AND facts.owner_kind = current_facts.owner_kind
+              AND facts.project_id = current_facts.project_id
+             WHERE current_facts.fact_id = ?1
+               AND current_facts.owner_kind = ?2
+               AND current_facts.project_id = ?3
+               AND facts.owner_json = ?4",
+            params![
+                fact_id.as_str(),
+                owner.kind,
+                owner.project_id.as_str(),
+                owner.json.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(QUERY_OPERATION, error))?
+    else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        parse_payload_access(&row_string(&row, 0, QUERY_OPERATION)?)?,
+        PayloadAccessState::Quarantined | PayloadAccessState::Deleted
+    ))
 }
 
 async fn insert_legacy_mapping(
@@ -1052,6 +1154,133 @@ async fn legacy_mapping_matches(
         && row_string(&row, 1, QUERY_OPERATION)? == mapping.fact_id().as_str()
         && row_string(&row, 2, QUERY_OPERATION)?
             == to_json(mapping, "serialize legacy fact mapping")?)
+}
+
+async fn ensure_event_references(
+    transaction: &Transaction,
+    owner: &OwnerKey,
+    event: &FactLineageEventV1,
+) -> FactStoreResult<()> {
+    match event.kind() {
+        FactLineageEventKindV1::AssertionRecorded { assertion_id } => {
+            if !owned_assertion_exists(transaction, owner, event.fact_id(), assertion_id).await? {
+                return Err(storage_message(
+                    COMMIT_OPERATION,
+                    "lineage assertion reference is missing",
+                ));
+            }
+        }
+        FactLineageEventKindV1::TrustChanged { evidence_ids, .. } => {
+            ensure_event_evidence(transaction, owner, event.fact_id(), evidence_ids).await?;
+        }
+        FactLineageEventKindV1::Curated {
+            action,
+            evidence_ids,
+        } => {
+            ensure_event_evidence(transaction, owner, event.fact_id(), evidence_ids).await?;
+            if let FactCurationActionV1::ContradictedBy { fact_id }
+            | FactCurationActionV1::SupersededBy { fact_id }
+            | FactCurationActionV1::MergedInto { fact_id } = action
+                && !owned_fact_exists(transaction, owner, fact_id).await?
+            {
+                return Err(storage_message(
+                    COMMIT_OPERATION,
+                    "lineage curation target is missing",
+                ));
+            }
+        }
+        FactLineageEventKindV1::PayloadAccessChanged { .. } => {}
+        FactLineageEventKindV1::LegacyImported { mapping } => {
+            if !legacy_mapping_matches(transaction, owner, mapping).await? {
+                return Err(storage_message(
+                    COMMIT_OPERATION,
+                    "lineage legacy mapping reference is missing",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_event_evidence(
+    transaction: &Transaction,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+    evidence_ids: &[FactEvidenceId],
+) -> FactStoreResult<()> {
+    for evidence_id in evidence_ids {
+        if !owned_evidence_exists(transaction, owner, fact_id, evidence_id).await? {
+            return Err(storage_message(
+                COMMIT_OPERATION,
+                "lineage evidence reference is missing",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn owned_assertion_exists(
+    transaction: &Transaction,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+    assertion_id: &FactAssertionId,
+) -> FactStoreResult<bool> {
+    row_exists_params(
+        transaction,
+        "SELECT 1 FROM memory_v2_assertions
+         WHERE assertion_id = ?1 AND fact_id = ?2 AND owner_kind = ?3
+           AND project_id = ?4 AND owner_json = ?5",
+        params![
+            assertion_id.as_str(),
+            fact_id.as_str(),
+            owner.kind,
+            owner.project_id.as_str(),
+            owner.json.as_str(),
+        ],
+    )
+    .await
+}
+
+async fn owned_evidence_exists(
+    transaction: &Transaction,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+    evidence_id: &FactEvidenceId,
+) -> FactStoreResult<bool> {
+    row_exists_params(
+        transaction,
+        "SELECT 1 FROM memory_v2_evidence
+         WHERE evidence_id = ?1 AND fact_id = ?2 AND owner_kind = ?3
+           AND project_id = ?4 AND owner_json = ?5",
+        params![
+            evidence_id.as_str(),
+            fact_id.as_str(),
+            owner.kind,
+            owner.project_id.as_str(),
+            owner.json.as_str(),
+        ],
+    )
+    .await
+}
+
+async fn owned_fact_exists(
+    transaction: &Transaction,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+) -> FactStoreResult<bool> {
+    row_exists_params(
+        transaction,
+        "SELECT 1 FROM memory_v2_facts
+         WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+           AND owner_json = ?4",
+        params![
+            fact_id.as_str(),
+            owner.kind,
+            owner.project_id.as_str(),
+            owner.json.as_str(),
+        ],
+    )
+    .await
 }
 
 async fn insert_event(
@@ -1172,6 +1401,9 @@ impl Projection {
                     ));
                 }
                 self.access = *current;
+                if requires_payload_purge(*current) {
+                    self.active_assertion_id = None;
+                }
             }
             FactLineageEventKindV1::Curated { .. }
             | FactLineageEventKindV1::LegacyImported { .. } => {}
@@ -1193,9 +1425,12 @@ async fn publish_current_projection(
     for event in batch.events() {
         projection.apply(event)?;
     }
-    let active = projection.active_assertion_id.as_ref().ok_or_else(|| {
-        storage_message(COMMIT_OPERATION, "fact projection has no active assertion")
-    })?;
+    if projection.active_assertion_id.is_none() && !requires_payload_purge(projection.access) {
+        return Err(storage_message(
+            COMMIT_OPERATION,
+            "fact projection has no active assertion",
+        ));
+    }
     let last = projection
         .last_event_id
         .as_ref()
@@ -1218,14 +1453,21 @@ async fn publish_current_projection(
                 owner.project_id.as_str(),
                 payload_access_label(projection.access),
                 projection.trust.as_f64(),
-                active.as_str(),
+                projection
+                    .active_assertion_id
+                    .as_ref()
+                    .map(FactAssertionId::as_str),
                 last.as_str(),
                 projection.updated_at.0,
             ],
         )
         .await
         .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-    if projection.access == PayloadAccessState::Deleted {
+    if requires_payload_purge(projection.access) {
+        transaction
+            .execute_batch("PRAGMA secure_delete = ON;")
+            .await
+            .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
         transaction
             .execute(
                 "DELETE FROM memory_v2_assertion_vectors
@@ -1515,6 +1757,13 @@ fn parse_payload_access(value: &str) -> FactStoreResult<PayloadAccessState> {
     }
 }
 
+fn requires_payload_purge(access: PayloadAccessState) -> bool {
+    matches!(
+        access,
+        PayloadAccessState::Quarantined | PayloadAccessState::Deleted
+    )
+}
+
 async fn query_current_facts_tx(
     snapshot: &Transaction,
     query: &CurrentFactsQuery,
@@ -1525,7 +1774,8 @@ async fn query_current_facts_tx(
             snapshot
                 .query(
                     "SELECT fact_id FROM memory_v2_current_facts
-                 WHERE owner_kind = ?1 AND project_id = ?2 AND fact_id > ?3
+                 WHERE owner_kind = ?1 AND project_id = ?2
+                   AND active_assertion_id IS NOT NULL AND fact_id > ?3
                  ORDER BY fact_id ASC LIMIT ?4",
                     params![
                         owner.kind,
@@ -1541,6 +1791,7 @@ async fn query_current_facts_tx(
                 .query(
                     "SELECT fact_id FROM memory_v2_current_facts
                  WHERE owner_kind = ?1 AND project_id = ?2
+                   AND active_assertion_id IS NOT NULL
                  ORDER BY fact_id ASC LIMIT ?3",
                     params![owner.kind, owner.project_id.as_str(), query.limit() as i64],
                 )
@@ -1634,7 +1885,10 @@ async fn load_current_fact_tx(
             "current fact trust score is unexpectedly null",
         )
     })?)?;
-    let active_assertion_id = FactAssertionId::new(row_string(&row, 3, QUERY_OPERATION)?)?;
+    let Some(active_assertion_id) = row_optional_string(&row, 3, QUERY_OPERATION)? else {
+        return Ok(None);
+    };
+    let active_assertion_id = FactAssertionId::new(active_assertion_id)?;
     let last_event_id = FactEventId::new(row_string(&row, 4, QUERY_OPERATION)?)?;
     let projected_as_of = UtcMicros(row_i64(&row, 5, QUERY_OPERATION)?);
     let payload = match access {
@@ -1704,9 +1958,9 @@ async fn query_fact_as_of_tx(
     if !observed_event {
         return Ok(None);
     }
-    let active_assertion_id = projection.active_assertion_id.clone().ok_or_else(|| {
-        storage_message(QUERY_OPERATION, "as-of projection has no active assertion")
-    })?;
+    let Some(active_assertion_id) = projection.active_assertion_id.clone() else {
+        return Ok(None);
+    };
     let last_event_id = projection
         .last_event_id
         .clone()
@@ -1948,6 +2202,35 @@ async fn promote_fact_proposal_tx(
     let owner = OwnerKey::new(promotion.owner())?;
     let actual = proposal_current_state(transaction, &owner, promotion.proposal_id()).await?;
     if actual != Some(promotion.expected_state()) {
+        if let Some(stored_transition_json) = matching_applied_promotion_transition(
+            transaction,
+            &owner,
+            promotion,
+        )
+        .await?
+        {
+            let actual_last = current_last_event(transaction, &owner, promotion.batch().fact_id())
+                .await?;
+            if actual_last
+                .as_ref()
+                == promotion.batch().events().last().map(FactLineageEventV1::event_id)
+            {
+                let commit = commit_fact_tx(transaction, promotion.batch()).await?.outcome;
+                if let FactCommitOutcome::IdempotentReplay(receipt) = &commit
+                    && promotion_transition_json(promotion, receipt)? == stored_transition_json
+                {
+                    return Ok(PromotionAttempt {
+                        outcome: PromoteFactProposalOutcome::new(
+                            promotion.proposal_id().clone(),
+                            promotion.expected_state(),
+                            commit,
+                        )
+                        .map_err(FactStoreError::from)?,
+                        wrote: false,
+                    });
+                }
+            }
+        }
         return Err(FactProposalStoreError::ProposalStateConflict {
             proposal_id: promotion.proposal_id().clone(),
             expected: promotion.expected_state(),
@@ -2095,6 +2378,71 @@ async fn proposal_current_state(
         .get::<String>(0)
         .map_err(|error| authority_storage_error(PROMOTE_OPERATION, error))?;
     parse_proposal_current_state(&state)
+}
+
+async fn matching_applied_promotion_transition(
+    transaction: &Transaction,
+    owner: &OwnerKey,
+    promotion: &PromoteFactProposal,
+) -> Result<Option<String>, FactProposalStoreError> {
+    let mut rows = transaction
+        .query(
+            "SELECT current_state.state, proposals.owner_json,
+                    transition.previous_state, transition.current_state,
+                    transition.promoted_fact_id, transition.promoted_event_id,
+                    transition.transition_json
+             FROM memory_v2_proposal_current AS current_state
+             JOIN memory_v2_proposals AS proposals
+               ON proposals.proposal_id = current_state.proposal_id
+              AND proposals.owner_kind = current_state.owner_kind
+              AND proposals.project_id = current_state.project_id
+             JOIN memory_v2_proposal_transitions AS transition
+               ON transition.transition_id = current_state.last_transition_id
+              AND transition.proposal_id = current_state.proposal_id
+              AND transition.owner_kind = current_state.owner_kind
+              AND transition.project_id = current_state.project_id
+             WHERE current_state.proposal_id = ?1
+               AND current_state.owner_kind = ?2
+               AND current_state.project_id = ?3",
+            params![
+                promotion.proposal_id().as_str(),
+                owner.kind,
+                owner.project_id.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| authority_storage_error(PROMOTE_OPERATION, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| authority_storage_error(PROMOTE_OPERATION, error))?
+    else {
+        return Ok(None);
+    };
+    if row_string(&row, 1, PROMOTE_OPERATION)? != owner.json {
+        return Err(authority_storage_error(
+            PROMOTE_OPERATION,
+            std::io::Error::other("proposal owner identity mismatch"),
+        ));
+    }
+    let last_event_id = promotion
+        .batch()
+        .events()
+        .last()
+        .map(FactLineageEventV1::event_id)
+        .ok_or(FactStoreError::EmptyBatch)?;
+    if row_string(&row, 0, PROMOTE_OPERATION)? != "applied"
+        || row_string(&row, 2, PROMOTE_OPERATION)?
+            != proposal_state_label(promotion.expected_state())
+        || row_string(&row, 3, PROMOTE_OPERATION)? != "applied"
+        || row_optional_string(&row, 4, PROMOTE_OPERATION)?.as_deref()
+            != Some(promotion.batch().fact_id().as_str())
+        || row_optional_string(&row, 5, PROMOTE_OPERATION)?.as_deref()
+            != Some(last_event_id.as_str())
+    {
+        return Ok(None);
+    }
+    Ok(Some(row_string(&row, 6, PROMOTE_OPERATION)?))
 }
 
 fn proposal_state_label(state: FactProposalPromotionStateV1) -> &'static str {

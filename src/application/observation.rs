@@ -855,6 +855,7 @@ mod tests {
         }))
         .with_repository_provenance(Some(RepositoryProvenanceAdmissionContext::new(
             repository.path().to_path_buf(),
+            ProjectId::new("project.application-test").unwrap(),
             RepositoryId::new("repository.application-test").unwrap(),
             Some(WorktreeId::new("worktree.application-test").unwrap()),
             [0x5a; 32],
@@ -879,6 +880,35 @@ mod tests {
         let encoded = serde_json::to_string(attachment).unwrap();
         assert!(!encoded.contains(repository.path().to_string_lossy().as_ref()));
         assert!(!encoded.contains("sk-repository-provenance-secret"));
+    }
+
+    #[tokio::test]
+    async fn repository_provenance_context_refuses_cross_project_reuse() {
+        let repository = TempDir::new().unwrap();
+        let request = request(&json!({
+            "type": "user",
+            "message": { "role": "user", "content": "cross-project evidence" }
+        }))
+        .with_repository_provenance(Some(RepositoryProvenanceAdmissionContext::new(
+            repository.path().to_path_buf(),
+            ProjectId::new("project.other-authority").unwrap(),
+            RepositoryId::new("repository.cross-project-test").unwrap(),
+            Some(WorktreeId::new("worktree.cross-project-test").unwrap()),
+            [0x5a; 32],
+        )));
+
+        let CaptureObservationOutcome::Persisted { outcome, .. } =
+            application().capture_observation(request).await.unwrap()
+        else {
+            panic!("cross-project observation must still persist");
+        };
+        assert!(matches!(
+            outcome
+                .receipt()
+                .repository_provenance_attachment()
+                .availability(),
+            EvidenceAvailabilityV1::Unavailable
+        ));
     }
 
     #[test]

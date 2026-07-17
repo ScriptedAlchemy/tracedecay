@@ -66,11 +66,11 @@ impl ProjectProviderRun<'_> {
         let mut deferred = discovery.is_truncated();
         let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         for path in discovery.paths {
-            match codex::try_admit_codex_jsonl_observations_for_project(
+            match codex::try_admit_codex_jsonl_observations_for_project_with_admission(
                 &path,
-                self.db,
                 self.project_root,
                 self.project_id.clone(),
+                self.facade,
                 Some(remaining),
             )
             .await
@@ -167,6 +167,7 @@ impl ProjectProviderRun<'_> {
             self.db,
             self.project_root,
             self.project_id.clone(),
+            self.facade,
             self.max_new_bytes,
         )
         .await
@@ -199,10 +200,11 @@ impl ProjectProviderRun<'_> {
     async fn run_cursor(self) -> ProviderRunOutcome {
         let composer = if let Some(source) = cursor_composer::CursorComposerSource::new() {
             source
-                .ingest_capped(
+                .ingest_capped_with_admission(
                     self.db,
                     self.project_root,
                     self.project_id.clone(),
+                    self.facade,
                     cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
                     Some(self.max_new_bytes),
                 )
@@ -219,10 +221,10 @@ impl ProjectProviderRun<'_> {
             composer.deferred_by_byte_cap,
         );
         let remaining = self.max_new_bytes.saturating_sub(composer.bytes_consumed);
-        match cursor::try_ingest_cursor_project_sweep_capped(
+        match cursor::try_ingest_cursor_project_sweep_capped_with_admission(
             self.project_root,
-            self.db,
             self.project_id.clone(),
+            self.facade,
             Some(remaining),
             composer.owned_session_ids,
         )
@@ -250,10 +252,10 @@ impl ProjectProviderRun<'_> {
     }
 
     async fn run_hermes(self) -> ProviderRunOutcome {
-        let outcome = hermes::ingest_for_project_capped(
-            self.db,
+        let outcome = hermes::ingest_for_project_capped_with_admission(
             self.project_root,
             self.project_id.clone(),
+            self.facade,
             Some(self.max_new_bytes),
         )
         .await;
@@ -269,6 +271,7 @@ async fn ingest_project_claude_observations(
     db: &GlobalDb,
     project_root: &Path,
     project_id: ProjectId,
+    admission: &HostAdmissionFacade<'_>,
     max_new_bytes: u64,
 ) -> std::result::Result<
     claude_observation::ClaudeObservationIngestStats,
@@ -277,11 +280,12 @@ async fn ingest_project_claude_observations(
     let Some(source) = claude::ClaudeSource::new() else {
         return Ok(claude_observation::ClaudeObservationIngestStats::default());
     };
-    claude_observation::ingest_source_with_observations(
+    claude_observation::ingest_source_with_observations_with_admission(
         db,
         &source,
         project_root,
         ObservationScopeV1::Project { project_id },
+        admission,
         Some(max_new_bytes),
         ObservationCancellation::default(),
     )

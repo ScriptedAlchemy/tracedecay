@@ -4,8 +4,8 @@ use libsql::{Connection, params};
 use tracedecay_domain::{
     CanonicalObservationIdV1, EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1,
     ObservationCollisionOutcomeV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1, ProjectionGenerationId, RetrievalAnchorRecordV2,
-    RetrievalAnchorId, RetrievalAnchorTargetV2, SanitizationReceiptV1, UtcMicros,
+    ObservationSourceIdentityV1, ProjectionGenerationId, RetrievalAnchorId,
+    RetrievalAnchorRecordV2, RetrievalAnchorTargetV2, SanitizationReceiptV1, UtcMicros,
     classify_observation_collision,
 };
 use tracedecay_store::observation::{
@@ -927,7 +927,7 @@ async fn read_observation_id_for_retrieval_anchor(
     }
     CanonicalObservationIdV1::new(observation_id)
         .map(Some)
-        .map_err(ObservationStoreError::RetrievalAnchorContract)
+        .map_err(ObservationStoreError::Contract)
 }
 
 async fn read_cursor(
@@ -1204,7 +1204,7 @@ impl GlobalDb {
                     Ok(ObservationPersistOutcome::CoveredDuplicate(
                         ObservationCommitReceipt::new(
                             existing.sequence(),
-                            candidate.clone(),
+                            existing.observation().clone(),
                             write.next_cursor().clone(),
                             existing.retrieval_anchor().clone(),
                             existing.projection_generation().clone(),

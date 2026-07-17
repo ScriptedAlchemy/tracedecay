@@ -774,9 +774,6 @@ pub(crate) async fn ingest_source_with_observations(
     max_new_bytes: Option<u64>,
     cancellation: ObservationCancellation,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
-    if cancellation.is_cancelled() {
-        return Err(ObservationApplicationError::Cancelled.into());
-    }
     let authorities = match &scope {
         ObservationScopeV1::Profile => HostAdmissionAuthorities::for_profile(db),
         ObservationScopeV1::Project { project_id } => {
@@ -784,9 +781,34 @@ pub(crate) async fn ingest_source_with_observations(
         }
     };
     let admission = HostAdmissionFacade::new(authorities);
+    ingest_source_with_observations_with_admission(
+        db,
+        source,
+        project_root,
+        scope,
+        &admission,
+        max_new_bytes,
+        cancellation,
+    )
+    .await
+}
+
+/// Ingest one Claude source through caller-prepared project admission authority.
+pub(crate) async fn ingest_source_with_observations_with_admission(
+    db: &crate::global_db::GlobalDb,
+    source: &ClaudeSource,
+    project_root: &Path,
+    scope: ObservationScopeV1,
+    admission: &HostAdmissionFacade<'_>,
+    max_new_bytes: Option<u64>,
+    cancellation: ObservationCancellation,
+) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
+    if cancellation.is_cancelled() {
+        return Err(ObservationApplicationError::Cancelled.into());
+    }
     let processing_context = SourceProcessingContext {
         db,
-        admission: &admission,
+        admission,
         source_adapter: source,
         project_root,
         scope: &scope,
@@ -829,7 +851,7 @@ pub(crate) async fn ingest_source_with_observations(
     if deferred > 0 || attempted_sources < scheduled_source_count {
         advance_source_frontier(db, attempted_sources).await?;
     }
-    let projection_stats = drain_projection_queue(&admission, &scope, &cancellation).await?;
+    let projection_stats = drain_projection_queue(admission, &scope, &cancellation).await?;
     if let Some((failed_sources, first_reason_code, first_retryable)) = source_failures {
         return Err(ClaudeObservationIngestError::SourceFailures {
             failed_sources,

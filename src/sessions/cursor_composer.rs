@@ -468,12 +468,12 @@ pub struct CursorComposerSource {
     chats_dir: PathBuf,
 }
 
-struct ComposerIngestContext<'a> {
-    db: &'a GlobalDb,
-    facade: HostAdmissionFacade<'a>,
+struct ComposerIngestContext<'facade, 'db, 'root> {
+    db: &'db GlobalDb,
+    facade: &'facade HostAdmissionFacade<'db>,
     scope: ObservationScopeV1,
-    project_root: Option<&'a Path>,
-    registered_roots: &'a [PathBuf],
+    project_root: Option<&'root Path>,
+    registered_roots: &'root [PathBuf],
 }
 
 /// Outcome of a length-gated `SQLite` text/blob fetch that never materializes
@@ -570,37 +570,41 @@ impl CursorComposerSource {
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
     ) -> CursorComposerSweepOutcome {
-        let mut outcome = CursorComposerSweepOutcome::default();
-        let mut byte_budget =
-            IngestByteBudget::bounded(max_new_bytes.unwrap_or(DEFAULT_COMPOSER_SWEEP_BYTES));
+        let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+            db,
+            project_id.clone(),
+        ));
+        self.ingest_capped_with_admission(
+            db,
+            project_root,
+            project_id,
+            &admission,
+            envelope_cap,
+            max_new_bytes,
+        )
+        .await
+    }
+
+    /// Project startup-sweep variant whose authority has already been prepared
+    /// by the caller from the authoritative project identity and privacy policy.
+    pub(crate) async fn ingest_capped_with_admission(
+        &self,
+        db: &GlobalDb,
+        project_root: &Path,
+        project_id: ProjectId,
+        admission: &HostAdmissionFacade<'_>,
+        envelope_cap: usize,
+        max_new_bytes: Option<u64>,
+    ) -> CursorComposerSweepOutcome {
         let context = ComposerIngestContext {
             db,
-            facade: HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
-                db,
-                project_id.clone(),
-            )),
+            facade: admission,
             scope: ObservationScopeV1::Project { project_id },
             project_root: Some(project_root),
             registered_roots: &[],
         };
-        drain_composer_projection_queue(&context).await;
-        // ws-hash -> workspace fsPath, harvested from envelopes so per-session
-        // store.db files (which key only by ws-hash) can be scoped to a project.
-        let mut workspace_paths = HashMap::new();
-        self.ingest_state_vscdb(
-            &context,
-            envelope_cap,
-            &mut byte_budget,
-            &mut outcome,
-            &mut workspace_paths,
-        )
-        .await;
-        self.ingest_chat_store_dbs(&context, &workspace_paths, &mut byte_budget, &mut outcome)
-            .await;
-        drain_composer_projection_queue(&context).await;
-        outcome.bytes_consumed = byte_budget.consumed();
-        outcome.deferred_by_byte_cap = byte_budget.deferred();
-        outcome
+        self.ingest_with_context(&context, envelope_cap, max_new_bytes)
+            .await
     }
 
     pub async fn ingest_user(
@@ -627,29 +631,40 @@ impl CursorComposerSource {
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
     ) -> CursorComposerSweepOutcome {
-        let mut outcome = CursorComposerSweepOutcome::default();
-        let mut byte_budget =
-            IngestByteBudget::bounded(max_new_bytes.unwrap_or(DEFAULT_COMPOSER_SWEEP_BYTES));
+        let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db));
         let context = ComposerIngestContext {
             db,
-            facade: HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db)),
+            facade: &admission,
             scope: ObservationScopeV1::Profile,
             project_root: None,
             registered_roots,
         };
-        drain_composer_projection_queue(&context).await;
+        self.ingest_with_context(&context, envelope_cap, max_new_bytes)
+            .await
+    }
+
+    async fn ingest_with_context(
+        &self,
+        context: &ComposerIngestContext<'_, '_, '_>,
+        envelope_cap: usize,
+        max_new_bytes: Option<u64>,
+    ) -> CursorComposerSweepOutcome {
+        let mut outcome = CursorComposerSweepOutcome::default();
+        let mut byte_budget =
+            IngestByteBudget::bounded(max_new_bytes.unwrap_or(DEFAULT_COMPOSER_SWEEP_BYTES));
+        drain_composer_projection_queue(context).await;
         let mut workspace_paths = HashMap::new();
         self.ingest_state_vscdb(
-            &context,
+            context,
             envelope_cap,
             &mut byte_budget,
             &mut outcome,
             &mut workspace_paths,
         )
         .await;
-        self.ingest_chat_store_dbs(&context, &workspace_paths, &mut byte_budget, &mut outcome)
+        self.ingest_chat_store_dbs(context, &workspace_paths, &mut byte_budget, &mut outcome)
             .await;
-        drain_composer_projection_queue(&context).await;
+        drain_composer_projection_queue(context).await;
         outcome.bytes_consumed = byte_budget.consumed();
         outcome.deferred_by_byte_cap = byte_budget.deferred();
         outcome
@@ -657,7 +672,7 @@ impl CursorComposerSource {
 
     async fn ingest_state_vscdb(
         &self,
-        context: &ComposerIngestContext<'_>,
+        context: &ComposerIngestContext<'_, '_, '_>,
         envelope_cap: usize,
         byte_budget: &mut IngestByteBudget,
         outcome: &mut CursorComposerSweepOutcome,
@@ -881,7 +896,7 @@ impl CursorComposerSource {
                         }
                         if advance_composer_coverage(
                             ComposerCoverageContext {
-                                facade: &context.facade,
+                                facade: context.facade,
                                 scope: &context.scope,
                                 generation,
                             },
@@ -903,7 +918,7 @@ impl CursorComposerSource {
                         }
                         if advance_composer_coverage(
                             ComposerCoverageContext {
-                                facade: &context.facade,
+                                facade: context.facade,
                                 scope: &context.scope,
                                 generation,
                             },
@@ -944,7 +959,7 @@ impl CursorComposerSource {
                         let Ok(request) = request else {
                             if advance_composer_coverage(
                                 ComposerCoverageContext {
-                                    facade: &context.facade,
+                                    facade: context.facade,
                                     scope: &context.scope,
                                     generation,
                                 },
@@ -973,7 +988,7 @@ impl CursorComposerSource {
                             Ok(CaptureObservationOutcome::Rejected { receipt, .. }) => {
                                 if advance_composer_coverage(
                                     ComposerCoverageContext {
-                                        facade: &context.facade,
+                                        facade: context.facade,
                                         scope: &context.scope,
                                         generation,
                                     },
@@ -992,7 +1007,7 @@ impl CursorComposerSource {
                             Ok(CaptureObservationOutcome::Quarantined { receipt, .. }) => {
                                 if advance_composer_coverage(
                                     ComposerCoverageContext {
-                                        facade: &context.facade,
+                                        facade: context.facade,
                                         scope: &context.scope,
                                         generation,
                                     },
@@ -1022,7 +1037,7 @@ impl CursorComposerSource {
 
     async fn ingest_chat_store_dbs(
         &self,
-        context: &ComposerIngestContext<'_>,
+        context: &ComposerIngestContext<'_, '_, '_>,
         workspace_paths: &HashMap<String, String>,
         byte_budget: &mut IngestByteBudget,
         outcome: &mut CursorComposerSweepOutcome,
@@ -1067,7 +1082,7 @@ impl CursorComposerSource {
 
     async fn ingest_one_store_db(
         &self,
-        context: &ComposerIngestContext<'_>,
+        context: &ComposerIngestContext<'_, '_, '_>,
         store_path: &Path,
         project_path: &str,
         byte_budget: &mut IngestByteBudget,
@@ -1174,7 +1189,7 @@ impl CursorComposerSource {
             let Ok(request) = request else {
                 if advance_composer_coverage(
                     ComposerCoverageContext {
-                        facade: &context.facade,
+                        facade: context.facade,
                         scope: &context.scope,
                         generation,
                     },
@@ -1203,7 +1218,7 @@ impl CursorComposerSource {
                 Ok(CaptureObservationOutcome::Rejected { receipt, .. }) => {
                     if advance_composer_coverage(
                         ComposerCoverageContext {
-                            facade: &context.facade,
+                            facade: context.facade,
                             scope: &context.scope,
                             generation,
                         },
@@ -1222,7 +1237,7 @@ impl CursorComposerSource {
                 Ok(CaptureObservationOutcome::Quarantined { receipt, .. }) => {
                     if advance_composer_coverage(
                         ComposerCoverageContext {
-                            facade: &context.facade,
+                            facade: context.facade,
                             scope: &context.scope,
                             generation,
                         },
@@ -1247,9 +1262,9 @@ impl CursorComposerSource {
     }
 }
 
-async fn drain_composer_projection_queue(context: &ComposerIngestContext<'_>) {
+async fn drain_composer_projection_queue(context: &ComposerIngestContext<'_, '_, '_>) {
     if let Err(error) = crate::sessions::claude_observation::drain_projection_queue(
-        &context.facade,
+        context.facade,
         &context.scope,
         &ObservationCancellation::default(),
     )

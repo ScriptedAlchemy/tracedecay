@@ -95,10 +95,30 @@ pub async fn ingest_for_project_capped(
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
 ) -> HermesSweepOutcome {
+    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+        db,
+        project_id.clone(),
+    ));
+    ingest_for_project_capped_with_admission(project_root, project_id, &admission, max_new_bytes)
+        .await
+}
+
+/// Project ingestion with the already-prepared central host-admission facade.
+///
+/// The project provider composes repository provenance once from the
+/// authoritative project root and passes it through this path. Direct and
+/// profile entrypoints intentionally continue to construct their own facade.
+pub(crate) async fn ingest_for_project_capped_with_admission(
+    project_root: &Path,
+    project_id: ProjectId,
+    admission: &HostAdmissionFacade<'_>,
+    max_new_bytes: Option<u64>,
+) -> HermesSweepOutcome {
     let homes = crate::sessions::home_dir()
         .map(|home| vec![home.join(".hermes")])
         .unwrap_or_default();
-    ingest_homes_capped(db, &homes, project_root, project_id, max_new_bytes).await
+    ingest_homes_capped_with_admission(&homes, project_root, project_id, admission, max_new_bytes)
+        .await
 }
 
 /// One project-store destination for a shared Hermes source sweep.
@@ -180,17 +200,38 @@ pub async fn ingest_homes_capped(
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
 ) -> HermesSweepOutcome {
+    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+        db,
+        project_id.clone(),
+    ));
+    ingest_homes_capped_with_admission(
+        hermes_homes,
+        project_root,
+        project_id,
+        &admission,
+        max_new_bytes,
+    )
+    .await
+}
+
+async fn ingest_homes_capped_with_admission(
+    hermes_homes: &[PathBuf],
+    project_root: &Path,
+    project_id: ProjectId,
+    admission: &HostAdmissionFacade<'_>,
+    max_new_bytes: Option<u64>,
+) -> HermesSweepOutcome {
     let mut outcome = HermesSweepOutcome::default();
     let mut budget = match max_new_bytes {
         Some(limit) => IngestByteBudget::bounded(limit),
         None => IngestByteBudget::unbounded(),
     };
     for source in candidate_state_dbs(hermes_homes, project_root) {
-        match try_ingest_state_db_bounded(
-            db,
+        match try_ingest_state_db_bounded_with_admission(
             &source,
             project_root,
             project_id.clone(),
+            admission,
             &mut budget,
         )
         .await
@@ -204,7 +245,7 @@ pub async fn ingest_homes_capped(
         }
     }
     let scope = ObservationScopeV1::Project { project_id };
-    if let Err(error) = drain_hermes_projections(db, &scope).await {
+    if let Err(error) = drain_hermes_projections_with_admission(admission, &scope).await {
         tracing::debug!(error, "Hermes project projection drain deferred");
     }
     outcome.bytes_consumed = budget.consumed();
@@ -1123,6 +1164,13 @@ async fn drain_hermes_projections(db: &GlobalDb, scope: &ObservationScopeV1) -> 
         ObservationScopeV1::Profile => HostAdmissionAuthorities::for_profile(db),
     };
     let facade = HostAdmissionFacade::new(authorities);
+    drain_hermes_projections_with_admission(&facade, scope).await
+}
+
+async fn drain_hermes_projections_with_admission(
+    facade: &HostAdmissionFacade<'_>,
+    scope: &ObservationScopeV1,
+) -> Result<(), String> {
     loop {
         let outcome = facade
             .drain_projection_queue(
@@ -1159,6 +1207,27 @@ async fn admit_rows(
         ObservationScopeV1::Profile => HostAdmissionAuthorities::for_profile(db),
     };
     let facade = HostAdmissionFacade::new(authorities);
+    admit_rows_with_admission(
+        &facade,
+        rows,
+        scope,
+        generation,
+        file_identity,
+        resume_fingerprint,
+        route,
+    )
+    .await
+}
+
+async fn admit_rows_with_admission(
+    facade: &HostAdmissionFacade<'_>,
+    rows: &[HermesRow],
+    scope: ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    file_identity: u64,
+    resume_fingerprint: u64,
+    route: impl Fn(&HermesRow) -> Option<HermesProjectionMetadata>,
+) -> Result<TranscriptIngestStats, String> {
     let mut stats = TranscriptIngestStats::default();
     let mut sessions = BTreeSet::new();
     for row in rows {
@@ -1192,7 +1261,7 @@ async fn admit_rows(
         match action {
             HermesAdmissionAction::Cover(reason) => {
                 advance_coverage(
-                    &facade,
+                    facade,
                     source,
                     range,
                     expected_cursor,
@@ -1219,7 +1288,7 @@ async fn admit_rows(
                     }
                     CaptureObservationOutcome::Rejected { receipt, .. } => {
                         advance_coverage(
-                            &facade,
+                            facade,
                             source,
                             range,
                             expected_cursor,
@@ -1234,7 +1303,7 @@ async fn admit_rows(
                     }
                     CaptureObservationOutcome::Quarantined { receipt, .. } => {
                         advance_coverage(
-                            &facade,
+                            facade,
                             source,
                             range,
                             expected_cursor,
@@ -1511,7 +1580,7 @@ async fn open_state_source(
 /// destination's authoritative SQLite-row cursor.
 #[allow(clippy::too_many_arguments)]
 async fn ingest_bounded_pages<F, R>(
-    db: &GlobalDb,
+    admission: &HostAdmissionFacade<'_>,
     conn: &libsql::Connection,
     select_sql: &str,
     scope: ObservationScopeV1,
@@ -1543,8 +1612,8 @@ where
         }
         let bounded = &new.items[..bounded_count];
         let route = route_page(bounded);
-        let admitted = admit_rows(
-            db,
+        let admitted = admit_rows_with_admission(
+            admission,
             bounded,
             scope.clone(),
             generation,
@@ -1582,11 +1651,26 @@ async fn try_ingest_state_db_bounded(
     project_id: ProjectId,
     budget: &mut IngestByteBudget,
 ) -> Result<TranscriptIngestStats, String> {
+    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+        db,
+        project_id.clone(),
+    ));
+    try_ingest_state_db_bounded_with_admission(source, project_root, project_id, &admission, budget)
+        .await
+}
+
+async fn try_ingest_state_db_bounded_with_admission(
+    source: &HermesProfileSource,
+    project_root: &Path,
+    project_id: ProjectId,
+    admission: &HostAdmissionFacade<'_>,
+    budget: &mut IngestByteBudget,
+) -> Result<TranscriptIngestStats, String> {
     let (conn, generation, file_identity, resume_fingerprint, select_sql) =
         open_state_source(source).await?;
     let scope = ObservationScopeV1::Project { project_id };
     ingest_bounded_pages(
-        db,
+        admission,
         &conn,
         &select_sql,
         scope,
@@ -1690,8 +1774,9 @@ async fn try_ingest_user_state_db_bounded(
 ) -> Result<TranscriptIngestStats, String> {
     let (conn, generation, file_identity, resume_fingerprint, select_sql) =
         open_state_source(source).await?;
+    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db));
     ingest_bounded_pages(
-        db,
+        &admission,
         &conn,
         &select_sql,
         ObservationScopeV1::Profile,

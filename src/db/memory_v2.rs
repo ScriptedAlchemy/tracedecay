@@ -187,6 +187,19 @@ pub(crate) async fn create_schema(conn: &Connection, operation: &str) -> Result<
             active_assertion_id TEXT,
             last_event_id TEXT NOT NULL,
             updated_at INTEGER NOT NULL,
+            retrieval_count INTEGER NOT NULL DEFAULT 0 CHECK(retrieval_count >= 0),
+            access_count INTEGER NOT NULL DEFAULT 0 CHECK(access_count >= 0),
+            helpful_count INTEGER NOT NULL DEFAULT 0 CHECK(helpful_count >= 0),
+            unhelpful_count INTEGER NOT NULL DEFAULT 0 CHECK(unhelpful_count >= 0),
+            last_retrieved_at INTEGER,
+            last_recalled_at INTEGER,
+            last_feedback_at INTEGER,
+            projection_state TEXT NOT NULL DEFAULT 'unavailable' CHECK(projection_state IN (
+                'ready', 'rebuilding', 'stale', 'unavailable'
+            )),
+            vector_watermark_json TEXT CHECK(
+                vector_watermark_json IS NULL OR json_valid(vector_watermark_json)
+            ),
             PRIMARY KEY(fact_id, owner_kind, project_id),
             FOREIGN KEY(fact_id, owner_kind, project_id)
                 REFERENCES memory_v2_facts(fact_id, owner_kind, project_id),
@@ -307,7 +320,6 @@ pub(crate) async fn create_schema(conn: &Connection, operation: &str) -> Result<
             CHECK(
                 (current_state = 'applied'
                     AND promoted_fact_id IS NOT NULL
-                    AND promoted_assertion_id IS NOT NULL
                     AND promoted_event_id IS NOT NULL) OR
                 (current_state <> 'applied'
                     AND promoted_fact_id IS NULL
@@ -463,6 +475,7 @@ pub(crate) async fn create_schema(conn: &Connection, operation: &str) -> Result<
     .await
     .map_err(|error| db_error(operation, error))?;
     install_v20_integrity_triggers(conn, operation).await?;
+    install_v21_current_projection_indexes(conn, operation).await?;
     Ok(())
 }
 
@@ -553,7 +566,7 @@ pub(super) async fn upgrade_v20_schema(conn: &Connection, operation: &str) -> Re
     conn.execute(transition_origin_backfill, ())
         .await
         .map_err(|error| db_error(operation, error))?;
-    create_schema(conn, operation).await?;
+    rebuild_v20_proposal_transition_tables(conn, operation).await?;
 
     conn.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_v2_proposals_owner_idempotency
@@ -565,6 +578,55 @@ pub(super) async fn upgrade_v20_schema(conn: &Connection, operation: &str) -> Re
     .map_err(|error| db_error(operation, error))?;
 
     scrub_payload_bearing_assertion_headers(conn, operation).await
+}
+
+/// Adds the V21 compatibility projection fields without fabricating telemetry
+/// or vector readiness for already-migrated facts. The daemon-authorized
+/// compatibility store is the only writer that may advance these fields.
+pub(super) async fn upgrade_v21_schema(conn: &Connection, operation: &str) -> Result<()> {
+    for (column, definition) in [
+        (
+            "retrieval_count",
+            "retrieval_count INTEGER NOT NULL DEFAULT 0 CHECK(retrieval_count >= 0)",
+        ),
+        (
+            "access_count",
+            "access_count INTEGER NOT NULL DEFAULT 0 CHECK(access_count >= 0)",
+        ),
+        (
+            "helpful_count",
+            "helpful_count INTEGER NOT NULL DEFAULT 0 CHECK(helpful_count >= 0)",
+        ),
+        (
+            "unhelpful_count",
+            "unhelpful_count INTEGER NOT NULL DEFAULT 0 CHECK(unhelpful_count >= 0)",
+        ),
+        ("last_retrieved_at", "last_retrieved_at INTEGER"),
+        ("last_recalled_at", "last_recalled_at INTEGER"),
+        ("last_feedback_at", "last_feedback_at INTEGER"),
+        (
+            "projection_state",
+            "projection_state TEXT NOT NULL DEFAULT 'unavailable' CHECK(\
+                projection_state IN ('ready', 'rebuilding', 'stale', 'unavailable')\
+            )",
+        ),
+        (
+            "vector_watermark_json",
+            "vector_watermark_json TEXT CHECK(\
+                vector_watermark_json IS NULL OR json_valid(vector_watermark_json)\
+            )",
+        ),
+    ] {
+        add_column_if_missing(
+            conn,
+            "memory_v2_current_facts",
+            column,
+            definition,
+            operation,
+        )
+        .await?;
+    }
+    create_schema(conn, operation).await
 }
 
 async fn add_column_if_missing(
@@ -594,6 +656,78 @@ async fn add_column_if_missing(
         .await
         .map_err(|error| db_error(operation, error))?;
     Ok(true)
+}
+
+/// SQLite cannot relax a table CHECK in place. Rebuild the immutable proposal
+/// transition log and its current-state projection together so v19 databases
+/// retain every transition while allowing an applied, assertion-less batch.
+async fn rebuild_v20_proposal_transition_tables(conn: &Connection, operation: &str) -> Result<()> {
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS memory_v2_proposal_transitions_no_update;
+         DROP TRIGGER IF EXISTS memory_v2_proposal_transitions_no_delete;
+         DROP TRIGGER IF EXISTS memory_v2_proposal_transitions_require_origin;
+         DROP INDEX IF EXISTS idx_memory_v2_proposal_list;
+         ALTER TABLE memory_v2_proposal_current
+         RENAME TO memory_v2_proposal_current_v19;
+         ALTER TABLE memory_v2_proposal_transitions
+         RENAME TO memory_v2_proposal_transitions_v19;",
+    )
+    .await
+    .map_err(|error| db_error(operation, error))?;
+
+    create_schema(conn, operation).await?;
+    conn.execute_batch(
+        "INSERT INTO memory_v2_proposal_transitions(
+            transition_sequence, transition_id, proposal_id, owner_kind,
+            project_id, previous_state, current_state, reviewer_json,
+            validation_json, origin, promoted_fact_id, promoted_assertion_id,
+            promoted_event_id, transition_json, occurred_at
+         )
+         SELECT transition_sequence, transition_id, proposal_id, owner_kind,
+                project_id, previous_state, current_state, reviewer_json,
+                validation_json, origin, promoted_fact_id, promoted_assertion_id,
+                promoted_event_id, transition_json, occurred_at
+         FROM memory_v2_proposal_transitions_v19;
+         INSERT INTO memory_v2_proposal_current(
+            proposal_id, owner_kind, project_id, state, revision,
+            last_transition_id, updated_at
+         )
+         SELECT proposal_id, owner_kind, project_id, state, revision,
+                last_transition_id, updated_at
+         FROM memory_v2_proposal_current_v19;
+         DROP TABLE memory_v2_proposal_current_v19;
+         DROP TABLE memory_v2_proposal_transitions_v19;",
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| db_error(operation, error))
+}
+
+async fn install_v21_current_projection_indexes(
+    conn: &Connection,
+    operation: &str,
+) -> Result<()> {
+    if !table_has_column(
+        conn,
+        "memory_v2_current_facts",
+        "projection_state",
+        operation,
+    )
+    .await?
+    {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_memory_v2_current_compatibility_search
+             ON memory_v2_current_facts(
+                 owner_kind, project_id, updated_at DESC, fact_id
+             );
+         CREATE INDEX IF NOT EXISTS idx_memory_v2_current_projection_state
+             ON memory_v2_current_facts(owner_kind, project_id, projection_state);",
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| db_error(operation, error))
 }
 
 async fn install_v20_integrity_triggers(conn: &Connection, operation: &str) -> Result<()> {

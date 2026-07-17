@@ -3,17 +3,19 @@ use std::collections::BTreeMap;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tracedecay::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use tracedecay::application::memory::{EvidenceAnchorResolutionError, EvidenceAnchorResolver};
 use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1,
-    EvidenceAvailabilityV1, NativeAliasV2, ObservationCollisionOutcomeV1, ObservationId,
-    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    EvidenceAvailabilityV1, FactOwnerV1, NativeAliasV2, ObservationCollisionOutcomeV1,
+    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId,
-    RetentionClass, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, UtcMicros,
+    RetentionClass, RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, NonDurableFrameReason, ObservationCoverageV1, ObservationCursorAdvance,
@@ -125,8 +127,18 @@ fn anchored_write(write: ObservationWrite) -> AnchoredObservationWrite {
 }
 
 fn anchored_write_at(write: ObservationWrite, ingested_at: UtcMicros) -> AnchoredObservationWrite {
-    let projection_generation =
-        ProjectionGenerationId::new(SESSION_MESSAGE_PROJECTOR_VERSION).unwrap();
+    anchored_write_at_with_projection_generation(
+        write,
+        ingested_at,
+        ProjectionGenerationId::new(SESSION_MESSAGE_PROJECTOR_VERSION).unwrap(),
+    )
+}
+
+fn anchored_write_at_with_projection_generation(
+    write: ObservationWrite,
+    ingested_at: UtcMicros,
+    projection_generation: ProjectionGenerationId,
+) -> AnchoredObservationWrite {
     let authorization = build_observation_resolution_authorization_v1(
         write.observation(),
         "observation-store-test.v1",
@@ -837,7 +849,11 @@ async fn exact_duplicate_returns_original_receipt_without_mutating_cursor_or_sto
         ObservationWrite::new(candidate, None, original_receipt.committed_cursor().clone())
             .unwrap();
     let duplicate = store
-        .persist_observation(anchored_write_at(duplicate_write, UtcMicros(2)))
+        .persist_observation(anchored_write_at_with_projection_generation(
+            duplicate_write,
+            UtcMicros(2),
+            ProjectionGenerationId::new("projection.retry.v2").unwrap(),
+        ))
         .await
         .unwrap();
     let duplicate_receipt = match duplicate {
@@ -857,6 +873,44 @@ async fn exact_duplicate_returns_original_receipt_without_mutating_cursor_or_sto
         cursor_before
     );
     assert_eq!(user_table_counts(&tmp).await, counts_before);
+}
+
+#[tokio::test]
+async fn daemon_resolves_only_canonical_owner_bound_observation_anchors() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let candidate = observation(0, 100, "receipt.resolver", "stable sanitized payload");
+    let receipt = match store
+        .persist_observation(write(candidate, None))
+        .await
+        .unwrap()
+    {
+        ObservationPersistOutcome::Committed(receipt) => receipt,
+        other => panic!("first persistence must commit, got {other:?}"),
+    };
+    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(&db));
+
+    let resolved = facade
+        .resolve_evidence_anchor(
+            FactOwnerV1::Profile,
+            receipt.retrieval_anchor().anchor_id().clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved.record(), receipt.retrieval_anchor());
+
+    let error = facade
+        .resolve_evidence_anchor(
+            FactOwnerV1::Profile,
+            RetrievalAnchorId::new("retrieval.missing").unwrap(),
+        )
+        .await
+        .expect_err("a primary anchor cannot be unavailable");
+    assert!(matches!(
+        error,
+        EvidenceAnchorResolutionError::Unavailable { .. }
+    ));
 }
 
 #[tokio::test]
@@ -963,7 +1017,11 @@ async fn relocated_native_duplicate_advances_coverage_without_reinserting_observ
         other => panic!("relocated native record must advance coverage, got {other:?}"),
     };
     assert_eq!(coverage_receipt.sequence(), original_receipt.sequence());
-    assert_eq!(coverage_receipt.observation(), &relocated);
+    assert_eq!(coverage_receipt.observation(), &original);
+    assert_eq!(
+        coverage_receipt.retrieval_anchor(),
+        original_receipt.retrieval_anchor()
+    );
     assert_eq!(coverage_receipt.committed_cursor(), &native_cursor(2, 72));
     assert_eq!(
         store

@@ -1158,13 +1158,36 @@ pub async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
+    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+        db,
+        project_id.clone(),
+    ));
+    try_ingest_cursor_project_sweep_capped_with_admission(
+        project_root,
+        project_id,
+        &admission,
+        max_new_bytes,
+        skip_session_ids,
+    )
+    .await
+}
+
+/// Project startup-sweep variant whose authority has already been prepared by
+/// the caller from the authoritative project identity and privacy policy.
+pub(crate) async fn try_ingest_cursor_project_sweep_capped_with_admission<S: BuildHasher>(
+    project_root: &Path,
+    project_id: ProjectId,
+    admission: &HostAdmissionFacade<'_>,
+    max_new_bytes: Option<u64>,
+    skip_session_ids: std::collections::HashSet<String, S>,
+) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
     let Some(source) = CursorSweepSource::new() else {
         return Ok(CursorTranscriptIngestStats::default());
     };
-    admit_cursor_sweep_observations(
+    admit_cursor_sweep_observations_with_admission(
         &source.with_skip_session_ids(skip_session_ids.into_iter().collect()),
         project_root,
-        db,
+        admission,
         max_new_bytes,
         ObservationScopeV1::Project { project_id },
     )
@@ -1208,6 +1231,23 @@ async fn admit_cursor_sweep_observations(
             HostAdmissionAuthorities::for_project(db, project_id.clone())
         }
     });
+    admit_cursor_sweep_observations_with_admission(
+        source,
+        project_root,
+        &admission,
+        max_new_bytes,
+        scope,
+    )
+    .await
+}
+
+async fn admit_cursor_sweep_observations_with_admission(
+    source: &CursorSweepSource,
+    project_root: &Path,
+    admission: &HostAdmissionFacade<'_>,
+    max_new_bytes: Option<u64>,
+    scope: ObservationScopeV1,
+) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
     let mut budget = match max_new_bytes {
         Some(limit) => IngestByteBudget::bounded(limit),
         None => IngestByteBudget::unbounded(),
@@ -1230,14 +1270,14 @@ async fn admit_cursor_sweep_observations(
             &parent_session_id,
             &path,
             &context,
-            &admission,
+            admission,
             &scope,
             budget.remaining(),
         )
         .await?;
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
-    let mut stats = drain_cursor_observation_projections(&admission, &scope).await?;
+    let mut stats = drain_cursor_observation_projections(admission, &scope).await?;
     stats.bytes_consumed = budget.consumed();
     stats.source_deferred = budget.deferred();
     Ok(stats)
