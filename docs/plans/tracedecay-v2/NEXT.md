@@ -8,22 +8,36 @@ authorized result back to the exact retained evidence that supports it.
 
 ## Current branch status
 
-The current branch adds the PR7 domain fact and anchor contracts, the
-`retrieval_anchors`/`retrieval_anchor_aliases`/binding schema with owner-bound
-identity and immutability triggers, the `AnchoredObservationWrite` persist path,
-the `memory_v2` fact store with assertions, supersession, trust, and proposals,
-the `v19`-`v21` migrations, and the repository-provenance evidence path. The
-compatibility fact authority carries legacy V1 memory-tool facts forward through
-the same owner-bound contract.
+The branch delivers the PR7 slice end to end: the domain fact and anchor
+contracts, the `retrieval_anchors`/`retrieval_anchor_aliases`/binding schema
+with owner-bound identity and immutability triggers, the
+`AnchoredObservationWrite` persist path, the `memory_v2` fact store with
+assertions, supersession, trust, and proposals, the `v19`-`v23` migrations,
+the repository-provenance evidence path, and the compatibility fact authority
+that carries legacy V1 memory-tool facts forward through the same owner-bound
+contract. The legacy cutover is daemon-scheduled (decision-driven ticks on the
+shared bounded backoff curve), preserves legacy usage counters into the
+canonical projection, and memory replay identities are scoped per client
+connection so persistent operation receipts never collide across hosts.
 
-This is in-progress work completing the application and store wiring. The
-correctness review is not yet closed and the aggregate gates are not yet green.
-Pending before completion: the application wiring compiles clean; the acceptance
-test matrix from plans 13, 36, and 05 passes; Linux workspace tests, native and
-Windows all-feature Clippy, and formatting gates pass; developer-build feedback
-evidence is recorded for the changed compilation scope; and clean attested
-memory/anchor baselines are indexed. This section is finalized only at
-completion; it is accurate now with the pending items marked.
+Acceptance evidence: the plan 13/36/05 PR7 matrix passes (anchor atomicity,
+idempotent replay, retargeting immunity, typed tombstones with deletion
+lineage, authorization recheck, compatibility migration parity including the
+behavioral memory-hygiene evals); the deletion path redacts feedback
+free text; Linux `cargo check`/`clippy --all-features --all-targets` are
+error-free, formatting is clean, and the full workspace nextest suite passes.
+Structural debt and deferred alignments are cataloged in
+`docs/PR7-STRUCTURAL-QUALITY-REPORT.md` (P2 decomposition wave, P3 planned-PR
+items). Release-profile memory/anchor/migration baselines are recorded as
+provisional evidence under `benchmarks/pr7-memory/` (dirty-worktree runs carry
+no commit attestation by design), and developer build feedback is captured via
+`scripts/dev/pr7-build-feedback.sh`.
+
+Forward note for PR11: `build_resolution_authorization_v1` snapshots are
+namespace-derived placeholders. The resolution-side recheck contract is
+correct and tested, but the snapshots are not policy-engine-issued grants;
+PR11's policy surface replaces their derivation without changing the recheck
+boundary (report item P3.1).
 
 ## Product slice
 
