@@ -447,7 +447,30 @@ pub(crate) fn matching_legacy_profile_layouts(
     project_root: &Path,
     profile_root: &Path,
     excluded_project_id: Option<&str>,
+    selected_exact_root_is_authoritative: bool,
 ) -> Result<(Vec<StoreLayout>, bool)> {
+    matching_legacy_profile_layouts_with_git_resolver(
+        project_root,
+        profile_root,
+        excluded_project_id,
+        selected_exact_root_is_authoritative,
+        crate::worktree::is_detached_linked_worktree,
+        crate::worktree::git_common_dir,
+    )
+}
+
+fn matching_legacy_profile_layouts_with_git_resolver<D, G>(
+    project_root: &Path,
+    profile_root: &Path,
+    excluded_project_id: Option<&str>,
+    selected_exact_root_is_authoritative: bool,
+    mut is_detached_linked_worktree: D,
+    mut git_common_dir: G,
+) -> Result<(Vec<StoreLayout>, bool)>
+where
+    D: FnMut(&Path) -> bool,
+    G: FnMut(&Path) -> Option<PathBuf>,
+{
     let projects_root = profile_root.join("projects");
     let Ok(entries) = fs::read_dir(&projects_root) else {
         return Ok((Vec::new(), false));
@@ -459,12 +482,8 @@ pub(crate) fn matching_legacy_profile_layouts(
         .collect::<Vec<_>>();
     manifest_paths.sort();
 
-    let project_git_common_dir = (!crate::worktree::is_detached_linked_worktree(project_root))
-        .then(|| crate::worktree::git_common_dir(project_root))
-        .flatten();
-    let mut legacy_git_common_dirs = HashMap::<PathBuf, Option<PathBuf>>::new();
     let mut exact_manifests = Vec::new();
-    let mut shared_git_manifests = Vec::new();
+    let mut non_exact_manifests = Vec::new();
     let mut selected_manifest_matches_exact_root = false;
     for manifest_path in manifest_paths {
         let Ok(manifest) = read_store_manifest(&manifest_path) else {
@@ -479,34 +498,43 @@ pub(crate) fn matching_legacy_profile_layouts(
             exact_manifests.push((manifest_path, manifest));
             continue;
         }
-        let same_git_checkout = project_git_common_dir.as_deref().is_some_and(|current| {
-            legacy_git_common_dirs
-                .entry(manifest.project_root.clone())
-                .or_insert_with(|| {
-                    manifest
-                        .project_root
-                        .is_dir()
-                        .then(|| crate::worktree::git_common_dir(&manifest.project_root))
-                        .flatten()
-                })
-                .as_deref()
-                .is_some_and(|legacy| same_local_path(legacy, current))
-        });
-        if same_git_checkout {
-            shared_git_manifests.push((manifest_path, manifest));
-        }
+        non_exact_manifests.push((manifest_path, manifest));
     }
 
     // A linked worktree may have its own profile shard while sharing a Git
-    // common directory with every sibling checkout. Treat an exact manifest
-    // root as authoritative; the shared-Git fallback is only for worktrees
-    // that have not yet acquired their own shard.
+    // common directory with every sibling checkout. A non-excluded exact
+    // manifest is authoritative. The selected exact manifest is authoritative
+    // only when its inventory is healthy and populated; a pristine or
+    // unhealthy selection must retain the shared-Git recovery path.
     let selected_is_sole_exact_root =
         selected_manifest_matches_exact_root && exact_manifests.is_empty();
-    let matching_manifests = if exact_manifests.is_empty() {
-        shared_git_manifests
-    } else {
+    let matching_manifests = if !exact_manifests.is_empty()
+        || (selected_is_sole_exact_root && selected_exact_root_is_authoritative)
+    {
         exact_manifests
+    } else {
+        let project_git_common_dir = (!is_detached_linked_worktree(project_root))
+            .then(|| git_common_dir(project_root))
+            .flatten();
+        let mut legacy_git_common_dirs = HashMap::<PathBuf, Option<PathBuf>>::new();
+        non_exact_manifests
+            .into_iter()
+            .filter(|(_, manifest)| {
+                project_git_common_dir.as_deref().is_some_and(|current| {
+                    legacy_git_common_dirs
+                        .entry(manifest.project_root.clone())
+                        .or_insert_with(|| {
+                            manifest
+                                .project_root
+                                .is_dir()
+                                .then(|| git_common_dir(&manifest.project_root))
+                                .flatten()
+                        })
+                        .as_deref()
+                        .is_some_and(|legacy| same_local_path(legacy, current))
+                })
+            })
+            .collect()
     };
     let mut layouts = Vec::new();
     for (manifest_path, manifest) in matching_manifests {
@@ -1288,7 +1316,112 @@ fn set_private_file_permissions(_path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::cell::RefCell;
     use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn exact_root_authority_controls_shared_git_discovery() {
+        fn write_manifest(profile_root: &Path, project_id: &str, project_root: &Path) {
+            let data_root = profile_root.join("projects").join(project_id);
+            fs::create_dir_all(&data_root).unwrap();
+            write_store_manifest_to_path(
+                &data_root.join(STORE_MANIFEST_FILENAME),
+                &StoreManifest {
+                    schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+                    project_id: Some(project_id.to_string()),
+                    store_kind: StoreKind::CodeProject,
+                    storage_mode: StorageMode::ProfileSharded,
+                    project_root: project_root.to_path_buf(),
+                    data_root,
+                    graph_db_relpath: "tracedecay.db".into(),
+                    sessions_db_relpath: "sessions.db".into(),
+                    branch_meta_relpath: "branch-meta.json".into(),
+                },
+            )
+            .unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let project_root = dir.path().join("repo");
+        let unrelated_root = dir.path().join("unrelated");
+        let profile_root = dir.path().join("profile");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::create_dir_all(&unrelated_root).unwrap();
+        write_manifest(&profile_root, "proj_exact", &project_root);
+        write_manifest(&profile_root, "proj_unrelated", &unrelated_root);
+
+        let resolver_calls = RefCell::new(Vec::new());
+        let (layouts, selected_is_sole_exact_root) =
+            matching_legacy_profile_layouts_with_git_resolver(
+                &project_root,
+                &profile_root,
+                None,
+                false,
+                |_| false,
+                |root| {
+                    resolver_calls.borrow_mut().push(root.to_path_buf());
+                    Some(dir.path().join("shared.git"))
+                },
+            )
+            .unwrap();
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(
+            layouts[0].identity.project_id.as_deref(),
+            Some("proj_exact")
+        );
+        assert!(!selected_is_sole_exact_root);
+        assert!(
+            resolver_calls.borrow().is_empty(),
+            "exact-root selection must not invoke shared-Git discovery"
+        );
+
+        resolver_calls.borrow_mut().clear();
+        let (layouts, selected_is_sole_exact_root) =
+            matching_legacy_profile_layouts_with_git_resolver(
+                &project_root,
+                &profile_root,
+                Some("proj_exact"),
+                true,
+                |_| false,
+                |root| {
+                    resolver_calls.borrow_mut().push(root.to_path_buf());
+                    Some(dir.path().join("shared.git"))
+                },
+            )
+            .unwrap();
+        assert!(layouts.is_empty());
+        assert!(selected_is_sole_exact_root);
+        assert!(
+            resolver_calls.borrow().is_empty(),
+            "an authoritative selected exact root must not invoke shared-Git discovery"
+        );
+
+        resolver_calls.borrow_mut().clear();
+        let (layouts, selected_is_sole_exact_root) =
+            matching_legacy_profile_layouts_with_git_resolver(
+                &project_root,
+                &profile_root,
+                Some("proj_exact"),
+                false,
+                |_| false,
+                |root| {
+                    resolver_calls.borrow_mut().push(root.to_path_buf());
+                    Some(dir.path().join("shared.git"))
+                },
+            )
+            .unwrap();
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(
+            layouts[0].identity.project_id.as_deref(),
+            Some("proj_unrelated")
+        );
+        assert!(selected_is_sole_exact_root);
+        assert_eq!(
+            resolver_calls.borrow().as_slice(),
+            [project_root, unrelated_root],
+            "a non-authoritative selected exact root must retain shared-Git recovery"
+        );
+    }
 
     #[test]
     fn append_line_keeps_concurrent_jsonl_writes_intact() {

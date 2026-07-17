@@ -205,8 +205,18 @@ impl TraceDecay {
         let selected_id = selected
             .as_ref()
             .and_then(|layout| layout.identity.project_id.as_deref());
-        let (candidates, selected_is_sole_exact_root) =
-            storage::matching_legacy_profile_layouts(project_root, &profile_root, selected_id)?;
+        let selected_exact_root_is_authoritative = if let Some(selected) = selected.as_ref() {
+            let inventory = store_identity_inventory(selected).await;
+            inventory.is_healthy() && !inventory.is_pristine()
+        } else {
+            false
+        };
+        let (candidates, selected_is_sole_exact_root) = storage::matching_legacy_profile_layouts(
+            project_root,
+            &profile_root,
+            selected_id,
+            selected_exact_root_is_authoritative,
+        )?;
         Self::choose_identity_layout(
             project_root,
             selected,

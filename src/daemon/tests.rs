@@ -407,6 +407,63 @@ async fn draining_waits_for_one_bounded_in_flight_request() {
 }
 
 #[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let engine = DaemonEngine::default();
+    let handshake = DaemonHandshake {
+        project_path: Some(project),
+        client_identity: test_client_identity_for(profile_root),
+        ..test_handshake_defaults()
+    };
+    let initialize_request = serde_json::from_value(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {}
+    }))
+    .expect("initialize request");
+
+    let store_administration = engine.store_administration.clone();
+    let writer_held = Arc::new(tokio::sync::Notify::new());
+    let writer_held_by_blocker = Arc::clone(&writer_held);
+    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(async move {
+        store_administration
+            .with_writer(|| async move {
+                writer_held_by_blocker.notify_one();
+                writer_release.await.expect("release writer gate");
+            })
+            .await;
+    });
+    writer_held.notified().await;
+
+    engine.spawn_project_server_warmup(handshake, initialize_request);
+    engine.lifecycle.begin_draining();
+    let idle_while_writer_held = tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        engine.lifecycle.wait_for_idle(),
+    )
+    .await;
+
+    release_writer.send(()).expect("signal writer gate release");
+    blocker.await.expect("writer gate blocker task");
+    if idle_while_writer_held.is_err() {
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            engine.lifecycle.wait_for_idle(),
+        )
+        .await
+        .expect("warmup cleanup after writer release");
+    }
+
+    idle_while_writer_held.expect("draining must cancel project warmup before writer release");
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
     let engine = DaemonEngine::default();
@@ -576,6 +633,153 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
         .await
         .expect("cache-test shutdown phase timed out");
     eprintln!("[cache-test] phase=shutdown done");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
+    const PHASE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    let options = crate::tracedecay::TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(client_identity.global_db_path.clone()),
+    };
+    drop(
+        crate::tracedecay::TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize project"),
+    );
+    let mut config = crate::config::load_config(&project).expect("load project config");
+    config.sync.session_start_sync = false;
+    crate::config::save_config(&project, &config)
+        .expect("disable unrelated startup transcript ingestion");
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 1, "mcp-bootstrap-cache-test")
+            .expect("daemon database scope");
+    let engine = DaemonEngine::default();
+    let handshake = DaemonHandshake {
+        project_path: Some(project),
+        client_identity,
+        allow_initialize_root_routing: false,
+        ..test_handshake_defaults()
+    };
+
+    let store_administration = engine.store_administration.clone();
+    let writer_held = Arc::new(tokio::sync::Notify::new());
+    let writer_held_by_blocker = Arc::clone(&writer_held);
+    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(async move {
+        store_administration
+            .with_writer(|| async move {
+                writer_held_by_blocker.notify_one();
+                writer_release.await.expect("release writer gate");
+            })
+            .await;
+    });
+    writer_held.notified().await;
+
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "bootstrap-cache-test", "version": "1"}
+        }
+    });
+    let tools_list = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list"
+    });
+    let initialize_engine = engine.clone();
+    let initialize_handshake = handshake.clone();
+    let mut initialize_task = tokio::spawn(async move {
+        daemon_round_trip(initialize_engine, &initialize_handshake, initialize).await
+    });
+    let tools_list_engine = engine.clone();
+    let tools_list_handshake = handshake.clone();
+    let mut tools_list_task = tokio::spawn(async move {
+        daemon_round_trip(tools_list_engine, &tools_list_handshake, tools_list).await
+    });
+    let (initialize_within_bound, tools_list_within_bound) = tokio::join!(
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut initialize_task),
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut tools_list_task),
+    );
+
+    release_writer.send(()).expect("signal writer gate release");
+    blocker.await.expect("writer gate blocker task");
+    if initialize_within_bound.is_err() {
+        let _ = initialize_task.await;
+    }
+    if tools_list_within_bound.is_err() {
+        let _ = tools_list_task.await;
+    }
+
+    let initialize_responses = initialize_within_bound
+        .expect("initialize must not wait for project writer gate")
+        .expect("initialize client task");
+    let initialize_response = initialize_responses
+        .iter()
+        .find(|response| response["id"] == json!(1))
+        .expect("initialize response");
+    assert_eq!(
+        initialize_response["result"]["protocolVersion"],
+        json!("2024-11-05")
+    );
+    assert_eq!(
+        initialize_response["result"]["serverInfo"]["name"],
+        json!("tracedecay")
+    );
+
+    let tools_list_responses = tools_list_within_bound
+        .expect("tools/list must not wait for project writer gate")
+        .expect("tools/list client task");
+    let tools = tools_list_responses
+        .iter()
+        .find(|response| response["id"] == json!(2))
+        .and_then(|response| response["result"]["tools"].as_array())
+        .expect("tools/list result catalog");
+    assert!(
+        !tools.is_empty(),
+        "bootstrap tool catalog must not be empty"
+    );
+
+    let project_path = handshake.project_path.as_ref().expect("project path");
+    let route = ProjectRouteKey::from_handshake(project_path, &handshake).expect("project route");
+    tokio::time::timeout(PHASE_TIMEOUT, async {
+        loop {
+            let warmed = engine
+                .store_administration
+                .project_servers()
+                .lock()
+                .await
+                .get_route(&route)
+                .is_some();
+            if warmed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initialize background warmup timed out");
+    assert_eq!(
+        engine
+            .project_open_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "initialize warmup must singleflight one project open"
+    );
+
+    tokio::time::timeout(PHASE_TIMEOUT, engine.shutdown_all())
+        .await
+        .expect("bootstrap-cache shutdown timed out");
 }
 
 #[cfg(unix)]

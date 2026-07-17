@@ -17,6 +17,8 @@ use tokio::time::{Duration, timeout};
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
+use crate::mcp::server::{McpMethod, SERVER_INSTRUCTIONS, classify_mcp_method, initialize_result};
+use crate::mcp::tools::{explore_call_budget, get_tool_definitions_with_budget};
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, StdioTransport};
 use branch_add::{branch_add_response, coordinated_hook_branch_writer, parse_branch_add_request};
 use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
@@ -2243,6 +2245,38 @@ impl DaemonEngine {
             .await)
     }
 
+    fn spawn_project_server_warmup(
+        &self,
+        handshake: DaemonHandshake,
+        initialize_request: JsonRpcRequest,
+    ) {
+        let Some(activity) = self.lifecycle.try_enter() else {
+            return;
+        };
+        let engine = self.clone();
+        let _warmup = tokio::spawn(async move {
+            let _activity = activity;
+            let project_server = tokio::select! {
+                result = Box::pin(engine.project_server(&handshake)) => result,
+                () = engine.lifecycle.wait_for_draining() => return,
+            };
+            match project_server {
+                Ok(server) => {
+                    // Preserve the regular initialize side effect that records
+                    // the negotiated MCP client name on the real server.
+                    let _ = server.handle_request(&initialize_request).await;
+                }
+                Err(error) => log_daemon_event(
+                    "project_server_warmup",
+                    &[
+                        ("outcome", "error".to_string()),
+                        ("error", error.to_string()),
+                    ],
+                ),
+            }
+        });
+    }
+
     /// Opens or resolves a project server while writer administration is held.
     /// Watcher and scheduler activation happen only after this returns so those
     /// components can acquire the same coordinator without recursive locking.
@@ -2544,6 +2578,31 @@ fn attach_initialize_route_metadata(
     result["_meta"]["tracedecayInitializeRoute"] = json!(route);
 }
 
+/// Returns `None` for project-dependent requests, `Some(None)` for handled
+/// notifications, and `Some(Some(response))` for static MCP bootstrap calls.
+fn daemon_bootstrap_response(
+    request: &JsonRpcRequest,
+    route: Option<&InitializeRouteMetadata>,
+) -> Option<Option<JsonRpcResponse>> {
+    match classify_mcp_method(&request.method) {
+        McpMethod::Initialize => Some(request.id.clone().map(|id| {
+            let mut response = JsonRpcResponse::success(id, initialize_result(SERVER_INSTRUCTIONS));
+            if let Some(route) = route {
+                attach_initialize_route_metadata(&mut response, route);
+            }
+            response
+        })),
+        McpMethod::InitializedAck => Some(None),
+        McpMethod::ToolsList => Some(request.id.clone().map(|id| {
+            let node_count = 0;
+            let budget = explore_call_budget(node_count);
+            let tools = get_tool_definitions_with_budget(node_count, budget);
+            JsonRpcResponse::success(id, json!({ "tools": tools }))
+        })),
+        _ => None,
+    }
+}
+
 async fn write_routed_initialize_response(
     server: &crate::mcp::McpServer,
     transport: &mut impl McpTransport,
@@ -2633,6 +2692,25 @@ async fn serve_broker_socket_client(
             branch_add_response(&engine.store_administration, &handshake, &request).await;
         drop(setup_activity);
         write_json_rpc_response(&mut transport, &response).await?;
+        return Ok(());
+    }
+    if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim())
+        && let Some(response) = daemon_bootstrap_response(&request, initialize_route.as_ref())
+    {
+        // Keep catalog-refresh bookkeeping consistent with the regular MCP
+        // server path: initialize and tools/list mark this catalog current.
+        let _ = engine
+            .claim_catalog_refresh(&handshake, &first_request_line)
+            .await;
+        if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+            && handshake.project_path.is_some()
+        {
+            engine.spawn_project_server_warmup(handshake.clone(), request);
+        }
+        drop(setup_activity);
+        if let Some(response) = response {
+            write_json_rpc_response(&mut transport, &response).await?;
+        }
         return Ok(());
     }
     let server = if handshake.project_path.is_some() {
