@@ -124,9 +124,33 @@ fn refresh_daemon_service_after_update(
     Ok(())
 }
 
+fn restart_daemon_service_with<Lease, Quiesce, Acquire, Refresh>(
+    quiesce: Quiesce,
+    acquire: Acquire,
+    refresh: Refresh,
+) -> tracedecay::errors::Result<Option<(PathBuf, PathBuf)>>
+where
+    Quiesce: FnOnce() -> tracedecay::errors::Result<tracedecay::daemon::DaemonServiceState>,
+    Acquire: FnOnce() -> tracedecay::errors::Result<Lease>,
+    Refresh: FnOnce(
+        tracedecay::daemon::DaemonServiceState,
+    ) -> tracedecay::errors::Result<Option<(PathBuf, PathBuf)>>,
+{
+    // The managed daemon holds a shared lifecycle lease while serving its
+    // databases. Stop it first, then acquire exclusive ownership before the
+    // service unit is rewritten and restarted.
+    let previous_state = quiesce()?;
+    let _lifecycle_lease = acquire()?;
+    refresh(previous_state)
+}
+
 pub(crate) fn restart_daemon_service() -> tracedecay::errors::Result<()> {
-    let _lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive("daemon restart")?;
-    match refresh_daemon_service(tracedecay::daemon::DaemonServiceState::RunningEnabled)? {
+    let restarted = restart_daemon_service_with(
+        tracedecay::daemon::quiesce_installed_service_for_restart,
+        || tracedecay::lifecycle_lease::acquire_exclusive("daemon restart"),
+        refresh_daemon_service,
+    )?;
+    match restarted {
         Some((service_path, socket_path)) => {
             eprintln!(
                 "\x1b[32m✔\x1b[0m Daemon service restarted at {}",
@@ -560,10 +584,68 @@ mod tests {
     use super::{
         RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from, normalize_bin_path,
         partition_reinstall_results, post_update_binary, post_update_binary_from,
-        prepare_post_update_lease, run_install_then_refresh,
+        prepare_post_update_lease, restart_daemon_service_with, run_install_then_refresh,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
+
+    #[test]
+    fn daemon_restart_quiesces_service_before_acquiring_exclusive_lease() {
+        let order = RefCell::new(Vec::new());
+        let result = restart_daemon_service_with(
+            || {
+                order.borrow_mut().push("quiesce");
+                Ok(tracedecay::daemon::DaemonServiceState::RunningEnabled)
+            },
+            || {
+                assert_eq!(order.borrow().as_slice(), ["quiesce"]);
+                order.borrow_mut().push("acquire");
+                Ok(())
+            },
+            |state| {
+                assert_eq!(
+                    state,
+                    tracedecay::daemon::DaemonServiceState::RunningEnabled
+                );
+                order.borrow_mut().push("refresh");
+                Ok(Some((PathBuf::from("service"), PathBuf::from("socket"))))
+            },
+        )
+        .expect("restart orchestration");
+
+        assert_eq!(
+            result,
+            Some((PathBuf::from("service"), PathBuf::from("socket")))
+        );
+        assert_eq!(order.into_inner(), ["quiesce", "acquire", "refresh"]);
+    }
+
+    #[test]
+    fn daemon_restart_does_not_refresh_when_exclusive_lease_acquisition_fails() {
+        let order = RefCell::new(Vec::new());
+        let result = restart_daemon_service_with(
+            || {
+                order.borrow_mut().push("quiesce");
+                Ok(tracedecay::daemon::DaemonServiceState::RunningEnabled)
+            },
+            || -> tracedecay::errors::Result<()> {
+                order.borrow_mut().push("acquire");
+                Err(config_err("lifecycle lease busy"))
+            },
+            |_| {
+                order.borrow_mut().push("refresh");
+                Ok(None)
+            },
+        );
+
+        assert!(
+            result
+                .expect_err("lease acquisition should fail")
+                .to_string()
+                .contains("lifecycle lease busy")
+        );
+        assert_eq!(order.into_inner(), ["quiesce", "acquire"]);
+    }
 
     #[test]
     fn post_update_lease_handoff_matches_platform_contract() {

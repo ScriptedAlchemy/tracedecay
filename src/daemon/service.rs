@@ -373,8 +373,19 @@ fn refresh_installed_service_with_state(
     refresh_service_with_runner(&runner, &refreshed_spec, previous_state).map(Some)
 }
 
+/// Stops a managed daemon before `daemon restart` acquires exclusive lifecycle
+/// ownership. The daemon itself holds a shared lease while it is running.
+#[doc(hidden)]
+pub fn quiesce_installed_service_for_restart() -> Result<DaemonServiceState> {
+    quiesce_installed_service()
+}
+
 #[doc(hidden)]
 pub fn quiesce_installed_service_under_lease() -> Result<DaemonServiceState> {
+    quiesce_installed_service()
+}
+
+fn quiesce_installed_service() -> Result<DaemonServiceState> {
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
         return Ok(DaemonServiceState::Missing);
     }
