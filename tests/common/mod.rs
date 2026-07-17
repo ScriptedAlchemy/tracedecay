@@ -476,6 +476,16 @@ impl DaemonProcess {
             return;
         };
         std::thread::spawn(move || {
+            if let Some(path) = std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG") {
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let _ = std::io::copy(&mut stderr, &mut file);
+                    return;
+                }
+            }
             let _ = std::io::copy(&mut stderr, &mut std::io::sink());
         });
     }

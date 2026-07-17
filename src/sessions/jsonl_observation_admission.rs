@@ -244,7 +244,7 @@ impl ActiveAdmission<'_, '_> {
         })?
         .with_resume_checkpoint(self.file_identity, frame.checkpoint.resume_fingerprint);
 
-        match self.admission.capture_observation(capture).await {
+        match Box::pin(self.admission.capture_observation(capture)).await {
             Ok(CaptureObservationOutcome::Persisted { .. }) => {
                 let should_update = match persisted_cursor_update {
                     PersistedCursorUpdate::Replace => true,

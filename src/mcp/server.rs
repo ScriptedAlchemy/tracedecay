@@ -1235,6 +1235,12 @@ pub struct McpServer {
     /// be grouped. It is deliberately kept out of the `session_id` column so it
     /// never masquerades as a real session.
     mcp_instance_id: String,
+    /// Monotonic per-connection sequence. Combined with `mcp_instance_id` it
+    /// scopes memory replay identities so JSON-RPC envelope ids — which are
+    /// only unique within one client connection — never collide across the
+    /// connections a retained daemon server multiplexes, or across host
+    /// restarts against the same persistent receipt store.
+    connection_scope_seq: std::sync::atomic::AtomicU64,
 }
 
 /// Runs the project and user transcript portions of startup recovery against
@@ -1544,6 +1550,7 @@ impl McpServer {
             // Field/metadata key stay `mcp_instance_id` (no analytics schema
             // churn) even though the id now lives in `runtime_identity`.
             mcp_instance_id: crate::runtime_identity::process_run_id().to_string(),
+            connection_scope_seq: std::sync::atomic::AtomicU64::new(0),
         });
 
         tokio::task::spawn_blocking(move || {
@@ -2459,6 +2466,15 @@ impl McpServer {
         });
 
         let mut connection_route = ConnectionRouteState::default();
+        // One replay-identity scope per client connection: envelope ids are
+        // client-chosen and connection-local, so the daemon widens them here
+        // before they become persistent memory operation identities.
+        let memory_request_scope = format!(
+            "{}-c{}",
+            self.mcp_instance_id,
+            self.connection_scope_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
 
         loop {
             let line: String = {
@@ -2588,11 +2604,12 @@ impl McpServer {
                                 )
                                 .await;
                         }
-                        Box::pin(self.handle_request_with_timings_and_implicit_project(
+                        Box::pin(self.handle_request_for_connection(
                             &request,
                             timings_override.unwrap_or_else(|| self.timings_enabled()),
                             &mut route_cache,
                             connection_route.implicit_project_path(),
+                            Some(memory_request_scope.as_str()),
                         ))
                         .await
                     }
@@ -2743,21 +2760,17 @@ impl McpServer {
         timings_enabled: bool,
         route_cache: &mut HookProjectRouteCache,
     ) -> Option<JsonRpcResponse> {
-        Box::pin(self.handle_request_with_timings_and_implicit_project(
-            request,
-            timings_enabled,
-            route_cache,
-            None,
-        ))
-        .await
+        Box::pin(self.handle_request_for_connection(request, timings_enabled, route_cache, None, None))
+            .await
     }
 
-    async fn handle_request_with_timings_and_implicit_project(
+    async fn handle_request_for_connection(
         &self,
         request: &JsonRpcRequest,
         timings_enabled: bool,
         route_cache: &mut HookProjectRouteCache,
         implicit_project_path: Option<&Path>,
+        memory_request_scope: Option<&str>,
     ) -> Option<JsonRpcResponse> {
         debug_assert!(
             !request.method.is_empty(),
@@ -2790,6 +2803,7 @@ impl McpServer {
                     timings_enabled,
                     route_cache,
                     implicit_project_path,
+                    memory_request_scope,
                 ))
                 .await,
             ),
@@ -3550,6 +3564,7 @@ impl McpServer {
         timings_enabled: bool,
         route_cache: &HookProjectRouteCache,
         implicit_project_path: Option<&Path>,
+        memory_request_scope: Option<&str>,
     ) -> JsonRpcResponse {
         let Some(params) = params else {
             return JsonRpcResponse::error(
@@ -3626,7 +3641,12 @@ impl McpServer {
         {
             map.insert("__mcp_request_id".to_string(), json!(request_id));
         }
-        inject_trusted_memory_request_id(tool_name, &id, &mut handler_arguments);
+        inject_trusted_memory_request_id(
+            tool_name,
+            &id,
+            memory_request_scope,
+            &mut handler_arguments,
+        );
 
         let dispatch_outcome = Box::pin(handle_tool_call_with_registry_and_implicit_project(
             &cg,
@@ -4202,7 +4222,12 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
     }
 }
 
-fn inject_trusted_memory_request_id(tool_name: &str, id: &Value, arguments: &mut Value) {
+fn inject_trusted_memory_request_id(
+    tool_name: &str,
+    id: &Value,
+    memory_request_scope: Option<&str>,
+    arguments: &mut Value,
+) {
     // The memory handler module owns the action taxonomy; the dispatcher only
     // queries whether this call needs a daemon-issued replay identity.
     if !super::tools::memory_needs_operation_context(tool_name, arguments) {
@@ -4215,8 +4240,19 @@ fn inject_trusted_memory_request_id(tool_name: &str, id: &Value, arguments: &mut
     // JSON-RPC envelope. A malformed or absent envelope ID must not preserve
     // caller-controlled arguments for the handler fallback path.
     map.remove("__mcp_request_id");
+    // Envelope ids are client-chosen and only unique within one connection,
+    // while operation receipts persist in the store. Without a connection
+    // scope to widen the id there is no safe replay identity; the handler then
+    // falls back to a fresh generated identity instead of risking a collision
+    // with an unrelated call's receipt.
+    let Some(scope) = memory_request_scope else {
+        return;
+    };
     if let Some(request_id) = json_rpc_request_id_string(id) {
-        map.insert("__mcp_request_id".to_string(), json!(request_id));
+        map.insert(
+            "__mcp_request_id".to_string(),
+            json!(format!("{scope}:{request_id}")),
+        );
     }
 }
 
@@ -4239,10 +4275,14 @@ mod trusted_memory_request_id_tests {
             inject_trusted_memory_request_id(
                 "tracedecay_fact_store",
                 &json!("json-rpc-17"),
+                Some("conn-scope"),
                 &mut arguments,
             );
 
-            assert_eq!(arguments["__mcp_request_id"], json!("json-rpc-17"));
+            assert_eq!(
+                arguments["__mcp_request_id"],
+                json!("conn-scope:json-rpc-17")
+            );
         }
     }
 
@@ -4253,9 +4293,14 @@ mod trusted_memory_request_id_tests {
             "__mcp_request_id": "caller-controlled",
         });
 
-        inject_trusted_memory_request_id("tracedecay_fact_store", &json!(17), &mut arguments);
+        inject_trusted_memory_request_id(
+            "tracedecay_fact_store",
+            &json!(17),
+            Some("conn-scope"),
+            &mut arguments,
+        );
 
-        assert_eq!(arguments["__mcp_request_id"], json!("17"));
+        assert_eq!(arguments["__mcp_request_id"], json!("conn-scope:17"));
     }
 
     #[test]
@@ -4265,10 +4310,14 @@ mod trusted_memory_request_id_tests {
         inject_trusted_memory_request_id(
             "tracedecay_fact_feedback",
             &json!("json-rpc-17"),
+            Some("conn-scope"),
             &mut arguments,
         );
 
-        assert_eq!(arguments["__mcp_request_id"], json!("json-rpc-17"));
+        assert_eq!(
+            arguments["__mcp_request_id"],
+            json!("conn-scope:json-rpc-17")
+        );
     }
 
     #[test]
@@ -4278,7 +4327,12 @@ mod trusted_memory_request_id_tests {
             "__mcp_request_id": "caller-controlled",
         });
 
-        inject_trusted_memory_request_id("tracedecay_fact_store", &Value::Null, &mut arguments);
+        inject_trusted_memory_request_id(
+            "tracedecay_fact_store",
+            &Value::Null,
+            Some("conn-scope"),
+            &mut arguments,
+        );
 
         assert!(arguments.get("__mcp_request_id").is_none());
     }
@@ -4290,6 +4344,24 @@ mod trusted_memory_request_id_tests {
         inject_trusted_memory_request_id(
             "tracedecay_fact_store",
             &json!("json-rpc-17"),
+            Some("conn-scope"),
+            &mut arguments,
+        );
+
+        assert!(arguments.get("__mcp_request_id").is_none());
+    }
+
+    #[test]
+    fn missing_connection_scope_clears_call_supplied_request_id() {
+        let mut arguments = json!({
+            "action": "add",
+            "__mcp_request_id": "caller-controlled",
+        });
+
+        inject_trusted_memory_request_id(
+            "tracedecay_fact_store",
+            &json!("json-rpc-17"),
+            None,
             &mut arguments,
         );
 

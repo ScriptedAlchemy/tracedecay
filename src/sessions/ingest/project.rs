@@ -85,7 +85,7 @@ pub(crate) async fn ingest_project_sources_for_provider(
         Some(provider) => push_file_source(&mut sources, provider),
     }
     let mut source_outcome =
-        ingest_sources(db, project_root, &canonical_project_id, &sources).await;
+        Box::pin(ingest_sources(db, project_root, &canonical_project_id, &sources)).await;
     let scope = ObservationScopeV1::Project {
         project_id: canonical_project_id.clone(),
     };
@@ -114,22 +114,30 @@ pub(crate) async fn ingest_project_sources_for_provider(
             continue;
         }
         provider_runs.record(
-            ProjectProviderRun {
-                db,
-                project_root,
-                project_id: &canonical_project_id,
-                facade: &facade,
-                scope: &scope,
-                candidate,
-                max_new_bytes: provider_byte_cap,
-                cancellation: &cancellation,
-            }
-            .run()
+            Box::pin(
+                ProjectProviderRun {
+                    db,
+                    project_root,
+                    project_id: &canonical_project_id,
+                    facade: &facade,
+                    scope: &scope,
+                    candidate,
+                    max_new_bytes: provider_byte_cap,
+                    cancellation: &cancellation,
+                }
+                .run(),
+            )
             .await,
         );
     }
 
-    match claude_observation::drain_projection_queue(&facade, &scope, &cancellation).await {
+    match Box::pin(claude_observation::drain_projection_queue(
+        &facade,
+        &scope,
+        &cancellation,
+    ))
+    .await
+    {
         Ok(projection_stats) => {
             provider_runs.stats = provider_runs.stats.merge(projection_stats.transcript);
         }

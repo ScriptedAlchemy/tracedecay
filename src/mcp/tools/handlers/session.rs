@@ -2456,14 +2456,15 @@ pub(super) async fn handle_message_search(
             if let Some(user_db) = retained_user_db
                 && let Some(user_profile_root) = user_db.db_path().parent()
             {
-                let outcome =
+                let outcome = Box::pin(
                     crate::sessions::ingest_user_global_sources_for_provider_with_authorities(
                         user_db.as_ref(),
                         global,
                         user_profile_root,
                         provider,
-                    )
-                    .await;
+                    ),
+                )
+                .await;
                 catch_up_failures.extend(outcome.failures);
             }
             if provider.is_none() || provider == Some(crate::sessions::SessionProvider::Hermes) {
@@ -2478,27 +2479,29 @@ pub(super) async fn handle_message_search(
                         }
                     })
                     .collect::<Vec<_>>();
-                let _ = crate::sessions::hermes::ingest_for_projects(&hermes_destinations).await;
+                let _ =
+                    Box::pin(crate::sessions::hermes::ingest_for_projects(&hermes_destinations))
+                        .await;
             }
             if provider == Some(crate::sessions::SessionProvider::Hermes) {
                 for (db, project_root, _, _) in destinations
                     .iter()
                     .filter(|(_, _, _, has_write_authority)| *has_write_authority)
                 {
-                    crate::sessions::finalize_project_ingest(db, project_root).await;
+                    Box::pin(crate::sessions::finalize_project_ingest(db, project_root)).await;
                 }
             } else {
                 for (db, project_root, project_id, _) in destinations
                     .iter()
                     .filter(|(_, _, _, has_write_authority)| *has_write_authority)
                 {
-                    let outcome = crate::sessions::ingest_project_sources_for_provider(
+                    let outcome = Box::pin(crate::sessions::ingest_project_sources_for_provider(
                         db,
                         project_root,
                         Some(project_id.clone()),
                         provider,
                         false,
-                    )
+                    ))
                     .await;
                     catch_up_failures.extend(outcome.failures);
                 }
@@ -2631,19 +2634,21 @@ pub(super) async fn handle_message_search(
             && let Some(profile_root) = user_db.db_path().parent()
         {
             let outcome = if let Some(registry_db) = global_db {
-                crate::sessions::ingest_user_global_sources_for_provider_with_authorities(
-                    user_db.as_ref(),
-                    registry_db,
-                    profile_root,
-                    provider,
+                Box::pin(
+                    crate::sessions::ingest_user_global_sources_for_provider_with_authorities(
+                        user_db.as_ref(),
+                        registry_db,
+                        profile_root,
+                        provider,
+                    ),
                 )
                 .await
             } else {
-                crate::sessions::ingest_user_global_sources_for_provider_at_with_db(
+                Box::pin(crate::sessions::ingest_user_global_sources_for_provider_at_with_db(
                     user_db.as_ref(),
                     profile_root,
                     provider,
-                )
+                ))
                 .await
             };
             catch_up_failures.extend(outcome.failures);
@@ -2651,13 +2656,13 @@ pub(super) async fn handle_message_search(
         let target_project_id = target_project_id
             .as_deref()
             .and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
-        let outcome = crate::sessions::ingest_project_sources_for_provider(
+        let outcome = Box::pin(crate::sessions::ingest_project_sources_for_provider(
             db,
             &target_root,
             target_project_id,
             provider,
             true,
-        )
+        ))
         .await;
         catch_up_failures.extend(outcome.failures);
     }

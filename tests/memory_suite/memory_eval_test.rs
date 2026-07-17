@@ -549,7 +549,43 @@ fn build_fixture(setup: &Setup) -> Fixture {
     initialize_fixture_project(&fixture);
     seed_setup_facts(&fixture, &setup.facts);
     fixture.start_daemon();
+    wait_for_seeded_fact_cutover(&fixture, setup.facts.len());
     fixture
+}
+
+/// Seeded facts land in the legacy `memory_facts` table; canonical search
+/// reads `memory_v2_current_facts`, which the daemon-owned legacy cutover
+/// populates asynchronously after the project first opens. Block until the
+/// cutover has imported every seeded fact so scenario steps observe a settled
+/// store instead of racing the daemon's repair scheduler.
+fn wait_for_seeded_fact_cutover(fixture: &Fixture, seeded: usize) {
+    if seeded == 0 {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let output = run_ok(
+            fixture,
+            &["tool", "memory_status", "--args", r#"{"format":"json"}"#],
+        );
+        let status: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|e| panic!("memory_status output was not JSON: {e}"));
+        let memory = &status["memory"];
+        let fact_count = memory["fact_count"].as_u64().unwrap_or(0) as usize;
+        let backfill_complete = memory["legacy_backfill_complete"]
+            .as_bool()
+            .unwrap_or(false);
+        if fact_count >= seeded && backfill_complete {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "seeded legacy facts never finished the memory_v2 cutover \
+             ({fact_count}/{seeded} canonical facts, backfill_complete={backfill_complete}); \
+             last status: {memory}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 struct StepResult {

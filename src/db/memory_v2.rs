@@ -1920,6 +1920,18 @@ struct LegacyFact {
     source: String,
     metadata_json: String,
     updated_at: i64,
+    telemetry: LegacyFactTelemetry,
+}
+
+/// Usage counters carried from `memory_facts` into the canonical projection.
+/// Unlike feedback, retrieval history has no legacy event log to replay, so
+/// the cutover must preserve these counters or every migrated store silently
+/// loses its ranking usage signal.
+struct LegacyFactTelemetry {
+    retrieval_count: i64,
+    access_count: i64,
+    helpful_count: i64,
+    unhelpful_count: i64,
 }
 
 #[derive(Serialize)]
@@ -3177,7 +3189,8 @@ async fn backfill_fact_batch(
 ) -> Result<MemoryV2BackfillBatchOutcome> {
     let mut rows = conn
         .query(
-            "SELECT fact_id, content, category, tags, trust_score, source, metadata, updated_at
+            "SELECT fact_id, content, category, tags, trust_score, source, metadata, updated_at,
+                    retrieval_count, access_count, helpful_count, unhelpful_count
              FROM memory_facts
              WHERE fact_id > ?1 AND fact_id <= ?2 ORDER BY fact_id LIMIT ?3",
             params![progress.fact_cursor, progress.fact_frontier, limit],
@@ -3199,6 +3212,12 @@ async fn backfill_fact_batch(
             source: row.get(5).map_err(|error| db_error(OPERATION, error))?,
             metadata_json: row.get(6).map_err(|error| db_error(OPERATION, error))?,
             updated_at: row.get(7).map_err(|error| db_error(OPERATION, error))?,
+            telemetry: LegacyFactTelemetry {
+                retrieval_count: row.get(8).map_err(|error| db_error(OPERATION, error))?,
+                access_count: row.get(9).map_err(|error| db_error(OPERATION, error))?,
+                helpful_count: row.get(10).map_err(|error| db_error(OPERATION, error))?,
+                unhelpful_count: row.get(11).map_err(|error| db_error(OPERATION, error))?,
+            },
         });
     }
     if batch.is_empty() {
@@ -3391,6 +3410,7 @@ async fn backfill_fact_payload(
         asserted_at.0,
     )
     .await?;
+    merge_legacy_fact_telemetry(conn, owner_key, fact_id, &legacy.telemetry).await?;
     mirror_sanitized_legacy(
         conn,
         SanitizedLegacyMirror {
@@ -4138,6 +4158,41 @@ async fn update_current(
             assertion_id,
             event_id.as_str(),
             updated_at,
+            fact_id.as_str(),
+            owner.kind,
+            owner.project_id.as_str()
+        ],
+    )
+    .await
+    .map_err(|error| db_error(OPERATION, error))?;
+    Ok(())
+}
+
+/// Merges legacy usage counters into the canonical projection with
+/// take-the-maximum semantics: counters only grow, so replaying a crashed
+/// backfill batch is idempotent and live retrievals or feedback recorded
+/// mid-cutover are never rolled back. The legacy `last_*` recency timestamps
+/// are deliberately not carried: a migrated fact's canonical `created_at` is
+/// its migration time, and `CompatibilityFactTelemetryV1` rejects recency
+/// timestamps earlier than creation, so historical values can never validate.
+async fn merge_legacy_fact_telemetry(
+    conn: &Connection,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+    telemetry: &LegacyFactTelemetry,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE memory_v2_current_facts SET
+            retrieval_count = MAX(retrieval_count, ?1),
+            access_count = MAX(access_count, ?2),
+            helpful_count = MAX(helpful_count, ?3),
+            unhelpful_count = MAX(unhelpful_count, ?4)
+         WHERE fact_id = ?5 AND owner_kind = ?6 AND project_id = ?7",
+        params![
+            telemetry.retrieval_count.max(0),
+            telemetry.access_count.max(0),
+            telemetry.helpful_count.max(0),
+            telemetry.unhelpful_count.max(0),
             fact_id.as_str(),
             owner.kind,
             owner.project_id.as_str()

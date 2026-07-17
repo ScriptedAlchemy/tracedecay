@@ -1266,14 +1266,14 @@ async fn admit_cursor_sweep_observations_with_admission(
             &path,
             matches!(&scope, ObservationScopeV1::Profile),
         );
-        let progress = admit_cursor_jsonl_observations(
+        let progress = Box::pin(admit_cursor_jsonl_observations(
             &parent_session_id,
             &path,
             &context,
             admission,
             &scope,
             budget.remaining(),
-        )
+        ))
         .await?;
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }

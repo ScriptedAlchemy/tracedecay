@@ -62,9 +62,16 @@ impl TraceDecayError {
         operation: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
+        let mut message = source.to_string();
+        let mut layer: Option<&(dyn std::error::Error + 'static)> = source.source();
+        while let Some(current) = layer {
+            message.push_str(": ");
+            message.push_str(&current.to_string());
+            layer = current.source();
+        }
         Self::Database {
             operation: operation.into(),
-            message: source.to_string(),
+            message,
         }
     }
 

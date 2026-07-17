@@ -123,3 +123,125 @@ async fn compatibility_mapping_count(
     drop(rows);
     count
 }
+
+#[tokio::test]
+async fn cutover_preserves_legacy_usage_telemetry_and_search_ranking() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("compatibility-cutover-telemetry.db");
+    let authority =
+        DatabaseAuthority::acquire_test(&path, "compatibility cutover telemetry test").unwrap();
+    let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+    let owner = FactOwnerV1::Project {
+        project_id: tracedecay_domain::ProjectId::new("pr7.project.cutover-telemetry".to_owned())
+            .unwrap(),
+    };
+    {
+        let raw_db = libsql::Builder::new_local(&path).build().await.unwrap();
+        let writer = raw_db.connect().unwrap();
+        let legacy = crate::memory::store::MemoryStore::new(&writer);
+        for (content, source) in [
+            (
+                "Database backups run via pg_dump every night",
+                "on-topic-backup-plural",
+            ),
+            (
+                "Acme primary database runs on Postgres",
+                "off-topic-backup-exact",
+            ),
+        ] {
+            legacy
+                .add_fact(
+                    crate::memory::types::AddFactRequest {
+                        content: content.to_owned(),
+                        category: crate::memory::types::MemoryCategory::Project,
+                        source: Some(source.to_owned()),
+                        tags: Vec::new(),
+                        entities: Vec::new(),
+                        trust: Some(0.5),
+                        metadata: serde_json::json!({}),
+                    },
+                    crate::memory::trust::DEFAULT_TRUST,
+                )
+                .await
+                .unwrap();
+        }
+        // Usage counters have no legacy event log to replay; they exist only
+        // as columns on `memory_facts`, so the cutover must carry them or a
+        // migrated store silently loses its ranking usage signal. The recency
+        // timestamps stay behind by contract: canonical created_at is the
+        // migration time and pre-creation recency never validates.
+        writer
+            .execute(
+                "UPDATE memory_facts SET trust_score = 0.5, retrieval_count = 5000,
+                     access_count = 5100, helpful_count = 7, unhelpful_count = 2,
+                     last_retrieved_at = 1700000000, last_recalled_at = 1700000100,
+                     last_feedback_at = 1700000200
+                 WHERE source = 'on-topic-backup-plural'",
+                (),
+            )
+            .await
+            .unwrap();
+    }
+    let store = DatabaseFactStore::new(&db);
+    let request = CompatibilityLegacyMemoryCutoverCommandV1::new(
+        owner.clone(),
+        ProvenanceId::new("compatibility-legacy-cutover-telemetry-test".to_owned()).unwrap(),
+    )
+    .unwrap();
+    for _ in 0..8 {
+        if store
+            .advance_compatibility_legacy_memory_cutover(request.clone())
+            .await
+            .unwrap()
+            .is_complete()
+        {
+            break;
+        }
+    }
+
+    let application =
+        crate::application::memory::MemoryApplication::new(owner.clone(), store).unwrap();
+    let context = crate::application::memory::MemoryOperationContext::from_trusted_request_id(
+        &owner,
+        "search",
+        "cutover-telemetry-search-1",
+        None,
+    )
+    .unwrap();
+    let results = application
+        .search_facts_v1(
+            crate::memory::types::SearchFactsRequest {
+                query: "database backup".to_owned(),
+                category: None,
+                limit: Some(5),
+                min_trust: None,
+                include_why: true,
+            },
+            context,
+        )
+        .await
+        .unwrap();
+    let hit = results
+        .iter()
+        .find(|row| row.fact.source.as_deref() == Some("on-topic-backup-plural"))
+        .expect("backfilled fact must be searchable through the canonical projection");
+    // The tracked search itself bumps retrieval/access by one; the carried
+    // legacy baseline must still dominate the count.
+    assert!(
+        hit.fact.retrieval_count >= 5000,
+        "legacy retrieval_count must survive the cutover, got {}",
+        hit.fact.retrieval_count
+    );
+    assert!(hit.fact.access_count >= 5100);
+    assert_eq!(hit.fact.helpful_count, 7);
+    assert_eq!(hit.fact.unhelpful_count, 2);
+    assert_eq!(
+        hit.fact.last_feedback_at, None,
+        "pre-migration recency timestamps cannot precede canonical created_at and must be dropped"
+    );
+    assert_eq!(
+        results[0].fact.source.as_deref(),
+        Some("on-topic-backup-plural"),
+        "usage boost from carried retrieval telemetry must rank the reinforced fact first"
+    );
+}
