@@ -85,11 +85,33 @@ artifact.
 
 ## Measured summary
 
-Captured from the dirty PR7 worktree at the recorded Git HEAD (dirty, so no
-commit attestation), release test profile (`debug_assertions: false`), 3
-warmups and 30 measured repetitions of 8 records per record phase (30 x 8 =
-240 records) and 30 migration runs. The raw artifact records the Linux kernel,
-CPU, memory, Rust/Cargo toolchains, every repetition, and the
-nearest-rank/sample-standard-deviation method.
+Captured from the dirty PR7 worktree at commit
+`0c7c2c4ae3a4dce53c6ebddb97fdb0b3cd20528a` (dirty, so no commit attestation),
+release test profile (`debug_assertions: false`), on an AMD EPYC 7742 under
+Linux 6.8.0-134-generic, rustc/cargo 1.95.0, 3 warmups and 30 measured
+repetitions of 8 records per record phase (30 x 8 = 240 records) and 30
+migration runs of 5 applied steps each (v19 through v23; the chain gained the
+additive v23 PR7 migration while this baseline was recorded). The raw artifact
+records the Linux kernel, CPU, memory, Rust/Cargo toolchains, every
+repetition, and the nearest-rank/sample-standard-deviation method.
 
-<!-- MEASURED_SUMMARY -->
+- Fact write (8 facts/repetition): p50 16,786,352 ns; p95 40,404,376 ns; p99
+  41,284,518 ns; 339.2 facts/s. Timed CPU: 520 ms; process write I/O:
+  85,409,792 bytes; database growth: 2,703,960 bytes; peak RSS: 25,844 KiB.
+- Anchor create (8 anchored observations/repetition): p50 25,695,910 ns; p95
+  32,589,403 ns; p99 35,251,936 ns; 299.5 records/s. Timed CPU: 440 ms;
+  process write I/O: 25,460,736 bytes; database growth: 3,337,400 bytes; peak
+  RSS: 30,080 KiB.
+- Anchor resolution (8 resolutions/repetition): p50 11,493,323 ns; p95
+  11,603,194 ns; p99 12,320,053 ns; 693.6 resolutions/s. Timed CPU: 330 ms;
+  zero process write bytes and database growth; peak RSS: 30,100 KiB.
+- Anchor replay (8 exact repeat persists/repetition): p50 11,325,881 ns; p95
+  11,446,143 ns; p99 11,563,782 ns; 706.0 replays/s; every sample returned the
+  originally created anchor as an exact duplicate and durable observation
+  cardinality stayed at 264. Timed CPU: 360 ms; zero process write bytes and
+  database growth; peak RSS: 30,100 KiB.
+- Migration v19-to-v23 (one production `migrate()` run per repetition, 5
+  applied steps): p50 24,465,974 ns; p95 25,545,768 ns; p99 95,928,022 ns;
+  185.7 migration steps/s. Timed CPU: 680 ms; process write I/O: 12,922,880
+  bytes; database growth: 12,854,400 bytes across the 30 independent fixture
+  databases; peak RSS: 29,672 KiB.
