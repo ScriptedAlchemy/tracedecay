@@ -1099,6 +1099,7 @@ pub(crate) async fn retire_applied_input_manifests(
         .collect::<Vec<_>>();
     ledger_paths.sort();
 
+    let mut applied = Vec::new();
     for ledger_path in ledger_paths {
         let ledger = match load_ledger(&ledger_path) {
             Ok(Some(ledger)) => ledger,
@@ -1120,7 +1121,28 @@ pub(crate) async fn retire_applied_input_manifests(
             ));
             continue;
         }
-        match finalize_applied_consolidation(profile_root, &ledger).await {
+        applied.push((ledger_path, ledger));
+    }
+    for (ledger_path, ledger) in &applied {
+        // A destination that later became the source or target of another
+        // applied consolidation of the same repository was consolidated
+        // forward: its markers now identify the newer destination, so this
+        // ledger can no longer validate — and no longer needs to. Its inputs
+        // were retired when it applied; leave the ledger as audit history.
+        let superseded = applied.iter().any(|(_, later)| {
+            later.migration_id != ledger.migration_id
+                && same_path(&later.git_common_dir, &ledger.git_common_dir)
+                && (later.source_project_id == ledger.destination_project_id
+                    || later.target_project_id == ledger.destination_project_id)
+        });
+        if superseded {
+            eprintln!(
+                "[tracedecay] consolidation ledger '{}' superseded by a later consolidation; skipping retirement validation",
+                ledger_path.display()
+            );
+            continue;
+        }
+        match finalize_applied_consolidation(profile_root, ledger).await {
             Ok((retired, registry_projects)) => {
                 report.retired.extend(retired);
                 report.retired_registry_projects = report
