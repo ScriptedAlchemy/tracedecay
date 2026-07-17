@@ -382,3 +382,80 @@ async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
     );
     close_graph(cg).await;
 }
+
+#[tokio::test]
+async fn branch_serving_instance_writes_facts_to_the_project_wide_store() {
+    let _env_lock = HOME_ENV_LOCK.lock().await;
+    let home = TempDir::new().unwrap();
+    let _home_env = HomeEnvGuard::set(home.path());
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    init_repo_on_main(project);
+
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.index_all().await.unwrap();
+    close_graph(cg).await;
+    // A tracked non-default branch resolves to its own shard database; the
+    // default branch serves the project store directly.
+    git(project, &["checkout", "-b", "feature"]);
+    TraceDecay::add_branch_tracking(project, "feature")
+        .await
+        .unwrap();
+
+    let cg = TraceDecay::open(project).await.unwrap();
+    assert_eq!(cg.serving_branch(), Some("feature"));
+    let branch_db_path = cg.db_path();
+    let project_db_path = cg.store_layout().graph_db_path.clone();
+    assert_ne!(
+        branch_db_path, project_db_path,
+        "fixture must serve a branch shard distinct from the project store"
+    );
+
+    // Project facts are project-wide: writing through a branch-serving
+    // instance must land in the shared project store, not the branch shard.
+    let outcome = cg
+        .add_fact(tracedecay::memory::types::AddFactRequest {
+            content: "Branch shards must not fork the project fact store".to_string(),
+            category: tracedecay::memory::types::MemoryCategory::Project,
+            source: Some("branch-shard-regression".to_string()),
+            tags: Vec::new(),
+            entities: Vec::new(),
+            trust: Some(0.8),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    assert!(outcome.fact.is_some(), "fact must be accepted");
+    let facts = cg
+        .search_facts(tracedecay::memory::types::SearchFactsRequest {
+            query: "project fact store".to_string(),
+            category: None,
+            limit: Some(5),
+            min_trust: None,
+            include_why: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(facts.len(), 1, "branch-serving search must see the fact");
+    close_graph(cg).await;
+
+    let count = |path: PathBuf| async move {
+        let db = libsql::Builder::new_local(&path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM memory_v2_current_facts", ())
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    };
+    assert_eq!(
+        count(project_db_path).await,
+        1,
+        "the canonical fact must live in the project-wide store"
+    );
+    assert_eq!(
+        count(branch_db_path).await,
+        0,
+        "the branch shard must not fork the project fact store"
+    );
+}
