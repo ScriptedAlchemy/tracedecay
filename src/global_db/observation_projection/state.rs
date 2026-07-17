@@ -720,6 +720,20 @@ pub(super) fn session_rows_compatible(
     reconcile_session_rows(actual, expected).is_some()
 }
 
+/// True when two stored project-path strings name the same live directory —
+/// e.g. one recorded through a symlinked family root and one through the
+/// canonical mount. Non-paths and vanished paths never match, so identity is
+/// only widened by verifiable filesystem evidence.
+fn same_live_project_path(left: &str, right: &str) -> Option<String> {
+    if left == right {
+        return Some(left.to_owned());
+    }
+    let (left_path, right_path) = (std::path::Path::new(left), std::path::Path::new(right));
+    let left_canonical = left_path.canonicalize().ok()?;
+    let right_canonical = right_path.canonicalize().ok()?;
+    (left_canonical == right_canonical).then(|| left_canonical.to_string_lossy().into_owned())
+}
+
 pub(super) fn reconcile_session_rows(
     actual: &crate::sessions::SessionRecord,
     expected: &crate::sessions::SessionRecord,
@@ -727,6 +741,7 @@ pub(super) fn reconcile_session_rows(
     if actual.provider != expected.provider || actual.session_id != expected.session_id {
         return None;
     }
+    let paths_same_family = same_live_project_path(&actual.project_path, &expected.project_path);
     let project_key = if actual.project_key == expected.project_key {
         actual.project_key.clone()
     } else if actual.project_key == "user" {
@@ -741,11 +756,21 @@ pub(super) fn reconcile_session_rows(
         && expected.project_path == actual.project_path
     {
         actual.project_key.clone()
+    } else if let Some(canonical) = paths_same_family.as_ref().filter(|_| {
+        actual.project_key == actual.project_path && expected.project_key == expected.project_path
+    }) {
+        // Both keys are path-shaped and both paths name the same live
+        // directory (symlinked family roots); converge on the canonical form.
+        canonical.clone()
     } else {
         return None;
     };
     let project_path = if actual.project_path == expected.project_path {
         actual.project_path.clone()
+    } else if let Some(canonical) = paths_same_family {
+        // Verified same-directory evidence outranks the shape heuristics:
+        // both spellings converge on the canonical form regardless of order.
+        canonical
     } else if actual.project_path == actual.project_key {
         expected.project_path.clone()
     } else if expected.project_path == expected.project_key {
@@ -872,4 +897,73 @@ pub(super) fn message_rows_compatible(
     expected: &crate::sessions::SessionMessageRecord,
 ) -> bool {
     actual == expected
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod reconcile_tests {
+    use super::reconcile_session_rows;
+
+    fn record(project_path: &str) -> crate::sessions::SessionRecord {
+        crate::sessions::SessionRecord {
+            provider: "codex".to_owned(),
+            session_id: "session-family".to_owned(),
+            project_key: project_path.to_owned(),
+            project_path: project_path.to_owned(),
+            title: None,
+            started_at: Some(1),
+            ended_at: Some(2),
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_family_roots_reconcile_to_the_canonical_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real = tmp.path().join("fast-projects").join("repo");
+        std::fs::create_dir_all(&real).unwrap();
+        let alias_parent = tmp.path().join("home-projects");
+        std::os::unix::fs::symlink(tmp.path().join("fast-projects"), &alias_parent).unwrap();
+        let real = real.canonicalize().unwrap();
+        let aliased = alias_parent.join("repo");
+
+        let merged = reconcile_session_rows(
+            &record(&aliased.to_string_lossy()),
+            &record(&real.to_string_lossy()),
+        )
+        .expect("symlinked roots naming the same directory must reconcile");
+        assert_eq!(merged.project_path, real.to_string_lossy());
+        assert_eq!(merged.project_key, real.to_string_lossy());
+
+        // Symmetric: order must not change the merged identity.
+        let merged_reversed = reconcile_session_rows(
+            &record(&real.to_string_lossy()),
+            &record(&aliased.to_string_lossy()),
+        )
+        .unwrap();
+        assert_eq!(merged_reversed.project_path, merged.project_path);
+    }
+
+    #[test]
+    fn genuinely_different_roots_still_refuse_to_reconcile() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        assert!(
+            reconcile_session_rows(
+                &record(&first.to_string_lossy()),
+                &record(&second.to_string_lossy()),
+            )
+            .is_none(),
+            "distinct directories must never merge"
+        );
+    }
 }
