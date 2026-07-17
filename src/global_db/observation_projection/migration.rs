@@ -42,7 +42,7 @@ pub(in crate::global_db) async fn prepare_projection_version_migration(
     }
 
     match migrate_projection_page(db).await? {
-        MigrationPageOutcome::Advanced(_) => Ok(()),
+        MigrationPageOutcome::Advanced => Ok(()),
         MigrationPageOutcome::UnmigratableLineage => rebuild_instead_of_migrating(db).await,
     }
 }
@@ -112,11 +112,11 @@ async fn rebuild_instead_of_migrating(db: &GlobalDb) -> ProjectionStoreResult<()
         .map_err(|error| storage("commit projection migration supersession", error))
 }
 
-/// One incremental migration page: either it advanced (with more pages
-/// possibly remaining), or the predecessor lineage disqualified incremental
-/// migration entirely.
+/// One incremental migration page: either it advanced (more pages may
+/// remain; the next open continues), or the predecessor lineage disqualified
+/// incremental migration entirely.
 pub(super) enum MigrationPageOutcome {
-    Advanced(bool),
+    Advanced,
     UnmigratableLineage,
 }
 
@@ -133,7 +133,7 @@ pub(super) async fn migrate_projection_page(
             .commit()
             .await
             .map_err(|error| storage("commit projection version migration page", error))?;
-        return Ok(MigrationPageOutcome::Advanced(false));
+        return Ok(MigrationPageOutcome::Advanced);
     };
 
     transaction
@@ -166,7 +166,7 @@ pub(super) async fn migrate_projection_page(
             .commit()
             .await
             .map_err(|error| storage("commit projection version migration page", error))?;
-        return Ok(MigrationPageOutcome::Advanced(false));
+        return Ok(MigrationPageOutcome::Advanced);
     }
 
     ensure_projection_output_state_cache(&transaction).await?;
@@ -427,9 +427,7 @@ pub(super) async fn migrate_projection_page(
         .commit()
         .await
         .map_err(|error| storage("commit projection version migration page", error))?;
-    Ok(MigrationPageOutcome::Advanced(
-        migrated_frontier < predecessor.sequence,
-    ))
+    Ok(MigrationPageOutcome::Advanced)
 }
 
 async fn projection_version_migration_pending(conn: &Connection) -> ProjectionStoreResult<bool> {
