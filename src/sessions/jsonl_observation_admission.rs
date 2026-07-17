@@ -244,7 +244,11 @@ impl ActiveAdmission<'_, '_> {
         })?
         .with_resume_checkpoint(self.file_identity, frame.checkpoint.resume_fingerprint);
 
-        match Box::pin(self.admission.capture_observation(capture)).await {
+        // The admission future is boxed inside
+        // `ObservationApplication::capture_observation`, so this per-frame
+        // hot loop awaits it directly with a bounded debug poll frame and no
+        // per-frame heap allocation at the call site.
+        match self.admission.capture_observation(capture).await {
             Ok(CaptureObservationOutcome::Persisted { .. }) => {
                 let should_update = match persisted_cursor_update {
                     PersistedCursorUpdate::Replace => true,

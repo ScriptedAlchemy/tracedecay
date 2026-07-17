@@ -1,8 +1,10 @@
 use std::fmt::Write as _;
 use std::fs::File;
+use std::future::Future;
 use std::hash::BuildHasher;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -255,100 +257,110 @@ struct CursorJsonlAdmitState {
     namespace_replacement: bool,
 }
 
-async fn admit_cursor_jsonl_observations(
-    parent_session_id: &str,
-    path: &Path,
-    context: &CursorObservationContext,
-    admission: &HostAdmissionFacade<'_>,
-    scope: &ObservationScopeV1,
+// Cursor JSONL admission chokepoint: the whole per-file admission future is
+// boxed here so the per-file sweep loop no longer pins each call, keeping the
+// debug poll frame bounded through the deep ingest recursion chain.
+fn admit_cursor_jsonl_observations<'a>(
+    parent_session_id: &'a str,
+    path: &'a Path,
+    context: &'a CursorObservationContext,
+    admission: &'a HostAdmissionFacade<'a>,
+    scope: &'a ObservationScopeV1,
     max_new_bytes: Option<u64>,
-) -> TranscriptIngestResult<JsonlObservationAdmissionProgress> {
-    let subagent = cursor_subagent_identity(path, parent_session_id);
-    let native_session_id = subagent
-        .as_ref()
-        .map_or(parent_session_id, |(session_id, _)| session_id.as_str());
-    let source = ObservationSourceIdentityV1::for_provider(
-        ProviderId::new("cursor")?,
-        SessionId::new(native_session_id.to_owned())?,
-    )?;
-    let mut context = context.clone();
-    if let Some((_, agent_id)) = subagent.as_ref() {
-        context.model =
-            parent_dispatch_model_for_subagent(path, parent_session_id, agent_id).or(context.model);
-    }
-    let request = JsonlObservationAdmissionRequest::new(
-        "cursor",
-        path,
-        admission,
-        source,
-        scope.clone(),
-        RetentionClass::new(CURSOR_OBSERVATION_RETENTION)?,
-    )
-    .with_max_new_bytes(max_new_bytes);
-    let progress = admit_jsonl_observations(
-        request,
-        |scan| CursorJsonlAdmitState {
-            timestamps: TimestampCarry::new(i64::try_from(scan.source_mtime).ok()),
-            generation: scan.generation,
-            namespace_replacement: scan.replacement_rescan,
-        },
-        |state, bytes, range, source_offset| {
-            let mut stable_record_id = None;
-            let mut unsupported_record = false;
-            let parsed = parse_normalized_observation_record_v1(
-                bytes,
-                range,
-                ObservationOrderingDomainV1::FileBytes,
-                |native| {
-                    if native.get("role").and_then(Value::as_str).is_none() {
-                        unsupported_record = true;
-                        return Err(ObservationRecordParseErrorV1::NormalizationFailed);
-                    }
-                    let record_id =
-                        observation_native_record_id("cursor", native_session_id, &native)
-                            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
-                    let message_id = cursor_projected_message_id(
-                        &native,
-                        native_session_id,
-                        source_offset,
-                        state.generation,
-                        state.namespace_replacement,
-                    )?;
-                    let timestamp = state.timestamps.observe(&native);
-                    let native = cursor_native_with_context(native, &context, timestamp);
-                    let (agent_id, parent_agent_id) = match subagent.as_ref() {
-                        Some((child_id, _)) => (Some(child_id.as_str()), Some(parent_session_id)),
-                        None => (None, None),
-                    };
-                    let envelope = normalize_cursor_observation_with_message_id(
-                        &native,
-                        native_session_id,
-                        record_id.clone(),
-                        message_id.clone(),
-                        range,
-                        agent_id,
-                        parent_agent_id,
-                    )?;
-                    stable_record_id = Some(record_id);
-                    Ok(envelope)
-                },
-            );
-            match parsed {
-                Ok(parsed) => Ok(JsonlFrameAdmission::durable(
-                    parsed,
-                    stable_record_id
-                        .ok_or(TranscriptIngestError::InvalidFrameState { provider: "cursor" })?,
-                )),
-                Err(_) => Ok(JsonlFrameAdmission::non_durable(if unsupported_record {
-                    ObservationCoverageReason::UnsupportedFact
-                } else {
-                    ObservationCoverageReason::MalformedFrame
-                })),
-            }
-        },
-    )
-    .await?;
-    Ok(progress)
+) -> Pin<
+    Box<dyn Future<Output = TranscriptIngestResult<JsonlObservationAdmissionProgress>> + Send + 'a>,
+> {
+    Box::pin(async move {
+        let subagent = cursor_subagent_identity(path, parent_session_id);
+        let native_session_id = subagent
+            .as_ref()
+            .map_or(parent_session_id, |(session_id, _)| session_id.as_str());
+        let source = ObservationSourceIdentityV1::for_provider(
+            ProviderId::new("cursor")?,
+            SessionId::new(native_session_id.to_owned())?,
+        )?;
+        let mut context = context.clone();
+        if let Some((_, agent_id)) = subagent.as_ref() {
+            context.model = parent_dispatch_model_for_subagent(path, parent_session_id, agent_id)
+                .or(context.model);
+        }
+        let request = JsonlObservationAdmissionRequest::new(
+            "cursor",
+            path,
+            admission,
+            source,
+            scope.clone(),
+            RetentionClass::new(CURSOR_OBSERVATION_RETENTION)?,
+        )
+        .with_max_new_bytes(max_new_bytes);
+        let progress = admit_jsonl_observations(
+            request,
+            |scan| CursorJsonlAdmitState {
+                timestamps: TimestampCarry::new(i64::try_from(scan.source_mtime).ok()),
+                generation: scan.generation,
+                namespace_replacement: scan.replacement_rescan,
+            },
+            |state, bytes, range, source_offset| {
+                let mut stable_record_id = None;
+                let mut unsupported_record = false;
+                let parsed = parse_normalized_observation_record_v1(
+                    bytes,
+                    range,
+                    ObservationOrderingDomainV1::FileBytes,
+                    |native| {
+                        if native.get("role").and_then(Value::as_str).is_none() {
+                            unsupported_record = true;
+                            return Err(ObservationRecordParseErrorV1::NormalizationFailed);
+                        }
+                        let record_id =
+                            observation_native_record_id("cursor", native_session_id, &native)
+                                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
+                        let message_id = cursor_projected_message_id(
+                            &native,
+                            native_session_id,
+                            source_offset,
+                            state.generation,
+                            state.namespace_replacement,
+                        )?;
+                        let timestamp = state.timestamps.observe(&native);
+                        let native = cursor_native_with_context(native, &context, timestamp);
+                        let (agent_id, parent_agent_id) = match subagent.as_ref() {
+                            Some((child_id, _)) => {
+                                (Some(child_id.as_str()), Some(parent_session_id))
+                            }
+                            None => (None, None),
+                        };
+                        let envelope = normalize_cursor_observation_with_message_id(
+                            &native,
+                            native_session_id,
+                            record_id.clone(),
+                            message_id.clone(),
+                            range,
+                            agent_id,
+                            parent_agent_id,
+                        )?;
+                        stable_record_id = Some(record_id);
+                        Ok(envelope)
+                    },
+                );
+                match parsed {
+                    Ok(parsed) => Ok(JsonlFrameAdmission::durable(
+                        parsed,
+                        stable_record_id.ok_or(TranscriptIngestError::InvalidFrameState {
+                            provider: "cursor",
+                        })?,
+                    )),
+                    Err(_) => Ok(JsonlFrameAdmission::non_durable(if unsupported_record {
+                        ObservationCoverageReason::UnsupportedFact
+                    } else {
+                        ObservationCoverageReason::MalformedFrame
+                    })),
+                }
+            },
+        )
+        .await?;
+        Ok(progress)
+    })
 }
 
 #[cfg(test)]
@@ -1174,24 +1186,31 @@ pub async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
 
 /// Project startup-sweep variant whose authority has already been prepared by
 /// the caller from the authoritative project identity and privacy policy.
-pub(crate) async fn try_ingest_cursor_project_sweep_capped_with_admission<S: BuildHasher>(
-    project_root: &Path,
+pub(crate) fn try_ingest_cursor_project_sweep_capped_with_admission<'a, S: BuildHasher>(
+    project_root: &'a Path,
     project_id: ProjectId,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &'a HostAdmissionFacade<'a>,
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
-) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    let Some(source) = CursorSweepSource::new() else {
-        return Ok(CursorTranscriptIngestStats::default());
-    };
-    admit_cursor_sweep_observations_with_admission(
-        &source.with_skip_session_ids(skip_session_ids.into_iter().collect()),
-        project_root,
-        admission,
-        max_new_bytes,
-        ObservationScopeV1::Project { project_id },
-    )
-    .await
+) -> Pin<Box<dyn Future<Output = TranscriptIngestResult<CursorTranscriptIngestStats>> + Send + 'a>>
+{
+    // Rehash into the default (Send) hasher before boxing so the returned
+    // future never captures the caller's `S` hasher and stays `Send`.
+    let skip_session_ids: std::collections::HashSet<String> =
+        skip_session_ids.into_iter().collect();
+    Box::pin(async move {
+        let Some(source) = CursorSweepSource::new() else {
+            return Ok(CursorTranscriptIngestStats::default());
+        };
+        admit_cursor_sweep_observations_with_admission(
+            &source.with_skip_session_ids(skip_session_ids),
+            project_root,
+            admission,
+            max_new_bytes,
+            ObservationScopeV1::Project { project_id },
+        )
+        .await
+    })
 }
 
 /// Canonically admit Cursor JSONL transcripts discovered during a profile startup
@@ -1266,14 +1285,14 @@ async fn admit_cursor_sweep_observations_with_admission(
             &path,
             matches!(&scope, ObservationScopeV1::Profile),
         );
-        let progress = Box::pin(admit_cursor_jsonl_observations(
+        let progress = admit_cursor_jsonl_observations(
             &parent_session_id,
             &path,
             &context,
             admission,
             &scope,
             budget.remaining(),
-        ))
+        )
         .await?;
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }

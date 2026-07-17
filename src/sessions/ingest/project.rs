@@ -119,19 +119,17 @@ pub(crate) async fn ingest_project_sources_for_provider(
             continue;
         }
         provider_runs.record(
-            Box::pin(
-                ProjectProviderRun {
-                    db,
-                    project_root,
-                    project_id: &canonical_project_id,
-                    facade: &facade,
-                    scope: &scope,
-                    candidate,
-                    max_new_bytes: provider_byte_cap,
-                    cancellation: &cancellation,
-                }
-                .run(),
-            )
+            ProjectProviderRun {
+                db,
+                project_root,
+                project_id: &canonical_project_id,
+                facade: &facade,
+                scope: &scope,
+                candidate,
+                max_new_bytes: provider_byte_cap,
+                cancellation: &cancellation,
+            }
+            .run()
             .await,
         );
     }

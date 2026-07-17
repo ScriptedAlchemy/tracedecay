@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
@@ -39,19 +41,24 @@ pub(super) struct ProjectProviderRun<'a> {
     pub(super) cancellation: &'a ObservationCancellation,
 }
 
-impl ProjectProviderRun<'_> {
-    pub(super) async fn run(self) -> ProviderRunOutcome {
-        match self.candidate {
-            SessionProvider::Codex => self.run_codex().await,
-            SessionProvider::Kiro => self.run_kiro().await,
-            SessionProvider::Cline | SessionProvider::RooCode | SessionProvider::Kilo => {
-                self.run_cline_like().await
+impl<'a> ProjectProviderRun<'a> {
+    /// Provider-run chokepoint: boxes the whole per-provider ingest future so
+    /// the project catch-up loop inherits a bounded debug poll frame and no
+    /// longer pins each `run()` at the call site.
+    pub(super) fn run(self) -> Pin<Box<dyn Future<Output = ProviderRunOutcome> + Send + 'a>> {
+        Box::pin(async move {
+            match self.candidate {
+                SessionProvider::Codex => self.run_codex().await,
+                SessionProvider::Kiro => self.run_kiro().await,
+                SessionProvider::Cline | SessionProvider::RooCode | SessionProvider::Kilo => {
+                    self.run_cline_like().await
+                }
+                SessionProvider::Claude => self.run_claude().await,
+                SessionProvider::Cursor => self.run_cursor().await,
+                SessionProvider::Hermes => self.run_hermes().await,
+                SessionProvider::Vibe => ProviderRunOutcome::skipped(),
             }
-            SessionProvider::Claude => self.run_claude().await,
-            SessionProvider::Cursor => self.run_cursor().await,
-            SessionProvider::Hermes => self.run_hermes().await,
-            SessionProvider::Vibe => ProviderRunOutcome::skipped(),
-        }
+        })
     }
 
     async fn run_codex(self) -> ProviderRunOutcome {
@@ -221,14 +228,12 @@ impl ProjectProviderRun<'_> {
             composer.deferred_by_byte_cap,
         );
         let remaining = self.max_new_bytes.saturating_sub(composer.bytes_consumed);
-        match Box::pin(
-            cursor::try_ingest_cursor_project_sweep_capped_with_admission(
-                self.project_root,
-                self.project_id.clone(),
-                self.facade,
-                Some(remaining),
-                composer.owned_session_ids,
-            ),
+        match cursor::try_ingest_cursor_project_sweep_capped_with_admission(
+            self.project_root,
+            self.project_id.clone(),
+            self.facade,
+            Some(remaining),
+            composer.owned_session_ids,
         )
         .await
         {
