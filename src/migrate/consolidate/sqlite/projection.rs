@@ -92,7 +92,7 @@ pub(super) async fn materialize(conn: &Connection, target: &str, source: &str) -
          CREATE TEMP TABLE consolidation_projection_provenance_candidates AS
          SELECT p.projector_version, p.observation_id, p.output_ordinal, p.receipt_id,
                 p.output_provider, p.output_message_id,
-                p.output_digest, p.message_created
+                p.output_digest, p.message_created, p.retrieval_anchor_id
          FROM {target}.observation_projection_provenance AS p
          UNION ALL
          SELECT p.projector_version, p.observation_id, p.output_ordinal, p.receipt_id,
@@ -108,7 +108,8 @@ pub(super) async fn materialize(conn: &Connection, target: &str, source: &str) -
                        AND owner.output_provider=p.output_provider
                        AND owner.output_message_id=p.output_message_id
                        AND owner.message_created=1
-                ) THEN 0 ELSE p.message_created END
+                ) THEN 0 ELSE p.message_created END,
+                p.retrieval_anchor_id
          FROM {source}.observation_projection_provenance AS p
          LEFT JOIN consolidation_message_map AS m
            ON m.provider=p.output_provider AND m.original_id=p.output_message_id
@@ -145,12 +146,13 @@ pub(super) async fn materialize(conn: &Connection, target: &str, source: &str) -
              output_message_id TEXT NOT NULL,
              output_digest TEXT NOT NULL,
              message_created INTEGER NOT NULL,
+             retrieval_anchor_id TEXT,
              PRIMARY KEY(projector_version, observation_id, output_ordinal)
          );
          INSERT INTO consolidation_projection_provenance_plan
          SELECT projector_version, observation_id, output_ordinal, MIN(receipt_id),
                 MIN(output_provider), MIN(output_message_id), MIN(output_digest),
-                MAX(message_created)
+                MAX(message_created), MIN(retrieval_anchor_id)
          FROM consolidation_projection_provenance_claims
          GROUP BY projector_version, observation_id, output_ordinal;
 
@@ -225,6 +227,7 @@ async fn validate_claims(conn: &Connection, operation: &'static str) -> Result<(
                      OR MIN(output_provider) IS NOT MAX(output_provider)
                      OR MIN(output_message_id) IS NOT MAX(output_message_id)
                      OR MIN(output_digest) IS NOT MAX(output_digest)
+                     OR MIN(retrieval_anchor_id) IS NOT MAX(retrieval_anchor_id)
              )",
             "projection provenance collision cannot be represented losslessly",
         ),
@@ -330,7 +333,7 @@ pub(super) async fn verify(conn: &Connection) -> Result<()> {
             "observation_projection_provenance",
             "consolidation_projection_provenance_plan",
             "projector_version, observation_id, output_ordinal, receipt_id, output_provider,
-             output_message_id, output_digest, message_created",
+             output_message_id, output_digest, message_created, retrieval_anchor_id",
         ),
         (
             "projection dispositions",
