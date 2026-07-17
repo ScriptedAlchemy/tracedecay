@@ -447,10 +447,10 @@ pub(crate) fn matching_legacy_profile_layouts(
     project_root: &Path,
     profile_root: &Path,
     excluded_project_id: Option<&str>,
-) -> Result<Vec<StoreLayout>> {
+) -> Result<(Vec<StoreLayout>, bool)> {
     let projects_root = profile_root.join("projects");
     let Ok(entries) = fs::read_dir(&projects_root) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     };
     let mut manifest_paths = entries
         .flatten()
@@ -459,41 +459,63 @@ pub(crate) fn matching_legacy_profile_layouts(
         .collect::<Vec<_>>();
     manifest_paths.sort();
 
-    let mut layouts = Vec::new();
     let project_git_common_dir = (!crate::worktree::is_detached_linked_worktree(project_root))
         .then(|| crate::worktree::git_common_dir(project_root))
         .flatten();
     let mut legacy_git_common_dirs = HashMap::<PathBuf, Option<PathBuf>>::new();
+    let mut exact_manifests = Vec::new();
+    let mut shared_git_manifests = Vec::new();
+    let mut selected_manifest_matches_exact_root = false;
     for manifest_path in manifest_paths {
         let Ok(manifest) = read_store_manifest(&manifest_path) else {
             continue;
         };
-        let same_checkout = same_local_path(&manifest.project_root, project_root)
-            || project_git_common_dir.as_deref().is_some_and(|current| {
-                legacy_git_common_dirs
-                    .entry(manifest.project_root.clone())
-                    .or_insert_with(|| {
-                        manifest
-                            .project_root
-                            .is_dir()
-                            .then(|| crate::worktree::git_common_dir(&manifest.project_root))
-                            .flatten()
-                    })
-                    .as_deref()
-                    .is_some_and(|legacy| same_local_path(legacy, current))
-            });
-        if !same_checkout {
+        let exact_root = same_local_path(&manifest.project_root, project_root);
+        if manifest.project_id.as_deref() == excluded_project_id {
+            selected_manifest_matches_exact_root |= exact_root;
             continue;
         }
+        if exact_root {
+            exact_manifests.push((manifest_path, manifest));
+            continue;
+        }
+        let same_git_checkout = project_git_common_dir.as_deref().is_some_and(|current| {
+            legacy_git_common_dirs
+                .entry(manifest.project_root.clone())
+                .or_insert_with(|| {
+                    manifest
+                        .project_root
+                        .is_dir()
+                        .then(|| crate::worktree::git_common_dir(&manifest.project_root))
+                        .flatten()
+                })
+                .as_deref()
+                .is_some_and(|legacy| same_local_path(legacy, current))
+        });
+        if same_git_checkout {
+            shared_git_manifests.push((manifest_path, manifest));
+        }
+    }
+
+    // A linked worktree may have its own profile shard while sharing a Git
+    // common directory with every sibling checkout. Treat an exact manifest
+    // root as authoritative; the shared-Git fallback is only for worktrees
+    // that have not yet acquired their own shard.
+    let selected_is_sole_exact_root =
+        selected_manifest_matches_exact_root && exact_manifests.is_empty();
+    let matching_manifests = if exact_manifests.is_empty() {
+        shared_git_manifests
+    } else {
+        exact_manifests
+    };
+    let mut layouts = Vec::new();
+    for (manifest_path, manifest) in matching_manifests {
         let project_id = manifest
             .project_id
             .as_deref()
             .ok_or_else(|| invalid_legacy_manifest(&manifest_path, "project_id is missing"))?;
         validate_project_id(project_id)
             .map_err(|message| invalid_legacy_manifest(&manifest_path, message))?;
-        if excluded_project_id == Some(project_id) {
-            continue;
-        }
         if manifest.schema_version != STORE_MANIFEST_SCHEMA_VERSION
             || manifest.store_kind != StoreKind::CodeProject
             || manifest.storage_mode != StorageMode::ProfileSharded
@@ -533,7 +555,7 @@ pub(crate) fn matching_legacy_profile_layouts(
         }
         layouts.push(layout);
     }
-    Ok(layouts)
+    Ok((layouts, selected_is_sole_exact_root))
 }
 
 pub(crate) fn retire_identity_cutover_manifest(layout: &StoreLayout) -> Result<PathBuf> {

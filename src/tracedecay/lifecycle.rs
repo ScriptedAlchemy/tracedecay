@@ -205,22 +205,35 @@ impl TraceDecay {
         let selected_id = selected
             .as_ref()
             .and_then(|layout| layout.identity.project_id.as_deref());
-        let candidates =
+        let (candidates, selected_is_sole_exact_root) =
             storage::matching_legacy_profile_layouts(project_root, &profile_root, selected_id)?;
-        Self::choose_identity_layout(project_root, selected, candidates, allow_repair)
-            .await?
-            .map_or_else(
-                || storage::default_profile_sharded_layout(project_root, &profile_root),
-                Ok,
-            )
+        Self::choose_identity_layout(
+            project_root,
+            selected,
+            candidates,
+            selected_is_sole_exact_root,
+            allow_repair,
+        )
+        .await?
+        .map_or_else(
+            || storage::default_profile_sharded_layout(project_root, &profile_root),
+            Ok,
+        )
     }
 
     async fn choose_identity_layout(
         project_root: &Path,
         selected: Option<StoreLayout>,
         candidates: Vec<StoreLayout>,
+        selected_is_sole_exact_root: bool,
         allow_repair: bool,
     ) -> Result<Option<StoreLayout>> {
+        if selected_is_sole_exact_root && let Some(selected) = selected.as_ref() {
+            let selected_inventory = store_identity_inventory(selected).await;
+            if selected_inventory.is_healthy() && !selected_inventory.is_pristine() {
+                return Ok(Some(selected.clone()));
+            }
+        }
         if candidates.len() > 1 {
             let mut details = Vec::new();
             for candidate in &candidates {
