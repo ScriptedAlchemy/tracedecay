@@ -298,6 +298,11 @@ pub struct CompatibilityMemoryRepairStatsV1 {
     /// Exact feedback-history batch outcome when this is an explicit repair
     /// receipt. Other repair-producing paths leave this `Unknown`.
     feedback_history_repair: CompatibilityFeedbackRepairProgressV1,
+    /// Whether the producing repair pass filled a per-pass batch cap and may
+    /// have more backlog behind it. Computed by the store, which alone knows
+    /// the caps; consumers (e.g. the daemon scheduler) read [`Self::saturated`]
+    /// instead of comparing counters against store-internal batch constants.
+    saturated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -338,6 +343,7 @@ impl CompatibilityMemoryRepairStatsV1 {
             missing_vectors_repaired,
             banks_rebuilt,
             feedback_history_repair: CompatibilityFeedbackRepairProgressV1::Unknown,
+            saturated: false,
         }
     }
 
@@ -349,6 +355,13 @@ impl CompatibilityMemoryRepairStatsV1 {
         self
     }
 
+    /// Records whether the producing repair pass filled a per-pass batch cap.
+    /// Only the store computes this, since it alone knows the batch caps.
+    pub fn with_saturated(mut self, saturated: bool) -> Self {
+        self.saturated = saturated;
+        self
+    }
+
     pub fn missing_vectors_repaired(&self) -> u64 {
         self.missing_vectors_repaired
     }
@@ -357,6 +370,12 @@ impl CompatibilityMemoryRepairStatsV1 {
     }
     pub fn feedback_history_repair(&self) -> CompatibilityFeedbackRepairProgressV1 {
         self.feedback_history_repair
+    }
+    /// True when the producing repair pass filled a per-pass batch cap and may
+    /// have more backlog behind it. Lets the daemon scheduler keep ticking
+    /// without depending on store-internal batch constants.
+    pub fn saturated(&self) -> bool {
+        self.saturated
     }
 }
 

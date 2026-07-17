@@ -12,9 +12,9 @@ const MAX_COMPATIBILITY_DASHBOARD_FACTS: usize = 100;
 
 const MAX_COMPATIBILITY_DASHBOARD_GRAPH: usize = 1_000;
 
-pub(crate) const MAX_COMPATIBILITY_DASHBOARD_VECTORS: usize = 2_000;
+pub(in crate::memory) const MAX_COMPATIBILITY_DASHBOARD_VECTORS: usize = 2_000;
 
-pub(crate) const MAX_COMPATIBILITY_DASHBOARD_OPLOG: usize = 300;
+pub(in crate::memory) const MAX_COMPATIBILITY_DASHBOARD_OPLOG: usize = 300;
 
 /// Explicit, bounded dashboard overview request. It is intentionally not a
 /// general query language: the dashboard receives one finite snapshot shape.

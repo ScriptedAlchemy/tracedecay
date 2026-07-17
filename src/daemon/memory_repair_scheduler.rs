@@ -170,14 +170,14 @@ pub(super) async fn run_memory_repair_scheduler_tick(
     let progress = stats.feedback_history_repair();
     let repair_outcome = memory_repair_tick_outcome(progress)?;
     // A pass that filled either repair batch may have more backlog behind the
-    // cap; keep ticking instead of going idle mid-convergence.
-    let repair_batches_saturated = stats.missing_vectors_repaired()
-        >= crate::store::memory::COMPATIBILITY_REPAIR_VECTOR_BATCH as u64
-        || stats.banks_rebuilt() >= crate::store::memory::COMPATIBILITY_REPAIR_BANK_BATCH as u64;
-    let (repair_outcome, repair_advanced) = match repair_outcome {
-        MemoryRepairTickOutcome::Incomplete => ("incomplete", true),
-        MemoryRepairTickOutcome::Complete => ("complete", repair_batches_saturated),
-        MemoryRepairTickOutcome::NotRequired => ("not_required", repair_batches_saturated),
+    // cap; keep ticking instead of going idle mid-convergence. The store owns
+    // the batch caps and reports saturation directly, so the scheduler no
+    // longer compares counters against store-internal batch constants.
+    let repair_advanced = memory_repair_pass_advanced(repair_outcome, stats.saturated());
+    let repair_outcome = match repair_outcome {
+        MemoryRepairTickOutcome::Incomplete => "incomplete",
+        MemoryRepairTickOutcome::Complete => "complete",
+        MemoryRepairTickOutcome::NotRequired => "not_required",
     };
     let cutover_progress = cg.advance_project_memory_cutover_once().await?;
     let cutover_advanced = legacy_memory_cutover_should_retry(cutover_progress);
@@ -230,6 +230,21 @@ pub(super) fn memory_repair_tick_outcome(
     }
 }
 
+/// Whether the repair half of a tick still has work pending. Incomplete
+/// feedback-history repair always advances; an otherwise-finished pass advances
+/// only when the store reports it saturated a per-pass batch cap (so backlog
+/// may remain behind the cap). The store computes saturation because it alone
+/// owns the batch caps.
+pub(super) fn memory_repair_pass_advanced(
+    outcome: MemoryRepairTickOutcome,
+    saturated: bool,
+) -> bool {
+    match outcome {
+        MemoryRepairTickOutcome::Incomplete => true,
+        MemoryRepairTickOutcome::Complete | MemoryRepairTickOutcome::NotRequired => saturated,
+    }
+}
+
 pub(super) fn legacy_memory_cutover_should_retry(
     progress: CompatibilityLegacyMemoryCutoverProgressV1,
 ) -> bool {
@@ -237,4 +252,37 @@ pub(super) fn legacy_memory_cutover_should_retry(
         progress,
         CompatibilityLegacyMemoryCutoverProgressV1::Incomplete { .. }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MemoryRepairTickOutcome, memory_repair_pass_advanced};
+
+    #[test]
+    fn saturation_flips_the_repair_decision_for_finished_passes() {
+        // Incomplete feedback-history repair advances regardless of saturation.
+        assert!(memory_repair_pass_advanced(
+            MemoryRepairTickOutcome::Incomplete,
+            false
+        ));
+        assert!(memory_repair_pass_advanced(
+            MemoryRepairTickOutcome::Incomplete,
+            true
+        ));
+
+        // A finished pass advances exactly when the store reports saturation.
+        for outcome in [
+            MemoryRepairTickOutcome::Complete,
+            MemoryRepairTickOutcome::NotRequired,
+        ] {
+            assert!(
+                !memory_repair_pass_advanced(outcome, false),
+                "{outcome:?} must go idle when the store reports no saturation"
+            );
+            assert!(
+                memory_repair_pass_advanced(outcome, true),
+                "{outcome:?} must keep ticking when the store reports saturation"
+            );
+        }
+    }
 }

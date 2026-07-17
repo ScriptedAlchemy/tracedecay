@@ -549,6 +549,11 @@ fn repair_stats_preserve_the_atomic_feedback_batch_outcome() {
         CompatibilityMemoryRepairStatsV1::default().feedback_history_repair(),
         CompatibilityFeedbackRepairProgressV1::Unknown
     );
+    // Saturation defaults off and round-trips through the builder without
+    // disturbing the feedback-history outcome.
+    assert!(!stats.saturated());
+    assert!(!CompatibilityMemoryRepairStatsV1::default().saturated());
+    assert!(stats.with_saturated(true).saturated());
 }
 
 #[test]

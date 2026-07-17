@@ -24,7 +24,7 @@ pub enum CompatibilityFactSearchKindV1 {
 }
 
 impl CompatibilityFactSearchKindV1 {
-    pub(crate) fn validate(&self) -> FactStoreResult<()> {
+    pub(in crate::memory) fn validate(&self) -> FactStoreResult<()> {
         match self {
             Self::Search | Self::Probe => {}
             Self::Related { entity } => validate_compatibility_entity(entity)?,

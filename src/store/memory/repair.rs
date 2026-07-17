@@ -37,6 +37,18 @@ pub(crate) const COMPATIBILITY_REPAIR_VECTOR_BATCH: i64 = 512;
 
 pub(crate) const COMPATIBILITY_REPAIR_BANK_BATCH: i64 = 32;
 
+/// True when a repair pass filled either per-pass batch cap, so backlog may
+/// remain behind the cap. Only the store computes this — it owns the caps — so
+/// the daemon scheduler can consume [`CompatibilityMemoryRepairStatsV1::saturated`]
+/// without depending on these store-internal constants.
+fn compatibility_repair_batches_saturated(
+    missing_vectors_repaired: u64,
+    banks_rebuilt: u64,
+) -> bool {
+    missing_vectors_repaired >= COMPATIBILITY_REPAIR_VECTOR_BATCH as u64
+        || banks_rebuilt >= COMPATIBILITY_REPAIR_BANK_BATCH as u64
+}
+
 async fn advance_compatibility_feedback_history_repair_tx(
     db: &Database,
     transaction: &Transaction,
@@ -257,13 +269,19 @@ pub(super) async fn repair_compatibility_memory_tx(
     )
     .await?
     {
-        return Ok(CompatibilityMemoryRepairStatsV1::new(
-            compatibility_receipt_u64(&receipt.receipt, "missing_vectors_repaired")?,
-            compatibility_receipt_u64(&receipt.receipt, "banks_rebuilt")?,
-        )
-        .with_feedback_history_repair(compatibility_receipt_feedback_history_repair(
-            &receipt.receipt,
-        )?));
+        let missing_vectors_repaired =
+            compatibility_receipt_u64(&receipt.receipt, "missing_vectors_repaired")?;
+        let banks_rebuilt = compatibility_receipt_u64(&receipt.receipt, "banks_rebuilt")?;
+        return Ok(
+            CompatibilityMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt)
+                .with_feedback_history_repair(compatibility_receipt_feedback_history_repair(
+                    &receipt.receipt,
+                )?)
+                .with_saturated(compatibility_repair_batches_saturated(
+                    missing_vectors_repaired,
+                    banks_rebuilt,
+                )),
+        );
     }
     let feedback_repair =
         advance_compatibility_feedback_history_repair_tx(db, transaction, request.owner()).await?;
@@ -297,7 +315,11 @@ pub(super) async fn repair_compatibility_memory_tx(
     .await?;
     Ok(
         CompatibilityMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt)
-            .with_feedback_history_repair(feedback_repair),
+            .with_feedback_history_repair(feedback_repair)
+            .with_saturated(compatibility_repair_batches_saturated(
+                missing_vectors_repaired,
+                banks_rebuilt,
+            )),
     )
 }
 
@@ -519,12 +541,13 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
              WHERE owner_kind = ?1 AND project_id = ?2
                AND owner_json = ?3 AND source_store_id = ?4
              ORDER BY bank_name ASC
-             LIMIT 32",
+             LIMIT ?5",
             params![
                 key.kind,
                 key.project_id.as_str(),
                 key.json.as_str(),
                 source_store_id.as_str(),
+                COMPATIBILITY_REPAIR_BANK_BATCH,
             ],
         )
         .await
