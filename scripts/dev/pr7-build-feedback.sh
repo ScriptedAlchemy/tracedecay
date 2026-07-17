@@ -38,10 +38,11 @@ measure() {
     echo "-- touched-unit incremental check x$RUNS (touch store crate) --"
     for i in $(seq 1 "$RUNS"); do
         touch crates/tracedecay-store/src/lib.rs
-        /usr/bin/time -f "wall=%es maxrss=%MKB cpu=%P" \
+        time_out="$WORK/touched-unit-time.$label.$i"
+        /usr/bin/time -f "wall=%es maxrss=%MKB cpu=%P" -o "$time_out" \
             cargo check --all-features 2>&1 | grep -cE "^\s+Checking" | \
             xargs -I{} echo "rebuilt_units={}"
-        /usr/bin/time -f "wall=%es maxrss=%MKB cpu=%P" true 2>/dev/null || true
+        cat "$time_out"
     done
 
     echo "-- representative test target build x$RUNS (session_suite) --"

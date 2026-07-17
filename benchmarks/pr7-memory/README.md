@@ -132,3 +132,12 @@ caches and is excluded from the comparison:
 No incremental rebuild amplification; the cold-link and RSS growth (~5–10%)
 tracks the slice's added code. Absolute timings are diagnostic, not portable
 gates.
+
+The touched-unit row above reports only the rebuilt-unit count because the
+measurement script's `/usr/bin/time` output was piped straight into the
+`grep -c` used to count `Checking` lines, silently discarding the wall/maxrss/cpu
+line, and a second `/usr/bin/time ... true` line measured a no-op instead of
+recovering it. The script now writes `/usr/bin/time`'s output to a file with
+`-o` and `cat`s it after counting rebuilt units, so re-running
+`scripts/dev/pr7-build-feedback.sh` will surface wall/maxrss/cpu for this
+phase alongside the unit count.
