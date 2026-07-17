@@ -797,25 +797,39 @@ pub fn wait_for_installed_service_state(expected: DaemonServiceState) -> Result<
     // before it answers its first initialize, so the restoration window is
     // generous — bounded, with progress visibility — rather than a snap
     // judgement that fails a healthy, still-converging service.
-    const ATTEMPTS: usize = 360;
+    //
+    // The bound is a wall-clock deadline, not an attempt count: each attempt
+    // calls into `query_daemon_identity`, which itself has a per-probe
+    // timeout for a connect-but-never-answer daemon. An attempt-count bound
+    // multiplies that per-probe timeout by the attempt count in the worst
+    // case, which can stretch total wait time (and the progress-message
+    // cadence) far past what the comment above promises. Bounding by
+    // elapsed wall-clock time keeps the overall wait — and how often we
+    // report progress — independent of per-probe cost.
+    const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
-    const PROGRESS_EVERY: usize = 40;
+    const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 
+    let deadline = std::time::Instant::now() + TOTAL_TIMEOUT;
     let mut last = installed_service_status_snapshot()?;
-    for attempt in 0..ATTEMPTS {
+    let mut last_progress = std::time::Instant::now();
+    loop {
         let (actual, _, socket_state, protocol_state) = &last;
         if restored_service_matches(expected, *actual, *socket_state, protocol_state) {
             return Ok(());
         }
-        if attempt > 0 && attempt % PROGRESS_EVERY == 0 {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        if now.duration_since(last_progress) >= PROGRESS_INTERVAL {
             eprintln!(
                 "Waiting for the restored daemon to reach {expected:?} (service {actual:?}, socket {socket_state}, protocol {protocol_state})…"
             );
+            last_progress = now;
         }
-        if attempt + 1 < ATTEMPTS {
-            std::thread::sleep(POLL_INTERVAL);
-            last = installed_service_status_snapshot()?;
-        }
+        std::thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
+        last = installed_service_status_snapshot()?;
     }
 
     let (actual, socket_path, socket_state, protocol_state) = last;
