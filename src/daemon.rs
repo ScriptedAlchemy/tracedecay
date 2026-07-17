@@ -73,7 +73,6 @@ fn coordinated_background_refresh_writer(
 /// being killed with `SIGKILL` mid-checkpoint.
 #[cfg(unix)]
 const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
-#[cfg(unix)]
 const DAEMON_CLIENT_DRAIN_DEADLINE: Duration = Duration::from_secs(15);
 #[cfg(unix)]
 const DAEMON_TASK_ABORT_DEADLINE: Duration = Duration::from_secs(2);
@@ -133,7 +132,6 @@ impl DaemonLifecycle {
         }
     }
 
-    #[cfg(unix)]
     async fn wait_for_idle(&self) {
         loop {
             let notified = self.inner.idle.notified();
@@ -1071,9 +1069,29 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         });
     }
     lifecycle.begin_draining();
+    let in_flight_drained = timeout(DAEMON_CLIENT_DRAIN_DEADLINE, lifecycle.wait_for_idle())
+        .await
+        .is_ok();
     clients.abort_all();
     while clients.join_next().await.is_some() {}
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
+    if !in_flight_drained {
+        log_daemon_event(
+            "daemon_shutdown",
+            &[
+                ("outcome", "client_drain_timeout".to_string()),
+                (
+                    "deadline_secs",
+                    DAEMON_CLIENT_DRAIN_DEADLINE.as_secs().to_string(),
+                ),
+                (
+                    "checkpoint",
+                    "skipped_active_clients_were_aborted".to_string(),
+                ),
+            ],
+        );
+        return endpoint_cleanup;
+    }
     shutdown_project_servers(&store_administration).await;
     endpoint_cleanup
 }
@@ -2597,8 +2615,9 @@ fn spawn_lifecycle_project_server_warmup<OpenFuture>(
     let _warmup = tokio::spawn(async move {
         let _activity = activity;
         let project_server = tokio::select! {
-            result = Box::pin(open_project_server) => result,
+            biased;
             () = lifecycle.wait_for_draining() => return,
+            result = Box::pin(open_project_server) => result,
         };
         match project_server {
             Ok(server) => {
@@ -2626,13 +2645,13 @@ fn spawn_portable_project_server_warmup(
     initialize_request: JsonRpcRequest,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) {
-    let Some(project_path) = handshake.project_path.as_deref() else {
+    let Some(project_path) = handshake.project_path.clone() else {
         return;
     };
-    let canonical_project_path = project_path
-        .canonicalize()
-        .unwrap_or_else(|_| project_path.to_path_buf());
     spawn_lifecycle_project_server_warmup(lifecycle, initialize_request, async move {
+        let canonical_project_path = project_path
+            .canonicalize()
+            .unwrap_or_else(|_| project_path.clone());
         store_administration
             .with_writer(|| {
                 portable_project_server(

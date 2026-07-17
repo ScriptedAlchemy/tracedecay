@@ -657,6 +657,123 @@ async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
     idle_while_writer_held.expect("draining must cancel project warmup before writer release");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn portable_project_warmup_cancels_before_shutdown_snapshot() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let handshake = DaemonHandshake {
+        project_path: Some(project),
+        client_identity: test_client_identity_for(profile_root),
+        ..test_handshake_defaults()
+    };
+    let initialize_request: crate::mcp::JsonRpcRequest =
+        serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }))
+        .expect("initialize request");
+    let owners = Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default()));
+    let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners));
+    let project_open_gates = Arc::new(tokio::sync::Mutex::new(super::ProjectOpenGates::default()));
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let lifecycle = DaemonLifecycle::default();
+
+    let blocker_administration = store_administration.clone();
+    let writer_held = Arc::new(tokio::sync::Notify::new());
+    let writer_held_by_blocker = Arc::clone(&writer_held);
+    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(async move {
+        blocker_administration
+            .with_writer(|| async move {
+                writer_held_by_blocker.notify_one();
+                writer_release.await.expect("release writer gate");
+            })
+            .await;
+    });
+    writer_held.notified().await;
+
+    super::spawn_portable_project_server_warmup(
+        lifecycle.clone(),
+        store_administration,
+        project_open_gates,
+        handshake,
+        initialize_request,
+        Some(Arc::clone(&attempts)),
+    );
+    tokio::task::yield_now().await;
+    lifecycle.begin_draining();
+    let idle_before_writer_release = tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        lifecycle.wait_for_idle(),
+    )
+    .await;
+
+    release_writer.send(()).expect("signal writer gate release");
+    blocker.await.expect("writer gate blocker task");
+
+    idle_before_writer_release
+        .expect("portable warmup must release lifecycle activity before writer release");
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "draining portable warmup must not start a project open"
+    );
+    assert!(
+        owners.lock().await.values().next().is_none(),
+        "draining portable warmup must not insert a server after shutdown snapshot"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn project_warmup_drain_wins_when_open_is_simultaneously_ready() {
+    let initialize_request: crate::mcp::JsonRpcRequest =
+        serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }))
+        .expect("initialize request");
+
+    for _ in 0..32 {
+        let lifecycle = DaemonLifecycle::default();
+        let open_polled = Arc::new(tokio::sync::Notify::new());
+        let open_polled_by_future = Arc::clone(&open_polled);
+        let open_lifecycle = lifecycle.clone();
+        let open_won = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let open_won_by_future = Arc::clone(&open_won);
+        super::spawn_lifecycle_project_server_warmup(
+            lifecycle.clone(),
+            initialize_request.clone(),
+            async move {
+                open_polled_by_future.notify_one();
+                open_lifecycle.wait_for_draining().await;
+                open_won_by_future.store(true, std::sync::atomic::Ordering::Release);
+                Err(crate::errors::TraceDecayError::Config {
+                    message: "simultaneous warmup completion".to_string(),
+                })
+            },
+        );
+        open_polled.notified().await;
+
+        lifecycle.begin_draining();
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(1),
+            lifecycle.wait_for_idle(),
+        )
+        .await
+        .expect("simultaneous warmup drain timed out");
+        assert!(
+            !open_won.load(std::sync::atomic::Ordering::Acquire),
+            "draining must win when project open becomes ready on the same tick"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
