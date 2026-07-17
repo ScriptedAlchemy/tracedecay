@@ -645,6 +645,195 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
     }
 }
 
+/// Owned-or-borrowed project-memory database backing a [`ProjectFactStore`].
+enum ProjectFactStoreDb<'a> {
+    Borrowed(&'a Database),
+    Owned(Box<Database>),
+}
+
+/// Canonical fact authority that *owns* its resolved project-memory database.
+///
+/// Project-memory routes resolve the shared project store into either the
+/// active database or a separately opened handle. Borrowing that resolution
+/// into a [`DatabaseFactStore`] cannot outlive the resolving call, which forced
+/// every route to re-resolve the owner and database inline. This adapter owns
+/// the resolved handle so one accessor can build the whole memory application,
+/// delegating each fact-store operation to a borrowed [`DatabaseFactStore`].
+pub struct ProjectFactStore<'a> {
+    db: ProjectFactStoreDb<'a>,
+}
+
+impl<'a> ProjectFactStore<'a> {
+    /// Wraps the active database without taking ownership.
+    pub const fn borrowed(db: &'a Database) -> Self {
+        Self {
+            db: ProjectFactStoreDb::Borrowed(db),
+        }
+    }
+
+    /// Takes ownership of a separately opened project-store handle.
+    pub const fn owned(db: Box<Database>) -> Self {
+        Self {
+            db: ProjectFactStoreDb::Owned(db),
+        }
+    }
+
+    fn store(&self) -> DatabaseFactStore<'_> {
+        let db = match &self.db {
+            ProjectFactStoreDb::Borrowed(db) => *db,
+            ProjectFactStoreDb::Owned(db) => db.as_ref(),
+        };
+        DatabaseFactStore::new(db)
+    }
+}
+
+/// Delegates each fact-store trait method to the borrowed [`DatabaseFactStore`].
+macro_rules! delegate_fact_store_methods {
+    ( $( fn $name:ident ( $( $arg:ident : $ty:ty ),* $(,)? ) -> $ret:ty; )+ ) => {
+        $(
+            async fn $name(&self, $( $arg : $ty ),* ) -> $ret {
+                self.store().$name( $( $arg ),* ).await
+            }
+        )+
+    };
+}
+
+impl FactStore for ProjectFactStore<'_> {
+    delegate_fact_store_methods! {
+        fn commit_fact(batch: FactWriteBatch) -> FactStoreResult<FactCommitOutcome>;
+        fn query_current_facts(query: CurrentFactsQuery) -> FactStoreResult<Vec<StoredFactV1>>;
+        fn query_fact_current(query: FactCurrentQuery) -> FactStoreResult<Option<StoredFactV1>>;
+        fn query_fact_as_of(query: FactAsOfQuery) -> FactStoreResult<Option<StoredFactV1>>;
+        fn query_fact_lineage(query: FactLineageQuery) -> FactStoreResult<Vec<FactLineageEventV1>>;
+        fn resolve_legacy_fact(query: LegacyFactQuery) -> FactStoreResult<Option<FactId>>;
+        fn get_retrieval_anchor(
+            query: RetrievalAnchorQuery,
+        ) -> FactStoreResult<Option<RetrievalAnchorRecordV2>>;
+    }
+}
+
+impl FactProposalStore for ProjectFactStore<'_> {
+    delegate_fact_store_methods! {
+        fn promote_fact_proposal(
+            promotion: PromoteFactProposal,
+        ) -> Result<PromoteFactProposalOutcome, FactProposalStoreError>;
+    }
+}
+
+impl FactCompatibilityStore for ProjectFactStore<'_> {
+    delegate_fact_store_methods! {
+        fn list_compatibility_facts(
+            query: CompatibilityFactListQueryV1,
+        ) -> FactCompatibilityResult<CompatibilityFactPageV1>;
+        fn search_compatibility_facts(
+            query: CompatibilityFactSearchQuery,
+        ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1>;
+        fn probe_compatibility_facts(
+            query: CompatibilityFactSearchQuery,
+        ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1>;
+        fn related_compatibility_facts(
+            query: CompatibilityFactSearchQuery,
+        ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1>;
+        fn reason_compatibility_facts(
+            query: CompatibilityFactSearchQuery,
+        ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1>;
+        fn find_compatibility_contradictions(
+            query: CompatibilityFactContradictionQueryV1,
+        ) -> FactCompatibilityResult<CompatibilityFactContradictionPageV1>;
+        fn get_compatibility_fact(
+            target: CompatibilityFactTargetV1,
+        ) -> FactCompatibilityResult<Option<CompatibilityFactProjectionV1>>;
+        fn compatibility_fact_history(
+            query: CompatibilityFactHistoryQueryV1,
+        ) -> FactCompatibilityResult<CompatibilityFactHistoryV1>;
+        fn compatibility_memory_status(
+            owner: FactOwnerV1,
+        ) -> FactCompatibilityResult<CompatibilityMemoryStatusV1>;
+        fn inspect_compatibility_fact(
+            target: CompatibilityFactTargetV1,
+        ) -> FactCompatibilityResult<Option<CompatibilityFactInspectionV1>>;
+        fn add_compatibility_fact(
+            request: CompatibilityFactAddCommandV1,
+        ) -> FactCompatibilityResult<CompatibilityFactAddOutcomeV1>;
+        fn update_compatibility_fact(
+            request: CompatibilityFactUpdateCommandV1,
+        ) -> FactCompatibilityResult<CompatibilityFactUpdateOutcomeV1>;
+        fn remove_compatibility_fact(
+            request: CompatibilityFactRemoveCommandV1,
+        ) -> FactCompatibilityResult<CompatibilityFactRemoveOutcomeV1>;
+        fn record_compatibility_fact_feedback(
+            request: CompatibilityFactFeedbackCommandV1,
+        ) -> FactCompatibilityResult<CompatibilityFactFeedbackOutcomeV1>;
+        fn compatibility_fact_feedback_history(
+            query: CompatibilityFactFeedbackHistoryQueryV1,
+        ) -> FactCompatibilityResult<CompatibilityFactFeedbackHistoryV1>;
+        fn find_compatibility_fact_by_content_digest(
+            query: CompatibilityFactContentDigestQueryV1,
+        ) -> FactCompatibilityResult<Option<CompatibilityFactProjectionV1>>;
+        fn apply_compatibility_fact_curation(
+            request: CompatibilityFactCurationBatchV1,
+        ) -> FactCompatibilityResult<CompatibilityFactCurationReceiptV1>;
+        fn merge_compatibility_facts(
+            request: CompatibilityFactMergeCommandV1,
+        ) -> FactCompatibilityResult<CompatibilityFactMergeOutcomeV1>;
+        fn repair_compatibility_memory(
+            request: CompatibilityMemoryRepairCommandV1,
+        ) -> FactCompatibilityResult<CompatibilityMemoryRepairStatsV1>;
+        fn advance_compatibility_legacy_memory_cutover(
+            request: CompatibilityLegacyMemoryCutoverCommandV1,
+        ) -> FactCompatibilityResult<CompatibilityLegacyMemoryCutoverProgressV1>;
+        fn dashboard_compatibility_memory_overview(
+            query: CompatibilityDashboardMemoryOverviewQueryV1,
+        ) -> FactCompatibilityResult<CompatibilityDashboardMemoryOverviewV1>;
+        fn dashboard_compatibility_fact_detail(
+            query: CompatibilityDashboardFactDetailQueryV1,
+        ) -> FactCompatibilityResult<Option<CompatibilityDashboardFactDetailV1>>;
+        fn dashboard_compatibility_vector_points(
+            query: CompatibilityDashboardVectorPointsQueryV1,
+        ) -> FactCompatibilityResult<Vec<CompatibilityDashboardVectorPointV1>>;
+        fn dashboard_compatibility_memory_oplog(
+            query: CompatibilityDashboardOplogQueryV1,
+        ) -> FactCompatibilityResult<Vec<CompatibilityDashboardOplogEntryV1>>;
+        fn record_compatibility_fact_retrieval(
+            request: CompatibilityFactRetrievalCommandV1,
+        ) -> FactCompatibilityResult<Vec<CompatibilityFactProjectionV1>>;
+        fn submit_compatibility_fact_proposal(
+            proposal_id: ProvenanceId,
+            request: CompatibilityFactAddCommandV1,
+            submitter: Option<ActorId>,
+        ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1>;
+        fn get_compatibility_fact_proposal(
+            owner: FactOwnerV1,
+            proposal_id: ProvenanceId,
+        ) -> FactCompatibilityResult<Option<CompatibilityFactProposalRecordV1>>;
+        fn list_compatibility_fact_proposals(
+            owner: FactOwnerV1,
+            state: Option<CompatibilityFactProposalStateV1>,
+            after_proposal_id: Option<ProvenanceId>,
+            limit: usize,
+        ) -> FactCompatibilityResult<CompatibilityFactProposalPageV1>;
+        fn count_pending_compatibility_fact_proposals(
+            owner: FactOwnerV1,
+        ) -> FactCompatibilityResult<u64>;
+        fn reject_compatibility_fact_proposal(
+            owner: FactOwnerV1,
+            proposal_id: ProvenanceId,
+            expected_revision: CompatibilityFactProposalRevisionV1,
+            reviewer: ActorId,
+            reason: String,
+        ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1>;
+        fn import_legacy_compatibility_fact_proposals(
+            request: CompatibilityFactProposalImportV1,
+        ) -> FactCompatibilityResult<CompatibilityFactProposalImportReceiptV1>;
+        fn promote_compatibility_fact_proposal(
+            request: CompatibilityFactProposalPromotionV1,
+        ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1>;
+        fn promote_compatibility_fact_proposal_with_disposition(
+            request: CompatibilityFactProposalPromotionV1,
+        ) -> FactCompatibilityResult<CompatibilityFactProposalPromotionResultV1>;
+    }
+}
+
 #[cfg(test)]
 #[path = "memory_repair_test.rs"]
 mod memory_repair_test;

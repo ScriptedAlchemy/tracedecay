@@ -10,7 +10,7 @@ use crate::memory::types::{
     FeedbackRequest, FeedbackResult, MemoryCategory, MemoryStatus, SearchFactsRequest,
     TrustHistoryEntry, UpdateFactRequest,
 };
-use crate::store::memory::DatabaseFactStore;
+use crate::store::memory::{DatabaseFactStore, ProjectFactStore};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 
 use super::TraceDecay;
@@ -47,11 +47,14 @@ pub(crate) enum ProjectMemoryDb<'a> {
     Owned(Box<Database>),
 }
 
-impl ProjectMemoryDb<'_> {
-    pub(crate) fn as_db(&self) -> &Database {
+impl<'a> ProjectMemoryDb<'a> {
+    /// Consumes the resolved handle into a fact store that owns it, so a single
+    /// accessor can build a memory application whose authority outlives the
+    /// resolving call.
+    fn into_fact_store(self) -> ProjectFactStore<'a> {
         match self {
-            Self::Active(db) => db,
-            Self::Owned(db) => db,
+            Self::Active(db) => ProjectFactStore::borrowed(db),
+            Self::Owned(db) => ProjectFactStore::owned(db),
         }
     }
 }
@@ -96,30 +99,35 @@ impl TraceDecay {
         .map_err(memory_application_error)
     }
 
+    /// Resolves the project-memory owner and database into one owner-bound
+    /// application over a fact store that owns its resolved handle. Every
+    /// project-memory route builds its application through this accessor.
+    async fn project_memory_application(&self) -> Result<MemoryApplication<ProjectFactStore<'_>>> {
+        let owner = self.project_memory_owner()?;
+        let store = self.project_memory_db().await?.into_fact_store();
+        MemoryApplication::new(owner, store).map_err(memory_application_error)
+    }
+
     /// Add a fact to the holographic memory store. The outcome carries the
     /// stored (or pre-existing) fact plus a write-time diff report
     /// (near-duplicate / possible-conflict / secret rejection).
     pub async fn add_fact(&self, request: AddFactRequest) -> Result<AddFactOutcome> {
         let context = self.generated_memory_operation("add fact")?;
-        memory_application_for_db(
-            self.project_memory_owner()?,
-            self.project_memory_db().await?.as_db(),
-        )?
-        .add_fact_v1(request, context)
-        .await
-        .map_err(memory_application_error)
+        self.project_memory_application()
+            .await?
+            .add_fact_v1(request, context)
+            .await
+            .map_err(memory_application_error)
     }
 
     /// Search facts by lexical overlap, entity metadata, category, and trust.
     pub async fn search_facts(&self, request: SearchFactsRequest) -> Result<Vec<FactSearchResult>> {
         let context = self.generated_memory_operation("search facts")?;
-        memory_application_for_db(
-            self.project_memory_owner()?,
-            self.project_memory_db().await?.as_db(),
-        )?
-        .search_facts_v1(request, context)
-        .await
-        .map_err(memory_application_error)
+        self.project_memory_application()
+            .await?
+            .search_facts_v1(request, context)
+            .await
+            .map_err(memory_application_error)
     }
 
     /// Search facts without updating recall/access counters. This is for
@@ -145,22 +153,20 @@ impl TraceDecay {
         limit: usize,
     ) -> Result<Vec<FactSearchResult>> {
         let context = self.generated_memory_operation("probe facts")?;
-        memory_application_for_db(
-            self.project_memory_owner()?,
-            self.project_memory_db().await?.as_db(),
-        )?
-        .probe_facts_v1(
-            SearchFactsRequest {
-                query: entity.to_owned(),
-                category,
-                limit: Some(limit),
-                min_trust,
-                include_why: true,
-            },
-            context,
-        )
-        .await
-        .map_err(memory_application_error)
+        self.project_memory_application()
+            .await?
+            .probe_facts_v1(
+                SearchFactsRequest {
+                    query: entity.to_owned(),
+                    category,
+                    limit: Some(limit),
+                    min_trust,
+                    include_why: true,
+                },
+                context,
+            )
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn related_facts(
@@ -171,22 +177,20 @@ impl TraceDecay {
         limit: usize,
     ) -> Result<Vec<FactSearchResult>> {
         let context = self.generated_memory_operation("related facts")?;
-        memory_application_for_db(
-            self.project_memory_owner()?,
-            self.project_memory_db().await?.as_db(),
-        )?
-        .related_facts_v1(
-            SearchFactsRequest {
-                query: entity.to_owned(),
-                category,
-                limit: Some(limit),
-                min_trust,
-                include_why: true,
-            },
-            context,
-        )
-        .await
-        .map_err(memory_application_error)
+        self.project_memory_application()
+            .await?
+            .related_facts_v1(
+                SearchFactsRequest {
+                    query: entity.to_owned(),
+                    category,
+                    limit: Some(limit),
+                    min_trust,
+                    include_why: true,
+                },
+                context,
+            )
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn reason_facts(
@@ -197,13 +201,11 @@ impl TraceDecay {
         limit: usize,
     ) -> Result<Vec<FactSearchResult>> {
         let context = self.generated_memory_operation("reason facts")?;
-        memory_application_for_db(
-            self.project_memory_owner()?,
-            self.project_memory_db().await?.as_db(),
-        )?
-        .reason_facts_v1(entities.to_vec(), category, min_trust, limit, context)
-        .await
-        .map_err(memory_application_error)
+        self.project_memory_application()
+            .await?
+            .reason_facts_v1(entities.to_vec(), category, min_trust, limit, context)
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn contradict_facts(
@@ -212,24 +214,21 @@ impl TraceDecay {
         threshold: f64,
         limit: usize,
     ) -> Result<Vec<ContradictionResult>> {
-        memory_application_for_db(
-            self.project_memory_owner()?,
-            self.project_memory_db().await?.as_db(),
-        )?
-        .contradict_facts_v1(category, threshold, limit)
-        .await
-        .map_err(memory_application_error)
+        self.project_memory_application()
+            .await?
+            .contradict_facts_v1(category, threshold, limit)
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn update_fact(&self, request: UpdateFactRequest) -> Result<FactRecord> {
         let context = self.generated_memory_operation("update fact")?;
-        match memory_application_for_db(
-            self.project_memory_owner()?,
-            self.project_memory_db().await?.as_db(),
-        )?
-        .update_fact_v1(request, context)
-        .await
-        .map_err(memory_application_error)?
+        match self
+            .project_memory_application()
+            .await?
+            .update_fact_v1(request, context)
+            .await
+            .map_err(memory_application_error)?
         {
             V1UpdateFactOutcome::Updated(fact) => Ok(*fact),
             V1UpdateFactOutcome::RejectedSecretLike { reason } => Err(TraceDecayError::Database {
@@ -241,13 +240,11 @@ impl TraceDecay {
 
     pub async fn remove_fact(&self, fact_id: i64) -> Result<bool> {
         let context = self.generated_memory_operation("remove fact")?;
-        memory_application_for_db(
-            self.project_memory_owner()?,
-            self.project_memory_db().await?.as_db(),
-        )?
-        .remove_fact_v1(fact_id, context)
-        .await
-        .map_err(memory_application_error)
+        self.project_memory_application()
+            .await?
+            .remove_fact_v1(fact_id, context)
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn list_facts(
@@ -257,60 +254,41 @@ impl TraceDecay {
         limit: usize,
     ) -> Result<Vec<FactRecord>> {
         let context = self.generated_memory_operation("list facts")?;
-        memory_application_for_db(
-            self.project_memory_owner()?,
-            self.project_memory_db().await?.as_db(),
-        )?
-        .list_facts_v1(category, min_trust, limit, context)
-        .await
-        .map_err(memory_application_error)
+        self.project_memory_application()
+            .await?
+            .list_facts_v1(category, min_trust, limit, context)
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn get_fact(&self, fact_id: i64) -> Result<Option<FactRecord>> {
-        memory_application_for_db(
-            self.project_memory_owner()?,
-            self.project_memory_db().await?.as_db(),
-        )?
-        .get_fact_v1(fact_id)
-        .await
-        .map_err(memory_application_error)
+        self.project_memory_application()
+            .await?
+            .get_fact_v1(fact_id)
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn record_fact_feedback(&self, request: FeedbackRequest) -> Result<FeedbackResult> {
         let context = self.generated_memory_operation("record fact feedback")?;
-        memory_application_for_db(
-            self.project_memory_owner()?,
-            self.project_memory_db().await?.as_db(),
-        )?
-        .record_fact_feedback_v1(request, context)
-        .await
-        .map_err(memory_application_error)
+        self.project_memory_application()
+            .await?
+            .record_fact_feedback_v1(request, context)
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn fact_trust_history(&self, fact_id: i64) -> Result<Vec<TrustHistoryEntry>> {
-        memory_application_for_db(
-            self.project_memory_owner()?,
-            self.project_memory_db().await?.as_db(),
-        )?
-        .fact_trust_history_v1(fact_id, MAX_FACT_HISTORY_LIMIT)
-        .await
-        .map_err(memory_application_error)
+        self.project_memory_application()
+            .await?
+            .fact_trust_history_v1(fact_id, MAX_FACT_HISTORY_LIMIT)
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn memory_status(&self) -> Result<MemoryStatus> {
-        memory_application_for_db(
-            self.project_memory_owner()?,
-            self.project_memory_db().await?.as_db(),
-        )?
-        .memory_status_v1()
-        .await
-        .map_err(memory_application_error)
-    }
-
-    pub async fn project_memory_status(&self) -> Result<MemoryStatus> {
-        let owner = self.project_memory_owner()?;
-        let db = self.open_project_store_db().await?;
-        memory_application_for_db(owner, &db)?
+        self.project_memory_application()
+            .await?
             .memory_status_v1()
             .await
             .map_err(memory_application_error)
@@ -323,13 +301,11 @@ impl TraceDecay {
         &self,
     ) -> Result<tracedecay_store::CompatibilityMemoryRepairStatsV1> {
         let context = self.generated_memory_operation("daemon memory repair")?;
-        memory_application_for_db(
-            self.project_memory_owner()?,
-            self.project_memory_db().await?.as_db(),
-        )?
-        .dashboard_repair_v1(context)
-        .await
-        .map_err(memory_application_error)
+        self.project_memory_application()
+            .await?
+            .dashboard_repair_v1(context)
+            .await
+            .map_err(memory_application_error)
     }
 
     /// Advances exactly one persisted V1 raw-memory cutover batch. The stable
@@ -339,13 +315,11 @@ impl TraceDecay {
         &self,
     ) -> Result<tracedecay_store::CompatibilityLegacyMemoryCutoverProgressV1> {
         let context = self.daemon_memory_cutover_operation()?;
-        memory_application_for_db(
-            self.project_memory_owner()?,
-            self.project_memory_db().await?.as_db(),
-        )?
-        .daemon_legacy_memory_cutover_v1(context)
-        .await
-        .map_err(memory_application_error)
+        self.project_memory_application()
+            .await?
+            .daemon_legacy_memory_cutover_v1(context)
+            .await
+            .map_err(memory_application_error)
     }
 }
 

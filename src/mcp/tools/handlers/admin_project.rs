@@ -232,7 +232,7 @@ pub(super) async fn handle_admin_project(
             })
         }
         AdminProjectAction::MemoryStatus => {
-            let status = cg.project_memory_status().await?;
+            let status = cg.memory_status().await?;
             let db = cg.open_project_store_db().await?;
             let mut rows = db
                 .conn()
