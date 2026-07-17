@@ -2548,11 +2548,14 @@ async fn daemon_memory_repair_tick_runs_without_automation_configuration() {
         .expect("project init");
     drop(cg);
 
-    let retry = super::run_memory_repair_scheduler_tick(&project, &handshake)
+    let decision = super::run_memory_repair_scheduler_tick(&project, &handshake)
         .await
         .expect("memory repair tick must not depend on automation configuration");
 
-    assert!(!retry, "a fresh project has no repair backlog");
+    assert!(
+        matches!(decision, super::MemoryRepairPassDecision::Idle),
+        "a fresh project has no repair backlog"
+    );
 }
 
 #[cfg(unix)]

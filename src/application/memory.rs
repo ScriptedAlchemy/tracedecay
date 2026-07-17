@@ -60,6 +60,7 @@ use crate::memory::types::{
 use crate::privacy::{
     MemoryFactSanitizationV1, sanitize_memory_fact_payload, sanitize_provider_metadata_text,
 };
+use crate::sessions::source::canonical_framed_sha256;
 
 #[derive(Debug, Error)]
 pub enum MemoryApplicationError {
@@ -176,23 +177,16 @@ impl MemoryOperationContext {
             FactOwnerV1::Profile => "profile".to_owned(),
             FactOwnerV1::Project { project_id } => format!("project:{}", project_id.as_str()),
         };
-        let mut hasher = Sha256::new();
-        for component in [
-            b"tracedecay.memory.operation.v1".as_slice(),
-            owner.as_bytes(),
-            action.as_bytes(),
-            request_id.as_bytes(),
-        ] {
-            hasher.update((component.len() as u64).to_be_bytes());
-            hasher.update(component);
-        }
-        let operation_id = ProvenanceId::new(format!(
-            "memory-operation.v1.{}",
-            hex::encode(hasher.finalize())
-        ))
-        .map_err(|_| MemoryApplicationError::InvalidCompatibilityInput {
-            invariant: "derived memory operation identity",
-        })?;
+        let digest = canonical_framed_sha256(
+            b"tracedecay.memory.operation.v1",
+            &[owner.as_bytes(), action.as_bytes(), request_id.as_bytes()],
+        );
+        let operation_id =
+            ProvenanceId::new(format!("memory-operation.v1.{digest}")).map_err(|_| {
+                MemoryApplicationError::InvalidCompatibilityInput {
+                    invariant: "derived memory operation identity",
+                }
+            })?;
         Ok(Self {
             operation_id,
             actor,
@@ -4047,6 +4041,22 @@ mod tests {
             Some(&serde_json::Value::String("retained".to_owned()))
         );
         assert!(command.metadata().get("automation_run_id").is_none());
+    }
+
+    #[test]
+    fn operation_identity_digest_matches_canonical_framed_sha256() {
+        let context = MemoryOperationContext::from_trusted_request_id(
+            &FactOwnerV1::Profile,
+            "feedback",
+            "fixture-feedback-mcp",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            context.operation_id().as_str(),
+            "memory-operation.v1.178353d02133a655ee53c04806709a086671ac1e7a364969759cb3be8b810a4b"
+        );
     }
 
     #[test]

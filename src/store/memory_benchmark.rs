@@ -1440,8 +1440,19 @@ fn validate_phase(
         .map(|sample| sample.latency_ns)
         .collect::<Vec<_>>();
     let expected = Distribution::from_samples(&latencies);
-    if expected != phase.latency {
-        return Err(format!("phase {scope} distribution mismatch"));
+    if expected.repetitions != phase.latency.repetitions
+        || expected.min_ns != phase.latency.min_ns
+        || expected.p50_ns != phase.latency.p50_ns
+        || expected.p95_ns != phase.latency.p95_ns
+        || expected.p99_ns != phase.latency.p99_ns
+        || expected.max_ns != phase.latency.max_ns
+        || !float_close(expected.mean_ns, phase.latency.mean_ns)
+        || !float_close(expected.sample_stddev_ns, phase.latency.sample_stddev_ns)
+    {
+        return Err(format!(
+            "phase {scope} distribution mismatch: recomputed {expected:?}, stored {:?}",
+            phase.latency
+        ));
     }
     let aggregate = aggregate_samples(&phase.raw_samples);
     if phase.cpu_ticks != aggregate.cpu_ticks
@@ -1678,7 +1689,7 @@ async fn run() {
     let git = git_snapshot();
     let fact_write = measure_fact_write(clock_ticks_per_second).await;
     let (anchor_create, anchor_resolution, anchor_replay) =
-        measure_anchor_phases(clock_ticks_per_second).await;
+        Box::pin(measure_anchor_phases(clock_ticks_per_second)).await;
     let migration_v19_to_v22 = measure_migration(clock_ticks_per_second).await;
     assert_eq!(
         workload_identity(),
@@ -1733,5 +1744,5 @@ async fn pr7_memory_baseline() {
         eprintln!("[pr7-benchmark] skipping measurement: the evidence platform contract is Linux");
         return;
     }
-    run().await;
+    Box::pin(run()).await;
 }

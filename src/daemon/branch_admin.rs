@@ -10,9 +10,11 @@ use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;
+#[cfg(unix)]
+use super::memory_repair_scheduler::MemoryRepairSchedulerHandle;
 use super::profile_host_admission_replay::ProfileHostAdmissionReplayRegistry;
 #[cfg(unix)]
-use super::scheduler::{AutomationSchedulerHandle, MemoryRepairSchedulerHandle};
+use super::scheduler::AutomationSchedulerHandle;
 use super::{DaemonHandshake, DatabaseOwnerRegistry, authority, write_json_rpc_response};
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";

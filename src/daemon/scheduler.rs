@@ -4,14 +4,9 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
-use crate::application::memory::MemoryApplication;
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
-use crate::store::DatabaseFactStore;
 use crate::tracedecay::TraceDecay;
-use tracedecay_store::{
-    CompatibilityFeedbackRepairProgressV1, CompatibilityLegacyMemoryCutoverProgressV1,
-};
 
 use super::{
     DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event,
@@ -144,7 +139,7 @@ async fn log_automation_staged_if_pending(project_path: &Path, cg: &TraceDecay) 
     let Ok(memory_db) = cg.open_project_store_db().await else {
         return;
     };
-    let Ok(memory) = MemoryApplication::new(owner, DatabaseFactStore::new(&memory_db)) else {
+    let Ok(memory) = crate::tracedecay::facts::memory_application_for_db(owner, &memory_db) else {
         return;
     };
     let counts =
@@ -164,92 +159,7 @@ pub(super) struct AutomationSchedulerHandle {
     pub(super) wake: Arc<tokio::sync::Notify>,
 }
 
-pub(super) struct MemoryRepairSchedulerHandle {
-    pub(super) task: JoinHandle<()>,
-    pub(super) completion: Arc<()>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum MemoryRepairTickOutcome {
-    Incomplete,
-    Complete,
-    NotRequired,
-}
-
-const MEMORY_REPAIR_RETRY_DELAY: Duration = Duration::from_secs(1);
-
 impl DaemonEngine {
-    /// Starts one daemon-owned compatibility-memory repair loop for this exact
-    /// project owner. Unlike automation, repair is never configuration-gated.
-    pub(super) async fn ensure_memory_repair_scheduler(
-        &self,
-        key: ProjectServerKey,
-        project_path: PathBuf,
-        handshake: DaemonHandshake,
-    ) {
-        self.store_administration
-            .with_writer(|| async move {
-                self.start_memory_repair_scheduler(key, project_path, handshake)
-                    .await;
-            })
-            .await;
-    }
-
-    async fn start_memory_repair_scheduler(
-        &self,
-        key: ProjectServerKey,
-        project_path: PathBuf,
-        handshake: DaemonHandshake,
-    ) {
-        if !self.lifecycle.accepting() {
-            return;
-        }
-        let mut schedulers = self
-            .store_administration
-            .memory_repair_schedulers()
-            .lock()
-            .await;
-        if !self.lifecycle.accepting() || schedulers.contains_key(&key) {
-            return;
-        }
-
-        let completion = Arc::new(());
-        let completed = Arc::clone(&completion);
-        let administration = self.store_administration.clone();
-        let task = tokio::spawn(async move {
-            Box::pin(run_memory_repair_scheduler_loop(project_path, handshake)).await;
-            administration
-                .memory_repair_schedulers()
-                .lock()
-                .await
-                .retain(|_, handle| !Arc::ptr_eq(&handle.completion, &completed));
-        });
-        schedulers.insert(key, MemoryRepairSchedulerHandle { task, completion });
-    }
-
-    pub(super) async fn shutdown_memory_repair_schedulers(&self) {
-        let scheduler_handles: Vec<JoinHandle<()>> = self
-            .store_administration
-            .with_writer(|| async {
-                let mut schedulers = self
-                    .store_administration
-                    .memory_repair_schedulers()
-                    .lock()
-                    .await;
-                schedulers.drain().map(|(_, handle)| handle.task).collect()
-            })
-            .await;
-        for handle in &scheduler_handles {
-            handle.abort();
-        }
-        let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
-            for handle in scheduler_handles {
-                let _ = handle.await;
-            }
-        })
-        .await;
-    }
-
     pub(super) async fn ensure_automation_scheduler(
         &self,
         key: ProjectServerKey,
@@ -392,113 +302,6 @@ impl DaemonEngine {
         })
         .await;
     }
-}
-
-async fn run_memory_repair_scheduler_loop(project_path: PathBuf, handshake: DaemonHandshake) {
-    loop {
-        match Box::pin(run_memory_repair_scheduler_tick(&project_path, &handshake)).await {
-            Ok(true) => {
-                log_daemon_event(
-                    "memory_repair_scheduler",
-                    &[
-                        ("project", project_path.display().to_string()),
-                        (
-                            "next_tick_secs",
-                            MEMORY_REPAIR_RETRY_DELAY.as_secs().to_string(),
-                        ),
-                    ],
-                );
-                tokio::time::sleep(MEMORY_REPAIR_RETRY_DELAY).await;
-            }
-            Ok(false) => return,
-            Err(error) => {
-                log_daemon_event(
-                    "memory_repair_scheduler",
-                    &[
-                        ("project", project_path.display().to_string()),
-                        ("outcome", "error".to_string()),
-                        ("error", error.to_string()),
-                    ],
-                );
-                return;
-            }
-        }
-    }
-}
-
-pub(super) async fn run_memory_repair_scheduler_tick(
-    project_path: &Path,
-    handshake: &DaemonHandshake,
-) -> Result<bool> {
-    let cg = Box::pin(open_existing_project_with_options(
-        project_path,
-        handshake.open_options(),
-    ))
-    .await?;
-    let progress = cg
-        .repair_project_memory_once()
-        .await?
-        .feedback_history_repair();
-    let repair_outcome = memory_repair_tick_outcome(progress)?;
-    let (repair_outcome, repair_retry) = match repair_outcome {
-        MemoryRepairTickOutcome::Incomplete => ("incomplete", true),
-        MemoryRepairTickOutcome::Complete => ("complete", false),
-        MemoryRepairTickOutcome::NotRequired => ("not_required", false),
-    };
-    let cutover_progress = cg.advance_project_memory_cutover_once().await?;
-    let cutover_retry = legacy_memory_cutover_should_retry(cutover_progress);
-    let cutover_outcome = if cutover_retry {
-        "incomplete"
-    } else {
-        "complete"
-    };
-    let retry = repair_retry || cutover_retry;
-    log_daemon_event(
-        "memory_repair",
-        &[
-            ("project", project_path.display().to_string()),
-            (
-                "outcome",
-                if retry { "incomplete" } else { "complete" }.to_string(),
-            ),
-            ("repair_outcome", repair_outcome.to_string()),
-            ("repair_processed", progress.processed().to_string()),
-            ("cutover_outcome", cutover_outcome.to_string()),
-            (
-                "cutover_processed",
-                cutover_progress.processed().to_string(),
-            ),
-        ],
-    );
-    Ok(retry)
-}
-
-pub(super) fn memory_repair_tick_outcome(
-    progress: CompatibilityFeedbackRepairProgressV1,
-) -> Result<MemoryRepairTickOutcome> {
-    match progress {
-        CompatibilityFeedbackRepairProgressV1::Incomplete { .. } => {
-            Ok(MemoryRepairTickOutcome::Incomplete)
-        }
-        CompatibilityFeedbackRepairProgressV1::Complete { .. } => {
-            Ok(MemoryRepairTickOutcome::Complete)
-        }
-        CompatibilityFeedbackRepairProgressV1::NotRequired => {
-            Ok(MemoryRepairTickOutcome::NotRequired)
-        }
-        CompatibilityFeedbackRepairProgressV1::Unknown => Err(TraceDecayError::Config {
-            message: "daemon memory repair returned unknown feedback-history progress".to_string(),
-        }),
-    }
-}
-
-pub(super) fn legacy_memory_cutover_should_retry(
-    progress: CompatibilityLegacyMemoryCutoverProgressV1,
-) -> bool {
-    matches!(
-        progress,
-        CompatibilityLegacyMemoryCutoverProgressV1::Incomplete { .. }
-    )
 }
 
 async fn run_automation_scheduler_loop(

@@ -22,6 +22,8 @@ const MAX_COMPATIBILITY_DASHBOARD_FACTS: usize = 100;
 const MAX_COMPATIBILITY_DASHBOARD_GRAPH: usize = 1_000;
 const MAX_COMPATIBILITY_DASHBOARD_VECTORS: usize = 2_000;
 const MAX_COMPATIBILITY_DASHBOARD_OPLOG: usize = 300;
+const MAX_FACT_WRITE_BATCH_EVENTS: usize = 256;
+const MAX_FACT_WRITE_BATCH_NEW_ANCHORS: usize = 256;
 
 /// One validated, atomic append to a fact's authoritative lineage.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +59,20 @@ impl FactWriteBatch {
         }
         if events.is_empty() {
             return Err(FactStoreError::EmptyBatch);
+        }
+        if events.len() > MAX_FACT_WRITE_BATCH_EVENTS {
+            return Err(FactStoreError::BatchLimitExceeded {
+                field: "fact write batch events",
+                count: events.len(),
+                max: MAX_FACT_WRITE_BATCH_EVENTS,
+            });
+        }
+        if new_anchors.len() > MAX_FACT_WRITE_BATCH_NEW_ANCHORS {
+            return Err(FactStoreError::BatchLimitExceeded {
+                field: "fact write batch new anchors",
+                count: new_anchors.len(),
+                max: MAX_FACT_WRITE_BATCH_NEW_ANCHORS,
+            });
         }
 
         if let Some(assertion) = &assertion {
@@ -2043,6 +2059,12 @@ fn validate_entity_merge(
 pub enum FactStoreError {
     #[error("fact write batch must append at least one lineage event")]
     EmptyBatch,
+    #[error("{field} count {count} exceeds the maximum of {max}")]
+    BatchLimitExceeded {
+        field: &'static str,
+        count: usize,
+        max: usize,
+    },
     #[error("fact write contains an item for another fact")]
     FactMismatch,
     #[error("fact write contains an item for another owner")]
@@ -5565,6 +5587,79 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, FactStoreError::DuplicateEventId { .. }));
+    }
+
+    #[test]
+    fn batch_accepts_item_counts_at_the_limit() {
+        let owner = FactOwnerV1::Profile;
+        let fact_id = fact_id(owner.clone(), "operation.batch-limit.boundary");
+        let events = (1..=MAX_FACT_WRITE_BATCH_EVENTS)
+            .map(|offset| payload_event(fact_id.clone(), owner.clone(), offset as i64))
+            .collect();
+        let new_anchors = (0..MAX_FACT_WRITE_BATCH_NEW_ANCHORS)
+            .map(|index| anchor(&format!("entity.batch-limit.{index}"), vec![]))
+            .collect();
+
+        FactWriteBatch::new(
+            fact_id,
+            owner,
+            None,
+            events,
+            new_anchors,
+            vec![],
+            None,
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn batch_rejects_item_counts_over_the_limit() {
+        let owner = FactOwnerV1::Profile;
+        let fact_id = fact_id(owner.clone(), "operation.batch-limit.overflow");
+        let events = (1..=MAX_FACT_WRITE_BATCH_EVENTS + 1)
+            .map(|offset| payload_event(fact_id.clone(), owner.clone(), offset as i64))
+            .collect();
+        let error = FactWriteBatch::new(
+            fact_id.clone(),
+            owner.clone(),
+            None,
+            events,
+            vec![],
+            vec![],
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            FactStoreError::BatchLimitExceeded { field, count, max }
+                if field == "fact write batch events"
+                    && count == MAX_FACT_WRITE_BATCH_EVENTS + 1
+                    && max == MAX_FACT_WRITE_BATCH_EVENTS
+        ));
+
+        let new_anchors = (0..=MAX_FACT_WRITE_BATCH_NEW_ANCHORS)
+            .map(|index| anchor(&format!("entity.batch-limit.overflow.{index}"), vec![]))
+            .collect();
+        let error = FactWriteBatch::new(
+            fact_id.clone(),
+            owner.clone(),
+            None,
+            vec![payload_event(fact_id, owner, 1)],
+            new_anchors,
+            vec![],
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            FactStoreError::BatchLimitExceeded { field, count, max }
+                if field == "fact write batch new anchors"
+                    && count == MAX_FACT_WRITE_BATCH_NEW_ANCHORS + 1
+                    && max == MAX_FACT_WRITE_BATCH_NEW_ANCHORS
+        ));
     }
 
     #[test]

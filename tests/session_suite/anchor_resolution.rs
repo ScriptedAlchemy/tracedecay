@@ -503,6 +503,13 @@ async fn ambiguous_resolution_reports_typed_state_from_record_and_store_conflict
         .await
         .unwrap();
     let raw_conn = raw_db.connect().unwrap();
+    // Simulate out-of-band store corruption: a second binding for the same
+    // anchor id that the authoritative writer would never commit. The foreign
+    // key exemption stays local to this raw connection.
+    raw_conn
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .await
+        .unwrap();
     raw_conn
         .execute(
             "INSERT INTO observation_repository_provenance (

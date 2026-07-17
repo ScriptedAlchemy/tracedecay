@@ -205,7 +205,10 @@ fn trust_batch(
 }
 
 async fn fact_db(path: &Path) -> Database {
-    crate::common::initialize_test_database(path).await.unwrap().0
+    crate::common::initialize_test_database(path)
+        .await
+        .unwrap()
+        .0
 }
 
 async fn lineage(
@@ -214,7 +217,9 @@ async fn lineage(
     fact_id: &FactId,
 ) -> Vec<FactLineageEventV1> {
     store
-        .query_fact_lineage(FactLineageQuery::new(owner.clone(), fact_id.clone(), None, 16).unwrap())
+        .query_fact_lineage(
+            FactLineageQuery::new(owner.clone(), fact_id.clone(), None, 16).unwrap(),
+        )
         .await
         .unwrap()
 }
@@ -254,8 +259,8 @@ async fn revoked_write_authority_fails_closed_without_partial_fact_commit() {
     let tmp = TempDir::new().unwrap();
     let profile_root = canonical(tmp.path());
     let db_path = profile_root.join("projects/pr7-authority/memory.db");
-    let lease = acquire_exclusive_for_profile(&profile_root, "pr7 revoked authority fixture")
-        .unwrap();
+    let lease =
+        acquire_exclusive_for_profile(&profile_root, "pr7 revoked authority fixture").unwrap();
     let scope =
         enter_maintenance_database_scope(&lease, &profile_root, "pr7 revoked authority fixture")
             .unwrap();
@@ -285,16 +290,18 @@ async fn revoked_write_authority_fails_closed_without_partial_fact_commit() {
         .commit_fact(trust_batch(&owner, &fact_id, 2, Some(last_event_id)))
         .await
         .expect_err("a write with a revoked authority must fail closed");
-    assert!(
-        matches!(error, FactStoreError::Storage { .. }),
-        "revoked authority must surface as a storage failure, got {error:?}"
-    );
-    assert!(
-        error
-            .to_string()
-            .contains("active daemon or exclusive maintenance scope"),
-        "revoked authority must be reported as a missing live scope, got {error}"
-    );
+    match &error {
+        FactStoreError::Storage { operation, source } => {
+            assert_eq!(*operation, "commit canonical memory fact");
+            assert!(
+                source
+                    .to_string()
+                    .contains("active daemon or exclusive maintenance scope"),
+                "revoked authority must be reported as a missing live scope, got {source}"
+            );
+        }
+        other => panic!("revoked authority must surface as a storage failure, got {other:?}"),
+    }
 
     let lineage = lineage(&store, &owner, &fact_id).await;
     assert_eq!(
@@ -345,10 +352,7 @@ async fn stale_fact_authority_cas_conflict_is_typed_and_leaves_lineage_untouched
         .await
         .unwrap();
     match stale {
-        FactCommitOutcome::Conflict(FactCommitConflict::LastEventMismatch {
-            expected,
-            actual,
-        }) => {
+        FactCommitOutcome::Conflict(FactCommitConflict::LastEventMismatch { expected, actual }) => {
             assert_eq!(expected, Some(first_event));
             assert_eq!(actual, Some(second_event.clone()));
         }
@@ -367,12 +371,10 @@ async fn stale_fact_authority_cas_conflict_is_typed_and_leaves_lineage_untouched
 async fn missing_daemon_authority_fails_closed_without_a_fallback_store() {
     // A path outside every isolated-test root keeps `for_runtime` on the
     // production branch: no live daemon, no maintenance scope, no fallback.
-    let root = std::env::current_dir()
-        .unwrap()
-        .join(format!(
-            "target/tracedecay-pr7-authority/missing-daemon-{}",
-            std::process::id()
-        ));
+    let root = std::env::current_dir().unwrap().join(format!(
+        "target/tracedecay-pr7-authority/missing-daemon-{}",
+        std::process::id()
+    ));
     let db_path = root.join("global.db");
 
     let error = match DatabaseAuthority::for_runtime(&db_path, "pr7 missing daemon fixture") {
@@ -409,7 +411,12 @@ async fn missing_daemon_authority_fails_closed_without_a_fallback_store() {
         let writer_owners = std::fs::read_dir(&lock_root)
             .unwrap()
             .filter_map(std::result::Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".writer.owner"))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".writer.owner")
+            })
             .count();
         assert_eq!(
             writer_owners, 0,
@@ -448,7 +455,9 @@ async fn register_project(
 #[tokio::test]
 async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical_identity() {
     let tmp = TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&tmp.path().join("global.db")).await.unwrap();
+    let db = GlobalDb::open_at(&tmp.path().join("global.db"))
+        .await
+        .unwrap();
     let remote = "https://github.com/pr7/ambiguous.git";
     let root_a = tmp.path().join("project-a");
     let common_a = root_a.join(".git");
@@ -498,7 +507,11 @@ async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical
     let owner = FactOwnerV1::Project {
         project_id: project_id.clone(),
     };
-    let fact_db = fact_db(&tmp.path().join("projects/pr7.project.ambiguity-a/memory.db")).await;
+    let fact_db = fact_db(
+        &tmp.path()
+            .join("projects/pr7.project.ambiguity-a/memory.db"),
+    )
+    .await;
     let store = DatabaseFactStore::new(&fact_db);
     let batch = assertion_batch(
         &owner,
@@ -547,13 +560,26 @@ async fn concurrent_clients_commit_one_fact_and_one_anchor_with_typed_loser_outc
     let scope = ObservationScopeV1::Profile;
 
     // Exact retry race: both clients submit the identical assertion batch.
-    let left = assertion_batch(&owner, scope.clone(), "race.identical", "entity.race.identical", "identical content", 10, None);
-    let right = assertion_batch(&owner, scope.clone(), "race.identical", "entity.race.identical", "identical content", 10, None);
-    let anchor_id = left.new_anchors()[0].anchor_id().clone();
-    let (left, right) = tokio::join!(
-        store_left.commit_fact(left),
-        store_right.commit_fact(right)
+    let left = assertion_batch(
+        &owner,
+        scope.clone(),
+        "race.identical",
+        "entity.race.identical",
+        "identical content",
+        10,
+        None,
     );
+    let right = assertion_batch(
+        &owner,
+        scope.clone(),
+        "race.identical",
+        "entity.race.identical",
+        "identical content",
+        10,
+        None,
+    );
+    let anchor_id = left.new_anchors()[0].anchor_id().clone();
+    let (left, right) = tokio::join!(store_left.commit_fact(left), store_right.commit_fact(right));
     let outcomes = [left.unwrap(), right.unwrap()];
     let committed_receipt = outcomes
         .iter()
@@ -583,15 +609,28 @@ async fn concurrent_clients_commit_one_fact_and_one_anchor_with_typed_loser_outc
 
     // Conflicting race: same fact identity, different assertion content. The
     // loser gets a typed frontier conflict, not a second committed fact.
-    let left = assertion_batch(&owner, scope.clone(), "race.conflict", "entity.race.left", "left content", 20, None);
-    let right = assertion_batch(&owner, scope.clone(), "race.conflict", "entity.race.right", "right content", 21, None);
+    let left = assertion_batch(
+        &owner,
+        scope.clone(),
+        "race.conflict",
+        "entity.race.left",
+        "left content",
+        20,
+        None,
+    );
+    let right = assertion_batch(
+        &owner,
+        scope.clone(),
+        "race.conflict",
+        "entity.race.right",
+        "right content",
+        21,
+        None,
+    );
     let fact_id = left.fact_id().clone();
     let left_event = left.events()[0].event_id().clone();
     let right_event = right.events()[0].event_id().clone();
-    let (left, right) = tokio::join!(
-        store_left.commit_fact(left),
-        store_right.commit_fact(right)
-    );
+    let (left, right) = tokio::join!(store_left.commit_fact(left), store_right.commit_fact(right));
     let outcomes = [left.unwrap(), right.unwrap()];
     let winner = outcomes
         .iter()
@@ -635,16 +674,29 @@ async fn concurrent_clients_commit_one_fact_and_one_anchor_with_typed_loser_outc
 
     // Anchor race: two different facts carry the same anchor identity with
     // conflicting content. Exactly one anchor may exist afterwards.
-    let left = assertion_batch(&owner, scope.clone(), "race.anchor.left", "entity.shared", "anchor race left fact", 30, None);
-    let right = assertion_batch(&owner, scope.clone(), "race.anchor.right", "entity.shared", "anchor race right fact", 31, None);
+    let left = assertion_batch(
+        &owner,
+        scope.clone(),
+        "race.anchor.left",
+        "entity.shared",
+        "anchor race left fact",
+        30,
+        None,
+    );
+    let right = assertion_batch(
+        &owner,
+        scope.clone(),
+        "race.anchor.right",
+        "entity.shared",
+        "anchor race right fact",
+        31,
+        None,
+    );
     let anchor_id = left.new_anchors()[0].anchor_id().clone();
     assert_eq!(anchor_id, right.new_anchors()[0].anchor_id().clone());
     let left_fact_id = left.fact_id().clone();
     let right_fact_id = right.fact_id().clone();
-    let (left, right) = tokio::join!(
-        store_left.commit_fact(left),
-        store_right.commit_fact(right)
-    );
+    let (left, right) = tokio::join!(store_left.commit_fact(left), store_right.commit_fact(right));
     let outcomes = [left.unwrap(), right.unwrap()];
     outcomes
         .iter()
