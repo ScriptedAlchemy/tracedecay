@@ -2250,31 +2250,12 @@ impl DaemonEngine {
         handshake: DaemonHandshake,
         initialize_request: JsonRpcRequest,
     ) {
-        let Some(activity) = self.lifecycle.try_enter() else {
-            return;
-        };
         let engine = self.clone();
-        let _warmup = tokio::spawn(async move {
-            let _activity = activity;
-            let project_server = tokio::select! {
-                result = Box::pin(engine.project_server(&handshake)) => result,
-                () = engine.lifecycle.wait_for_draining() => return,
-            };
-            match project_server {
-                Ok(server) => {
-                    // Preserve the regular initialize side effect that records
-                    // the negotiated MCP client name on the real server.
-                    let _ = server.handle_request(&initialize_request).await;
-                }
-                Err(error) => log_daemon_event(
-                    "project_server_warmup",
-                    &[
-                        ("outcome", "error".to_string()),
-                        ("error", error.to_string()),
-                    ],
-                ),
-            }
-        });
+        spawn_lifecycle_project_server_warmup(
+            self.lifecycle.clone(),
+            initialize_request,
+            async move { Box::pin(engine.project_server(&handshake)).await },
+        );
     }
 
     /// Opens or resolves a project server while writer administration is held.
@@ -2603,6 +2584,70 @@ fn daemon_bootstrap_response(
     }
 }
 
+fn spawn_lifecycle_project_server_warmup<OpenFuture>(
+    lifecycle: DaemonLifecycle,
+    initialize_request: JsonRpcRequest,
+    open_project_server: OpenFuture,
+) where
+    OpenFuture: std::future::Future<Output = Result<Arc<crate::mcp::McpServer>>> + Send + 'static,
+{
+    let Some(activity) = lifecycle.try_enter() else {
+        return;
+    };
+    let _warmup = tokio::spawn(async move {
+        let _activity = activity;
+        let project_server = tokio::select! {
+            result = Box::pin(open_project_server) => result,
+            () = lifecycle.wait_for_draining() => return,
+        };
+        match project_server {
+            Ok(server) => {
+                // Preserve the regular initialize side effect that records
+                // the negotiated MCP client name on the real server.
+                let _ = server.handle_request(&initialize_request).await;
+            }
+            Err(error) => log_daemon_event(
+                "project_server_warmup",
+                &[
+                    ("outcome", "error".to_string()),
+                    ("error", error.to_string()),
+                ],
+            ),
+        }
+    });
+}
+
+#[cfg(any(not(unix), test))]
+fn spawn_portable_project_server_warmup(
+    lifecycle: DaemonLifecycle,
+    store_administration: StoreAdministration,
+    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    handshake: DaemonHandshake,
+    initialize_request: JsonRpcRequest,
+    #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
+) {
+    let Some(project_path) = handshake.project_path.as_deref() else {
+        return;
+    };
+    let canonical_project_path = project_path
+        .canonicalize()
+        .unwrap_or_else(|_| project_path.to_path_buf());
+    spawn_lifecycle_project_server_warmup(lifecycle, initialize_request, async move {
+        store_administration
+            .with_writer(|| {
+                portable_project_server(
+                    &store_administration,
+                    &project_open_gates,
+                    &canonical_project_path,
+                    &handshake,
+                    #[cfg(test)]
+                    project_open_attempts.as_ref(),
+                )
+            })
+            .await
+    });
+}
+
 async fn write_routed_initialize_response(
     server: &crate::mcp::McpServer,
     transport: &mut impl McpTransport,
@@ -2829,6 +2874,28 @@ async fn serve_windows_broker_client(
         let response = branch_add_response(&store_administration, &handshake, &request).await;
         drop(setup_activity);
         write_json_rpc_response(&mut transport, &response).await?;
+        return Ok(());
+    }
+    if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim())
+        && let Some(response) = daemon_bootstrap_response(&request, initialize_route.as_ref())
+    {
+        if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+            && handshake.project_path.is_some()
+        {
+            spawn_portable_project_server_warmup(
+                lifecycle.clone(),
+                store_administration.clone(),
+                Arc::clone(&project_open_gates),
+                handshake.clone(),
+                request,
+                #[cfg(test)]
+                project_open_attempts.clone(),
+            );
+        }
+        drop(setup_activity);
+        if let Some(response) = response {
+            write_json_rpc_response(&mut transport, &response).await?;
+        }
         return Ok(());
     }
     if let Some(project_path) = handshake.project_path.as_deref() {
