@@ -50,7 +50,13 @@ pub(super) async fn merge_observation_authority(conn: &Connection) -> Result<()>
 
          INSERT OR IGNORE INTO observation_retrieval_anchors(observation_id, anchor_id)
          SELECT observation_id, anchor_id
-         FROM source.observation_retrieval_anchors;",
+         FROM source.observation_retrieval_anchors;
+
+         INSERT OR IGNORE INTO retrieval_anchor_aliases(
+             owner_json, alias_kind, locator_digest, anchor_id
+         )
+         SELECT owner_json, alias_kind, locator_digest, anchor_id
+         FROM source.retrieval_anchor_aliases;",
     )
     .await
     .map_err(|error| db_error("merge_observation_authority", error))?;
