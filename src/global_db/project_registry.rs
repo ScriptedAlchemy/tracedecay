@@ -268,48 +268,61 @@ pub(super) async fn list_code_project_paths(
         last_seen_at,
     ) in roots
     {
+        // One project's stale or malformed evidence must not make every
+        // registered root unlistable — a listing consumer (transcript sweeps,
+        // storage inventory) degrades to skipping that project, while doctor
+        // still surfaces the row through its own registry checks.
+        let skip = |detail: String| {
+            tracing::warn!(
+                project_id = project_id.as_str(),
+                %detail,
+                "skipping unlistable code project root"
+            );
+        };
         let path = match (platform, bytes, primary_root_last_seen_at) {
             (Some(platform), Some(bytes), Some(primary_last_seen)) => {
-                let path = decode_native_project_path(&platform, bytes).map_err(|error| {
-                    global_db_operation_message(
-                        OPERATION,
-                        format!("invalid primary root for project '{project_id}': {error}"),
-                    )
-                })?;
+                let path = match decode_native_project_path(&platform, bytes) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        skip(format!("invalid primary root: {error}"));
+                        continue;
+                    }
+                };
                 let display_evidence = path.to_string_lossy();
                 if primary_last_seen != last_seen_at
                     || (display_evidence != canonical_root && display_evidence != display_root)
                     || !project_alias_is_current(db, &project_id, &path, last_seen_at).await?
                 {
-                    return Err(global_db_operation_message(
-                        OPERATION,
-                        format!("project '{project_id}' has a stale primary root"),
-                    ));
+                    skip("stale primary root".to_string());
+                    continue;
                 }
                 path
             }
             (None, None, None) => {
-                legacy_code_project_path(
+                match legacy_code_project_path(
                     db,
                     &project_id,
                     &canonical_root,
                     &display_root,
                     last_seen_at,
                 )
-                .await?
+                .await
+                {
+                    Ok(path) => path,
+                    Err(error) => {
+                        skip(format!("legacy root evidence rejected: {error}"));
+                        continue;
+                    }
+                }
             }
             _ => {
-                return Err(global_db_operation_message(
-                    OPERATION,
-                    format!("project '{project_id}' has an incomplete primary root"),
-                ));
+                skip("incomplete primary root".to_string());
+                continue;
             }
         };
         if !path.is_absolute() {
-            return Err(global_db_operation_message(
-                OPERATION,
-                format!("project '{project_id}' has a non-absolute root"),
-            ));
+            skip("non-absolute root".to_string());
+            continue;
         }
         paths.push(path);
     }

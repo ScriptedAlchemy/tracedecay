@@ -62,12 +62,18 @@ impl ProjectionProvenance {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectionSkipReason {
     NonConversationalRecord,
+    /// The observation's deterministic output identity is already owned by a
+    /// different observation (duplicate-era provider records). The first
+    /// binder keeps the output; this observation converges as a durable,
+    /// auditable skip instead of wedging the projection queue.
+    OutputCollision,
 }
 
 impl ProjectionSkipReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NonConversationalRecord => "non_conversational_record",
+            Self::OutputCollision => "output_collision",
         }
     }
 }

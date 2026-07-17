@@ -1807,6 +1807,31 @@ async fn apply_provenance(
     Ok(())
 }
 
+/// True when this observation already carries a durable `output_collision`
+/// disposition: it must project as a skip everywhere (drain, audit, replay)
+/// because its output identity is owned by a different observation.
+pub(in crate::global_db) async fn output_collision_disposed(
+    conn: &Connection,
+    observation_id: &str,
+) -> ProjectionStoreResult<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT reason FROM observation_projection_dispositions
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id],
+        )
+        .await
+        .map_err(|error| storage("read projection disposition", error))?;
+    let reason = rows
+        .next()
+        .await
+        .map_err(|error| storage("read projection disposition", error))?
+        .map(|row| row.get::<String>(0))
+        .transpose()
+        .map_err(|error| storage("read projection disposition", error))?;
+    Ok(reason.as_deref() == Some(ProjectionSkipReason::OutputCollision.as_str()))
+}
+
 async fn verify_skip_disposition(
     conn: &Connection,
     observation: &DurableObservationV1,

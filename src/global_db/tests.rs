@@ -2537,14 +2537,11 @@ async fn legacy_code_project_listing_rejects_display_without_lossless_alias_evid
         .await
         .unwrap();
 
-    let error = db
-        .try_list_code_project_paths(usize::MAX)
-        .await
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("no current lossless legacy root evidence")
+    // One project's unresolvable evidence must not make every registered
+    // root unlistable; the row is skipped, never guessed.
+    assert_eq!(
+        db.try_list_code_project_paths(usize::MAX).await.unwrap(),
+        Vec::<PathBuf>::new()
     );
 }
 
@@ -2567,11 +2564,11 @@ async fn code_project_listing_rejects_incomplete_primary_root_tuple() {
         .await
         .unwrap();
 
-    let error = db
-        .try_list_code_project_paths(usize::MAX)
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("incomplete primary root"));
+    assert_eq!(
+        db.try_list_code_project_paths(usize::MAX).await.unwrap(),
+        Vec::<PathBuf>::new(),
+        "an incomplete primary root tuple is skipped, never resolved"
+    );
 }
 
 #[cfg(any(unix, windows))]
@@ -2619,11 +2616,11 @@ async fn legacy_code_project_listing_fails_closed_on_ambiguous_native_roots() {
         .await
         .unwrap();
 
-    let error = db
-        .try_list_code_project_paths(usize::MAX)
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("ambiguous legacy"), "{error}");
+    assert_eq!(
+        db.try_list_code_project_paths(usize::MAX).await.unwrap(),
+        Vec::<PathBuf>::new(),
+        "ambiguous legacy evidence is skipped, never resolved to a guess"
+    );
 }
 
 #[cfg(any(unix, windows))]

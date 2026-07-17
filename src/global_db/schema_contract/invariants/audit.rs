@@ -665,6 +665,22 @@ async fn validate_projection_effect(
             })?;
     let observation_id = observation.observation_id().as_str();
     let state = ProjectionAuthorityState::load(conn, observation_id).await?;
+    // An output_collision disposition is authoritative: the observation's
+    // deterministic output identity belongs to a different observation, so it
+    // audits as the durable skip it converged to, not as the message its
+    // derivation would produce.
+    if crate::global_db::observation_projection::output_collision_disposed(conn, observation_id)
+        .await
+        .map_err(|error| authority_violation(format!("invalid projection authority: {error}")))?
+    {
+        return validate_skipped_projection(
+            conn,
+            observation,
+            state,
+            ProjectionSkipReason::OutputCollision,
+        )
+        .await;
+    }
     match &effect {
         ObservationProjection::Message(projection) => {
             if state.workflow_rows != 0 {

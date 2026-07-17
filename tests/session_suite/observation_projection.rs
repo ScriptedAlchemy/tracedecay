@@ -1350,7 +1350,7 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
 }
 
 #[tokio::test]
-async fn divergent_output_collision_is_typed_and_rolls_back_every_projection_write() {
+async fn divergent_output_collision_converges_as_a_skip_without_overwriting() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     let store = GlobalDbObservationStore::new(&db);
@@ -1381,29 +1381,36 @@ async fn divergent_output_collision_is_typed_and_rolls_back_every_projection_wri
         .unwrap();
     let counts_before = projection_counts(&tmp).await;
 
-    let error = store
+    // A divergent output for an already-bound identity never overwrites the
+    // first binder; the second observation converges as a durable, auditable
+    // skip so the projection queue keeps draining.
+    match store
         .project_observation(second.observation_id())
         .await
-        .expect_err("same legacy key with different output must collide");
-    assert!(matches!(
-        error,
-        ProjectionStoreError::OutputCollision { provider, message_id }
-            if provider == "claude" && message_id == "shared-message"
-    ));
+        .unwrap()
+    {
+        ProjectionPersistOutcome::Skipped { reason, .. } => assert_eq!(
+            reason,
+            tracedecay_store::ProjectionSkipReason::OutputCollision
+        ),
+        other => panic!("expected a collision skip, got {other:?}"),
+    }
     assert_eq!(
         store.projection_checkpoint().await.unwrap().last_sequence(),
-        1
+        2
     );
-    assert_eq!(projection_counts(&tmp).await, counts_before);
+    let counts_after = projection_counts(&tmp).await;
     assert_eq!(
-        store
-            .get_observation(second.observation_id())
-            .await
-            .unwrap()
-            .unwrap()
-            .projection_status(),
-        ObservationProjectionStatus::Queued
+        (counts_after.0, counts_after.1, counts_after.2),
+        (counts_before.0, counts_before.1, counts_before.2),
+        "no session, message, or provenance rows may change on a collision"
     );
+    assert_eq!(
+        counts_after.4,
+        counts_before.4 + 1,
+        "the collision must record exactly one disposition"
+    );
+    assert_eq!(counts_after.5, 0, "the projection queue must converge");
     assert_eq!(
         db.search_session_messages("claude", Some("user"), "original collision", 10)
             .await
@@ -1415,20 +1422,19 @@ async fn divergent_output_collision_is_typed_and_rolls_back_every_projection_wri
     assert!(texts[0].contains("original collision canary"));
     assert!(!texts[0].contains("divergent collision canary"));
 
-    let rebuild_error = store
+    // A full rebuild reaches the same converged state: first binder kept,
+    // second staged as a skip.
+    store
         .rebuild_projection(2)
         .await
-        .expect_err("rebuild must preserve divergent-output collision semantics");
-    assert!(matches!(
-        rebuild_error,
-        ProjectionStoreError::OutputCollision { provider, message_id }
-            if provider == "claude" && message_id == "shared-message"
-    ));
-    assert_eq!(projection_counts(&tmp).await, counts_before);
+        .expect("rebuild must converge past divergent-output collisions");
+    let texts = projected_message_texts(&tmp).await;
+    assert_eq!(texts.len(), 1);
+    assert!(texts[0].contains("original collision canary"));
 }
 
 #[tokio::test]
-async fn reused_message_id_across_sources_collides_without_consuming_queue() {
+async fn reused_message_id_across_sources_converges_without_adoption() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     let store = GlobalDbObservationStore::new(&db);
@@ -1454,25 +1460,22 @@ async fn reused_message_id_across_sources_collides_without_consuming_queue() {
         .project_observation(first.observation_id())
         .await
         .unwrap();
-    let counts_before = projection_counts(&tmp).await;
     let provenance_before = projection_provenance_rows(&tmp).await;
     let texts_before = projected_message_texts(&tmp).await;
-    let checkpoint_before = store.projection_checkpoint().await.unwrap();
 
-    let error = store
+    // A reused message ID from another typed source must not adopt or
+    // replace the first binder's output; it converges as a durable skip.
+    match store
         .project_observation(second.observation_id())
         .await
-        .expect_err("a reused message ID from another typed source must collide");
-    assert!(matches!(
-        error,
-        ProjectionStoreError::OutputCollision { provider, message_id }
-            if provider == "claude" && message_id == "shared-cross-source"
-    ));
-    assert_eq!(
-        store.projection_checkpoint().await.unwrap(),
-        checkpoint_before
-    );
-    assert_eq!(projection_counts(&tmp).await, counts_before);
+        .unwrap()
+    {
+        ProjectionPersistOutcome::Skipped { reason, .. } => assert_eq!(
+            reason,
+            tracedecay_store::ProjectionSkipReason::OutputCollision
+        ),
+        other => panic!("expected a collision skip, got {other:?}"),
+    }
     assert_eq!(projection_provenance_rows(&tmp).await, provenance_before);
     assert_eq!(projected_message_texts(&tmp).await, texts_before);
     assert_eq!(texts_before.len(), 1);
@@ -1484,7 +1487,8 @@ async fn reused_message_id_across_sources_collides_without_consuming_queue() {
             .unwrap()
             .unwrap()
             .projection_status(),
-        ObservationProjectionStatus::Queued
+        ObservationProjectionStatus::NotQueued,
+        "the disposed observation must leave the queue"
     );
 }
 
@@ -2126,15 +2130,22 @@ async fn cross_projector_owner_blocks_incompatible_generation_rollover() {
         )),
     )
     .await;
-    assert!(matches!(
-        store
-            .project_observation(replacement.observation_id())
-            .await
-            .unwrap_err(),
-        ProjectionStoreError::OutputCollision { .. }
-    ));
+    // The cross-projector owner still blocks the rollover from replacing the
+    // original output; the incompatible replacement converges as a durable
+    // skip instead of wedging the queue.
+    match store
+        .project_observation(replacement.observation_id())
+        .await
+        .unwrap()
+    {
+        ProjectionPersistOutcome::Skipped { reason, .. } => assert_eq!(
+            reason,
+            tracedecay_store::ProjectionSkipReason::OutputCollision
+        ),
+        other => panic!("expected a collision skip, got {other:?}"),
+    }
     assert!(projected_message_texts(&tmp).await[0].contains("global owner original"));
-    assert_eq!(table_count(&tmp, "projection_queue").await, 1);
+    assert_eq!(table_count(&tmp, "projection_queue").await, 0);
 }
 
 #[tokio::test]

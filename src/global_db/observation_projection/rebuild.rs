@@ -9,8 +9,8 @@ use tracedecay_store::{
 
 use super::super::GlobalDb;
 use super::apply::{
-    apply_effect, derive_projection_for_rebuild, derive_projection_with_alias, verify_effect,
-    workflow_semantic_kind,
+    apply_effect, derive_projection_for_rebuild, derive_projection_with_alias,
+    output_collision_disposed, verify_effect, workflow_semantic_kind,
 };
 use super::state::{
     consume_projection_queue_item, decode_observation_row, decode_sequence,
@@ -71,7 +71,12 @@ impl GlobalDb {
         else {
             return Err(ProjectionStoreError::ObservationNotFound);
         };
-        let effect = derive_projection_with_alias(&transaction, &observation).await?;
+        let mut effect = if output_collision_disposed(&transaction, observation_id.as_str()).await?
+        {
+            ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision)
+        } else {
+            derive_projection_with_alias(&transaction, &observation).await?
+        };
         if sequence <= checkpoint.last_sequence() {
             verify_effect(&transaction, &observation, &effect).await?;
             consume_projection_queue_item(&transaction, observation_id).await?;
@@ -92,7 +97,39 @@ impl GlobalDb {
             return Err(ProjectionStoreError::NotQueued);
         }
 
-        apply_effect(&transaction, sequence, &observation, &effect).await?;
+        transaction
+            .execute_batch("SAVEPOINT projection_apply;")
+            .await
+            .map_err(|error| storage("begin projection apply savepoint", error))?;
+        match apply_effect(&transaction, sequence, &observation, &effect).await {
+            Ok(()) => {
+                transaction
+                    .execute_batch("RELEASE projection_apply;")
+                    .await
+                    .map_err(|error| storage("release projection apply savepoint", error))?;
+            }
+            // The output identity is owned by a different observation: the
+            // first binder keeps it, and this observation converges as a
+            // durable skip instead of wedging the queue on every drain.
+            Err(ProjectionStoreError::OutputCollision {
+                provider,
+                message_id,
+            }) => {
+                tracing::warn!(
+                    %provider,
+                    %message_id,
+                    observation = observation_id.as_str(),
+                    "projection output collided; recording a durable skip disposition"
+                );
+                transaction
+                    .execute_batch("ROLLBACK TO projection_apply; RELEASE projection_apply;")
+                    .await
+                    .map_err(|error| storage("rollback projection apply savepoint", error))?;
+                effect = ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision);
+                apply_effect(&transaction, sequence, &observation, &effect).await?;
+            }
+            Err(error) => return Err(error),
+        }
         consume_projection_queue_item(&transaction, observation_id).await?;
         let checkpoint = write_checkpoint(&transaction, sequence).await?;
         transaction
@@ -331,8 +368,55 @@ impl GlobalDb {
         let mut projected_rows = job.projected_rows;
         let mut skipped_observations = job.skipped_observations;
         for (sequence, observation) in page {
-            let effect =
+            let mut effect =
                 derive_projection_for_rebuild(&transaction, &observation, &job.generation).await?;
+            transaction
+                .execute_batch("SAVEPOINT rebuild_stage;")
+                .await
+                .map_err(|error| storage("begin rebuild stage savepoint", error))?;
+            let staged = stage_rebuild_effect(
+                &transaction,
+                &job.generation,
+                sequence,
+                &observation,
+                &effect,
+            )
+            .await;
+            match staged {
+                Ok(()) => {
+                    transaction
+                        .execute_batch("RELEASE rebuild_stage;")
+                        .await
+                        .map_err(|error| storage("release rebuild stage savepoint", error))?;
+                }
+                // Duplicate-era records whose output identity is owned by an
+                // earlier observation converge as skips during a rebuild too.
+                Err(ProjectionStoreError::OutputCollision {
+                    provider,
+                    message_id,
+                }) => {
+                    tracing::warn!(
+                        %provider,
+                        %message_id,
+                        observation = observation.observation_id().as_str(),
+                        "rebuild output collided; staging a skip disposition"
+                    );
+                    transaction
+                        .execute_batch("ROLLBACK TO rebuild_stage; RELEASE rebuild_stage;")
+                        .await
+                        .map_err(|error| storage("rollback rebuild stage savepoint", error))?;
+                    effect = ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision);
+                    stage_rebuild_effect(
+                        &transaction,
+                        &job.generation,
+                        sequence,
+                        &observation,
+                        &effect,
+                    )
+                    .await?;
+                }
+                Err(error) => return Err(error),
+            }
             match &effect {
                 ObservationProjection::Message(_) | ObservationProjection::Composite { .. } => {
                     projected_rows = projected_rows.saturating_add(effect.output_count());
@@ -341,14 +425,6 @@ impl GlobalDb {
                     skipped_observations = skipped_observations.saturating_add(1);
                 }
             }
-            stage_rebuild_effect(
-                &transaction,
-                &job.generation,
-                sequence,
-                &observation,
-                &effect,
-            )
-            .await?;
             staged_through = sequence_i64(sequence)?;
         }
         if staged_through < job.frontier && staged_through == job.staged_through {

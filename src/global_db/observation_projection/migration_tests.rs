@@ -804,6 +804,112 @@ async fn v2_upgrade_preserves_changed_generation_lineage_and_future_supersession
 }
 
 #[tokio::test]
+async fn duplicate_output_identity_converges_as_a_durable_collision_skip() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let store = GlobalDbObservationStore::new(&db);
+
+    // Two distinct claude observations (different byte ranges, so different
+    // observation identities) carrying the same session/message uuid — the
+    // duplicate-era provider-record shape whose second binder collides on
+    // output ownership.
+    let build = |range: (u64, u64), content: &str, receipt: &str, source_key: &str| {
+        let payload = serde_json::json!({
+            "cwd": "/workspace/project",
+            "message": {"content": content, "role": "user"},
+            "sessionId": LEGACY_CLAUDE_SESSION_ID,
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "type": "user",
+            "uuid": LEGACY_CLAUDE_MESSAGE_ID
+        });
+        let source = ObservationSourceIdentityV1::for_provider_source(
+            ProviderId::new("claude").unwrap(),
+            SessionId::new(LEGACY_CLAUDE_SESSION_ID).unwrap(),
+            SessionId::new(source_key).unwrap(),
+        )
+        .unwrap();
+        let identity = ObservationIdentityMaterialV1::new(
+            source,
+            ObservationScopeV1::Project {
+                project_id: ProjectId::new("project.collision-skip").unwrap(),
+            },
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            ObservationSourceRangeV1::new(range.0, range.1).unwrap(),
+        )
+        .unwrap();
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new(receipt).unwrap(),
+                ComponentVersion::new("sanitizer.collision-skip.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+        )
+        .unwrap();
+        DurableObservationV1::new(
+            identity,
+            receipt,
+            RetentionClass::new("retention.collision-skip").unwrap(),
+            payload,
+        )
+        .unwrap()
+    };
+    // Different source keys model the same message re-serialized in two
+    // transcript files: no shared projection lineage, so the second binder
+    // must not adopt or supersede the first's output.
+    let second_source_key = concat!(
+        "tracedecay-claude-observation-source-v1-sha256-",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    );
+    let first = build(
+        (0, 2),
+        "First binder keeps the output.",
+        "receipt.collision.1",
+        LEGACY_CLAUDE_SOURCE_KEY,
+    );
+    let second = build(
+        (0, 3),
+        "Second binder must converge.",
+        "receipt.collision.2",
+        second_source_key,
+    );
+    store.persist_observation(write(first)).await.unwrap();
+    store.persist_observation(write(second)).await.unwrap();
+
+    let first_queued = store.next_queued_observation().await.unwrap().unwrap();
+    assert!(matches!(
+        store.project_observation(&first_queued).await.unwrap(),
+        ProjectionPersistOutcome::Projected(_)
+    ));
+    let second_queued = store.next_queued_observation().await.unwrap().unwrap();
+    match store.project_observation(&second_queued).await.unwrap() {
+        ProjectionPersistOutcome::Skipped { reason, .. } => {
+            assert_eq!(
+                reason,
+                tracedecay_store::ProjectionSkipReason::OutputCollision,
+                "the second binder must converge as a collision skip"
+            );
+        }
+        other => panic!("expected a collision skip, got {other:?}"),
+    }
+    assert!(
+        store.next_queued_observation().await.unwrap().is_none(),
+        "the projection queue must converge"
+    );
+
+    // Replay is idempotent through the recorded disposition, and the
+    // authority audit accepts the skip against a message-shaped derivation.
+    assert!(matches!(
+        store.project_observation(&second_queued).await.unwrap(),
+        ProjectionPersistOutcome::ExactDuplicate(_)
+    ));
+    db.audit_observation_authority().await.unwrap();
+}
+
+#[tokio::test]
 async fn v2_upgrade_with_broken_predecessor_lineage_falls_back_to_rebuild() {
     const PREDECESSOR_ROWS: usize = 6;
 
