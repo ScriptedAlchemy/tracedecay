@@ -804,6 +804,106 @@ async fn v2_upgrade_preserves_changed_generation_lineage_and_future_supersession
 }
 
 #[tokio::test]
+async fn v2_upgrade_with_broken_predecessor_lineage_falls_back_to_rebuild() {
+    const PREDECESSOR_ROWS: usize = 6;
+
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let store = GlobalDbObservationStore::new(&db);
+    for index in 0..PREDECESSOR_ROWS {
+        store
+            .persist_observation(write(checked_in_codex_session_boundary(index)))
+            .await
+            .unwrap();
+    }
+    while let Some(queued) = store.next_queued_observation().await.unwrap() {
+        assert!(matches!(
+            store.project_observation(&queued).await.unwrap(),
+            ProjectionPersistOutcome::Skipped { .. }
+        ));
+    }
+    db.conn
+        .execute(
+            "UPDATE observation_projection_dispositions SET projector_version = ?1
+             WHERE projector_version = ?2",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V2,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
+            ],
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE observation_projection_checkpoints SET projector_version = ?1
+             WHERE projector_version = ?2",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V2,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
+            ],
+        )
+        .await
+        .unwrap();
+    // Break the predecessor lineage the way an interrupted older writer can:
+    // one observation has no terminal predecessor outcome at all, so the
+    // incremental page validation can never pass.
+    db.conn
+        .execute(
+            "DELETE FROM observation_projection_dispositions
+             WHERE projector_version = ?1
+               AND observation_id = (
+                   SELECT observation_id FROM observation_projection_dispositions
+                   WHERE projector_version = ?1
+                   ORDER BY observation_id LIMIT 1
+               )",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V2],
+        )
+        .await
+        .unwrap();
+    drop(db);
+
+    // Every reopen must succeed (never fail closed) and the staged rebuild
+    // must converge to a superseded incremental migration.
+    let mut superseded = false;
+    for attempt in 0..16 {
+        let open = match GlobalDb::try_open_at(&db_path).await {
+            Ok(open) => open.unwrap(),
+            Err(error) => panic!("open attempt {attempt} failed: {error}"),
+        };
+        let mut rows = open
+            .conn
+            .query(
+                "SELECT completed FROM observation_projection_migrations
+                 WHERE source_projector_version = ?1
+                   AND target_projector_version = ?2",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION_V2,
+                    SESSION_MESSAGE_PROJECTOR_VERSION_V4
+                ],
+            )
+            .await
+            .unwrap();
+        let completed = rows
+            .next()
+            .await
+            .unwrap()
+            .map(|row| row.get::<i64>(0).unwrap());
+        drop(rows);
+        if completed == Some(1) {
+            open.audit_observation_authority().await.unwrap();
+            superseded = true;
+            break;
+        }
+        drop(open);
+    }
+    assert!(
+        superseded,
+        "rebuild fallback must converge and supersede the incremental migration"
+    );
+}
+
+#[tokio::test]
 async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
     const PREDECESSOR_ROWS: usize = 257;
 

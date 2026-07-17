@@ -41,11 +41,88 @@ pub(in crate::global_db) async fn prepare_projection_version_migration(
         return Ok(());
     }
 
-    migrate_projection_page(db).await?;
-    Ok(())
+    match migrate_projection_page(db).await? {
+        MigrationPageOutcome::Advanced(_) => Ok(()),
+        MigrationPageOutcome::UnmigratableLineage => rebuild_instead_of_migrating(db).await,
+    }
 }
 
-pub(super) async fn migrate_projection_page(db: &GlobalDb) -> ProjectionStoreResult<bool> {
+/// Converges a store whose predecessor projection lineage cannot support the
+/// incremental version migration (sequence gaps, or observations with zero or
+/// several predecessor outcomes — states an interrupted or older writer can
+/// leave behind). Projections are derived data: rebuild the current version
+/// from canonical observations instead of failing the open forever, then mark
+/// the incremental migration superseded so it stops re-arming.
+async fn rebuild_instead_of_migrating(db: &GlobalDb) -> ProjectionStoreResult<()> {
+    eprintln!(
+        "[tracedecay] projection version migration fell back to a full {} rebuild",
+        SESSION_MESSAGE_PROJECTOR_VERSION
+    );
+    let mut rows = db
+        .conn
+        .query("SELECT COALESCE(MAX(sequence), 0) FROM observations", ())
+        .await
+        .map_err(|error| storage("read projection rebuild frontier", error))?;
+    let frontier = rows
+        .next()
+        .await
+        .map_err(|error| storage("read projection rebuild frontier", error))?
+        .ok_or_else(|| storage_message("read projection rebuild frontier", "count disappeared"))?
+        .get::<i64>(0)
+        .map_err(|error| storage("read projection rebuild frontier", error))?;
+    // A live cursor pins this connection's read snapshot; the rebuild below
+    // must observe its own committed staging rows through the same connection.
+    drop(rows);
+    let frontier = u64::try_from(frontier)
+        .map_err(|_| storage_message("read projection rebuild frontier", "negative sequence"))?;
+    let outcome = db.rebuild_projection_result(frontier).await?;
+    if !outcome.is_complete() {
+        // Bounded pass; the next open resumes the staged rebuild.
+        return Ok(());
+    }
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .map_err(|error| storage("begin projection migration supersession", error))?;
+    if let Some(predecessor) = read_predecessor_frontier(&transaction).await? {
+        let frontier_i64 = i64::try_from(predecessor.sequence).map_err(|_| {
+            storage_message(
+                "record projection migration supersession",
+                "sequence overflow",
+            )
+        })?;
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO observation_projection_migrations (
+                    source_projector_version, target_projector_version,
+                    source_frontier, migrated_through, completed
+                 ) VALUES (?1, ?2, ?3, ?3, 1)",
+                params![
+                    predecessor.version.as_str(),
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    frontier_i64
+                ],
+            )
+            .await
+            .map_err(|error| storage("record projection migration supersession", error))?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| storage("commit projection migration supersession", error))
+}
+
+/// One incremental migration page: either it advanced (with more pages
+/// possibly remaining), or the predecessor lineage disqualified incremental
+/// migration entirely.
+pub(super) enum MigrationPageOutcome {
+    Advanced(bool),
+    UnmigratableLineage,
+}
+
+pub(super) async fn migrate_projection_page(
+    db: &GlobalDb,
+) -> ProjectionStoreResult<MigrationPageOutcome> {
     let transaction = db
         .begin_write_transaction()
         .await
@@ -56,7 +133,7 @@ pub(super) async fn migrate_projection_page(db: &GlobalDb) -> ProjectionStoreRes
             .commit()
             .await
             .map_err(|error| storage("commit projection version migration page", error))?;
-        return Ok(false);
+        return Ok(MigrationPageOutcome::Advanced(false));
     };
 
     transaction
@@ -89,7 +166,7 @@ pub(super) async fn migrate_projection_page(db: &GlobalDb) -> ProjectionStoreRes
             .commit()
             .await
             .map_err(|error| storage("commit projection version migration page", error))?;
-        return Ok(false);
+        return Ok(MigrationPageOutcome::Advanced(false));
     }
 
     ensure_projection_output_state_cache(&transaction).await?;
@@ -304,10 +381,9 @@ pub(super) async fn migrate_projection_page(db: &GlobalDb) -> ProjectionStoreRes
 
     for ((sequence, observation), predecessor_outcomes) in page {
         if sequence != migrated_frontier.saturating_add(1) || predecessor_outcomes != 1 {
-            return Err(storage_message(
-                "migrate projection frontier",
-                "predecessor frontier lacks exactly one terminal outcome",
-            ));
+            // Dropping the transaction rolls this page back; the caller
+            // converges through a full rebuild instead.
+            return Ok(MigrationPageOutcome::UnmigratableLineage);
         }
         let effect = derive_projection_with_alias(&transaction, &observation).await?;
         apply_effect(&transaction, sequence, &observation, &effect).await?;
@@ -351,7 +427,9 @@ pub(super) async fn migrate_projection_page(db: &GlobalDb) -> ProjectionStoreRes
         .commit()
         .await
         .map_err(|error| storage("commit projection version migration page", error))?;
-    Ok(migrated_frontier < predecessor.sequence)
+    Ok(MigrationPageOutcome::Advanced(
+        migrated_frontier < predecessor.sequence,
+    ))
 }
 
 async fn projection_version_migration_pending(conn: &Connection) -> ProjectionStoreResult<bool> {
