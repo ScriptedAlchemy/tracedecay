@@ -544,15 +544,33 @@ where
     // serving. Fact writes defer bank rebuilds to the repair pass, and a
     // standalone dashboard has no daemon scheduler to drive that convergence,
     // so without this pass the overview reports stale or empty banks.
-    for _ in 0..8 {
+    //
+    // This bounded-retry convergence policy intentionally lives here
+    // temporarily, next to the standalone dashboard's only caller of the
+    // repair pass. It should collapse into a single call against the
+    // application-layer repair API once that layer's in-flight refactor
+    // (see src/application/memory.rs) lands.
+    const REPAIR_PASS_BOUND: usize = 8;
+    let mut repair_bound_exhausted = true;
+    for _ in 0..REPAIR_PASS_BOUND {
         match memory_api::repair_derived_memory(&state).await {
             Ok(repair) if repair.missing_vectors_repaired > 0 || repair.banks_rebuilt > 0 => {}
-            Ok(_) => break,
+            Ok(_) => {
+                repair_bound_exhausted = false;
+                break;
+            }
             Err(message) => {
-                eprintln!("Derived memory startup repair skipped: {message}");
+                tracing::warn!("Derived memory startup repair skipped: {message}");
+                repair_bound_exhausted = false;
                 break;
             }
         }
+    }
+    if repair_bound_exhausted {
+        tracing::warn!(
+            "Derived memory startup repair exhausted {REPAIR_PASS_BOUND} passes while still \
+             making progress; serving possibly-stale banks"
+        );
     }
     if options.start_session_catch_up {
         if let Some(db) = state.lcm_db.as_ref() {
