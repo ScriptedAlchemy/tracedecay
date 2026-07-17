@@ -7,6 +7,7 @@ use tracedecay_store::{
 
 use super::super::GlobalDb;
 use super::apply::{apply_effect, derive_projection_with_alias, seed_predecessor_message_lineage};
+use super::rebuild::read_observation_frontier;
 use super::state::{
     consume_projection_queue_item, decode_observation_row, decode_sequence,
     ensure_projection_output_state_cache, inherit_predecessor_output_state, storage,
@@ -54,27 +55,11 @@ pub(in crate::global_db) async fn prepare_projection_version_migration(
 /// from canonical observations instead of failing the open forever, then mark
 /// the incremental migration superseded so it stops re-arming.
 async fn rebuild_instead_of_migrating(db: &GlobalDb) -> ProjectionStoreResult<()> {
-    eprintln!(
-        "[tracedecay] projection version migration fell back to a full {} rebuild",
-        SESSION_MESSAGE_PROJECTOR_VERSION
+    tracing::warn!(
+        target_version = SESSION_MESSAGE_PROJECTOR_VERSION,
+        "projection version migration fell back to a full rebuild"
     );
-    let mut rows = db
-        .conn
-        .query("SELECT COALESCE(MAX(sequence), 0) FROM observations", ())
-        .await
-        .map_err(|error| storage("read projection rebuild frontier", error))?;
-    let frontier = rows
-        .next()
-        .await
-        .map_err(|error| storage("read projection rebuild frontier", error))?
-        .ok_or_else(|| storage_message("read projection rebuild frontier", "count disappeared"))?
-        .get::<i64>(0)
-        .map_err(|error| storage("read projection rebuild frontier", error))?;
-    // A live cursor pins this connection's read snapshot; the rebuild below
-    // must observe its own committed staging rows through the same connection.
-    drop(rows);
-    let frontier = u64::try_from(frontier)
-        .map_err(|_| storage_message("read projection rebuild frontier", "negative sequence"))?;
+    let frontier = read_observation_frontier(&db.conn).await?;
     let outcome = db.rebuild_projection_result(frontier).await?;
     if !outcome.is_complete() {
         // Bounded pass; the next open resumes the staged rebuild.

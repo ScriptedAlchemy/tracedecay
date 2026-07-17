@@ -607,19 +607,29 @@ fn decode_usize(value: i64, operation: &'static str) -> ProjectionStoreResult<us
     usize::try_from(value).map_err(|_| storage_message(operation, "invalid rebuild counter"))
 }
 
-async fn validate_rebuild_frontier(conn: &Connection, frontier: u64) -> ProjectionStoreResult<()> {
+/// Reads the current observation frontier: `COALESCE(MAX(sequence), 0)` over
+/// `observations`. The query's row cursor lives only inside this function and
+/// is fully consumed and dropped before it returns, so a caller may safely go
+/// on to read or write further rows through the same connection and observe
+/// them — a cursor left open past that point would otherwise pin the
+/// connection's read snapshot and hide those subsequent writes.
+pub(super) async fn read_observation_frontier(conn: &Connection) -> ProjectionStoreResult<u64> {
     let mut rows = conn
         .query("SELECT COALESCE(MAX(sequence), 0) FROM observations", ())
         .await
         .map_err(|error| storage("read projection rebuild frontier", error))?;
-    let committed = rows
+    let frontier = rows
         .next()
         .await
         .map_err(|error| storage("read projection rebuild frontier", error))?
         .ok_or_else(|| storage_message("read projection rebuild frontier", "no row"))?
         .get::<i64>(0)
         .map_err(|error| storage("read projection rebuild frontier", error))?;
-    let committed = decode_sequence(committed, "read projection rebuild frontier")?;
+    decode_sequence(frontier, "read projection rebuild frontier")
+}
+
+async fn validate_rebuild_frontier(conn: &Connection, frontier: u64) -> ProjectionStoreResult<()> {
+    let committed = read_observation_frontier(conn).await?;
     if frontier > committed {
         Err(ProjectionStoreError::InvalidRebuildFrontier {
             frontier,

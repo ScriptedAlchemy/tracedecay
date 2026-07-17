@@ -21,6 +21,25 @@ struct CommittedCursorCandidate {
     cursor: ObservationSourceCursorV1,
 }
 
+/// Reads the current observation frontier: `COALESCE(MAX(sequence), 0)` over
+/// `observations`. The row cursor lives only inside this function, so it is
+/// fully consumed and dropped before returning — see
+/// `observation_projection::rebuild::read_observation_frontier` for why a
+/// caller doing further reads or writes on the same connection depends on
+/// that.
+async fn read_observation_frontier(conn: &Connection) -> crate::errors::Result<i64> {
+    let mut rows = conn
+        .query("SELECT COALESCE(MAX(sequence), 0) FROM observations", ())
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    rows.next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .ok_or_else(|| authority_violation("observation frontier query returned no row"))?
+        .get::<i64>(0)
+        .map_err(|error| global_db_operation_error(OPERATION, error))
+}
+
 pub(super) async fn repair_projection_frontier(
     conn: &Connection,
     trusted_checkpoint: i64,
@@ -43,18 +62,7 @@ pub(super) async fn repair_projection_frontier(
         .unwrap_or(0);
     drop(rows);
 
-    let mut rows = conn
-        .query("SELECT COALESCE(MAX(sequence), 0) FROM observations", ())
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let observation_frontier = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .ok_or_else(|| authority_violation("observation frontier query returned no row"))?
-        .get::<i64>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    drop(rows);
+    let observation_frontier = read_observation_frontier(conn).await?;
     let checkpoint = stored_checkpoint.min(observation_frontier);
     let coverage_start = if checkpoint < trusted_checkpoint {
         0

@@ -1,4 +1,5 @@
 use libsql::{Connection, params};
+use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION_V4;
 
 const LEGACY_PROJECTION_PROVENANCE_TABLE_SQL: &str =
     "CREATE TABLE observation_projection_provenance (
@@ -293,7 +294,13 @@ pub(in super::super) async fn ensure_observation_projection_schema(
          CREATE INDEX IF NOT EXISTS idx_projection_rebuild_workflow_goal
          ON observation_projection_rebuild_workflow_facts
             (projector_version, generation, provider, session_id, semantic_kind,
-             provider_reference, observation_sequence);",
+             provider_reference, observation_sequence);
+         CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_pending_anchor
+         ON observation_projection_provenance (projector_version, observation_id)
+            WHERE retrieval_anchor_id IS NULL;
+         CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_pending_anchor
+         ON observation_workflow_facts (projector_version, observation_id)
+            WHERE retrieval_anchor_id IS NULL;",
     )
     .await?;
     ensure_v4_projection_binding_triggers(conn).await?;
@@ -308,6 +315,17 @@ pub(in super::super) async fn ensure_observation_projection_schema(
 /// fill each NULL anchor from the observation's already-backfilled binding. The
 /// v4 update triggers validate that the anchor resolves to the same observation
 /// and receipt, so a mismatch fails closed rather than persisting a bad binding.
+///
+/// This must re-run on every open rather than be skipped forever after a
+/// first success: [`ensure_projection_anchor_columns`] can reintroduce NULL
+/// anchors (e.g. after a legacy schema reinstall re-adds the column), and a
+/// permanent completion marker would then leave those rows unbound. Instead,
+/// the `idx_observation_projection_provenance_pending_anchor` and
+/// `idx_observation_workflow_facts_pending_anchor` partial indexes created
+/// above — covering only rows with `retrieval_anchor_id IS NULL` — keep the
+/// `WHERE retrieval_anchor_id IS NULL` scan below cheap in the steady state
+/// where that partial index is empty, instead of running the two `UPDATE`s as
+/// unindexed full-table scans.
 async fn backfill_v4_projection_anchor_bindings(conn: &Connection) -> Result<(), libsql::Error> {
     for table in [
         "observation_projection_provenance",
@@ -321,7 +339,7 @@ async fn backfill_v4_projection_anchor_bindings(conn: &Connection) -> Result<(),
                      FROM observation_retrieval_anchors AS anchor
                      WHERE anchor.observation_id = {table}.observation_id
                  )
-                 WHERE projector_version = 'claude-session-message-v4'
+                 WHERE projector_version = ?1
                    AND retrieval_anchor_id IS NULL
                    AND EXISTS (
                        SELECT 1
@@ -329,7 +347,7 @@ async fn backfill_v4_projection_anchor_bindings(conn: &Connection) -> Result<(),
                        WHERE anchor.observation_id = {table}.observation_id
                    )"
             ),
-            (),
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
         )
         .await?;
     }
