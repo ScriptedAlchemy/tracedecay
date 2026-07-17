@@ -2569,6 +2569,127 @@ async fn current_schema_tables_have_an_explicit_consolidation_disposition() {
 }
 
 #[tokio::test]
+async fn memory_v2_merge_preserves_deletion_terminality_and_carries_live_facts() {
+    // Seeds two graph shards that share profile-owned fact identities and merges
+    // the source's memory_v2 authority into the target. A tombstone in either
+    // shard must win over a live copy in the other (deletion is terminal), and a
+    // fact that only exists in the source must survive the merge.
+    let temp = TempDir::new().unwrap();
+    let target_path = temp.path().join("target-graph.db");
+    let source_path = temp.path().join("source-graph.db");
+
+    // Common minimal rows for a profile-owned fact: identity, one lineage event
+    // per shard, and a current-fact projection row referencing that event.
+    fn seed_fact(
+        fact_id: &str,
+        event_id: &str,
+        payload_access: &str,
+        updated_at: i64,
+    ) -> String {
+        format!(
+            "INSERT OR IGNORE INTO memory_v2_facts(
+                 fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+             ) VALUES ('{fact_id}', 'profile', '', '{{\"kind\":\"profile\"}}',
+                       '{{\"id\":\"{fact_id}\"}}', 1);
+             INSERT INTO memory_v2_lineage_events(
+                 event_id, fact_id, owner_kind, project_id, event_json,
+                 occurred_at, recorded_at
+             ) VALUES ('{event_id}', '{fact_id}', 'profile', '',
+                       '{{\"event\":\"{event_id}\"}}', {updated_at}, {updated_at});
+             INSERT INTO memory_v2_current_facts(
+                 fact_id, owner_kind, project_id, payload_access, trust_score,
+                 active_assertion_id, last_event_id, updated_at, retrieval_count,
+                 access_count, helpful_count, unhelpful_count, last_retrieved_at,
+                 last_recalled_at, last_feedback_at, projection_state,
+                 vector_watermark_json
+             ) VALUES ('{fact_id}', 'profile', '', '{payload_access}', 0.5,
+                       NULL, '{event_id}', {updated_at}, 0, 0, 0, 0,
+                       NULL, NULL, NULL, 'ready', NULL);"
+        )
+    }
+
+    async fn seed_shard(path: &Path, batch: String) {
+        let (db, _) = test_initialize(path).await;
+        let transaction = db.begin_write_transaction("seed memory_v2").await.unwrap();
+        transaction.execute_batch(&batch).await.unwrap();
+        transaction.commit().await.unwrap();
+        db.checkpoint().await.unwrap();
+        db.close();
+    }
+
+    seed_shard(
+        &target_path,
+        format!(
+            "{}{}",
+            // fact.shared: live in target, tombstoned (newer) in source.
+            seed_fact("fact.shared", "ev.shared.t", "eligible", 100),
+            // fact.tombstone: tombstoned in target, live (newer) in source.
+            seed_fact("fact.tombstone", "ev.tomb.t", "deleted", 100),
+        ),
+    )
+    .await;
+    seed_shard(
+        &source_path,
+        format!(
+            "{}{}{}",
+            seed_fact("fact.shared", "ev.shared.s", "deleted", 200),
+            seed_fact("fact.tombstone", "ev.tomb.s", "eligible", 200),
+            seed_fact("fact.sourceonly", "ev.srconly", "eligible", 50),
+        ),
+    )
+    .await;
+
+    sqlite::merge_memory_v2_for_test(&target_path, &source_path)
+        .await
+        .unwrap();
+
+    let (target, _) = test_open_read_only(&target_path).await;
+    let access = |fact_id: &'static str| {
+        let conn = target.conn();
+        async move {
+            let mut rows = conn
+                .query(
+                    "SELECT payload_access FROM memory_v2_current_facts
+                     WHERE fact_id = ?1",
+                    params![fact_id],
+                )
+                .await
+                .unwrap();
+            rows.next()
+                .await
+                .unwrap()
+                .map(|row| row.get::<String>(0).unwrap())
+        }
+    };
+
+    // A tombstone from either shard is terminal, even when the live copy in the
+    // other shard is strictly newer.
+    assert_eq!(access("fact.shared").await.as_deref(), Some("deleted"));
+    assert_eq!(access("fact.tombstone").await.as_deref(), Some("deleted"));
+    // A fact only present in the source survives with its live projection.
+    assert_eq!(access("fact.sourceonly").await.as_deref(), Some("eligible"));
+
+    // Deletion terminality must not re-materialize a derived projection: no
+    // assertion payload or vector row exists for a tombstoned fact.
+    for table in ["memory_v2_assertion_payloads", "memory_v2_assertion_vectors"] {
+        let mut rows = target
+            .conn()
+            .query(
+                &format!(
+                    "SELECT COUNT(*) FROM {table}
+                     WHERE fact_id IN ('fact.shared', 'fact.tombstone')"
+                ),
+                (),
+            )
+            .await
+            .unwrap();
+        let count: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(count, 0, "{table} must not re-materialize for tombstones");
+    }
+    target.close();
+}
+
+#[tokio::test]
 async fn observation_authority_merge_is_lossless_idempotent_and_replayable() {
     let temp = TempDir::new().unwrap();
     let target_path = temp.path().join("target-sessions.db");

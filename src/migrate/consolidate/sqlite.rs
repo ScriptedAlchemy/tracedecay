@@ -54,6 +54,28 @@ pub(super) async fn verify_projection_plan_for_test(
     result
 }
 
+#[cfg(test)]
+pub(super) async fn merge_memory_v2_for_test(target_path: &Path, source: &Path) -> Result<()> {
+    let authority = crate::db::DatabaseAuthority::for_runtime(target_path, "merge memory_v2 test")?;
+    let (target, _) = Database::open(target_path, &authority).await?;
+    let transaction = target
+        .begin_write_transaction("merge memory_v2 test")
+        .await?;
+    attach_as(&transaction, source, "source").await?;
+    transaction
+        .execute("PRAGMA defer_foreign_keys = ON", ())
+        .await
+        .map_err(|error| db_error("merge_memory_v2_for_test", error))?;
+    merge_memory_v2_authority(&transaction).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| db_error("merge_memory_v2_for_test", error))?;
+    target.checkpoint().await?;
+    target.close();
+    Ok(())
+}
+
 pub(super) const LCM_RAW_MESSAGE_DIVERGENCE_PREDICATE: &str =
     "t.session_id IS NOT s.session_id OR t.content_hash IS NOT s.content_hash
      OR t.storage_kind IS NOT s.storage_kind OR t.payload_ref IS NOT s.payload_ref";
