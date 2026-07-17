@@ -1,0 +1,588 @@
+//! Owner-scoped V2 fact lineage schema and bounded legacy backfill.
+
+use libsql::{Connection, params};
+use serde::Serialize;
+use serde_json::Value;
+use tracedecay_domain::{
+    FactAssertionId, FactEventId, FactId, FactOwnerV1, PayloadAccessState, SourceStoreId, UtcMicros,
+};
+
+use crate::errors::{Result, TraceDecayError};
+use crate::privacy::sanitize_provider_metadata_text;
+use crate::tracedecay::current_timestamp;
+
+mod backfill;
+mod cutover;
+mod repair;
+mod schema;
+#[cfg(test)]
+mod tests;
+mod types;
+mod writers;
+
+pub(super) use cutover::{
+    backfill_memory_v2_batch, finalize_memory_v2_cutover, load_or_capture_memory_v2_frontiers,
+};
+pub(super) use repair::{
+    feedback_history_repair_progress, repair_memory_v2_feedback_history_batch_in_transaction,
+};
+pub(crate) use schema::create_schema;
+pub(super) use schema::{
+    install_v22_fresh_schema, install_v23_fresh_schema, upgrade_v20_schema, upgrade_v21_schema,
+    upgrade_v22_schema, upgrade_v23_schema,
+};
+pub(crate) use types::{
+    CapturedMemoryV2Frontiers, MemoryV2BackfillBatchOutcome, MemoryV2CutoverOutcome,
+    MemoryV2CutoverReceipt, MemoryV2FeedbackHistoryRepairBatchOutcome,
+    MemoryV2FeedbackHistoryRepairProgress,
+};
+use types::{CurrentFactState, OwnerKey, Progress};
+pub(super) use writers::{
+    clear_memory_v2_compatibility_bank_dirty_in_transaction,
+    delete_memory_v2_compatibility_bank_in_transaction,
+    mark_memory_v2_compatibility_bank_dirty_in_transaction,
+    upsert_memory_v2_compatibility_bank_in_transaction,
+};
+
+const OPERATION: &str = "memory_v2_backfill_v1";
+const MAX_BATCH_SIZE: i64 = 500;
+const MAX_FEEDBACK_HISTORY_REPAIR_BATCH_SIZE: i64 = 512;
+const RETENTION_CLASS: &str = "legacy-current-snapshot-v1";
+const V1_COMPATIBILITY_SOURCE_STORE: &str = "legacy-memory-v1";
+const V23_COMPATIBILITY_BANK_VECTOR_BYTES: usize = 8 + 2048 * 4;
+const V23_COMPATIBILITY_BANK_VECTOR_HEADER: [u8; 8] = 2048_u64.to_le_bytes();
+
+async fn load_or_create_progress(
+    conn: &Connection,
+    owner: &OwnerKey,
+    source_store_id: &SourceStoreId,
+    frontiers: CapturedMemoryV2Frontiers,
+) -> Result<Progress> {
+    let mut rows = conn
+        .query(
+            "SELECT phase, feedback_frontier, oplog_frontier, fact_frontier,
+                    feedback_cursor, oplog_cursor, fact_cursor, started_at
+             FROM memory_v2_backfill_progress
+             WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3",
+            params![
+                owner.kind,
+                owner.project_id.as_str(),
+                source_store_id.as_str()
+            ],
+        )
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    if let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| db_error(OPERATION, error))?
+    {
+        let progress = Progress {
+            phase: row.get(0).map_err(|error| db_error(OPERATION, error))?,
+            feedback_frontier: row.get(1).map_err(|error| db_error(OPERATION, error))?,
+            oplog_frontier: row.get(2).map_err(|error| db_error(OPERATION, error))?,
+            fact_frontier: row.get(3).map_err(|error| db_error(OPERATION, error))?,
+            feedback_cursor: row.get(4).map_err(|error| db_error(OPERATION, error))?,
+            oplog_cursor: row.get(5).map_err(|error| db_error(OPERATION, error))?,
+            fact_cursor: row.get(6).map_err(|error| db_error(OPERATION, error))?,
+            started_at: row.get(7).map_err(|error| db_error(OPERATION, error))?,
+        };
+        if (
+            progress.feedback_frontier,
+            progress.oplog_frontier,
+            progress.fact_frontier,
+        ) != (frontiers.feedback, frontiers.oplog, frontiers.facts)
+        {
+            return Err(db_message(
+                OPERATION,
+                "captured backfill frontier changed across retry",
+            ));
+        }
+        return Ok(progress);
+    }
+    let started_at = now_micros()?;
+    conn.execute(
+        "INSERT INTO memory_v2_backfill_progress(
+            owner_kind, project_id, owner_json, source_store_id, phase,
+            feedback_frontier, oplog_frontier, fact_frontier, started_at, updated_at
+         ) VALUES(?1, ?2, ?3, ?4, 'feedback', ?5, ?6, ?7, ?8, ?8)",
+        params![
+            owner.kind,
+            owner.project_id.as_str(),
+            owner.json.as_str(),
+            source_store_id.as_str(),
+            frontiers.feedback,
+            frontiers.oplog,
+            frontiers.facts,
+            started_at
+        ],
+    )
+    .await
+    .map_err(|error| db_error(OPERATION, error))?;
+    Ok(Progress {
+        phase: "feedback".to_owned(),
+        feedback_frontier: frontiers.feedback,
+        oplog_frontier: frontiers.oplog,
+        fact_frontier: frontiers.facts,
+        feedback_cursor: 0,
+        oplog_cursor: 0,
+        fact_cursor: 0,
+        started_at,
+    })
+}
+
+async fn update_phase(
+    conn: &Connection,
+    owner: &OwnerKey,
+    source_store_id: &SourceStoreId,
+    phase: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE memory_v2_backfill_progress SET phase = ?1, updated_at = ?2
+         WHERE owner_kind = ?3 AND project_id = ?4 AND source_store_id = ?5",
+        params![
+            phase,
+            now_micros()?,
+            owner.kind,
+            owner.project_id.as_str(),
+            source_store_id.as_str()
+        ],
+    )
+    .await
+    .map_err(|error| db_error(OPERATION, error))?;
+    Ok(())
+}
+
+async fn update_cursor(
+    conn: &Connection,
+    owner: &OwnerKey,
+    source_store_id: &SourceStoreId,
+    column: &str,
+    cursor: i64,
+) -> Result<()> {
+    let sql = match column {
+        "feedback_cursor" => {
+            "UPDATE memory_v2_backfill_progress
+             SET feedback_cursor = ?1, updated_at = ?2
+             WHERE owner_kind = ?3 AND project_id = ?4 AND source_store_id = ?5"
+        }
+        "oplog_cursor" => {
+            "UPDATE memory_v2_backfill_progress
+             SET oplog_cursor = ?1, updated_at = ?2
+             WHERE owner_kind = ?3 AND project_id = ?4 AND source_store_id = ?5"
+        }
+        "fact_cursor" => {
+            "UPDATE memory_v2_backfill_progress
+             SET fact_cursor = ?1, updated_at = ?2
+             WHERE owner_kind = ?3 AND project_id = ?4 AND source_store_id = ?5"
+        }
+        _ => return Err(db_message(OPERATION, "invalid backfill cursor column")),
+    };
+    conn.execute(
+        sql,
+        params![
+            cursor,
+            now_micros()?,
+            owner.kind,
+            owner.project_id.as_str(),
+            source_store_id.as_str()
+        ],
+    )
+    .await
+    .map_err(|error| db_error(OPERATION, error))?;
+    Ok(())
+}
+
+async fn current_fact_state(
+    conn: &Connection,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+) -> Result<CurrentFactState> {
+    let mut rows = conn
+        .query(
+            "SELECT current.payload_access, current.last_event_id,
+                current.active_assertion_id, assertion.kind_json,
+                assertion.payload_reference_json
+         FROM memory_v2_current_facts current
+         LEFT JOIN memory_v2_assertions assertion
+           ON assertion.assertion_id = current.active_assertion_id
+          AND assertion.fact_id = current.fact_id
+          AND assertion.owner_kind = current.owner_kind
+          AND assertion.project_id = current.project_id
+         WHERE current.fact_id = ?1
+           AND current.owner_kind = ?2 AND current.project_id = ?3",
+            params![fact_id.as_str(), owner.kind, owner.project_id.as_str()],
+        )
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| db_error(OPERATION, error))?
+        .ok_or_else(|| db_message(OPERATION, "current fact projection is missing"))?;
+    let access = row
+        .get::<String>(0)
+        .map_err(|error| db_error(OPERATION, error))?;
+    let event_id = FactEventId::new(
+        row.get::<String>(1)
+            .map_err(|error| db_error(OPERATION, error))?,
+    )
+    .map_err(|_| db_message(OPERATION, "stored last event identity is invalid"))?;
+    let active_assertion_id = row
+        .get::<Option<String>>(2)
+        .map_err(|error| db_error(OPERATION, error))?
+        .map(FactAssertionId::new)
+        .transpose()
+        .map_err(|_| db_message(OPERATION, "stored active assertion identity is invalid"))?;
+    let active_kind = row
+        .get::<Option<String>>(3)
+        .map_err(|error| db_error(OPERATION, error))?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(|_| db_message(OPERATION, "stored assertion kind is invalid"))?;
+    let active_payload_reference = row
+        .get::<Option<String>>(4)
+        .map_err(|error| db_error(OPERATION, error))?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(|_| db_message(OPERATION, "stored payload reference is invalid"))?;
+    Ok(CurrentFactState {
+        access: parse_payload_access(&access)?,
+        last_event_id: event_id,
+        active_assertion_id,
+        active_kind,
+        active_payload_reference,
+    })
+}
+
+async fn load_legacy_entities(conn: &Connection, legacy_fact_id: i64) -> Result<Vec<String>> {
+    let mut rows = conn
+        .query(
+            "SELECT e.name FROM memory_entities e
+             JOIN memory_fact_entities fe ON fe.entity_id = e.entity_id
+             WHERE fe.fact_id = ?1 ORDER BY e.name",
+            params![legacy_fact_id],
+        )
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    let mut entities = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| db_error(OPERATION, error))?
+    {
+        entities.push(row.get(0).map_err(|error| db_error(OPERATION, error))?);
+    }
+    Ok(entities)
+}
+
+fn owner_key(owner: &FactOwnerV1) -> Result<OwnerKey> {
+    owner
+        .validate()
+        .map_err(|_| db_message(OPERATION, "fact owner is invalid"))?;
+    let (kind, project_id) = match owner {
+        FactOwnerV1::Profile => ("profile", String::new()),
+        FactOwnerV1::Project { project_id } => ("project", project_id.as_str().to_owned()),
+    };
+    Ok(OwnerKey {
+        kind,
+        project_id,
+        json: json_text(owner)?,
+    })
+}
+
+fn validate_scope(owner: &FactOwnerV1, source_store_id: &SourceStoreId) -> Result<()> {
+    owner
+        .validate()
+        .map_err(|_| db_message(OPERATION, "fact owner is invalid"))?;
+    source_store_id
+        .validate()
+        .map_err(|_| db_message(OPERATION, "source store identity is invalid"))?;
+    Ok(())
+}
+
+fn validate_v1_compatibility_source(source_store_id: &SourceStoreId) -> Result<()> {
+    if source_store_id.as_str() == V1_COMPATIBILITY_SOURCE_STORE {
+        Ok(())
+    } else {
+        Err(db_message(
+            OPERATION,
+            "V1 compatibility mappings require the fixed legacy-memory-v1 source store",
+        ))
+    }
+}
+
+fn validate_frontiers(frontiers: CapturedMemoryV2Frontiers) -> Result<()> {
+    if frontiers.feedback < 0 || frontiers.oplog < 0 || frontiers.facts < 0 {
+        Err(db_message(
+            OPERATION,
+            "backfill frontier cannot be negative",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn parse_category(value: &str) -> std::result::Result<tracedecay_domain::FactCategoryV1, ()> {
+    use tracedecay_domain::FactCategoryV1;
+    match value {
+        "general" => Ok(FactCategoryV1::General),
+        "user_pref" => Ok(FactCategoryV1::UserPref),
+        "project" => Ok(FactCategoryV1::Project),
+        "tool" => Ok(FactCategoryV1::Tool),
+        "decision" => Ok(FactCategoryV1::Decision),
+        "code_area" => Ok(FactCategoryV1::CodeArea),
+        _ => Err(()),
+    }
+}
+
+fn category_label(category: tracedecay_domain::FactCategoryV1) -> &'static str {
+    use tracedecay_domain::FactCategoryV1;
+    match category {
+        FactCategoryV1::General => "general",
+        FactCategoryV1::UserPref => "user_pref",
+        FactCategoryV1::Project => "project",
+        FactCategoryV1::Tool => "tool",
+        FactCategoryV1::Decision => "decision",
+        FactCategoryV1::CodeArea => "code_area",
+    }
+}
+
+fn payload_access_label(state: PayloadAccessState) -> &'static str {
+    match state {
+        PayloadAccessState::Eligible => "eligible",
+        PayloadAccessState::Redacted => "redacted",
+        PayloadAccessState::Quarantined => "quarantined",
+        PayloadAccessState::RetentionExpired => "retention_expired",
+        PayloadAccessState::Deleted => "deleted",
+        PayloadAccessState::Unavailable => "unavailable",
+        PayloadAccessState::Ambiguous => "ambiguous",
+    }
+}
+
+fn parse_payload_access(value: &str) -> Result<PayloadAccessState> {
+    match value {
+        "eligible" => Ok(PayloadAccessState::Eligible),
+        "redacted" => Ok(PayloadAccessState::Redacted),
+        "quarantined" => Ok(PayloadAccessState::Quarantined),
+        "retention_expired" => Ok(PayloadAccessState::RetentionExpired),
+        "deleted" => Ok(PayloadAccessState::Deleted),
+        "unavailable" => Ok(PayloadAccessState::Unavailable),
+        "ambiguous" => Ok(PayloadAccessState::Ambiguous),
+        _ => Err(db_message(
+            OPERATION,
+            "stored payload access state is invalid",
+        )),
+    }
+}
+
+fn value_strings(value: &Value) -> Option<Vec<String>> {
+    value
+        .as_array()?
+        .iter()
+        .map(|item| item.as_str().map(str::to_owned))
+        .collect()
+}
+
+fn seconds_to_micros(seconds: i64) -> Option<UtcMicros> {
+    seconds.checked_mul(1_000_000).map(UtcMicros)
+}
+
+fn sanitize_legacy_feedback_details(
+    source: Option<&str>,
+    note: Option<&str>,
+) -> (
+    Option<String>,
+    Option<String>,
+    &'static str,
+    Option<&'static str>,
+) {
+    let Some(source) = source else {
+        return (None, None, "unknown", Some("feedback_details_unknown"));
+    };
+    let Some(source) = sanitize_provider_metadata_text(source) else {
+        return (
+            None,
+            None,
+            "legacy_redacted",
+            Some("feedback_details_redacted"),
+        );
+    };
+    let note = match note {
+        Some(note) => match sanitize_provider_metadata_text(note) {
+            Some(note) => Some(note),
+            None => {
+                return (
+                    None,
+                    None,
+                    "legacy_redacted",
+                    Some("feedback_details_redacted"),
+                );
+            }
+        },
+        None => None,
+    };
+    (Some(source), note, "available", None)
+}
+
+fn now_micros() -> Result<i64> {
+    current_timestamp()
+        .checked_mul(1_000_000)
+        .ok_or_else(|| db_message(OPERATION, "current timestamp is outside supported range"))
+}
+
+fn json_text(value: &(impl Serialize + ?Sized)) -> Result<String> {
+    serde_json::to_string(value)
+        .map_err(|_| db_message(OPERATION, "canonical JSON encoding failed"))
+}
+
+fn canonical_replay(existing: String, candidate: &str, record: &str) -> Result<()> {
+    if existing == candidate {
+        Ok(())
+    } else {
+        Err(db_message(
+            OPERATION,
+            format!("{record} identity collision"),
+        ))
+    }
+}
+
+/// A cutover command's identity is its receipt id, owner/source, and drained
+/// frontier. Its completion timestamp is generated by the first successful
+/// finalization and must not make a retry collide with that completed receipt.
+fn canonical_cutover_replay(existing: String, candidate: &str) -> Result<()> {
+    canonical_replay(
+        cutover_replay_identity(&existing)?,
+        &cutover_replay_identity(candidate)?,
+        "cutover receipt",
+    )
+}
+
+fn cutover_replay_identity(receipt_json: &str) -> Result<String> {
+    let mut receipt: Value = serde_json::from_str(receipt_json)
+        .map_err(|_| db_message(OPERATION, "stored cutover receipt is invalid JSON"))?;
+    let object = receipt
+        .as_object_mut()
+        .ok_or_else(|| db_message(OPERATION, "stored cutover receipt is not an object"))?;
+    if object.remove("dual_write_activated_at").is_none() {
+        return Err(db_message(
+            OPERATION,
+            "stored cutover receipt lacks its completion timestamp",
+        ));
+    }
+    json_text(&receipt)
+}
+
+async fn begin(conn: &Connection, operation: &str) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .await
+        .map(|_| ())
+        .map_err(|error| db_error(operation, error))
+}
+
+async fn finish_transaction<T>(conn: &Connection, result: Result<T>, operation: &str) -> Result<T> {
+    match result {
+        Ok(value) => match conn.execute_batch("COMMIT").await {
+            Ok(_) => Ok(value),
+            Err(commit_error) => {
+                let rollback = conn.execute_batch("ROLLBACK").await;
+                let cleanup = if rollback.is_ok() {
+                    "rollback completed"
+                } else {
+                    "rollback failed; writer connection must be retired"
+                };
+                Err(db_message(
+                    operation,
+                    format!("commit failed ({cleanup}): {commit_error}"),
+                ))
+            }
+        },
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK").await;
+            Err(error)
+        }
+    }
+}
+
+async fn scalar_i64(conn: &Connection, sql: &str) -> Result<i64> {
+    scalar_i64_params(conn, sql, ()).await
+}
+
+async fn scalar_i64_params(
+    conn: &Connection,
+    sql: &str,
+    params: impl libsql::params::IntoParams,
+) -> Result<i64> {
+    let mut rows = conn
+        .query(sql, params)
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    rows.next()
+        .await
+        .map_err(|error| db_error(OPERATION, error))?
+        .ok_or_else(|| db_message(OPERATION, "scalar query returned no row"))?
+        .get(0)
+        .map_err(|error| db_error(OPERATION, error))
+}
+
+async fn optional_string(
+    conn: &Connection,
+    sql: &str,
+    params: impl libsql::params::IntoParams,
+) -> Result<Option<String>> {
+    let mut rows = conn
+        .query(sql, params)
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    rows.next()
+        .await
+        .map_err(|error| db_error(OPERATION, error))?
+        .map(|row| row.get(0).map_err(|error| db_error(OPERATION, error)))
+        .transpose()
+}
+
+async fn optional_i64(
+    conn: &Connection,
+    sql: &str,
+    params: impl libsql::params::IntoParams,
+) -> Result<Option<i64>> {
+    let mut rows = conn
+        .query(sql, params)
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    rows.next()
+        .await
+        .map_err(|error| db_error(OPERATION, error))?
+        .map(|row| row.get(0).map_err(|error| db_error(OPERATION, error)))
+        .transpose()
+}
+
+async fn row_exists(
+    conn: &Connection,
+    sql: &str,
+    params: impl libsql::params::IntoParams,
+) -> Result<bool> {
+    let mut rows = conn
+        .query(sql, params)
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|error| db_error(OPERATION, error))?
+        .is_some())
+}
+
+fn db_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayError {
+    TraceDecayError::Database {
+        message: format!("{operation}: storage operation failed: {error}"),
+        operation: operation.to_owned(),
+    }
+}
+
+fn db_message(operation: &str, message: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::Database {
+        message: message.into(),
+        operation: operation.to_owned(),
+    }
+}
