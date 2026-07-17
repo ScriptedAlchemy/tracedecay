@@ -655,8 +655,11 @@ async fn validate_projection_effect(
     conn: &Connection,
     observation: &DurableObservationV1,
 ) -> crate::errors::Result<()> {
-    let unaliased = crate::global_db::observation_projection::derive_projection(observation)
-        .map_err(|error| authority_violation(format!("invalid projection authority: {error}")))?;
+    // Derivation is disposition-aware, so an observation that converged to a
+    // durable output-collision skip re-derives as `Skipped(OutputCollision)`
+    // and audits through the `Skipped` arm below natively. The unaliased
+    // projection is only needed to validate alias bindings, so it is derived
+    // lazily inside the arms that consume it.
     let effect =
         crate::global_db::observation_projection::derive_projection_with_alias(conn, observation)
             .await
@@ -665,22 +668,6 @@ async fn validate_projection_effect(
             })?;
     let observation_id = observation.observation_id().as_str();
     let state = ProjectionAuthorityState::load(conn, observation_id).await?;
-    // An output_collision disposition is authoritative: the observation's
-    // deterministic output identity belongs to a different observation, so it
-    // audits as the durable skip it converged to, not as the message its
-    // derivation would produce.
-    if crate::global_db::observation_projection::output_collision_disposed(conn, observation_id)
-        .await
-        .map_err(|error| authority_violation(format!("invalid projection authority: {error}")))?
-    {
-        return validate_skipped_projection(
-            conn,
-            observation,
-            state,
-            ProjectionSkipReason::OutputCollision,
-        )
-        .await;
-    }
     match &effect {
         ObservationProjection::Message(projection) => {
             if state.workflow_rows != 0 {
@@ -688,6 +675,7 @@ async fn validate_projection_effect(
                     "message projection contains unexpected workflow output",
                 ));
             }
+            let unaliased = derive_unaliased_projection(observation)?;
             validate_message_projection(conn, observation_id, state, &unaliased, projection).await
         }
         ObservationProjection::Composite {
@@ -695,6 +683,7 @@ async fn validate_projection_effect(
             derived_messages,
             workflow_facts,
         } => {
+            let unaliased = derive_unaliased_projection(observation)?;
             validate_composite_projection(
                 conn,
                 observation_id,
@@ -710,6 +699,13 @@ async fn validate_projection_effect(
             validate_skipped_projection(conn, observation, state, *reason).await
         }
     }
+}
+
+fn derive_unaliased_projection(
+    observation: &DurableObservationV1,
+) -> crate::errors::Result<ObservationProjection> {
+    crate::global_db::observation_projection::derive_projection(observation)
+        .map_err(|error| authority_violation(format!("invalid projection authority: {error}")))
 }
 
 async fn observation_by_id(

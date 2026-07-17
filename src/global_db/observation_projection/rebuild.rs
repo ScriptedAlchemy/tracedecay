@@ -9,8 +9,8 @@ use tracedecay_store::{
 
 use super::super::GlobalDb;
 use super::apply::{
-    apply_effect, derive_projection_for_rebuild, derive_projection_with_alias,
-    output_collision_disposed, verify_effect, workflow_semantic_kind,
+    apply_effect, derive_projection_for_rebuild, derive_projection_with_alias, verify_effect,
+    workflow_semantic_kind,
 };
 use super::state::{
     consume_projection_queue_item, decode_observation_row, decode_sequence,
@@ -71,12 +71,7 @@ impl GlobalDb {
         else {
             return Err(ProjectionStoreError::ObservationNotFound);
         };
-        let mut effect = if output_collision_disposed(&transaction, observation_id.as_str()).await?
-        {
-            ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision)
-        } else {
-            derive_projection_with_alias(&transaction, &observation).await?
-        };
+        let mut effect = derive_projection_with_alias(&transaction, &observation).await?;
         if sequence <= checkpoint.last_sequence() {
             verify_effect(&transaction, &observation, &effect).await?;
             consume_projection_queue_item(&transaction, observation_id).await?;
@@ -97,39 +92,14 @@ impl GlobalDb {
             return Err(ProjectionStoreError::NotQueued);
         }
 
-        transaction
-            .execute_batch("SAVEPOINT projection_apply;")
-            .await
-            .map_err(|error| storage("begin projection apply savepoint", error))?;
-        match apply_effect(&transaction, sequence, &observation, &effect).await {
-            Ok(()) => {
-                transaction
-                    .execute_batch("RELEASE projection_apply;")
-                    .await
-                    .map_err(|error| storage("release projection apply savepoint", error))?;
-            }
-            // The output identity is owned by a different observation: the
-            // first binder keeps it, and this observation converges as a
-            // durable skip instead of wedging the queue on every drain.
-            Err(ProjectionStoreError::OutputCollision {
-                provider,
-                message_id,
-            }) => {
-                tracing::warn!(
-                    %provider,
-                    %message_id,
-                    observation = observation_id.as_str(),
-                    "projection output collided; recording a durable skip disposition"
-                );
-                transaction
-                    .execute_batch("ROLLBACK TO projection_apply; RELEASE projection_apply;")
-                    .await
-                    .map_err(|error| storage("rollback projection apply savepoint", error))?;
-                effect = ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision);
-                apply_effect(&transaction, sequence, &observation, &effect).await?;
-            }
-            Err(error) => return Err(error),
-        }
+        write_effect_converging_collisions(
+            &transaction,
+            &CollisionGuardedWrite::Drain,
+            sequence,
+            &observation,
+            &mut effect,
+        )
+        .await?;
         consume_projection_queue_item(&transaction, observation_id).await?;
         let checkpoint = write_checkpoint(&transaction, sequence).await?;
         transaction
@@ -370,53 +340,16 @@ impl GlobalDb {
         for (sequence, observation) in page {
             let mut effect =
                 derive_projection_for_rebuild(&transaction, &observation, &job.generation).await?;
-            transaction
-                .execute_batch("SAVEPOINT rebuild_stage;")
-                .await
-                .map_err(|error| storage("begin rebuild stage savepoint", error))?;
-            let staged = stage_rebuild_effect(
+            write_effect_converging_collisions(
                 &transaction,
-                &job.generation,
+                &CollisionGuardedWrite::Stage {
+                    generation: &job.generation,
+                },
                 sequence,
                 &observation,
-                &effect,
+                &mut effect,
             )
-            .await;
-            match staged {
-                Ok(()) => {
-                    transaction
-                        .execute_batch("RELEASE rebuild_stage;")
-                        .await
-                        .map_err(|error| storage("release rebuild stage savepoint", error))?;
-                }
-                // Duplicate-era records whose output identity is owned by an
-                // earlier observation converge as skips during a rebuild too.
-                Err(ProjectionStoreError::OutputCollision {
-                    provider,
-                    message_id,
-                }) => {
-                    tracing::warn!(
-                        %provider,
-                        %message_id,
-                        observation = observation.observation_id().as_str(),
-                        "rebuild output collided; staging a skip disposition"
-                    );
-                    transaction
-                        .execute_batch("ROLLBACK TO rebuild_stage; RELEASE rebuild_stage;")
-                        .await
-                        .map_err(|error| storage("rollback rebuild stage savepoint", error))?;
-                    effect = ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision);
-                    stage_rebuild_effect(
-                        &transaction,
-                        &job.generation,
-                        sequence,
-                        &observation,
-                        &effect,
-                    )
-                    .await?;
-                }
-                Err(error) => return Err(error),
-            }
+            .await?;
             match &effect {
                 ObservationProjection::Message(_) | ObservationProjection::Composite { .. } => {
                     projected_rows = projected_rows.saturating_add(effect.output_count());
@@ -532,6 +465,82 @@ impl GlobalDb {
             job.projected_rows,
             job.skipped_observations,
         ))
+    }
+}
+
+/// Single savepoint name shared by both collision-guarded write paths. Each
+/// path opens it in its own transaction, so one constant is sufficient and
+/// keeps the rollback pairing symmetric.
+const PROJECTION_COLLISION_SAVEPOINT: &str = "projection_collision_guard";
+
+/// Which write a collision-guarded persist runs. The live queue drain writes
+/// straight into the active projection tables; a rebuild batch writes into the
+/// generation's staging tables. Both share the savepoint/rollback/skip shape.
+enum CollisionGuardedWrite<'a> {
+    Drain,
+    Stage { generation: &'a str },
+}
+
+impl CollisionGuardedWrite<'_> {
+    async fn run(
+        &self,
+        conn: &Connection,
+        sequence: u64,
+        observation: &DurableObservationV1,
+        effect: &ObservationProjection,
+    ) -> ProjectionStoreResult<()> {
+        match self {
+            Self::Drain => apply_effect(conn, sequence, observation, effect).await,
+            Self::Stage { generation } => {
+                stage_rebuild_effect(conn, generation, sequence, observation, effect).await
+            }
+        }
+    }
+}
+
+/// Persist `effect` inside a savepoint. On success the savepoint is released.
+/// On an output-identity collision the savepoint is rolled back, `effect` is
+/// substituted with a durable `OutputCollision` skip, and the write is re-run
+/// so the live drain and a rebuild converge on the same skip instead of
+/// wedging on the collided output. This is the write-time backstop for
+/// collisions not yet recorded as a disposition.
+async fn write_effect_converging_collisions(
+    conn: &Connection,
+    write: &CollisionGuardedWrite<'_>,
+    sequence: u64,
+    observation: &DurableObservationV1,
+    effect: &mut ObservationProjection,
+) -> ProjectionStoreResult<()> {
+    conn.execute_batch(&format!("SAVEPOINT {PROJECTION_COLLISION_SAVEPOINT};"))
+        .await
+        .map_err(|error| storage("begin projection collision savepoint", error))?;
+    match write.run(conn, sequence, observation, effect).await {
+        Ok(()) => {
+            conn.execute_batch(&format!("RELEASE {PROJECTION_COLLISION_SAVEPOINT};"))
+                .await
+                .map_err(|error| storage("release projection collision savepoint", error))?;
+            Ok(())
+        }
+        Err(ProjectionStoreError::OutputCollision {
+            provider,
+            message_id,
+        }) => {
+            tracing::warn!(
+                %provider,
+                %message_id,
+                observation = observation.observation_id().as_str(),
+                "projection output collided; recording a durable skip disposition"
+            );
+            conn.execute_batch(&format!(
+                "ROLLBACK TO {PROJECTION_COLLISION_SAVEPOINT}; \
+                 RELEASE {PROJECTION_COLLISION_SAVEPOINT};"
+            ))
+            .await
+            .map_err(|error| storage("rollback projection collision savepoint", error))?;
+            *effect = ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision);
+            write.run(conn, sequence, observation, effect).await
+        }
+        Err(error) => Err(error),
     }
 }
 

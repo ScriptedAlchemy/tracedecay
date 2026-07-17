@@ -1096,6 +1096,19 @@ async fn derive_projection_with_alias_from_generation(
     observation: &DurableObservationV1,
     rebuild_generation: Option<&str>,
 ) -> ProjectionStoreResult<ObservationProjection> {
+    // Live derivation is disposition-aware: once an observation has converged
+    // to a durable output-collision skip, its deterministic output identity
+    // belongs to a different observation, so re-derivation must return that
+    // skip rather than the message it would otherwise produce. A rebuild
+    // (Some(generation)) re-derives from scratch by construction and ignores
+    // the live disposition.
+    if rebuild_generation.is_none()
+        && output_collision_disposed(conn, observation.observation_id().as_str()).await?
+    {
+        return Ok(ObservationProjection::Skipped(
+            ProjectionSkipReason::OutputCollision,
+        ));
+    }
     let projection = derive_projection(observation)?;
     // Collapse Codex-style token/time goal ticks at projection time so every
     // raw observation stays durable while current goal state follows the
