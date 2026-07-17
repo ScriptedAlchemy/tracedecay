@@ -23,7 +23,7 @@ use super::{begin, finish_transaction};
 
 /// Returns the V22-owned repair snapshot for an owner/source, if that owner
 /// had feedback already imported before V22 history projections existed.
-pub(crate) async fn feedback_history_repair_progress(
+pub(in crate::db) async fn feedback_history_repair_progress(
     conn: &Connection,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
@@ -76,7 +76,7 @@ pub(super) async fn repair_memory_v2_feedback_history_batch(
 /// authoritative writer transaction. This never starts or finishes a nested
 /// transaction, so the projection, V1 repair, and operation receipt can commit
 /// or roll back together.
-pub(crate) async fn repair_memory_v2_feedback_history_batch_in_transaction(
+pub(in crate::db) async fn repair_memory_v2_feedback_history_batch_in_transaction(
     conn: &Connection,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,

@@ -26,7 +26,7 @@ pub(super) use cutover::{
 pub(super) use repair::{
     feedback_history_repair_progress, repair_memory_v2_feedback_history_batch_in_transaction,
 };
-pub(crate) use schema::create_schema;
+pub(in crate::db) use schema::create_schema;
 pub(super) use schema::{
     install_v22_fresh_schema, install_v23_fresh_schema, upgrade_v20_schema, upgrade_v21_schema,
     upgrade_v22_schema, upgrade_v23_schema,

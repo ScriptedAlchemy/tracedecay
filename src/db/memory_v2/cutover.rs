@@ -14,7 +14,7 @@ use super::{
     validate_scope, validate_v1_compatibility_source,
 };
 
-pub(crate) async fn load_or_capture_memory_v2_frontiers(
+pub(in crate::db) async fn load_or_capture_memory_v2_frontiers(
     conn: &Connection,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
@@ -84,7 +84,7 @@ pub(crate) async fn load_or_capture_memory_v2_frontiers(
 
 /// Processes at most one bounded source-table batch. Captured frontiers are
 /// immutable job identity: retries with shifted frontiers fail closed.
-pub(crate) async fn backfill_memory_v2_batch(
+pub(in crate::db) async fn backfill_memory_v2_batch(
     conn: &Connection,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
@@ -154,7 +154,7 @@ pub(crate) async fn backfill_memory_v2_batch(
     finish_transaction(conn, result, OPERATION).await
 }
 
-pub(crate) async fn finalize_memory_v2_cutover(
+pub(in crate::db) async fn finalize_memory_v2_cutover(
     conn: &Connection,
     receipt: &MemoryV2CutoverReceipt,
 ) -> Result<MemoryV2CutoverOutcome> {

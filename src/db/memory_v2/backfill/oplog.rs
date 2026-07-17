@@ -8,7 +8,7 @@ use super::super::writers::{insert_quarantine, purge_memory_v2_fact_inner};
 use super::super::{OPERATION, db_error, seconds_to_micros, update_cursor, update_phase};
 use super::facts::ensure_legacy_identity;
 
-pub(crate) async fn backfill_oplog_batch(
+pub(in crate::db) async fn backfill_oplog_batch(
     conn: &Connection,
     owner: &FactOwnerV1,
     owner_key: &OwnerKey,

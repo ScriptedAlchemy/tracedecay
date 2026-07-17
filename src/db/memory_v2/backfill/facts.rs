@@ -28,7 +28,7 @@ use super::super::{
     update_cursor, update_phase, value_strings,
 };
 
-pub(crate) async fn backfill_fact_batch(
+pub(in crate::db) async fn backfill_fact_batch(
     conn: &Connection,
     owner: &FactOwnerV1,
     owner_key: &OwnerKey,
@@ -290,7 +290,7 @@ async fn backfill_fact_payload(
     Ok(Ok(()))
 }
 
-pub(crate) async fn ensure_legacy_identity(
+pub(in crate::db) async fn ensure_legacy_identity(
     conn: &Connection,
     owner: &FactOwnerV1,
     owner_key: &OwnerKey,

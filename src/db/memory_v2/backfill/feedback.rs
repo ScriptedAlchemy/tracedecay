@@ -53,7 +53,7 @@ async fn load_legacy_feedback_batch(
     Ok(batch)
 }
 
-pub(crate) async fn backfill_feedback_batch(
+pub(in crate::db) async fn backfill_feedback_batch(
     conn: &Connection,
     owner: &FactOwnerV1,
     owner_key: &OwnerKey,
