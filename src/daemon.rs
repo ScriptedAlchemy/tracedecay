@@ -2221,6 +2221,19 @@ impl DaemonEngine {
         &self,
         handshake: &DaemonHandshake,
     ) -> Result<Arc<crate::mcp::McpServer>> {
+        let (project_path, route) = Self::project_route(handshake)?;
+        let cached = {
+            let servers = self.store_administration.project_servers().lock().await;
+            servers
+                .get_route(&route)
+                .map(|(key, server)| (key.clone(), Arc::clone(server)))
+        };
+        if let Some((key, server)) = cached {
+            return Ok(self
+                .activate_project_server(key, project_path, handshake, server)
+                .await);
+        }
+
         let (key, project_path, server) = self
             .store_administration
             .with_writer(|| self.open_project_server(handshake))
@@ -2237,15 +2250,7 @@ impl DaemonEngine {
         &self,
         handshake: &DaemonHandshake,
     ) -> Result<(ProjectServerKey, PathBuf, Arc<crate::mcp::McpServer>)> {
-        let Some(project_path) = handshake.project_path.as_ref() else {
-            return Err(TraceDecayError::Config {
-                message: "project server requested without project_path".to_string(),
-            });
-        };
-        let canonical_project_path = project_path
-            .canonicalize()
-            .unwrap_or_else(|_| project_path.clone());
-        let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake)?;
+        let (canonical_project_path, route) = Self::project_route(handshake)?;
         let cached = {
             let servers = self.store_administration.project_servers().lock().await;
             servers
@@ -2334,6 +2339,19 @@ impl DaemonEngine {
         Ok((key, canonical_project_path, server))
     }
 
+    fn project_route(handshake: &DaemonHandshake) -> Result<(PathBuf, ProjectRouteKey)> {
+        let Some(project_path) = handshake.project_path.as_ref() else {
+            return Err(TraceDecayError::Config {
+                message: "project server requested without project_path".to_string(),
+            });
+        };
+        let canonical_project_path = project_path
+            .canonicalize()
+            .unwrap_or_else(|_| project_path.clone());
+        let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake)?;
+        Ok((canonical_project_path, route))
+    }
+
     async fn activate_project_server(
         &self,
         key: ProjectServerKey,
@@ -2344,7 +2362,16 @@ impl DaemonEngine {
         // A freshly-handshaken project should be watched even on a cache hit
         // (the watcher may have started after this server was cached).
         self.git_watcher.ensure_watching(&project_path).await;
-        Box::pin(self.ensure_automation_scheduler(key, project_path, handshake.clone())).await;
+        // Scheduler discovery is ancillary and reacquires the daemon writer
+        // gate, so it must not make a cached MCP server wait behind unrelated
+        // store administration.
+        let engine = self.clone();
+        let handshake = handshake.clone();
+        let _scheduler_activation = tokio::spawn(async move {
+            engine
+                .ensure_automation_scheduler(key, project_path, handshake)
+                .await;
+        });
         server
     }
 

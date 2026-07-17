@@ -538,6 +538,36 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
         1,
         "cache hits must return before opening project databases"
     );
+
+    let store_administration = engine.store_administration.clone();
+    let writer_held = Arc::new(tokio::sync::Notify::new());
+    let writer_held_by_blocker = Arc::clone(&writer_held);
+    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(async move {
+        store_administration
+            .with_writer(|| async move {
+                writer_held_by_blocker.notify_one();
+                writer_release.await.expect("release writer gate");
+            })
+            .await;
+    });
+    writer_held.notified().await;
+
+    let cached_while_writer_held = tokio::time::timeout(
+        tokio::time::Duration::from_secs(2),
+        engine.project_server(&direct),
+    )
+    .await;
+    release_writer.send(()).expect("signal writer gate release");
+    blocker.await.expect("writer gate blocker task");
+
+    let cached_while_writer_held = cached_while_writer_held
+        .expect("cached project server must not wait for writer gate")
+        .expect("cached project server while writer gate held");
+    assert!(std::sync::Arc::ptr_eq(
+        &direct_server,
+        &cached_while_writer_held
+    ));
     drop(cached);
     drop(alias_server);
     drop(direct_server);
