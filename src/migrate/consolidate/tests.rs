@@ -2253,7 +2253,12 @@ async fn branch_metadata_paths_cannot_escape_the_profile_shard() {
 }
 
 #[tokio::test]
-async fn a_third_matching_shard_is_rejected_as_ambiguous() {
+async fn a_third_matching_shard_is_left_for_its_own_pass() {
+    // A repository can be split across more than two legacy shards. The named
+    // source and target only need to be a *subset* of this identity's
+    // claimants, so a third matching shard no longer blocks the pairwise
+    // source->target pass; it is simply left untouched for its own explicit
+    // consolidation later.
     let fixture = fixture().await;
     create_shard(
         &fixture.profile,
@@ -2264,9 +2269,78 @@ async fn a_third_matching_shard_is_rejected_as_ambiguous() {
         false,
     )
     .await;
-    let error = plan(&fixture.options()).await.unwrap_err();
-    assert!(error.to_string().contains("ambiguous split-store identity"));
-    assert!(error.to_string().contains("proj_third"));
+    let third_layout = layout_for_id(&fixture.project, &fixture.profile, "proj_third").unwrap();
+    let third_manifest_path = third_layout.manifest_path.clone().unwrap();
+    let third_graph_before = file_digest(&third_layout.graph_db_path).unwrap();
+    let third_sessions_before = file_digest(&third_layout.sessions_db_path).unwrap();
+    let third_manifest_before = fs::read(&third_manifest_path).unwrap();
+
+    let options = fixture.options();
+    let planned = plan(&options).await.unwrap();
+    let applied = apply(&options, &planned.confirmation_token).await.unwrap();
+    assert_eq!(applied.state, ConsolidationState::Applied);
+
+    // The extra shard's store is completely untouched by this pass.
+    assert_eq!(
+        file_digest(&third_layout.graph_db_path).unwrap(),
+        third_graph_before,
+        "the untouched third shard's graph database changed"
+    );
+    assert_eq!(
+        file_digest(&third_layout.sessions_db_path).unwrap(),
+        third_sessions_before,
+        "the untouched third shard's sessions database changed"
+    );
+    assert_eq!(
+        fs::read(&third_manifest_path).unwrap(),
+        third_manifest_before,
+        "the untouched third shard's store manifest changed"
+    );
+
+    // ...and it still fails resolution closed on its own: unlike the source
+    // and target manifests, which this applied consolidation retires, the
+    // third shard's manifest is neither retired nor absorbed into the
+    // destination. Store resolution still reports it as an unresolved legacy
+    // claimant of this exact repository identity, which is what keeps its
+    // opens failing closed until an explicit pass names it.
+    let (third_canonical, third_retired) =
+        input_manifest_paths(&fixture, "proj_third", &applied.destination_project_id);
+    assert!(
+        third_canonical.is_file(),
+        "the untouched third shard's manifest must not be retired by this pass"
+    );
+    assert!(
+        !third_retired.exists(),
+        "the untouched third shard must not be folded into this pass's destination"
+    );
+    let claimants = storage::matching_legacy_profile_layouts(
+        &fixture.project,
+        &fixture.profile,
+        Some(applied.destination_project_id.as_str()),
+    )
+    .unwrap();
+    assert_eq!(
+        claimants
+            .iter()
+            .map(|layout| layout.identity.project_id.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["proj_third"],
+        "the untouched third shard must remain the sole unresolved claimant \
+         of this repository identity"
+    );
+
+    // The third shard is consumable by its own explicit pairwise pass: a
+    // follow-up consolidation naming it as the source and the just-published
+    // destination as the target plans cleanly.
+    let second_pass = ConsolidationOptions {
+        project_root: fixture.project.clone(),
+        profile_root: fixture.profile.clone(),
+        source_project_id: "proj_third".to_string(),
+        target_project_id: applied.destination_project_id.clone(),
+    };
+    let second_plan = plan(&second_pass).await.unwrap();
+    assert_eq!(second_plan.state, ConsolidationState::Planned);
+    assert_eq!(second_plan.source.facts, 1);
 }
 
 #[tokio::test]
