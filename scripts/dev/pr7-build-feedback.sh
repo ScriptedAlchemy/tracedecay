@@ -18,7 +18,9 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 measure() {
-    local label="$1" commit="$2" dir="$WORK/$label"
+    local label="$1"
+    local commit="$2"
+    local dir="$WORK/$label"
     git clone --quiet --shared --no-checkout "$REPO_ROOT" "$dir"
     git -C "$dir" checkout --quiet "$commit"
     pushd "$dir" >/dev/null
