@@ -78,6 +78,12 @@ const DEFAULT_TRUST: f64 = 0.5;
 const COMPATIBILITY_RETENTION_CLASS: &str = "compatibility-runtime-v1";
 const COMPATIBILITY_SOURCE_STORE: &str = "legacy-memory-v1";
 const COMPATIBILITY_LEGACY_CUTOVER_BATCH_SIZE: i64 = 500;
+/// Per-repair-pass batch caps. The daemon scheduler treats a pass that hits
+/// either cap as incomplete and keeps ticking rather than going idle with a
+/// converging backlog.
+pub(crate) const COMPATIBILITY_REPAIR_VECTOR_BATCH: i64 = 512;
+pub(crate) const COMPATIBILITY_REPAIR_BANK_BATCH: i64 = 32;
+
 /// Upper bound on empty backfill-phase transitions drained inside one cutover
 /// pass. The phase walk is feedback → oplog → facts → awaiting_cutover, so a
 /// small bound comfortably covers draining every empty phase in a single tick
@@ -5517,8 +5523,13 @@ async fn apply_compatibility_fact_curation_tx(
             }
         }
     }
-    let missing_vectors_repaired =
-        compatibility_repair_missing_vectors_tx(db, transaction, request.owner(), 512).await?;
+    let missing_vectors_repaired = compatibility_repair_missing_vectors_tx(
+        db,
+        transaction,
+        request.owner(),
+        COMPATIBILITY_REPAIR_VECTOR_BATCH,
+    )
+    .await?;
     let banks_rebuilt =
         compatibility_rebuild_dirty_banks_tx(db, transaction, request.owner()).await?;
     let mappings =
@@ -6246,8 +6257,14 @@ async fn repair_compatibility_memory_tx(
     let feedback_repair =
         advance_compatibility_feedback_history_repair_tx(db, transaction, request.owner()).await?;
     let now = compatibility_now()?;
-    let missing_vectors_repaired =
-        compatibility_repair_missing_vectors_tx(db, transaction, request.owner(), 512).await?;
+    let missing_vectors_repaired = compatibility_repair_missing_vectors_tx(
+        db,
+        transaction,
+        request.owner(),
+        COMPATIBILITY_REPAIR_VECTOR_BATCH,
+    )
+    .await?;
+    compatibility_mark_absent_banks_dirty_tx(db, transaction, request.owner(), now).await?;
     let banks_rebuilt =
         compatibility_rebuild_dirty_banks_tx(db, transaction, request.owner()).await?;
     let receipt = json!({
@@ -6394,6 +6411,87 @@ fn compatibility_average_vectors(vectors: &[Vec<f64>]) -> Vec<f64> {
         }
     }
     average
+}
+
+/// Marks every populated bank dirty when the owner has eligible facts but no
+/// materialized bank projections at all — the state a store lands in when its
+/// legacy cutover predates dirty-marking (or a bank table was lost). Repair
+/// then rebuilds them in the same pass; stores with any banks are untouched.
+async fn compatibility_mark_absent_banks_dirty_tx(
+    db: &Database,
+    transaction: &Transaction,
+    owner: &FactOwnerV1,
+    now: UtcMicros,
+) -> FactStoreResult<()> {
+    let key = OwnerKey::new(owner)?;
+    let source_store_id = compatibility_source_store_id()?;
+    let mut rows = transaction
+        .query(
+            "SELECT COUNT(*) FROM memory_v2_compatibility_banks
+             WHERE owner_kind = ?1 AND project_id = ?2
+               AND owner_json = ?3 AND source_store_id = ?4",
+            params![
+                key.kind,
+                key.project_id.as_str(),
+                key.json.as_str(),
+                source_store_id.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+    let bank_count = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map(|row| row_i64(&row, 0, COMPATIBILITY_WRITE_OPERATION))
+        .transpose()?
+        .unwrap_or(0);
+    drop(rows);
+    if bank_count > 0 {
+        return Ok(());
+    }
+    let mut rows = transaction
+        .query(
+            "SELECT DISTINCT json_extract(payloads.payload_json, '$.category')
+             FROM memory_v2_current_facts AS current_facts
+             JOIN memory_v2_assertion_payloads AS payloads
+               ON payloads.assertion_id = current_facts.active_assertion_id
+              AND payloads.fact_id = current_facts.fact_id
+              AND payloads.owner_kind = current_facts.owner_kind
+              AND payloads.project_id = current_facts.project_id
+             WHERE current_facts.owner_kind = ?1
+               AND current_facts.project_id = ?2
+               AND current_facts.payload_access = 'eligible'
+               AND json_extract(payloads.payload_json, '$.category') IS NOT NULL",
+            params![key.kind, key.project_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+    let mut bank_names = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+    {
+        bank_names.push(row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?);
+    }
+    drop(rows);
+    if bank_names.is_empty() {
+        return Ok(());
+    }
+    bank_names.push("all".to_owned());
+    for bank_name in bank_names {
+        db.mark_memory_v2_compatibility_bank_dirty_in_transaction(
+            transaction,
+            owner,
+            &source_store_id,
+            &bank_name,
+            now,
+        )
+        .await
+        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+    }
+    Ok(())
 }
 
 async fn compatibility_rebuild_dirty_banks_tx(

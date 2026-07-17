@@ -3271,7 +3271,7 @@ async fn backfill_fact_payload(
     conn: &Connection,
     owner: &FactOwnerV1,
     owner_key: &OwnerKey,
-    _source_store_id: &SourceStoreId,
+    source_store_id: &SourceStoreId,
     fact_id: &FactId,
     legacy: &LegacyFact,
     recorded_at: i64,
@@ -3410,6 +3410,19 @@ async fn backfill_fact_payload(
     )
     .await?;
     merge_legacy_fact_telemetry(conn, owner_key, fact_id, &legacy.telemetry).await?;
+    // Live commits mark the affected HRR banks dirty so the daemon repair
+    // pass rebuilds them; imported facts need the same marks or a migrated
+    // store reports zero banks until every category sees a fresh write.
+    for bank_name in ["all", category_label(category)] {
+        mark_memory_v2_compatibility_bank_dirty_in_transaction(
+            conn,
+            owner,
+            source_store_id,
+            bank_name,
+            UtcMicros(recorded_at),
+        )
+        .await?;
+    }
     mirror_sanitized_legacy(
         conn,
         SanitizedLegacyMirror {

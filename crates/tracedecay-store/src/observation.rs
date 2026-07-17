@@ -474,6 +474,11 @@ pub enum ObservationCoverageReason {
     DuplicateObservation,
     SanitizerRejected,
     SanitizerQuarantined,
+    /// The daemon admission refused the record with a deterministic,
+    /// non-retryable disposition (e.g. a content-derived identity conflict).
+    /// Coverage advances so the stream converges; the refusal stays auditable
+    /// through the recorded cursor-advance reason.
+    AdmissionRefused,
 }
 
 impl ObservationCoverageReason {
@@ -488,6 +493,7 @@ impl ObservationCoverageReason {
             Self::DuplicateObservation => "duplicate_observation",
             Self::SanitizerRejected => "sanitizer_rejected",
             Self::SanitizerQuarantined => "sanitizer_quarantined",
+            Self::AdmissionRefused => "admission_refused",
         }
     }
 }
@@ -657,7 +663,8 @@ impl ObservationCursorAdvance {
                     | ObservationCoverageReason::MalformedFrame
                     | ObservationCoverageReason::OversizedFrame
                     | ObservationCoverageReason::UnknownVersion
-                    | ObservationCoverageReason::UnsupportedFact,
+                    | ObservationCoverageReason::UnsupportedFact
+                    | ObservationCoverageReason::AdmissionRefused,
                 None
             )
         );

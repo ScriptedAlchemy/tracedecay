@@ -166,15 +166,18 @@ pub(super) async fn run_memory_repair_scheduler_tick(
         handshake.open_options(),
     ))
     .await?;
-    let progress = cg
-        .repair_project_memory_once()
-        .await?
-        .feedback_history_repair();
+    let stats = cg.repair_project_memory_once().await?;
+    let progress = stats.feedback_history_repair();
     let repair_outcome = memory_repair_tick_outcome(progress)?;
+    // A pass that filled either repair batch may have more backlog behind the
+    // cap; keep ticking instead of going idle mid-convergence.
+    let repair_batches_saturated = stats.missing_vectors_repaired()
+        >= crate::store::memory::COMPATIBILITY_REPAIR_VECTOR_BATCH as u64
+        || stats.banks_rebuilt() >= crate::store::memory::COMPATIBILITY_REPAIR_BANK_BATCH as u64;
     let (repair_outcome, repair_advanced) = match repair_outcome {
         MemoryRepairTickOutcome::Incomplete => ("incomplete", true),
-        MemoryRepairTickOutcome::Complete => ("complete", false),
-        MemoryRepairTickOutcome::NotRequired => ("not_required", false),
+        MemoryRepairTickOutcome::Complete => ("complete", repair_batches_saturated),
+        MemoryRepairTickOutcome::NotRequired => ("not_required", repair_batches_saturated),
     };
     let cutover_progress = cg.advance_project_memory_cutover_once().await?;
     let cutover_advanced = legacy_memory_cutover_should_retry(cutover_progress);

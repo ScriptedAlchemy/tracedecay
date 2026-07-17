@@ -264,7 +264,7 @@ pub(super) async fn validate_source_cursor_authority_rows(
         let receipt_matches = match (reason.as_str(), receipt_id, receipt_json) {
             (
                 "blank_frame" | "out_of_scope" | "malformed_frame" | "oversized_frame"
-                | "unknown_version" | "unsupported_fact",
+                | "unknown_version" | "unsupported_fact" | "admission_refused",
                 None,
                 None,
             ) => true,
@@ -308,6 +308,7 @@ pub(super) async fn validate_source_cursor_authority_rows(
                     | "oversized_frame"
                     | "unknown_version"
                     | "unsupported_fact"
+                    | "admission_refused"
                     | "duplicate_observation"
                     | "sanitizer_rejected"
                     | "sanitizer_quarantined"

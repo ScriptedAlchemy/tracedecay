@@ -244,6 +244,66 @@ async fn cutover_preserves_legacy_usage_telemetry_and_search_ranking() {
         Some("on-topic-backup-plural"),
         "usage boost from carried retrieval telemetry must rank the reinforced fact first"
     );
+
+    // The backfill marks the imported facts' banks dirty; one repair pass
+    // must materialize the compatibility bank projections, or a migrated
+    // store reports zero banks until every category sees a fresh write.
+    let repair = application
+        .dashboard_repair_v1(
+            crate::application::memory::MemoryOperationContext::generated(
+                &owner,
+                "cutover-bank-repair",
+                None,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        repair.banks_rebuilt() > 0,
+        "cutover-marked banks must rebuild in the first repair pass"
+    );
+    let status = application.dashboard_memory_status_v1().await.unwrap();
+    assert!(
+        status.bank_count() > 0,
+        "migrated store must report materialized banks, got {}",
+        status.bank_count()
+    );
+
+    // Stores migrated before the backfill marked banks dirty have eligible
+    // facts, no banks, and no dirty marks; repair must self-heal that state
+    // rather than waiting for a fresh write in every category.
+    {
+        let raw_db = libsql::Builder::new_local(&path).build().await.unwrap();
+        let raw_conn = raw_db.connect().unwrap();
+        raw_conn
+            .execute_batch(
+                "DELETE FROM memory_v2_compatibility_banks;
+                 DELETE FROM memory_v2_compatibility_bank_dirty;",
+            )
+            .await
+            .unwrap();
+    }
+    let repair = application
+        .dashboard_repair_v1(
+            crate::application::memory::MemoryOperationContext::generated(
+                &owner,
+                "cutover-bank-self-heal",
+                None,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        repair.banks_rebuilt() > 0,
+        "repair must self-heal absent banks for a populated store"
+    );
+    let status = application.dashboard_memory_status_v1().await.unwrap();
+    assert!(
+        status.bank_count() > 0,
+        "self-healed store must report materialized banks again"
+    );
 }
 
 #[tokio::test]

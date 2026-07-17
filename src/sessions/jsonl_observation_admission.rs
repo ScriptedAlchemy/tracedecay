@@ -281,6 +281,25 @@ impl ActiveAdmission<'_, '_> {
                 )
                 .await
             }
+            // Deterministic refusals (content-derived identity conflicts and
+            // other non-retryable dispositions) re-fail identically forever;
+            // advance coverage with a durable typed reason so the stream
+            // converges instead of re-reporting the same records every sweep.
+            Err(outcome) if !outcome.retryable => {
+                tracing::warn!(
+                    provider = self.provider,
+                    offset = frame.checkpoint.offset,
+                    reason = outcome.reason_code.unwrap_or("host_admission_refused"),
+                    "admission refused a record; covering past it"
+                );
+                self.advance_coverage(
+                    expected_cursor,
+                    frame.checkpoint,
+                    ObservationCoverageReason::AdmissionRefused,
+                    None,
+                )
+                .await
+            }
             Err(outcome) => Err(TranscriptIngestError::NonDurableRecord {
                 provider: self.provider,
                 offset: frame.checkpoint.offset,
