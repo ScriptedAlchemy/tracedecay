@@ -51,9 +51,28 @@ async fn try_registered_project_roots_at(profile_root: &Path) -> Option<Vec<Path
 }
 
 pub(crate) async fn registered_project_roots_from(global: &GlobalDb) -> Option<Vec<PathBuf>> {
-    let mut roots = global.try_list_project_paths().await.ok()?;
-    roots.extend(global.try_list_code_project_paths(usize::MAX).await.ok()?);
-    roots.extend(global.try_list_project_alias_paths().await.ok()?);
+    let log_unavailable = |surface: &'static str, error: &dyn std::fmt::Display| {
+        tracing::warn!(surface, %error, "project registry read failed during user-global ingest");
+    };
+    let mut roots = global
+        .try_list_project_paths()
+        .await
+        .inspect_err(|error| log_unavailable("project_paths", error))
+        .ok()?;
+    roots.extend(
+        global
+            .try_list_code_project_paths(usize::MAX)
+            .await
+            .inspect_err(|error| log_unavailable("code_project_paths", error))
+            .ok()?,
+    );
+    roots.extend(
+        global
+            .try_list_project_alias_paths()
+            .await
+            .inspect_err(|error| log_unavailable("project_alias_paths", error))
+            .ok()?,
+    );
     roots.sort();
     roots.dedup();
     Some(roots)

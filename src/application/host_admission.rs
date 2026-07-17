@@ -757,18 +757,20 @@ impl<'a> HostAdmissionFacade<'a> {
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }
-            let Some(observation_id) = store
-                .next_queued_observation()
-                .await
-                .map_err(|_| projection_store_unavailable())?
+            let Some(observation_id) = store.next_queued_observation().await.map_err(|error| {
+                tracing::warn!(%error, "projection store operation failed during host drain");
+                projection_store_unavailable()
+            })?
             else {
                 break;
             };
             match store
                 .project_observation(&observation_id)
                 .await
-                .map_err(|_| projection_store_unavailable())?
-            {
+                .map_err(|error| {
+                    tracing::warn!(%error, "projection store operation failed during host drain");
+                    projection_store_unavailable()
+                })? {
                 ProjectionPersistOutcome::Projected(projected) => {
                     outcome.projected = outcome.projected.saturating_add(1);
                     outcome.projected_outputs = outcome.projected_outputs.saturating_add(
@@ -777,7 +779,10 @@ impl<'a> HostAdmissionFacade<'a> {
                     if let Some(observation) = store
                         .get_observation(&observation_id)
                         .await
-                        .map_err(|_| projection_store_unavailable())?
+                        .map_err(|error| {
+                    tracing::warn!(%error, "projection store operation failed during host drain");
+                    projection_store_unavailable()
+                })?
                     {
                         session_ids.insert(
                             observation
