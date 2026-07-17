@@ -2,9 +2,9 @@ use libsql::{Connection, params};
 use serde::{Serialize, de::DeserializeOwned};
 use tracedecay_domain::{
     DurableObservationV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    ObservationSourceIdentityV1, SanitizationReceiptV1,
 };
-use tracedecay_store::observation::ObservationCoverageV1;
+use tracedecay_store::observation::{ObservationCoverageReason, ObservationCoverageV1};
 
 use crate::global_db::{global_db_operation_error, global_db_operation_message};
 
@@ -261,58 +261,27 @@ pub(super) async fn validate_source_cursor_authority_rows(
             decode_authority_json(&scope_json, "source cursor advance scope JSON")?;
         let coverage: ObservationCoverageV1 =
             decode_authority_json(&coverage_json, "source cursor advance coverage JSON")?;
-        let receipt_matches = match (reason.as_str(), receipt_id, receipt_json) {
-            (
-                "blank_frame" | "out_of_scope" | "malformed_frame" | "oversized_frame"
-                | "unknown_version" | "unsupported_fact" | "admission_refused",
-                None,
-                None,
-            ) => true,
-            (
-                "sanitizer_rejected" | "sanitizer_quarantined" | "duplicate_observation",
-                Some(receipt_id),
-                Some(receipt_json),
-            ) => {
-                let receipt: SanitizationReceiptV1 = decode_authority_json(
-                    &receipt_json,
-                    "source cursor advance sanitization receipt JSON",
-                )?;
-                let disposition_matches = match reason.as_str() {
-                    "sanitizer_rejected" => {
-                        receipt.disposition() == SanitizerDispositionV1::Rejected
-                    }
-                    "sanitizer_quarantined" => {
-                        receipt.disposition() == SanitizerDispositionV1::Quarantined
-                    }
-                    "duplicate_observation" => matches!(
-                        receipt.disposition(),
-                        SanitizerDispositionV1::Accepted | SanitizerDispositionV1::Redacted
-                    ),
-                    _ => false,
-                };
-                receipt.receipt().receipt_id().as_str() == receipt_id
-                    && disposition_matches
-                    && (reason == "duplicate_observation") == receipt.payload().is_some()
-            }
-            _ => false,
+        let receipt_matches = match ObservationCoverageReason::try_from(reason.as_str()) {
+            Ok(parsed_reason) => match (receipt_id, receipt_json) {
+                (None, None) => parsed_reason.is_receiptless(),
+                (Some(receipt_id), Some(receipt_json)) if !parsed_reason.is_receiptless() => {
+                    let receipt: SanitizationReceiptV1 = decode_authority_json(
+                        &receipt_json,
+                        "source cursor advance sanitization receipt JSON",
+                    )?;
+                    receipt.receipt().receipt_id().as_str() == receipt_id
+                        && parsed_reason.disposition_matches(Some(receipt.disposition()))
+                        && (parsed_reason == ObservationCoverageReason::DuplicateObservation)
+                            == receipt.payload().is_some()
+                }
+                _ => false,
+            },
+            Err(_) => false,
         };
         if source_json != encode_authority_json(&source, "source cursor advance identity JSON")?
             || scope_json != encode_authority_json(&scope, "source cursor advance scope JSON")?
             || coverage_json
                 != encode_authority_json(&coverage, "source cursor advance coverage JSON")?
-            || !matches!(
-                reason.as_str(),
-                "blank_frame"
-                    | "out_of_scope"
-                    | "malformed_frame"
-                    | "oversized_frame"
-                    | "unknown_version"
-                    | "unsupported_fact"
-                    | "admission_refused"
-                    | "duplicate_observation"
-                    | "sanitizer_rejected"
-                    | "sanitizer_quarantined"
-            )
             || !receipt_matches
         {
             return Err(authority_violation(

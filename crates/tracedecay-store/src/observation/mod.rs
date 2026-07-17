@@ -277,6 +277,68 @@ impl ObservationCoverageReason {
             Self::AdmissionRefused => "admission_refused",
         }
     }
+
+    /// True when this reason never carries a sanitization receipt, i.e. the
+    /// evidence was disposed of before it ever reached the sanitizer.
+    pub fn is_receiptless(self) -> bool {
+        !matches!(
+            self,
+            Self::SanitizerRejected | Self::SanitizerQuarantined | Self::DuplicateObservation
+        )
+    }
+
+    /// Whether `disposition` is the sanitizer disposition this reason
+    /// requires. Receiptless reasons require `None`; receipt-bearing reasons
+    /// require the specific disposition their name promises.
+    pub fn disposition_matches(self, disposition: Option<SanitizerDispositionV1>) -> bool {
+        matches!(
+            (self, disposition),
+            (
+                Self::SanitizerRejected,
+                Some(SanitizerDispositionV1::Rejected)
+            ) | (
+                Self::SanitizerQuarantined,
+                Some(SanitizerDispositionV1::Quarantined)
+            ) | (
+                Self::DuplicateObservation,
+                Some(SanitizerDispositionV1::Accepted | SanitizerDispositionV1::Redacted)
+            ) | (
+                Self::BlankFrame
+                    | Self::OutOfScope
+                    | Self::MalformedFrame
+                    | Self::OversizedFrame
+                    | Self::UnknownVersion
+                    | Self::UnsupportedFact
+                    | Self::AdmissionRefused,
+                None
+            )
+        )
+    }
+}
+
+/// The wire form did not name a known [`ObservationCoverageReason`] variant.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("unknown observation coverage reason: {0:?}")]
+pub struct UnknownObservationCoverageReason(pub String);
+
+impl TryFrom<&str> for ObservationCoverageReason {
+    type Error = UnknownObservationCoverageReason;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "blank_frame" => Ok(Self::BlankFrame),
+            "out_of_scope" => Ok(Self::OutOfScope),
+            "malformed_frame" => Ok(Self::MalformedFrame),
+            "oversized_frame" => Ok(Self::OversizedFrame),
+            "unknown_version" => Ok(Self::UnknownVersion),
+            "unsupported_fact" => Ok(Self::UnsupportedFact),
+            "duplicate_observation" => Ok(Self::DuplicateObservation),
+            "sanitizer_rejected" => Ok(Self::SanitizerRejected),
+            "sanitizer_quarantined" => Ok(Self::SanitizerQuarantined),
+            "admission_refused" => Ok(Self::AdmissionRefused),
+            other => Err(UnknownObservationCoverageReason(other.to_string())),
+        }
+    }
 }
 
 pub type NonDurableFrameReason = ObservationCoverageReason;
@@ -422,32 +484,10 @@ impl ObservationCursorAdvance {
         reason: ObservationCoverageReason,
         sanitization_receipt: Option<SanitizationReceiptV1>,
     ) -> ObservationStoreResult<Self> {
-        let receipt_matches_reason = matches!(
-            (
-                reason,
-                sanitization_receipt
-                    .as_ref()
-                    .map(SanitizationReceiptV1::disposition)
-            ),
-            (
-                ObservationCoverageReason::SanitizerRejected,
-                Some(SanitizerDispositionV1::Rejected)
-            ) | (
-                ObservationCoverageReason::SanitizerQuarantined,
-                Some(SanitizerDispositionV1::Quarantined)
-            ) | (
-                ObservationCoverageReason::DuplicateObservation,
-                Some(SanitizerDispositionV1::Accepted | SanitizerDispositionV1::Redacted)
-            ) | (
-                ObservationCoverageReason::BlankFrame
-                    | ObservationCoverageReason::OutOfScope
-                    | ObservationCoverageReason::MalformedFrame
-                    | ObservationCoverageReason::OversizedFrame
-                    | ObservationCoverageReason::UnknownVersion
-                    | ObservationCoverageReason::UnsupportedFact
-                    | ObservationCoverageReason::AdmissionRefused,
-                None
-            )
+        let receipt_matches_reason = reason.disposition_matches(
+            sanitization_receipt
+                .as_ref()
+                .map(SanitizationReceiptV1::disposition),
         );
         if !receipt_matches_reason {
             return Err(ObservationStoreError::CursorSanitizationReceiptMismatch);
