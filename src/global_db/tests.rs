@@ -897,6 +897,199 @@ async fn store_project_identity_cannot_be_reparented() {
 }
 
 #[tokio::test]
+async fn anchor_backfill_preserves_colliding_alias_binding_and_still_completes() {
+    use tracedecay_domain::{
+        DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
+        ObservationOrderingDomainV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+        ObservationSourceRangeV1, ProviderId,
+    };
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = GlobalDb::open_at(&db_path).await.unwrap();
+
+    // Native-record observations derive a ProviderRecord alias; byte-range
+    // fixtures do not, and this scenario is about alias bindings.
+    let seed_native = |sequence: i64, record: &str| {
+        let conn = &db.conn;
+        let record = record.to_owned();
+        async move {
+            let source = ObservationSourceIdentityV1::for_provider(
+                ProviderId::new("codex").unwrap(),
+                SessionId::new("session.alias-collision").unwrap(),
+            )
+            .unwrap();
+            let start = u64::try_from(sequence - 1).unwrap();
+            let payload = json!({"kind": "alias_collision_fixture", "record": record});
+            let receipt = SanitizationReceiptV1::new(
+                SanitizationReceiptRefV1::new(
+                    SanitizationReceiptId::new(format!("receipt.alias-collision.{sequence}"))
+                        .unwrap(),
+                    ComponentVersion::new("sanitizer.alias-collision.v1").unwrap(),
+                )
+                .unwrap(),
+                SanitizerDispositionV1::Accepted,
+                SensitivityV1::NonSensitive,
+                Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+            )
+            .unwrap();
+            let observation = DurableObservationV1::new(
+                ObservationIdentityMaterialV1::for_native_record(
+                    source,
+                    ObservationScopeV1::Profile,
+                    ObservationSourceGenerationV1::new(1).unwrap(),
+                    ObservationSourceRangeV1::new(start, start + 1).unwrap(),
+                    ObservationOrderingDomainV1::SqliteRowId,
+                    ObservationId::new(record).unwrap(),
+                )
+                .unwrap(),
+                receipt,
+                RetentionClass::new("retention.alias-collision").unwrap(),
+                payload,
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sanitization_receipts
+                 (receipt_id, sanitizer_version, payload_digest, receipt_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    observation.receipt().receipt().receipt_id().as_str(),
+                    observation.receipt().receipt().sanitizer_version().as_str(),
+                    observation.payload_reference().digest().as_str(),
+                    serde_json::to_string(observation.receipt()).unwrap(),
+                ],
+            )
+            .await
+            .unwrap();
+            conn.execute(
+                "INSERT INTO observations
+                 (sequence, observation_id, payload_digest, receipt_id,
+                  observation_json, committed_cursor_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    sequence,
+                    observation.observation_id().as_str(),
+                    observation.payload_reference().digest().as_str(),
+                    observation.receipt().receipt().receipt_id().as_str(),
+                    serde_json::to_string(&observation).unwrap(),
+                    serde_json::to_string(&json!({
+                        "source": observation.source(),
+                        "scope": observation.scope(),
+                        "coverage": {
+                            "generation": 1,
+                            "ordering_domain": "sqlite_rowid",
+                            "range": {"start": start, "end": start + 1}
+                        },
+                    }))
+                    .unwrap(),
+                ],
+            )
+            .await
+            .unwrap();
+            observation
+        }
+    };
+    let first = seed_native(1, "record.alias-collision.first").await;
+    let second = seed_native(2, "record.alias-collision.second").await;
+    super::observation::backfill_observation_retrieval_anchors(&db.conn)
+        .await
+        .unwrap();
+
+    let bound_anchor = |observation_id: String| {
+        let conn = &db.conn;
+        async move {
+            let mut rows = conn
+                .query(
+                    "SELECT anchor_id FROM observation_retrieval_anchors
+                     WHERE observation_id = ?1",
+                    params![observation_id],
+                )
+                .await
+                .unwrap();
+            rows.next()
+                .await
+                .unwrap()
+                .map(|row| row.get::<String>(0).unwrap())
+        }
+    };
+    let first_anchor = bound_anchor(first.observation_id().as_str().to_owned())
+        .await
+        .expect("first observation anchored");
+    let second_anchor = bound_anchor(second.observation_id().as_str().to_owned())
+        .await
+        .expect("second observation anchored");
+    assert_ne!(first_anchor, second_anchor);
+
+    // Simulate a store whose alias was bound by an anchor from an abandoned
+    // in-development derivation: the first observation\'s alias points at a
+    // different surviving anchor and its own anchor rows are gone, so the
+    // next open re-derives an anchor whose alias collides. The immutability
+    // triggers guard the live write path; drop them for this out-of-band
+    // state surgery exactly as an older schema (which lacked these rows)
+    // would present.
+    db.conn
+        .execute_batch(
+            "DROP TRIGGER observation_retrieval_anchors_immutable_update;
+             DROP TRIGGER observation_retrieval_anchors_immutable_delete;
+             DROP TRIGGER retrieval_anchor_aliases_immutable_update;
+             DROP TRIGGER retrieval_anchor_aliases_immutable_delete;
+             DROP TRIGGER retrieval_anchors_immutable_update;
+             DROP TRIGGER retrieval_anchors_immutable_delete;",
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "UPDATE retrieval_anchor_aliases SET anchor_id = ?1 WHERE anchor_id = ?2",
+            params![second_anchor.as_str(), first_anchor.as_str()],
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "DELETE FROM observation_retrieval_anchors WHERE anchor_id = ?1",
+            params![first_anchor.as_str()],
+        )
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "DELETE FROM retrieval_anchors WHERE anchor_id = ?1",
+            params![first_anchor.as_str()],
+        )
+        .await
+        .unwrap();
+
+    super::observation::backfill_observation_retrieval_anchors(&db.conn)
+        .await
+        .expect("a colliding alias must not brick the anchor backfill");
+
+    // The migration converged: the observation is anchored again by id, and
+    // the previously bound alias is preserved rather than overwritten.
+    let rebound_anchor = bound_anchor(first.observation_id().as_str().to_owned())
+        .await
+        .expect("first observation re-anchored after collision");
+    assert_eq!(rebound_anchor, first_anchor);
+    let mut rows = db
+        .conn
+        .query(
+            "SELECT anchor_id FROM retrieval_anchor_aliases ORDER BY anchor_id",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut alias_owners = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        alias_owners.push(row.get::<String>(0).unwrap());
+    }
+    assert_eq!(
+        alias_owners,
+        vec![second_anchor.clone(), second_anchor.clone()],
+        "existing alias bindings must survive the colliding backfill un-overwritten"
+    );
+}
+
+#[tokio::test]
 async fn schema_reensure_repairs_projection_queue_to_checkpoint_frontier() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");

@@ -299,9 +299,14 @@ pub(super) async fn backfill_observation_retrieval_anchors(
             authorization,
         )
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-        persist_observation_retrieval_anchor(conn, observation.observation_id(), &anchor)
-            .await
-            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        persist_observation_retrieval_anchor(
+            conn,
+            observation.observation_id(),
+            &anchor,
+            AnchorAliasCollisionPolicy::PreserveExisting,
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
     }
     conn.execute(
         "INSERT OR REPLACE INTO global_schema_migrations(migration) VALUES (?1)",
@@ -577,9 +582,22 @@ fn encode_json_string<T: serde::Serialize>(
     }
 }
 
+/// How anchor persistence treats a native alias already bound to a different
+/// anchor. Live writes fail closed: a conflicting identity must not commit.
+/// The legacy anchor backfill preserves the existing binding instead — stores
+/// that accumulated duplicate provider records (or anchors minted by an
+/// earlier derivation) must still finish migrating; the first-bound alias is
+/// never overwritten and the later anchor simply stays reachable only by id.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnchorAliasCollisionPolicy {
+    FailClosed,
+    PreserveExisting,
+}
+
 async fn persist_retrieval_anchor(
     conn: &Connection,
     candidate: &RetrievalAnchorRecordV2,
+    alias_policy: AnchorAliasCollisionPolicy,
 ) -> ObservationStoreResult<(RetrievalAnchorRecordV2, ProjectionGenerationId)> {
     let anchor_json = encode(candidate, "encode retrieval anchor")?;
     let owner_json = encode(candidate.owner(), "encode retrieval anchor owner")?;
@@ -677,14 +695,25 @@ async fn persist_retrieval_anchor(
                 .get::<String>(0)
                 .map_err(|error| storage("read retrieval anchor alias", error))?;
             if existing_anchor_id != stored.anchor_id().as_str() {
-                return Err(ObservationStoreError::RetrievalAnchorAliasCollision {
-                    alias: Box::new(alias.clone()),
-                    existing_anchor_id: Box::new(
-                        tracedecay_domain::RetrievalAnchorId::new(existing_anchor_id)
-                            .map_err(ObservationStoreError::RetrievalAnchorContract)?,
-                    ),
-                    candidate_anchor_id: Box::new(stored.anchor_id().clone()),
-                });
+                match alias_policy {
+                    AnchorAliasCollisionPolicy::FailClosed => {
+                        return Err(ObservationStoreError::RetrievalAnchorAliasCollision {
+                            alias: Box::new(alias.clone()),
+                            existing_anchor_id: Box::new(
+                                tracedecay_domain::RetrievalAnchorId::new(existing_anchor_id)
+                                    .map_err(ObservationStoreError::RetrievalAnchorContract)?,
+                            ),
+                            candidate_anchor_id: Box::new(stored.anchor_id().clone()),
+                        });
+                    }
+                    AnchorAliasCollisionPolicy::PreserveExisting => {
+                        eprintln!(
+                            "[tracedecay] anchor backfill preserved alias binding to {existing_anchor_id}; \
+                             candidate {} stays reachable by id only",
+                            stored.anchor_id().as_str()
+                        );
+                    }
+                }
             }
         }
     }
@@ -695,6 +724,7 @@ async fn persist_observation_retrieval_anchor(
     conn: &Connection,
     observation_id: &CanonicalObservationIdV1,
     candidate: &RetrievalAnchorRecordV2,
+    alias_policy: AnchorAliasCollisionPolicy,
 ) -> ObservationStoreResult<(RetrievalAnchorRecordV2, ProjectionGenerationId)> {
     if !matches!(
         candidate.target(),
@@ -702,7 +732,8 @@ async fn persist_observation_retrieval_anchor(
     ) {
         return Err(ObservationStoreError::RetrievalAnchorObservationMismatch);
     }
-    let (stored, projection_generation) = persist_retrieval_anchor(conn, candidate).await?;
+    let (stored, projection_generation) =
+        persist_retrieval_anchor(conn, candidate, alias_policy).await?;
     conn.execute(
         "INSERT OR IGNORE INTO observation_retrieval_anchors (observation_id, anchor_id)
          VALUES (?1, ?2)",
@@ -742,7 +773,12 @@ async fn persist_repository_provenance_attachment(
 ) -> ObservationStoreResult<RepositoryProvenanceAttachmentV1> {
     let stored_anchor = match candidate.anchor() {
         Some(candidate_anchor) => {
-            let (stored_anchor, _) = persist_retrieval_anchor(conn, candidate_anchor).await?;
+            let (stored_anchor, _) = persist_retrieval_anchor(
+                conn,
+                candidate_anchor,
+                AnchorAliasCollisionPolicy::FailClosed,
+            )
+            .await?;
             if &stored_anchor != candidate_anchor {
                 return Err(ObservationStoreError::RetrievalAnchorCollision);
             }
@@ -1354,6 +1390,7 @@ impl GlobalDb {
             &transaction,
             candidate.observation_id(),
             write.retrieval_anchor(),
+            AnchorAliasCollisionPolicy::FailClosed,
         )
         .await?;
         let repository_provenance = persist_repository_provenance_attachment(
