@@ -2580,12 +2580,7 @@ async fn memory_v2_merge_preserves_deletion_terminality_and_carries_live_facts()
 
     // Common minimal rows for a profile-owned fact: identity, one lineage event
     // per shard, and a current-fact projection row referencing that event.
-    fn seed_fact(
-        fact_id: &str,
-        event_id: &str,
-        payload_access: &str,
-        updated_at: i64,
-    ) -> String {
+    fn seed_fact(fact_id: &str, event_id: &str, payload_access: &str, updated_at: i64) -> String {
         format!(
             "INSERT OR IGNORE INTO memory_v2_facts(
                  fact_id, owner_kind, project_id, owner_json, identity_json, created_at
@@ -2671,7 +2666,10 @@ async fn memory_v2_merge_preserves_deletion_terminality_and_carries_live_facts()
 
     // Deletion terminality must not re-materialize a derived projection: no
     // assertion payload or vector row exists for a tombstoned fact.
-    for table in ["memory_v2_assertion_payloads", "memory_v2_assertion_vectors"] {
+    for table in [
+        "memory_v2_assertion_payloads",
+        "memory_v2_assertion_vectors",
+    ] {
         let mut rows = target
             .conn()
             .query(

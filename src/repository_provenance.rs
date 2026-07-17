@@ -253,7 +253,7 @@ impl NativeRepositoryProvenanceProbe {
         }
         let (git_dir, git_dir_is_partial) = canonical_path(repo.git_dir());
         let (common_dir, common_dir_is_partial) = canonical_path(repo.common_dir());
-        let remote_identity = observe_remote_identity(&repo, request.privacy_domain_salt);
+        let remote_identity = observe_remote_identity(repo, request.privacy_domain_salt);
 
         let Some(canonical_root_digest) = privacy_bound_digest(
             request.privacy_domain_salt,
@@ -278,8 +278,8 @@ impl NativeRepositoryProvenanceProbe {
             return EvidenceAvailabilityV1::Unavailable;
         };
 
-        let head = observe_head(&repo);
-        let index = observe_index(&repo);
+        let head = observe_head(repo);
+        let index = observe_index(repo);
         let Ok(evidence) = RepositoryEvidenceV1::new(
             head.attached_ref,
             head.commit,
@@ -312,7 +312,7 @@ impl NativeRepositoryProvenanceProbe {
 pub(crate) fn capture_repository_provenance(
     request: &RepositoryProvenanceProbeRequest<'_>,
 ) -> EvidenceAvailabilityV1<RepositoryProvenanceV1> {
-    NativeRepositoryProvenanceProbe::default().capture(request)
+    NativeRepositoryProvenanceProbe.capture(request)
 }
 
 fn prepare_generation_binding(
@@ -465,7 +465,7 @@ fn observe_remote_identity(
     let Ok(remote) = remote.to_str() else {
         return remote_identity_observation(RepositoryRemoteIdentityV1::Invalid);
     };
-    let Some(normalized) = normalize_remote_without_credentials(&remote) else {
+    let Some(normalized) = normalize_remote_without_credentials(remote) else {
         return remote_identity_observation(RepositoryRemoteIdentityV1::Invalid);
     };
     if normalized.len() > MAX_REMOTE_IDENTITY_BYTES {
@@ -718,7 +718,7 @@ mod tests {
         }
 
         fn capture(&self) -> RepositoryProvenanceV1 {
-            match self.capture_with(&NativeRepositoryProvenanceProbe::default()) {
+            match self.capture_with(&NativeRepositoryProvenanceProbe) {
                 EvidenceAvailabilityV1::Known(capture) => capture,
                 other => panic!("expected known capture, got {other:?}"),
             }
@@ -1223,7 +1223,7 @@ mod tests {
         // Remove the checkout entirely. A fresh capture must not walk up to an
         // ambient repository; it reports typed absence instead.
         fs::remove_dir_all(fixture.path()).unwrap();
-        let fresh = fixture.capture_with(&NativeRepositoryProvenanceProbe::default());
+        let fresh = fixture.capture_with(&NativeRepositoryProvenanceProbe);
         assert!(matches!(fresh, EvidenceAvailabilityV1::Unavailable));
 
         // The capture taken before deletion remains fully readable evidence.

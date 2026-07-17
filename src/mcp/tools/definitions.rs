@@ -2384,7 +2384,7 @@ fn def_fact_feedback() -> ToolDefinition {
                 "action": {
                     "type": "string",
                     "enum": ["helpful", "unhelpful"],
-                    "description": "Feedback action."
+                    "description": "Feedback action. One of action, helpful, or unhelpful must be provided."
                 },
                 "helpful": {
                     "type": "boolean",
@@ -2416,17 +2416,9 @@ fn def_fact_feedback() -> ToolDefinition {
                     "description": "Scope containing the fact id (default: project)."
                 }
             },
-            "anyOf": [
-                { "required": ["action"] },
-                {
-                    "properties": { "helpful": { "const": true } },
-                    "required": ["helpful"]
-                },
-                {
-                    "properties": { "unhelpful": { "const": true } },
-                    "required": ["unhelpful"]
-                }
-            ],
+            // No root-level anyOf: some providers (e.g. Moonshot) reject `anyOf`
+            // alongside a parent `type`; feedback_action() enforces the
+            // action/helpful/unhelpful requirement at runtime.
             "required": ["fact_id"]
         }),
     )

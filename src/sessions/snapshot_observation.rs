@@ -292,7 +292,7 @@ impl SnapshotAdmissionRunner {
             };
             match outcome {
                 CaptureObservationOutcome::Persisted { outcome, .. } => {
-                    if let ObservationPersistOutcome::Committed(receipt) = &outcome {
+                    if let ObservationPersistOutcome::Committed(receipt) = outcome.as_ref() {
                         self.stats.messages_upserted =
                             self.stats.messages_upserted.saturating_add(1);
                         cursors.insert(

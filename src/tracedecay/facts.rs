@@ -182,7 +182,7 @@ impl TraceDecay {
             .await
             .map_err(memory_application_error)?
         {
-            V1UpdateFactOutcome::Updated(fact) => Ok(fact),
+            V1UpdateFactOutcome::Updated(fact) => Ok(*fact),
             V1UpdateFactOutcome::RejectedSecretLike { reason } => Err(TraceDecayError::Database {
                 operation: "update_fact".to_owned(),
                 message: reason,

@@ -2760,8 +2760,14 @@ impl McpServer {
         timings_enabled: bool,
         route_cache: &mut HookProjectRouteCache,
     ) -> Option<JsonRpcResponse> {
-        Box::pin(self.handle_request_for_connection(request, timings_enabled, route_cache, None, None))
-            .await
+        Box::pin(self.handle_request_for_connection(
+            request,
+            timings_enabled,
+            route_cache,
+            None,
+            None,
+        ))
+        .await
     }
 
     async fn handle_request_for_connection(

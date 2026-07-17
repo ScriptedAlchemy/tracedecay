@@ -303,13 +303,13 @@ async fn capture_frame(
             ..
         } => {
             let receipt = outcome.receipt();
-            if !frame.set_sanitized_record(sanitized_record) {
+            if !frame.set_sanitized_record(*sanitized_record) {
                 return Err(ClaudeObservationIngestError::InvalidFrameState);
             }
             Ok(FrameCaptureOutcome::Persisted(CapturedClaudeFrame {
                 committed_cursor: receipt.committed_cursor().clone(),
                 exact_duplicate: matches!(
-                    outcome,
+                    *outcome,
                     ObservationPersistOutcome::ExactDuplicate(_)
                         | ObservationPersistOutcome::CoveredDuplicate(_)
                 ),

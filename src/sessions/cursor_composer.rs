@@ -847,7 +847,7 @@ impl CursorComposerSource {
                     } = outcome
                 {
                     session_accepted = true;
-                    if matches!(persisted, ObservationPersistOutcome::Committed(_)) {
+                    if matches!(*persisted, ObservationPersistOutcome::Committed(_)) {
                         messages = messages.saturating_add(1);
                     }
                 }
@@ -981,7 +981,7 @@ impl CursorComposerSource {
                                 outcome: persisted, ..
                             }) => {
                                 session_accepted = true;
-                                if matches!(persisted, ObservationPersistOutcome::Committed(_)) {
+                                if matches!(*persisted, ObservationPersistOutcome::Committed(_)) {
                                     messages = messages.saturating_add(1);
                                 }
                             }
@@ -1211,7 +1211,7 @@ impl CursorComposerSource {
                     outcome: persisted, ..
                 }) => {
                     session_accepted = true;
-                    if matches!(persisted, ObservationPersistOutcome::Committed(_)) {
+                    if matches!(*persisted, ObservationPersistOutcome::Committed(_)) {
                         messages = messages.saturating_add(1);
                     }
                 }

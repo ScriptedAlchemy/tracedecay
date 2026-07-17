@@ -166,9 +166,9 @@ impl ReplayObservationsRequest {
 #[derive(Debug)]
 pub enum CaptureObservationOutcome {
     Persisted {
-        outcome: ObservationPersistOutcome,
+        outcome: Box<ObservationPersistOutcome>,
         projection_status: ObservationProjectionStatus,
-        sanitized_record: SanitizedObservationRecordV1,
+        sanitized_record: Box<SanitizedObservationRecordV1>,
         findings: Vec<SanitizationFindingV1>,
     },
     Rejected {
@@ -386,9 +386,9 @@ impl<S: ObservationStore> ObservationApplication<S> {
                     .ok_or(ObservationApplicationError::PersistedObservationUnavailable)?
                     .projection_status();
                 Ok(CaptureObservationOutcome::Persisted {
-                    outcome,
+                    outcome: Box::new(outcome),
                     projection_status,
-                    sanitized_record,
+                    sanitized_record: Box::new(sanitized_record),
                     findings,
                 })
             }
@@ -1005,7 +1005,7 @@ mod tests {
                 ..
             } => {
                 assert!(matches!(
-                    outcome,
+                    *outcome,
                     ObservationPersistOutcome::ExactDuplicate(_)
                 ));
                 assert_eq!(projection_status, ObservationProjectionStatus::NotQueued);
@@ -1148,7 +1148,7 @@ mod tests {
             panic!("retry must persist");
         };
         assert!(matches!(
-            outcome,
+            *outcome,
             ObservationPersistOutcome::ExactDuplicate(_)
         ));
         assert_eq!(application.store.observations.lock().unwrap().len(), 1);

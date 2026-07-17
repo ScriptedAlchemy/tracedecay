@@ -87,7 +87,6 @@ impl DatabaseWriterConnection<'_> {
     pub(crate) fn memory_store(&self) -> crate::memory::store::MemoryStore<'_> {
         crate::memory::store::MemoryStore::new(&self.conn)
     }
-
 }
 
 impl DatabaseMemoryWriter<'_> {
@@ -469,7 +468,7 @@ impl Database {
         source_store_id: &SourceStoreId,
     ) -> Result<Option<MemoryV2FeedbackHistoryRepairProgress>> {
         self.require_active_write_scope("read memory v2 feedback history in writer transaction")?;
-        memory_v2::feedback_history_repair_progress(&**transaction, owner, source_store_id).await
+        memory_v2::feedback_history_repair_progress(transaction, owner, source_store_id).await
     }
 
     /// Repairs one bounded V22 feedback-history batch inside an already-open
@@ -484,7 +483,7 @@ impl Database {
     ) -> Result<MemoryV2FeedbackHistoryRepairBatchOutcome> {
         self.require_active_write_scope("repair memory v2 feedback history in writer transaction")?;
         memory_v2::repair_memory_v2_feedback_history_batch_in_transaction(
-            &**transaction,
+            transaction,
             owner,
             source_store_id,
             batch_size,
@@ -506,7 +505,7 @@ impl Database {
             "mark memory v2 compatibility bank dirty in writer transaction",
         )?;
         memory_v2::mark_memory_v2_compatibility_bank_dirty_in_transaction(
-            &**transaction,
+            transaction,
             owner,
             source_store_id,
             bank_name,
@@ -517,6 +516,7 @@ impl Database {
 
     /// Replaces an owner-bound V23 compatibility-bank projection inside an
     /// already-open authoritative writer transaction.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn upsert_memory_v2_compatibility_bank_in_transaction(
         &self,
         transaction: &Transaction,
@@ -531,7 +531,7 @@ impl Database {
             "upsert memory v2 compatibility bank in writer transaction",
         )?;
         memory_v2::upsert_memory_v2_compatibility_bank_in_transaction(
-            &**transaction,
+            transaction,
             owner,
             source_store_id,
             bank_name,
@@ -555,7 +555,7 @@ impl Database {
             "delete memory v2 compatibility bank in writer transaction",
         )?;
         memory_v2::delete_memory_v2_compatibility_bank_in_transaction(
-            &**transaction,
+            transaction,
             owner,
             source_store_id,
             bank_name,
@@ -577,7 +577,7 @@ impl Database {
             "clear memory v2 compatibility bank dirty in writer transaction",
         )?;
         memory_v2::clear_memory_v2_compatibility_bank_dirty_in_transaction(
-            &**transaction,
+            transaction,
             owner,
             source_store_id,
             bank_name,

@@ -974,7 +974,7 @@ fn supported_provider(provider: &str) -> bool {
 
 fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome {
     match outcome {
-        CaptureObservationOutcome::Persisted { outcome, .. } => match outcome {
+        CaptureObservationOutcome::Persisted { outcome, .. } => match *outcome {
             ObservationPersistOutcome::Committed(_) => {
                 HostAdmissionOutcome::new(HostAdmissionStatus::Committed, false, None)
             }
@@ -1086,7 +1086,8 @@ mod tests {
         // must present a canonical observation envelope rather than a raw
         // provider frame.
         let encoded = serde_json::to_vec(&json!({ "text": "host provenance fixture" })).unwrap();
-        let range = ObservationSourceRangeV1::new(0, u64::try_from(encoded.len()).unwrap()).unwrap();
+        let range =
+            ObservationSourceRangeV1::new(0, u64::try_from(encoded.len()).unwrap()).unwrap();
         let ordering_domain = ObservationOrderingDomainV1::SqliteRowId;
         let session_id = "session.host-provenance".to_owned();
         let envelope_session = session_id.clone();
@@ -1270,13 +1271,17 @@ mod tests {
             .await
             .unwrap();
         let (initial_attachment, initial_generation) = match initial {
-            CaptureObservationOutcome::Persisted {
-                outcome: ObservationPersistOutcome::Committed(receipt),
-                ..
-            } => (
-                receipt.repository_provenance_attachment().clone(),
-                receipt.projection_generation().clone(),
-            ),
+            CaptureObservationOutcome::Persisted { outcome, .. }
+                if matches!(*outcome, ObservationPersistOutcome::Committed(_)) =>
+            {
+                let ObservationPersistOutcome::Committed(receipt) = *outcome else {
+                    unreachable!("guard matched committed persist outcome");
+                };
+                (
+                    receipt.repository_provenance_attachment().clone(),
+                    receipt.projection_generation().clone(),
+                )
+            }
             other => panic!("expected committed project observation, got {other:?}"),
         };
         let initial_provenance = initial_attachment.provenance().unwrap();
@@ -1302,10 +1307,14 @@ mod tests {
             .await
             .unwrap();
         let replay_attachment = match replay {
-            CaptureObservationOutcome::Persisted {
-                outcome: ObservationPersistOutcome::ExactDuplicate(receipt),
-                ..
-            } => receipt.repository_provenance_attachment().clone(),
+            CaptureObservationOutcome::Persisted { outcome, .. }
+                if matches!(*outcome, ObservationPersistOutcome::ExactDuplicate(_)) =>
+            {
+                let ObservationPersistOutcome::ExactDuplicate(receipt) = *outcome else {
+                    unreachable!("guard matched exact duplicate persist outcome");
+                };
+                receipt.repository_provenance_attachment().clone()
+            }
             other => panic!("expected exact duplicate replay, got {other:?}"),
         };
         assert_eq!(replay_attachment, initial_attachment);
@@ -1344,10 +1353,14 @@ mod tests {
             .await
             .unwrap();
         let profile_attachment = match profile {
-            CaptureObservationOutcome::Persisted {
-                outcome: ObservationPersistOutcome::Committed(receipt),
-                ..
-            } => receipt.repository_provenance_attachment().clone(),
+            CaptureObservationOutcome::Persisted { outcome, .. }
+                if matches!(*outcome, ObservationPersistOutcome::Committed(_)) =>
+            {
+                let ObservationPersistOutcome::Committed(receipt) = *outcome else {
+                    unreachable!("guard matched committed persist outcome");
+                };
+                receipt.repository_provenance_attachment().clone()
+            }
             other => panic!("expected committed profile observation, got {other:?}"),
         };
         assert!(matches!(

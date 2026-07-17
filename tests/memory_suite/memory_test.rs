@@ -1128,6 +1128,85 @@ async fn compatibility_v1_remove_defaults_to_the_current_event() {
 }
 
 #[tokio::test]
+async fn compatibility_v1_remove_redacts_feedback_history_free_text() {
+    let (db, _tmp) = make_memory_store().await;
+    let owner = FactOwnerV1::Profile;
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
+    let fact = add_compatibility_fixture_fact(
+        &memory,
+        &owner,
+        "Deleting a fact must erase its feedback free text",
+        MemoryCategory::Project,
+    )
+    .await;
+    memory
+        .record_fact_feedback_v1(
+            FeedbackRequest {
+                fact_id: fact.fact_id,
+                action: FeedbackAction::Helpful,
+                source: Some("reviewer".to_string()),
+                note: Some("private context that must not outlive the fact".to_string()),
+            },
+            MemoryOperationContext::generated(&owner, "redaction-feedback", None).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let history_state = |label: &'static str| {
+        let db = &db;
+        async move {
+            let mut rows = db
+                .conn()
+                .query(
+                    "SELECT COUNT(*),
+                            COUNT(source), COUNT(note),
+                            SUM(CASE WHEN details_availability = 'available' THEN 1 ELSE 0 END)
+                     FROM memory_v2_feedback_history
+                     WHERE fact_id = (
+                         SELECT fact_id FROM memory_v2_legacy_map WHERE legacy_fact_id = ?1
+                     )",
+                    libsql::params![fact.fact_id],
+                )
+                .await
+                .unwrap();
+            let row = rows.next().await.unwrap().unwrap_or_else(|| {
+                panic!("{label}: feedback history row must exist");
+            });
+            (
+                row.get::<i64>(0).unwrap(),
+                row.get::<i64>(1).unwrap(),
+                row.get::<i64>(2).unwrap(),
+                row.get::<i64>(3).unwrap(),
+            )
+        }
+    };
+    let (rows, sources, notes, available) = history_state("before remove").await;
+    assert_eq!(rows, 1);
+    assert_eq!((sources, notes, available), (1, 1, 1));
+
+    assert!(
+        memory
+            .remove_fact_v1(
+                fact.fact_id,
+                MemoryOperationContext::generated(&owner, "redaction-remove", None).unwrap(),
+            )
+            .await
+            .unwrap()
+    );
+
+    // A live deletion must erase the same feedback free-text surface as the
+    // canonical purge path: rows stay for lineage, but source/note are gone
+    // and availability is downgraded.
+    let (rows, sources, notes, available) = history_state("after remove").await;
+    assert_eq!(rows, 1, "feedback lineage rows must survive deletion");
+    assert_eq!(
+        (sources, notes, available),
+        (0, 0, 0),
+        "deleted facts must not retain feedback source/note free text"
+    );
+}
+
+#[tokio::test]
 async fn compatibility_repair_skips_malformed_unavailable_vectors() {
     let (db, _tmp) = make_memory_store().await;
     let owner = FactOwnerV1::Profile;

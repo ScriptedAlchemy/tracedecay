@@ -702,16 +702,14 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
                             error,
                         ))
                     })?;
-                    return match self
-                        .db
-                        .finalize_memory_v2_cutover(&receipt)
-                        .await
-                        .map_err(|error| {
+                    return match self.db.finalize_memory_v2_cutover(&receipt).await.map_err(
+                        |error| {
                             FactCompatibilityStoreError::Store(storage_error(
                                 COMPATIBILITY_WRITE_OPERATION,
                                 error,
                             ))
-                        })? {
+                        },
+                    )? {
                         MemoryV2CutoverOutcome::TailPending(_) => {
                             Ok(CompatibilityLegacyMemoryCutoverProgressV1::Incomplete {
                                 processed: total_processed,
@@ -1794,6 +1792,7 @@ async fn compatibility_mirror_insert_tx(
     Ok(CompatibilityMirrorInsertV1::Inserted(legacy_fact_id))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn compatibility_mirror_update_tx(
     db: &Database,
     transaction: &Transaction,
@@ -1953,6 +1952,7 @@ async fn compatibility_lookup_operation_receipt_tx(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn compatibility_record_operation_receipt_tx(
     transaction: &Transaction,
     owner: &FactOwnerV1,
@@ -2028,6 +2028,7 @@ fn compatibility_legacy_mapping_for_new_fact(
     Ok((identity, mapping))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compatibility_initial_batch(
     owner: &FactOwnerV1,
     identity: FactIdentityMaterialV1,
@@ -2915,6 +2916,7 @@ fn compatibility_feedback_delta(action: CompatibilityFactFeedbackActionV1) -> f6
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn compatibility_mirror_feedback_tx(
     transaction: &Transaction,
     legacy_fact_id: i64,
@@ -3859,10 +3861,10 @@ fn compatibility_feedback_details(
         None => Some("mcp".to_owned()),
     };
     let persisted_note = compatibility_feedback_detail(reason);
-    let details_available =
-        persisted_source.is_some() && (reason.is_none() || persisted_note.is_some());
-    if details_available {
-        let source = persisted_source.expect("checked above");
+    let details_available = reason.is_none() || persisted_note.is_some();
+    if let Some(source) = persisted_source
+        && details_available
+    {
         (
             source.clone(),
             Some(source),
@@ -4563,6 +4565,7 @@ async fn compatibility_sanitized_relation_metadata(metadata: &Value) -> FactStor
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn compatibility_upsert_legacy_relation_tx(
     transaction: &Transaction,
     source_legacy_fact_id: i64,
@@ -7518,18 +7521,17 @@ async fn dashboard_compatibility_hrr_coverage_tx(
         } else {
             tracedecay_store::CompatibilityDashboardHrrStateV1::Ready
         };
-        let coverage_basis_points = if fact_count == 0 {
-            0
-        } else {
-            u16::try_from(vector_count.saturating_mul(10_000) / fact_count).unwrap_or(10_000)
-        };
+        let coverage_basis_points = vector_count
+            .saturating_mul(10_000)
+            .checked_div(fact_count)
+            .map_or(0, |basis| u16::try_from(basis).unwrap_or(10_000));
         coverage.push(tracedecay_store::CompatibilityDashboardHrrCoverageV1::new(
             category.clone(),
             fact_count,
             vector_count,
             coverage_basis_points,
             category,
-            has_bank.then_some(vector_count).unwrap_or_default(),
+            if has_bank { vector_count } else { 0 },
             dashboard_compatibility_dimension(row_optional_i64(
                 &row,
                 4,
@@ -7867,12 +7869,11 @@ async fn dashboard_compatibility_vector_points_tx(
         .map(dashboard_compatibility_like_pattern);
     let mut rows = transaction
         .query(
+            // The V1 dashboard reported a fact's graph connections as its
+            // entity-link count; parity keeps both columns on that basis.
             "SELECT mappings.fact_id, legacy_facts.hrr_vector, banks.bank_name,
                     COUNT(DISTINCT relations.entity_id),
-                    CASE
-                        WHEN COUNT(DISTINCT connected_mappings.fact_id) = 0 THEN 0
-                        ELSE COUNT(DISTINCT connected_mappings.fact_id) - 1
-                    END
+                    COUNT(DISTINCT relations.entity_id)
              FROM memory_v2_legacy_map AS mappings
              JOIN memory_facts AS legacy_facts
                ON legacy_facts.fact_id = mappings.legacy_fact_id
@@ -7884,14 +7885,6 @@ async fn dashboard_compatibility_vector_points_tx(
               AND banks.bank_name = legacy_facts.category
              LEFT JOIN memory_fact_entities AS relations
                ON relations.fact_id = legacy_facts.fact_id
-             LEFT JOIN memory_fact_entities AS connected_relations
-               ON connected_relations.entity_id = relations.entity_id
-             LEFT JOIN memory_v2_legacy_map AS connected_mappings
-               ON connected_mappings.legacy_fact_id = connected_relations.fact_id
-              AND connected_mappings.owner_kind = ?1
-              AND connected_mappings.project_id = ?2
-              AND connected_mappings.owner_json = ?3
-              AND connected_mappings.source_store_id = ?4
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
@@ -8262,6 +8255,7 @@ fn compatibility_proposal_action_id(
     ProvenanceId::new(format!("compatibility-{kind}:{digest}")).map_err(FactStoreError::from)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compatibility_proposal_transition_json(
     proposal_id: &ProvenanceId,
     previous_state: Option<&str>,

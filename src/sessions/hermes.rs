@@ -1281,7 +1281,7 @@ async fn admit_rows_with_admission(
                     .map_err(host_admission_error)?
                 {
                     CaptureObservationOutcome::Persisted { outcome, .. } => {
-                        if matches!(outcome, ObservationPersistOutcome::Committed(_)) {
+                        if matches!(*outcome, ObservationPersistOutcome::Committed(_)) {
                             stats.messages_upserted = stats.messages_upserted.saturating_add(1);
                         }
                         sessions.insert(row.session_id.clone());

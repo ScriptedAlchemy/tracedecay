@@ -2479,9 +2479,10 @@ pub(super) async fn handle_message_search(
                         }
                     })
                     .collect::<Vec<_>>();
-                let _ =
-                    Box::pin(crate::sessions::hermes::ingest_for_projects(&hermes_destinations))
-                        .await;
+                let _ = Box::pin(crate::sessions::hermes::ingest_for_projects(
+                    &hermes_destinations,
+                ))
+                .await;
             }
             if provider == Some(crate::sessions::SessionProvider::Hermes) {
                 for (db, project_root, _, _) in destinations
@@ -2644,11 +2645,13 @@ pub(super) async fn handle_message_search(
                 )
                 .await
             } else {
-                Box::pin(crate::sessions::ingest_user_global_sources_for_provider_at_with_db(
-                    user_db.as_ref(),
-                    profile_root,
-                    provider,
-                ))
+                Box::pin(
+                    crate::sessions::ingest_user_global_sources_for_provider_at_with_db(
+                        user_db.as_ref(),
+                        profile_root,
+                        provider,
+                    ),
+                )
                 .await
             };
             catch_up_failures.extend(outcome.failures);

@@ -540,6 +540,20 @@ where
         direct_dashboard_automation_writer(),
     )
     .await?;
+    // Converge derived memory projections (missing vectors, HRR banks) before
+    // serving. Fact writes defer bank rebuilds to the repair pass, and a
+    // standalone dashboard has no daemon scheduler to drive that convergence,
+    // so without this pass the overview reports stale or empty banks.
+    for _ in 0..8 {
+        match memory_api::repair_derived_memory(&state).await {
+            Ok(repair) if repair.missing_vectors_repaired > 0 || repair.banks_rebuilt > 0 => {}
+            Ok(_) => break,
+            Err(message) => {
+                eprintln!("Derived memory startup repair skipped: {message}");
+                break;
+            }
+        }
+    }
     if options.start_session_catch_up {
         if let Some(db) = state.lcm_db.as_ref() {
             spawn_session_catch_up_ingest(

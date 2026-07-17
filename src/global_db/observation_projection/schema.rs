@@ -308,9 +308,7 @@ pub(in super::super) async fn ensure_observation_projection_schema(
 /// fill each NULL anchor from the observation's already-backfilled binding. The
 /// v4 update triggers validate that the anchor resolves to the same observation
 /// and receipt, so a mismatch fails closed rather than persisting a bad binding.
-async fn backfill_v4_projection_anchor_bindings(
-    conn: &Connection,
-) -> Result<(), libsql::Error> {
+async fn backfill_v4_projection_anchor_bindings(conn: &Connection) -> Result<(), libsql::Error> {
     for table in [
         "observation_projection_provenance",
         "observation_workflow_facts",

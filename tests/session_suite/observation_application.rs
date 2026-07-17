@@ -172,7 +172,7 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
     let first_receipt = committed.sanitization_receipt().clone();
     let observation_id = match &committed {
         CaptureClaudeObservationOutcome::Persisted { outcome, .. } => {
-            assert!(matches!(outcome, ObservationPersistOutcome::Committed(_)));
+            assert!(matches!(**outcome, ObservationPersistOutcome::Committed(_)));
             outcome.receipt().observation().observation_id().clone()
         }
         other => panic!("sanitized record must persist, got {other:?}"),
@@ -187,7 +187,7 @@ async fn secret_canary_is_absent_from_every_observation_sink_and_safe_representa
     match &retry {
         CaptureClaudeObservationOutcome::Persisted { outcome, .. } => {
             assert!(matches!(
-                outcome,
+                **outcome,
                 ObservationPersistOutcome::ExactDuplicate(_)
             ));
         }
@@ -406,7 +406,7 @@ async fn native_ordering_domain_survives_authoritative_capture() {
     let outcome = application.capture_observation(request).await.unwrap();
     let observation_id = match &outcome {
         CaptureObservationOutcome::Persisted { outcome, .. } => {
-            assert!(matches!(outcome, ObservationPersistOutcome::Committed(_)));
+            assert!(matches!(**outcome, ObservationPersistOutcome::Committed(_)));
             outcome.receipt().observation().observation_id().clone()
         }
         other => panic!("native observation must persist, got {other:?}"),
@@ -643,7 +643,7 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
         let first_receipt = first.sanitization_receipt().clone();
         let observation_id = match &first {
             CaptureObservationOutcome::Persisted { outcome, .. } => {
-                assert!(matches!(outcome, ObservationPersistOutcome::Committed(_)));
+                assert!(matches!(**outcome, ObservationPersistOutcome::Committed(_)));
                 outcome.receipt().observation().observation_id().clone()
             }
             other => panic!("{provider}: first capture must persist, got {other:?}"),
@@ -669,7 +669,7 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
         match &duplicate {
             CaptureObservationOutcome::Persisted { outcome, .. } => {
                 assert!(
-                    matches!(outcome, ObservationPersistOutcome::ExactDuplicate(_)),
+                    matches!(**outcome, ObservationPersistOutcome::ExactDuplicate(_)),
                     "{provider}: exact retry must be ExactDuplicate, got {outcome:?}"
                 );
             }
@@ -765,11 +765,9 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
             .unwrap();
         assert!(
             matches!(
-                captured_after_malformed_frame,
-                CaptureObservationOutcome::Persisted {
-                    outcome: ObservationPersistOutcome::Committed(_),
-                    ..
-                }
+                &captured_after_malformed_frame,
+                CaptureObservationOutcome::Persisted { outcome, .. }
+                    if matches!(**outcome, ObservationPersistOutcome::Committed(_))
             ),
             "{provider}: capture after malformed-frame coverage must commit, got {captured_after_malformed_frame:?}"
         );
@@ -834,7 +832,7 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
         match &restarted {
             CaptureObservationOutcome::Persisted { outcome, .. } => {
                 assert!(
-                    matches!(outcome, ObservationPersistOutcome::ExactDuplicate(_)),
+                    matches!(**outcome, ObservationPersistOutcome::ExactDuplicate(_)),
                     "{provider}: restart retry must be ExactDuplicate, got {outcome:?}"
                 );
                 assert_eq!(

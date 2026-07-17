@@ -2768,8 +2768,8 @@ async fn backfill_feedback_batch(
             None,
         )
         .map_err(|_| db_message(OPERATION, "typed feedback event construction failed"))?;
-        if write_v22_feedback_history {
-            if !legacy_feedback_mapping_can_be_recorded(
+        if write_v22_feedback_history
+            && !legacy_feedback_mapping_can_be_recorded(
                 conn,
                 owner_key,
                 source_store_id,
@@ -2779,9 +2779,8 @@ async fn backfill_feedback_batch(
                 progress.started_at,
             )
             .await?
-            {
-                continue;
-            }
+        {
+            continue;
         }
         insert_event(conn, owner_key, &event, progress.started_at).await?;
         if write_v22_feedback_history {
@@ -3697,20 +3696,19 @@ async fn legacy_feedback_mapping_can_be_recorded(
         ],
     )
     .await?
+        && existing_legacy_event_id != legacy_feedback_event_id
     {
-        if existing_legacy_event_id != legacy_feedback_event_id {
-            insert_quarantine(
-                conn,
-                owner,
-                source_store_id,
-                "memory_feedback_events",
-                legacy_feedback_event_id,
-                "feedback_event_duplicate",
-                recorded_at,
-            )
-            .await?;
-            return Ok(false);
-        }
+        insert_quarantine(
+            conn,
+            owner,
+            source_store_id,
+            "memory_feedback_events",
+            legacy_feedback_event_id,
+            "feedback_event_duplicate",
+            recorded_at,
+        )
+        .await?;
+        return Ok(false);
     }
     Ok(true)
 }

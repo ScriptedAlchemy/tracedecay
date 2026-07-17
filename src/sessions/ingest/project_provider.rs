@@ -221,13 +221,15 @@ impl ProjectProviderRun<'_> {
             composer.deferred_by_byte_cap,
         );
         let remaining = self.max_new_bytes.saturating_sub(composer.bytes_consumed);
-        match Box::pin(cursor::try_ingest_cursor_project_sweep_capped_with_admission(
-            self.project_root,
-            self.project_id.clone(),
-            self.facade,
-            Some(remaining),
-            composer.owned_session_ids,
-        ))
+        match Box::pin(
+            cursor::try_ingest_cursor_project_sweep_capped_with_admission(
+                self.project_root,
+                self.project_id.clone(),
+                self.facade,
+                Some(remaining),
+                composer.owned_session_ids,
+            ),
+        )
         .await
         {
             Ok(stats) => {

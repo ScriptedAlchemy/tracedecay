@@ -236,7 +236,7 @@ fn validate_operation_component(
 /// fact-authority write.
 #[derive(Clone, Debug, PartialEq)]
 pub enum V1UpdateFactOutcome {
-    Updated(FactRecord),
+    Updated(Box<FactRecord>),
     RejectedSecretLike { reason: String },
 }
 
@@ -1172,8 +1172,8 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
                 target.clone(),
             )?)
             .await?;
-        if let Some(detail) = &detail {
-            if detail.fact.owner() != &self.owner
+        if let Some(detail) = &detail
+            && (detail.fact.owner() != &self.owner
                 || detail
                     .entities
                     .iter()
@@ -1181,12 +1181,11 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
                 || detail
                     .history
                     .as_ref()
-                    .is_some_and(|history| history.owner() != &self.owner)
-            {
-                return Err(MemoryApplicationError::InvalidAuthorityResult {
-                    invariant: "dashboard detail owner",
-                });
-            }
+                    .is_some_and(|history| history.owner() != &self.owner))
+        {
+            return Err(MemoryApplicationError::InvalidAuthorityResult {
+                invariant: "dashboard detail owner",
+            });
         }
         Ok(detail)
     }
@@ -2142,9 +2141,9 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
                 context.actor().cloned(),
             )?)
             .await?;
-        Ok(V1UpdateFactOutcome::Updated(
+        Ok(V1UpdateFactOutcome::Updated(Box::new(
             compatibility_projection_record(&self.compatibility_scope, outcome.fact())?,
-        ))
+        )))
     }
 
     pub async fn remove_fact_v1(
@@ -2300,8 +2299,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     pub async fn memory_status_with_repair_v1(
         &self,
     ) -> Result<V1MemoryStatusWithRepairV1, MemoryApplicationError> {
-        let context =
-            MemoryOperationContext::generated(&self.owner, "memory-status-repair", None)?;
+        let context = MemoryOperationContext::generated(&self.owner, "memory-status-repair", None)?;
         let repair = self.dashboard_repair_v1(context).await?;
         let status = self.compatibility_memory_status().await?;
         let feedback_history_repair = status.feedback_history_repair();

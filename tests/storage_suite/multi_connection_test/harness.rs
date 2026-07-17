@@ -385,6 +385,27 @@ pub(super) fn storage_snapshot(db_path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         .collect()
 }
 
+/// Blocks until the owner daemon's post-open maintenance (legacy memory
+/// cutover receipts, repair passes) stops mutating the project store, so
+/// byte-stability assertions measure only the window under test instead of
+/// racing the owner's own startup writes.
+pub(super) fn wait_for_quiescent_storage(db_path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut previous = storage_snapshot(db_path);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let current = storage_snapshot(db_path);
+        if current == previous {
+            return current;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "project storage never became quiescent under the owner daemon"
+        );
+        previous = current;
+    }
+}
+
 pub(super) fn daemon_authority_record(home: &Path) -> Value {
     serde_json::from_slice(
         &std::fs::read(home.join(".tracedecay/daemon-authority.json"))

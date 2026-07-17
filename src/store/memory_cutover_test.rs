@@ -245,3 +245,61 @@ async fn cutover_preserves_legacy_usage_telemetry_and_search_ranking() {
         "usage boost from carried retrieval telemetry must rank the reinforced fact first"
     );
 }
+
+#[tokio::test]
+async fn dashboard_vector_points_report_v1_entity_link_connections() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("vector-points.db");
+    let authority = DatabaseAuthority::acquire_test(&path, "vector points test").unwrap();
+    let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+    let owner = FactOwnerV1::Profile;
+    let store = DatabaseFactStore::new(&db);
+    let application =
+        crate::application::memory::MemoryApplication::new(owner.clone(), store).unwrap();
+    for (content, category, entities) in [
+        (
+            "Cache invalidation policy must be explicit",
+            crate::memory::types::MemoryCategory::Project,
+            vec!["CachePolicy".to_owned()],
+        ),
+        (
+            "LCM dashboard empty states must stay friendly",
+            crate::memory::types::MemoryCategory::Tool,
+            vec!["LCMTab".to_owned(), "SimilarityView".to_owned()],
+        ),
+    ] {
+        application
+            .add_fact_v1(
+                crate::memory::types::AddFactRequest {
+                    content: content.to_owned(),
+                    category,
+                    source: Some("scratch".to_owned()),
+                    tags: vec!["cache".to_owned()],
+                    entities,
+                    trust: Some(0.8),
+                    metadata: serde_json::json!({}),
+                },
+                crate::application::memory::MemoryOperationContext::generated(
+                    &owner,
+                    "scratch-add",
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    let points = application
+        .dashboard_vector_points_v1(None, 50)
+        .await
+        .unwrap();
+    assert_eq!(points.len(), 2);
+    // V1 dashboard parity: a fact's graph connection count is its
+    // entity-link count, not a shared-fact tally.
+    let mut counts = points
+        .iter()
+        .map(|point| (point.entity_count, point.connection_count))
+        .collect::<Vec<_>>();
+    counts.sort_unstable();
+    assert_eq!(counts, vec![(1, 1), (2, 2)]);
+}

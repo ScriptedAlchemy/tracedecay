@@ -1473,21 +1473,27 @@ async fn storage_status_tool_summarizes_active_project_store_health() {
     assert_eq!(payload["quotas"]["graph_db_size_limit_bytes"], Value::Null);
 }
 
-fn assert_schema_has_required_alternatives(
+fn assert_schema_advertises_required_alternatives(
     tools: &[tracedecay::mcp::ToolDefinition],
     tool_name: &str,
+    property: &str,
     alternatives: &[&str],
 ) {
+    // Root-level `anyOf` alternatives are rejected by some providers (e.g.
+    // Moonshot refuses `anyOf` alongside a parent `type`), so the requirement
+    // is advertised in the property description and enforced by the handler.
     let schema = tool_schema(tools, tool_name);
-    let any_of = schema["anyOf"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{tool_name} schema is missing anyOf required alternatives"));
+    assert!(
+        schema.get("anyOf").is_none(),
+        "{tool_name} schema must not use root-level anyOf; providers such as Moonshot reject it"
+    );
+    let description = schema["properties"][property]["description"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{tool_name} schema is missing a {property} description"));
     for alternative in alternatives {
         assert!(
-            any_of
-                .iter()
-                .any(|entry| entry["required"] == json!([alternative])),
-            "{tool_name} schema must advertise that one of {alternatives:?} is required by the handler parser; missing alternative {alternative}"
+            description.contains(alternative),
+            "{tool_name} {property} description must advertise that one of {alternatives:?} is required by the handler parser; missing alternative {alternative}"
         );
     }
 }
@@ -1570,9 +1576,10 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
 
     // Alternative parser style: fact_feedback accepts action/helpful/unhelpful, but one is required.
     assert_schema_requires(&tools, "tracedecay_fact_feedback", &["fact_id"]);
-    assert_schema_has_required_alternatives(
+    assert_schema_advertises_required_alternatives(
         &tools,
         "tracedecay_fact_feedback",
+        "action",
         &["action", "helpful", "unhelpful"],
     );
     expect_missing_argument_error(
