@@ -7,7 +7,6 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::util::{JsonError, http_detail};
-use crate::application::memory::MemoryApplication;
 use crate::automation::backend::{AgentTaskKind, task_key};
 use crate::automation::config::{AutomationConfig, effective_config, load_project_config};
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, load_run_records};
@@ -16,7 +15,6 @@ use crate::automation::scheduler::{
     save_scheduler_control, schedule_decision, scheduler_control_path,
 };
 use crate::automation::staged_notice::{AutomationPendingCounts, count_pending_automation_output};
-use crate::store::DatabaseFactStore;
 use crate::tracedecay::current_timestamp;
 use crate::user_config::UserConfig;
 
@@ -64,9 +62,9 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
     // Pending fact proposals and skill drafts both require review.
     let pending = match (
         crate::storage::default_profile_root(),
-        MemoryApplication::new(
+        crate::tracedecay::facts::memory_application_for_db(
             state.memory_owner.clone(),
-            DatabaseFactStore::new(state.mem_db.as_ref()),
+            state.mem_db.as_ref(),
         ),
     ) {
         (Ok(profile_root), Ok(memory)) => {

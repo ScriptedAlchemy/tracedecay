@@ -2077,9 +2077,13 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
             )?)
             .await?;
         let targets = compatibility_projection_targets(page.facts());
+        // Unavailable projections (deleted, redacted, expired) read as absent
+        // under the V1 contract — mirroring get_fact_v1 — so one tombstone
+        // never makes the whole listing fail.
         let records = page
             .facts()
             .iter()
+            .filter(|fact| matches!(fact, CompatibilityFactProjectionV1::Available(_)))
             .map(|fact| compatibility_projection_record(&self.compatibility_scope, fact))
             .collect::<Result<Vec<_>, _>>()?;
         if let Some(context) = context.as_ref() {

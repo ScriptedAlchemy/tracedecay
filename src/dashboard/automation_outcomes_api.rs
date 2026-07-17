@@ -9,14 +9,12 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::util::http_detail;
-use crate::application::memory::MemoryApplication;
 use crate::automation::managed_skills::list_managed_skills;
 use crate::automation::outcomes::{
     compute_fact_outcomes, compute_skill_outcomes, load_outcomes_snapshot,
 };
 use crate::automation::skill_usage::summarize_skill_usage;
 use crate::errors::{Result, TraceDecayError};
-use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::current_timestamp;
 
 pub(crate) async fn outcomes(State(state): State<DashboardState>) -> (StatusCode, Json<Value>) {
@@ -38,9 +36,9 @@ async fn outcomes_payload(state: &DashboardState) -> Result<Value> {
     let summaries = summarize_skill_usage(&profile_root, &skills).await?;
     let skill_outcomes = compute_skill_outcomes(&summaries, now);
 
-    let memory = MemoryApplication::new(
+    let memory = crate::tracedecay::facts::memory_application_for_db(
         state.memory_owner.clone(),
-        DatabaseFactStore::new(state.mem_db.as_ref()),
+        state.mem_db.as_ref(),
     )
     .map_err(|error| TraceDecayError::Config {
         message: format!("could not initialize dashboard memory authority: {error}"),
