@@ -23,10 +23,11 @@ use tracedecay::storage::{
     ActiveProjectContext, EnrollmentMarker, GraphScopeId, PrivateStoreIo, ProjectPath,
     STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath,
     StoreKind, StoreManifest, default_profile_project_id, default_profile_sharded_layout,
-    profile_sharded_layout, read_enrollment_marker, read_repository_identity_marker,
-    read_store_manifest, repository_identity_path, resolve_layout, resolve_lcm_payload_root,
-    resolve_project_session_db_path, resolve_response_handle_root,
-    write_repository_identity_marker, write_store_manifest, write_store_manifest_to_path,
+    enrollment_marker_path, profile_sharded_layout, read_enrollment_marker,
+    read_repository_identity_marker, read_store_manifest, repository_identity_path, resolve_layout,
+    resolve_lcm_payload_root, resolve_project_session_db_path, resolve_response_handle_root,
+    write_enrollment_marker, write_repository_identity_marker, write_store_manifest,
+    write_store_manifest_to_path,
 };
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
@@ -164,6 +165,50 @@ fn relocate_store_as_legacy(
     manifest.project_root = project_root.to_path_buf();
     manifest.data_root = legacy_root.to_path_buf();
     write_store_manifest_to_path(&manifest_path, &manifest).unwrap();
+}
+
+/// Initializes a profile shard enrolled under `legacy_project_id` so every fact
+/// written through it is owned by that id. Canonical fact ids embed the owner
+/// digest (`FactId::derive`), so a legacy store must be born under its own
+/// identity — relabeling a store manifest afterwards cannot re-own its memory.
+async fn init_enrolled_legacy_shard(project: &Path, legacy_project_id: &str) -> TraceDecay {
+    write_enrollment_marker(
+        project,
+        &EnrollmentMarker {
+            project_id: legacy_project_id.to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let store = TraceDecay::init(project).await.unwrap();
+    assert_eq!(
+        store.store_layout().identity.project_id.as_deref(),
+        Some(legacy_project_id),
+        "enrolled shard must own its memory under the legacy identity"
+    );
+    store
+}
+
+/// Points a seeded shard's manifest at a different checkout in the same
+/// repository (e.g. a linked worktree that shares the git common dir) without
+/// disturbing its project id, so adoption is exercised by repository identity
+/// rather than an exact project-root match.
+fn rebind_manifest_project_root(data_root: &Path, project_root: &Path) {
+    let manifest_path = data_root.join(STORE_MANIFEST_FILENAME);
+    let mut manifest = read_store_manifest(&manifest_path).unwrap();
+    manifest.project_root = project_root.to_path_buf();
+    write_store_manifest_to_path(&manifest_path, &manifest).unwrap();
+}
+
+/// Strips the enrollment and repository-identity markers plus the global
+/// registry so a seeded shard looks like an unadopted legacy store the resolver
+/// must rediscover by scanning profile manifests.
+fn demote_shard_to_unadopted_legacy(project: &Path, profile_root: &Path) {
+    let _ = fs::remove_file(enrollment_marker_path(project));
+    if let Some(marker) = repository_identity_path(project) {
+        let _ = fs::remove_file(marker);
+    }
+    remove_sqlite_family(&profile_root.join("global.db"));
 }
 
 async fn initialize_empty_profile_layout(layout: &tracedecay::storage::StoreLayout) {
@@ -980,7 +1025,8 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
     git(&project, &["push", "-u", "origin", "main"]);
     git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
 
-    let cg = TraceDecay::init(&project).await.unwrap();
+    let legacy_project_id = "proj_legacy_path_hash";
+    let cg = init_enrolled_legacy_shard(&project, legacy_project_id).await;
     cg.index_all().await.unwrap();
     let main_fact_id = cg
         .add_fact(fact_request("legacy main fact sentinel"))
@@ -1036,12 +1082,11 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
     fs::create_dir_all(automation_sentinel.parent().unwrap()).unwrap();
     fs::write(&automation_sentinel, br#"{"preserved":true}"#).unwrap();
 
-    fs::remove_file(repository_identity_path(&project).unwrap()).unwrap();
-    remove_sqlite_family(&profile_root.join("global.db"));
-
-    let legacy_project_id = "proj_legacy_path_hash";
-    let legacy_root = profile_root.join(format!("projects/{legacy_project_id}"));
-    relocate_store_as_legacy(&current_root, &legacy_root, &project, legacy_project_id);
+    // The shard was born under its legacy identity, so its memory, sessions and
+    // automation state already live at the legacy root; demote it to an
+    // unadopted legacy store the resolver must rediscover and upgrade in place.
+    let legacy_root = current_root.clone();
+    demote_shard_to_unadopted_legacy(&project, &profile_root);
 
     let adopted = TraceDecay::open(&project)
         .await
@@ -1153,7 +1198,8 @@ async fn empty_cutover_store_is_atomically_replaced_by_healthy_legacy_store() {
     let _home_guard = HomeGuard::set(&home);
     init_repo_with_commit(&project);
 
-    let old = TraceDecay::init(&project).await.unwrap();
+    let legacy_project_id = "proj_healthy_legacy";
+    let old = init_enrolled_legacy_shard(&project, legacy_project_id).await;
     let fact_id = old
         .add_fact(fact_request("healthy legacy cutover fact"))
         .await
@@ -1161,15 +1207,10 @@ async fn empty_cutover_store_is_atomically_replaced_by_healthy_legacy_store() {
         .fact
         .unwrap()
         .fact_id;
-    let original_root = old.store_layout().data_root.clone();
+    let legacy_root = old.store_layout().data_root.clone();
     old.checkpoint().await.unwrap();
     old.close();
-    fs::remove_file(repository_identity_path(&project).unwrap()).unwrap();
-    remove_sqlite_family(&profile_root.join("global.db"));
-
-    let legacy_project_id = "proj_healthy_legacy";
-    let legacy_root = profile_root.join(format!("projects/{legacy_project_id}"));
-    relocate_store_as_legacy(&original_root, &legacy_root, &project, legacy_project_id);
+    demote_shard_to_unadopted_legacy(&project, &profile_root);
 
     let cutover = default_profile_sharded_layout(&project, &profile_root).unwrap();
     let cutover_project_id = cutover.identity.project_id.clone().unwrap();
@@ -1229,7 +1270,8 @@ async fn empty_cutover_store_adopts_healthy_legacy_linked_worktree_store() {
         ],
     );
 
-    let old = TraceDecay::init(&project).await.unwrap();
+    let legacy_project_id = "proj_healthy_linked_legacy";
+    let old = init_enrolled_legacy_shard(&project, legacy_project_id).await;
     let fact_id = old
         .add_fact(fact_request("healthy linked legacy cutover fact"))
         .await
@@ -1237,15 +1279,14 @@ async fn empty_cutover_store_adopts_healthy_legacy_linked_worktree_store() {
         .fact
         .unwrap()
         .fact_id;
-    let original_root = old.store_layout().data_root.clone();
+    let legacy_root = old.store_layout().data_root.clone();
     old.checkpoint().await.unwrap();
     old.close();
-    fs::remove_file(repository_identity_path(&project).unwrap()).unwrap();
-    remove_sqlite_family(&profile_root.join("global.db"));
-
-    let legacy_project_id = "proj_healthy_linked_legacy";
-    let legacy_root = profile_root.join(format!("projects/{legacy_project_id}"));
-    relocate_store_as_legacy(&original_root, &legacy_root, &linked, legacy_project_id);
+    demote_shard_to_unadopted_legacy(&project, &profile_root);
+    // Bind the legacy shard's manifest to the linked worktree; it shares the
+    // git common dir with the primary checkout, so the resolver must adopt it by
+    // repository identity when opening from the primary.
+    rebind_manifest_project_root(&legacy_root, &linked);
 
     let cutover = default_profile_sharded_layout(&project, &profile_root).unwrap();
     let cutover_project_id = cutover.identity.project_id.clone().unwrap();

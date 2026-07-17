@@ -9,10 +9,12 @@ use crate::global_db::GlobalDb;
 use crate::memory::store::MemoryStore;
 
 mod inspect;
+mod memory_v2;
 mod observation;
 pub(super) mod projection;
 mod verify;
 
+use memory_v2::merge_memory_v2_authority;
 use observation::merge_observation_authority;
 pub(super) use observation::{preflight_observation_merge, verify_observation_merge};
 
@@ -358,6 +360,7 @@ async fn merge_one_graph_tx(conn: &Connection, offset: &GraphMergeOffsets) -> Re
     ))
     .await
     .map_err(|error| db_error("merge_graph_facts", error))?;
+    merge_memory_v2_authority(conn).await?;
     Ok(())
 }
 

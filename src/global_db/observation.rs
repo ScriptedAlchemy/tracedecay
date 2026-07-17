@@ -229,7 +229,9 @@ async fn migrate_source_cursor_advances_schema(conn: &Connection) -> crate::erro
     .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
 }
 
-async fn backfill_observation_retrieval_anchors(conn: &Connection) -> crate::errors::Result<()> {
+pub(super) async fn backfill_observation_retrieval_anchors(
+    conn: &Connection,
+) -> crate::errors::Result<()> {
     let mut rows = conn
         .query(
             "SELECT observation.observation_json, observation.receipt_id,

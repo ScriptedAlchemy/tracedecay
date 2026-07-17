@@ -296,7 +296,46 @@ pub(in super::super) async fn ensure_observation_projection_schema(
              provider_reference, observation_sequence);",
     )
     .await?;
-    ensure_v4_projection_binding_triggers(conn).await
+    ensure_v4_projection_binding_triggers(conn).await?;
+    backfill_v4_projection_anchor_bindings(conn).await
+}
+
+/// Binds the canonical retrieval anchor onto v4 projection rows that predate the
+/// `retrieval_anchor_id` column. A store upgraded from an earlier v4 schema kept
+/// its projected provenance and workflow rows but gained a NULL anchor when
+/// [`ensure_projection_anchor_columns`] added the column; the v4 authority
+/// invariants require every v4 output to resolve to an owner-bound anchor, so
+/// fill each NULL anchor from the observation's already-backfilled binding. The
+/// v4 update triggers validate that the anchor resolves to the same observation
+/// and receipt, so a mismatch fails closed rather than persisting a bad binding.
+async fn backfill_v4_projection_anchor_bindings(
+    conn: &Connection,
+) -> Result<(), libsql::Error> {
+    for table in [
+        "observation_projection_provenance",
+        "observation_workflow_facts",
+    ] {
+        conn.execute(
+            &format!(
+                "UPDATE {table}
+                 SET retrieval_anchor_id = (
+                     SELECT anchor.anchor_id
+                     FROM observation_retrieval_anchors AS anchor
+                     WHERE anchor.observation_id = {table}.observation_id
+                 )
+                 WHERE projector_version = 'claude-session-message-v4'
+                   AND retrieval_anchor_id IS NULL
+                   AND EXISTS (
+                       SELECT 1
+                       FROM observation_retrieval_anchors AS anchor
+                       WHERE anchor.observation_id = {table}.observation_id
+                   )"
+            ),
+            (),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn ensure_projection_anchor_columns(conn: &Connection) -> Result<(), libsql::Error> {

@@ -1821,11 +1821,11 @@ async fn generation_rollover_coalesces_same_and_changed_native_output() {
     assert_eq!(projection_counts(&tmp).await, (1, 1, 3, 1, 0, 0));
     let provenance = projection_provenance_rows(&tmp).await;
     assert_eq!(provenance.len(), 3);
-    assert!(provenance.iter().all(|row| row.4 == "message-generation"));
+    assert!(provenance.iter().all(|row| row.5 == "message-generation"));
     assert_eq!(
         provenance
             .iter()
-            .map(|row| row.5.as_str())
+            .map(|row| row.6.as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
         3,

@@ -782,8 +782,13 @@ mod tests {
             .await
             .unwrap()
             .execute(
-                "UPDATE code_projects SET canonical_root=?1 WHERE project_id=?2",
-                libsql::params!["/moved/elsewhere", source_id],
+                // Registry retirement is keyed by repository identity (the git
+                // common dir), not by canonical_root: a legacy input id that has
+                // been rebound to a *different* repository must survive. Move the
+                // source row to another repository by rebinding both its root and
+                // its git common dir.
+                "UPDATE code_projects SET canonical_root=?1, git_common_dir=?2 WHERE project_id=?3",
+                libsql::params!["/moved/elsewhere", "/moved/elsewhere/.git", source_id],
             )
             .await
             .unwrap();

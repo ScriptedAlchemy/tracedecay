@@ -242,6 +242,35 @@ async fn seed_observation_with_scope(
     (observation, cursor)
 }
 
+/// Binds the deterministic retrieval anchor for an already-seeded observation,
+/// mirroring the anchor-backfill the authoritative open performs. Every
+/// committed observation carries a retrieval anchor under the PR7 anchored-write
+/// contract, so seed it explicitly whenever a later insert must reference the
+/// anchor or when a reopen must reach the row invariants without the migration
+/// re-deriving anchors from a deliberately corrupted receipt. Returns the bound
+/// anchor id.
+async fn seed_observation_retrieval_anchor(
+    conn: &Connection,
+    observation: &DurableClaudeObservationV1,
+) -> String {
+    super::observation::backfill_observation_retrieval_anchors(conn)
+        .await
+        .unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT anchor_id FROM observation_retrieval_anchors WHERE observation_id = ?1",
+            params![observation.observation_id().as_str()],
+        )
+        .await
+        .unwrap();
+    rows.next()
+        .await
+        .unwrap()
+        .expect("anchor backfill binds the seeded observation")
+        .get::<String>(0)
+        .unwrap()
+}
+
 async fn seed_skip_projection(conn: &Connection, observation: &DurableClaudeObservationV1) {
     conn.execute(
         "INSERT INTO observation_projection_dispositions
@@ -1492,6 +1521,10 @@ async fn malformed_receipt_authority_json_is_rejected_before_repair() {
     let db_path = dir.path().join("global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
     let (observation, _) = seed_observation(&db.conn, 1, "malformed-receipt").await;
+    // Bind the anchor while the receipt is still valid so the reopen's
+    // anchor-backfill migration is a no-op and the corrupt receipt is caught by
+    // the receipt-authority row invariant rather than by anchor re-derivation.
+    seed_observation_retrieval_anchor(&db.conn, &observation).await;
     db.conn
         .execute_batch(
             "DROP TRIGGER sanitization_receipts_immutable_update_v1;
@@ -1748,17 +1781,21 @@ async fn conflicting_projection_outcomes_are_rejected_atomically() {
     let db_path = dir.path().join("global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
     let (observation, _) = seed_observation(&db.conn, 1, "conflicting-effects").await;
+    // The v4 projector binds every provenance row to the observation's retrieval
+    // anchor, so seed the anchor and reference it in the conflicting output.
+    let anchor_id = seed_observation_retrieval_anchor(&db.conn, &observation).await;
     seed_skip_projection(&db.conn, &observation).await;
     db.conn
         .execute(
             "INSERT INTO observation_projection_provenance
              (projector_version, observation_id, receipt_id, output_provider,
-              output_message_id, output_digest, message_created)
-             VALUES (?1, ?2, ?3, 'claude', 'invalid', 'sha256:invalid', 0)",
+              output_message_id, output_digest, message_created, retrieval_anchor_id)
+             VALUES (?1, ?2, ?3, 'claude', 'invalid', 'sha256:invalid', 0, ?4)",
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION,
                 observation.observation_id().as_str(),
-                observation.receipt().receipt().receipt_id().as_str()
+                observation.receipt().receipt().receipt_id().as_str(),
+                anchor_id.as_str()
             ],
         )
         .await

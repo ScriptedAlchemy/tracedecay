@@ -4248,6 +4248,45 @@ fn graph_table_disposition(table: &str) -> Option<&'static str> {
         name if name == "memory_facts_fts" || name.starts_with("memory_facts_fts_") => {
             Some("derived/rebuilt")
         }
+        // memory_v2 durable evidence set: unioned by owner-bound identity so
+        // facts, assertions, evidence, lineage, proposals and their legacy
+        // mappings survive consolidation (see merge_memory_v2_authority).
+        "memory_v2_facts"
+        | "memory_v2_assertions"
+        | "memory_v2_assertion_evidence"
+        | "memory_v2_assertion_payloads"
+        | "memory_v2_assertion_supersession"
+        | "memory_v2_evidence"
+        | "memory_v2_fact_relations"
+        | "memory_v2_lineage_events"
+        | "memory_v2_feedback_history"
+        | "memory_v2_proposals"
+        | "memory_v2_proposal_transitions"
+        | "memory_v2_proposal_current"
+        | "memory_v2_legacy_map"
+        | "memory_v2_legacy_proposal_map"
+        | "memory_v2_legacy_feedback_event_map"
+        | "memory_v2_legacy_quarantine"
+        | "memory_v2_compatibility_operation_receipts"
+        | "retrieval_anchors"
+        | "retrieval_anchor_aliases" => Some("merged"),
+        // Derived compatibility projections rebuilt from the merged lineage:
+        // current_facts is re-derived with deletion terminality, banks are
+        // marked dirty, vectors and the assertion-payload FTS shadow rebuild.
+        "memory_v2_current_facts"
+        | "memory_v2_assertion_vectors"
+        | "memory_v2_compatibility_banks"
+        | "memory_v2_compatibility_bank_dirty" => Some("derived/rebuilt"),
+        name if name == "memory_v2_assertion_payloads_fts"
+            || name.starts_with("memory_v2_assertion_payloads_fts_") =>
+        {
+            Some("derived/rebuilt")
+        }
+        // Per-store backfill/repair ledgers are target-local runtime cursors,
+        // not durable evidence, so they are never carried across the merge.
+        "memory_v2_backfill_progress" | "memory_v2_feedback_history_repair_progress" => {
+            Some("target-local schema ledger")
+        }
         // Code-graph tables are not flattened. Every source and target branch
         // database is copied intact into the destination branch topology.
         "edges" | "files" | "metadata" | "node_fingerprints" | "nodes" | "read_cache"
@@ -4277,6 +4316,7 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
         | "observation_projection_aliases"
         | "observation_projection_dispositions"
         | "observation_projection_provenance"
+        | "observation_repository_provenance"
         | "observation_retrieval_anchors"
         | "parse_offsets"
         | "projects"

@@ -1051,13 +1051,15 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
     use tracedecay_domain::{
-        ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
-        ClaudeSourceIdentityV1, EvidenceAvailabilityV1, ObservationScopeV1, RepositoryId,
-        RetentionClass, SessionId, WorktreeId,
+        CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+        CanonicalObservationFactV1, CanonicalObservationRelationsV1, EvidenceAvailabilityV1,
+        ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
+        ObservationScopeV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+        ObservationSourceRangeV1, ProviderId, RepositoryId, RetentionClass, SessionId, WorktreeId,
     };
     use tracedecay_store::ObservationReplayRequest;
 
-    use crate::privacy::parse_claude_record_v1;
+    use crate::privacy::{ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1};
 
     use super::*;
 
@@ -1079,27 +1081,54 @@ mod tests {
         scope: ObservationScopeV1,
         record_id: &str,
     ) -> CaptureObservationRequest {
-        let encoded = serde_json::to_vec(&json!({
-            "type": "user",
-            "uuid": format!("record-{record_id}"),
-            "timestamp": 1_750_000_000_i64,
-            "message": {
-                "id": record_id,
-                "role": "user",
-                "content": "host provenance fixture",
+        // Host admission sanitizes through the single provider-neutral
+        // observation path (RecordSanitizerV1::observation_v1), so the fixture
+        // must present a canonical observation envelope rather than a raw
+        // provider frame.
+        let encoded = serde_json::to_vec(&json!({ "text": "host provenance fixture" })).unwrap();
+        let range = ObservationSourceRangeV1::new(0, u64::try_from(encoded.len()).unwrap()).unwrap();
+        let ordering_domain = ObservationOrderingDomainV1::SqliteRowId;
+        let session_id = "session.host-provenance".to_owned();
+        let envelope_session = session_id.clone();
+        let envelope_record = record_id.to_owned();
+        let parsed = parse_normalized_observation_record_v1(
+            &encoded,
+            range,
+            ordering_domain,
+            move |native| {
+                CanonicalObservationEnvelopeV1::new(
+                    ProviderId::new("claude").unwrap(),
+                    "message",
+                    ObservationId::new(envelope_record.clone()).unwrap(),
+                    CanonicalObservationRelationsV1::new(
+                        SessionId::new(envelope_session.clone()).unwrap(),
+                    )
+                    .with_message_id(ObservationId::new(envelope_record.clone()).unwrap()),
+                    vec![CanonicalObservationFactV1::Message {
+                        role: CanonicalMessageRoleV1::User,
+                        content: native,
+                        model: None,
+                        timestamp: None,
+                    }],
+                    CanonicalObservationEvidenceV1::new(ordering_domain, range),
+                )
+                .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
             },
-        }))
+        )
         .unwrap();
-        let range = ClaudeByteRangeV1::new(0, u64::try_from(encoded.len()).unwrap()).unwrap();
-        let parsed = parse_claude_record_v1(&encoded, range).unwrap();
         CaptureObservationRequest::new(
             parsed,
-            ClaudeObservationIdentityMaterialV1::new(
-                ClaudeSourceIdentityV1::new(SessionId::new("session.host-provenance").unwrap())
-                    .unwrap(),
+            ObservationIdentityMaterialV1::for_native_record(
+                ObservationSourceIdentityV1::for_provider(
+                    ProviderId::new("claude").unwrap(),
+                    SessionId::new(session_id).unwrap(),
+                )
+                .unwrap(),
                 scope,
-                ClaudeFileGenerationV1::new(41).unwrap(),
+                ObservationSourceGenerationV1::new(41).unwrap(),
                 range,
+                ordering_domain,
+                ObservationId::new(record_id).unwrap(),
             )
             .unwrap(),
             None,
