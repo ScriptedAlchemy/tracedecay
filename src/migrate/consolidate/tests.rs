@@ -4859,3 +4859,67 @@ fn run_git(path: &Path, args: &[&str]) {
         .unwrap();
     assert!(status.success(), "git {args:?} failed");
 }
+
+#[tokio::test]
+async fn superseded_chained_ledgers_skip_retirement_validation() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let profile = dir.path().join("profile");
+    let ledger_root = profile.join("migration-inventory");
+    std::fs::create_dir_all(&ledger_root).unwrap();
+    let git_common_dir = dir.path().join("repo/.git");
+    let write = |migration_id: &str, source: &str, target: &str, destination: &str| {
+        std::fs::write(
+            ledger_root.join(format!("{migration_id}.json")),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 2,
+                "migration_id": migration_id,
+                "confirmation_token": "confirm",
+                "input_fingerprint": "fixture",
+                "source_project_id": source,
+                "target_project_id": target,
+                "destination_project_id": destination,
+                "project_root": dir.path().join("repo"),
+                "git_common_dir": git_common_dir,
+                "state": "applied",
+                "graph_offsets": [],
+                "session_offsets": null,
+                "preserved_collisions": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    // proj_aaa -> consolidated forward into proj_bbb: the older ledger's
+    // destination is the newer ledger's target.
+    write(
+        "consolidate_aaaaaaaaaaaaaaaa",
+        "proj_src1",
+        "proj_tgt1",
+        "proj_aaaaaaaaaaaaaaaa",
+    );
+    write(
+        "consolidate_bbbbbbbbbbbbbbbb",
+        "proj_src2",
+        "proj_aaaaaaaaaaaaaaaa",
+        "proj_bbbbbbbbbbbbbbbb",
+    );
+
+    let report = retire_applied_input_manifests(&profile).await;
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("proj_aaaaaaaaaaaaaaaa")),
+        "superseded ledger must be skipped, got warnings: {:?}",
+        report.warnings
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("consolidation marker mismatch")
+                || warning.contains("proj_bbbbbbbbbbbbbbbb")),
+        "only the live chain head may fail validation: {:?}",
+        report.warnings
+    );
+}

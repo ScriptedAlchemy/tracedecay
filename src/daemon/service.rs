@@ -792,14 +792,25 @@ fn installed_service_state() -> Result<DaemonServiceState> {
 /// unit and identify as the current installed version; stopped or missing
 /// services must remain quiescent.
 pub fn wait_for_installed_service_state(expected: DaemonServiceState) -> Result<()> {
-    const ATTEMPTS: usize = 50;
-    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+    // A freshly restored daemon may legitimately spend a while on startup
+    // recovery (schema migrations, projection rebuilds, transcript catch-up)
+    // before it answers its first initialize, so the restoration window is
+    // generous — bounded, with progress visibility — rather than a snap
+    // judgement that fails a healthy, still-converging service.
+    const ATTEMPTS: usize = 360;
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+    const PROGRESS_EVERY: usize = 40;
 
     let mut last = installed_service_status_snapshot()?;
     for attempt in 0..ATTEMPTS {
         let (actual, _, socket_state, protocol_state) = &last;
         if restored_service_matches(expected, *actual, *socket_state, protocol_state) {
             return Ok(());
+        }
+        if attempt > 0 && attempt % PROGRESS_EVERY == 0 {
+            eprintln!(
+                "Waiting for the restored daemon to reach {expected:?} (service {actual:?}, socket {socket_state}, protocol {protocol_state})…"
+            );
         }
         if attempt + 1 < ATTEMPTS {
             std::thread::sleep(POLL_INTERVAL);
@@ -1012,7 +1023,10 @@ fn daemon_protocol_state(_socket_path: &Path) -> DaemonProtocolState {
 
 #[cfg(unix)]
 fn query_daemon_identity(socket_path: &Path) -> Result<(Option<String>, Option<String>)> {
-    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+    // The first initialize after a restart can sit behind startup recovery
+    // on the daemon side; a sub-second read deadline misclassifies a busy,
+    // healthy daemon as unresponsive.
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     const REQUEST_ID: i64 = 1;
 
     let connection = super::client_connection(socket_path)?;
