@@ -271,8 +271,12 @@ pub(super) async fn list_code_project_paths(
         // One project's stale or malformed evidence must not make every
         // registered root unlistable — a listing consumer (transcript sweeps,
         // storage inventory) degrades to skipping that project, while doctor
-        // still surfaces the row through its own registry checks.
-        let skip = |detail: String| {
+        // still surfaces the row through its own registry checks. Genuine
+        // storage failures (query/transaction errors) are a different class
+        // of problem and must not be downgraded to a per-row skip: they
+        // propagate as `Err` and abort the whole listing, matching the
+        // existing contract of `project_alias_is_current` below.
+        let skip = |detail: &str| {
             tracing::warn!(
                 project_id = project_id.as_str(),
                 %detail,
@@ -284,7 +288,7 @@ pub(super) async fn list_code_project_paths(
                 let path = match decode_native_project_path(&platform, bytes) {
                     Ok(path) => path,
                     Err(error) => {
-                        skip(format!("invalid primary root: {error}"));
+                        skip(&format!("invalid primary root: {error}"));
                         continue;
                     }
                 };
@@ -293,7 +297,7 @@ pub(super) async fn list_code_project_paths(
                     || (display_evidence != canonical_root && display_evidence != display_root)
                     || !project_alias_is_current(db, &project_id, &path, last_seen_at).await?
                 {
-                    skip("stale primary root".to_string());
+                    skip("stale primary root");
                     continue;
                 }
                 path
@@ -306,22 +310,22 @@ pub(super) async fn list_code_project_paths(
                     &display_root,
                     last_seen_at,
                 )
-                .await
+                .await?
                 {
-                    Ok(path) => path,
-                    Err(error) => {
-                        skip(format!("legacy root evidence rejected: {error}"));
+                    PathEvidenceVerdict::Accepted(path) => path,
+                    PathEvidenceVerdict::Rejected(detail) => {
+                        skip(&format!("legacy root evidence rejected: {detail}"));
                         continue;
                     }
                 }
             }
             _ => {
-                skip("incomplete primary root".to_string());
+                skip("incomplete primary root");
                 continue;
             }
         };
         if !path.is_absolute() {
-            skip("non-absolute root".to_string());
+            skip("non-absolute root");
             continue;
         }
         paths.push(path);
@@ -352,13 +356,25 @@ async fn project_alias_is_current(
         .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
+/// Outcome of resolving a project's legacy (pre-primary-root) path evidence.
+///
+/// This only represents the row-local "this project's evidence doesn't
+/// support a path" case, which the caller skips and continues past. Genuine
+/// storage failures (query/transaction errors) are never wrapped here — they
+/// propagate as `Err`, so a real DB failure aborts the whole listing instead
+/// of silently degrading it, consistent with `project_alias_is_current`.
+enum PathEvidenceVerdict {
+    Accepted(PathBuf),
+    Rejected(String),
+}
+
 async fn legacy_code_project_path(
     db: &GlobalDb,
     project_id: &str,
     canonical_root: &str,
     display_root: &str,
     last_seen_at: i64,
-) -> crate::errors::Result<PathBuf> {
+) -> crate::errors::Result<PathEvidenceVerdict> {
     const OPERATION: &str = "list native code project paths";
     let mut rows = db
         .conn
@@ -404,16 +420,14 @@ async fn legacy_code_project_path(
 
     let mut candidates = candidates.into_values();
     let Some(path) = candidates.next() else {
-        return Err(global_db_operation_message(
-            OPERATION,
-            format!("project '{project_id}' has no current lossless legacy root evidence"),
-        ));
+        return Ok(PathEvidenceVerdict::Rejected(format!(
+            "project '{project_id}' has no current lossless legacy root evidence"
+        )));
     };
     if candidates.next().is_some() {
-        return Err(global_db_operation_message(
-            OPERATION,
-            format!("project '{project_id}' has ambiguous legacy current roots"),
-        ));
+        return Ok(PathEvidenceVerdict::Rejected(format!(
+            "project '{project_id}' has ambiguous legacy current roots"
+        )));
     }
     let transaction = db
         .begin_write_transaction()
@@ -437,16 +451,18 @@ async fn legacy_code_project_path(
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
     if updated != 1 {
-        return Err(global_db_operation_message(
-            OPERATION,
-            format!("project '{project_id}' changed while resolving its legacy root"),
-        ));
+        // The row changed concurrently (raced with another writer); treat as
+        // row-local evidence rejection rather than a hard storage failure —
+        // the write itself succeeded, it just no longer applies.
+        return Ok(PathEvidenceVerdict::Rejected(format!(
+            "project '{project_id}' changed while resolving its legacy root"
+        )));
     }
     transaction
         .commit()
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    Ok(path)
+    Ok(PathEvidenceVerdict::Accepted(path))
 }
 
 pub(super) async fn list_lossless_paths(
