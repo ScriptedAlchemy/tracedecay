@@ -10,6 +10,7 @@ use super::backend::{
 use super::config::AutomationConfig;
 use super::lifecycle::{AgentTaskRunContext, SchedulerGate, failed_backend_fallback_report};
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
+use crate::application::memory::MemoryApplication;
 use crate::dashboard::memory_curate::{
     CURATION_DEFAULT_MAX_CLUSTERS, CURATION_DEFAULT_MIN_CONFIDENCE, MemoryCurateOptions,
     run_memory_curate, run_user_memory_curate,
@@ -18,6 +19,7 @@ use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::user::{open_user_memory_db, user_memory_db_path};
 use crate::sessions::user_sessions_db_path;
+use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::TraceDecay;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,9 +135,11 @@ impl MemoryCuratorStore<'_> {
     async fn refresh_digest(&self) {
         if let Self::Project(cg) = self
             && let Ok(project_db) = cg.open_project_store_db().await
+            && let Ok(owner) = cg.project_memory_owner()
+            && let Ok(memory) = MemoryApplication::new(owner, DatabaseFactStore::new(&project_db))
         {
             crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-                project_db.conn(),
+                &memory,
                 &cg.store_layout().project_root,
             )
             .await;

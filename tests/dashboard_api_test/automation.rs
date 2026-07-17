@@ -466,11 +466,11 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_approval() 
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-        let fake_codex = FakeCodexAppServer::new_memory_curator();
-        let _codex_bin_guard = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake_codex.bin);
 
         let cg = setup_project(&project_root).await;
-        seed_memory_fixture(&cg).await;
+        let fixture = seed_memory_fixture(&cg).await;
+        let fake_codex = FakeCodexAppServer::new_memory_curator(fixture.near_duplicate_fact_id);
+        let _codex_bin_guard = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake_codex.bin);
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let agent = http_agent();
         let port = pick_free_port();
@@ -846,42 +846,19 @@ fn automation_outcomes_endpoint_reports_applied_fact_trajectories() {
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
         let cg = setup_project(&project_root).await;
-        seed_memory_fixture(&cg).await;
-        let dashboard_root = cg.store_layout().dashboard_root.clone();
-
-        // One applied proposal whose fact still exists (seeded fact 101) and
-        // one whose fact was deleted by curation (no such fact id).
-        let applied = |proposal_id: &str, fact_id: i64| {
-            tracedecay::automation::fact_proposals::FactProposalRecord {
-                schema_version: 1,
-                proposal_id: proposal_id.to_string(),
-                run_id: "run_outcomes".to_string(),
-                evidence_hash: None,
-                state: tracedecay::automation::fact_proposals::FactProposalState::Applied,
-                add_fact_request: None,
-                proposal: None,
-                validation_reason: None,
-                validation: None,
-                reviewer: Some("dashboard".to_string()),
-                applied_canonical_fact_id: None,
-                applied_fact_id: Some(fact_id),
-                apply_outcome: None,
-                created_at: 1_700_000_000,
-                updated_at: 1_700_000_050,
-                duplicate_count: 0,
-                last_duplicate_run_id: None,
-                folded_contents: Vec::new(),
-            }
-        };
-        tracedecay::automation::fact_proposals::save_fact_proposal_store(
-            &dashboard_root,
-            &tracedecay::automation::fact_proposals::FactProposalStore {
-                schema_version: 1,
-                proposals: vec![applied("fact_alive", 101), applied("fact_gone", 999_999)],
-            },
+        let alive_record = apply_dashboard_automation_fact(
+            &cg,
+            "run_outcomes_alive",
+            "Automation outcomes retain canonical applied fact identity",
         )
-        .await
-        .unwrap();
+        .await;
+        let gone_record = apply_dashboard_automation_fact(
+            &cg,
+            "run_outcomes_deleted",
+            "Automation outcomes retain deleted fact lineage safely",
+        )
+        .await;
+        delete_dashboard_automation_fact(&cg, &gone_record).await;
 
         let agent = http_agent();
         let port = pick_free_port();
@@ -903,13 +880,27 @@ fn automation_outcomes_endpoint_reports_applied_fact_trajectories() {
                 .find(|fact| fact["proposal_id"] == id)
                 .unwrap_or_else(|| panic!("missing proposal {id}: {outcomes}"))
         };
-        let alive = by_id("fact_alive");
+        let alive = by_id(&alive_record.proposal_id);
         assert_eq!(alive["verdict"], "never_recalled");
         assert_eq!(alive["still_exists"], true);
-        assert_eq!(alive["helpful_count"], 5);
-        let gone = by_id("fact_gone");
+        assert_eq!(alive["helpful_count"], 0);
+        assert_eq!(
+            alive["canonical_fact_id"],
+            serde_json::json!(alive_record.canonical_fact_id)
+        );
+        assert_eq!(
+            alive["fact_id"],
+            serde_json::json!(alive_record.legacy_fact_id)
+        );
+        assert_eq!(alive["run_id"], "run_outcomes_alive");
+        let gone = by_id(&gone_record.proposal_id);
         assert_eq!(gone["verdict"], "deleted");
         assert_eq!(gone["still_exists"], false);
+        assert_eq!(
+            gone["canonical_fact_id"],
+            serde_json::json!(gone_record.canonical_fact_id)
+        );
+        assert_eq!(gone["run_id"], "run_outcomes_deleted");
 
         server.stop();
     });

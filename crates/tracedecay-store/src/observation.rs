@@ -103,19 +103,48 @@ pub fn build_observation_resolution_authorization_v1(
     observation: &DurableObservationV1,
     authority_namespace: &str,
 ) -> ObservationStoreResult<ResolutionAuthorizationV1> {
-    let access_policy_digest = PayloadReferenceV1::for_payload(&serde_json::json!({
-        "domain": "tracedecay.observation-anchor.authorization.v1",
-        "authority": authority_namespace,
-    }))
-    .map_err(ObservationStoreError::Contract)?
-    .digest()
-    .as_str()
-    .to_owned();
     let canonical_request_digest = PayloadReferenceV1::for_payload(&serde_json::json!({
         "domain": "tracedecay.observation-anchor.request.v1",
         "authority": authority_namespace,
         "owner": observation.scope(),
         "observation_id": observation.observation_id(),
+    }))
+    .map_err(ObservationStoreError::Contract)?
+    .digest()
+    .as_str()
+    .to_owned();
+    build_resolution_authorization_v1(authority_namespace, canonical_request_digest)
+}
+
+/// Derives a caller-bound authorization snapshot for resolutions that have no
+/// retained record to carry one, such as absent or ambiguous anchor bindings.
+/// The request digest binds only the owner scope and the requested anchor id;
+/// it never embeds payload bytes or a source locator.
+pub fn build_scope_resolution_authorization_v1(
+    scope: &ObservationScopeV1,
+    anchor_id: &RetrievalAnchorId,
+    authority_namespace: &str,
+) -> ObservationStoreResult<ResolutionAuthorizationV1> {
+    let canonical_request_digest = PayloadReferenceV1::for_payload(&serde_json::json!({
+        "domain": "tracedecay.observation-anchor.request.v1",
+        "authority": authority_namespace,
+        "owner": scope,
+        "anchor_id": anchor_id,
+    }))
+    .map_err(ObservationStoreError::Contract)?
+    .digest()
+    .as_str()
+    .to_owned();
+    build_resolution_authorization_v1(authority_namespace, canonical_request_digest)
+}
+
+fn build_resolution_authorization_v1(
+    authority_namespace: &str,
+    canonical_request_digest: String,
+) -> ObservationStoreResult<ResolutionAuthorizationV1> {
+    let access_policy_digest = PayloadReferenceV1::for_payload(&serde_json::json!({
+        "domain": "tracedecay.observation-anchor.authorization.v1",
+        "authority": authority_namespace,
     }))
     .map_err(ObservationStoreError::Contract)?
     .digest()
@@ -186,6 +215,27 @@ pub fn build_observation_retrieval_anchor_v2(
         durability: AnchorDurabilityClass::DurableEvidence,
     })
     .map_err(ObservationStoreError::RetrievalAnchorContract)
+}
+
+/// Store-side observation of an evidence-anchor binding at resolution time.
+///
+/// This is the raw material for a typed resolution report: it carries the
+/// retained record together with the store's current projection watermark, or
+/// a safe signal when no single authoritative record can be presented.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ObservedEvidenceAnchorResolution {
+    /// Exactly one authoritative record resolved for the anchor. The observed
+    /// watermark is the store's current projection-stream position reported
+    /// under exactly the shard keys the record's frozen watermark claims.
+    Resolved {
+        record: Box<RetrievalAnchorRecordV2>,
+        observed_watermark: VectorWatermark,
+    },
+    /// No binding for the anchor exists in this authority.
+    Unavailable,
+    /// The anchor binds to conflicting evidence in this authority, so no
+    /// single record may be presented.
+    Ambiguous,
 }
 
 fn validate_retrieval_anchor_binding(

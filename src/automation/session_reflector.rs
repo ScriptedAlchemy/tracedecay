@@ -1,22 +1,26 @@
 use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
+use tracedecay_domain::PayloadAccessState;
+use tracedecay_store::{
+    CompatibilityFactAvailabilityV1, CompatibilityFactProjectionV1, FactCompatibilityStore,
+};
 
-use crate::errors::Result;
-use crate::memory::retrieval::FactRetriever;
+use crate::application::memory::MemoryApplication;
+use crate::errors::{Result, TraceDecayError};
 use crate::memory::trust::{DEFAULT_TRUST, HIGH_TRUST_REPRESENTATIVE, LOW_TRUST_REPRESENTATIVE};
-use crate::memory::types::{AddFactRequest, MemoryCategory};
-pub(crate) async fn validate_fact_proposals_on_connection(
-    conn: &libsql::Connection,
+use crate::memory::types::{AddFactRequest, MemoryCategory, SearchFactsRequest};
+
+pub(crate) async fn validate_fact_proposals<A: FactCompatibilityStore>(
+    memory: &MemoryApplication<A>,
     proposals: &[Value],
     evidence: &Value,
 ) -> Result<(Vec<Value>, Vec<Value>)> {
-    let retriever = FactRetriever::new(conn);
     let citations = EvidenceCitationSet::from_evidence(evidence);
     let mut accepted = Vec::new();
     let mut rejected = Vec::new();
     for proposal in proposals {
-        match validate_fact_proposal(conn, &retriever, proposal, &citations).await? {
+        match validate_fact_proposal(memory, proposal, &citations).await? {
             FactProposalValidation::Accepted(value) => accepted.push(value),
             FactProposalValidation::Rejected(value) => rejected.push(value),
         }
@@ -134,9 +138,8 @@ impl EvidenceCitationSet {
     }
 }
 
-async fn validate_fact_proposal(
-    conn: &libsql::Connection,
-    retriever: &FactRetriever<'_>,
+async fn validate_fact_proposal<A: FactCompatibilityStore>(
+    memory: &MemoryApplication<A>,
     proposal: &Value,
     citations: &EvidenceCitationSet,
 ) -> Result<FactProposalValidation> {
@@ -200,7 +203,35 @@ async fn validate_fact_proposal(
             "source_span must cite a bounded session reflection evidence hit",
         ));
     }
-    if let Some(fact_id) = exact_fact_content_id(conn, &content).await? {
+    let exact_duplicate_id = match memory
+        .find_exact_fact_v1_by_content(&content)
+        .await
+        .map_err(|error| {
+            TraceDecayError::database_operation(
+                "validate session reflector exact duplicate through memory authority",
+                error,
+            )
+        })? {
+        None => None,
+        Some(CompatibilityFactProjectionV1::Available(fact)) => {
+            let Some(fact_id) = fact.legacy_fact_id() else {
+                return Ok(rejected_unavailable_exact_duplicate(
+                    proposal,
+                    "unavailable",
+                    "unknown",
+                ));
+            };
+            Some(fact_id)
+        }
+        Some(CompatibilityFactProjectionV1::Unavailable(unavailable)) => {
+            return Ok(rejected_unavailable_exact_duplicate(
+                proposal,
+                compatibility_availability_label(unavailable.availability()),
+                payload_access_label(unavailable.status().payload_access()),
+            ));
+        }
+    };
+    if let Some(fact_id) = exact_duplicate_id {
         let reason = format!("exact duplicate of fact #{fact_id}");
         return Ok(rejected_fact_with_validation(
             proposal,
@@ -214,9 +245,21 @@ async fn validate_fact_proposal(
             }),
         ));
     }
-    let matches = retriever
-        .search_untracked(&content, Some(category), None, 1)
-        .await?;
+    let matches = memory
+        .search_facts_untracked_v1(SearchFactsRequest {
+            query: content.clone(),
+            category: Some(category),
+            limit: Some(1),
+            min_trust: None,
+            include_why: false,
+        })
+        .await
+        .map_err(|error| {
+            TraceDecayError::database_operation(
+                "validate session reflector near duplicate through memory authority",
+                error,
+            )
+        })?;
     let nearest = matches.first().map(|existing| {
         json!({
             "fact_id": existing.fact.fact_id,
@@ -301,20 +344,6 @@ fn value_as_i64(value: &Value) -> Option<i64> {
         .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
 }
 
-async fn exact_fact_content_id(conn: &libsql::Connection, content: &str) -> Result<Option<i64>> {
-    let mut rows = conn
-        .query(
-            "SELECT fact_id FROM memory_facts WHERE content = ?1 LIMIT 1",
-            libsql::params![content],
-        )
-        .await?;
-    Ok(rows
-        .next()
-        .await?
-        .map(|row| row.get::<i64>(0))
-        .transpose()?)
-}
-
 fn string_array_field(value: Option<&Value>) -> Option<Vec<String>> {
     let Some(value) = value else {
         return Some(Vec::new());
@@ -339,6 +368,49 @@ fn rejected_fact(proposal: &Value, reason: &str) -> FactProposalValidation {
             "reason": reason,
         }),
     )
+}
+
+fn rejected_unavailable_exact_duplicate(
+    proposal: &Value,
+    availability: &str,
+    payload_access: &str,
+) -> FactProposalValidation {
+    let reason = "exact duplicate is unavailable for safe validation";
+    rejected_fact_with_validation(
+        proposal,
+        reason,
+        &json!({
+            "status": "rejected",
+            "reason": reason,
+            "dedupe": {
+                "exact_match": {
+                    "availability": availability,
+                    "payload_access": payload_access,
+                },
+            },
+        }),
+    )
+}
+
+fn compatibility_availability_label(value: CompatibilityFactAvailabilityV1) -> &'static str {
+    match value {
+        CompatibilityFactAvailabilityV1::Deleted => "deleted",
+        CompatibilityFactAvailabilityV1::Quarantined => "quarantined",
+        CompatibilityFactAvailabilityV1::Unavailable => "unavailable",
+    }
+}
+
+fn payload_access_label(value: Option<PayloadAccessState>) -> &'static str {
+    match value {
+        Some(PayloadAccessState::Eligible) => "eligible",
+        Some(PayloadAccessState::Redacted) => "redacted",
+        Some(PayloadAccessState::Quarantined) => "quarantined",
+        Some(PayloadAccessState::RetentionExpired) => "retention_expired",
+        Some(PayloadAccessState::Deleted) => "deleted",
+        Some(PayloadAccessState::Unavailable) => "unavailable",
+        Some(PayloadAccessState::Ambiguous) => "ambiguous",
+        None => "unknown",
+    }
 }
 
 fn rejected_fact_with_validation(

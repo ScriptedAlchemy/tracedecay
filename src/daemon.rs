@@ -22,12 +22,14 @@ use crate::mcp::ReplayTransport;
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, StdioTransport};
 use branch_add::{branch_add_response, coordinated_hook_branch_writer, parse_branch_add_request};
 use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
-#[cfg(unix)]
-use scheduler::AutomationSchedulerHandle;
+#[cfg(all(unix, test))]
+use scheduler::{AutomationSchedulerHandle, MemoryRepairSchedulerHandle};
 #[cfg(all(unix, test))]
 use scheduler::{
-    automation_scheduler_configured, automation_scheduler_tick_secs_for_project,
-    automation_staged_log_fields, daemon_scheduler_record_log_line, run_automation_scheduler_tick,
+    MemoryRepairTickOutcome, automation_scheduler_configured,
+    automation_scheduler_tick_secs_for_project, automation_staged_log_fields,
+    daemon_scheduler_record_log_line, legacy_memory_cutover_should_retry,
+    memory_repair_tick_outcome, run_automation_scheduler_tick, run_memory_repair_scheduler_tick,
     scheduler_task_log_fields, user_config_for_client,
 };
 use transport::{BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint};
@@ -1761,6 +1763,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     // Scheduler tasks may be inside a synchronous auxiliary-agent call, so
     // shutdown also terminates their tracked process trees before joining.
     engine.shutdown_automation_schedulers().await;
+    engine.shutdown_memory_repair_schedulers().await;
     log_daemon_event(
         "daemon_shutdown",
         &[("socket", socket_path.display().to_string())],
@@ -2442,6 +2445,12 @@ impl DaemonEngine {
         // A freshly-handshaken project should be watched even on a cache hit
         // (the watcher may have started after this server was cached).
         self.git_watcher.ensure_watching(&project_path).await;
+        Box::pin(self.ensure_memory_repair_scheduler(
+            key.clone(),
+            project_path.clone(),
+            handshake.clone(),
+        ))
+        .await;
         Box::pin(self.ensure_automation_scheduler(key, project_path, handshake.clone())).await;
         server
     }
@@ -2510,6 +2519,27 @@ impl DaemonEngine {
                         if let Some(handle) = removed_scheduler {
                             handle.task.abort();
                         }
+                        let removed_memory_repair_scheduler = {
+                            let mut schedulers = engine
+                                .store_administration
+                                .memory_repair_schedulers()
+                                .lock()
+                                .await;
+                            let removed = schedulers.remove(&old_key);
+                            if let Some(handle) = removed {
+                                if schedulers.contains_key(&new_key) {
+                                    Some(handle)
+                                } else {
+                                    schedulers.insert(new_key.clone(), handle);
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(handle) = removed_memory_repair_scheduler {
+                            handle.task.abort();
+                        }
                         *current = new_key;
                     })
                     .await;
@@ -2519,6 +2549,7 @@ impl DaemonEngine {
 
     async fn shutdown_background_tasks(&self) {
         self.shutdown_automation_schedulers().await;
+        self.shutdown_memory_repair_schedulers().await;
         self.store_administration
             .shutdown_host_admission_replay()
             .await;

@@ -32,15 +32,15 @@ async fn memory_curator_runner_skips_when_automation_is_disabled() {
 async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    seed_duplicate_facts(&cg).await;
+    let facts = seed_duplicate_facts(&cg).await;
     let backend = JsonBackend::new(json!({
         "ops": [
             {
                 "cluster_id": "cluster-0000",
                 "op": "delete",
-                "fact_id": 102,
+                "fact_id": facts.loser_id,
                 "confidence": 0.98,
-                "reason": "near duplicate of fact 101"
+                "reason": format!("near duplicate of fact {}", facts.winner_id)
             },
             {
                 "cluster_id": "cluster-0000",
@@ -118,7 +118,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert_eq!(
         run.ledger_record.applied_ops.as_ref().unwrap()[0]["fact_id"],
-        json!(102)
+        json!(facts.loser_id)
     );
     assert_eq!(
         run.ledger_record.rejected_ops.as_ref().unwrap()[0]["rejected_reason"],
@@ -144,7 +144,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
         run.report["automation_apply_policy"]["autonomous_memory_apply"],
         json!(true)
     );
-    assert!(!fact_exists(&cg, 102).await);
+    assert!(!fact_exists(&cg, facts.loser_id).await);
     assert_eq!(
         run.report["automation_apply_policy"]["require_dashboard_approval"],
         json!(false)
@@ -530,7 +530,10 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
             .as_str()
             .is_some_and(|hash| hash.starts_with("sha256:"))
     );
-    assert_eq!(run.report["llm_apply"]["ops"][0]["fact_id"], json!(102));
+    assert_eq!(
+        run.report["llm_apply"]["ops"][0]["fact_id"],
+        json!(facts.loser_id)
+    );
     assert_eq!(
         run.report["llm_apply"]["rejected_ops"][0]["rejected_reason"],
         json!("fact_id 999 was not in reviewed evidence")
@@ -545,7 +548,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(records[0].rejected_count, 1);
     assert_eq!(records[0].artifacts.len(), 6);
     assert!(
-        !fact_exists(&cg, 102).await,
+        !fact_exists(&cg, facts.loser_id).await,
         "default memory curation must apply accepted validated ops"
     );
 }
@@ -554,14 +557,14 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
 async fn scheduler_memory_curator_applies_validated_ops_despite_legacy_preview_setting() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    seed_duplicate_facts(&cg).await;
+    let facts = seed_duplicate_facts(&cg).await;
     let backend = JsonBackend::new(json!({
         "ops": [{
             "cluster_id": "cluster-0000",
             "op": "delete",
-            "fact_id": 102,
+            "fact_id": facts.loser_id,
             "confidence": 0.98,
-            "reason": "near duplicate of fact 101"
+            "reason": format!("near duplicate of fact {}", facts.winner_id)
         }]
     }));
     let mut config = scheduler_config(None, None);
@@ -591,7 +594,7 @@ async fn scheduler_memory_curator_applies_validated_ops_despite_legacy_preview_s
         run.report["automation_apply_policy"]["validated_before_apply"],
         json!(true)
     );
-    assert!(!fact_exists(&cg, 102).await);
+    assert!(!fact_exists(&cg, facts.loser_id).await);
 }
 
 #[tokio::test]
@@ -684,14 +687,14 @@ async fn memory_curator_runner_artifacts_block_handoff_without_validation_exampl
 async fn memory_curator_runner_artifacts_mark_handoff_ready_for_accepted_only_examples() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    seed_duplicate_facts(&cg).await;
+    let facts = seed_duplicate_facts(&cg).await;
     let backend = JsonBackend::new(json!({
         "ops": [{
             "cluster_id": "cluster-0000",
             "op": "delete",
-            "fact_id": 102,
+            "fact_id": facts.loser_id,
             "confidence": 0.98,
-            "reason": "near duplicate of fact 101"
+            "reason": format!("near duplicate of fact {}", facts.winner_id)
         }]
     }));
     let config = AutomationConfig {
@@ -774,14 +777,14 @@ async fn memory_curator_runner_artifacts_mark_handoff_ready_for_accepted_only_ex
 async fn memory_curator_runner_auto_apply_is_blocked_by_dashboard_approval() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    seed_duplicate_facts(&cg).await;
+    let facts = seed_duplicate_facts(&cg).await;
     let backend = JsonBackend::new(json!({
         "ops": [{
             "cluster_id": "cluster-0000",
             "op": "delete",
-            "fact_id": 102,
+            "fact_id": facts.loser_id,
             "confidence": 0.98,
-            "reason": "near duplicate of fact 101"
+            "reason": format!("near duplicate of fact {}", facts.winner_id)
         }]
     }));
     let config = AutomationConfig {
@@ -841,7 +844,7 @@ async fn memory_curator_runner_auto_apply_is_blocked_by_dashboard_approval() {
     );
     assert_eq!(run.report["llm_apply"]["applied"], json!(1));
     assert!(
-        !fact_exists(&cg, 102).await,
+        !fact_exists(&cg, facts.loser_id).await,
         "auto-apply must delete accepted permanent-delete ops"
     );
 }
@@ -850,14 +853,14 @@ async fn memory_curator_runner_auto_apply_is_blocked_by_dashboard_approval() {
 async fn memory_curator_runner_preserves_review_gate_when_auto_apply_applies_zero_ops() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    seed_duplicate_facts(&cg).await;
+    let facts = seed_duplicate_facts(&cg).await;
     let backend = JsonBackend::new(json!({
         "ops": [
             {
                 "cluster_id": "cluster-0000",
                 "op": "merge",
-                "winner_id": 101,
-                "loser_ids": [102, 102],
+                "winner_id": facts.winner_id,
+                "loser_ids": [facts.loser_id, facts.loser_id],
                 "confidence": 0.98,
                 "reason": "valid dry-run ids but invalid duplicate loser ids at apply"
             }
@@ -958,14 +961,14 @@ async fn memory_curator_runner_preserves_review_gate_when_auto_apply_applies_zer
 async fn memory_curator_runner_auto_applies_only_when_approval_is_not_required() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    seed_duplicate_facts(&cg).await;
+    let facts = seed_duplicate_facts(&cg).await;
     let backend = JsonBackend::new(json!({
         "ops": [{
             "cluster_id": "cluster-0000",
             "op": "delete",
-            "fact_id": 102,
+            "fact_id": facts.loser_id,
             "confidence": 0.98,
-            "reason": "near duplicate of fact 101"
+            "reason": format!("near duplicate of fact {}", facts.winner_id)
         }]
     }));
     let config = AutomationConfig {
@@ -1013,7 +1016,7 @@ async fn memory_curator_runner_auto_applies_only_when_approval_is_not_required()
         json!("deleted")
     );
     assert!(
-        !fact_exists(&cg, 102).await,
+        !fact_exists(&cg, facts.loser_id).await,
         "explicit no-approval auto-apply policy should delete accepted fact"
     );
 }

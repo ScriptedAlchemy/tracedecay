@@ -31,16 +31,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use libsql::Connection;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use tracedecay_store::FactCompatibilityStore;
 
 use super::config_error;
+use crate::application::memory::MemoryApplication;
 use crate::automation::config::AutomationConfig;
 use crate::automation::skill_targets::SkillInstallTarget;
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::hygiene::detect_secret_like;
-use crate::memory::store::MemoryStore;
 use crate::memory::types::{FactRecord, MemoryCategory};
 use crate::tracedecay::current_timestamp;
 use crate::user_config::UserConfig;
@@ -839,16 +839,19 @@ fn project_label_for_root(project_root: &Path) -> String {
 
 /// Regenerates the project's digest section from the memory store and
 /// re-exports the snapshot into all recorded host channels.
-pub async fn refresh_project_memory_digest(
+pub async fn refresh_project_memory_digest<A: FactCompatibilityStore>(
     profile_root: &Path,
-    conn: &Connection,
+    memory: &MemoryApplication<A>,
     project_root: &Path,
     options: &MemoryDigestOptions,
 ) -> Result<()> {
     let category = None;
-    let facts = MemoryStore::new(conn)
-        .list_facts(category, Some(options.min_trust), FACT_FETCH_LIMIT)
-        .await?;
+    let facts = memory
+        .list_facts_untracked_v1(category, Some(options.min_trust), FACT_FETCH_LIMIT)
+        .await
+        .map_err(|error| {
+            TraceDecayError::database_operation("list memory digest facts through authority", error)
+        })?;
     let section = build_project_section(
         &project_key_for_root(project_root),
         &project_label_for_root(project_root),
@@ -864,9 +867,9 @@ pub async fn refresh_project_memory_digest(
 /// automation config allows export. When disabled, any existing section for
 /// that project is removed and recorded host channels are refreshed so stale
 /// facts disappear from prompts.
-pub async fn refresh_memory_digest_after_memory_change_for_profile(
+pub async fn refresh_memory_digest_after_memory_change_for_profile<A: FactCompatibilityStore>(
     profile_root: &Path,
-    conn: &Connection,
+    memory: &MemoryApplication<A>,
     project_root: &Path,
 ) -> Result<bool> {
     if !memory_digest_export_enabled_for_project(profile_root, project_root).await? {
@@ -876,7 +879,7 @@ pub async fn refresh_memory_digest_after_memory_change_for_profile(
     }
     refresh_project_memory_digest(
         profile_root,
-        conn,
+        memory,
         project_root,
         &MemoryDigestOptions::default(),
     )
@@ -887,13 +890,16 @@ pub async fn refresh_memory_digest_after_memory_change_for_profile(
 /// Non-fatal wrapper for memory-mutating apply paths: resolves the profile
 /// root from the environment, honors the config gate, and logs (rather than
 /// propagates) failures so digest refresh never breaks an apply.
-pub async fn refresh_memory_digest_after_memory_change(conn: &Connection, project_root: &Path) {
+pub async fn refresh_memory_digest_after_memory_change<A: FactCompatibilityStore>(
+    memory: &MemoryApplication<A>,
+    project_root: &Path,
+) {
     let Some(home) = crate::agents::home_dir() else {
         return;
     };
     let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(&home);
     if let Err(err) =
-        refresh_memory_digest_after_memory_change_for_profile(&profile_root, conn, project_root)
+        refresh_memory_digest_after_memory_change_for_profile(&profile_root, memory, project_root)
             .await
     {
         eprintln!("warning: memory digest refresh failed: {err}");

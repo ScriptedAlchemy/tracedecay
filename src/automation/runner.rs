@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracedecay_domain::FactOwnerV1;
+use tracedecay_store::FactCompatibilityStore;
 
 use super::apply_policy::MemoryApplyPolicy;
 use super::artifacts::sha256_json;
@@ -11,7 +13,7 @@ use super::backend::{
 };
 use super::config::AutomationConfig;
 use super::fact_proposals::{
-    FactProposalRecord, FactProposalState, apply_fact_proposal, list_applying_fact_proposals,
+    FactProposalRecord, FactProposalState, apply_fact_proposal_with_result,
     record_session_fact_proposals,
 };
 use super::lifecycle::{
@@ -20,7 +22,7 @@ use super::lifecycle::{
 };
 use super::managed_skills::list_managed_skills;
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
-use super::session_reflector::validate_fact_proposals_on_connection;
+use super::session_reflector::validate_fact_proposals;
 use super::skill_usage::{
     DEFAULT_SKILL_OVERLAP_LIMIT, ingest_project_analytics_events, skill_overlap_candidates,
     stale_skill_recommendations, summarize_skill_usage,
@@ -32,6 +34,7 @@ use super::skill_writer::{
 };
 use super::text::truncate_chars_for_prompt;
 use crate::analytics::{ToolUsageObservation, underused_tool_family_signals};
+use crate::application::memory::MemoryApplication;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::memory::user::open_user_memory_db;
@@ -39,6 +42,7 @@ use crate::sessions::lcm::{
     LcmGrepRequest, LcmGrepSort, LcmScope, LcmSessionReplayRequest, LcmSessionReplaySlice,
 };
 use crate::sessions::user_sessions_db_path;
+use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::{TraceDecay, current_timestamp};
 
 pub use super::memory_curator::{
@@ -258,10 +262,19 @@ pub async fn run_session_reflector_with_backend(
     options: SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorAutomationRun> {
     let memory_db = cg.open_project_store_db().await?;
+    let memory = MemoryApplication::new(
+        cg.project_memory_owner()?,
+        DatabaseFactStore::new(&memory_db),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "could not initialize project session reflector memory authority: {error}"
+        ),
+    })?;
     run_session_reflector_for_store(
         cg.store_layout().dashboard_root.clone(),
         cg.store_layout().sessions_db_path.clone(),
-        &memory_db,
+        &memory,
         Some(cg.store_layout().project_root.as_path()),
         config,
         backend,
@@ -278,10 +291,16 @@ pub async fn run_user_session_reflector_with_backend(
     options: SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorAutomationRun> {
     let memory_db = open_user_memory_db(profile_root).await?;
+    let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&memory_db))
+        .map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "could not initialize profile session reflector memory authority: {error}"
+        ),
+    })?;
     run_session_reflector_for_store(
         user_automation_root(profile_root),
         user_sessions_db_path(profile_root),
-        &memory_db,
+        &memory,
         None,
         config,
         backend,
@@ -290,10 +309,10 @@ pub async fn run_user_session_reflector_with_backend(
     .await
 }
 
-async fn run_session_reflector_for_store(
+async fn run_session_reflector_for_store<A: FactCompatibilityStore>(
     dashboard_root: PathBuf,
     sessions_db_path: PathBuf,
-    memory_db: &crate::db::Database,
+    memory: &MemoryApplication<A>,
     digest_root: Option<&std::path::Path>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
@@ -321,7 +340,7 @@ async fn run_session_reflector_for_store(
     } = match build_session_reflector_evidence(
         &run.dashboard_root,
         &sessions_db_path,
-        memory_db.conn(),
+        memory,
         &options,
     )
     .await?
@@ -369,7 +388,7 @@ async fn run_session_reflector_for_store(
         )
         .await?;
     let (report, record) = finalize_session_reflector_success(
-        memory_db,
+        memory,
         digest_root,
         &finalizer,
         ProposedAgentOutput {
@@ -403,8 +422,8 @@ struct ProposedAgentOutput<'a> {
     proposals: &'a [Value],
 }
 
-async fn finalize_session_reflector_success(
-    memory_db: &crate::db::Database,
+async fn finalize_session_reflector_success<A: FactCompatibilityStore>(
+    memory: &MemoryApplication<A>,
     digest_root: Option<&std::path::Path>,
     finalizer: &AgentRunFinalizer<'_>,
     output: ProposedAgentOutput<'_>,
@@ -419,11 +438,11 @@ async fn finalize_session_reflector_success(
     let dashboard_root = finalizer.dashboard_root();
     let run_id = finalizer.run_id();
     let (accepted_facts, rejected_facts) =
-        validate_session_fact_proposals(memory_db, proposals, evidence).await?;
+        validate_session_fact_proposals(memory, proposals, evidence).await?;
     let accepted_count = accepted_facts.len();
     let rejected_count = rejected_facts.len();
-    auto_apply_session_fact_proposals(memory_db, digest_root, dashboard_root, Vec::new()).await?;
     let mut proposal_records = record_session_fact_proposals(
+        memory,
         dashboard_root,
         run_id,
         evidence_hash.as_deref(),
@@ -433,13 +452,14 @@ async fn finalize_session_reflector_success(
     .await?;
     let auto_apply_facts = MemoryApplyPolicy::should_apply(accepted_count);
     let applied_fact_proposals = if auto_apply_facts {
-        auto_apply_session_fact_proposals(
-            memory_db,
+        let (records, _) = auto_apply_session_fact_proposals(
+            memory,
             digest_root,
             dashboard_root,
             std::mem::take(&mut proposal_records),
         )
-        .await?
+        .await?;
+        records
     } else {
         Vec::new()
     };
@@ -455,8 +475,14 @@ async fn finalize_session_reflector_success(
         .filter(|record| record.state == FactProposalState::Applied)
         .map(|record| record.proposal_id.clone())
         .collect();
-    let applied_fact_ids: Vec<i64> = applied_fact_proposals
+    let applied_canonical_fact_ids: Vec<String> = applied_fact_proposals
         .iter()
+        .filter(|record| record.state == FactProposalState::Applied)
+        .filter_map(|record| record.applied_canonical_fact_id.clone())
+        .collect();
+    let applied_legacy_fact_ids: Vec<i64> = applied_fact_proposals
+        .iter()
+        .filter(|record| record.state == FactProposalState::Applied)
         .filter_map(|record| record.applied_fact_id)
         .collect();
     let applied_count = applied_proposal_ids.len();
@@ -468,7 +494,20 @@ async fn finalize_session_reflector_success(
             "applied_proposal_ids".to_string(),
             json!(applied_proposal_ids),
         );
-        object.insert("applied_fact_ids".to_string(), json!(applied_fact_ids));
+        object.insert(
+            "applied_canonical_fact_ids".to_string(),
+            json!(applied_canonical_fact_ids),
+        );
+        // Compatibility-only numeric mappings. Canonical IDs above are the
+        // primary fact identities reported by session reflection.
+        object.insert(
+            "applied_legacy_fact_ids".to_string(),
+            json!(applied_legacy_fact_ids),
+        );
+        object.insert(
+            "applied_fact_ids".to_string(),
+            json!(applied_legacy_fact_ids),
+        );
         object.insert("applied_count".to_string(), json!(applied_count));
         object.insert("fully_applied".to_string(), json!(fully_applied));
     }
@@ -536,71 +575,64 @@ async fn finalize_session_reflector_success(
     Ok((report, record))
 }
 
-async fn validate_session_fact_proposals(
-    memory_db: &crate::db::Database,
+async fn validate_session_fact_proposals<A: FactCompatibilityStore>(
+    memory: &MemoryApplication<A>,
     proposals: &[Value],
     evidence: &Value,
 ) -> Result<(Vec<Value>, Vec<Value>)> {
-    let reader = memory_db
-        .begin_isolated_read_snapshot("validate session fact proposals")
-        .await?;
-    validate_fact_proposals_on_connection(&reader, proposals, evidence).await
+    validate_fact_proposals(memory, proposals, evidence).await
 }
 
-async fn auto_apply_session_fact_proposals(
-    memory_db: &crate::db::Database,
+async fn auto_apply_session_fact_proposals<A: FactCompatibilityStore>(
+    memory: &MemoryApplication<A>,
     digest_root: Option<&std::path::Path>,
     dashboard_root: &std::path::Path,
-    mut proposal_records: Vec<FactProposalRecord>,
-) -> Result<Vec<FactProposalRecord>> {
-    let mut known_ids = proposal_records
-        .iter()
-        .map(|record| record.proposal_id.clone())
-        .collect::<std::collections::HashSet<_>>();
-    for record in list_applying_fact_proposals(dashboard_root).await? {
-        if known_ids.insert(record.proposal_id.clone()) {
-            proposal_records.push(record);
-        }
-    }
+    proposal_records: Vec<FactProposalRecord>,
+) -> Result<(Vec<FactProposalRecord>, bool)> {
     let mut applied = Vec::with_capacity(proposal_records.len());
+    let mut newly_promoted = false;
     for record in proposal_records {
-        if !matches!(
-            record.state,
-            FactProposalState::PendingApproval | FactProposalState::Applying
-        ) {
+        if record.state != FactProposalState::PendingApproval {
             applied.push(record);
             continue;
         }
-        applied.push(
-            apply_fact_proposal(
-                dashboard_root,
-                memory_db,
-                &record.proposal_id,
-                Some("session_reflector:auto_apply".to_string()),
-            )
-            .await?,
-        );
-    }
-    if applied
-        .iter()
-        .any(|record| record.state == FactProposalState::Applied)
-        && let Some(digest_root) = digest_root
-    {
-        match memory_db
-            .begin_isolated_read_snapshot("refresh session reflector memory digest")
-            .await
+        let result = match apply_fact_proposal_with_result(
+            memory,
+            dashboard_root,
+            &record.proposal_id,
+            Some("session_reflector:auto_apply".to_string()),
+        )
+        .await
         {
-            Ok(reader) => {
-                crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-                    &reader,
-                    digest_root,
-                )
-                .await;
+            Ok(result) => result,
+            Err(error) => {
+                refresh_auto_apply_digest_for_new_promotions(memory, digest_root, newly_promoted)
+                    .await;
+                return Err(error);
             }
-            Err(error) => eprintln!("warning: memory digest refresh failed: {error}"),
-        }
+        };
+        newly_promoted |= result.newly_promoted;
+        applied.push(result.record);
     }
-    Ok(applied)
+    refresh_auto_apply_digest_for_new_promotions(memory, digest_root, newly_promoted).await;
+    Ok((applied, newly_promoted))
+}
+
+async fn refresh_auto_apply_digest_for_new_promotions<A: FactCompatibilityStore>(
+    memory: &MemoryApplication<A>,
+    digest_root: Option<&std::path::Path>,
+    newly_promoted: bool,
+) {
+    if !newly_promoted {
+        return;
+    }
+    if let Some(digest_root) = digest_root {
+        crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+            memory,
+            digest_root,
+        )
+        .await;
+    }
 }
 
 pub async fn run_skill_writer_with_backend(
@@ -845,18 +877,17 @@ async fn finalize_skill_writer_success(
     Ok((report, record))
 }
 
-async fn build_session_reflector_evidence(
+async fn build_session_reflector_evidence<A: FactCompatibilityStore>(
     dashboard_root: &std::path::Path,
     sessions_db_path: &std::path::Path,
-    memory_conn: &libsql::Connection,
+    memory: &MemoryApplication<A>,
     options: &SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorEvidenceOutcome> {
     // Refresh outcomes of previously applied fact proposals so this run's
     // feedback artifact reports real post-apply quality. Best effort: a
     // missing memory store must not block reflection.
     if let Err(err) =
-        super::outcomes::refresh_fact_outcomes(dashboard_root, memory_conn, current_timestamp())
-            .await
+        super::outcomes::refresh_fact_outcomes(dashboard_root, memory, current_timestamp()).await
     {
         eprintln!("[tracedecay] warning: failed to refresh fact outcomes: {err}");
     }
@@ -1221,6 +1252,13 @@ pub async fn run_combined_review_with_backend(
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let sessions_db_path = cg.store_layout().sessions_db_path.clone();
     let memory_db = cg.open_project_store_db().await?;
+    let memory = MemoryApplication::new(
+        cg.project_memory_owner()?,
+        DatabaseFactStore::new(&memory_db),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("could not initialize combined review memory authority: {error}"),
+    })?;
     let started_at = current_timestamp().to_string();
 
     let (reflector_gate, _) = task_run_gate(
@@ -1259,7 +1297,7 @@ pub async fn run_combined_review_with_backend(
     let reflector_bundle = match build_session_reflector_evidence(
         &dashboard_root,
         &sessions_db_path,
-        memory_db.conn(),
+        &memory,
         &options.session_reflector,
     )
     .await?
@@ -1409,7 +1447,7 @@ pub async fn run_combined_review_with_backend(
     };
 
     let (reflector_report, reflector_record) = finalize_session_reflector_success(
-        &memory_db,
+        &memory,
         Some(cg.store_layout().project_root.as_path()),
         &reflector_finalizer,
         ProposedAgentOutput {
@@ -1764,6 +1802,8 @@ fn default_skill_writer_evidence_limit() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{Database, DatabaseAuthority};
+    use std::path::PathBuf;
 
     #[tokio::test]
     async fn proposal_validation_does_not_wait_for_the_writer_lane() {
@@ -1775,38 +1815,38 @@ mod tests {
         let (db, _) = crate::db::Database::initialize(&path, &authority)
             .await
             .unwrap();
-        let existing_fact_id = {
-            let writer = db
-                .writer_connection("seed automation validation")
-                .await
-                .unwrap();
-            writer
-                .memory_store()
-                .add_fact(
-                    crate::memory::types::AddFactRequest {
-                        content: "Committed memory baseline".to_string(),
-                        category: crate::memory::types::MemoryCategory::Project,
-                        source: None,
-                        tags: vec!["automation".to_string()],
-                        entities: vec!["TraceDecay".to_string()],
-                        trust: Some(0.8),
-                        metadata: json!({}),
-                    },
-                    crate::memory::trust::DEFAULT_TRUST,
+        let owner = FactOwnerV1::Profile;
+        let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
+        let existing_fact_id = memory
+            .add_fact_v1(
+                crate::memory::types::AddFactRequest {
+                    content: "Committed memory baseline".to_string(),
+                    category: crate::memory::types::MemoryCategory::Project,
+                    source: None,
+                    tags: vec!["automation".to_string()],
+                    entities: vec!["TraceDecay".to_string()],
+                    trust: Some(0.8),
+                    metadata: json!({}),
+                },
+                crate::application::memory::MemoryOperationContext::generated(
+                    &owner,
+                    "seed automation validation",
+                    None,
                 )
-                .await
-                .unwrap()
-                .fact
-                .unwrap()
-                .fact_id
-        };
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+            .fact
+            .unwrap()
+            .fact_id;
         let transaction = db
             .begin_write_transaction("hold automation validation writer")
             .await
             .unwrap();
         transaction
             .execute(
-                "UPDATE memory_facts SET content = 'Validation stays read-only' WHERE fact_id = ?1",
+                "UPDATE memory_facts SET updated_at = updated_at WHERE fact_id = ?1",
                 [existing_fact_id],
             )
             .await
@@ -1830,7 +1870,7 @@ mod tests {
 
         let validated = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            validate_session_fact_proposals(&db, &proposals, &evidence),
+            validate_session_fact_proposals(&memory, &proposals, &evidence),
         )
         .await
         .expect("read-only validation must not wait for writer authority")
@@ -1838,8 +1878,8 @@ mod tests {
         assert_eq!(validated.0.len(), 1);
         assert!(validated.1.is_empty());
         assert_eq!(
-            crate::memory::store::MemoryStore::new(db.conn())
-                .get_fact(existing_fact_id)
+            memory
+                .get_fact_v1(existing_fact_id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1847,5 +1887,169 @@ mod tests {
             0
         );
         transaction.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_apply_refreshes_digest_only_for_a_new_authority_promotion() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile_root = std::env::var_os(crate::config::USER_DATA_DIR_ENV)
+            .map(PathBuf::from)
+            .expect("pinned profile root");
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let database_path = temp.path().join("memory.db");
+        let authority = DatabaseAuthority::acquire_test(
+            &database_path,
+            "automation proposal digest disposition test",
+        )
+        .unwrap();
+        let (database, _) = Database::initialize(&database_path, &authority)
+            .await
+            .unwrap();
+        let memory =
+            MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
+                .unwrap();
+        let dashboard_root = temp.path().join("dashboard");
+        let records = record_session_fact_proposals(
+            &memory,
+            &dashboard_root,
+            "run-digest-disposition",
+            None,
+            &[json!({
+                "add_fact_request": {
+                    "content": "Refresh the digest only after a new authority promotion",
+                    "category": "project",
+                    "source": "automation-test",
+                    "tags": ["automation"],
+                    "entities": ["TraceDecay"],
+                    "trust": 0.9,
+                    "metadata": {}
+                }
+            })],
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let (applied, newly_promoted) = auto_apply_session_fact_proposals(
+            &memory,
+            Some(&project_root),
+            &dashboard_root,
+            records.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(newly_promoted);
+        assert_eq!(applied[0].state, FactProposalState::Applied);
+
+        let snapshot = crate::automation::memory_digest::memory_digest_snapshot_path(&profile_root);
+        assert!(snapshot.exists(), "new promotion must refresh the digest");
+        std::fs::remove_file(&snapshot).unwrap();
+
+        let (replayed, newly_promoted) = auto_apply_session_fact_proposals(
+            &memory,
+            Some(&project_root),
+            &dashboard_root,
+            records,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !newly_promoted,
+            "an applied proposal replay is not a promotion"
+        );
+        assert_eq!(replayed[0].state, FactProposalState::Applied);
+        assert!(
+            !snapshot.exists(),
+            "an idempotent applied replay must not refresh the digest"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_apply_flushes_a_new_promotion_before_later_conflict_returns() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile_root = std::env::var_os(crate::config::USER_DATA_DIR_ENV)
+            .map(PathBuf::from)
+            .expect("pinned profile root");
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let database_path = temp.path().join("memory.db");
+        let authority = DatabaseAuthority::acquire_test(
+            &database_path,
+            "automation proposal partial digest refresh test",
+        )
+        .unwrap();
+        let (database, _) = Database::initialize(&database_path, &authority)
+            .await
+            .unwrap();
+        let owner = FactOwnerV1::Profile;
+        let memory =
+            MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database)).unwrap();
+        let dashboard_root = temp.path().join("dashboard");
+        let records = record_session_fact_proposals(
+            &memory,
+            &dashboard_root,
+            "run-digest-partial",
+            None,
+            &[
+                json!({
+                    "add_fact_request": {
+                        "content": "A successful promotion must refresh before a later conflict",
+                        "category": "project",
+                        "source": "automation-test",
+                        "tags": ["automation"],
+                        "entities": ["TraceDecay"],
+                        "trust": 0.9,
+                        "metadata": {}
+                    }
+                }),
+                json!({
+                    "add_fact_request": {
+                        "content": "This proposal is rejected to force the later conflict",
+                        "category": "project",
+                        "source": "automation-test",
+                        "tags": ["automation"],
+                        "entities": ["TraceDecay"],
+                        "trust": 0.9,
+                        "metadata": {}
+                    }
+                }),
+            ],
+            &[],
+        )
+        .await
+        .unwrap();
+        let rejected_id =
+            tracedecay_domain::ProvenanceId::new(records[1].proposal_id.clone()).unwrap();
+        let rejected = memory
+            .get_compatibility_fact_proposal(rejected_id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        memory
+            .reject_compatibility_fact_proposal(
+                rejected_id,
+                rejected.revision(),
+                tracedecay_domain::ActorId::new("test:reviewer".to_string()).unwrap(),
+                "fixture conflict".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let error = auto_apply_session_fact_proposals(
+            &memory,
+            Some(&project_root),
+            &dashboard_root,
+            records,
+        )
+        .await
+        .expect_err("the rejected second proposal must keep its original error path");
+        assert!(error.to_string().contains("not pending approval"));
+        assert!(
+            crate::automation::memory_digest::memory_digest_snapshot_path(&profile_root).exists(),
+            "the first new promotion must still refresh before returning the later conflict"
+        );
     }
 }

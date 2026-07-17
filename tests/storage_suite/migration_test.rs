@@ -182,6 +182,12 @@ async fn scalar_i64(conn: &Connection, sql: &str) -> i64 {
     row.get(0).expect("failed to read scalar value")
 }
 
+fn valid_v23_compatibility_bank_vector() -> Vec<u8> {
+    let mut vector = vec![0_u8; 8 + 2048 * 4];
+    vector[..8].copy_from_slice(&(2048_u64).to_le_bytes());
+    vector
+}
+
 async fn assert_backfilled_memory_has_vectors_and_banks(
     conn: &Connection,
     category: &str,
@@ -680,6 +686,49 @@ async fn create_v20_current_projection_for_v21_test(conn: &Connection) {
     set_user_version(conn, 20).await;
 }
 
+/// Builds the committed V21 shape without V22 compatibility additions.
+async fn create_v21_current_projection_for_v22_test(conn: &Connection) {
+    create_v20_current_projection_for_v21_test(conn).await;
+    conn.execute_batch(
+        "ALTER TABLE memory_v2_current_facts
+             ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0 CHECK(retrieval_count >= 0);
+         ALTER TABLE memory_v2_current_facts
+             ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0 CHECK(access_count >= 0);
+         ALTER TABLE memory_v2_current_facts
+             ADD COLUMN helpful_count INTEGER NOT NULL DEFAULT 0 CHECK(helpful_count >= 0);
+         ALTER TABLE memory_v2_current_facts
+             ADD COLUMN unhelpful_count INTEGER NOT NULL DEFAULT 0 CHECK(unhelpful_count >= 0);
+         ALTER TABLE memory_v2_current_facts ADD COLUMN last_retrieved_at INTEGER;
+         ALTER TABLE memory_v2_current_facts ADD COLUMN last_recalled_at INTEGER;
+         ALTER TABLE memory_v2_current_facts ADD COLUMN last_feedback_at INTEGER;
+         ALTER TABLE memory_v2_current_facts
+             ADD COLUMN projection_state TEXT NOT NULL DEFAULT 'unavailable'
+                 CHECK(projection_state IN ('ready', 'rebuilding', 'stale', 'unavailable'));
+         ALTER TABLE memory_v2_current_facts
+             ADD COLUMN vector_watermark_json TEXT
+                 CHECK(vector_watermark_json IS NULL OR json_valid(vector_watermark_json));",
+    )
+    .await
+    .expect("failed to create V21 current projection fixture");
+    conn.execute_batch(
+        "CREATE TABLE memory_v2_backfill_progress (
+            owner_kind TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            owner_json TEXT NOT NULL,
+            source_store_id TEXT NOT NULL,
+            feedback_frontier INTEGER NOT NULL,
+            feedback_cursor INTEGER NOT NULL
+         );
+         INSERT INTO memory_v2_backfill_progress(
+            owner_kind, project_id, owner_json, source_store_id,
+            feedback_frontier, feedback_cursor
+         ) VALUES('profile', '', '{}', 'legacy-memory-v1', 11, 11);",
+    )
+    .await
+    .expect("failed to create completed V21 feedback-backfill fixture");
+    set_user_version(conn, 21).await;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -693,7 +742,7 @@ async fn test_create_schema_fresh_db() {
         .await
         .expect("create_schema should succeed");
 
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         2,
@@ -727,6 +776,13 @@ async fn test_create_schema_fresh_db() {
     assert!(table_exists(&conn, "memory_v2_proposals").await);
     assert!(table_exists(&conn, "memory_v2_proposal_transitions").await);
     assert!(table_exists(&conn, "memory_v2_proposal_current").await);
+    assert!(table_exists(&conn, "memory_v2_compatibility_operation_receipts").await);
+    assert!(table_exists(&conn, "memory_v2_legacy_feedback_event_map").await);
+    assert!(table_exists(&conn, "memory_v2_feedback_history").await);
+    assert!(table_exists(&conn, "memory_v2_feedback_history_repair_progress").await);
+    assert!(table_exists(&conn, "memory_v2_fact_relations").await);
+    assert!(table_exists(&conn, "memory_v2_compatibility_banks").await);
+    assert!(table_exists(&conn, "memory_v2_compatibility_bank_dirty").await);
     assert!(table_exists(&conn, "redundancy_pairs").await);
     assert!(index_exists(&conn, "idx_redundancy_pairs_node_b").await);
     assert!(column_exists(&conn, "memory_v2_current_facts", "retrieval_count").await);
@@ -735,8 +791,15 @@ async fn test_create_schema_fresh_db() {
     assert!(column_exists(&conn, "memory_v2_current_facts", "unhelpful_count").await);
     assert!(column_exists(&conn, "memory_v2_current_facts", "projection_state").await);
     assert!(column_exists(&conn, "memory_v2_current_facts", "vector_watermark_json").await);
+    assert!(column_exists(&conn, "memory_v2_fact_relations", "provenance_json").await);
     assert!(index_exists(&conn, "idx_memory_v2_current_compatibility_search").await);
     assert!(index_exists(&conn, "idx_memory_v2_current_projection_state").await);
+    assert!(index_exists(&conn, "idx_memory_v2_compatibility_receipts_fact").await);
+    assert!(index_exists(&conn, "idx_memory_v2_feedback_history_repair_pending").await);
+    assert!(index_exists(&conn, "idx_memory_v2_fact_relations_source").await);
+    assert!(index_exists(&conn, "idx_memory_v2_fact_relations_target").await);
+    assert!(index_exists(&conn, "idx_memory_v2_compatibility_banks_owner").await);
+    assert!(index_exists(&conn, "idx_memory_v2_compatibility_bank_dirty_owner").await);
 }
 
 /// create_schema is idempotent — calling it twice does not error.
@@ -751,7 +814,64 @@ async fn test_create_schema_idempotent() {
         .await
         .expect("second create_schema should succeed");
 
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
+}
+
+#[tokio::test]
+async fn test_create_schema_fresh_v22_proposal_projection_is_terminal() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_schema(&conn)
+        .await
+        .expect("fresh V22 schema should install");
+
+    conn.execute_batch(
+        "INSERT INTO memory_v2_proposals(
+            proposal_id, owner_kind, project_id, owner_json, idempotency_key,
+            request_digest, request_json, evidence_json, submitted_at
+          ) VALUES(
+            'proposal.fresh.v22', 'profile', '', '{}', 'fresh-v22', 'fresh-v22',
+            '{}', '{}', 1
+          );
+          INSERT INTO memory_v2_proposal_transitions(
+            transition_id, proposal_id, owner_kind, project_id,
+            previous_state, current_state, reviewer_json, validation_json,
+            origin, promoted_fact_id, promoted_assertion_id, promoted_event_id,
+            transition_json, occurred_at
+          ) VALUES(
+            'transition.fresh.v22', 'proposal.fresh.v22', 'profile', '',
+            NULL, 'quarantined', NULL, NULL, 'runtime', NULL, NULL, NULL, '{}', 1
+          );
+          INSERT INTO memory_v2_proposal_current(
+            proposal_id, owner_kind, project_id, state, revision,
+            last_transition_id, updated_at
+          ) VALUES(
+            'proposal.fresh.v22', 'profile', '', 'quarantined', 1,
+            'transition.fresh.v22', 1
+          );",
+    )
+    .await
+    .expect("fresh V22 projection must admit quarantined terminal state");
+
+    assert!(
+        conn.execute(
+            "UPDATE memory_v2_proposal_current SET state = 'applying'
+             WHERE proposal_id = 'proposal.fresh.v22'",
+            (),
+        )
+        .await
+        .is_err(),
+        "fresh V22 projection must never durably expose applying"
+    );
+    assert!(
+        conn.execute(
+            "UPDATE memory_v2_proposal_current SET revision = 0
+             WHERE proposal_id = 'proposal.fresh.v22'",
+            (),
+        )
+        .await
+        .is_err(),
+        "fresh V22 projection must start revisions at one"
+    );
 }
 
 /// migrate returns false when already at the latest version.
@@ -765,20 +885,27 @@ async fn test_migrate_already_latest_returns_false() {
         !migrated,
         "migrate should return false when already at latest"
     );
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
 }
 
 #[tokio::test]
-async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_v21_contracts() {
+async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_to_v22_contracts() {
     let (conn, _db, _dir) = create_raw_db().await;
     create_v19_memory_schema_for_v20_test(&conn).await;
+    conn.execute(
+        "UPDATE memory_v2_proposal_current SET state = 'applying'
+         WHERE proposal_id = 'proposal.v19'",
+        (),
+    )
+    .await
+    .expect("fixture must model a legacy durable applying projection");
 
     assert!(
         migrate(&conn)
             .await
             .expect("v19 PR7 schema should migrate through v20 and v21")
     );
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
     assert!(column_exists(&conn, "memory_v2_backfill_progress", "cutover_receipt_json").await);
     assert!(column_exists(&conn, "memory_v2_proposals", "idempotency_key").await);
     assert!(column_exists(&conn, "memory_v2_proposals", "request_digest").await);
@@ -789,6 +916,10 @@ async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_v21_contrac
     assert!(index_exists(&conn, "idx_memory_v2_proposal_list").await);
     assert!(column_exists(&conn, "memory_v2_current_facts", "projection_state").await);
     assert!(index_exists(&conn, "idx_memory_v2_current_compatibility_search").await);
+    assert!(table_exists(&conn, "memory_v2_compatibility_operation_receipts").await);
+    assert!(table_exists(&conn, "memory_v2_legacy_feedback_event_map").await);
+    assert!(table_exists(&conn, "memory_v2_feedback_history").await);
+    assert!(table_exists(&conn, "memory_v2_feedback_history_repair_progress").await);
 
     let mut rows = conn
         .query(
@@ -843,7 +974,7 @@ async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_v21_contrac
 
     let mut rows = conn
         .query(
-            "SELECT state, last_transition_id FROM memory_v2_proposal_current
+            "SELECT state, revision, last_transition_id FROM memory_v2_proposal_current
              WHERE proposal_id = 'proposal.v19'",
             (),
         )
@@ -855,9 +986,50 @@ async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_v21_contrac
         .expect("read rebuilt proposal current state row")
         .expect("rebuilt proposal current state row");
     let state: String = row.get(0).expect("decode rebuilt proposal state");
-    let last_transition_id: String = row.get(1).expect("decode rebuilt transition id");
+    let revision: i64 = row.get(1).expect("decode rebuilt proposal revision");
+    let last_transition_id: String = row.get(2).expect("decode rebuilt transition id");
     assert_eq!(state, "pending");
+    assert_eq!(
+        revision, 1,
+        "V22 rebuild must normalize revision zero to one"
+    );
     assert_eq!(last_transition_id, "transition.v19");
+
+    assert!(
+        conn.execute(
+            "UPDATE memory_v2_proposal_current SET state = 'applying'
+             WHERE proposal_id = 'proposal.v19'",
+            (),
+        )
+        .await
+        .is_err(),
+        "V22 current proposal projection must never durably expose applying"
+    );
+    conn.execute(
+        "UPDATE memory_v2_proposal_current SET state = 'quarantined'
+         WHERE proposal_id = 'proposal.v19'",
+        (),
+    )
+    .await
+    .expect("V22 current projection must permit quarantined proposals");
+    assert!(
+        conn.execute(
+            "INSERT INTO memory_v2_proposal_transitions(
+                transition_id, proposal_id, owner_kind, project_id,
+                previous_state, current_state, reviewer_json, validation_json,
+                origin, promoted_fact_id, promoted_assertion_id, promoted_event_id,
+                transition_json, occurred_at
+             ) VALUES(
+                'transition.applying.v22', 'proposal.v19', 'profile', '',
+                'pending', 'applying', NULL, NULL, 'runtime', NULL, NULL, NULL,
+                '{}', 101
+             )",
+            (),
+        )
+        .await
+        .is_err(),
+        "V22 must not append new applying transitions"
+    );
 
     conn.execute_batch(
         "INSERT INTO memory_v2_facts(
@@ -941,7 +1113,7 @@ async fn test_migrate_v20_current_projection_adds_v21_compatibility_state() {
             .await
             .expect("v20 current projection should migrate to v21")
     );
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
     for column in [
         "retrieval_count",
         "access_count",
@@ -1036,6 +1208,518 @@ async fn test_migrate_v20_current_projection_adds_v21_compatibility_state() {
 }
 
 #[tokio::test]
+async fn test_migrate_v21_adds_owner_bound_compatibility_receipt_ledger() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_v21_current_projection_for_v22_test(&conn).await;
+    assert!(!table_exists(&conn, "memory_v2_compatibility_operation_receipts").await);
+
+    assert!(
+        migrate(&conn)
+            .await
+            .expect("v21 current projection should migrate to v22")
+    );
+    assert_eq!(get_user_version(&conn).await, 23);
+    assert!(table_exists(&conn, "memory_v2_compatibility_operation_receipts").await);
+    assert!(table_exists(&conn, "memory_v2_legacy_feedback_event_map").await);
+    assert!(table_exists(&conn, "memory_v2_feedback_history").await);
+    assert!(table_exists(&conn, "memory_v2_feedback_history_repair_progress").await);
+    assert!(table_exists(&conn, "memory_v2_fact_relations").await);
+    assert!(table_exists(&conn, "memory_v2_compatibility_banks").await);
+    assert!(table_exists(&conn, "memory_v2_compatibility_bank_dirty").await);
+    assert!(column_exists(&conn, "memory_v2_fact_relations", "provenance_json").await);
+    assert!(index_exists(&conn, "idx_memory_v2_compatibility_receipts_fact").await);
+    assert!(index_exists(&conn, "idx_memory_v2_fact_relations_source").await);
+    assert!(index_exists(&conn, "idx_memory_v2_fact_relations_target").await);
+    assert!(index_exists(&conn, "idx_memory_v2_compatibility_banks_owner").await);
+    assert!(index_exists(&conn, "idx_memory_v2_compatibility_bank_dirty_owner").await);
+
+    let mut rows = conn
+        .query(
+            "SELECT feedback_frontier, feedback_cursor, phase
+             FROM memory_v2_feedback_history_repair_progress
+             WHERE owner_kind = 'profile' AND project_id = ''
+               AND source_store_id = 'legacy-memory-v1'",
+            (),
+        )
+        .await
+        .expect("read V22 pending feedback-history repair");
+    let row = rows
+        .next()
+        .await
+        .expect("read V22 pending feedback-history repair row")
+        .expect("V22 migration must seed a repair row without scanning history");
+    assert_eq!(row.get::<i64>(0).expect("decode repair frontier"), 11);
+    assert_eq!(row.get::<i64>(1).expect("decode repair cursor"), 0);
+    assert_eq!(
+        row.get::<String>(2).expect("decode repair phase"),
+        "pending"
+    );
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM memory_v2_legacy_feedback_event_map"
+        )
+        .await,
+        0,
+        "V22 migration must seed repair work, not scan legacy feedback under migration lock"
+    );
+    assert_eq!(
+        scalar_i64(&conn, "SELECT COUNT(*) FROM memory_v2_feedback_history").await,
+        0,
+        "V22 migration must not materialize feedback history under migration lock"
+    );
+
+    conn.execute(
+        "INSERT INTO memory_v2_compatibility_operation_receipts(
+            owner_kind, project_id, operation_id, operation_kind, request_digest,
+            fact_id, event_id, receipt_json, recorded_at
+         ) VALUES(
+            'profile', '', 'operation.v22.feedback', 'feedback', 'digest.v22',
+            'fact.v20', 'event.v20',
+            '{\"outcome\":\"applied\",\"helpful_count\":1}', 120
+         )",
+        (),
+    )
+    .await
+    .expect("store a non-payload compatibility receipt");
+    conn.execute(
+        "INSERT INTO memory_v2_compatibility_operation_receipts(
+            owner_kind, project_id, operation_id, operation_kind, request_digest,
+            fact_id, event_id, receipt_json, recorded_at
+         ) VALUES(
+            'profile', '', 'operation.v22.repair', 'repair', 'digest.repair',
+            NULL, NULL, '{\"outcome\":\"advanced\",\"processed\":512}', 121
+         )",
+        (),
+    )
+    .await
+    .expect("a bounded repair command must retain an idempotency receipt");
+    for (operation_id, operation_kind) in [
+        ("operation.v22.curation", "curation"),
+        ("operation.v22.merge", "merge"),
+    ] {
+        conn.execute(
+            "INSERT INTO memory_v2_compatibility_operation_receipts(
+                owner_kind, project_id, operation_id, operation_kind, request_digest,
+                fact_id, event_id, receipt_json, recorded_at
+             ) VALUES(
+                'profile', '', ?1, ?2, ?1,
+                NULL, NULL, '{\"outcome\":\"applied\"}', 121
+             )",
+            libsql::params![operation_id, operation_kind],
+        )
+        .await
+        .expect("a real compatibility operation kind must retain an idempotency receipt");
+    }
+    assert!(
+        conn.execute(
+            "INSERT INTO memory_v2_compatibility_operation_receipts(
+                owner_kind, project_id, operation_id, operation_kind, request_digest,
+                fact_id, event_id, receipt_json, recorded_at
+             ) VALUES(
+                'profile', '', 'operation.v22.invalid-kind', 'repair_all', 'digest.invalid',
+                NULL, NULL, '{\"outcome\":\"rejected\"}', 121
+             )",
+            (),
+        )
+        .await
+        .is_err(),
+        "the receipt ledger must admit only explicit operation kinds"
+    );
+    assert!(
+        conn.execute(
+            "INSERT INTO memory_v2_compatibility_operation_receipts(
+                owner_kind, project_id, operation_id, operation_kind, request_digest,
+                fact_id, event_id, receipt_json, recorded_at
+             ) VALUES(
+                'profile', '', 'operation.v22.feedback', 'update', 'different-digest',
+                'fact.v20', 'event.v20', '{\"outcome\":\"applied\"}', 121
+             )",
+            (),
+        )
+        .await
+        .is_err(),
+        "same owner-bound operation id must not admit a conflicting retry"
+    );
+    assert!(
+        conn.execute(
+            "INSERT INTO memory_v2_compatibility_operation_receipts(
+                owner_kind, project_id, operation_id, operation_kind, request_digest,
+                fact_id, event_id, receipt_json, recorded_at
+             ) VALUES(
+                'profile', '', 'operation.v22.payload', 'feedback', 'digest.payload',
+                'fact.v20', 'event.v20', '{\"metadata\":{\"content\":\"secret\"}}', 121
+             )",
+            (),
+        )
+        .await
+        .is_err(),
+        "compatibility receipts must not retain payload-bearing fields"
+    );
+    assert!(
+        conn.execute(
+            "INSERT INTO memory_v2_compatibility_operation_receipts(
+                owner_kind, project_id, operation_id, operation_kind, request_digest,
+                fact_id, event_id, receipt_json, recorded_at
+             ) VALUES(
+                'profile', '', 'operation.v22.case-payload', 'feedback', 'digest.case',
+                'fact.v20', 'event.v20', '{\"Content\":\"secret\"}', 121
+             )",
+            (),
+        )
+        .await
+        .is_err(),
+        "receipt payload-key filtering must be case-insensitive"
+    );
+    assert!(
+        conn.execute(
+            "UPDATE memory_v2_compatibility_operation_receipts
+             SET receipt_json = '{\"outcome\":\"changed\"}'
+             WHERE operation_id = 'operation.v22.feedback'",
+            (),
+        )
+        .await
+        .is_err(),
+        "compatibility receipts must remain immutable"
+    );
+    assert_eq!(
+        scalar_i64(&conn, "SELECT COUNT(*) FROM pragma_foreign_key_check").await,
+        0,
+        "a receipt must retain owner-bound canonical references"
+    );
+    assert!(
+        !migrate(&conn)
+            .await
+            .expect("replaying V22 migration should be a no-op")
+    );
+}
+
+#[tokio::test]
+async fn test_migrate_v21_adds_owner_bound_typed_fact_relations() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_v21_current_projection_for_v22_test(&conn).await;
+    migrate(&conn)
+        .await
+        .expect("v21 current projection should migrate to V22 relations");
+
+    assert!(table_exists(&conn, "memory_v2_fact_relations").await);
+    assert!(column_exists(&conn, "memory_v2_fact_relations", "provenance_json").await);
+    assert!(index_exists(&conn, "idx_memory_v2_fact_relations_source").await);
+    assert!(index_exists(&conn, "idx_memory_v2_fact_relations_target").await);
+    conn.execute_batch(
+        "INSERT INTO memory_v2_facts(
+            fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+         ) VALUES
+            ('fact.relation.source', 'profile', '', '{}', '{}', 200),
+            ('fact.relation.target', 'profile', '', '{}', '{}', 200),
+            ('fact.relation.evidence', 'profile', '', '{}', '{}', 200),
+            ('fact.relation.other-owner', 'project', 'project.other',
+             '{\"project_id\":\"project.other\"}', '{}', 200);",
+    )
+    .await
+    .expect("create canonical fact-relation fixture");
+    conn.execute(
+        "INSERT INTO memory_v2_fact_relations(
+            owner_kind, project_id, source_fact_id, target_fact_id, relation,
+            confidence, source_label, provenance_json, evidence_fact_ids_json, occurred_at, updated_at
+         ) VALUES(
+            'profile', '', 'fact.relation.source', 'fact.relation.target', 'supports',
+            0.8, 'curator', '{\"provenance\":\"fixture\"}',
+            '[\"fact.relation.evidence\"]', 200, 200
+         )",
+        (),
+    )
+    .await
+    .expect("insert a typed supports relation");
+    conn.execute(
+        "INSERT INTO memory_v2_fact_relations(
+            owner_kind, project_id, source_fact_id, target_fact_id, relation,
+            confidence, source_label, provenance_json, evidence_fact_ids_json, occurred_at, updated_at
+         ) VALUES(
+            'profile', '', 'fact.relation.source', 'fact.relation.target', 'supports',
+            0.9, 'curator', '{\"provenance\":\"updated\"}',
+            '[\"fact.relation.evidence\"]', 200, 201
+         ) ON CONFLICT(owner_kind, project_id, source_fact_id, target_fact_id, relation)
+         DO UPDATE SET confidence = excluded.confidence,
+                       source_label = excluded.source_label,
+                       provenance_json = excluded.provenance_json,
+                       evidence_fact_ids_json = excluded.evidence_fact_ids_json,
+                       updated_at = excluded.updated_at",
+        (),
+    )
+    .await
+    .expect("typed relation rows must support canonical upsert");
+    let mut rows = conn
+        .query(
+            "SELECT confidence, provenance_json, occurred_at, updated_at
+             FROM memory_v2_fact_relations
+             WHERE owner_kind = 'profile' AND project_id = ''
+               AND source_fact_id = 'fact.relation.source'
+               AND target_fact_id = 'fact.relation.target' AND relation = 'supports'",
+            (),
+        )
+        .await
+        .expect("read upserted typed relation");
+    let row = rows
+        .next()
+        .await
+        .expect("read upserted typed relation row")
+        .expect("typed relation row");
+    assert_eq!(row.get::<f64>(0).expect("decode relation confidence"), 0.9);
+    assert_eq!(
+        row.get::<String>(1).expect("decode relation provenance"),
+        "{\"provenance\":\"updated\"}"
+    );
+    assert_eq!(row.get::<i64>(2).expect("decode relation occurrence"), 200);
+    assert_eq!(row.get::<i64>(3).expect("decode relation update"), 201);
+
+    for relation in ["contradicts", "supersedes", "derived_from"] {
+        conn.execute(
+            "INSERT INTO memory_v2_fact_relations(
+                owner_kind, project_id, source_fact_id, target_fact_id, relation,
+                confidence, source_label, provenance_json, evidence_fact_ids_json,
+                occurred_at, updated_at
+             ) VALUES(
+                'profile', '', 'fact.relation.source', 'fact.relation.target', ?1,
+                0.8, 'curator', '{\"provenance\":\"fixture\"}',
+                '[\"fact.relation.evidence\"]', 202, 202
+             )",
+            libsql::params![relation],
+        )
+        .await
+        .expect("V22 must preserve every legacy relation kind canonically");
+    }
+    assert_eq!(
+        scalar_i64(&conn, "SELECT COUNT(*) FROM memory_v2_fact_relations").await,
+        4,
+        "all four legacy relation kinds must have canonical rows"
+    );
+
+    for statement in [
+        "INSERT INTO memory_v2_fact_relations(
+             owner_kind, project_id, source_fact_id, target_fact_id, relation,
+             confidence, source_label, provenance_json, evidence_fact_ids_json, occurred_at, updated_at
+          ) VALUES(
+             'profile', '', 'fact.relation.source', 'fact.relation.target', 'unknown',
+             0.8, 'curator', '{\"provenance\":\"fixture\"}',
+             '[\"fact.relation.evidence\"]', 203, 203
+          )",
+        "INSERT INTO memory_v2_fact_relations(
+             owner_kind, project_id, source_fact_id, target_fact_id, relation,
+             confidence, source_label, provenance_json, evidence_fact_ids_json, occurred_at, updated_at
+          ) VALUES(
+             'profile', '', 'fact.relation.source', 'fact.relation.other-owner', 'derived_from',
+             0.8, 'curator', '{\"provenance\":\"fixture\"}',
+             '[\"fact.relation.evidence\"]', 203, 203
+          )",
+        "INSERT INTO memory_v2_fact_relations(
+             owner_kind, project_id, source_fact_id, target_fact_id, relation,
+             confidence, source_label, provenance_json, evidence_fact_ids_json, occurred_at, updated_at
+          ) VALUES(
+             'profile', '', 'fact.relation.source', 'fact.relation.target', 'derived_from',
+             0.8, 'curator', '{\"provenance\":\"fixture\"}',
+             '[\"fact.relation.other-owner\"]', 203, 203
+          )",
+        "INSERT INTO memory_v2_fact_relations(
+             owner_kind, project_id, source_fact_id, target_fact_id, relation,
+             confidence, source_label, provenance_json, evidence_fact_ids_json, occurred_at, updated_at
+          ) VALUES(
+             'profile', '', 'fact.relation.source', 'fact.relation.target', 'derived_from',
+             0.8, 'curator', 'not-json', '[\"fact.relation.evidence\"]', 203, 203
+          )",
+        "INSERT INTO memory_v2_fact_relations(
+             owner_kind, project_id, source_fact_id, target_fact_id, relation,
+             confidence, source_label, provenance_json, evidence_fact_ids_json, occurred_at, updated_at
+          ) VALUES(
+             'profile', '', 'fact.relation.source', 'fact.relation.target', 'derived_from',
+             0.8, 'curator', '{\"provenance\":\"fixture\"}',
+             '[\"fact.relation.evidence\", \"fact.relation.evidence\"]', 203, 203
+          )",
+    ] {
+        assert!(
+            conn.execute(statement, ()).await.is_err(),
+            "V22 relation rows must reject invalid kinds, provenance, and owner evidence"
+        );
+    }
+    assert_eq!(
+        scalar_i64(&conn, "SELECT COUNT(*) FROM pragma_foreign_key_check").await,
+        0,
+        "typed relation rows must retain exact owner-bound canonical references"
+    );
+}
+
+#[tokio::test]
+async fn test_migrate_v21_to_v23_scopes_compatibility_banks_and_dirty_state_by_owner() {
+    let (conn, _db, _dir) = create_raw_db().await;
+    create_v21_current_projection_for_v22_test(&conn).await;
+    migrate(&conn)
+        .await
+        .expect("v21 current projection should migrate to V23 compatibility banks");
+
+    let profile_vector = valid_v23_compatibility_bank_vector();
+    let project_vector = valid_v23_compatibility_bank_vector();
+    conn.execute(
+        "INSERT INTO memory_v2_compatibility_banks(
+            owner_kind, project_id, source_store_id, owner_json, bank_name,
+            vector, hrr_algebra, hrr_dim, fact_count, updated_at
+         ) VALUES(
+            'profile', '', 'legacy-memory-v1', '{\"kind\":\"profile\"}', 'all',
+            ?1, 'amari_fhrr', 2048, 1, 100
+         )",
+        libsql::params![profile_vector],
+    )
+    .await
+    .expect("insert profile-owned compatibility bank");
+    conn.execute(
+        "INSERT INTO memory_v2_compatibility_banks(
+            owner_kind, project_id, source_store_id, owner_json, bank_name,
+            vector, hrr_algebra, hrr_dim, fact_count, updated_at
+         ) VALUES(
+            'project', 'project.other', 'legacy-memory-v1',
+            '{\"kind\":\"project\",\"project_id\":\"project.other\"}', 'all',
+            ?1, 'amari_fhrr', 2048, 1, 100
+         )",
+        libsql::params![project_vector],
+    )
+    .await
+    .expect("insert project-owned compatibility bank");
+
+    let rebuilt_profile_vector = valid_v23_compatibility_bank_vector();
+    conn.execute(
+        "INSERT INTO memory_v2_compatibility_banks(
+            owner_kind, project_id, source_store_id, owner_json, bank_name,
+            vector, hrr_algebra, hrr_dim, fact_count, updated_at
+         ) VALUES(
+            'profile', '', 'legacy-memory-v1', '{\"kind\":\"profile\"}', 'all',
+            ?1, 'amari_fhrr', 2048, 2, 101
+         ) ON CONFLICT(owner_kind, project_id, source_store_id, bank_name)
+         DO UPDATE SET vector = excluded.vector,
+                       hrr_algebra = excluded.hrr_algebra,
+                       hrr_dim = excluded.hrr_dim,
+                       fact_count = excluded.fact_count,
+                       updated_at = excluded.updated_at",
+        libsql::params![rebuilt_profile_vector],
+    )
+    .await
+    .expect("rebuild must replace only the owning bank projection");
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT fact_count FROM memory_v2_compatibility_banks
+             WHERE owner_kind = 'profile' AND project_id = ''
+               AND source_store_id = 'legacy-memory-v1' AND bank_name = 'all'",
+        )
+        .await,
+        2
+    );
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT fact_count FROM memory_v2_compatibility_banks
+             WHERE owner_kind = 'project' AND project_id = 'project.other'
+               AND source_store_id = 'legacy-memory-v1' AND bank_name = 'all'",
+        )
+        .await,
+        1,
+        "a profile rebuild must not mutate another owner's bank"
+    );
+
+    conn.execute_batch(
+        "INSERT INTO memory_v2_compatibility_bank_dirty(
+            owner_kind, project_id, source_store_id, owner_json, bank_name, updated_at
+         ) VALUES
+            ('profile', '', 'legacy-memory-v1', '{\"kind\":\"profile\"}', 'all', 100),
+            ('project', 'project.other', 'legacy-memory-v1',
+             '{\"kind\":\"project\",\"project_id\":\"project.other\"}', 'all', 100);",
+    )
+    .await
+    .expect("insert owner-scoped dirty bank projections");
+    assert_eq!(
+        conn.execute(
+            "DELETE FROM memory_v2_compatibility_bank_dirty
+             WHERE owner_kind = 'profile' AND project_id = ''
+               AND source_store_id = 'legacy-memory-v1' AND bank_name = 'all'
+               AND updated_at = 99",
+            (),
+        )
+        .await
+        .expect("attempt stale dirty clear"),
+        0,
+        "a rebuild may clear only the exact dirty generation it read"
+    );
+    assert_eq!(
+        conn.execute(
+            "DELETE FROM memory_v2_compatibility_bank_dirty
+             WHERE owner_kind = 'profile' AND project_id = ''
+               AND source_store_id = 'legacy-memory-v1' AND bank_name = 'all'
+               AND updated_at = 100",
+            (),
+        )
+        .await
+        .expect("clear rebuilt profile dirty generation"),
+        1
+    );
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM memory_v2_compatibility_bank_dirty
+             WHERE owner_kind = 'project' AND project_id = 'project.other'",
+        )
+        .await,
+        1,
+        "clearing one owner's rebuilt bank must retain another owner's dirty state"
+    );
+
+    let malformed_header = vec![0_u8; 8200];
+    assert!(
+        conn.execute(
+            "INSERT INTO memory_v2_compatibility_banks(
+                owner_kind, project_id, source_store_id, owner_json, bank_name,
+                vector, hrr_algebra, hrr_dim, fact_count, updated_at
+             ) VALUES(
+                'profile', '', 'legacy-memory-v1', '{\"kind\":\"profile\"}', 'general',
+                ?1, 'amari_fhrr', 2048, 1, 102
+             )",
+            libsql::params![malformed_header],
+        )
+        .await
+        .is_err(),
+        "a bank vector must carry the canonical f32-2048 serialization header"
+    );
+    let mut malformed_length = valid_v23_compatibility_bank_vector();
+    malformed_length.pop();
+    assert!(
+        conn.execute(
+            "INSERT INTO memory_v2_compatibility_banks(
+                owner_kind, project_id, source_store_id, owner_json, bank_name,
+                vector, hrr_algebra, hrr_dim, fact_count, updated_at
+             ) VALUES(
+                'profile', '', 'legacy-memory-v1', '{\"kind\":\"profile\"}', 'general',
+                ?1, 'amari_fhrr', 2048, 1, 102
+             )",
+            libsql::params![malformed_length],
+        )
+        .await
+        .is_err(),
+        "a bank vector must have the exact canonical f32-2048 serialization length"
+    );
+    assert!(
+        conn.execute(
+            "INSERT INTO memory_v2_compatibility_bank_dirty(
+                owner_kind, project_id, source_store_id, owner_json, bank_name, updated_at
+             ) VALUES(
+                'profile', '', 'legacy-memory-v1',
+                '{\"kind\":\"project\",\"project_id\":\"project.other\"}', 'all', 102
+             )",
+            (),
+        )
+        .await
+        .is_err(),
+        "owner JSON must agree with the canonical owner-keyed dirty identity"
+    );
+}
+
+#[tokio::test]
 async fn test_migrate_v20_proposal_rebuild_rolls_back_atomically() {
     let (conn, _db, _dir) = create_raw_db().await;
     create_v19_memory_schema_for_v20_test(&conn).await;
@@ -1058,14 +1742,14 @@ async fn test_migrate_v20_proposal_rebuild_rolls_back_atomically() {
 #[tokio::test]
 async fn test_migrate_rejects_schema_newer_than_supported() {
     let (conn, _db, _dir) = create_schema_db().await;
-    set_user_version(&conn, 22).await;
+    set_user_version(&conn, 24).await;
 
     let error = migrate(&conn)
         .await
         .expect_err("future schema versions must be rejected");
 
-    assert!(error.to_string().contains("newer than supported v21"));
-    assert_eq!(get_user_version(&conn).await, 22);
+    assert!(error.to_string().contains("newer than supported v23"));
+    assert_eq!(get_user_version(&conn).await, 24);
 }
 
 /// migrate from v0 (completely empty database) applies all migrations to latest.
@@ -1084,7 +1768,7 @@ async fn test_migrate_from_v0() {
         migrated,
         "migrate should return true when migrations were applied"
     );
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
 
     // All expected tables should exist
     assert!(table_exists(&conn, "nodes").await);
@@ -1125,7 +1809,7 @@ async fn test_migrate_from_v1() {
         .expect("migrate from v1 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
 
     // V2: metadata table
     assert!(table_exists(&conn, "metadata").await);
@@ -1161,7 +1845,7 @@ async fn test_migrate_from_v2() {
         .expect("migrate from v2 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
 
     // V3 columns
     assert!(column_exists(&conn, "nodes", "branches").await);
@@ -1191,7 +1875,7 @@ async fn test_migrate_from_v3() {
         .expect("migrate from v3 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
 
     // V4 columns
     assert!(column_exists(&conn, "nodes", "unsafe_blocks").await);
@@ -1219,7 +1903,7 @@ async fn test_migrate_from_v4() {
         .expect("migrate from v4 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
 
     assert!(index_exists(&conn, "idx_edges_unique").await);
 }
@@ -1349,7 +2033,7 @@ async fn test_database_initialize_creates_latest_version() {
         .await
         .expect("Database::initialize should succeed");
 
-    assert_eq!(get_user_version(db.conn()).await, 21);
+    assert_eq!(get_user_version(db.conn()).await, 23);
 }
 
 /// Database::open on an already-current database does not re-migrate.
@@ -1401,7 +2085,7 @@ async fn test_database_open_migrates_v1_to_latest() {
 
     assert!(migrated, "opening a v1 database should trigger migration");
 
-    assert_eq!(get_user_version(db.conn()).await, 21);
+    assert_eq!(get_user_version(db.conn()).await, 23);
 }
 
 /// After create_schema, all v5 columns on nodes exist.
@@ -1544,7 +2228,7 @@ async fn test_v7_to_latest_upgrade_path() {
     let did_migrate = migrate(&conn).await.unwrap();
     assert!(did_migrate, "expected migrate() to return true");
 
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
 
     let mut rows = conn
         .query(
@@ -1592,7 +2276,7 @@ async fn test_migrate_v16_adds_redundancy_pairs() {
     let migrated = migrate(&conn).await.expect("v16 migration should apply");
 
     assert!(migrated, "expected migrate() to run the v16 addition");
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
     assert!(
         table_exists(&conn, "redundancy_pairs").await,
         "v16 migration should create the redundancy_pairs table"
@@ -1638,7 +2322,7 @@ async fn test_migrate_v18_preserves_memory_and_adds_bounded_relations() {
 
     assert!(migrate(&conn).await.unwrap());
 
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
     assert!(table_exists(&conn, "memory_fact_relations").await);
     assert!(index_exists(&conn, "idx_memory_fact_relations_target").await);
     assert_eq!(
@@ -1796,7 +2480,7 @@ async fn test_v10_to_v11_backfills_and_drops_legacy_memory_tables() {
     let did_migrate = migrate(&conn).await.expect("v10 to v11 should migrate");
 
     assert!(did_migrate);
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
     assert!(!table_exists(&conn, "memory_decisions").await);
     assert!(!table_exists(&conn, "memory_code_areas").await);
     assert!(table_exists(&conn, "memory_facts").await);
@@ -1816,7 +2500,7 @@ async fn test_v11_database_migrates_to_monotonic_v12() {
     let did_migrate = migrate(&conn).await.expect("v11 to v12 should migrate");
 
     assert!(did_migrate);
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
     assert!(table_exists(&conn, "memory_bank_dirty").await);
 }
 
@@ -2239,7 +2923,7 @@ async fn test_v13_drops_archive_columns_with_generated_column_dependency() {
         .await
         .expect("v13 must drop archive columns even with a generated-column dependency");
     assert!(migrated, "expected migrate() to run the v13 cleanup");
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
 
     let columns = column_names(&conn, "memory_facts").await;
     for col in [
@@ -2288,7 +2972,7 @@ async fn test_v14_adds_access_tracking_and_oplog() {
 
     let migrated = migrate(&conn).await.expect("v14 must apply cleanly");
     assert!(migrated, "expected migrate() to run the v14 additions");
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
 
     let columns = column_names(&conn, "memory_facts").await;
     for col in ["access_count", "last_recalled_at"] {
@@ -2314,7 +2998,7 @@ async fn test_v14_adds_access_tracking_and_oplog() {
         .await
         .expect("v14 must be idempotent on an already-upgraded schema");
     assert!(migrated_again);
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
     assert_eq!(
         scalar_i64(&conn, "SELECT COUNT(*) FROM memory_facts").await,
         1
@@ -2347,7 +3031,7 @@ async fn test_v15_compacts_legacy_f64_vectors_without_open_time_vacuum() {
         .await
         .expect("v15 must compact legacy vectors");
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         0,
@@ -2390,7 +3074,7 @@ async fn test_latest_open_defers_incremental_vacuum_repair() {
     )
     .await
     .expect("failed to simulate pre-repair auto_vacuum mode");
-    set_user_version(&conn, 21).await;
+    set_user_version(&conn, 23).await;
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         0,
@@ -2405,7 +3089,7 @@ async fn test_latest_open_defers_incremental_vacuum_repair() {
         !migrated,
         "auto_vacuum repair should not report a schema migration"
     );
-    assert_eq!(get_user_version(&conn).await, 21);
+    assert_eq!(get_user_version(&conn).await, 23);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         0,

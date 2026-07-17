@@ -9,13 +9,14 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::util::http_detail;
-use crate::automation::fact_proposals::load_fact_proposal_store;
+use crate::application::memory::MemoryApplication;
 use crate::automation::managed_skills::list_managed_skills;
 use crate::automation::outcomes::{
     compute_fact_outcomes, compute_skill_outcomes, load_outcomes_snapshot,
 };
 use crate::automation::skill_usage::summarize_skill_usage;
-use crate::errors::Result;
+use crate::errors::{Result, TraceDecayError};
+use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::current_timestamp;
 
 pub(crate) async fn outcomes(State(state): State<DashboardState>) -> (StatusCode, Json<Value>) {
@@ -37,10 +38,14 @@ async fn outcomes_payload(state: &DashboardState) -> Result<Value> {
     let summaries = summarize_skill_usage(&profile_root, &skills).await?;
     let skill_outcomes = compute_skill_outcomes(&summaries, now);
 
-    let proposals = load_fact_proposal_store(&state.dashboard_root)
-        .await?
-        .proposals;
-    let fact_outcomes = compute_fact_outcomes(&proposals, &state.mem_conn, now).await?;
+    let memory = MemoryApplication::new(
+        state.memory_owner.clone(),
+        DatabaseFactStore::new(state.mem_db.as_ref()),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("could not initialize dashboard memory authority: {error}"),
+    })?;
+    let fact_outcomes = compute_fact_outcomes(&memory, now).await?;
 
     let snapshot = load_outcomes_snapshot(&state.dashboard_root)
         .await

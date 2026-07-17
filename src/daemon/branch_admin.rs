@@ -8,11 +8,11 @@ use serde_json::json;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
-#[cfg(unix)]
-use super::AutomationSchedulerHandle;
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;
 use super::profile_host_admission_replay::ProfileHostAdmissionReplayRegistry;
+#[cfg(unix)]
+use super::scheduler::{AutomationSchedulerHandle, MemoryRepairSchedulerHandle};
 use super::{DaemonHandshake, DatabaseOwnerRegistry, authority, write_json_rpc_response};
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
@@ -65,6 +65,9 @@ pub(super) struct StoreAdministration {
     #[cfg(unix)]
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
+    #[cfg(unix)]
+    memory_repair_schedulers:
+        Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, MemoryRepairSchedulerHandle>>>,
     #[cfg(test)]
     external_holder_verifier: Option<ExternalHolderVerifier>,
 }
@@ -80,6 +83,8 @@ impl Default for StoreAdministration {
             profile_host_admission_replay: Arc::new(ProfileHostAdmissionReplayRegistry::default()),
             #[cfg(unix)]
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            #[cfg(unix)]
+            memory_repair_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             #[cfg(test)]
             external_holder_verifier: None,
         }
@@ -259,6 +264,13 @@ impl StoreAdministration {
         &self.automation_schedulers
     }
 
+    #[cfg(unix)]
+    pub(super) fn memory_repair_schedulers(
+        &self,
+    ) -> &Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, MemoryRepairSchedulerHandle>>> {
+        &self.memory_repair_schedulers
+    }
+
     #[cfg_attr(not(test), allow(clippy::unused_self))]
     fn prove_no_external_branch_store_holders(&self, database_paths: &[PathBuf]) -> Result<()> {
         #[cfg(test)]
@@ -332,6 +344,9 @@ impl StoreAdministration {
                     let scheduler_busy = cached_scheduler_owns_selected(
                         &*self.automation_schedulers.lock().await,
                         &database_paths,
+                    ) || cached_scheduler_owns_selected(
+                        &*self.memory_repair_schedulers.lock().await,
+                        &database_paths,
                     );
                     #[cfg(not(unix))]
                     let scheduler_busy = false;
@@ -391,6 +406,9 @@ impl StoreAdministration {
                 #[cfg(unix)]
                 let scheduler_busy = cached_scheduler_owns_selected(
                     &*self.automation_schedulers.lock().await,
+                    &database_paths,
+                ) || cached_scheduler_owns_selected(
+                    &*self.memory_repair_schedulers.lock().await,
                     &database_paths,
                 );
                 #[cfg(not(unix))]

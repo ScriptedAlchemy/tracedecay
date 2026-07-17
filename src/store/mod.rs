@@ -12,6 +12,8 @@ use crate::sessions::git_correlation::{CommitSessionRecord, SpanObservation};
 
 pub mod global_db;
 pub mod memory;
+#[cfg(test)]
+mod memory_benchmark;
 pub mod observation;
 
 pub use global_db::GlobalDbTranscriptStore;

@@ -6,6 +6,9 @@ use super::render::{self, Md};
 
 pub(super) fn fact_store_md(args: &Value, value: &Value) -> String {
     let mut md = Md::new();
+    let trust_history_availability = value
+        .get("trust_history_availability")
+        .filter(|availability| availability.is_object());
     md.heading(2, "Fact Store");
     let action = render::field_str(value, "action");
     if !action.is_empty() {
@@ -40,7 +43,15 @@ pub(super) fn fact_store_md(args: &Value, value: &Value) -> String {
     if let Some(history) = value.get("trust_history").and_then(Value::as_array) {
         md.blank().heading(3, "Trust History");
         if history.is_empty() {
-            md.empty_note("No trust feedback recorded.");
+            let incomplete = trust_history_availability
+                .and_then(|availability| availability.get("state"))
+                .and_then(Value::as_str)
+                .is_some_and(|state| matches!(state, "unknown" | "incomplete"));
+            md.empty_note(if incomplete {
+                "Trust history is incomplete or unavailable; see trust_history_availability."
+            } else {
+                "No trust feedback recorded."
+            });
         } else {
             for item in history.iter().take(10) {
                 md.bullet(&compact_json_summary(item));
@@ -49,6 +60,12 @@ pub(super) fn fact_store_md(args: &Value, value: &Value) -> String {
                 md.bullet(&format!("... {} more", history.len() - 10));
             }
         }
+    }
+    if let Some(availability) = trust_history_availability {
+        md.field(
+            "trust_history_availability",
+            &compact_json_summary(availability),
+        );
     }
 
     md.render()
@@ -585,5 +602,36 @@ fn append_analytics_automation(md: &mut Md, automation: &Value) {
             render::field_i64(job, "skipped"),
             render::field_i64(job, "other"),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::fact_store_md;
+
+    #[test]
+    fn fact_store_markdown_surfaces_trust_history_availability() {
+        let markdown = fact_store_md(
+            &json!({ "action": "get" }),
+            &json!({
+                "action": "get",
+                "count": 1,
+                "trust_history": [],
+                "trust_history_availability": {
+                    "state": "incomplete",
+                    "processed": 1,
+                    "remaining": 2,
+                },
+            }),
+        );
+
+        assert!(markdown.contains("**trust_history_availability:**"));
+        assert!(markdown.contains("\"state\":\"incomplete\""));
+        assert!(markdown.contains("\"processed\":1"));
+        assert!(markdown.contains("\"remaining\":2"));
+        assert!(markdown.contains("Trust history is incomplete or unavailable"));
+        assert!(!markdown.contains("No trust feedback recorded."));
     }
 }

@@ -131,6 +131,25 @@ pub enum AnchorResolutionStateV2 {
 }
 
 impl AnchorResolutionStateV2 {
+    /// Classify the resolution state from the payload access declared by the
+    /// retained record (or the store's binding signal) and the validated
+    /// watermark drift. The result always satisfies `validate`: access states
+    /// win over freshness, so a redacted, expired, deleted, unavailable, or
+    /// ambiguous target is never reported as current or merely drifted.
+    pub fn classify(payload_access: PayloadAccessState, drift: WatermarkDriftV1) -> Self {
+        match payload_access {
+            PayloadAccessState::Eligible => match drift {
+                WatermarkDriftV1::Exact => Self::Current,
+                drift => Self::Drifted { drift },
+            },
+            PayloadAccessState::Redacted | PayloadAccessState::Quarantined => Self::Redacted,
+            PayloadAccessState::RetentionExpired => Self::Expired,
+            PayloadAccessState::Deleted => Self::Deleted,
+            PayloadAccessState::Unavailable => Self::Unavailable,
+            PayloadAccessState::Ambiguous => Self::Ambiguous,
+        }
+    }
+
     fn validate(
         self,
         watermark: &FrozenWatermarkResolutionV1,
@@ -431,5 +450,76 @@ mod tests {
         wire["payload_access"] = json!("eligible");
 
         assert!(serde_json::from_value::<AuthorizedAnchorResolutionV2>(wire).is_err());
+    }
+
+    #[test]
+    fn classified_states_always_validate_against_their_inputs() {
+        let drifts = [
+            WatermarkDriftV1::Exact,
+            WatermarkDriftV1::ObservedAhead,
+            WatermarkDriftV1::ObservedBehind,
+            WatermarkDriftV1::Concurrent,
+        ];
+        let accesses = [
+            PayloadAccessState::Eligible,
+            PayloadAccessState::Redacted,
+            PayloadAccessState::Quarantined,
+            PayloadAccessState::RetentionExpired,
+            PayloadAccessState::Deleted,
+            PayloadAccessState::Unavailable,
+            PayloadAccessState::Ambiguous,
+        ];
+        for access in accesses {
+            for drift in drifts {
+                let state = AnchorResolutionStateV2::classify(access, drift);
+                let (frozen, observed) = match drift {
+                    WatermarkDriftV1::Exact => (watermark(&[("a", 3)]), watermark(&[("a", 3)])),
+                    WatermarkDriftV1::ObservedAhead => {
+                        (watermark(&[("a", 3)]), watermark(&[("a", 4)]))
+                    }
+                    WatermarkDriftV1::ObservedBehind => {
+                        (watermark(&[("a", 3)]), watermark(&[("a", 2)]))
+                    }
+                    WatermarkDriftV1::Concurrent => (
+                        watermark(&[("a", 3), ("b", 3)]),
+                        watermark(&[("a", 4), ("b", 2)]),
+                    ),
+                };
+                let resolution = AuthorizedAnchorResolutionV2::new(
+                    RetrievalAnchorId::new("anchor.fixture").unwrap(),
+                    authorization(),
+                    FrozenWatermarkResolutionV1::new(frozen, observed),
+                    CoverageReportV1::default(),
+                    state,
+                    access,
+                    ManifestDigest::new(SHA256_FIXTURE).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(resolution.state(), state);
+            }
+        }
+        assert_eq!(
+            AnchorResolutionStateV2::classify(
+                PayloadAccessState::Eligible,
+                WatermarkDriftV1::Exact
+            ),
+            AnchorResolutionStateV2::Current
+        );
+        assert_eq!(
+            AnchorResolutionStateV2::classify(
+                PayloadAccessState::Eligible,
+                WatermarkDriftV1::ObservedAhead
+            ),
+            AnchorResolutionStateV2::Drifted {
+                drift: WatermarkDriftV1::ObservedAhead
+            }
+        );
+        assert_eq!(
+            AnchorResolutionStateV2::classify(
+                PayloadAccessState::Quarantined,
+                WatermarkDriftV1::Exact
+            ),
+            AnchorResolutionStateV2::Redacted
+        );
     }
 }

@@ -4,19 +4,21 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
+use tracedecay_store::CompatibilityFeedbackRepairProgressV1;
 
+use crate::application::memory::{
+    MemoryApplication, MemoryApplicationError, MemoryOperationContext, V1UpdateFactOutcome,
+};
 use crate::automation::memory_digest::refresh_memory_digest_after_memory_change;
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
-use crate::memory::retrieval::FactRetriever;
-use crate::memory::store::MemoryStore;
-use crate::memory::trust::DEFAULT_TRUST;
 use crate::memory::types::{
-    AddFactRequest, FactRecord, FactSearchResult, FeedbackAction, FeedbackRequest, MemoryCategory,
-    SearchFactsRequest, UpdateFactRequest,
+    AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory, SearchFactsRequest,
+    UpdateFactRequest,
 };
 use crate::memory::user::open_user_memory_db;
+use crate::store::DatabaseFactStore;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
@@ -166,6 +168,40 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
+fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
+    TraceDecayError::database_operation("memory application", error)
+}
+
+fn memory_application<'a>(
+    target_memory: &'a TargetMemoryDb<'_>,
+) -> Result<MemoryApplication<DatabaseFactStore<'a>>> {
+    MemoryApplication::new(
+        target_memory.owner().clone(),
+        DatabaseFactStore::new(target_memory.db()),
+    )
+    .map_err(memory_application_error)
+}
+
+fn memory_operation_context(
+    args: &Value,
+    target_memory: &TargetMemoryDb<'_>,
+    action: &str,
+) -> Result<MemoryOperationContext> {
+    // `McpServer` overwrites this private field from the JSON-RPC id for
+    // mutations and retrieval-accounting actions. Direct non-retriable calls
+    // deliberately receive a fresh opaque operation identity instead.
+    match args.get("__mcp_request_id").and_then(Value::as_str) {
+        Some(request_id) => MemoryOperationContext::from_trusted_request_id(
+            target_memory.owner(),
+            action,
+            request_id,
+            None,
+        ),
+        None => MemoryOperationContext::generated(target_memory.owner(), action, None),
+    }
+    .map_err(memory_application_error)
+}
+
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
@@ -262,84 +298,38 @@ fn results_envelope(action: &str, results: &Value, count: usize) -> Value {
     })
 }
 
-fn fact_result_ids(results: &[FactSearchResult]) -> Vec<i64> {
-    results.iter().map(|result| result.fact.fact_id).collect()
-}
-
-fn fact_ids(facts: &[FactRecord]) -> Vec<i64> {
-    facts.iter().map(|fact| fact.fact_id).collect()
-}
-
-fn update_rejected_secret_like(err: &TraceDecayError) -> Option<String> {
-    match err {
-        TraceDecayError::Database { message, operation }
-            if operation == "update_fact" && message.contains("rejected_secret_like") =>
-        {
-            Some(message.clone())
-        }
-        _ => None,
-    }
+fn feedback_history_repair_payload(progress: CompatibilityFeedbackRepairProgressV1) -> Value {
+    let state = match progress {
+        CompatibilityFeedbackRepairProgressV1::Unknown => "unknown",
+        CompatibilityFeedbackRepairProgressV1::NotRequired => "not_required",
+        CompatibilityFeedbackRepairProgressV1::Complete { .. } => "complete",
+        CompatibilityFeedbackRepairProgressV1::Incomplete { .. } => "incomplete",
+    };
+    json!({
+        "state": state,
+        "processed": progress.processed(),
+        "remaining": progress.remaining(),
+    })
 }
 
 fn action_writes_memory(action: &str) -> bool {
     matches!(action, "add" | "update" | "remove")
 }
-
-fn action_records_retrieval(action: &str) -> bool {
-    matches!(action, "search" | "probe" | "related" | "reason" | "list")
-}
-
-async fn record_retrieval_counts(
-    db: &Database,
-    cross_project_selector: bool,
-    ids: &[i64],
-    recall: bool,
-) -> Result<()> {
-    if !cross_project_selector && !ids.is_empty() {
-        let writer = db.writer_connection("record memory retrieval").await?;
-        let store = writer.memory_store();
-        if recall {
-            let _ = store.record_fact_recalls(ids).await;
-        }
-        store.increment_retrieval_counts(ids).await?;
-    }
-    Ok(())
-}
-
-async fn search_results_envelope(
-    db: &Database,
-    cross_project_selector: bool,
-    action: &str,
-    facts: Vec<FactSearchResult>,
-) -> Result<Value> {
-    let ids = fact_result_ids(&facts);
-    record_retrieval_counts(db, cross_project_selector, &ids, action == "search").await?;
-    let count = facts.len();
-    Ok(results_envelope(action, &json!(facts), count))
-}
-
-async fn fact_records_envelope(
-    db: &Database,
-    cross_project_selector: bool,
-    action: &str,
-    facts: Vec<FactRecord>,
-) -> Result<Value> {
-    let ids = fact_ids(&facts);
-    record_retrieval_counts(db, cross_project_selector, &ids, false).await?;
-    let count = facts.len();
-    Ok(results_envelope(action, &json!(facts), count))
-}
-
-async fn update_trust(args: &Value, store: &MemoryStore<'_>, fact_id: i64) -> Result<Option<f64>> {
+async fn update_trust(
+    args: &Value,
+    memory: &MemoryApplication<DatabaseFactStore<'_>>,
+    fact_id: i64,
+) -> Result<Option<f64>> {
     if let Some(trust) = optional_f64(args, "trust") {
         return Ok(Some(trust));
     }
     let Some(delta) = optional_f64(args, "trust_delta") else {
         return Ok(None);
     };
-    let existing = store
-        .get_fact(fact_id)
-        .await?
+    let existing = memory
+        .get_fact_v1(fact_id)
+        .await
+        .map_err(memory_application_error)?
         .ok_or_else(|| config_error(format!("fact {fact_id} not found")))?;
     Ok(Some((existing.trust_score + delta).clamp(0.0, 1.0)))
 }
@@ -368,18 +358,7 @@ async fn handle_fact_store_for_target(
     target_memory: TargetMemoryDb<'_>,
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
-    let db = target_memory.db();
-    let records_retrieval = !cross_project_selector && action_records_retrieval(action);
-    let reader = if action_writes_memory(action) || records_retrieval {
-        None
-    } else {
-        Some(
-            db.begin_isolated_read_snapshot("read memory tool facts")
-                .await?,
-        )
-    };
-    let conn = reader.as_ref().map_or(db.conn(), |reader| reader);
-    let store = MemoryStore::new(conn);
+    let memory = memory_application(&target_memory)?;
     let mut refresh_digest = false;
     let out = match action {
         "add" => {
@@ -395,11 +374,13 @@ async fn handle_fact_store_for_target(
                 trust: optional_f64(&args, "trust"),
                 metadata: metadata_with_tags(&args),
             };
-            let writer = db.writer_connection("add memory tool fact").await?;
-            let outcome = writer
-                .memory_store()
-                .add_fact(request, DEFAULT_TRUST)
-                .await?;
+            let outcome = memory
+                .add_fact_v1(
+                    request,
+                    memory_operation_context(&args, &target_memory, "add")?,
+                )
+                .await
+                .map_err(memory_application_error)?;
             // Additive write-time diff report fields, so writers SEE
             // near-duplicates, possible conflicts, and secret rejections.
             let count = usize::from(outcome.fact.is_some());
@@ -422,108 +403,114 @@ async fn handle_fact_store_for_target(
                 min_trust: optional_f64(&args, "min_trust"),
                 include_why: true,
             };
-            let facts = FactRetriever::new(conn)
-                .search_untracked(
-                    &request.query,
-                    request.category,
-                    request.min_trust,
-                    request.limit.unwrap_or(DEFAULT_FACT_LIMIT),
-                )
-                .await?;
-            search_results_envelope(db, cross_project_selector, action, facts).await?
+            let facts = if cross_project_selector {
+                memory.search_facts_untracked_v1(request).await
+            } else {
+                memory
+                    .search_facts_v1(
+                        request,
+                        memory_operation_context(&args, &target_memory, "search")?,
+                    )
+                    .await
+            }
+            .map_err(memory_application_error)?;
+            let count = facts.len();
+            results_envelope(action, &json!(facts), count)
         }
         "probe" => {
-            let facts = FactRetriever::new(conn)
-                .probe(
-                    required_str(&args, "entity")?,
-                    optional_category(&args)?,
-                    optional_f64(&args, "min_trust"),
-                    limit(&args),
-                )
-                .await?;
-            search_results_envelope(db, cross_project_selector, action, facts).await?
+            let request = SearchFactsRequest {
+                query: required_str(&args, "entity")?.to_owned(),
+                category: optional_category(&args)?,
+                limit: Some(limit(&args)),
+                min_trust: optional_f64(&args, "min_trust"),
+                include_why: true,
+            };
+            let facts = if cross_project_selector {
+                memory.probe_facts_untracked_v1(request).await
+            } else {
+                memory
+                    .probe_facts_v1(
+                        request,
+                        memory_operation_context(&args, &target_memory, "probe")?,
+                    )
+                    .await
+            }
+            .map_err(memory_application_error)?;
+            let count = facts.len();
+            results_envelope(action, &json!(facts), count)
         }
         "related" => {
-            let limit = limit(&args);
-            let retriever = FactRetriever::new(conn);
-            let related_entities = retriever
-                .related(required_str(&args, "entity")?, limit)
-                .await?;
-            let mut seen = std::collections::HashSet::new();
-            let mut facts = Vec::new();
-            for related in related_entities {
-                for result in retriever
-                    .probe(
-                        &related.name,
-                        optional_category(&args)?,
-                        optional_f64(&args, "min_trust"),
-                        limit.saturating_mul(2),
+            let request = SearchFactsRequest {
+                query: required_str(&args, "entity")?.to_owned(),
+                category: optional_category(&args)?,
+                limit: Some(limit(&args)),
+                min_trust: optional_f64(&args, "min_trust"),
+                include_why: true,
+            };
+            let facts = if cross_project_selector {
+                memory.related_facts_untracked_v1(request).await
+            } else {
+                memory
+                    .related_facts_v1(
+                        request,
+                        memory_operation_context(&args, &target_memory, "related")?,
                     )
-                    .await?
-                {
-                    if seen.insert(result.fact.fact_id) {
-                        facts.push(result);
-                        if facts.len() >= limit.clamp(1, MAX_FACT_LIMIT) {
-                            break;
-                        }
-                    }
-                }
-                if facts.len() >= limit.clamp(1, MAX_FACT_LIMIT) {
-                    break;
-                }
+                    .await
             }
-            search_results_envelope(db, cross_project_selector, action, facts).await?
+            .map_err(memory_application_error)?;
+            let count = facts.len();
+            results_envelope(action, &json!(facts), count)
         }
         "reason" => {
             let entities = request_entities(&args);
-            let facts = FactRetriever::new(conn)
-                .reason(
-                    &entities,
-                    optional_category(&args)?,
-                    optional_f64(&args, "min_trust"),
-                    limit(&args),
-                )
-                .await?;
-            search_results_envelope(db, cross_project_selector, action, facts).await?
+            let category = optional_category(&args)?;
+            let min_trust = optional_f64(&args, "min_trust");
+            let limit = limit(&args);
+            let facts = if cross_project_selector {
+                memory
+                    .reason_facts_untracked_v1(entities, category, min_trust, limit)
+                    .await
+            } else {
+                memory
+                    .reason_facts_v1(
+                        entities,
+                        category,
+                        min_trust,
+                        limit,
+                        memory_operation_context(&args, &target_memory, "reason")?,
+                    )
+                    .await
+            }
+            .map_err(memory_application_error)?;
+            let count = facts.len();
+            results_envelope(action, &json!(facts), count)
         }
         "contradict" => {
             let threshold = optional_f64(&args, "threshold").unwrap_or(0.3);
             let limit = limit(&args);
-            let retriever = FactRetriever::new(conn);
-            let facts = if let Some(category) = optional_category(&args)? {
-                retriever.contradict(category, threshold, limit).await?
-            } else {
-                let mut out = Vec::new();
-                for category in [
-                    MemoryCategory::General,
-                    MemoryCategory::UserPref,
-                    MemoryCategory::Project,
-                    MemoryCategory::Tool,
-                    MemoryCategory::Decision,
-                    MemoryCategory::CodeArea,
-                ] {
-                    out.extend(retriever.contradict(category, threshold, limit).await?);
-                    if out.len() >= limit.clamp(1, MAX_FACT_LIMIT) {
-                        out.truncate(limit.clamp(1, MAX_FACT_LIMIT));
-                        break;
-                    }
-                }
-                out
-            };
+            let facts = memory
+                .contradict_facts_v1(optional_category(&args)?, threshold, limit)
+                .await
+                .map_err(memory_application_error)?;
             let count = facts.len();
             results_envelope(action, &json!(facts), count)
         }
         "get" => {
             let id = fact_id(&args)?;
-            let fact = store
-                .get_fact(id)
-                .await?
+            let fact = memory
+                .get_fact_v1(id)
+                .await
+                .map_err(memory_application_error)?
                 .ok_or_else(|| config_error(format!("fact {id} not found")))?;
-            let trust_history = store.fact_trust_history(id).await?;
+            let trust_history = memory
+                .fact_trust_history_with_progress_v1(id, MAX_FACT_LIMIT)
+                .await
+                .map_err(memory_application_error)?;
             json!({
                 "action": action,
                 "fact": fact,
-                "trust_history": trust_history,
+                "trust_history": trust_history.entries,
+                "trust_history_availability": feedback_history_repair_payload(trust_history.repair_progress),
                 "count": 1,
             })
         }
@@ -541,63 +528,76 @@ async fn handle_fact_store_for_target(
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             let metadata = args.get("metadata").cloned();
-            let result = {
-                let writer = db.writer_connection("update memory tool fact").await?;
-                let store = writer.memory_store();
-                let update = UpdateFactRequest {
-                    fact_id: id,
-                    content,
-                    category,
-                    tags,
-                    entities,
-                    trust: update_trust(&args, &store, id).await?,
-                    source,
-                    metadata,
-                };
-                store.update_fact(update).await
+            let update = UpdateFactRequest {
+                fact_id: id,
+                content,
+                category,
+                tags,
+                entities,
+                trust: update_trust(&args, &memory, id).await?,
+                source,
+                metadata,
             };
-            match result {
-                Ok(fact) => {
+            match memory
+                .update_fact_v1(
+                    update,
+                    memory_operation_context(&args, &target_memory, "update")?,
+                )
+                .await
+                .map_err(memory_application_error)?
+            {
+                V1UpdateFactOutcome::Updated(fact) => {
                     refresh_digest = true;
                     json!({ "action": action, "fact": fact, "count": 1 })
                 }
-                Err(err) => {
-                    if let Some(reason) = update_rejected_secret_like(&err) {
-                        json!({
-                            "action": action,
-                            "fact": Value::Null,
-                            "count": 0,
-                            "diff": "rejected_secret_like",
-                            "reason": reason,
-                            "error": reason,
-                        })
-                    } else {
-                        return Err(err);
-                    }
-                }
+                V1UpdateFactOutcome::RejectedSecretLike { reason } => json!({
+                    "action": action,
+                    "fact": Value::Null,
+                    "count": 0,
+                    "diff": "rejected_secret_like",
+                    "reason": reason,
+                    "error": reason,
+                }),
             }
         }
         "remove" => {
             let id = fact_id(&args)?;
-            let writer = db.writer_connection("remove memory tool fact").await?;
-            let removed = writer.memory_store().remove_fact(id).await?;
+            let removed = memory
+                .remove_fact_v1(
+                    id,
+                    memory_operation_context(&args, &target_memory, "remove")?,
+                )
+                .await
+                .map_err(memory_application_error)?;
             refresh_digest = removed;
             json!({ "action": action, "removed": removed, "count": usize::from(removed) })
         }
         "list" => {
-            let facts = store
-                .list_facts(
-                    optional_category(&args)?,
-                    optional_f64(&args, "min_trust"),
-                    limit(&args),
-                )
-                .await?;
-            fact_records_envelope(db, cross_project_selector, action, facts).await?
+            let category = optional_category(&args)?;
+            let min_trust = optional_f64(&args, "min_trust");
+            let limit = limit(&args);
+            let facts = if cross_project_selector {
+                memory
+                    .list_facts_untracked_v1(category, min_trust, limit)
+                    .await
+            } else {
+                memory
+                    .list_facts_v1(
+                        category,
+                        min_trust,
+                        limit,
+                        memory_operation_context(&args, &target_memory, "list")?,
+                    )
+                    .await
+            }
+            .map_err(memory_application_error)?;
+            let count = facts.len();
+            results_envelope(action, &json!(facts), count)
         }
         other => return Err(config_error(format!("unknown fact_store action: {other}"))),
     };
     if refresh_digest && !target_memory.user_scope {
-        refresh_target_memory_digest(&target_memory).await;
+        refresh_target_memory_digest(&memory, &target_memory).await;
     }
     Ok(rendered_fact_store(
         (!target_memory.user_scope).then_some(target_memory.project_root.as_path()),
@@ -606,17 +606,11 @@ async fn handle_fact_store_for_target(
     ))
 }
 
-async fn refresh_target_memory_digest(target_memory: &TargetMemoryDb<'_>) {
-    match target_memory
-        .db()
-        .begin_isolated_read_snapshot("refresh memory tool digest")
-        .await
-    {
-        Ok(reader) => {
-            refresh_memory_digest_after_memory_change(&reader, &target_memory.project_root).await;
-        }
-        Err(error) => eprintln!("warning: memory digest refresh failed: {error}"),
-    }
+async fn refresh_target_memory_digest(
+    memory: &MemoryApplication<DatabaseFactStore<'_>>,
+    target_memory: &TargetMemoryDb<'_>,
+) {
+    refresh_memory_digest_after_memory_change(memory, &target_memory.project_root).await;
 }
 
 pub(super) async fn handle_fact_feedback(
@@ -646,13 +640,16 @@ pub(super) async fn handle_fact_feedback(
             .map(ToOwned::to_owned),
         note,
     };
-    let writer = target_memory
-        .db()
-        .writer_connection("record memory tool feedback")
-        .await?;
-    let result = writer.memory_store().record_feedback_event(request).await?;
+    let memory = memory_application(&target_memory)?;
+    let result = memory
+        .record_fact_feedback_v1(
+            request,
+            memory_operation_context(&args, &target_memory, "feedback")?,
+        )
+        .await
+        .map_err(memory_application_error)?;
     if !target_memory.user_scope {
-        refresh_target_memory_digest(&target_memory).await;
+        refresh_target_memory_digest(&memory, &target_memory).await;
     }
     let value = json!({ "status": "recorded", "feedback": result });
     Ok(rendered_tool_json(
@@ -670,8 +667,15 @@ pub(super) async fn handle_memory_status(
 ) -> Result<ToolResult> {
     let target_memory =
         open_target_memory_db(cg, &args, global_db, allow_default_registry_fallback).await?;
-    let status = TraceDecay::memory_status_for_db(target_memory.db()).await?;
-    let value = json!({ "status": "ok", "memory": status });
+    let status = memory_application(&target_memory)?
+        .memory_status_with_repair_v1()
+        .await
+        .map_err(memory_application_error)?;
+    let value = json!({
+        "status": "ok",
+        "memory": status.status,
+        "feedback_history_repair": feedback_history_repair_payload(status.feedback_history_repair),
+    });
     Ok(rendered_tool_json(
         (!target_memory.user_scope).then_some(target_memory.project_root.as_path()),
         &args,
@@ -715,11 +719,13 @@ pub async fn handle_user_memory_tool(
                     .map(ToOwned::to_owned),
                 note,
             };
-            let writer = target_memory
-                .db()
-                .writer_connection("record user memory feedback")
-                .await?;
-            let result = writer.memory_store().record_feedback_event(request).await?;
+            let result = memory_application(&target_memory)?
+                .record_fact_feedback_v1(
+                    request,
+                    memory_operation_context(&args, &target_memory, "feedback")?,
+                )
+                .await
+                .map_err(memory_application_error)?;
             Ok(rendered_tool_json(
                 None,
                 &args,
@@ -727,11 +733,18 @@ pub async fn handle_user_memory_tool(
             ))
         }
         "tracedecay_memory_status" => {
-            let status = TraceDecay::memory_status_for_db(target_memory.db()).await?;
+            let status = memory_application(&target_memory)?
+                .memory_status_with_repair_v1()
+                .await
+                .map_err(memory_application_error)?;
             Ok(rendered_tool_json(
                 None,
                 &args,
-                &json!({ "status": "ok", "memory": status }),
+                &json!({
+                    "status": "ok",
+                    "memory": status.status,
+                    "feedback_history_repair": feedback_history_repair_payload(status.feedback_history_repair),
+                }),
             ))
         }
         other => Err(config_error(format!("{other} is not a user-memory tool"))),
@@ -741,8 +754,47 @@ pub async fn handle_user_memory_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_store::{
+        CompatibilityFactSearchCursorV1, CompatibilityFactSearchFilterV1,
+        CompatibilityFactSearchKindV1, CompatibilityFactSearchQuery, FactStoreError,
+    };
 
-    async fn seeded_memory() -> (tempfile::TempDir, TraceDecay, i64) {
+    fn cursor_fact(content: &str) -> AddFactRequest {
+        AddFactRequest {
+            content: content.to_owned(),
+            category: MemoryCategory::General,
+            source: None,
+            tags: Vec::new(),
+            entities: Vec::new(),
+            trust: None,
+            metadata: json!({}),
+        }
+    }
+
+    fn cursor_search_query(
+        owner: FactOwnerV1,
+        query: &str,
+        after: Option<CompatibilityFactSearchCursorV1>,
+    ) -> std::result::Result<CompatibilityFactSearchQuery, FactStoreError> {
+        CompatibilityFactSearchQuery::with_filter(
+            owner,
+            CompatibilityFactSearchKindV1::Search,
+            Some(query.to_owned()),
+            CompatibilityFactSearchFilterV1::new(None, None, None)?,
+            after,
+            1,
+        )
+    }
+
+    fn active_memory(cg: &TraceDecay) -> MemoryApplication<DatabaseFactStore<'_>> {
+        MemoryApplication::new(
+            active_project_memory_owner(cg).unwrap(),
+            DatabaseFactStore::new(cg.db()),
+        )
+        .unwrap()
+    }
+
+    async fn empty_memory() -> (tempfile::TempDir, TraceDecay) {
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path().join("project");
         let profile_root = tmp.path().join("profile");
@@ -756,32 +808,30 @@ mod tests {
         )
         .await
         .unwrap();
-        let fact_id = {
-            let writer = cg
-                .db()
-                .writer_connection("seed memory tool test")
-                .await
-                .unwrap();
-            writer
-                .memory_store()
-                .add_fact(
-                    AddFactRequest {
-                        content: "existing fact".to_string(),
-                        category: MemoryCategory::General,
-                        source: None,
-                        tags: Vec::new(),
-                        entities: Vec::new(),
-                        trust: None,
-                        metadata: json!({}),
-                    },
-                    DEFAULT_TRUST,
-                )
-                .await
-                .unwrap()
-                .fact
-                .unwrap()
-                .fact_id
-        };
+        (tmp, cg)
+    }
+
+    async fn seeded_memory() -> (tempfile::TempDir, TraceDecay, i64) {
+        let (tmp, cg) = empty_memory().await;
+        let owner = active_project_memory_owner(&cg).unwrap();
+        let fact_id = active_memory(&cg)
+            .add_fact_v1(
+                AddFactRequest {
+                    content: "existing fact".to_string(),
+                    category: MemoryCategory::General,
+                    source: None,
+                    tags: Vec::new(),
+                    entities: Vec::new(),
+                    trust: None,
+                    metadata: json!({}),
+                },
+                MemoryOperationContext::generated(&owner, "test-seed", None).unwrap(),
+            )
+            .await
+            .unwrap()
+            .fact
+            .unwrap()
+            .fact_id;
         (tmp, cg, fact_id)
     }
 
@@ -836,6 +886,64 @@ mod tests {
             TraceDecayError::Config { ref message }
                 if message.contains("cross-project fact_feedback writes")
         ));
+    }
+
+    #[tokio::test]
+    async fn fact_feedback_without_source_keeps_legacy_mcp_history() {
+        let (_tmp, cg, fact_id) = seeded_memory().await;
+
+        handle_fact_feedback(
+            &cg,
+            json!({ "fact_id": fact_id, "action": "helpful" }),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let history = active_memory(&cg)
+            .fact_trust_history_v1(fact_id, MAX_FACT_LIMIT)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].source, "mcp");
+    }
+
+    #[tokio::test]
+    async fn trusted_fact_feedback_id_replays_without_duplicate_history() {
+        let (_tmp, cg, fact_id) = seeded_memory().await;
+        let args = json!({
+            "fact_id": fact_id,
+            "action": "helpful",
+            "__mcp_request_id": "same-feedback-json-rpc-request",
+        });
+
+        for _ in 0..2 {
+            handle_fact_feedback(&cg, args.clone(), None, true)
+                .await
+                .unwrap();
+        }
+
+        let history = active_memory(&cg)
+            .fact_trust_history_v1(fact_id, MAX_FACT_LIMIT)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn incomplete_feedback_history_repair_is_explicit() {
+        assert_eq!(
+            feedback_history_repair_payload(CompatibilityFeedbackRepairProgressV1::Incomplete {
+                processed: 1,
+                remaining: Some(2),
+            }),
+            json!({
+                "state": "incomplete",
+                "processed": 1,
+                "remaining": 2,
+            })
+        );
     }
 
     #[tokio::test]
@@ -899,8 +1007,8 @@ mod tests {
         .expect("local retrieval-counting actions must not hold a read snapshot")
         .unwrap();
 
-        let fact = MemoryStore::new(cg.db().conn())
-            .get_fact(fact_id)
+        let fact = active_memory(&cg)
+            .get_fact_v1(fact_id)
             .await
             .unwrap()
             .unwrap();
@@ -936,8 +1044,8 @@ mod tests {
         drop(writer);
         add.await.unwrap();
         assert_eq!(
-            MemoryStore::new(cg.db().conn())
-                .list_facts(None, None, 10)
+            active_memory(&cg)
+                .list_facts_untracked_v1(None, None, 10)
                 .await
                 .unwrap()
                 .len(),
@@ -953,8 +1061,17 @@ mod tests {
             .writer_connection("hold memory retrieval writer")
             .await
             .unwrap();
-        let fact_ids = [fact_id];
-        let mut record = Box::pin(record_retrieval_counts(cg.db(), false, &fact_ids, true));
+        let target = TargetMemoryDb {
+            db: TargetMemoryDbHandle::Active(cg.db()),
+            project_root: cg.project_root().to_path_buf(),
+            user_scope: true,
+            owner: active_project_memory_owner(&cg).unwrap(),
+        };
+        let mut record = Box::pin(handle_fact_store_for_target(
+            json!({ "action": "search", "query": "existing fact" }),
+            false,
+            target,
+        ));
 
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(25), &mut record)
@@ -964,8 +1081,8 @@ mod tests {
         drop(writer);
         record.await.unwrap();
         assert_eq!(
-            MemoryStore::new(cg.db().conn())
-                .get_fact(fact_id)
+            active_memory(&cg)
+                .get_fact_v1(fact_id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -973,13 +1090,185 @@ mod tests {
             1
         );
         assert_eq!(
-            MemoryStore::new(cg.db().conn())
-                .get_fact(fact_id)
+            active_memory(&cg)
+                .get_fact_v1(fact_id)
                 .await
                 .unwrap()
                 .unwrap()
                 .access_count,
             1
         );
+    }
+
+    #[tokio::test]
+    async fn trusted_memory_retrieval_id_replays_without_double_counting() {
+        let (_tmp, cg, fact_id) = seeded_memory().await;
+        for _ in 0..2 {
+            let target = TargetMemoryDb {
+                db: TargetMemoryDbHandle::Active(cg.db()),
+                project_root: cg.project_root().to_path_buf(),
+                user_scope: true,
+                owner: active_project_memory_owner(&cg).unwrap(),
+            };
+            handle_fact_store_for_target(
+                json!({
+                    "action": "search",
+                    "query": "existing fact",
+                    "__mcp_request_id": "same-json-rpc-request",
+                }),
+                false,
+                target,
+            )
+            .await
+            .unwrap();
+        }
+        let fact = active_memory(&cg)
+            .get_fact_v1(fact_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fact.retrieval_count, 1);
+        assert_eq!(fact.access_count, 1);
+    }
+
+    #[tokio::test]
+    async fn cross_project_memory_retrieval_is_untracked() {
+        let (_tmp, cg, fact_id) = seeded_memory().await;
+        let target = TargetMemoryDb {
+            db: TargetMemoryDbHandle::Active(cg.db()),
+            project_root: cg.project_root().to_path_buf(),
+            user_scope: true,
+            owner: active_project_memory_owner(&cg).unwrap(),
+        };
+        handle_fact_store_for_target(
+            json!({ "action": "search", "query": "existing fact" }),
+            true,
+            target,
+        )
+        .await
+        .unwrap();
+        let fact = active_memory(&cg)
+            .get_fact_v1(fact_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fact.retrieval_count, 0);
+        assert_eq!(fact.access_count, 0);
+    }
+
+    #[tokio::test]
+    async fn compatibility_search_cursor_replays_and_rejects_other_owners() {
+        let (_tmp, cg) = empty_memory().await;
+        let owner = active_project_memory_owner(&cg).unwrap();
+        let memory = active_memory(&cg);
+        for (operation, content) in [
+            (
+                "test-project-cursor-one",
+                "cursor fixture marigold topology",
+            ),
+            ("test-project-cursor-two", "cursor fixture basalt workflow"),
+        ] {
+            assert!(
+                memory
+                    .add_fact_v1(
+                        cursor_fact(content),
+                        MemoryOperationContext::generated(&owner, operation, None).unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .fact
+                    .is_some(),
+                "{operation} must persist a real fixture fact"
+            );
+        }
+
+        let first_page = memory
+            .search_compatibility_facts(
+                cursor_search_query(owner.clone(), "cursor fixture", None).unwrap(),
+            )
+            .await
+            .unwrap();
+        let cursor = first_page
+            .next_after()
+            .cloned()
+            .expect("the first finite page must provide its real cursor");
+        let second_page = memory
+            .search_compatibility_facts(
+                cursor_search_query(owner.clone(), "cursor fixture", Some(cursor.clone())).unwrap(),
+            )
+            .await
+            .unwrap();
+        let replay_page = memory
+            .search_compatibility_facts(
+                cursor_search_query(owner.clone(), "cursor fixture", Some(cursor)).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first_page.owner(), &owner);
+        assert_eq!(first_page.hits().len(), 1);
+        assert_eq!(second_page.hits().len(), 1);
+        assert!(
+            second_page.next_after().is_none(),
+            "the two real fixture facts must exhaust the second page"
+        );
+        assert_ne!(
+            first_page.hits()[0].fact().fact_id(),
+            second_page.hits()[0].fact().fact_id()
+        );
+        let first = &first_page.hits()[0];
+        let second = &second_page.hits()[0];
+        assert!(
+            first.score_millionths() > second.score_millionths()
+                || (first.score_millionths() == second.score_millionths()
+                    && (first.fact().telemetry().updated_at()
+                        > second.fact().telemetry().updated_at()
+                        || (first.fact().telemetry().updated_at()
+                            == second.fact().telemetry().updated_at()
+                            && first.fact().fact_id() < second.fact().fact_id()))),
+            "search pages must preserve canonical score, timestamp, and fact-id ordering"
+        );
+        assert_eq!(replay_page, second_page);
+
+        let profile_owner = FactOwnerV1::Profile;
+        let profile_memory =
+            MemoryApplication::new(profile_owner.clone(), DatabaseFactStore::new(cg.db())).unwrap();
+        for (operation, content) in [
+            (
+                "test-profile-cursor-one",
+                "profile cursor fixture violet semantics",
+            ),
+            (
+                "test-profile-cursor-two",
+                "profile cursor fixture amber provenance",
+            ),
+        ] {
+            assert!(
+                profile_memory
+                    .add_fact_v1(
+                        cursor_fact(content),
+                        MemoryOperationContext::generated(&profile_owner, operation, None).unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .fact
+                    .is_some(),
+                "{operation} must persist a real fixture fact"
+            );
+        }
+        let profile_first_page = profile_memory
+            .search_compatibility_facts(
+                cursor_search_query(profile_owner, "profile cursor fixture", None).unwrap(),
+            )
+            .await
+            .unwrap();
+        let foreign_cursor = profile_first_page
+            .next_after()
+            .cloned()
+            .expect("the profile page must provide its real cursor");
+        assert!(matches!(
+            cursor_search_query(owner, "profile cursor fixture", Some(foreign_cursor)),
+            Err(FactStoreError::OwnerMismatch)
+        ));
     }
 }

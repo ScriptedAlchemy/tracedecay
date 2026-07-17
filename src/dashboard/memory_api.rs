@@ -1,8 +1,7 @@
 //! Holographic-memory dashboard API, backed by tracedecay's memory store.
 //!
 //! Port of `plugins/memory/holographic_plus/dashboard/plugin_api.py` (Hermes)
-//! onto the project database tables `memory_facts`, `memory_entities`,
-//! `memory_fact_entities`, and `memory_banks`. Payload shapes mirror the
+//! through the memory application authority. Payload shapes mirror the
 //! original routes so the ported UI bundle works unchanged.
 //!
 //! Differences from the Hermes backend, by design:
@@ -21,11 +20,9 @@ use serde_json::{Map, Value, json};
 use super::DashboardState;
 use super::memory_analysis::{SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_PAIR_CAP};
 use super::memory_service;
-use super::util::{JsonPath, JsonQuery, coerce_limit, http_detail, query_i64};
-use crate::memory::encoding::HolographicEncoder;
-use crate::memory::store::MemoryStore;
-use crate::memory::trust::DEFAULT_MIN_TRUST;
+use super::util::{JsonPath, JsonQuery, coerce_limit, http_detail};
 use crate::memory::types::{MemoryFeedbackFunnel, MemoryRepairStats, MemoryStatus};
+use crate::tracedecay::facts::memory_application_for_db;
 
 #[derive(Deserialize)]
 pub(crate) struct OverviewParams {
@@ -84,178 +81,80 @@ pub(crate) fn default_agent_plan_min_confidence() -> f64 {
 }
 
 async fn largest_bank_fact_count(state: &DashboardState) -> Result<i64, String> {
-    let mut rows = state
-        .mem_conn
-        .query("SELECT COALESCE(MAX(fact_count), 0) FROM memory_banks", ())
-        .await
-        .map_err(|e| e.to_string())?;
-    let Some(row) = rows.next().await.map_err(|e| e.to_string())? else {
-        return Ok(0);
-    };
-    Ok(row.get::<i64>(0).unwrap_or(0).max(0))
+    let overview = memory_service::overview_payload(state).await?;
+    Ok(overview["memory_banks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|bank| bank.get("fact_count").and_then(Value::as_i64))
+        .max()
+        .unwrap_or_default())
 }
 
 pub(crate) async fn repair_derived_memory(
     state: &DashboardState,
 ) -> Result<MemoryRepairStats, String> {
-    let writer = state
-        .mem_db
-        .writer_connection("repair dashboard memory")
+    let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
+        .map_err(|error| error.to_string())?;
+    let context = crate::application::memory::MemoryOperationContext::generated(
+        &state.memory_owner,
+        "dashboard-repair",
+        None,
+    )
+    .map_err(|error| error.to_string())?;
+    let repair = application
+        .dashboard_repair_v1(context)
         .await
         .map_err(|error| error.to_string())?;
-    let store = writer.memory_store();
-    let mut missing_vectors_repaired = 0;
-    loop {
-        let repaired = store
-            .compute_missing_vectors(500)
-            .await
-            .map_err(|e| e.to_string())?;
-        if repaired == 0 {
-            break;
-        }
-        missing_vectors_repaired += repaired;
-    }
-
-    let banks_rebuilt = store
-        .rebuild_dirty_banks()
-        .await
-        .map_err(|e| e.to_string())?;
 
     Ok(MemoryRepairStats {
-        missing_vectors_repaired,
-        banks_rebuilt,
+        missing_vectors_repaired: usize::try_from(repair.missing_vectors_repaired())
+            .map_err(|error| error.to_string())?,
+        banks_rebuilt: usize::try_from(repair.banks_rebuilt())
+            .map_err(|error| error.to_string())?,
     })
 }
 
-/// Fact-store adoption funnel (seen vs. rated) for the dashboard memory
-/// status payload — mirrors the funnel computed in
-/// [`crate::tracedecay::TraceDecay::memory_status_for_db`] for the MCP
-/// `tracedecay_memory_status` tool, kept as a separate query here since the
-/// dashboard builds `MemoryStatus` from ad-hoc `query_i64` calls rather than
-/// sharing that connection-taking helper.
-async fn memory_feedback_funnel(state: &DashboardState) -> MemoryFeedbackFunnel {
-    let retrieval_count_total = query_i64(
-        &state.mem_conn,
-        "SELECT COALESCE(SUM(retrieval_count), 0) FROM memory_facts",
-        (),
-    )
-    .await;
-    let access_count_total = query_i64(
-        &state.mem_conn,
-        "SELECT COALESCE(SUM(access_count), 0) FROM memory_facts",
-        (),
-    )
-    .await;
-    let retrieved_fact_count = query_i64(
-        &state.mem_conn,
-        "SELECT COALESCE(SUM(retrieval_count > 0), 0) FROM memory_facts",
-        (),
-    )
-    .await
-    .max(0) as usize;
-    let rated_fact_count = query_i64(
-        &state.mem_conn,
-        "SELECT COALESCE(SUM(helpful_count + unhelpful_count > 0), 0) FROM memory_facts",
-        (),
-    )
-    .await
-    .max(0) as usize;
-    let feedback_total = query_i64(
-        &state.mem_conn,
-        "SELECT COALESCE(SUM(helpful_count + unhelpful_count), 0) FROM memory_facts",
-        (),
-    )
-    .await
-    .max(0) as usize;
-    let seen_total = retrieval_count_total + access_count_total;
-    let seen_to_feedback_ratio = if feedback_total > 0 {
-        Some(seen_total / feedback_total as i64)
-    } else {
-        None
-    };
-    MemoryFeedbackFunnel {
-        retrieval_count_total,
-        access_count_total,
-        retrieved_fact_count,
-        rated_fact_count,
-        feedback_total,
-        seen_to_feedback_ratio,
-    }
-}
-
 async fn memory_status_payload(state: &DashboardState) -> Result<Value, String> {
-    let hrr_dim = HolographicEncoder::DIMENSIONS;
-    let repair = repair_derived_memory(state).await?;
-    let feedback_funnel = memory_feedback_funnel(state).await;
-    let status = MemoryStatus {
-        fact_count: query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_facts", ()).await
-            as usize,
-        entity_count: query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_entities", ()).await
-            as usize,
-        bank_count: query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_banks", ()).await
-            as usize,
-        algebra_name: "amari_fhrr".to_string(),
-        hrr_dim,
-        estimated_capacity: (hrr_dim as f64 / (hrr_dim as f64).ln()).round() as usize,
-        trust_0_025_count: query_i64(
-            &state.mem_conn,
-            "SELECT COUNT(*) FROM memory_facts WHERE trust_score < 0.25",
-            (),
-        )
-        .await as usize,
-        trust_025_050_count: query_i64(
-            &state.mem_conn,
-            "SELECT COUNT(*) FROM memory_facts WHERE trust_score >= 0.25 AND trust_score < 0.50",
-            (),
-        )
-        .await as usize,
-        trust_050_075_count: query_i64(
-            &state.mem_conn,
-            "SELECT COUNT(*) FROM memory_facts WHERE trust_score >= 0.50 AND trust_score < 0.75",
-            (),
-        )
-        .await as usize,
-        trust_075_100_count: query_i64(
-            &state.mem_conn,
-            "SELECT COUNT(*) FROM memory_facts WHERE trust_score >= 0.75",
-            (),
-        )
-        .await as usize,
-        below_default_recall_threshold_count: query_i64(
-            &state.mem_conn,
-            "SELECT COUNT(*) FROM memory_facts WHERE trust_score < ?1",
-            libsql::params![DEFAULT_MIN_TRUST],
-        )
-        .await as usize,
-        helpful_count: query_i64(
-            &state.mem_conn,
-            "SELECT COALESCE(SUM(helpful_count), 0) FROM memory_facts",
-            (),
-        )
-        .await as usize,
-        unhelpful_count: query_i64(
-            &state.mem_conn,
-            "SELECT COALESCE(SUM(unhelpful_count), 0) FROM memory_facts",
-            (),
-        )
-        .await as usize,
-        missing_vector_count: query_i64(
-            &state.mem_conn,
-            "SELECT COUNT(*) FROM memory_facts
-             WHERE hrr_vector IS NULL OR hrr_algebra != 'amari_fhrr' OR hrr_dim != ?1",
-            libsql::params![hrr_dim as i64],
-        )
-        .await as usize,
-        legacy_backfill_complete: query_i64(
-            &state.mem_conn,
-            "SELECT COUNT(*) FROM memory_facts
-             WHERE json_extract(metadata, '$.holographic_memory_backfill_v1') = 1",
-            (),
-        )
+    let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
+        .map_err(|error| error.to_string())?;
+    let typed_status = application
+        .dashboard_memory_status_v1()
         .await
-            > 0,
-        repair,
-        feedback_funnel,
+        .map_err(|error| error.to_string())?;
+    let as_usize = |value: u64| usize::try_from(value).map_err(|error| error.to_string());
+    let as_i64 = |value: u64| i64::try_from(value).map_err(|error| error.to_string());
+    let funnel = typed_status.feedback_funnel();
+    let status = MemoryStatus {
+        fact_count: as_usize(typed_status.fact_count())?,
+        entity_count: as_usize(typed_status.entity_count())?,
+        bank_count: as_usize(typed_status.bank_count())?,
+        algebra_name: typed_status.algebra().name().to_owned(),
+        hrr_dim: as_usize(typed_status.algebra().hrr_dim())?,
+        estimated_capacity: as_usize(typed_status.algebra().estimated_capacity())?,
+        trust_0_025_count: as_usize(typed_status.trust_0_025_count())?,
+        trust_025_050_count: as_usize(typed_status.trust_025_050_count())?,
+        trust_050_075_count: as_usize(typed_status.trust_050_075_count())?,
+        trust_075_100_count: as_usize(typed_status.trust_075_100_count())?,
+        below_default_recall_threshold_count: as_usize(
+            typed_status.below_default_recall_threshold_count(),
+        )?,
+        helpful_count: as_usize(typed_status.helpful_count())?,
+        unhelpful_count: as_usize(typed_status.unhelpful_count())?,
+        missing_vector_count: as_usize(typed_status.missing_vector_count())?,
+        legacy_backfill_complete: typed_status.legacy_backfill_complete(),
+        repair: MemoryRepairStats {
+            missing_vectors_repaired: as_usize(typed_status.repair().missing_vectors_repaired())?,
+            banks_rebuilt: as_usize(typed_status.repair().banks_rebuilt())?,
+        },
+        feedback_funnel: MemoryFeedbackFunnel {
+            retrieval_count_total: as_i64(funnel.retrieval_count_total())?,
+            access_count_total: as_i64(funnel.access_count_total())?,
+            retrieved_fact_count: as_usize(funnel.retrieved_fact_count())?,
+            rated_fact_count: as_usize(funnel.rated_fact_count())?,
+            feedback_total: as_usize(funnel.feedback_total())?,
+            seen_to_feedback_ratio: funnel.seen_to_feedback_ratio().map(as_i64).transpose()?,
+        },
     };
     let largest_bank_fact_count = largest_bank_fact_count(state).await?;
     let largest_bank_utilization_pct = if status.estimated_capacity > 0 {
@@ -269,6 +168,16 @@ async fn memory_status_payload(state: &DashboardState) -> Result<Value, String> 
         "memory": status,
         "largest_bank_fact_count": largest_bank_fact_count,
         "largest_bank_utilization_pct": largest_bank_utilization_pct,
+        "feedback_history_repair": {
+            "state": match typed_status.feedback_history_repair() {
+                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Unknown => "unknown",
+                tracedecay_store::CompatibilityFeedbackRepairProgressV1::NotRequired => "not_required",
+                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Complete { .. } => "complete",
+                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Incomplete { .. } => "incomplete",
+            },
+            "processed": typed_status.feedback_history_repair().processed(),
+            "remaining": typed_status.feedback_history_repair().remaining(),
+        },
         "error": "",
     }))
 }
@@ -277,17 +186,72 @@ async fn fact_trust_history_payload(
     state: &DashboardState,
     fact_id: i64,
 ) -> Result<Option<Value>, String> {
-    let store = MemoryStore::new(&state.mem_conn);
-    let Some(_fact) = store.get_fact(fact_id).await.map_err(|e| e.to_string())? else {
+    let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
+        .map_err(|error| error.to_string())?;
+    let Some(_detail) = application
+        .dashboard_fact_detail_v1(fact_id)
+        .await
+        .map_err(|error| error.to_string())?
+    else {
         return Ok(None);
     };
-    let trust_history = store
-        .fact_trust_history(fact_id)
+    let history = application
+        .dashboard_feedback_history_v1(fact_id, 300)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
+    let trust_history: Vec<Value> = history
+        .events()
+        .iter()
+        .map(|event| {
+            let action = match event.action() {
+                tracedecay_store::CompatibilityFactFeedbackActionV1::Helpful => "helpful",
+                tracedecay_store::CompatibilityFactFeedbackActionV1::Unhelpful => "unhelpful",
+            };
+            let availability = match event.details_availability() {
+                tracedecay_store::CompatibilityFactFeedbackDetailsAvailabilityV1::Available => {
+                    "available"
+                }
+                tracedecay_store::CompatibilityFactFeedbackDetailsAvailabilityV1::LegacyRedacted => {
+                    "legacy_redacted"
+                }
+                tracedecay_store::CompatibilityFactFeedbackDetailsAvailabilityV1::Unknown => {
+                    "unknown"
+                }
+            };
+            let mut row = Map::new();
+            row.insert("timestamp".into(), json!(event.occurred_at().0));
+            row.insert("action".into(), json!(action));
+            row.insert("old_trust".into(), json!(event.old_trust().as_f64()));
+            row.insert("new_trust".into(), json!(event.new_trust().as_f64()));
+            row.insert(
+                "delta".into(),
+                json!(event.new_trust().as_f64() - event.old_trust().as_f64()),
+            );
+            row.insert("details_availability".into(), json!(availability));
+            if let Some(source) = event.source() {
+                row.insert("source".into(), json!(source));
+            }
+            if let Some(note) = event.note() {
+                row.insert("note".into(), json!(note));
+            }
+            Value::Object(row)
+        })
+        .collect();
+    let repair_progress = history.repair_progress();
+    let repair_state = match repair_progress {
+        tracedecay_store::CompatibilityFeedbackRepairProgressV1::Unknown => "unknown",
+        tracedecay_store::CompatibilityFeedbackRepairProgressV1::NotRequired => "not_required",
+        tracedecay_store::CompatibilityFeedbackRepairProgressV1::Complete { .. } => "complete",
+        tracedecay_store::CompatibilityFeedbackRepairProgressV1::Incomplete { .. } => "incomplete",
+    };
     Ok(Some(json!({
         "fact_id": fact_id,
         "trust_history": trust_history,
+        "repair": {
+            "state": repair_state,
+            "processed": repair_progress.processed(),
+            "remaining": repair_progress.remaining(),
+        },
         "error": "",
     })))
 }
@@ -336,8 +300,8 @@ pub(crate) async fn overview(
 }
 
 /// `GET /api/plugins/holographic/status` — rich holographic-memory health
-/// derived from `TraceDecay::memory_status()` plus the largest-bank utilization
-/// that operators need for the dashboard health card.
+/// derived from the memory application authority plus the largest-bank
+/// utilization that operators need for the dashboard health card.
 pub(crate) async fn status(State(state): State<DashboardState>) -> (StatusCode, Json<Value>) {
     match memory_status_payload(&state).await {
         Ok(payload) => (StatusCode::OK, Json(payload)),
@@ -469,7 +433,13 @@ pub(crate) async fn fact_proposals(
         Err(message) => return (StatusCode::BAD_REQUEST, Json(http_detail(&message))),
     };
     let limit = coerce_limit(params.limit, 50, 200) as usize;
+    let memory = match memory_application_for_db(state.memory_owner.clone(), state.mem_db.as_ref())
+    {
+        Ok(memory) => memory,
+        Err(err) => return fact_proposal_error(&err),
+    };
     match crate::automation::fact_proposals::list_fact_proposals(
+        &memory,
         &state.dashboard_root,
         proposal_state,
         limit,
@@ -500,24 +470,31 @@ pub(crate) async fn fact_proposal_apply(
     body: Option<axum::extract::Json<FactProposalApplyBody>>,
 ) -> (StatusCode, Json<Value>) {
     let reviewer = body.and_then(|body| body.0.reviewer);
-    match crate::automation::fact_proposals::apply_fact_proposal(
+    let memory = match memory_application_for_db(state.memory_owner.clone(), state.mem_db.as_ref())
+    {
+        Ok(memory) => memory,
+        Err(err) => return fact_proposal_error(&err),
+    };
+    match crate::automation::fact_proposals::apply_fact_proposal_with_result(
+        &memory,
         &state.dashboard_root,
-        &state.mem_db,
         &proposal_id,
         reviewer,
     )
     .await
     {
-        Ok(proposal) => {
-            crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-                &state.mem_conn,
-                &state.project_root,
-            )
-            .await;
+        Ok(result) => {
+            if result.newly_promoted {
+                crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+                    &memory,
+                    &state.project_root,
+                )
+                .await;
+            }
             (
                 StatusCode::OK,
                 Json(json!({
-                    "proposal": proposal,
+                    "proposal": result.record,
                     "error": "",
                 })),
             )
@@ -534,7 +511,13 @@ pub(crate) async fn fact_proposal_reject(
     body: Option<axum::extract::Json<FactProposalRejectBody>>,
 ) -> (StatusCode, Json<Value>) {
     let body = body.map(|body| body.0).unwrap_or_default();
+    let memory = match memory_application_for_db(state.memory_owner.clone(), state.mem_db.as_ref())
+    {
+        Ok(memory) => memory,
+        Err(err) => return fact_proposal_error(&err),
+    };
     match crate::automation::fact_proposals::reject_fact_proposal(
+        &memory,
         &state.dashboard_root,
         &proposal_id,
         body.reviewer,
@@ -606,19 +589,20 @@ pub(crate) async fn curate_apply(
     };
 
     let payload = memory_service::curate_apply_payload(&state, &body.ops).await;
-    crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-        &state.mem_conn,
-        &state.project_root,
-    )
-    .await;
+    if let Ok(application) = memory_application_for_db(state.memory_owner.clone(), &state.mem_db) {
+        crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+            &application,
+            &state.project_root,
+        )
+        .await;
+    }
     (StatusCode::OK, Json(payload))
 }
 
 /// `GET /api/plugins/holographic/oplog` — recent memory operations, newest
-/// first. Rows come from `memory_oplog`, the append-only audit written by the
-/// store mutation paths (add/update/remove/feedback) and curation applies.
-/// `detail_json` never carries fact content beyond what the op needs
-/// (deletes record a content hash, not the content).
+/// first. Rows come from the authoritative compatibility audit. Details are
+/// privacy-gated and may be explicitly redacted rather than reconstructed
+/// from legacy JSON.
 pub(crate) async fn oplog(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<LimitParams>,

@@ -9,6 +9,9 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod anchor_resolution;
+mod anchor_tombstone_expiry;
+mod fact_anchor_authority;
 mod git_backfill;
 mod global_db;
 mod lcm_compression;

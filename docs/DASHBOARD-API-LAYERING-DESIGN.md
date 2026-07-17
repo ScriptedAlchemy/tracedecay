@@ -38,7 +38,7 @@ canonical `src/db/` layer.
 | C1 | One `router(state)` builder stays the single source of route registration; the route table in `mod.rs` does not change. | P21, §1 |
 | C2 | Every route path and JSON key stays byte-identical (standalone UIs + the Hermes reverse-proxy depend on them). | P18, P19, §2 |
 | C3 | The fail-soft error contract is preserved: `query_rows → Err(String)` surfaced in the payload `error` field (never a raw 500); `query_i64 → 0` on any error/empty; `JsonPath`/`JsonQuery` rejections stay `{detail}` JSON. | P2, P3 |
-| C4 | Deletion stays permanent and goes through `MemoryStore` canonical paths (no raw `DELETE`, no archive/soft-delete). | P4, P5 |
+| C4 | Memory mutations stay permanent and go through `MemoryApplication<DatabaseFactStore>` (no dashboard-local `DELETE`, no archive/soft-delete). | P4, P5 |
 | C5 | The 5 `pub(crate)` curation functions stay a reusable seam for `memory_curate.rs` (the CLI curation path + LLM-review tier). | P20, §5 |
 | C6 | Cache keying/invalidation semantics are untouched (per-DB keys, content fingerprints, negative-cache exemption). | P14–P17 |
 | C7 | Standalone behavior and Hermes-wrapper compatibility are both preserved — no new auth, no off-loopback exposure. | P1, §11 |
@@ -86,8 +86,7 @@ src/dashboard/
 ├── assets.rs               # unchanged
 │
 ├── memory_api.rs           # ROUTE  (11 handlers) — bodies become thin calls
-├── memory_service.rs       # NEW — domain logic + curation seam + projection cache
-├── memory_queries.rs       # NEW — facts/entities/banks/oplog SQL
+├── memory_service.rs       # domain logic + memory-application boundary + curation seam
 ├── memory_analysis.rs      # unchanged — similarity/PCA math (SimilarityComputation)
 ├── memory_curate.rs        # one-line import update only (§5)
 │
@@ -117,7 +116,6 @@ mod lcm_queries;
 mod lcm_service;
 mod graph_queries;
 mod graph_service;
-mod memory_queries;
 mod memory_service;
 ```
 
@@ -136,10 +134,10 @@ Each table shows where current code lands. Line numbers are from the audited
 | Current (in `memory_api.rs`) | Destination | Notes |
 |---|---|---|
 | Route fns: `overview`, `fact_detail`, `projection`, `similarity`, `curation_status`, `curation_activity`, `curate_apply`, `oplog` (+ the `/` overview alias) | **`memory_api.rs`** (stay) | Bodies shrink to: extract params → `memory_service::…` → wrap `Json`. |
-| `overview_payload`, `fetch_facts`, `fetch_entities`, `graph_payload`, `providers_stub` | **`memory_service.rs`** | Domain assembly; call `memory_queries`. |
+| `overview_payload`, `fetch_facts`, `fetch_entities`, `graph_payload`, `providers_stub` | **`memory_service.rs`** | Domain assembly through `MemoryApplication<DatabaseFactStore>` authorized by the dashboard owner and memory DB. |
 | `vector_facts` (`:595`), `ProjectionComputation` (`:694`), `PROJECTION_CACHE` | **`memory_service.rs`** | Cache + its `OnceLock` move together (C6). |
 | **5 curation fns:** `similarity_computation` (`:906`), `build_delete_plan` (`:1144`), `delete_fact` (`:1184`), `apply_delete_op` (`:1316`), `apply_merge_op` (`:1352`) | **`memory_service.rs`** | Stay `pub(crate)` — the curation seam (C5, §5). |
-| Inline facts/entities/banks/oplog/trust-histogram/growth SQL | **`memory_queries.rs`** | Named fns, e.g. `fact_rows(conn, fact_id)`, `oplog_rows(conn, limit)`. |
+| Facts/entities/banks/oplog/trust-history reads and mutations | **`MemoryApplication<DatabaseFactStore>`** | Typed compatibility projections and commands; no dashboard-local memory SQL layer. |
 | `memory_analysis.rs` (`SimilarityComputation` `:288`, PCA/phase-cosine) | **unchanged** | Already separated; `memory_service` calls it. |
 
 ### 4b. lcm domain
@@ -362,9 +360,9 @@ shared between `overview` and `default_subgraph` (both move to
    `VALIDATED_METADATA_STORES`, `parse_summary_node_ids`. Green.
 
 ### Phase 3 — memory domain (highest coupling; do last)
-1. **3a queries:** create `memory_queries.rs`; move facts/entities/banks/oplog/
-   trust-histogram/growth SQL. Green.
-2. **3b service + seam (atomic):** create `memory_service.rs`; move
+1. **3a service + authority (atomic):** create `memory_service.rs`; route
+   dashboard memory reads and mutations through `MemoryApplication<DatabaseFactStore>`;
+   do not add a dashboard-local memory query layer. Move
    `overview_payload`/`fetch_facts`/`fetch_entities`/`graph_payload`/
    `providers_stub`, `vector_facts`/`ProjectionComputation`/`PROJECTION_CACHE`,
    **and the 5 curation fns** (§5). In the **same commit**, update
@@ -403,8 +401,8 @@ Delete the shim in the same commit once `memory_curate` points at
   `providers_stub`) stay exactly as-is (P18, P19).
 - **No typing of response payloads.** They stay `serde_json::Value` (§7).
 - **No new auth / no off-loopback exposure** (P1).
-- **No archive/soft-delete**, no bypassing `MemoryStore` canonical delete/merge
-  paths (P4, P5).
+- **No archive/soft-delete**, no bypassing `MemoryApplication<DatabaseFactStore>`
+  canonical delete/merge paths (P4, P5).
 - **No perf changes.** Do not batch the 21 `query_i64` aggregates in lcm, do not
   rewrite the window-function growth query, do not "fix" the `DegreeSummary`
   node-edit blind spot. Those are audit §7 follow-ups, separate from layering.
@@ -427,8 +425,8 @@ Every audited preserve-item, mapped to where this design honors it:
 - **P1** (loopback-only, no auth) → §11; no route exposure changes.
 - **P2/P3** (error contract, `{detail}` rejections) → §9; query/service/route
   each keep their slice of the contract; `util.rs` unchanged.
-- **P4/P5** (permanent delete via `MemoryStore`) → curation fns move verbatim to
-  `memory_service.rs`; no new delete paths.
+- **P4/P5** (permanent delete via `MemoryApplication<DatabaseFactStore>`) →
+  curation fns stay on canonical application paths; no dashboard-local delete paths.
 - **P6** (`content`→`snippet_text` fallback) → preserved in `lcm_queries.rs`
   `MESSAGE_COLUMNS` const.
 - **P7** (token-estimate byte-identity) → one named const in `lcm_queries.rs`.

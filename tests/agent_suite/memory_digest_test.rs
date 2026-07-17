@@ -3,7 +3,9 @@
 //! write/removal, config gating, and regeneration after fact-proposal apply.
 
 use serde_json::json;
+use tracedecay_domain::FactOwnerV1;
 
+use tracedecay::application::memory::MemoryApplication;
 use tracedecay::automation::config::{AutomationConfigPatch, save_project_config};
 use tracedecay::automation::fact_proposals::{
     FactProposalState, apply_fact_proposal, record_session_fact_proposals,
@@ -21,6 +23,7 @@ use tracedecay::automation::skill_targets::SkillInstallTarget;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::memory::types::{FactRecord, MemoryCategory};
 use tracedecay::storage::default_profile_sharded_layout;
+use tracedecay::store::memory::DatabaseFactStore;
 
 fn fact(id: i64, content: &str, trust: f64, updated_at: i64) -> FactRecord {
     FactRecord {
@@ -435,9 +438,10 @@ async fn project_config_gate_disables_refresh_and_removes_existing_section() {
 
     let db_path = temp.path().join("graph.db");
     let db = crate::common::open_graph_db_from_template(&db_path).await;
+    let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&db)).unwrap();
     let refreshed = refresh_memory_digest_after_memory_change_for_profile(
         &profile_root,
-        db.conn(),
+        &memory,
         &project_root,
     )
     .await
@@ -470,8 +474,10 @@ async fn fact_proposal_apply_then_refresh_regenerates_recorded_overlays() {
 
     let db_path = temp.path().join("graph.db");
     let db = crate::common::open_graph_db_from_template(&db_path).await;
+    let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&db)).unwrap();
 
     let records = record_session_fact_proposals(
+        &memory,
         &dashboard_root,
         "run-1",
         None,
@@ -491,8 +497,8 @@ async fn fact_proposal_apply_then_refresh_regenerates_recorded_overlays() {
     .await
     .unwrap();
     let applied = apply_fact_proposal(
+        &memory,
         &dashboard_root,
-        &db,
         &records[0].proposal_id,
         Some("test".to_string()),
     )
@@ -502,7 +508,7 @@ async fn fact_proposal_apply_then_refresh_regenerates_recorded_overlays() {
 
     refresh_project_memory_digest(
         &profile_root,
-        db.conn(),
+        &memory,
         &project_root,
         &MemoryDigestOptions::default(),
     )

@@ -42,15 +42,45 @@ fn dashboard_plugin_manifest_assets_are_served() {
 }
 
 #[test]
+fn dashboard_memory_status_does_not_wait_for_the_writer_lane() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let cg = TraceDecay::open(&fixture.project_root)
+            .await
+            .unwrap_or_else(|error| panic!("reopen dashboard fixture project: {error}"));
+        let writer = cg
+            .db()
+            .memory_writer()
+            .await
+            .unwrap_or_else(|error| panic!("hold dashboard writer: {error}"));
+
+        let agent = http_agent_with_timeout(std::time::Duration::from_secs(2));
+        let response = agent
+            .get(&format!(
+                "{}/api/plugins/holographic/status",
+                fixture.base_url
+            ))
+            .call()
+            .unwrap_or_else(|error| panic!("status GET waited for writer lane: {error}"));
+        let (status, payload) = response_to_json(response);
+        assert_eq!(status, 200, "status payload: {payload}");
+
+        drop(writer);
+        cg.close();
+    });
+}
+
+#[test]
 fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        use tracedecay::automation::fact_proposals::{
-            FactProposalRecord, FactProposalState, FactProposalStore, save_fact_proposal_store,
-        };
         use tracedecay::automation::managed_skills::{
             ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, approve_managed_skill,
             create_managed_skill_draft, default_managed_skill_targets,
@@ -82,39 +112,15 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
             .await
             .unwrap();
 
-        set_fact_access_without_touching_updated_at(&fixture, 103, 2, 1_700_000_500).await;
         let cg = TraceDecay::open(&fixture.project_root)
             .await
             .unwrap_or_else(|err| panic!("failed to reopen dashboard fixture project: {err}"));
-        let dashboard_root = cg.store_layout().dashboard_root.clone();
-        save_fact_proposal_store(
-            &dashboard_root,
-            &FactProposalStore {
-                schema_version: 1,
-                proposals: vec![FactProposalRecord {
-                    schema_version: 1,
-                    proposal_id: "fact_dashboard_outcome".to_string(),
-                    run_id: "run_dashboard_outcomes".to_string(),
-                    evidence_hash: None,
-                    state: FactProposalState::Applied,
-                    add_fact_request: None,
-                    proposal: None,
-                    validation_reason: None,
-                    validation: None,
-                    reviewer: Some("dashboard-test".to_string()),
-                    applied_canonical_fact_id: None,
-                    applied_fact_id: Some(103),
-                    apply_outcome: None,
-                    created_at: 1_700_000_400,
-                    updated_at: 1_700_000_400,
-                    duplicate_count: 0,
-                    last_duplicate_run_id: None,
-                    folded_contents: Vec::new(),
-                }],
-            },
+        let applied_record = apply_dashboard_automation_fact(
+            &cg,
+            "run_dashboard_outcomes",
+            "Dashboard outcome reads use authoritative proposal promotion",
         )
-        .await
-        .unwrap();
+        .await;
 
         let agent = http_agent();
         let (status, payload) = get_json(
@@ -140,12 +146,20 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
             .unwrap_or_else(|| panic!("expected fact outcomes array: {payload}"));
         let fact = facts
             .iter()
-            .find(|fact| fact["proposal_id"] == "fact_dashboard_outcome")
+            .find(|fact| fact["proposal_id"].as_str() == Some(applied_record.proposal_id.as_str()))
             .unwrap_or_else(|| panic!("expected applied fact outcome: {payload}"));
-        assert_eq!(fact["fact_id"], 103);
-        assert_eq!(fact["verdict"], "recalled_and_helpful");
+        assert_eq!(
+            fact["canonical_fact_id"],
+            serde_json::json!(applied_record.canonical_fact_id)
+        );
+        assert_eq!(
+            fact["fact_id"],
+            serde_json::json!(applied_record.legacy_fact_id)
+        );
+        assert_eq!(fact["run_id"], "run_dashboard_outcomes");
+        assert_eq!(fact["verdict"], "never_recalled");
         assert_eq!(fact["still_exists"], true);
-        assert_eq!(fact["access_count"], 2);
+        assert_eq!(fact["access_count"], 0);
     });
 }
 
@@ -158,6 +172,12 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
         let agent = http_agent();
+        let project_fact_id = fixture_fact_id(
+            &agent,
+            &fixture,
+            "Cache invalidation policy must be explicit",
+        );
+        let tool_fact_id = fixture_fact_id(&agent, &fixture, "LCM dashboard empty states");
 
         let (status, overview) = get_json(
             &agent,
@@ -229,6 +249,18 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             "last cumulative growth point should include all seeded facts"
         );
 
+        let (status, memory_status) = get_json(
+            &agent,
+            &format!("{}/api/plugins/holographic/status", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert!(
+            memory_status["feedback_history_repair"]["state"].is_string()
+                && memory_status["feedback_history_repair"]["processed"].is_number()
+                && memory_status["feedback_history_repair"]["remaining"].is_number(),
+            "status must expose authoritative feedback-history repair progress: {memory_status}"
+        );
+
         let (status, projection) = get_json(
             &agent,
             &format!(
@@ -253,19 +285,19 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         );
         let project_point = projection_points
             .iter()
-            .find(|point| point["fact_id"].as_i64() == Some(101))
-            .unwrap_or_else(|| panic!("expected projection point for fact 101"));
+            .find(|point| point["fact_id"].as_i64() == Some(project_fact_id))
+            .unwrap_or_else(|| panic!("expected projection point for seeded project fact"));
         assert_eq!(project_point["bank_name"], "project");
         assert!(
-            project_point["bank_id"].is_number(),
-            "projection point should include numeric bank_id"
+            project_point["bank_id"].is_null() || project_point["bank_id"].is_number(),
+            "projection point may omit an unavailable legacy bank identity"
         );
         assert_eq!(project_point["entity_count"], 1);
         assert_eq!(project_point["connection_count"], 1);
         let tool_point = projection_points
             .iter()
-            .find(|point| point["fact_id"].as_i64() == Some(103))
-            .unwrap_or_else(|| panic!("expected projection point for fact 103"));
+            .find(|point| point["fact_id"].as_i64() == Some(tool_fact_id))
+            .unwrap_or_else(|| panic!("expected projection point for seeded tool fact"));
         assert_eq!(tool_point["entity_count"], 2);
         assert_eq!(tool_point["connection_count"], 2);
 
@@ -371,6 +403,7 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
         let agent = http_agent();
+        let tool_fact_id = fixture_fact_id(&agent, &fixture, "LCM dashboard empty states");
 
         assert!(
             LONG_FACT_CONTENT.chars().count() > 200,
@@ -391,9 +424,9 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
             .and_then(|points| {
                 points
                     .iter()
-                    .find(|point| point["fact_id"].as_i64() == Some(103))
+                    .find(|point| point["fact_id"].as_i64() == Some(tool_fact_id))
             })
-            .unwrap_or_else(|| panic!("expected projection point for fact 103"));
+            .unwrap_or_else(|| panic!("expected projection point for seeded tool fact"));
         assert_eq!(
             truncated_point["content"]
                 .as_str()
@@ -407,15 +440,18 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
         // The detail endpoint returns the complete row plus linked entities.
         let (status, detail) = get_json(
             &agent,
-            &format!("{}/api/plugins/holographic/fact/103", fixture.base_url),
+            &format!(
+                "{}/api/plugins/holographic/fact/{tool_fact_id}",
+                fixture.base_url
+            ),
         );
         assert_eq!(status, 200);
         assert_eq!(detail["error"], "");
-        assert_eq!(detail["fact"]["fact_id"], 103);
+        assert_eq!(detail["fact"]["fact_id"], tool_fact_id);
         assert_eq!(detail["fact"]["category"], "tool");
         assert_eq!(detail["fact"]["content"], LONG_FACT_CONTENT);
         assert_eq!(detail["fact"]["has_hrr"], 1);
-        assert_eq!(detail["fact"]["trust_score"], 0.76);
+        assert_eq!(detail["fact"]["trust_score"], 0.66);
         assert!(
             detail["fact"]["access_count"].is_number(),
             "fact detail must surface access_count"
@@ -461,76 +497,55 @@ fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewe
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_dashboard_fixture(false).await;
-        let conn = project_db_conn(&fixture).await;
-        conn.execute(
-            "INSERT INTO memory_feedback_events
-                (fact_id, action, trust_delta, old_trust, new_trust, created_at, source, note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            libsql::params![
-                103_i64,
-                "helpful",
-                0.05_f64,
-                0.71_f64,
-                0.76_f64,
-                1_700_000_450_i64,
-                "dashboard-test",
-                "confirmed durable"
-            ],
-        )
-        .await
-        .unwrap_or_else(|err| panic!("failed to insert helpful feedback row: {err}"));
-        conn.execute(
-            "INSERT INTO memory_feedback_events
-                (fact_id, action, trust_delta, old_trust, new_trust, created_at, source, note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            libsql::params![
-                103_i64,
-                "unhelpful",
-                -0.10_f64,
-                0.76_f64,
-                0.66_f64,
-                1_700_000_460_i64,
-                "dashboard-test",
-                libsql::Value::Null
-            ],
-        )
-        .await
-        .unwrap_or_else(|err| panic!("failed to insert unhelpful feedback row: {err}"));
-
         let agent = http_agent();
+        let tool_fact_id = fixture_fact_id(&agent, &fixture, "LCM dashboard empty states");
+        let project_fact_id = fixture_fact_id(
+            &agent,
+            &fixture,
+            "Cache invalidation policy must be explicit",
+        );
         let (status, history) = get_json(
             &agent,
             &format!(
-                "{}/api/plugins/holographic/fact/103/trust-history",
+                "{}/api/plugins/holographic/fact/{tool_fact_id}/trust-history",
                 fixture.base_url
             ),
         );
         assert_eq!(status, 200);
         assert_eq!(history["error"], "");
-        assert_eq!(history["fact_id"], 103);
+        assert_eq!(history["fact_id"], tool_fact_id);
         let trail = history["trust_history"]
             .as_array()
             .unwrap_or_else(|| panic!("expected trust_history array: {history}"));
         assert_eq!(trail.len(), 2);
-        assert_eq!(trail[0]["timestamp"], 1_700_000_450_i64);
+        assert!(trail[0]["timestamp"].is_number());
         assert_eq!(trail[0]["action"], "helpful");
         assert_eq!(trail[0]["old_trust"], 0.71);
         assert_eq!(trail[0]["new_trust"], 0.76);
-        assert_eq!(trail[0]["delta"], 0.05);
+        assert!(
+            (trail[0]["delta"]
+                .as_f64()
+                .unwrap_or_else(|| panic!("expected numeric trust delta: {}", trail[0]))
+                - 0.05)
+                .abs()
+                < 1e-12
+        );
         assert_eq!(trail[0]["source"], "dashboard-test");
         assert_eq!(trail[0]["note"], "confirmed durable");
         assert_eq!(trail[1]["action"], "unhelpful");
+        assert_eq!(trail[1]["old_trust"], 0.76);
+        assert_eq!(trail[1]["new_trust"], 0.66);
         assert!(trail[1]["note"].is_null());
 
         let (status, empty_history) = get_json(
             &agent,
             &format!(
-                "{}/api/plugins/holographic/fact/101/trust-history",
+                "{}/api/plugins/holographic/fact/{project_fact_id}/trust-history",
                 fixture.base_url
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(empty_history["fact_id"], 101);
+        assert_eq!(empty_history["fact_id"], project_fact_id);
         assert_eq!(
             empty_history["trust_history"]
                 .as_array()

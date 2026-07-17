@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use crate::application::host_admission::{
     HostAdmissionOutcome, HostAdmissionStatus, TerminalReason, is_wire_oversized_io_error,
 };
+use crate::application::memory::MemoryApplication;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::mcp::project_route::{
@@ -34,6 +35,7 @@ use crate::sessions::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
 };
+use crate::store::DatabaseFactStore;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use super::hook_events::{self, HookAgent, HookEventPlan};
@@ -2245,7 +2247,10 @@ impl McpServer {
             return None;
         }
         let profile_root = crate::storage::default_profile_root().ok()?;
+        let owner = cg.project_memory_owner().ok()?;
+        let memory = MemoryApplication::new(owner, DatabaseFactStore::new(cg.db())).ok()?;
         crate::automation::staged_notice::maybe_automation_staged_notice(
+            &memory,
             &cg.store_layout().dashboard_root,
             &profile_root,
         )
@@ -3617,12 +3622,14 @@ impl McpServer {
             None
         };
         let mut handler_arguments = route_cache.apply_to_tool_arguments(tool_name, arguments);
-        if crate::analytics::is_skill_view_tool(tool_name)
-            && let Some(request_id) = json_rpc_request_id_string(&id)
-            && let Some(map) = handler_arguments.as_object_mut()
-        {
-            map.insert("__mcp_request_id".to_string(), json!(request_id));
+        if let Some(map) = handler_arguments.as_object_mut() {
+            if crate::analytics::is_skill_view_tool(tool_name)
+                && let Some(request_id) = json_rpc_request_id_string(&id)
+            {
+                map.insert("__mcp_request_id".to_string(), json!(request_id));
+            }
         }
+        inject_trusted_memory_request_id(tool_name, &id, &mut handler_arguments);
 
         let dispatch_outcome = Box::pin(handle_tool_call_with_registry_and_implicit_project(
             &cg,
@@ -4195,6 +4202,112 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
         Value::String(id) => Some(id.clone()),
         Value::Number(id) => Some(id.to_string()),
         _ => None,
+    }
+}
+
+fn inject_trusted_memory_request_id(tool_name: &str, id: &Value, arguments: &mut Value) {
+    if !memory_call_requires_operation_context(tool_name, arguments) {
+        return;
+    }
+    let Some(map) = arguments.as_object_mut() else {
+        return;
+    };
+    // This private field is only trusted when the server derives it from the
+    // JSON-RPC envelope. A malformed or absent envelope ID must not preserve
+    // caller-controlled arguments for the handler fallback path.
+    map.remove("__mcp_request_id");
+    if let Some(request_id) = json_rpc_request_id_string(id) {
+        map.insert("__mcp_request_id".to_string(), json!(request_id));
+    }
+}
+
+/// Mutations and locally-accounted retrievals both write canonical memory
+/// events, so both need a daemon-issued replay identity.
+fn memory_call_requires_operation_context(tool_name: &str, arguments: &Value) -> bool {
+    match tool_name {
+        "tracedecay_fact_feedback" => true,
+        "tracedecay_fact_store" => matches!(
+            arguments.get("action").and_then(Value::as_str),
+            Some("add" | "update" | "remove" | "search" | "probe" | "related" | "reason" | "list")
+        ),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod trusted_memory_request_id_tests {
+    use serde_json::{Value, json};
+
+    use super::inject_trusted_memory_request_id;
+
+    #[test]
+    fn memory_stateful_actions_overwrite_call_supplied_request_id() {
+        for action in [
+            "add", "update", "remove", "search", "probe", "related", "reason", "list",
+        ] {
+            let mut arguments = json!({
+                "action": action,
+                "__mcp_request_id": "caller-controlled",
+            });
+
+            inject_trusted_memory_request_id(
+                "tracedecay_fact_store",
+                &json!("json-rpc-17"),
+                &mut arguments,
+            );
+
+            assert_eq!(arguments["__mcp_request_id"], json!("json-rpc-17"));
+        }
+    }
+
+    #[test]
+    fn memory_retrieval_overwrites_call_supplied_request_id() {
+        let mut arguments = json!({
+            "action": "search",
+            "__mcp_request_id": "caller-controlled",
+        });
+
+        inject_trusted_memory_request_id("tracedecay_fact_store", &json!(17), &mut arguments);
+
+        assert_eq!(arguments["__mcp_request_id"], json!("17"));
+    }
+
+    #[test]
+    fn feedback_overwrites_call_supplied_request_id() {
+        let mut arguments = json!({ "__mcp_request_id": "caller-controlled" });
+
+        inject_trusted_memory_request_id(
+            "tracedecay_fact_feedback",
+            &json!("json-rpc-17"),
+            &mut arguments,
+        );
+
+        assert_eq!(arguments["__mcp_request_id"], json!("json-rpc-17"));
+    }
+
+    #[test]
+    fn malformed_json_rpc_id_clears_call_supplied_memory_request_id() {
+        let mut arguments = json!({
+            "action": "add",
+            "__mcp_request_id": "caller-controlled",
+        });
+
+        inject_trusted_memory_request_id("tracedecay_fact_store", &Value::Null, &mut arguments);
+
+        assert!(arguments.get("__mcp_request_id").is_none());
+    }
+
+    #[test]
+    fn memory_read_does_not_receive_a_request_id() {
+        let mut arguments = json!({ "action": "get" });
+
+        inject_trusted_memory_request_id(
+            "tracedecay_fact_store",
+            &json!("json-rpc-17"),
+            &mut arguments,
+        );
+
+        assert!(arguments.get("__mcp_request_id").is_none());
     }
 }
 mod project_host_admission_replay;

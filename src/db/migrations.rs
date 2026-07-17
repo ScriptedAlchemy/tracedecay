@@ -16,7 +16,7 @@ use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 21;
+const LATEST_VERSION: u32 = 23;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &Connection) -> Result<u32> {
@@ -292,6 +292,8 @@ pub async fn create_schema(conn: &Connection) -> Result<()> {
 
     create_holographic_memory_schema(conn, "create_schema").await?;
     super::memory_v2::create_schema(conn, "create_schema").await?;
+    super::memory_v2::install_v22_fresh_schema(conn, "create_schema").await?;
+    super::memory_v2::install_v23_fresh_schema(conn, "create_schema").await?;
     set_version(conn, LATEST_VERSION).await?;
     Ok(())
 }
@@ -402,6 +404,8 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         19 => migrate_v19(conn).await,
         20 => migrate_v20(conn).await,
         21 => migrate_v21(conn).await,
+        22 => migrate_v22(conn).await,
+        23 => migrate_v23(conn).await,
         _ => Err(TraceDecayError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
@@ -428,6 +432,19 @@ async fn migrate_v20(conn: &Connection) -> Result<()> {
 /// derived by the daemon-authorized compatibility authority.
 async fn migrate_v21(conn: &Connection) -> Result<()> {
     super::memory_v2::upgrade_v21_schema(conn, "migrate_v21").await
+}
+
+/// v22: adds retry receipts, feedback-history/numeric-event parity, constrained
+/// baseline fact relations, and the final proposal-state projection. All V22
+/// data is owner-bound and does not retain a compatibility payload snapshot.
+async fn migrate_v22(conn: &Connection) -> Result<()> {
+    super::memory_v2::upgrade_v22_schema(conn, "migrate_v22").await
+}
+
+/// v23: upgrades durable V22 relation provenance/parity and adds owner-keyed
+/// compatibility-bank projections without reopening V20/V21 schema scope.
+async fn migrate_v23(conn: &Connection) -> Result<()> {
+    super::memory_v2::upgrade_v23_schema(conn, "migrate_v23").await
 }
 
 /// Compatibility marker after v12 was exposed on the PR stack.

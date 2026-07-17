@@ -17,7 +17,9 @@ pub(crate) use tracedecay::config::USER_DATA_DIR_ENV;
 pub(crate) use tracedecay::dashboard;
 pub(crate) use tracedecay::errors::TraceDecayError;
 pub(crate) use tracedecay::global_db::GlobalDb;
-pub(crate) use tracedecay::memory::encoding::HolographicEncoder;
+pub(crate) use tracedecay::memory::types::{
+    AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory,
+};
 pub(crate) use tracedecay::sessions::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 pub(crate) use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 pub(crate) use tracedecay::storage::{EnrollmentMarker, StorageMode, write_enrollment_marker};
@@ -63,7 +65,6 @@ pub(crate) struct DashboardFixture {
     pub(crate) home: std::path::PathBuf,
     pub(crate) base_url: String,
     pub(crate) project_root: std::path::PathBuf,
-    pub(crate) project_db_path: std::path::PathBuf,
     pub(crate) server: DashboardServer,
 }
 
@@ -96,32 +97,23 @@ impl Drop for DashboardServer {
 }
 
 pub(crate) fn spawn_dashboard_server(cg: TraceDecay, port: u16) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, port, true)
+    spawn_dashboard_server_with_runner(cg, port)
 }
 
 pub(crate) fn spawn_dashboard_server_lightweight(cg: TraceDecay, port: u16) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, port, false)
+    spawn_dashboard_server_with_runner(cg, port)
 }
 
-fn spawn_dashboard_server_with_runner(
-    cg: TraceDecay,
-    port: u16,
-    repair_memory_on_startup: bool,
-) -> DashboardServer {
+fn spawn_dashboard_server_with_runner(cg: TraceDecay, port: u16) -> DashboardServer {
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let thread = thread::spawn(move || {
         let runtime = create_runtime();
         runtime.block_on(async move {
-            let result = dashboard::run_until_shutdown_for_tests(
-                &cg,
-                "127.0.0.1",
-                port,
-                repair_memory_on_startup,
-                async move {
+            let result =
+                dashboard::run_until_shutdown_for_tests(&cg, "127.0.0.1", port, async move {
                     let _ = shutdown_rx.await;
-                },
-            )
-            .await;
+                })
+                .await;
             let _ = cg.checkpoint().await;
             cg.close();
             let _ = result;
@@ -169,177 +161,249 @@ pub(crate) async fn setup_project(project_root: &Path) -> TraceDecay {
     cg
 }
 
-pub(crate) fn blob_param(bytes: Vec<u8>) -> libsql::Value {
-    libsql::Value::Blob(bytes)
+pub(crate) struct AppliedDashboardAutomationFact {
+    pub(crate) proposal_id: String,
+    pub(crate) canonical_fact_id: String,
+    pub(crate) legacy_fact_id: Option<i64>,
 }
 
-pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) {
-    let db = cg.db();
-    let vec_a = match HolographicEncoder::serialize(&[0.20, 0.35, 0.50]) {
-        Ok(value) => value,
-        Err(err) => panic!("failed to serialize vec_a: {err}"),
-    };
-    let vec_b = match HolographicEncoder::serialize(&[0.21, 0.34, 0.49]) {
-        Ok(value) => value,
-        Err(err) => panic!("failed to serialize vec_b: {err}"),
-    };
-    let vec_c = match HolographicEncoder::serialize(&[2.1, -1.2, 0.9]) {
-        Ok(value) => value,
-        Err(err) => panic!("failed to serialize vec_c: {err}"),
-    };
-    let bank_a = match HolographicEncoder::serialize(&[0.1, 0.2, 0.3]) {
-        Ok(value) => value,
-        Err(err) => panic!("failed to serialize bank_a: {err}"),
-    };
-    let bank_b = match HolographicEncoder::serialize(&[0.4, 0.5, 0.6]) {
-        Ok(value) => value,
-        Err(err) => panic!("failed to serialize bank_b: {err}"),
-    };
+fn dashboard_fixture_project_owner(cg: &TraceDecay) -> tracedecay_domain::FactOwnerV1 {
+    let raw_project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .unwrap_or_else(|| panic!("dashboard fixture requires an authoritative project id"));
+    let project_id = tracedecay_domain::ProjectId::new(raw_project_id.to_owned())
+        .unwrap_or_else(|error| panic!("invalid dashboard fixture project id: {error}"));
+    tracedecay_domain::FactOwnerV1::Project { project_id }
+}
 
-    let inserts = [
-        (
-            "INSERT INTO memory_facts
-                (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at, hrr_vector, hrr_algebra, hrr_dim)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            libsql::params![
-                101_i64,
-                "Cache invalidation policy must be explicit",
-                "project",
-                "[\"cache\",\"policy\"]",
-                0.97_f64,
-                8_i64,
-                5_i64,
-                1_700_000_000_i64,
-                1_700_000_100_i64,
-                blob_param(vec_a.clone()),
-                "amari_fhrr",
-                HolographicEncoder::DIMENSIONS as i64
-            ],
-        ),
-        (
-            "INSERT INTO memory_facts
-                (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at, hrr_vector, hrr_algebra, hrr_dim)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            libsql::params![
-                102_i64,
-                "Cache invalidation policy must stay explicit",
-                "project",
-                "[\"cache\",\"policy\"]",
-                0.95_f64,
-                6_i64,
-                4_i64,
-                1_700_000_010_i64,
-                1_700_000_110_i64,
-                blob_param(vec_b.clone()),
-                "amari_fhrr",
-                HolographicEncoder::DIMENSIONS as i64
-            ],
-        ),
-        (
-            "INSERT INTO memory_facts
-                (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at, hrr_vector, hrr_algebra, hrr_dim)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            libsql::params![
-                103_i64,
-                LONG_FACT_CONTENT,
-                "tool",
-                "[\"lcm\",\"ux\"]",
-                0.76_f64,
-                3_i64,
-                2_i64,
-                1_700_000_020_i64,
-                1_700_000_120_i64,
-                blob_param(vec_c.clone()),
-                "amari_fhrr",
-                HolographicEncoder::DIMENSIONS as i64
-            ],
-        ),
-    ];
-    for (sql, params) in inserts {
-        if let Err(err) = db
-            .execute_write("seed dashboard memory fact", sql, params)
-            .await
-        {
-            panic!("failed to insert memory fact: {err}");
-        }
+/// Creates an applied automation fact through the canonical proposal and
+/// promotion path. No sidecar JSON participates in this fixture.
+pub(crate) async fn apply_dashboard_automation_fact(
+    cg: &TraceDecay,
+    run_id: &str,
+    content: &str,
+) -> AppliedDashboardAutomationFact {
+    use tracedecay::application::memory::{
+        MemoryApplication, MemoryOperationContext, automation_fact_proposal_add_command,
+    };
+    use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
+    use tracedecay::store::memory::DatabaseFactStore;
+    use tracedecay_store::CompatibilityFactProposalPromotionV1;
+
+    let memory_db = cg
+        .open_project_store_db()
+        .await
+        .unwrap_or_else(|error| panic!("open outcome memory authority: {error}"));
+    let owner = dashboard_fixture_project_owner(cg);
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&memory_db))
+        .unwrap_or_else(|error| panic!("initialize outcome memory application: {error}"));
+    let request = AddFactRequest {
+        content: content.to_string(),
+        category: MemoryCategory::Project,
+        source: Some("dashboard-outcome-test".to_string()),
+        tags: vec!["automation".to_string(), "outcome".to_string()],
+        entities: vec!["TraceDecay".to_string()],
+        trust: Some(0.9),
+        metadata: serde_json::json!({"origin": "dashboard-outcome-test"}),
+    };
+    let command = automation_fact_proposal_add_command(
+        owner.clone(),
+        request,
+        run_id,
+        "dashboard-outcome-test",
+        None,
+    )
+    .unwrap_or_else(|error| panic!("build outcome proposal command: {error}"));
+    let context = MemoryOperationContext::from_trusted_request_id(
+        &owner,
+        "dashboard-outcome-test-proposal",
+        run_id,
+        None,
+    )
+    .unwrap_or_else(|error| panic!("derive outcome proposal identity: {error}"));
+    let submitted = memory
+        .submit_compatibility_fact_proposal(context.operation_id().clone(), command, None)
+        .await
+        .unwrap_or_else(|error| panic!("submit outcome proposal: {error}"));
+    let promotion = CompatibilityFactProposalPromotionV1::new(
+        owner,
+        submitted.proposal_id().clone(),
+        submitted.revision(),
+        None,
+    )
+    .unwrap_or_else(|error| panic!("build outcome proposal promotion: {error}"));
+    let applied = memory
+        .promote_compatibility_fact_proposal(promotion)
+        .await
+        .unwrap_or_else(|error| panic!("promote outcome proposal: {error}"));
+    let canonical_fact_id = applied
+        .applied_fact_id()
+        .unwrap_or_else(|| panic!("applied outcome proposal needs canonical fact identity"))
+        .as_str()
+        .to_string();
+    AppliedDashboardAutomationFact {
+        proposal_id: applied.proposal_id().as_str().to_string(),
+        canonical_fact_id,
+        legacy_fact_id: applied.legacy_fact_id(),
     }
+}
 
-    let entity_rows = [
-        (
-            201_i64,
-            "CachePolicy",
-            "cachepolicy",
-            "concept",
-            "[\"cache policy\"]",
-        ),
-        (202_i64, "LCMTab", "lcmtab", "feature", "[\"lcm tab\"]"),
-        (203_i64, "SimilarityView", "similarityview", "feature", "[]"),
-    ];
-    for (entity_id, name, normalized_name, entity_type, aliases) in entity_rows {
-        if let Err(err) = db
-            .execute_write(
-                "seed dashboard memory entity",
-                "INSERT INTO memory_entities
-                    (entity_id, name, normalized_name, entity_type, aliases, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                libsql::params![
-                    entity_id,
-                    name,
-                    normalized_name,
-                    entity_type,
-                    aliases,
-                    1_700_000_050_i64
-                ],
+pub(crate) async fn delete_dashboard_automation_fact(
+    cg: &TraceDecay,
+    record: &AppliedDashboardAutomationFact,
+) {
+    use tracedecay::application::memory::{MemoryApplication, MemoryOperationContext};
+    use tracedecay::store::memory::DatabaseFactStore;
+    use tracedecay_domain::FactId;
+    use tracedecay_store::{
+        CompatibilityFactIdV1, CompatibilityFactProjectionV1, CompatibilityFactRemoveCommandV1,
+        CompatibilityFactTargetV1,
+    };
+
+    let memory_db = cg
+        .open_project_store_db()
+        .await
+        .unwrap_or_else(|error| panic!("open outcome memory authority: {error}"));
+    let owner = dashboard_fixture_project_owner(cg);
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&memory_db))
+        .unwrap_or_else(|error| panic!("initialize outcome memory application: {error}"));
+    let context = MemoryOperationContext::from_trusted_request_id(
+        &owner,
+        "dashboard-outcome-test-delete",
+        &record.proposal_id,
+        None,
+    )
+    .unwrap_or_else(|error| panic!("derive outcome deletion identity: {error}"));
+    let canonical_fact_id = FactId::new(record.canonical_fact_id.clone())
+        .unwrap_or_else(|error| panic!("parse outcome canonical fact identity: {error}"));
+    let target = CompatibilityFactTargetV1::Canonical(
+        CompatibilityFactIdV1::new(owner, canonical_fact_id)
+            .unwrap_or_else(|error| panic!("build outcome canonical fact target: {error}")),
+    );
+    let expected_last_event_id = match memory
+        .get_compatibility_fact(target.clone())
+        .await
+        .unwrap_or_else(|error| panic!("inspect outcome fact before deletion: {error}"))
+    {
+        Some(CompatibilityFactProjectionV1::Available(fact)) => fact.fact().last_event_id().clone(),
+        other => panic!("outcome fact must be available before deletion: {other:?}"),
+    };
+    assert!(
+        memory
+            .remove_compatibility_fact(
+                CompatibilityFactRemoveCommandV1::new(
+                    target,
+                    context.operation_id().clone(),
+                    Some(expected_last_event_id),
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("build outcome deletion command: {error}")),
             )
             .await
-        {
-            panic!("failed to insert memory entity: {err}");
-        }
-    }
+            .unwrap_or_else(|error| panic!("delete outcome fact: {error:?}"))
+            .removed()
+    );
+}
 
-    let joins = [
-        (101_i64, 201_i64),
-        (102_i64, 201_i64),
-        (103_i64, 202_i64),
-        (103_i64, 203_i64),
+pub(crate) struct DashboardMemoryFixture {
+    pub(crate) near_duplicate_fact_id: i64,
+}
+
+pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) -> DashboardMemoryFixture {
+    // Seed through the public TraceDecay facade so the canonical fact/event
+    // store and its compatibility projection stay coherent. Dashboard tests
+    // must not manufacture post-cutover legacy rows directly.
+    let fixtures = [
+        (
+            "Cache invalidation policy must be explicit",
+            MemoryCategory::Project,
+            0.97,
+            vec!["cache", "policy"],
+            vec!["CachePolicy"],
+        ),
+        (
+            "Cache invalidation policy must stay explicit",
+            MemoryCategory::Project,
+            0.95,
+            vec!["cache", "policy"],
+            vec!["CachePolicy"],
+        ),
+        (
+            LONG_FACT_CONTENT,
+            MemoryCategory::Tool,
+            0.71,
+            vec!["lcm", "ux"],
+            vec!["LCMTab", "SimilarityView"],
+        ),
     ];
-    for (fact_id, entity_id) in joins {
-        if let Err(err) = db
-            .execute_write(
-                "seed dashboard memory fact entity",
-                "INSERT INTO memory_fact_entities (fact_id, entity_id) VALUES (?1, ?2)",
-                libsql::params![fact_id, entity_id],
-            )
+    let mut fact_ids = Vec::with_capacity(fixtures.len());
+    for (content, category, trust, tags, entities) in fixtures {
+        let outcome = cg
+            .add_fact(AddFactRequest {
+                content: content.to_string(),
+                category,
+                source: Some("dashboard-fixture".to_string()),
+                tags: tags.into_iter().map(ToString::to_string).collect(),
+                entities: entities.into_iter().map(ToString::to_string).collect(),
+                trust: Some(trust),
+                metadata: serde_json::json!({}),
+            })
             .await
-        {
-            panic!("failed to insert memory_fact_entities row: {err}");
-        }
+            .unwrap_or_else(|error| panic!("failed to seed dashboard fact: {error}"));
+        let fact = outcome
+            .fact
+            .unwrap_or_else(|| panic!("dashboard fixture fact was not accepted: {content}"));
+        assert_eq!(fact.content, content);
+        fact_ids.push(fact.fact_id);
     }
+    let tool_fact_id = fact_ids[2];
+    for (action, note) in [
+        (
+            FeedbackAction::Helpful,
+            Some("confirmed durable".to_string()),
+        ),
+        (FeedbackAction::Unhelpful, None),
+    ] {
+        cg.record_fact_feedback(FeedbackRequest {
+            fact_id: tool_fact_id,
+            action,
+            source: Some("dashboard-test".to_string()),
+            note,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("failed to seed dashboard feedback: {error:?}"));
+    }
+    DashboardMemoryFixture {
+        near_duplicate_fact_id: fact_ids[1],
+    }
+}
 
-    // The "project" bank's stored fact_count is deliberately stale (5 vs the
-    // 2 live project facts): bank counts are denormalized snapshots from the
-    // last bundle rebuild, and the overview API must report live membership.
-    let bank_rows = [("project", bank_a, 5_i64), ("tool", bank_b, 1_i64)];
-    for (name, vector, fact_count) in bank_rows {
-        if let Err(err) = db
-            .execute_write(
-                "seed dashboard memory bank",
-                "INSERT INTO memory_banks
-                    (bank_name, vector, hrr_dim, fact_count, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                libsql::params![
-                    name,
-                    blob_param(vector),
-                    3_i64,
-                    fact_count,
-                    1_700_000_130_i64
-                ],
-            )
-            .await
-        {
-            panic!("failed to insert memory bank: {err}");
-        }
-    }
+/// Resolve a seeded fact through the served dashboard instead of coupling
+/// tests to legacy numeric IDs or storage rows.
+pub(crate) fn fixture_fact_id(
+    agent: &ureq::Agent,
+    fixture: &DashboardFixture,
+    content_prefix: &str,
+) -> i64 {
+    let (status, overview) = get_json(
+        agent,
+        &format!("{}/api/plugins/holographic/?limit=100", fixture.base_url),
+    );
+    assert_eq!(status, 200, "dashboard fixture overview must succeed");
+    overview["holographic"]["facts"]
+        .as_array()
+        .and_then(|facts| {
+            facts.iter().find_map(|fact| {
+                fact.get("content")
+                    .and_then(Value::as_str)
+                    .filter(|content| content.starts_with(content_prefix))
+                    .and_then(|_| fact.get("fact_id").and_then(Value::as_i64))
+            })
+        })
+        .unwrap_or_else(|| panic!("seeded dashboard fact not found for prefix: {content_prefix}"))
 }
 
 pub(crate) async fn seed_lcm_fixture(global_db: &GlobalDb, project_path: &Path) {
@@ -486,7 +550,7 @@ pub(crate) struct FakeCodexAppServer {
 }
 
 impl FakeCodexAppServer {
-    pub(crate) fn new_memory_curator() -> Self {
+    pub(crate) fn new_memory_curator(delete_fact_id: i64) -> Self {
         let temp = tempdir_or_panic();
         let script_path = temp.path().join("codex.py");
         let bin = fake_codex_bin(temp.path());
@@ -499,6 +563,7 @@ if len(sys.argv) != 2 or sys.argv[1] != "app-server":
     sys.exit(42)
 if os.environ.get("TRACEDECAY_CODEX_SUMMARY_CHILD") != "1":
     sys.exit(43)
+delete_fact_id = __DELETE_FACT_ID__
 
 for line in sys.stdin:
     msg = json.loads(line)
@@ -515,9 +580,9 @@ for line in sys.stdin:
             "ops": [{
                 "cluster_id": "cluster-0000",
                 "op": "delete",
-                "fact_id": 102,
+                "fact_id": delete_fact_id,
                 "confidence": 0.98,
-                "reason": "near duplicate of fact 101"
+                "reason": "near duplicate of the paired dashboard fact"
             }]
         }
         print(json.dumps({
@@ -526,8 +591,9 @@ for line in sys.stdin:
         }), flush=True)
         print(json.dumps({"method": "turn/completed"}), flush=True)
         break
-"#;
-        write_file(&script_path, script);
+"#
+        .replace("__DELETE_FACT_ID__", &delete_fact_id.to_string());
+        write_file(&script_path, &script);
         install_fake_codex_launcher(&script_path, &bin);
         Self { _temp: temp, bin }
     }
@@ -591,7 +657,6 @@ async fn start_dashboard_fixture_with_options(
 
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
-    let project_db_path = cg.store_layout().graph_db_path.clone();
     let server = spawn_dashboard_server(cg, port);
 
     let agent = http_agent();
@@ -606,143 +671,7 @@ async fn start_dashboard_fixture_with_options(
         home,
         base_url,
         project_root,
-        project_db_path,
         server,
-    }
-}
-
-/// Counts rows in the fixture's project DB matching `sql` (a SELECT COUNT query
-/// with one `?1` bind), via a fresh read connection. Used to prove hard deletes
-/// actually removed rows (and their entity links) from the store that
-/// `tracedecay_fact_store` recall reads.
-pub(crate) async fn count_in_project_db(
-    fixture: &DashboardFixture,
-    sql: &str,
-    fact_id: i64,
-) -> i64 {
-    let db = match libsql::Builder::new_local(&fixture.project_db_path)
-        .build()
-        .await
-    {
-        Ok(db) => db,
-        Err(err) => panic!("failed to open project DB for verification: {err}"),
-    };
-    let conn = match db.connect() {
-        Ok(conn) => conn,
-        Err(err) => panic!("failed to connect to project DB: {err}"),
-    };
-    let mut rows = match conn.query(sql, libsql::params![fact_id]).await {
-        Ok(rows) => rows,
-        Err(err) => panic!("verification query failed: {err}"),
-    };
-    match rows.next().await {
-        Ok(Some(row)) => row.get::<i64>(0).unwrap_or(-1),
-        Ok(None) => -1,
-        Err(err) => panic!("verification row read failed: {err}"),
-    }
-}
-
-pub(crate) async fn string_in_project_db(
-    fixture: &DashboardFixture,
-    sql: &str,
-    fact_id: i64,
-) -> Option<String> {
-    let conn = project_db_conn(fixture).await;
-    let mut rows = match conn.query(sql, libsql::params![fact_id]).await {
-        Ok(rows) => rows,
-        Err(err) => panic!("verification query failed: {err}"),
-    };
-    match rows.next().await {
-        Ok(Some(row)) => row.get::<String>(0).ok(),
-        Ok(None) => None,
-        Err(err) => panic!("verification row read failed: {err}"),
-    }
-}
-
-pub(crate) async fn project_db_conn(fixture: &DashboardFixture) -> libsql::Connection {
-    let db = match libsql::Builder::new_local(&fixture.project_db_path)
-        .build()
-        .await
-    {
-        Ok(db) => db,
-        Err(err) => panic!("failed to open project DB directly: {err}"),
-    };
-    let conn = match db.connect() {
-        Ok(conn) => conn,
-        Err(err) => panic!("failed to connect to project DB directly: {err}"),
-    };
-    // The running dashboard can write to this store concurrently; wait out
-    // transient write locks instead of failing the fixture mutation.
-    if let Err(err) = conn.execute_batch("PRAGMA busy_timeout = 5000;").await {
-        panic!("failed to set busy_timeout on project DB connection: {err}");
-    }
-    conn
-}
-
-/// Swaps a fact's vector the way every production re-encode does: alongside
-/// an `updated_at` bump (`update_fact` / `update_fact_vector` always bump it;
-/// the startup repair only fills NULL vectors, which changes the vectored
-/// count instead). The similarity cache fingerprint is metadata-only and
-/// relies on exactly that contract.
-pub(crate) async fn set_fact_vector_and_bump_updated_at(
-    fixture: &DashboardFixture,
-    fact_id: i64,
-    phases: &[f64],
-) {
-    let conn = project_db_conn(fixture).await;
-    let vector = match HolographicEncoder::serialize(phases) {
-        Ok(vector) => vector,
-        Err(err) => panic!("failed to serialize replacement vector: {err}"),
-    };
-    if let Err(err) = conn
-        .execute(
-            "UPDATE memory_facts
-             SET hrr_vector = ?1, hrr_algebra = 'amari_fhrr', hrr_dim = ?2,
-                 updated_at = updated_at + 1
-             WHERE fact_id = ?3",
-            libsql::params![blob_param(vector), phases.len() as i64, fact_id],
-        )
-        .await
-    {
-        panic!("failed to update fact vector fixture: {err}");
-    }
-}
-
-pub(crate) async fn clear_fact_vector_without_touching_updated_at(
-    fixture: &DashboardFixture,
-    fact_id: i64,
-) {
-    let conn = project_db_conn(fixture).await;
-    if let Err(err) = conn
-        .execute(
-            "UPDATE memory_facts
-             SET hrr_vector = NULL
-             WHERE fact_id = ?1",
-            libsql::params![fact_id],
-        )
-        .await
-    {
-        panic!("failed to clear fact vector fixture: {err}");
-    }
-}
-
-pub(crate) async fn set_fact_access_without_touching_updated_at(
-    fixture: &DashboardFixture,
-    fact_id: i64,
-    access_count: i64,
-    last_recalled_at: i64,
-) {
-    let conn = project_db_conn(fixture).await;
-    if let Err(err) = conn
-        .execute(
-            "UPDATE memory_facts
-             SET access_count = ?1, last_recalled_at = ?2
-             WHERE fact_id = ?3",
-            libsql::params![access_count, last_recalled_at, fact_id],
-        )
-        .await
-    {
-        panic!("failed to update fact access fixture: {err}");
     }
 }
 

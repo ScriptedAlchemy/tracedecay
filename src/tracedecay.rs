@@ -18,7 +18,7 @@ use crate::storage::{self, StoreLayout};
 
 mod diagnostics;
 mod edits;
-mod facts;
+pub(crate) mod facts;
 mod indexing;
 mod lifecycle;
 mod locking;

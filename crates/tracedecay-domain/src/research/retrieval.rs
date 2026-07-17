@@ -49,6 +49,10 @@ impl PrivacyDomainBoundLocatorDigest {
     pub fn validate(&self) -> Result<(), DomainError> {
         self.0.validate()
     }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
 }
 
 impl TryFrom<String> for PrivacyDomainBoundLocatorDigest {

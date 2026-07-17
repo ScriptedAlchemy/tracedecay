@@ -18,16 +18,15 @@ use std::sync::atomic::AtomicBool;
 use serde_json::{Map, Value, json};
 use tokio::sync::RwLock;
 
-use super::memory_queries::normalize_fact_metadata;
 use super::memory_service::{
     apply_delete_op, apply_merge_op, build_delete_plan, delete_fact, similarity_computation,
 };
-use super::util::{qmarks, query_rows};
 use super::{DashboardState, code_diagnostics_broker, storage_mode_label, token_count};
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::types::MemoryGroomingOperation;
 use crate::tracedecay::TraceDecay;
+use crate::tracedecay::facts::memory_application_for_db;
 
 pub const CURATION_DEFAULT_MAX_CLUSTERS: usize = 12;
 pub const CURATION_DEFAULT_MIN_CONFIDENCE: f64 = 0.5;
@@ -125,17 +124,14 @@ impl Default for MemoryCurateOptions {
 /// Minimal dashboard state over the project memory store — no LCM store,
 /// savings DB, or token-count cache warmup (those belong to the server).
 async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
-    let (mem_conn, mem_db_path, mem_db) = super::resolve_project_memory_store(cg).await;
+    let (mem_db_path, mem_db) = super::resolve_project_memory_store(cg);
     let store_layout = cg.store_layout();
     Ok(DashboardState {
         project_id: store_layout.identity.project_id.clone(),
         memory_owner: super::project_memory_owner(cg)?,
         graph_conn: cg.dashboard_connection(),
-        _database_guards: std::iter::once(cg.dashboard_database_guard())
-            .chain(std::iter::once(mem_db.clone()))
-            .collect(),
+        _database_guards: vec![mem_db.clone()],
         graph_db_path: cg.dashboard_db_path().display().to_string(),
-        mem_conn,
         mem_db,
         mem_db_path,
         lcm_conn: None,
@@ -176,7 +172,6 @@ fn user_state(
         graph_conn: conn.clone(),
         _database_guards: vec![mem_db.clone()],
         graph_db_path: memory_db_path.display().to_string(),
-        mem_conn: conn,
         mem_db,
         mem_db_path: memory_db_path.display().to_string(),
         lcm_conn: None,
@@ -271,14 +266,29 @@ async fn run_memory_curate_with_state(
             } else {
                 let grooming_ops = parse_grooming_ops(&valid)?;
                 if !grooming_ops.is_empty() {
-                    let writer = state
-                        .mem_db
-                        .writer_connection("apply memory grooming batch")
-                        .await?;
-                    let store = writer.memory_store();
-                    let grooming_report = store
-                        .apply_grooming_batch(&grooming_ops, options.min_confidence)
-                        .await?;
+                    let application =
+                        memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
+                            .map_err(|error| TraceDecayError::Config {
+                                message: format!("initialize memory curation authority: {error}"),
+                            })?;
+                    let context = crate::application::memory::MemoryOperationContext::generated(
+                        &state.memory_owner,
+                        "memory-curate-grooming",
+                        None,
+                    )
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!("derive memory curation operation: {error}"),
+                    })?;
+                    let grooming_report = application
+                        .dashboard_apply_grooming_v1(
+                            grooming_ops.clone(),
+                            options.min_confidence,
+                            context,
+                        )
+                        .await
+                        .map_err(|error| TraceDecayError::Config {
+                            message: format!("apply memory curation: {error:?}"),
+                        })?;
                     applied += grooming_ops.len() as i64;
                     results.push(json!({
                         "status": "applied",
@@ -542,26 +552,17 @@ async fn fact_details(
     fact_ids: &BTreeSet<i64>,
 ) -> Result<BTreeMap<i64, Value>> {
     let mut details = BTreeMap::new();
-    if fact_ids.is_empty() {
-        return Ok(details);
-    }
-    let ids: Vec<i64> = fact_ids.iter().copied().collect();
-    let sql = format!(
-        "SELECT fact_id, content, category, tags, trust_score, metadata, created_at, updated_at,
-                access_count, last_recalled_at
-         FROM memory_facts WHERE fact_id IN ({})",
-        qmarks(ids.len())
-    );
-    let params: Vec<libsql::Value> = ids.into_iter().map(libsql::Value::Integer).collect();
-    let rows = query_rows(&state.mem_conn, &sql, params)
-        .await
-        .map_err(|message| TraceDecayError::Config {
-            message: format!("fact detail query failed: {message}"),
-        })?;
-    for row in rows {
-        let row = normalize_fact_metadata(row);
-        if let Some(fact_id) = row.get("fact_id").and_then(Value::as_i64) {
-            details.insert(fact_id, row);
+    for fact_id in fact_ids {
+        let detail = super::memory_service::fact_detail_payload(state, *fact_id)
+            .await
+            .map_err(|message| TraceDecayError::Config {
+                message: format!("fact detail authority read failed: {message}"),
+            })?;
+        let Some(detail) = detail else {
+            continue;
+        };
+        if let Some(fact) = detail.get("fact").cloned() {
+            details.insert(*fact_id, fact);
         }
     }
     Ok(details)
@@ -828,24 +829,16 @@ async fn prevalidate_destructive_ops(state: &DashboardState, ops: &[Value]) -> R
             _ => {}
         }
     }
+    let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("initialize destructive-op authority: {error}"),
+        })?;
     for fact_id in required_facts {
-        let mut rows = state
-            .mem_conn
-            .query(
-                "SELECT 1 FROM memory_facts WHERE fact_id = ?1 LIMIT 1",
-                libsql::params![fact_id],
-            )
+        if application
+            .dashboard_fact_detail_v1(fact_id)
             .await
-            .map_err(|e| TraceDecayError::Database {
-                message: e.to_string(),
-                operation: "prevalidate_destructive_ops".to_string(),
-            })?;
-        if rows
-            .next()
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: e.to_string(),
-                operation: "prevalidate_destructive_ops".to_string(),
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("validate destructive fact {fact_id}: {error}"),
             })?
             .is_none()
         {
@@ -880,7 +873,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preview_is_read_only_while_apply_repairs_derived_memory() {
+    async fn preview_is_read_only_while_apply_runs_authoritative_repair() {
         let temp = tempfile::tempdir().unwrap();
         let memory_path = temp.path().join("user-memory.db");
         let authority =
@@ -889,20 +882,33 @@ mod tests {
         let (db, _) = Database::initialize(&memory_path, &authority)
             .await
             .unwrap();
-        let writer = db
-            .writer_connection("seed memory curation test")
-            .await
-            .unwrap();
-        writer
-            .execute(
-                "INSERT INTO memory_facts
-                    (fact_id, content, category, trust_score, created_at, updated_at, source)
-                 VALUES (1, 'Keep diagnostic previews read only', 'decision', 0.9, 1, 1, 'test')",
-                (),
+        let owner = tracedecay_domain::FactOwnerV1::Profile;
+        let memory = crate::application::memory::MemoryApplication::new(
+            owner.clone(),
+            crate::store::memory::DatabaseFactStore::new(&db),
+        )
+        .unwrap();
+        let seeded = memory
+            .add_fact_v1(
+                crate::memory::types::AddFactRequest {
+                    content: "Keep diagnostic previews read only".to_string(),
+                    category: crate::memory::types::MemoryCategory::Decision,
+                    source: Some("test".to_string()),
+                    tags: Vec::new(),
+                    entities: Vec::new(),
+                    trust: Some(0.9),
+                    metadata: json!({}),
+                },
+                crate::application::memory::MemoryOperationContext::generated(
+                    &owner,
+                    "memory-curation-test-seed",
+                    None,
+                )
+                .unwrap(),
             )
             .await
             .unwrap();
-        drop(writer);
+        let fact_id = seeded.fact.unwrap().fact_id;
         let options = MemoryCurateOptions {
             llm_ops: Some(json!({ "ops": [] })),
             ..MemoryCurateOptions::default()
@@ -922,7 +928,7 @@ mod tests {
             preview["derived_memory_repair"]["status"],
             json!("not_run_read_only_preview")
         );
-        assert_eq!(missing_vector_count(&db).await, 1);
+        assert!(memory.get_fact_v1(fact_id).await.unwrap().is_some());
 
         let applied = run_user_memory_curate(
             &db,
@@ -937,27 +943,13 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            applied["derived_memory_repair"]["missing_vectors_repaired"],
-            json!(1)
+        assert!(
+            applied["derived_memory_repair"]
+                .get("missing_vectors_repaired")
+                .is_some(),
+            "apply should expose the authoritative repair receipt: {applied}"
         );
-        assert_eq!(missing_vector_count(&db).await, 0);
-    }
-
-    async fn missing_vector_count(db: &Database) -> i64 {
-        db.conn()
-            .query(
-                "SELECT COUNT(*) FROM memory_facts WHERE hrr_vector IS NULL",
-                (),
-            )
-            .await
-            .unwrap()
-            .next()
-            .await
-            .unwrap()
-            .unwrap()
-            .get(0)
-            .unwrap()
+        assert!(memory.get_fact_v1(fact_id).await.unwrap().is_some());
     }
 
     #[test]

@@ -1,11 +1,13 @@
 use tracedecay_domain::{
     CanonicalObservationIdV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1, ObservationScopeV1,
+    RetrievalAnchorId,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
-    ObservationReplayRequest, ObservationStore, ObservationStoreResult, ProjectionCheckpoint,
-    ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionStoreResult, StoredObservation,
+    ObservationReplayRequest, ObservationStore, ObservationStoreResult,
+    ObservedEvidenceAnchorResolution, ProjectionCheckpoint, ProjectionPersistOutcome,
+    ProjectionRebuildOutcome, ProjectionStoreResult, StoredObservation,
 };
 
 use crate::global_db::GlobalDb;
@@ -18,6 +20,19 @@ pub struct GlobalDbObservationStore<'a> {
 impl<'a> GlobalDbObservationStore<'a> {
     pub const fn new(db: &'a GlobalDb) -> Self {
         Self { db }
+    }
+
+    /// Resolve an owner-bound evidence anchor into its typed store
+    /// observation: the retained record with the store's current projection
+    /// watermark, or a safe absent/ambiguous binding signal.
+    pub async fn resolve_evidence_anchor_report(
+        &self,
+        owner: &ObservationScopeV1,
+        anchor_id: &RetrievalAnchorId,
+    ) -> ObservationStoreResult<ObservedEvidenceAnchorResolution> {
+        self.db
+            .resolve_observation_evidence_anchor_report(owner, anchor_id)
+            .await
     }
 }
 

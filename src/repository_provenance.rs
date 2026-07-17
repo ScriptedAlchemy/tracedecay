@@ -1,23 +1,27 @@
 //! Bounded, read-only repository provenance capture.
 //!
 //! This adapter deliberately exposes no generic Git command surface, object
-//! traversal, index inspection, or worktree-status probing. It reads only
-//! bounded repository/worktree/HEAD/ref/remote identity through `gix`; PR9
-//! owns status, diff, history, blame, and hunk intelligence.
+//! traversal or worktree-status probing. It reads only bounded
+//! repository/worktree/HEAD/ref/remote identity plus persisted index metadata
+//! through `gix`; PR9 owns status, diff, history, blame, and hunk intelligence.
 
 use std::path::{Path, PathBuf};
 
+use gix::bstr::ByteSlice;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     AnchorDurabilityClass, AnchorSourceGenerationV2, CommitId, CoverageReportV1,
     DurableObservationV1, EvidenceAvailabilityV1, EvidenceClass,
     GenerationBoundRepositoryProvenanceV1, PayloadAccessState, PrivacyDomainBoundLocatorDigest,
-    ProjectId, ProjectionGenerationId, RefId, RepositoryEvidenceV1, RepositoryId,
-    RepositoryProvenanceV1, ResolutionAuthorizationV1, RetrievalAnchorRecordV2,
-    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, UtcMicros, VectorWatermark, WorktreeId,
+    ProjectId, ProjectionGenerationId, RefId, RepositoryDirtyStateV1, RepositoryEvidenceV1,
+    RepositoryId, RepositoryProvenanceV1, RepositoryRemoteIdentityV1, ResolutionAuthorizationV1,
+    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, TreeId,
+    UtcMicros, VectorWatermark, WorktreeId,
 };
 
 const MAX_REMOTE_IDENTITY_BYTES: usize = 8 * 1024;
+const MAX_INDEX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_INDEX_ENTRIES: usize = 250_000;
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 const PROJECT_PRIVACY_DOMAIN_SALT_NAMESPACE: &[u8] =
     b"tracedecay.repository-provenance.project-domain-salt.v1\0";
@@ -232,6 +236,13 @@ impl NativeRepositoryProvenanceProbe {
         let Ok(repo) = gix::discover(request.project_root) else {
             return EvidenceAvailabilityV1::Unavailable;
         };
+        Self::capture_open_repository(&repo, request)
+    }
+
+    fn capture_open_repository(
+        repo: &gix::Repository,
+        request: &RepositoryProvenanceProbeRequest<'_>,
+    ) -> EvidenceAvailabilityV1<RepositoryProvenanceV1> {
         let Some(workdir) = repo.workdir() else {
             return EvidenceAvailabilityV1::Unsupported;
         };
@@ -242,7 +253,7 @@ impl NativeRepositoryProvenanceProbe {
         }
         let (git_dir, git_dir_is_partial) = canonical_path(repo.git_dir());
         let (common_dir, common_dir_is_partial) = canonical_path(repo.common_dir());
-        let remote_identity = credential_free_remote_identity(&repo);
+        let remote_identity = observe_remote_identity(&repo, request.privacy_domain_salt);
 
         let Some(canonical_root_digest) = privacy_bound_digest(
             request.privacy_domain_salt,
@@ -257,7 +268,7 @@ impl NativeRepositoryProvenanceProbe {
             crate::os_str_bytes::native_os_str_bytes(canonical_root.as_os_str()),
             crate::os_str_bytes::native_os_str_bytes(git_dir.as_os_str()),
             crate::os_str_bytes::native_os_str_bytes(common_dir.as_os_str()),
-            remote_identity.unwrap_or_else(|| b"<remote-unavailable>".to_vec()),
+            remote_identity.path_frame,
         ];
         let Some(path_identity_digest) = privacy_bound_digest(
             request.privacy_domain_salt,
@@ -268,12 +279,14 @@ impl NativeRepositoryProvenanceProbe {
         };
 
         let head = observe_head(&repo);
+        let index = observe_index(&repo);
         let Ok(evidence) = RepositoryEvidenceV1::new(
             head.attached_ref,
             head.commit,
-            EvidenceAvailabilityV1::Unknown,
+            index.tree,
             EvidenceAvailabilityV1::Known(path_identity_digest),
-            EvidenceAvailabilityV1::Unknown,
+            remote_identity.identity,
+            index.dirty_state,
         ) else {
             return EvidenceAvailabilityV1::Unavailable;
         };
@@ -434,16 +447,122 @@ fn canonical_path(path: &Path) -> (PathBuf, bool) {
         .map_or_else(|_| (path.to_path_buf(), true), |path| (path, false))
 }
 
-fn credential_free_remote_identity(repo: &gix::Repository) -> Option<Vec<u8>> {
-    let remote = repo
-        .config_snapshot()
-        .string("remote.origin.url")?
-        .to_string();
+struct RemoteIdentityObservation {
+    identity: RepositoryRemoteIdentityV1,
+    path_frame: Vec<u8>,
+}
+
+fn observe_remote_identity(
+    repo: &gix::Repository,
+    privacy_domain_salt: &[u8; 32],
+) -> RemoteIdentityObservation {
+    let Some(remote) = repo.config_snapshot().string("remote.origin.url") else {
+        return remote_identity_observation(RepositoryRemoteIdentityV1::Missing);
+    };
     if remote.len() > MAX_REMOTE_IDENTITY_BYTES {
-        return None;
+        return remote_identity_observation(RepositoryRemoteIdentityV1::Oversized);
     }
-    let normalized = normalize_remote_without_credentials(&remote)?;
-    (normalized.len() <= MAX_REMOTE_IDENTITY_BYTES).then_some(normalized.into_bytes())
+    let Ok(remote) = remote.to_str() else {
+        return remote_identity_observation(RepositoryRemoteIdentityV1::Invalid);
+    };
+    let Some(normalized) = normalize_remote_without_credentials(&remote) else {
+        return remote_identity_observation(RepositoryRemoteIdentityV1::Invalid);
+    };
+    if normalized.len() > MAX_REMOTE_IDENTITY_BYTES {
+        return remote_identity_observation(RepositoryRemoteIdentityV1::Oversized);
+    }
+    let Some(digest) = privacy_bound_digest(
+        privacy_domain_salt,
+        b"repository-remote-identity-v1",
+        &[normalized.into_bytes()],
+    ) else {
+        return remote_identity_observation(RepositoryRemoteIdentityV1::Unavailable);
+    };
+    remote_identity_observation(RepositoryRemoteIdentityV1::Known(digest))
+}
+
+fn remote_identity_observation(identity: RepositoryRemoteIdentityV1) -> RemoteIdentityObservation {
+    let path_frame = match &identity {
+        RepositoryRemoteIdentityV1::Known(digest) => {
+            let mut frame = b"known\0".to_vec();
+            frame.extend_from_slice(digest.as_str().as_bytes());
+            frame
+        }
+        RepositoryRemoteIdentityV1::Missing => b"missing\0".to_vec(),
+        RepositoryRemoteIdentityV1::Invalid => b"invalid\0".to_vec(),
+        RepositoryRemoteIdentityV1::Oversized => b"oversized\0".to_vec(),
+        RepositoryRemoteIdentityV1::Unavailable => b"unavailable\0".to_vec(),
+        RepositoryRemoteIdentityV1::Unknown => b"unknown\0".to_vec(),
+    };
+    RemoteIdentityObservation {
+        identity,
+        path_frame,
+    }
+}
+
+struct IndexObservation {
+    tree: EvidenceAvailabilityV1<TreeId>,
+    dirty_state: EvidenceAvailabilityV1<RepositoryDirtyStateV1>,
+}
+
+fn observe_index(repo: &gix::Repository) -> IndexObservation {
+    let index_path = repo.index_path();
+    let metadata = match std::fs::metadata(index_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return IndexObservation {
+                tree: EvidenceAvailabilityV1::Missing,
+                dirty_state: EvidenceAvailabilityV1::Missing,
+            };
+        }
+        Err(_) => return unavailable_index_observation(),
+    };
+    if metadata.len() > MAX_INDEX_FILE_BYTES {
+        return unavailable_index_observation();
+    }
+    let Ok(index) = repo.open_index() else {
+        return unavailable_index_observation();
+    };
+    if index.entries().len() > MAX_INDEX_ENTRIES {
+        return unavailable_index_observation();
+    }
+    let tree = index
+        .tree()
+        .filter(|tree| tree.num_entries.is_some())
+        .and_then(|tree| TreeId::new(tree.id.to_hex().to_string()).ok())
+        .map_or(
+            EvidenceAvailabilityV1::Unknown,
+            EvidenceAvailabilityV1::Known,
+        );
+    let dirty_state = if index
+        .entries()
+        .iter()
+        .any(|entry| entry.stage() != gix::index::entry::Stage::Unconflicted)
+    {
+        EvidenceAvailabilityV1::Known(RepositoryDirtyStateV1::Conflicted)
+    } else if matches!(
+        (&tree, head_tree_id(repo)),
+        (EvidenceAvailabilityV1::Known(index_tree), Some(head_tree)) if index_tree != &head_tree
+    ) {
+        // A differing persisted index proves staged dirtiness. Equality cannot
+        // prove cleanliness without a worktree traversal, which belongs to PR9.
+        EvidenceAvailabilityV1::Known(RepositoryDirtyStateV1::Dirty)
+    } else {
+        EvidenceAvailabilityV1::Unknown
+    };
+    IndexObservation { tree, dirty_state }
+}
+
+fn unavailable_index_observation() -> IndexObservation {
+    IndexObservation {
+        tree: EvidenceAvailabilityV1::Unavailable,
+        dirty_state: EvidenceAvailabilityV1::Unavailable,
+    }
+}
+
+fn head_tree_id(repo: &gix::Repository) -> Option<TreeId> {
+    let tree = repo.head_commit().ok()?.tree_id().ok()?;
+    TreeId::new(tree.to_hex().to_string()).ok()
 }
 
 fn normalize_remote_without_credentials(remote: &str) -> Option<String> {
@@ -467,7 +586,11 @@ fn normalize_remote_without_credentials(remote: &str) -> Option<String> {
         && !(authority.len() == 1 && authority.as_bytes()[0].is_ascii_alphabetic())
     {
         let host = authority.rsplit('@').next()?.trim();
-        let path = path.trim_matches('/').trim_end_matches(".git");
+        let path = path
+            .split(['?', '#'])
+            .next()?
+            .trim_matches('/')
+            .trim_end_matches(".git");
         if host.is_empty() || path.is_empty() {
             return None;
         }
@@ -529,6 +652,7 @@ fn hash_frame(hasher: &mut Sha256, bytes: &[u8]) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::process::{Command, Output};
 
@@ -611,6 +735,7 @@ mod tests {
             "origin",
             "https://alice:top-secret@example.com/Owner/Repo.git?token=hidden",
         ]);
+        fixture.git(&["write-tree"]);
 
         let capture = fixture.capture();
         assert!(matches!(
@@ -623,11 +748,15 @@ mod tests {
         ));
         assert!(matches!(
             capture.evidence().index_tree(),
-            EvidenceAvailabilityV1::Unknown
+            EvidenceAvailabilityV1::Known(_)
         ));
         assert!(matches!(
             capture.evidence().dirty_state(),
             EvidenceAvailabilityV1::Unknown
+        ));
+        assert!(matches!(
+            capture.evidence().remote_identity(),
+            RepositoryRemoteIdentityV1::Known(_)
         ));
         let encoded = serde_json::to_string(&capture).unwrap();
         assert!(!encoded.contains("alice"));
@@ -676,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn conflicted_worktree_stays_unknown_without_a_status_probe() {
+    fn conflicted_index_is_explicit_without_a_status_probe() {
         let fixture = GitFixture::new();
         fixture.commit("base");
         fixture.git(&["checkout", "-q", "-b", "side"]);
@@ -693,31 +822,95 @@ mod tests {
         let capture = fixture.capture();
         assert!(matches!(
             capture.evidence().dirty_state(),
-            EvidenceAvailabilityV1::Unknown
-        ));
-        assert!(matches!(
-            capture.evidence().index_tree(),
-            EvidenceAvailabilityV1::Unknown
+            EvidenceAvailabilityV1::Known(RepositoryDirtyStateV1::Conflicted)
         ));
     }
 
     #[test]
-    fn oversized_remote_is_omitted_from_the_bounded_identity_frame() {
+    fn remote_availability_never_collapses_missing_invalid_and_oversized() {
         let fixture = GitFixture::new();
         fixture.commit("base");
+        let missing = fixture.capture();
+        assert_eq!(
+            missing.evidence().remote_identity(),
+            &RepositoryRemoteIdentityV1::Missing
+        );
+
+        fixture.git(&["config", "remote.origin.url", ""]);
+        let invalid = fixture.capture();
+        assert_eq!(
+            invalid.evidence().remote_identity(),
+            &RepositoryRemoteIdentityV1::Invalid
+        );
+
         let remote = format!(
             "https://example.invalid/{}",
             "x".repeat(MAX_REMOTE_IDENTITY_BYTES)
         );
-        fixture.git(&["remote", "add", "origin", &remote]);
+        fixture.git(&["config", "remote.origin.url", &remote]);
 
         let oversized = fixture.capture();
-        fixture.git(&["remote", "remove", "origin"]);
-        let without_remote = fixture.capture();
         assert_eq!(
-            oversized.evidence().path_identity_digest(),
-            without_remote.evidence().path_identity_digest(),
-            "oversized remote values must be treated as unavailable rather than retained"
+            oversized.evidence().remote_identity(),
+            &RepositoryRemoteIdentityV1::Oversized
+        );
+        assert_ne!(
+            missing.evidence().path_identity_digest(),
+            invalid.evidence().path_identity_digest()
+        );
+        assert_ne!(
+            invalid.evidence().path_identity_digest(),
+            oversized.evidence().path_identity_digest()
+        );
+        assert_ne!(missing.capture_id(), invalid.capture_id());
+        assert_ne!(invalid.capture_id(), oversized.capture_id());
+    }
+
+    #[test]
+    fn persisted_index_tree_reports_staged_dirtiness_without_worktree_status() {
+        let fixture = GitFixture::new();
+        fixture.commit("base");
+        fixture.git(&["write-tree"]);
+        let baseline = fixture.capture();
+        assert!(matches!(
+            baseline.evidence().index_tree(),
+            EvidenceAvailabilityV1::Known(_)
+        ));
+        assert!(matches!(
+            baseline.evidence().dirty_state(),
+            EvidenceAvailabilityV1::Unknown
+        ));
+
+        fs::write(fixture.path().join("tracked.txt"), "staged").unwrap();
+        fixture.git(&["add", "--", "tracked.txt"]);
+        fixture.git(&["write-tree"]);
+        let staged = fixture.capture();
+        assert!(matches!(
+            staged.evidence().index_tree(),
+            EvidenceAvailabilityV1::Known(_)
+        ));
+        assert_eq!(
+            staged.evidence().dirty_state(),
+            &EvidenceAvailabilityV1::Known(RepositoryDirtyStateV1::Dirty)
+        );
+        assert_ne!(
+            staged.evidence().index_tree(),
+            baseline.evidence().index_tree()
+        );
+    }
+
+    #[test]
+    fn unstaged_changes_never_claim_a_clean_repository() {
+        let fixture = GitFixture::new();
+        fixture.commit("base");
+        fixture.git(&["write-tree"]);
+        fs::write(fixture.path().join("tracked.txt"), "unstaged").unwrap();
+
+        let capture = fixture.capture();
+        assert_eq!(
+            capture.evidence().dirty_state(),
+            &EvidenceAvailabilityV1::Unknown,
+            "PR7 does not run a worktree status scan"
         );
     }
 
@@ -734,6 +927,72 @@ mod tests {
             normalize_remote_without_credentials("git@example.com:Owner/Repo.git").unwrap(),
             "ssh://example.com/Owner/Repo"
         );
+        assert_eq!(
+            normalize_remote_without_credentials(
+                "git@example.com:Owner/Repo.git?token=hidden#fragment"
+            )
+            .unwrap(),
+            "ssh://example.com/Owner/Repo"
+        );
+    }
+
+    #[test]
+    fn bare_repository_is_typed_unsupported() {
+        let root = TempDir::new().unwrap();
+        let output = Command::new(crate::git::git_program())
+            .args(["init", "--bare", "-q"])
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let repository_id = RepositoryId::new("repository.bare-fixture").unwrap();
+        let result = capture_repository_provenance(&RepositoryProvenanceProbeRequest::new(
+            root.path(),
+            &repository_id,
+            None,
+            None,
+            &PRIVACY_DOMAIN_SALT,
+            UtcMicros(123),
+        ));
+        assert!(matches!(result, EvidenceAvailabilityV1::Unsupported));
+    }
+
+    #[test]
+    fn missing_path_is_marked_partially_readable() {
+        let root = TempDir::new().unwrap();
+        let missing = root.path().join("missing");
+        let (canonical, partially_readable) = canonical_path(&missing);
+        assert!(partially_readable);
+        assert_eq!(canonical, missing);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removed_opened_worktree_is_captured_as_partially_readable() {
+        let fixture = GitFixture::new();
+        fixture.commit("base");
+        let repo = gix::discover(fixture.path()).unwrap();
+        let workdir = repo.workdir().unwrap().to_path_buf();
+        fs::remove_dir_all(&workdir).unwrap();
+
+        let repository_id = RepositoryId::new("repository.partial-fixture").unwrap();
+        let project_id = ProjectId::new("project.partial-fixture").unwrap();
+        let worktree_id = WorktreeId::new("worktree.partial-fixture").unwrap();
+        let result = NativeRepositoryProvenanceProbe::capture_open_repository(
+            &repo,
+            &RepositoryProvenanceProbeRequest::new(
+                fixture.path(),
+                &repository_id,
+                Some(&project_id),
+                Some(&worktree_id),
+                &PRIVACY_DOMAIN_SALT,
+                UtcMicros(123),
+            ),
+        );
+        assert!(matches!(
+            result,
+            EvidenceAvailabilityV1::PartiallyReadable(_)
+        ));
     }
 
     #[test]
@@ -831,5 +1090,269 @@ mod tests {
             UtcMicros(123),
         ));
         assert!(matches!(result, EvidenceAvailabilityV1::Unavailable));
+    }
+
+    fn head_oid(fixture: &GitFixture) -> String {
+        let output = fixture.git(&["rev-parse", "HEAD"]);
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    #[test]
+    fn ref_movement_does_not_retarget_retained_provenance() {
+        let fixture = GitFixture::new();
+        fixture.commit("commit-a");
+        let commit_a_oid = head_oid(&fixture);
+        let retained = fixture.capture();
+        let EvidenceAvailabilityV1::Known(retained_commit) = retained.evidence().head_commit()
+        else {
+            panic!(
+                "expected known head commit at A, got {:?}",
+                retained.evidence().head_commit()
+            );
+        };
+        assert_eq!(commit_a_oid, retained_commit.as_str());
+
+        // Build commit B on a scratch branch, then retarget `main` to it with a
+        // hard reset. The retained capture is immutable evidence; it must not
+        // follow the moving ref.
+        fixture.git(&["checkout", "-q", "-b", "scratch"]);
+        fixture.commit("commit-b");
+        let commit_b_oid = head_oid(&fixture);
+        assert_ne!(commit_a_oid, commit_b_oid);
+        fixture.git(&["checkout", "-q", "main"]);
+        fixture.git(&["reset", "--hard", "scratch"]);
+        assert_eq!(head_oid(&fixture), commit_b_oid);
+
+        let fresh = fixture.capture();
+        let EvidenceAvailabilityV1::Known(fresh_commit) = fresh.evidence().head_commit() else {
+            panic!(
+                "expected known head commit at B, got {:?}",
+                fresh.evidence().head_commit()
+            );
+        };
+        assert_eq!(commit_b_oid, fresh_commit.as_str());
+
+        // The first capture still names A even though the ref now names B.
+        let EvidenceAvailabilityV1::Known(retained_commit) = retained.evidence().head_commit()
+        else {
+            panic!("retained head commit was mutated by the ref move");
+        };
+        assert_eq!(commit_a_oid, retained_commit.as_str());
+        assert_ne!(
+            retained.evidence().head_commit(),
+            fresh.evidence().head_commit()
+        );
+    }
+
+    #[test]
+    fn branch_rewrite_and_detach_do_not_retarget_retained_provenance() {
+        let fixture = GitFixture::new();
+        fixture.commit("commit-a");
+        let commit_a_oid = head_oid(&fixture);
+        let retained = fixture.capture();
+        assert!(matches!(
+            retained.evidence().attached_ref(),
+            EvidenceAvailabilityV1::Known(_)
+        ));
+        let EvidenceAvailabilityV1::Known(retained_commit) = retained.evidence().head_commit()
+        else {
+            panic!(
+                "expected known head commit at A, got {:?}",
+                retained.evidence().head_commit()
+            );
+        };
+        assert_eq!(commit_a_oid, retained_commit.as_str());
+
+        // Detach HEAD and rewrite the commit in place. The rewrite produces a new
+        // object B while HEAD stays detached.
+        fixture.git(&["checkout", "-q", "--detach", "HEAD"]);
+        fs::write(fixture.path().join("tracked.txt"), "rewritten").unwrap();
+        fixture.git(&["add", "--", "tracked.txt"]);
+        fixture.git(&["commit", "-q", "--amend", "-m", "rewritten"]);
+        let commit_b_oid = head_oid(&fixture);
+        assert_ne!(commit_a_oid, commit_b_oid);
+
+        let fresh = fixture.capture();
+        // The fresh capture reports the detached state explicitly and names B.
+        assert!(matches!(
+            fresh.evidence().attached_ref(),
+            EvidenceAvailabilityV1::Detached
+        ));
+        let EvidenceAvailabilityV1::Known(fresh_commit) = fresh.evidence().head_commit() else {
+            panic!(
+                "expected known detached head commit at B, got {:?}",
+                fresh.evidence().head_commit()
+            );
+        };
+        assert_eq!(commit_b_oid, fresh_commit.as_str());
+
+        // The retained capture is unchanged: still attached to its ref and naming A.
+        assert!(matches!(
+            retained.evidence().attached_ref(),
+            EvidenceAvailabilityV1::Known(_)
+        ));
+        let EvidenceAvailabilityV1::Known(retained_commit) = retained.evidence().head_commit()
+        else {
+            panic!("retained head commit was mutated by the detach/rewrite");
+        };
+        assert_eq!(commit_a_oid, retained_commit.as_str());
+        assert_ne!(
+            retained.evidence().head_commit(),
+            fresh.evidence().head_commit()
+        );
+    }
+
+    #[test]
+    fn removed_checkout_yields_typed_absence_without_ambient_head() {
+        let fixture = GitFixture::new();
+        fixture.commit("base");
+        let retained = fixture.capture();
+        assert!(matches!(
+            retained.evidence().head_commit(),
+            EvidenceAvailabilityV1::Known(_)
+        ));
+        assert!(matches!(
+            retained.evidence().attached_ref(),
+            EvidenceAvailabilityV1::Known(_)
+        ));
+        assert!(matches!(
+            retained.evidence().path_identity_digest(),
+            EvidenceAvailabilityV1::Known(_)
+        ));
+
+        // Remove the checkout entirely. A fresh capture must not walk up to an
+        // ambient repository; it reports typed absence instead.
+        fs::remove_dir_all(fixture.path()).unwrap();
+        let fresh = fixture.capture_with(&NativeRepositoryProvenanceProbe::default());
+        assert!(matches!(fresh, EvidenceAvailabilityV1::Unavailable));
+
+        // The capture taken before deletion remains fully readable evidence.
+        assert!(matches!(
+            retained.evidence().head_commit(),
+            EvidenceAvailabilityV1::Known(_)
+        ));
+        assert!(matches!(
+            retained.evidence().path_identity_digest(),
+            EvidenceAvailabilityV1::Known(_)
+        ));
+        serde_json::to_string(&retained).unwrap();
+    }
+
+    fn git_dir_fingerprint(root: &Path) -> BTreeMap<PathBuf, (u64, std::time::SystemTime)> {
+        let mut entries = BTreeMap::new();
+        for entry in walkdir::WalkDir::new(root.join(".git")).sort_by_file_name() {
+            let entry = entry.unwrap();
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let metadata = entry.metadata().unwrap();
+            entries.insert(
+                entry.path().to_path_buf(),
+                (metadata.len(), metadata.modified().unwrap()),
+            );
+        }
+        entries
+    }
+
+    #[test]
+    fn provenance_capture_copies_no_git_objects() {
+        let fixture = GitFixture::new();
+        fixture.commit("initial");
+        fixture.git(&["write-tree"]);
+        let before = git_dir_fingerprint(fixture.path());
+
+        let first = fixture.capture();
+        let second = fixture.capture();
+        assert_eq!(first.capture_id(), second.capture_id());
+
+        let after = git_dir_fingerprint(fixture.path());
+        assert_eq!(
+            before, after,
+            "provenance capture must be read-only: it copies no git objects and \
+             leaves the object store untouched"
+        );
+    }
+
+    // PR7 contract gap (report, then unignore): when the admitted checkout's
+    // `.git` is removed but its path still exists inside an ambient ancestor
+    // repository, `gix::discover` walks up and the probe returns the ambient
+    // parent's HEAD as `Known` evidence bound to the defunct checkout's
+    // repository/worktree identity. The contract requires a typed
+    // missing/unavailable state; the probe needs to verify the discovered
+    // repository against the admission-pinned identity before capturing.
+    #[test]
+    #[ignore = "PR7 gap: probe resolves a defunct checkout against the ambient parent HEAD instead of a typed unavailable state"]
+    fn defunct_checkout_capture_never_falls_back_to_an_ambient_parent_repository() {
+        let parent = GitFixture::new();
+        parent.commit("ambient parent");
+        let parent_head = head_oid(&parent);
+
+        let child = parent.path().join("child");
+        fs::create_dir_all(&child).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new(crate::git::git_program())
+                .args(args)
+                .current_dir(&child)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "TraceDecay Test"]);
+        git(&["config", "user.email", "tracedecay@example.invalid"]);
+        fs::write(child.join("tracked.txt"), "nested").unwrap();
+        git(&["add", "--", "tracked.txt"]);
+        git(&["commit", "-q", "-m", "nested"]);
+        let child_head = {
+            let output = git(&["rev-parse", "HEAD"]);
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        assert_ne!(parent_head, child_head);
+
+        let repository_id = RepositoryId::new("repository.nested-fixture").unwrap();
+        let project_id = ProjectId::new("project.nested-fixture").unwrap();
+        let worktree_id = WorktreeId::new("worktree.nested-fixture").unwrap();
+        let request = RepositoryProvenanceProbeRequest::new(
+            &child,
+            &repository_id,
+            Some(&project_id),
+            Some(&worktree_id),
+            &PRIVACY_DOMAIN_SALT,
+            UtcMicros(123),
+        );
+        let before = capture_repository_provenance(&request);
+        let Some(before_capture) = before.value() else {
+            panic!("nested checkout must capture its own HEAD, got {before:?}");
+        };
+        assert_eq!(
+            before_capture
+                .evidence()
+                .head_commit()
+                .value()
+                .map(CommitId::as_str),
+            Some(child_head.as_str())
+        );
+
+        // The nested checkout's repository is gone, but its path still exists
+        // inside the ambient parent worktree. The contract requires a safe typed
+        // state — never the ambient parent's HEAD.
+        fs::remove_dir_all(child.join(".git")).unwrap();
+        fs::remove_file(child.join("tracked.txt")).unwrap();
+        let after = capture_repository_provenance(&request);
+        assert!(
+            matches!(
+                after,
+                EvidenceAvailabilityV1::Unavailable
+                    | EvidenceAvailabilityV1::Missing
+                    | EvidenceAvailabilityV1::Unsupported
+            ),
+            "a defunct checkout must be typed unavailable, never resolved against \
+             the ambient parent HEAD {parent_head}: {after:?}"
+        );
     }
 }

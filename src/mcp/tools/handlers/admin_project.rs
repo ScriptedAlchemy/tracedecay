@@ -1,16 +1,21 @@
 //! Unadvertised daemon-owned project operations used by one-shot CLI commands.
 
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
+use tracedecay_domain::{ActorId, ProvenanceId};
+use tracedecay_store::{
+    CompatibilityFactProposalPromotionV1, CompatibilityFactProposalRecordV1,
+    CompatibilityFactProposalStateV1,
+};
 
+use crate::application::memory::{MemoryApplication, MemoryApplicationError};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
+use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
 use super::json_result;
-
-static FACT_APPLY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -34,8 +39,19 @@ enum AdminProjectAction {
         json: bool,
         max_nodes: usize,
     },
+    FactList {
+        state: Option<String>,
+        limit: usize,
+    },
+    FactView {
+        id: String,
+    },
     FactApply {
         id: String,
+    },
+    FactReject {
+        id: String,
+        reason: Option<String>,
     },
     AutomationRun {
         task: AutomationRunTask,
@@ -80,6 +96,108 @@ struct SkillWritingOptions {
     provider: String,
     query: String,
     evidence_limit: usize,
+}
+
+fn project_memory_application<'a>(
+    cg: &TraceDecay,
+    db: &'a crate::db::Database,
+) -> Result<MemoryApplication<DatabaseFactStore<'a>>> {
+    let owner = cg.project_memory_owner()?;
+    MemoryApplication::new(owner, DatabaseFactStore::new(db)).map_err(memory_application_error)
+}
+
+fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("project memory application failed: {error}"),
+    }
+}
+
+fn parse_proposal_id(value: String) -> Result<ProvenanceId> {
+    ProvenanceId::new(value).map_err(|error| TraceDecayError::Config {
+        message: format!("invalid fact proposal id: {error}"),
+    })
+}
+
+fn cli_reviewer() -> Result<ActorId> {
+    ActorId::new("cli".to_owned()).map_err(|error| TraceDecayError::Config {
+        message: format!("invalid fact proposal reviewer: {error}"),
+    })
+}
+
+fn parse_fact_proposal_state(value: &str) -> Result<CompatibilityFactProposalStateV1> {
+    let normalized = value.trim().replace('-', "_");
+    match normalized.as_str() {
+        "pending" | "pending_approval" => Ok(CompatibilityFactProposalStateV1::PendingApproval),
+        "applying" => Ok(CompatibilityFactProposalStateV1::Applying),
+        "applied" => Ok(CompatibilityFactProposalStateV1::Applied),
+        "rejected" | "rejected_validation" => Ok(CompatibilityFactProposalStateV1::Rejected),
+        "quarantined" => Ok(CompatibilityFactProposalStateV1::Quarantined),
+        _ => Err(TraceDecayError::Config {
+            message: format!(
+                "invalid fact proposal state `{value}`; expected pending_approval, applying, applied, rejected, or quarantined"
+            ),
+        }),
+    }
+}
+
+fn fact_proposal_state_name(state: CompatibilityFactProposalStateV1) -> &'static str {
+    match state {
+        CompatibilityFactProposalStateV1::PendingApproval => "pending_approval",
+        CompatibilityFactProposalStateV1::Applying => "applying",
+        CompatibilityFactProposalStateV1::Applied => "applied",
+        CompatibilityFactProposalStateV1::Rejected => "rejected",
+        CompatibilityFactProposalStateV1::Quarantined => "quarantined",
+    }
+}
+
+fn fact_proposal_json(proposal: &CompatibilityFactProposalRecordV1) -> Value {
+    let request = proposal.request();
+    let mut value = Map::from_iter([
+        (
+            "proposal_id".to_owned(),
+            Value::String(proposal.proposal_id().as_str().to_owned()),
+        ),
+        ("revision".to_owned(), json!(proposal.revision().get())),
+        (
+            "state".to_owned(),
+            Value::String(fact_proposal_state_name(proposal.state()).to_owned()),
+        ),
+        (
+            "operation_id".to_owned(),
+            Value::String(request.operation_id().as_str().to_owned()),
+        ),
+        (
+            "add_fact_request".to_owned(),
+            json!({
+                "content": request.content(),
+                "category": request.category(),
+                "source": request.source(),
+                "tags": request.tags(),
+                "entities": request.entities(),
+                "trust": request.default_trust(),
+                "metadata": request.metadata(),
+            }),
+        ),
+    ]);
+    if let Some(fact_id) = proposal.applied_fact_id() {
+        value.insert(
+            "applied_canonical_fact_id".to_owned(),
+            Value::String(fact_id.as_str().to_owned()),
+        );
+    }
+    if let Some(legacy_fact_id) = proposal.legacy_fact_id() {
+        value.insert("applied_fact_id".to_owned(), json!(legacy_fact_id));
+    }
+    if let Some(reviewer) = proposal.reviewer() {
+        value.insert(
+            "reviewer".to_owned(),
+            Value::String(reviewer.as_str().to_owned()),
+        );
+    }
+    if let Some(reason) = proposal.reason() {
+        value.insert("reason".to_owned(), Value::String(reason.to_owned()));
+    }
+    Value::Object(value)
 }
 
 pub(super) async fn handle_admin_project(
@@ -179,22 +297,95 @@ pub(super) async fn handle_admin_project(
             };
             json!({ "output": output })
         }
-        AdminProjectAction::FactApply { id } => {
-            let _guard = FACT_APPLY_LOCK.lock().await;
+        AdminProjectAction::FactList { state, limit } => {
             let db = cg.open_project_store_db().await?;
-            let proposal = crate::automation::fact_proposals::apply_fact_proposal(
-                &cg.store_layout().dashboard_root,
-                &db,
-                &id,
-                Some("cli".to_string()),
+            let memory = project_memory_application(cg, &db)?;
+            let state = state
+                .as_deref()
+                .map(parse_fact_proposal_state)
+                .transpose()?;
+            let page = memory
+                .list_compatibility_fact_proposals(state, None, limit)
+                .await
+                .map_err(memory_application_error)?;
+            let proposals = page
+                .proposals()
+                .iter()
+                .map(fact_proposal_json)
+                .collect::<Vec<_>>();
+            json!({
+                "count": proposals.len(),
+                "proposals": proposals,
+                "next_after_proposal_id": page
+                    .next_after_proposal_id()
+                    .map(|proposal_id| proposal_id.as_str()),
+            })
+        }
+        AdminProjectAction::FactView { id } => {
+            let proposal_id = parse_proposal_id(id)?;
+            let db = cg.open_project_store_db().await?;
+            let memory = project_memory_application(cg, &db)?;
+            let proposal = memory
+                .get_compatibility_fact_proposal(proposal_id)
+                .await
+                .map_err(memory_application_error)?
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "fact proposal not found".to_string(),
+                })?;
+            json!({ "proposal": fact_proposal_json(&proposal) })
+        }
+        AdminProjectAction::FactApply { id } => {
+            let proposal_id = parse_proposal_id(id)?;
+            let db = cg.open_project_store_db().await?;
+            let memory = project_memory_application(cg, &db)?;
+            let proposal = memory
+                .get_compatibility_fact_proposal(proposal_id.clone())
+                .await
+                .map_err(memory_application_error)?
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "fact proposal not found".to_string(),
+                })?;
+            let promotion = CompatibilityFactProposalPromotionV1::new(
+                memory.owner().clone(),
+                proposal_id,
+                proposal.revision(),
+                Some(cli_reviewer()?),
             )
-            .await?;
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("invalid fact proposal promotion: {error}"),
+            })?;
+            let proposal = memory
+                .promote_compatibility_fact_proposal(promotion)
+                .await
+                .map_err(memory_application_error)?;
             crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-                db.conn(),
+                &memory,
                 cg.project_root(),
             )
             .await;
-            json!({ "proposal": proposal })
+            json!({ "proposal": fact_proposal_json(&proposal) })
+        }
+        AdminProjectAction::FactReject { id, reason } => {
+            let proposal_id = parse_proposal_id(id)?;
+            let db = cg.open_project_store_db().await?;
+            let memory = project_memory_application(cg, &db)?;
+            let current = memory
+                .get_compatibility_fact_proposal(proposal_id.clone())
+                .await
+                .map_err(memory_application_error)?
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "fact proposal not found".to_string(),
+                })?;
+            let proposal = memory
+                .reject_compatibility_fact_proposal(
+                    proposal_id,
+                    current.revision(),
+                    cli_reviewer()?,
+                    reason.unwrap_or_else(|| "rejected by cli".to_string()),
+                )
+                .await
+                .map_err(memory_application_error)?;
+            json!({ "proposal": fact_proposal_json(&proposal) })
         }
         AdminProjectAction::AutomationRun { task, options } => {
             run_automation(cg, global_db, task, options).await?
@@ -338,12 +529,44 @@ mod tests {
         .concat()
     }
 
+    async fn seed_compatibility_fact_proposal(
+        cg: &TraceDecay,
+        proposal_id: &str,
+        content: &str,
+    ) -> CompatibilityFactProposalRecordV1 {
+        use tracedecay_domain::{Confidence, FactCategoryV1};
+        use tracedecay_store::CompatibilityFactAddCommandV1;
+
+        let owner = cg.project_memory_owner().unwrap();
+        let db = cg.open_project_store_db().await.unwrap();
+        let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
+        let actor = ActorId::new("automation.session-reflector".to_owned()).unwrap();
+        let request = CompatibilityFactAddCommandV1::new(
+            owner,
+            ProvenanceId::new(format!("automation.operation.{proposal_id}")).unwrap(),
+            content.to_owned(),
+            FactCategoryV1::Decision,
+            None,
+            vec![],
+            vec![],
+            json!({}),
+            Confidence::new(0.9).unwrap(),
+            Some(actor.clone()),
+        )
+        .unwrap();
+        memory
+            .submit_compatibility_fact_proposal(
+                ProvenanceId::new(proposal_id.to_owned()).unwrap(),
+                request,
+                Some(actor),
+            )
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn admin_project_handler_executes_typed_fact_and_automation_round_trips_on_one_authority()
     {
-        use crate::automation::fact_proposals::{
-            FactProposalRecord, FactProposalState, record_session_fact_proposals,
-        };
         use crate::automation::run_ledger::{AutomationRunStatus, AutomationTrigger};
         use crate::automation::runner::MemoryCuratorAutomationRun;
 
@@ -362,37 +585,100 @@ mod tests {
         .unwrap();
         let owner_before = crate::db::probe_writer_owner(&cg.store_layout().graph_db_path).unwrap();
 
-        let proposals = record_session_fact_proposals(
-            &cg.store_layout().dashboard_root,
-            "rpc-run-1",
-            None,
-            &[json!({
-                "add_fact_request": {
-                    "content": "Admin project RPC applies this durable fact",
-                    "category": "decision",
-                    "source": null,
-                    "tags": [],
-                    "entities": [],
-                    "trust": 0.9,
-                    "metadata": {}
-                }
-            })],
-            &[],
+        let apply_id = "proposal.rpc.apply";
+        let reject_id = "proposal.rpc.reject";
+        seed_compatibility_fact_proposal(
+            &cg,
+            apply_id,
+            "Admin project RPC applies this durable fact",
         )
-        .await
-        .unwrap();
-        let fact = tool_json(
+        .await;
+        seed_compatibility_fact_proposal(
+            &cg,
+            reject_id,
+            "Admin project RPC rejects this durable fact",
+        )
+        .await;
+
+        let pending = tool_json(
             &handle_admin_project(
                 &cg,
-                json!({ "action": "fact_apply", "id": proposals[0].proposal_id.clone() }),
+                json!({
+                    "action": "fact_list",
+                    "state": "pending_approval",
+                    "limit": 50,
+                }),
                 None,
             )
             .await
             .unwrap(),
         );
-        let fact = serde_json::from_value::<FactProposalRecord>(fact["proposal"].clone()).unwrap();
-        assert_eq!(fact.state, FactProposalState::Applied);
-        assert_eq!(fact.reviewer.as_deref(), Some("cli"));
+        assert_eq!(pending["count"], 2);
+        assert!(
+            pending["proposals"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|proposal| proposal["state"] == "pending_approval")
+        );
+
+        let viewed = tool_json(
+            &handle_admin_project(&cg, json!({ "action": "fact_view", "id": apply_id }), None)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(viewed["proposal"]["proposal_id"], apply_id);
+        assert_eq!(viewed["proposal"]["state"], "pending_approval");
+        assert_eq!(
+            viewed["proposal"]["operation_id"],
+            "automation.operation.proposal.rpc.apply"
+        );
+        assert_eq!(
+            viewed["proposal"]["add_fact_request"]["content"],
+            "Admin project RPC applies this durable fact"
+        );
+        assert_eq!(
+            viewed["proposal"]["add_fact_request"]["category"],
+            "decision"
+        );
+        assert_eq!(viewed["proposal"]["add_fact_request"]["trust"], json!(0.9));
+        assert!(viewed["proposal"]["add_fact_request"]["source"].is_null());
+        let viewed_proposal = viewed["proposal"].as_object().unwrap();
+        assert!(!viewed_proposal.contains_key("applied_canonical_fact_id"));
+        assert!(!viewed_proposal.contains_key("applied_fact_id"));
+
+        let fact = tool_json(
+            &handle_admin_project(&cg, json!({ "action": "fact_apply", "id": apply_id }), None)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(fact["proposal"]["proposal_id"], apply_id);
+        assert_eq!(fact["proposal"]["state"], "applied");
+        assert_eq!(fact["proposal"]["reviewer"], "cli");
+        assert!(fact["proposal"]["applied_canonical_fact_id"].is_string());
+        let applied_proposal = fact["proposal"].as_object().unwrap();
+        assert!(matches!(
+            applied_proposal.get("applied_fact_id"),
+            None | Some(Value::Number(_))
+        ));
+
+        let rejected = tool_json(
+            &handle_admin_project(
+                &cg,
+                json!({
+                    "action": "fact_reject",
+                    "id": reject_id,
+                    "reason": "not durable",
+                }),
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(rejected["proposal"]["proposal_id"], reject_id);
+        assert_eq!(rejected["proposal"]["state"], "rejected");
+        assert_eq!(rejected["proposal"]["reviewer"], "cli");
+        assert_eq!(rejected["proposal"]["reason"], "not durable");
 
         let automation = tool_json(
             &handle_admin_project(
@@ -424,6 +710,21 @@ mod tests {
         assert!(client_source.contains("tracedecay_admin_project"));
         assert!(!client_source.contains(&direct_init));
         assert!(!client_source.contains(&direct_apply));
+
+        let admin_source = include_str!("admin_project.rs");
+        for direct_file_authority in [
+            ["load_", "fact_proposal("].concat(),
+            ["list_", "fact_proposals("].concat(),
+            ["apply_", "fact_proposal("].concat(),
+            ["reject_", "fact_proposal("].concat(),
+        ] {
+            assert!(
+                !admin_source.contains(&direct_file_authority),
+                "admin fact operations must use MemoryApplication, not {direct_file_authority}"
+            );
+        }
+        let application_boundary = ["Memory", "Application"].concat();
+        assert!(admin_source.contains(&application_boundary));
     }
 
     #[test]
@@ -433,6 +734,35 @@ mod tests {
         let fact_request = json!({ "action": "fact_apply", "id": "fact_1" });
         let fact = serde_json::from_value::<AdminProjectAction>(fact_request).unwrap();
         assert!(matches!(fact, AdminProjectAction::FactApply { id } if id == "fact_1"));
+
+        let list = serde_json::from_value::<AdminProjectAction>(json!({
+            "action": "fact_list",
+            "state": "pending_approval",
+            "limit": 50,
+        }))
+        .unwrap();
+        assert!(matches!(
+            list,
+            AdminProjectAction::FactList { state: Some(state), limit: 50 }
+                if state == "pending_approval"
+        ));
+        let view = serde_json::from_value::<AdminProjectAction>(json!({
+            "action": "fact_view",
+            "id": "fact_1",
+        }))
+        .unwrap();
+        assert!(matches!(view, AdminProjectAction::FactView { id } if id == "fact_1"));
+        let reject = serde_json::from_value::<AdminProjectAction>(json!({
+            "action": "fact_reject",
+            "id": "fact_1",
+            "reason": "not durable",
+        }))
+        .unwrap();
+        assert!(matches!(
+            reject,
+            AdminProjectAction::FactReject { id, reason: Some(reason) }
+                if id == "fact_1" && reason == "not durable"
+        ));
 
         let run_request = json!({
             "action": "automation_run",
@@ -487,6 +817,18 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(fact, AdminProjectAction::FactApply { id } if id == "fact_1"));
+        assert_eq!(
+            parse_fact_proposal_state("pending_approval").unwrap(),
+            CompatibilityFactProposalStateV1::PendingApproval
+        );
+        assert_eq!(
+            parse_fact_proposal_state("rejected_validation").unwrap(),
+            CompatibilityFactProposalStateV1::Rejected
+        );
+        assert_eq!(
+            parse_fact_proposal_state(" rejected-validation ").unwrap(),
+            CompatibilityFactProposalStateV1::Rejected
+        );
 
         let run = serde_json::from_value::<AdminProjectAction>(json!({
             "action": "automation_run",

@@ -44,7 +44,6 @@ mod lcm_service;
 mod memory_analysis;
 mod memory_api;
 pub mod memory_curate;
-mod memory_queries;
 mod memory_service;
 mod projects;
 mod savings_api;
@@ -53,7 +52,7 @@ mod settings_api;
 mod token_count;
 mod util;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -95,8 +94,6 @@ pub(crate) struct DashboardState {
     pub(crate) _database_guards: Vec<Arc<Database>>,
     /// Display path of the active code-graph database.
     pub(crate) graph_db_path: String,
-    /// Project memory database. This is shared across branches.
-    pub(crate) mem_conn: libsql::Connection,
     /// Authoritative project-memory handle and process-local writer lane.
     pub(crate) mem_db: Arc<Database>,
     /// Display path of the project memory database.
@@ -239,56 +236,11 @@ pub(crate) fn code_diagnostics_broker(
     lsp::broker::DiagnosticBroker::new(project_root, adapters, settings)
 }
 
-async fn open_dashboard_connection(path: &Path) -> Option<(libsql::Connection, Arc<Database>)> {
-    let authority = crate::db::DatabaseAuthority::for_runtime(path, "dashboard").ok()?;
-    let (db, _) = Database::open(path, &authority).await.ok()?;
-    let conn = db.conn().clone();
-    Some((conn, Arc::new(db)))
-}
-
-async fn memory_fact_count(conn: &libsql::Connection) -> Option<i64> {
-    let mut rows = conn
-        .query("SELECT COUNT(*) FROM memory_facts", ())
-        .await
-        .ok()?;
-    rows.next().await.ok()??.get::<i64>(0).ok()
-}
-
-pub(crate) async fn resolve_project_memory_store(
-    cg: &TraceDecay,
-) -> (libsql::Connection, String, Arc<Database>) {
-    let graph_path = cg.dashboard_db_path();
-    let mut first_open: Option<(libsql::Connection, String, Arc<Database>)> = None;
-    let mut seen = std::collections::BTreeSet::new();
-
-    for path in [cg.store_layout().graph_db_path.clone()] {
-        if !seen.insert(path.clone()) || !path.is_file() {
-            continue;
-        }
-        let opened = if path == graph_path {
-            Some((cg.dashboard_connection(), cg.dashboard_database_guard()))
-        } else {
-            open_dashboard_connection(&path).await
-        };
-        let Some((conn, guard)) = opened else {
-            continue;
-        };
-        let display_path = path.display().to_string();
-        if first_open.is_none() {
-            first_open = Some((conn.clone(), display_path.clone(), guard.clone()));
-        }
-        if memory_fact_count(&conn).await.unwrap_or(0) > 0 {
-            return (conn, display_path, guard);
-        }
-    }
-
-    first_open.unwrap_or_else(|| {
-        (
-            cg.dashboard_connection(),
-            cg.dashboard_db_path().display().to_string(),
-            cg.dashboard_database_guard(),
-        )
-    })
+pub(crate) fn resolve_project_memory_store(cg: &TraceDecay) -> (String, Arc<Database>) {
+    (
+        cg.dashboard_db_path().display().to_string(),
+        cg.dashboard_database_guard(),
+    )
 }
 
 /// Resolves the immutable fact owner from the validated project layout.
@@ -312,12 +264,11 @@ async fn build_state_inner(
     cg: &TraceDecay,
     retained_project_session_db: Option<Arc<GlobalDb>>,
     allow_direct_session_open: bool,
-    repair_memory_on_startup: bool,
     warm_token_counts: bool,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
 ) -> Result<DashboardState> {
-    let (mem_conn, mem_db_path, mem_db) = resolve_project_memory_store(cg).await;
+    let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
     let lcm = resolve_lcm_store(
         cg,
@@ -353,11 +304,8 @@ async fn build_state_inner(
         project_id: cg.store_layout().identity.project_id.clone(),
         memory_owner,
         graph_conn: cg.dashboard_connection(),
-        _database_guards: std::iter::once(cg.dashboard_database_guard())
-            .chain(std::iter::once(mem_db.clone()))
-            .collect(),
+        _database_guards: vec![mem_db.clone()],
         graph_db_path: cg.dashboard_db_path().display().to_string(),
-        mem_conn,
         mem_db,
         mem_db_path,
         lcm_conn: lcm.conn,
@@ -379,9 +327,6 @@ async fn build_state_inner(
         automation_scheduler_reconciler,
         automation_writer,
     };
-    if repair_memory_on_startup && let Err(err) = memory_api::repair_derived_memory(&state).await {
-        eprintln!("Dashboard memory repair skipped: {err}");
-    }
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
     if warm_token_counts {
@@ -397,7 +342,6 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
     build_state_inner(
         cg,
         None,
-        true,
         true,
         true,
         None,
@@ -417,7 +361,6 @@ pub(crate) async fn build_state_with_automation_reconciler(
         retained_project_session_db,
         false,
         true,
-        true,
         automation_scheduler_reconciler,
         automation_writer,
     )
@@ -435,7 +378,6 @@ pub(crate) async fn build_selected_project_state(
         cg,
         None,
         active.allow_direct_session_open,
-        false,
         false,
         None,
         Arc::clone(&active.automation_writer),
@@ -546,26 +488,17 @@ pub async fn run_until_shutdown_for_tests<F>(
     cg: &TraceDecay,
     host: &str,
     port: u16,
-    repair_memory_on_startup: bool,
     shutdown: F,
 ) -> Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    run_until_shutdown_inner(
-        cg,
-        host,
-        port,
-        shutdown,
-        DashboardRunOptions::test(repair_memory_on_startup),
-    )
-    .await
+    run_until_shutdown_inner(cg, host, port, shutdown, DashboardRunOptions::test()).await
 }
 
 #[derive(Debug, Clone, Copy)]
 struct DashboardRunOptions {
     open: bool,
-    repair_memory_on_startup: bool,
     warm_token_counts: bool,
     start_session_catch_up: bool,
 }
@@ -574,16 +507,14 @@ impl DashboardRunOptions {
     fn production(open: bool) -> Self {
         Self {
             open,
-            repair_memory_on_startup: true,
             warm_token_counts: true,
             start_session_catch_up: true,
         }
     }
 
-    fn test(repair_memory_on_startup: bool) -> Self {
+    fn test() -> Self {
         Self {
             open: false,
-            repair_memory_on_startup,
             warm_token_counts: false,
             start_session_catch_up: false,
         }
@@ -604,7 +535,6 @@ where
         cg,
         None,
         true,
-        options.repair_memory_on_startup,
         options.warm_token_counts,
         None,
         direct_dashboard_automation_writer(),
@@ -1135,6 +1065,23 @@ mod authority_tests {
                 project_id: expected,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn dashboard_state_reuses_its_active_database_as_memory_authority() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
+            .expect("fixture source");
+        let cg = TraceDecay::init(project.path())
+            .await
+            .expect("project init");
+
+        let expected_path = cg.dashboard_db_path().display().to_string();
+        let state = build_state(&cg).await.expect("dashboard state");
+
+        assert_eq!(state.mem_db_path, expected_path);
+        assert_eq!(state._database_guards.len(), 1);
     }
 
     #[tokio::test]

@@ -100,7 +100,13 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     }
 
     // Session facts are self-managed by default; managed skills still stage drafts.
+    let memory = tracedecay::application::memory::MemoryApplication::new(
+        project_memory_owner(&cg),
+        tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
+    )
+    .unwrap();
     let pending = list_fact_proposals(
+        &memory,
         &cg.store_layout().dashboard_root,
         Some(FactProposalState::PendingApproval),
         10,
@@ -109,6 +115,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     .unwrap();
     assert!(pending.is_empty());
     let proposals = list_fact_proposals(
+        &memory,
         &cg.store_layout().dashboard_root,
         Some(FactProposalState::Applied),
         10,

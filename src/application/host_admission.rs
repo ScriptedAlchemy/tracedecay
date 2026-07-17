@@ -10,9 +10,12 @@ use tracedecay_domain::{
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationStoreError,
-    ProjectionPersistOutcome,
+    ProjectionPersistOutcome, build_scope_resolution_authorization_v1,
 };
 
+use crate::application::anchor_resolution::{
+    EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
+};
 use crate::application::memory::{
     EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchorV1,
 };
@@ -888,6 +891,67 @@ impl EvidenceAnchorResolver for HostAdmissionFacade<'_> {
     }
 }
 
+/// Authority namespace stamped into caller-bound authorization snapshots for
+/// record-less anchor resolutions (absent or ambiguous bindings).
+const EVIDENCE_ANCHOR_RESOLUTION_NAMESPACE: &str = "observation-resolution.v1";
+
+impl EvidenceAnchorReportResolver for HostAdmissionFacade<'_> {
+    async fn resolve_evidence_anchor_report(
+        &self,
+        owner: FactOwnerV1,
+        anchor_id: RetrievalAnchorId,
+    ) -> Result<EvidenceAnchorResolutionReport, EvidenceAnchorResolutionError> {
+        owner
+            .validate()
+            .map_err(|error| EvidenceAnchorResolutionError::Authority {
+                operation: "validate evidence anchor owner",
+                source: Box::new(error),
+            })?;
+        anchor_id
+            .validate()
+            .map_err(|error| EvidenceAnchorResolutionError::Authority {
+                operation: "validate evidence anchor identifier",
+                source: Box::new(error),
+            })?;
+        let scope = ObservationScopeV1::from(owner);
+        self.authorities.validate_scope(&scope).map_err(|outcome| {
+            EvidenceAnchorResolutionError::Authority {
+                operation: "validate evidence anchor authority scope",
+                source: Box::new(std::io::Error::other(
+                    outcome.reason_code.unwrap_or("authority_unavailable"),
+                )),
+            }
+        })?;
+        let db = self.authorities.get(host_scope(&scope)).ok_or_else(|| {
+            EvidenceAnchorResolutionError::Authority {
+                operation: "resolve evidence anchor authority",
+                source: Box::new(std::io::Error::other("authority_unavailable")),
+            }
+        })?;
+        let observed = GlobalDbObservationStore::new(db)
+            .resolve_evidence_anchor_report(&scope, &anchor_id)
+            .await
+            .map_err(|error| EvidenceAnchorResolutionError::Authority {
+                operation: "resolve observation evidence anchor report",
+                source: Box::new(error),
+            })?;
+        let authorization = build_scope_resolution_authorization_v1(
+            &scope,
+            &anchor_id,
+            EVIDENCE_ANCHOR_RESOLUTION_NAMESPACE,
+        )
+        .map_err(|error| EvidenceAnchorResolutionError::Authority {
+            operation: "derive evidence anchor resolution authorization",
+            source: Box::new(error),
+        })?;
+        EvidenceAnchorResolutionReport::from_observation(anchor_id, observed, authorization)
+            .map_err(|error| EvidenceAnchorResolutionError::Authority {
+                operation: "validate observation evidence anchor report",
+                source: Box::new(error),
+            })
+    }
+}
+
 const fn projection_store_unavailable() -> HostAdmissionOutcome {
     HostAdmissionOutcome::new(
         HostAdmissionStatus::Unavailable,
@@ -980,7 +1044,70 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    use serde_json::json;
+    use tempfile::TempDir;
+    use tracedecay_domain::{
+        ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
+        ClaudeSourceIdentityV1, EvidenceAvailabilityV1, ObservationScopeV1, RepositoryId,
+        RetentionClass, SessionId, WorktreeId,
+    };
+    use tracedecay_store::ObservationReplayRequest;
+
+    use crate::privacy::parse_claude_record_v1;
+
     use super::*;
+
+    fn initialize_repository(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        let output = Command::new(crate::git::git_program())
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn host_capture_request(
+        scope: ObservationScopeV1,
+        record_id: &str,
+    ) -> CaptureObservationRequest {
+        let encoded = serde_json::to_vec(&json!({
+            "type": "user",
+            "uuid": format!("record-{record_id}"),
+            "timestamp": 1_750_000_000_i64,
+            "message": {
+                "id": record_id,
+                "role": "user",
+                "content": "host provenance fixture",
+            },
+        }))
+        .unwrap();
+        let range = ClaudeByteRangeV1::new(0, u64::try_from(encoded.len()).unwrap()).unwrap();
+        let parsed = parse_claude_record_v1(&encoded, range).unwrap();
+        CaptureObservationRequest::new(
+            parsed,
+            ClaudeObservationIdentityMaterialV1::new(
+                ClaudeSourceIdentityV1::new(SessionId::new("session.host-provenance").unwrap())
+                    .unwrap(),
+                scope,
+                ClaudeFileGenerationV1::new(41).unwrap(),
+                range,
+            )
+            .unwrap(),
+            None,
+            RetentionClass::new("retention.host-provenance-test").unwrap(),
+            ObservationCancellation::default(),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn probe_distinguishes_unknown_provider_and_missing_authority() {
@@ -1077,5 +1204,133 @@ mod tests {
                 Some("authority_write_failed"),
             )
         );
+    }
+
+    #[tokio::test]
+    async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stably() {
+        let root = TempDir::new().unwrap();
+        let repository_root = root.path().join("repository");
+        initialize_repository(&repository_root);
+        let project_db = GlobalDb::open_at(&root.path().join("project.db"))
+            .await
+            .unwrap();
+        let profile_db = GlobalDb::open_at(&root.path().join("profile.db"))
+            .await
+            .unwrap();
+        let project_id = ProjectId::new("project.host-provenance").unwrap();
+        let provenance = RepositoryProvenanceAdmissionContext::new(
+            repository_root.clone(),
+            project_id.clone(),
+            RepositoryId::new("repository.host-provenance").unwrap(),
+            Some(WorktreeId::new("worktree.host-provenance").unwrap()),
+            [0x51; 32],
+        );
+        let facade = HostAdmissionFacade::new(
+            HostAdmissionAuthorities::for_project(&project_db, project_id.clone())
+                .with_repository_provenance(provenance.clone()),
+        );
+        let project_scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+
+        let initial = facade
+            .capture_observation(host_capture_request(
+                project_scope.clone(),
+                "host.provenance",
+            ))
+            .await
+            .unwrap();
+        let (initial_attachment, initial_generation) = match initial {
+            CaptureObservationOutcome::Persisted {
+                outcome: ObservationPersistOutcome::Committed(receipt),
+                ..
+            } => (
+                receipt.repository_provenance_attachment().clone(),
+                receipt.projection_generation().clone(),
+            ),
+            other => panic!("expected committed project observation, got {other:?}"),
+        };
+        let initial_provenance = initial_attachment.provenance().unwrap();
+        assert_eq!(initial_provenance.capture().project_id(), Some(&project_id));
+        assert_eq!(initial_provenance.generation_id(), &initial_generation);
+
+        let remote = Command::new(crate::git::git_program())
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/changed.git",
+            ])
+            .current_dir(&repository_root)
+            .output()
+            .unwrap();
+        assert!(remote.status.success());
+        let replay = facade
+            .capture_observation(host_capture_request(
+                project_scope.clone(),
+                "host.provenance",
+            ))
+            .await
+            .unwrap();
+        let replay_attachment = match replay {
+            CaptureObservationOutcome::Persisted {
+                outcome: ObservationPersistOutcome::ExactDuplicate(receipt),
+                ..
+            } => receipt.repository_provenance_attachment().clone(),
+            other => panic!("expected exact duplicate replay, got {other:?}"),
+        };
+        assert_eq!(replay_attachment, initial_attachment);
+
+        let mismatched = facade
+            .capture(host_capture_request(
+                ObservationScopeV1::Project {
+                    project_id: ProjectId::new("project.host-provenance-other").unwrap(),
+                },
+                "host.provenance.mismatched",
+            ))
+            .await;
+        assert_eq!(mismatched.status, HostAdmissionStatus::Unavailable);
+        assert_eq!(mismatched.reason_code, Some("project_authority_mismatch"));
+
+        let profile_facade = HostAdmissionFacade::new(
+            HostAdmissionAuthorities::for_profile(&profile_db)
+                .with_repository_provenance(provenance),
+        );
+        let profile_project = profile_facade
+            .capture(host_capture_request(
+                project_scope,
+                "host.provenance.profile-project",
+            ))
+            .await;
+        assert_eq!(profile_project.status, HostAdmissionStatus::Unavailable);
+        assert_eq!(
+            profile_project.reason_code,
+            Some("project_authority_unbound")
+        );
+        let profile = profile_facade
+            .capture_observation(host_capture_request(
+                ObservationScopeV1::Profile,
+                "host.provenance.profile",
+            ))
+            .await
+            .unwrap();
+        let profile_attachment = match profile {
+            CaptureObservationOutcome::Persisted {
+                outcome: ObservationPersistOutcome::Committed(receipt),
+                ..
+            } => receipt.repository_provenance_attachment().clone(),
+            other => panic!("expected committed profile observation, got {other:?}"),
+        };
+        assert!(matches!(
+            profile_attachment.availability(),
+            EvidenceAvailabilityV1::Unavailable
+        ));
+        assert!(profile_attachment.anchor().is_none());
+
+        let project_rows = GlobalDbObservationStore::new(&project_db)
+            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(project_rows.len(), 1);
     }
 }

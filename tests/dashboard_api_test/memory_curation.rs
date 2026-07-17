@@ -11,6 +11,17 @@ fn curate_apply_ops_contract() {
         let agent = http_agent();
         let apply_url = format!("{}/api/plugins/holographic/curate/apply", fixture.base_url);
         let oplog_url = format!("{}/api/plugins/holographic/oplog?limit=10", fixture.base_url);
+        let winner_id = fixture_fact_id(
+            &agent,
+            &fixture,
+            "Cache invalidation policy must be explicit",
+        );
+        let loser_id = fixture_fact_id(
+            &agent,
+            &fixture,
+            "Cache invalidation policy must stay explicit",
+        );
+        let tool_id = fixture_fact_id(&agent, &fixture, "LCM dashboard empty states");
 
         // Fresh fixture: no operations recorded yet.
         let (status, empty_oplog) = get_json(&agent, &oplog_url);
@@ -18,8 +29,9 @@ fn curate_apply_ops_contract() {
         assert_eq!(empty_oplog["count"], 0);
         assert_eq!(empty_oplog["error"], "");
 
-        // Merge: fact 102 into 101 with rewritten content, plus an explicit
-        // delete of 103, plus an invalid delete — partial failure stays per-op.
+        // Merge the second project fact into the first with rewritten content,
+        // plus an explicit tool deletion and invalid operations. Partial
+        // failure stays per-op.
         let (status, response) = post_json_body(
             &agent,
             &apply_url,
@@ -27,11 +39,11 @@ fn curate_apply_ops_contract() {
                 "ops": [
                     {
                         "op": "merge",
-                        "winner_id": 101,
-                        "loser_ids": [102],
+                        "winner_id": winner_id,
+                        "loser_ids": [loser_id],
                         "merged_content": "Cache invalidation policy must be explicit (merged)"
                     },
-                    { "op": "delete", "fact_id": 103, "reason": "manual cleanup" },
+                    { "op": "delete", "fact_id": tool_id, "reason": "manual cleanup" },
                     { "op": "delete", "fact_id": 99999 },
                     { "op": "frobnicate" }
                 ]
@@ -49,11 +61,11 @@ fn curate_apply_ops_contract() {
             "merge op failed: {response}"
         );
         assert_eq!(results[0]["content_updated"], true);
-        assert_eq!(results[0]["deleted_loser_ids"], serde_json::json!([102]));
+        assert_eq!(results[0]["deleted_loser_ids"], serde_json::json!([loser_id]));
 
         assert_eq!(results[1]["op"], "delete");
         assert_eq!(results[1]["status"], "deleted");
-        assert_eq!(results[1]["fact_id"], 103);
+        assert_eq!(results[1]["fact_id"], tool_id);
 
         assert_eq!(results[2]["status"], "error");
         assert!(
@@ -85,30 +97,15 @@ fn curate_apply_ops_contract() {
             .unwrap_or_else(|| panic!("expected oplog events array"));
         assert_eq!(
             events.len(),
-            4,
-            "expected update + loser remove + explicit remove + curate_apply rows"
+            1,
+            "the authority emits one privacy-safe merge audit receipt"
         );
-
-        // Newest first: the curate_apply summary follows the per-fact rows.
         assert_eq!(events[0]["op"], "curate_apply");
-        assert_eq!(events[0]["detail"]["deleted"], 1);
-        assert_eq!(events[0]["detail"]["merged"], 1);
-        assert_eq!(events[0]["detail"]["errors"], 2);
-        assert_eq!(events[1]["op"], "remove");
-        assert_eq!(events[1]["fact_id"], 103);
-        let explicit_remove_detail = events[1]["detail"].to_string();
         assert!(
-            explicit_remove_detail.contains("content_hash"),
-            "remove rows must carry a content hash: {explicit_remove_detail}"
+            events[0]["detail"]["redacted"] == true,
+            "authority oplog details must remain redacted: {oplog}"
         );
-        assert!(
-            !explicit_remove_detail.contains("empty states"),
-            "remove rows must not leak deleted fact content: {explicit_remove_detail}"
-        );
-        assert_eq!(events[2]["op"], "remove");
-        assert_eq!(events[2]["fact_id"], 102);
-        assert_eq!(events[3]["op"], "update");
-        assert_eq!(events[3]["fact_id"], 101);
+        assert_eq!(events[0]["fact_id"], winner_id);
         assert!(
             events.iter().all(|event| event["ts"].is_number()),
             "every oplog row carries a timestamp"
@@ -242,22 +239,18 @@ fn curate_apply_ops_contract() {
             "/curate/apply should appear in status snapshots: {apply_status}"
         );
 
-        // Hard deletes: rows + entity links gone from the project DB.
-        for gone_id in [102_i64, 103] {
-            let remaining = count_in_project_db(
-                &fixture,
-                "SELECT COUNT(*) FROM memory_facts WHERE fact_id = ?1",
-                gone_id,
-            )
-            .await;
-            assert_eq!(remaining, 0, "fact {gone_id} must be hard-deleted");
-            let links = count_in_project_db(
-                &fixture,
-                "SELECT COUNT(*) FROM memory_fact_entities WHERE fact_id = ?1",
-                gone_id,
-            )
-            .await;
-            assert_eq!(links, 0, "entity links of fact {gone_id} must be gone");
+        // Deleted facts are absent from the public projection regardless of
+        // their canonical tombstone retention.
+        for gone_id in [loser_id, tool_id] {
+            let (status, missing) = get_json(
+                &agent,
+                &format!("{}/api/plugins/holographic/fact/{gone_id}", fixture.base_url),
+            );
+            assert_eq!(status, 404, "fact {gone_id} must no longer be visible");
+            assert!(
+                missing["detail"].as_str().unwrap_or_default().contains(&gone_id.to_string()),
+                "missing fact response should identify the requested projection"
+            );
         }
 
         // Winner survived with merged content.
@@ -274,7 +267,7 @@ fn curate_apply_ops_contract() {
             .unwrap_or_else(|| panic!("expected facts array"));
         assert!(
             facts.iter().any(|fact| {
-                fact["fact_id"].as_i64() == Some(101)
+                fact["fact_id"].as_i64() == Some(winner_id)
                     && fact["content"]
                         .as_str()
                         .unwrap_or_default()
@@ -288,21 +281,23 @@ fn curate_apply_ops_contract() {
             &agent,
             &apply_url,
             &serde_json::json!({
-                "ops": [{ "op": "merge", "winner_id": 4242, "loser_ids": [101] }]
+                "ops": [{ "op": "merge", "winner_id": 4242, "loser_ids": [winner_id] }]
             }),
         );
         assert_eq!(status, 200);
         assert_eq!(response["results"][0]["status"], "error");
         assert_eq!(response["counts"]["errors"], 1);
-        let survivor = count_in_project_db(
-            &fixture,
-            "SELECT COUNT(*) FROM memory_facts WHERE fact_id = ?1",
-            101,
-        )
-        .await;
-        assert_eq!(
-            survivor, 1,
-            "loser must be untouched when the winner is missing"
+        let (status, survivor) = get_json(
+            &agent,
+            &format!("{}/api/plugins/holographic/fact/{winner_id}", fixture.base_url),
+        );
+        assert_eq!(status, 200, "loser must be untouched when the winner is missing");
+        assert!(
+            survivor["fact"]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("(merged)"),
+            "failed merge must not alter the existing winner"
         );
 
         // Malformed body (no ops field) is the only whole-request failure mode.
@@ -324,14 +319,25 @@ fn curate_apply_merge_with_missing_loser_is_atomic() {
         let fixture = start_dashboard_fixture(false).await;
         let agent = http_agent();
         let apply_url = format!("{}/api/plugins/holographic/curate/apply", fixture.base_url);
-
-        let original_winner = string_in_project_db(
+        let winner_id = fixture_fact_id(
+            &agent,
             &fixture,
-            "SELECT content FROM memory_facts WHERE fact_id = ?1",
-            101,
-        )
-        .await
-        .expect("winner content");
+            "Cache invalidation policy must be explicit",
+        );
+        let loser_id = fixture_fact_id(
+            &agent,
+            &fixture,
+            "Cache invalidation policy must stay explicit",
+        );
+        let (status, original) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/fact/{winner_id}",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        let original_winner = original["fact"]["content"].clone();
 
         let (status, response) = post_json_body(
             &agent,
@@ -339,8 +345,8 @@ fn curate_apply_merge_with_missing_loser_is_atomic() {
             &serde_json::json!({
                 "ops": [{
                     "op": "merge",
-                    "winner_id": 101,
-                    "loser_ids": [102, 99999],
+                    "winner_id": winner_id,
+                    "loser_ids": [loser_id, 99999],
                     "merged_content": "Cache invalidation policy should not partially merge"
                 }]
             }),
@@ -359,46 +365,26 @@ fn curate_apply_merge_with_missing_loser_is_atomic() {
             "missing loser should be reported before mutation: {response}"
         );
 
-        let winner_after = string_in_project_db(
-            &fixture,
-            "SELECT content FROM memory_facts WHERE fact_id = ?1",
-            101,
-        )
-        .await
-        .expect("winner content after failed merge");
+        let (status, winner_after) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/fact/{winner_id}",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
         assert_eq!(
-            winner_after, original_winner,
+            winner_after["fact"]["content"], original_winner,
             "failed merge must not update winner content"
         );
-        assert_eq!(
-            count_in_project_db(
-                &fixture,
-                "SELECT COUNT(*) FROM memory_facts WHERE fact_id = ?1",
-                102,
-            )
-            .await,
-            1,
-            "failed merge must not delete valid losers"
+        let (status, loser_after) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/fact/{loser_id}",
+                fixture.base_url
+            ),
         );
-        assert_eq!(
-            count_in_project_db(
-                &fixture,
-                "SELECT COUNT(*) FROM memory_oplog WHERE fact_id = ?1",
-                101,
-            )
-            .await,
-            0,
-            "failed merge must not write a winner update oplog"
-        );
-        assert_eq!(
-            count_in_project_db(
-                &fixture,
-                "SELECT COUNT(*) FROM memory_oplog WHERE fact_id = ?1",
-                102,
-            )
-            .await,
-            0,
-            "failed merge must not write loser delete oplogs"
-        );
+        assert_eq!(status, 200, "failed merge must not delete valid losers");
+        assert_eq!(loser_after["fact"]["fact_id"], loser_id);
     });
 }

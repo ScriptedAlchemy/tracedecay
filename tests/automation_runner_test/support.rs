@@ -40,6 +40,19 @@ pub(crate) use tracedecay::tracedecay::{TraceDecay, current_timestamp};
 
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+pub(crate) fn project_memory_owner(cg: &TraceDecay) -> tracedecay_domain::FactOwnerV1 {
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("initialized test project has an authoritative project id");
+    tracedecay_domain::FactOwnerV1::Project {
+        project_id: tracedecay_domain::ProjectId::new(project_id)
+            .expect("initialized test project id is valid"),
+    }
+}
+
 pub(crate) struct JsonBackend {
     calls: AtomicUsize,
     output: Value,
@@ -906,48 +919,48 @@ pub(crate) async fn seed_session_message_in_db(
     assert!(db.upsert_session_message(&message).await);
 }
 
-pub(crate) async fn seed_duplicate_facts(cg: &TraceDecay) {
-    let vec_a = HolographicEncoder::serialize(&[0.20, 0.35, 0.50]).unwrap();
-    let vec_b = HolographicEncoder::serialize(&[0.21, 0.34, 0.49]).unwrap();
-    for (fact_id, content, vector, trust_score) in [
-        (
-            101_i64,
-            "Cache invalidation policy must be explicit",
-            vec_a,
-            0.97_f64,
-        ),
-        (
-            102_i64,
-            "Cache invalidation policy must stay explicit",
-            vec_b,
-            0.95_f64,
-        ),
-    ] {
-        cg.db()
-            .execute_write(
-                "seed duplicate memory fact",
-                "INSERT INTO memory_facts
-                (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count,
-                 created_at, updated_at, hrr_vector, hrr_algebra, hrr_dim, access_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                libsql::params![
-                    fact_id,
-                    content,
-                    "project",
-                    "[\"cache\",\"policy\"]",
-                    trust_score,
-                    0_i64,
-                    0_i64,
-                    1_700_000_000_i64 + fact_id,
-                    1_700_000_100_i64 + fact_id,
-                    libsql::Value::Blob(vector),
-                    "amari_fhrr",
-                    HolographicEncoder::DIMENSIONS as i64,
-                    0_i64,
-                ],
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SeededDuplicateFacts {
+    pub(crate) winner_id: i64,
+    pub(crate) loser_id: i64,
+}
+
+pub(crate) async fn seed_duplicate_facts(cg: &TraceDecay) -> SeededDuplicateFacts {
+    use tracedecay::application::memory::{MemoryApplication, MemoryOperationContext};
+    use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
+    use tracedecay::store::memory::DatabaseFactStore;
+
+    let owner = project_memory_owner(cg);
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db())).unwrap();
+    let mut fact_ids = [0_i64; 2];
+    for (index, (content, trust)) in [
+        ("Cache invalidation policy must be explicit", 0.97),
+        ("Cache invalidation policy must stay explicit", 0.95),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let outcome = memory
+            .add_fact_v1(
+                AddFactRequest {
+                    content: content.to_string(),
+                    category: MemoryCategory::Project,
+                    source: None,
+                    tags: vec!["cache".to_string(), "policy".to_string()],
+                    entities: Vec::new(),
+                    trust: Some(trust),
+                    metadata: json!({}),
+                },
+                MemoryOperationContext::generated(&owner, "seed automation duplicate fact", None)
+                    .unwrap(),
             )
             .await
             .unwrap();
+        fact_ids[index] = outcome.fact.expect("seeded fact must be projected").fact_id;
+    }
+    SeededDuplicateFacts {
+        winner_id: fact_ids[0],
+        loser_id: fact_ids[1],
     }
 }
 

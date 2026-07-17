@@ -1,35 +1,30 @@
 //! Session-memory (holographic fact store) surface of [`TraceDecay`].
 
+use crate::application::memory::{
+    MemoryApplication, MemoryApplicationError, MemoryOperationContext, V1UpdateFactOutcome,
+};
 use crate::errors::{Result, TraceDecayError};
-use crate::memory::encoding::HolographicEncoder;
-use crate::memory::retrieval::FactRetriever;
-use crate::memory::store::MemoryStore;
-use crate::memory::trust::{DEFAULT_MIN_TRUST, DEFAULT_TRUST};
 use crate::memory::types::{
     AddFactOutcome, AddFactRequest, ContradictionResult, FactRecord, FactSearchResult,
-    FeedbackRequest, FeedbackResult, MemoryCategory, MemoryFeedbackFunnel, MemoryRepairStats,
-    MemoryStatus, SearchFactsRequest, TrustHistoryEntry, UpdateFactRequest,
+    FeedbackRequest, FeedbackResult, MemoryCategory, MemoryStatus, SearchFactsRequest,
+    TrustHistoryEntry, UpdateFactRequest,
 };
+use crate::store::memory::DatabaseFactStore;
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 
 use super::TraceDecay;
 
-const MAX_FACT_LIMIT: usize = 200;
-const DEFAULT_FACT_LIMIT: usize = 20;
+const MAX_FACT_HISTORY_LIMIT: usize = 1_000;
 
-fn memory_database_error(operation: &str, message: impl std::fmt::Display) -> TraceDecayError {
-    TraceDecayError::Database {
-        message: format!("{operation} failed: {message}"),
-        operation: operation.to_string(),
-    }
+fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
+    TraceDecayError::database_operation("memory application", error)
 }
 
-fn fact_result_ids(results: &[FactSearchResult]) -> Vec<i64> {
-    results.iter().map(|result| result.fact.fact_id).collect()
-}
-
-fn fact_ids(facts: &[FactRecord]) -> Vec<i64> {
-    facts.iter().map(|fact| fact.fact_id).collect()
+pub(crate) fn memory_application_for_db(
+    owner: FactOwnerV1,
+    db: &crate::db::Database,
+) -> Result<MemoryApplication<DatabaseFactStore<'_>>> {
+    MemoryApplication::new(owner, DatabaseFactStore::new(db)).map_err(memory_application_error)
 }
 
 fn project_memory_owner_from_layout_id(project_id: Option<&str>) -> Result<FactOwnerV1> {
@@ -52,36 +47,44 @@ impl TraceDecay {
         project_memory_owner_from_layout_id(self.store_layout.identity.project_id.as_deref())
     }
 
+    fn memory_application(&self) -> Result<MemoryApplication<DatabaseFactStore<'_>>> {
+        memory_application_for_db(self.project_memory_owner()?, &self.db)
+    }
+
+    fn generated_memory_operation(&self, action: &str) -> Result<MemoryOperationContext> {
+        let owner = self.project_memory_owner()?;
+        MemoryOperationContext::generated(&owner, action, None).map_err(memory_application_error)
+    }
+
+    fn daemon_memory_cutover_operation(&self) -> Result<MemoryOperationContext> {
+        let owner = self.project_memory_owner()?;
+        MemoryOperationContext::from_trusted_request_id(
+            &owner,
+            "daemon legacy memory cutover",
+            "v1-cutover",
+            None,
+        )
+        .map_err(memory_application_error)
+    }
+
     /// Add a fact to the holographic memory store. The outcome carries the
     /// stored (or pre-existing) fact plus a write-time diff report
     /// (near-duplicate / possible-conflict / secret rejection).
     pub async fn add_fact(&self, request: AddFactRequest) -> Result<AddFactOutcome> {
-        let writer = self.db.writer_connection("add fact").await?;
-        writer.memory_store().add_fact(request, DEFAULT_TRUST).await
+        let context = self.generated_memory_operation("add fact")?;
+        self.memory_application()?
+            .add_fact_v1(request, context)
+            .await
+            .map_err(memory_application_error)
     }
 
     /// Search facts by lexical overlap, entity metadata, category, and trust.
     pub async fn search_facts(&self, request: SearchFactsRequest) -> Result<Vec<FactSearchResult>> {
-        let writer = self.db.writer_connection("search facts").await?;
-        let mut results = writer
-            .fact_retriever()
-            .search(
-                &request.query,
-                request.category,
-                request.min_trust,
-                request.limit.unwrap_or(DEFAULT_FACT_LIMIT),
-            )
-            .await?;
-        if !request.include_why {
-            for result in &mut results {
-                result.why = None;
-            }
-        }
-        writer
-            .memory_store()
-            .increment_retrieval_counts(&fact_result_ids(&results))
-            .await?;
-        Ok(results)
+        let context = self.generated_memory_operation("search facts")?;
+        self.memory_application()?
+            .search_facts_v1(request, context)
+            .await
+            .map_err(memory_application_error)
     }
 
     /// Search facts without updating recall/access counters. This is for
@@ -91,21 +94,12 @@ impl TraceDecay {
         &self,
         request: SearchFactsRequest,
     ) -> Result<Vec<FactSearchResult>> {
+        let owner = self.project_memory_owner()?;
         let db = self.open_project_store_db_read_only().await?;
-        let mut results = FactRetriever::new(db.conn())
-            .search_untracked(
-                &request.query,
-                request.category,
-                request.min_trust,
-                request.limit.unwrap_or(DEFAULT_FACT_LIMIT),
-            )
-            .await?;
-        if !request.include_why {
-            for result in &mut results {
-                result.why = None;
-            }
-        }
-        Ok(results)
+        memory_application_for_db(owner, &db)?
+            .search_facts_untracked_v1(request)
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn probe_entity(
@@ -115,16 +109,20 @@ impl TraceDecay {
         min_trust: Option<f64>,
         limit: usize,
     ) -> Result<Vec<FactSearchResult>> {
-        let writer = self.db.writer_connection("probe facts").await?;
-        let results = writer
-            .fact_retriever()
-            .probe(entity, category, min_trust, limit)
-            .await?;
-        writer
-            .memory_store()
-            .increment_retrieval_counts(&fact_result_ids(&results))
-            .await?;
-        Ok(results)
+        let context = self.generated_memory_operation("probe facts")?;
+        self.memory_application()?
+            .probe_facts_v1(
+                SearchFactsRequest {
+                    query: entity.to_owned(),
+                    category,
+                    limit: Some(limit),
+                    min_trust,
+                    include_why: true,
+                },
+                context,
+            )
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn related_facts(
@@ -134,32 +132,20 @@ impl TraceDecay {
         min_trust: Option<f64>,
         limit: usize,
     ) -> Result<Vec<FactSearchResult>> {
-        let writer = self.db.writer_connection("related facts").await?;
-        let retriever = writer.fact_retriever();
-        let related_entities = retriever.related(entity, limit).await?;
-        let mut seen = std::collections::HashSet::new();
-        let mut results = Vec::new();
-        for related in related_entities {
-            for result in retriever
-                .probe(&related.name, category, min_trust, limit.saturating_mul(2))
-                .await?
-            {
-                if seen.insert(result.fact.fact_id) {
-                    results.push(result);
-                    if results.len() >= limit.clamp(1, MAX_FACT_LIMIT) {
-                        break;
-                    }
-                }
-            }
-            if results.len() >= limit.clamp(1, MAX_FACT_LIMIT) {
-                break;
-            }
-        }
-        writer
-            .memory_store()
-            .increment_retrieval_counts(&fact_result_ids(&results))
-            .await?;
-        Ok(results)
+        let context = self.generated_memory_operation("related facts")?;
+        self.memory_application()?
+            .related_facts_v1(
+                SearchFactsRequest {
+                    query: entity.to_owned(),
+                    category,
+                    limit: Some(limit),
+                    min_trust,
+                    include_why: true,
+                },
+                context,
+            )
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn reason_facts(
@@ -169,16 +155,11 @@ impl TraceDecay {
         min_trust: Option<f64>,
         limit: usize,
     ) -> Result<Vec<FactSearchResult>> {
-        let writer = self.db.writer_connection("reason facts").await?;
-        let results = writer
-            .fact_retriever()
-            .reason(entities, category, min_trust, limit)
-            .await?;
-        writer
-            .memory_store()
-            .increment_retrieval_counts(&fact_result_ids(&results))
-            .await?;
-        Ok(results)
+        let context = self.generated_memory_operation("reason facts")?;
+        self.memory_application()?
+            .reason_facts_v1(entities.to_vec(), category, min_trust, limit, context)
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn contradict_facts(
@@ -187,37 +168,34 @@ impl TraceDecay {
         threshold: f64,
         limit: usize,
     ) -> Result<Vec<ContradictionResult>> {
-        let retriever = FactRetriever::new(self.db.conn());
-        if let Some(category) = category {
-            return retriever.contradict(category, threshold, limit).await;
-        }
-
-        let mut out = Vec::new();
-        for category in [
-            MemoryCategory::General,
-            MemoryCategory::UserPref,
-            MemoryCategory::Project,
-            MemoryCategory::Tool,
-            MemoryCategory::Decision,
-            MemoryCategory::CodeArea,
-        ] {
-            out.extend(retriever.contradict(category, threshold, limit).await?);
-            if out.len() >= limit.clamp(1, MAX_FACT_LIMIT) {
-                out.truncate(limit.clamp(1, MAX_FACT_LIMIT));
-                break;
-            }
-        }
-        Ok(out)
+        self.memory_application()?
+            .contradict_facts_v1(category, threshold, limit)
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn update_fact(&self, request: UpdateFactRequest) -> Result<FactRecord> {
-        let writer = self.db.writer_connection("update fact").await?;
-        writer.memory_store().update_fact(request).await
+        let context = self.generated_memory_operation("update fact")?;
+        match self
+            .memory_application()?
+            .update_fact_v1(request, context)
+            .await
+            .map_err(memory_application_error)?
+        {
+            V1UpdateFactOutcome::Updated(fact) => Ok(fact),
+            V1UpdateFactOutcome::RejectedSecretLike { reason } => Err(TraceDecayError::Database {
+                operation: "update_fact".to_owned(),
+                message: reason,
+            }),
+        }
     }
 
     pub async fn remove_fact(&self, fact_id: i64) -> Result<bool> {
-        let writer = self.db.writer_connection("remove fact").await?;
-        writer.memory_store().remove_fact(fact_id).await
+        let context = self.generated_memory_operation("remove fact")?;
+        self.memory_application()?
+            .remove_fact_v1(fact_id, context)
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn list_facts(
@@ -226,249 +204,86 @@ impl TraceDecay {
         min_trust: Option<f64>,
         limit: usize,
     ) -> Result<Vec<FactRecord>> {
-        let writer = self.db.writer_connection("list facts").await?;
-        let facts = writer
-            .memory_store()
-            .list_facts(category, min_trust, limit)
-            .await?;
-        writer
-            .memory_store()
-            .increment_retrieval_counts(&fact_ids(&facts))
-            .await?;
-        Ok(facts)
+        let context = self.generated_memory_operation("list facts")?;
+        self.memory_application()?
+            .list_facts_v1(category, min_trust, limit, context)
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn get_fact(&self, fact_id: i64) -> Result<Option<FactRecord>> {
-        MemoryStore::new(self.db.conn()).get_fact(fact_id).await
+        self.memory_application()?
+            .get_fact_v1(fact_id)
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn record_fact_feedback(&self, request: FeedbackRequest) -> Result<FeedbackResult> {
-        let writer = self.db.writer_connection("record fact feedback").await?;
-        writer.memory_store().record_feedback_event(request).await
+        let context = self.generated_memory_operation("record fact feedback")?;
+        self.memory_application()?
+            .record_fact_feedback_v1(request, context)
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn fact_trust_history(&self, fact_id: i64) -> Result<Vec<TrustHistoryEntry>> {
-        MemoryStore::new(self.db.conn())
-            .fact_trust_history(fact_id)
+        self.memory_application()?
+            .fact_trust_history_v1(fact_id, MAX_FACT_HISTORY_LIMIT)
             .await
-    }
-
-    async fn repair_derived_memory(store: &MemoryStore<'_>) -> Result<MemoryRepairStats> {
-        let mut missing_vectors_repaired = 0;
-        loop {
-            let repaired = store.compute_missing_vectors(500).await?;
-            if repaired == 0 {
-                break;
-            }
-            missing_vectors_repaired += repaired;
-        }
-
-        let banks_rebuilt = store.rebuild_dirty_banks().await?;
-
-        Ok(MemoryRepairStats {
-            missing_vectors_repaired,
-            banks_rebuilt,
-        })
-    }
-
-    pub(crate) async fn memory_status_for_db(db: &crate::db::Database) -> Result<MemoryStatus> {
-        let writer = db.writer_connection("memory status repair").await?;
-        let operation = "memory_status";
-        let store = writer.memory_store();
-        let repair = Self::repair_derived_memory(&store).await?;
-        let hrr_dim = HolographicEncoder::DIMENSIONS;
-        let mut fact_rows = writer
-            .query("SELECT trust_score FROM memory_facts", ())
-            .await
-            .map_err(|e| memory_database_error(operation, e))?;
-        let row_err = |e: libsql::Error| memory_database_error(operation, e);
-        let mut trust_0_025_count = 0_usize;
-        let mut trust_025_050_count = 0_usize;
-        let mut trust_050_075_count = 0_usize;
-        let mut trust_075_100_count = 0_usize;
-        let mut below_default_recall_threshold_count = 0_usize;
-        let mut fact_count = 0_usize;
-        while let Some(row) = fact_rows.next().await.map_err(row_err)? {
-            fact_count += 1;
-            let trust_score = row.get::<f64>(0).map_err(row_err)?;
-            if trust_score < DEFAULT_MIN_TRUST {
-                below_default_recall_threshold_count += 1;
-            }
-            if trust_score < 0.25 {
-                trust_0_025_count += 1;
-            } else if trust_score < 0.50 {
-                trust_025_050_count += 1;
-            } else if trust_score < 0.75 {
-                trust_050_075_count += 1;
-            } else {
-                trust_075_100_count += 1;
-            }
-        }
-        let mut entity_rows = writer
-            .query("SELECT COUNT(*) FROM memory_entities", ())
-            .await
-            .map_err(|e| memory_database_error(operation, e))?;
-        let entity_count = entity_rows
-            .next()
-            .await
-            .map_err(row_err)?
-            .map_or(Ok(0_i64), |row| row.get(0).map_err(row_err))?;
-        let mut bank_rows = writer
-            .query("SELECT COUNT(*) FROM memory_banks", ())
-            .await
-            .map_err(|e| memory_database_error(operation, e))?;
-        let bank_count = bank_rows
-            .next()
-            .await
-            .map_err(row_err)?
-            .map_or(Ok(0_i64), |row| row.get(0).map_err(row_err))?;
-        let mut aggregate_rows = writer
-            .query(
-                "SELECT COALESCE(SUM(helpful_count), 0),
-                        COALESCE(SUM(unhelpful_count), 0),
-                        COALESCE(SUM(CASE
-                            WHEN hrr_vector IS NULL
-                              OR hrr_algebra != 'amari_fhrr'
-                              OR hrr_dim != ?1
-                            THEN 1 ELSE 0 END), 0),
-                        COALESCE(SUM(retrieval_count), 0),
-                        COALESCE(SUM(access_count), 0),
-                        COALESCE(SUM(retrieval_count > 0), 0),
-                        COALESCE(SUM(helpful_count + unhelpful_count > 0), 0)
-                 FROM memory_facts",
-                libsql::params![hrr_dim as i64],
-            )
-            .await
-            .map_err(|e| memory_database_error(operation, e))?;
-        let Some(aggregate_row) = aggregate_rows.next().await.map_err(row_err)? else {
-            return Err(memory_database_error(
-                operation,
-                "memory aggregate query returned no rows",
-            ));
-        };
-        let helpful_count = aggregate_row.get::<i64>(0).map_err(row_err)?;
-        let unhelpful_count = aggregate_row.get::<i64>(1).map_err(row_err)?;
-        let missing_vector_count = aggregate_row.get::<i64>(2).map_err(row_err)?;
-        let retrieval_count_total = aggregate_row.get::<i64>(3).map_err(row_err)?;
-        let access_count_total = aggregate_row.get::<i64>(4).map_err(row_err)?;
-        let retrieved_fact_count = aggregate_row.get::<i64>(5).map_err(row_err)?;
-        let rated_fact_count = aggregate_row.get::<i64>(6).map_err(row_err)?;
-        let feedback_total = (helpful_count + unhelpful_count).max(0) as usize;
-        let seen_total = retrieval_count_total + access_count_total;
-        let seen_to_feedback_ratio = if feedback_total > 0 {
-            Some(seen_total / feedback_total as i64)
-        } else {
-            None
-        };
-        let feedback_funnel = MemoryFeedbackFunnel {
-            retrieval_count_total,
-            access_count_total,
-            retrieved_fact_count: retrieved_fact_count.max(0) as usize,
-            rated_fact_count: rated_fact_count.max(0) as usize,
-            feedback_total,
-            seen_to_feedback_ratio,
-        };
-        let mut backfill_rows = writer
-            .query(
-                "SELECT COUNT(*) FROM memory_facts
-                 WHERE json_extract(metadata, '$.holographic_memory_backfill_v1') = 1",
-                (),
-            )
-            .await
-            .map_err(|e| memory_database_error(operation, e))?;
-        let backfilled_count = backfill_rows
-            .next()
-            .await
-            .map_err(row_err)?
-            .map_or(Ok(0_i64), |row| row.get(0).map_err(row_err))?;
-        let estimated_capacity = (hrr_dim as f64 / (hrr_dim as f64).ln()).round() as usize;
-        Ok(MemoryStatus {
-            fact_count,
-            entity_count: entity_count as usize,
-            bank_count: bank_count as usize,
-            algebra_name: "amari_fhrr".to_string(),
-            hrr_dim,
-            estimated_capacity,
-            trust_0_025_count,
-            trust_025_050_count,
-            trust_050_075_count,
-            trust_075_100_count,
-            below_default_recall_threshold_count,
-            helpful_count: helpful_count as usize,
-            unhelpful_count: unhelpful_count as usize,
-            missing_vector_count: missing_vector_count as usize,
-            legacy_backfill_complete: backfilled_count > 0,
-            repair,
-            feedback_funnel,
-        })
+            .map_err(memory_application_error)
     }
 
     pub async fn memory_status(&self) -> Result<MemoryStatus> {
-        Self::memory_status_for_db(&self.db).await
+        self.memory_application()?
+            .memory_status_v1()
+            .await
+            .map_err(memory_application_error)
     }
 
     pub async fn project_memory_status(&self) -> Result<MemoryStatus> {
+        let owner = self.project_memory_owner()?;
         let db = self.open_project_store_db().await?;
-        Self::memory_status_for_db(&db).await
+        memory_application_for_db(owner, &db)?
+            .memory_status_v1()
+            .await
+            .map_err(memory_application_error)
+    }
+
+    /// Runs one bounded, authoritative compatibility-memory repair batch for
+    /// the active project. Daemon maintenance owns scheduling and retries;
+    /// callers receive the exact batch progress and must not infer completion.
+    pub(crate) async fn repair_project_memory_once(
+        &self,
+    ) -> Result<tracedecay_store::CompatibilityMemoryRepairStatsV1> {
+        let context = self.generated_memory_operation("daemon memory repair")?;
+        self.memory_application()?
+            .dashboard_repair_v1(context)
+            .await
+            .map_err(memory_application_error)
+    }
+
+    /// Advances exactly one persisted V1 raw-memory cutover batch. The stable
+    /// receipt identity makes daemon restarts replay a completed cutover rather
+    /// than creating a second import job.
+    pub(crate) async fn advance_project_memory_cutover_once(
+        &self,
+    ) -> Result<tracedecay_store::CompatibilityLegacyMemoryCutoverProgressV1> {
+        let context = self.daemon_memory_cutover_operation()?;
+        self.memory_application()?
+            .daemon_legacy_memory_cutover_v1(context)
+            .await
+            .map_err(memory_application_error)
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
-    use crate::db::DatabaseAuthority;
 
     #[test]
     fn project_memory_owner_requires_a_valid_authoritative_layout_id() {
         assert!(project_memory_owner_from_layout_id(None).is_err());
         assert!(project_memory_owner_from_layout_id(Some("")).is_err());
-    }
-
-    #[tokio::test]
-    async fn separate_memory_handles_serialize_mutations() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("memory.db");
-        let authority = DatabaseAuthority::acquire_test(&path, "memory writer lane").unwrap();
-        let (first, _) = crate::db::Database::initialize(&path, &authority)
-            .await
-            .unwrap();
-        let (second, _) = crate::db::Database::open(&path, &authority).await.unwrap();
-        let first_writer = first
-            .writer_connection("hold first memory writer")
-            .await
-            .unwrap();
-        let mut second_write = Box::pin(async {
-            let writer = second.writer_connection("second memory mutation").await?;
-            writer
-                .memory_store()
-                .add_fact(
-                    AddFactRequest {
-                        content: "serialized memory mutation".to_string(),
-                        category: MemoryCategory::Project,
-                        source: None,
-                        tags: Vec::new(),
-                        entities: Vec::new(),
-                        trust: None,
-                        metadata: serde_json::Value::Null,
-                    },
-                    DEFAULT_TRUST,
-                )
-                .await
-        });
-
-        assert!(
-            tokio::time::timeout(Duration::from_millis(25), &mut second_write)
-                .await
-                .is_err()
-        );
-        drop(first_writer);
-        let outcome = tokio::time::timeout(Duration::from_secs(10), second_write)
-            .await
-            .expect("second writer remained blocked")
-            .unwrap();
-        assert!(outcome.fact.is_some());
     }
 }

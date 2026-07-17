@@ -451,14 +451,9 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
     let server = tokio::spawn(async move {
-        let _ = dashboard::run_until_shutdown_for_tests(
-            &cg,
-            "127.0.0.1",
-            port,
-            false,
-            std::future::pending(),
-        )
-        .await;
+        let _ =
+            dashboard::run_until_shutdown_for_tests(&cg, "127.0.0.1", port, std::future::pending())
+                .await;
     });
 
     wait_for_dashboard(&http_agent(), &base_url).await;

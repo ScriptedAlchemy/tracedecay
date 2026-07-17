@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value, json};
@@ -9,9 +10,17 @@ use super::memory_analysis::{
     SIMILARITY_SCORE_MIN, SimilarityComputation, build_similarity_computation, pca_scores,
     propose_dedup_actions, propose_hygiene_candidates, score_distribution, score_similar_pairs,
 };
-use super::memory_queries::{self, VectorStateFingerprint};
+use crate::tracedecay::facts::memory_application_for_db;
+use tracedecay_domain::FactCategoryV1;
+use tracedecay_store::{
+    CompatibilityDashboardEntityV1, CompatibilityDashboardFactSummaryV1,
+    CompatibilityDashboardHrrStateV1, CompatibilityDashboardMemoryOverviewV1,
+    CompatibilityDashboardOplogDetailsV1, CompatibilityDashboardVectorPointV1,
+    CompatibilityFactProjectionV1, CompatibilityFactTargetV1,
+};
 
 const PROJECTION_POINT_CAP: i64 = 2000;
+type VectorStateFingerprint = (i64, i64, i64, u64);
 
 pub(crate) fn projection_point_cap() -> i64 {
     PROJECTION_POINT_CAP
@@ -40,29 +49,184 @@ pub(crate) fn coerce_similarity_score(value: Option<f64>, default: f64) -> f64 {
         .clamp(SIMILARITY_SCORE_MIN, SIMILARITY_SCORE_MAX)
 }
 
+const fn fact_category_label(category: FactCategoryV1) -> &'static str {
+    match category {
+        FactCategoryV1::General => "general",
+        FactCategoryV1::UserPref => "user_pref",
+        FactCategoryV1::Project => "project",
+        FactCategoryV1::Tool => "tool",
+        FactCategoryV1::Decision => "decision",
+        FactCategoryV1::CodeArea => "code_area",
+    }
+}
+
+fn legacy_fact_id(projection: &CompatibilityFactProjectionV1) -> Option<i64> {
+    match projection {
+        CompatibilityFactProjectionV1::Available(fact) => fact.legacy_fact_id(),
+        CompatibilityFactProjectionV1::Unavailable(_) => None,
+    }
+}
+
+fn target_legacy_fact_id(target: &CompatibilityFactTargetV1) -> Option<i64> {
+    target
+        .legacy_query()
+        .map(tracedecay_store::LegacyFactQuery::legacy_fact_id)
+}
+
+/// Converts only an available, mapped compatibility fact. Unavailable or
+/// redacted payload fields stay omitted; dashboard handlers never invent them.
+fn fact_summary_json(summary: &CompatibilityDashboardFactSummaryV1) -> Option<Value> {
+    let CompatibilityFactProjectionV1::Available(fact) = &summary.fact else {
+        return None;
+    };
+    let fact_id = fact.legacy_fact_id()?;
+    let telemetry = fact.telemetry();
+    let mut row = Map::new();
+    row.insert("fact_id".into(), json!(fact_id));
+    row.insert("trust_score".into(), json!(fact.fact().trust().as_f64()));
+    row.insert("retrieval_count".into(), json!(telemetry.retrieval_count()));
+    row.insert("access_count".into(), json!(telemetry.access_count()));
+    row.insert("helpful_count".into(), json!(telemetry.helpful_count()));
+    row.insert("unhelpful_count".into(), json!(telemetry.unhelpful_count()));
+    row.insert("created_at".into(), json!(telemetry.created_at().0));
+    row.insert("updated_at".into(), json!(telemetry.updated_at().0));
+    row.insert(
+        "last_recalled_at".into(),
+        json!(telemetry.last_recalled_at().map(|value| value.0)),
+    );
+    row.insert(
+        "has_hrr".into(),
+        json!(if summary.has_hrr_vector { 1_i64 } else { 0_i64 }),
+    );
+    if let Some(content) = fact.content() {
+        row.insert("content".into(), json!(content));
+    }
+    if let Some(category) = fact.category() {
+        row.insert("category".into(), json!(fact_category_label(category)));
+    }
+    if let Some(tags) = fact.tags() {
+        row.insert("tags".into(), json!(tags));
+    }
+    if let Some(metadata) = fact.metadata() {
+        row.insert("metadata".into(), metadata.clone());
+    }
+    Some(Value::Object(row))
+}
+
+fn entity_json(entity: &CompatibilityDashboardEntityV1) -> Value {
+    json!({
+        "entity_id": entity.target.legacy_entity_id(),
+        "name": entity.name,
+        "entity_type": entity.entity_type,
+        "aliases": entity.aliases,
+        "created_at": entity.created_at.0,
+        "fact_count": entity.fact_count,
+    })
+}
+
+fn fact_matches_query(fact: &Value, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    let query = query.to_ascii_lowercase();
+    fact.get("content")
+        .and_then(Value::as_str)
+        .is_some_and(|content| content.to_ascii_lowercase().contains(&query))
+        || fact
+            .get("tags")
+            .and_then(Value::as_array)
+            .is_some_and(|tags| {
+                tags.iter()
+                    .filter_map(Value::as_str)
+                    .any(|tag| tag.to_ascii_lowercase().contains(&query))
+            })
+}
+
+async fn dashboard_overview(
+    state: &DashboardState,
+    fact_limit: usize,
+    graph_limit: usize,
+) -> Result<CompatibilityDashboardMemoryOverviewV1, String> {
+    memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
+        .map_err(|error| error.to_string())?
+        .dashboard_overview_v1(fact_limit, graph_limit)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn vector_rows(points: Vec<CompatibilityDashboardVectorPointV1>) -> Vec<(Value, Vec<f64>)> {
+    points
+        .into_iter()
+        .filter_map(|point| {
+            let vector = point.vector?;
+            let mut fact = fact_summary_json(&point.fact)?;
+            let object = fact.as_object_mut()?;
+            object.insert("bank_id".into(), Value::Null);
+            object.insert("bank_name".into(), json!(point.bank_name));
+            object.insert("entity_count".into(), json!(point.entity_count));
+            object.insert("connection_count".into(), json!(point.connection_count));
+            Some((fact, vector))
+        })
+        .collect()
+}
+
+fn vector_fingerprint(rows: &[(Value, Vec<f64>)]) -> VectorStateFingerprint {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut updated_at = 0_i64;
+    let mut max_fact_id = 0_i64;
+    for (fact, vector) in rows {
+        let fact_id = fact
+            .get("fact_id")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let updated = fact
+            .get("updated_at")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        updated_at = updated_at.max(updated);
+        max_fact_id = max_fact_id.max(fact_id);
+        fact_id.hash(&mut hasher);
+        updated.hash(&mut hasher);
+        vector.len().hash(&mut hasher);
+        for component in vector {
+            component.to_bits().hash(&mut hasher);
+        }
+    }
+    (rows.len() as i64, updated_at, max_fact_id, hasher.finish())
+}
+
 pub(crate) async fn fetch_facts(
     state: &DashboardState,
     query: &str,
     limit: i64,
 ) -> Result<Vec<Value>, String> {
-    memory_queries::fact_rows(state, query, limit).await
+    let limit = usize::try_from(limit.max(1)).map_err(|error| error.to_string())?;
+    let overview = dashboard_overview(state, limit.min(100), 1).await?;
+    Ok(overview
+        .facts
+        .iter()
+        .filter_map(fact_summary_json)
+        .filter(|fact| fact_matches_query(fact, query))
+        .take(limit)
+        .collect())
 }
 
 pub(crate) async fn fetch_entities(
     state: &DashboardState,
     limit: i64,
 ) -> Result<Vec<Value>, String> {
-    memory_queries::entity_rows(state, limit).await
+    let limit = usize::try_from(limit.max(1)).map_err(|error| error.to_string())?;
+    let overview = dashboard_overview(state, 1, limit.min(1000)).await?;
+    Ok(overview
+        .entities
+        .iter()
+        .map(entity_json)
+        .take(limit)
+        .collect())
 }
 
-async fn trust_histogram(state: &DashboardState) -> Vec<Value> {
-    let Ok(rows) = memory_queries::trust_histogram_rows(state).await else {
-        return Vec::new();
-    };
-    if rows.is_empty() {
-        return Vec::new();
-    }
-
+fn trust_histogram(overview: &CompatibilityDashboardMemoryOverviewV1) -> Vec<Value> {
     let mut buckets: Vec<Value> = (0..10)
         .map(|i| {
             json!({
@@ -72,99 +236,89 @@ async fn trust_histogram(state: &DashboardState) -> Vec<Value> {
             })
         })
         .collect();
-    for row in rows {
-        let idx = row
-            .get("bucket")
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-            .clamp(0, 9) as usize;
-        let added = row.get("count").and_then(Value::as_i64).unwrap_or(0);
-        if let Some(count) = buckets[idx].get_mut("count") {
-            *count = json!(count.as_i64().unwrap_or(0) + added);
+    for row in &overview.trust_histogram {
+        let Ok(idx) = row.name.parse::<usize>() else {
+            continue;
+        };
+        let Some(bucket) = buckets.get_mut(idx.min(9)) else {
+            continue;
+        };
+        if let Some(count) = bucket.get_mut("count") {
+            *count = json!(count.as_u64().unwrap_or(0).saturating_add(row.count));
         }
     }
     buckets
 }
 
 pub(crate) async fn overview_payload(state: &DashboardState) -> Result<Value, String> {
-    let facts_count =
-        super::util::query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_facts", ()).await;
-    let banks_count =
-        super::util::query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_banks", ()).await;
-
-    let categories = memory_queries::overview_categories(state).await?;
-    let category_rows = memory_queries::overview_category_rows(state).await?;
-
-    let bank_rows = memory_queries::overview_bank_rows(state)
-        .await
-        .unwrap_or_default();
-    let banks_by_name: Map<String, Value> = bank_rows
+    let overview = dashboard_overview(state, 100, 1000).await?;
+    let hrr_coverage: Vec<Value> = overview
+        .hrr_coverage
         .iter()
-        .filter_map(|row| {
-            let name = row.get("bank_name")?.as_str()?.to_string();
-            Some((name, row.clone()))
+        .map(|coverage| {
+            let state = match &coverage.state {
+                CompatibilityDashboardHrrStateV1::Ready => "ready",
+                CompatibilityDashboardHrrStateV1::MissingVectors => "missing_vectors",
+                CompatibilityDashboardHrrStateV1::MissingBank => "missing_bank",
+                CompatibilityDashboardHrrStateV1::StaleBank => "stale_bank",
+            };
+            json!({
+                "category": coverage.category,
+                "facts": coverage.fact_count,
+                "hrr_vectors": coverage.hrr_vector_count,
+                "coverage": f64::from(coverage.coverage_basis_points) / 10_000.0,
+                "bank_name": coverage.bank_name,
+                "bank_fact_count": coverage.bank_fact_count,
+                "dim": coverage.dimension,
+                "updated_at": coverage.updated_at.map(|value| value.0),
+                "status": state,
+            })
+        })
+        .collect();
+    let categories: Vec<Value> = overview
+        .categories
+        .iter()
+        .map(|row| json!({ "category": row.name, "count": row.count }))
+        .collect();
+    let entity_types: Vec<Value> = overview
+        .entity_types
+        .iter()
+        .map(|row| json!({ "entity_type": row.name, "count": row.count }))
+        .collect();
+    let memory_banks: Vec<Value> = overview
+        .memory_banks
+        .iter()
+        .map(|bank| {
+            json!({
+                "bank_name": bank.name,
+                "dim": bank.dimension,
+                "fact_count": bank.fact_count,
+                "bundled_fact_count": bank.bundled_fact_count,
+                "updated_at": bank.updated_at.map(|value| value.0),
+            })
+        })
+        .collect();
+    let growth: Vec<Value> = overview
+        .growth
+        .iter()
+        .map(|point| {
+            json!({
+                "date": point.period,
+                "facts": point.fact_count,
+                "cumulative_facts": point.cumulative_fact_count,
+            })
         })
         .collect();
 
-    let mut hrr_coverage = Vec::new();
-    for row in &category_rows {
-        let category = row
-            .get("category")
-            .and_then(Value::as_str)
-            .unwrap_or("general")
-            .to_string();
-        let facts = row.get("facts").and_then(Value::as_i64).unwrap_or(0);
-        let hrr_vectors = row.get("hrr_vectors").and_then(Value::as_i64).unwrap_or(0);
-        let bank = banks_by_name.get(&category);
-        let bank_fact_count = bank
-            .and_then(|b| b.get("fact_count"))
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        let status = if hrr_vectors == 0 {
-            "missing_vectors"
-        } else if bank.is_none() {
-            "missing_bank"
-        } else if bank_fact_count != hrr_vectors {
-            "stale_bank"
-        } else {
-            "ready"
-        };
-        let coverage = if facts > 0 {
-            (hrr_vectors as f64 / facts as f64 * 10_000.0).round() / 10_000.0
-        } else {
-            0.0
-        };
-        hrr_coverage.push(json!({
-            "category": category,
-            "facts": facts,
-            "hrr_vectors": hrr_vectors,
-            "coverage": coverage,
-            "bank_name": category,
-            "bank_fact_count": bank_fact_count,
-            "dim": bank.and_then(|b| b.get("dim")).cloned().unwrap_or(Value::Null),
-            "updated_at": bank.and_then(|b| b.get("updated_at")).cloned().unwrap_or(Value::Null),
-            "status": status,
-        }));
-    }
-
-    let entity_types = memory_queries::overview_entity_types(state).await?;
-    let entities_count: i64 = entity_types
-        .iter()
-        .filter_map(|row| row.get("count").and_then(Value::as_i64))
-        .sum();
-
-    let memory_banks = memory_queries::live_memory_banks(state).await?;
-    let growth = memory_queries::growth_rows(state).await.unwrap_or_default();
-
     Ok(json!({
-        "facts": facts_count,
-        "entities": entities_count,
-        "banks": banks_count,
+        "facts": overview.fact_count,
+        "entities": overview.entity_count,
+        "banks": overview.bank_count,
         "categories": categories,
         "entity_types": entity_types,
         "hrr_coverage": hrr_coverage,
         "memory_banks": memory_banks,
-        "trust_histogram": trust_histogram(state).await,
+        "trust_histogram": trust_histogram(&overview),
         "growth": growth,
     }))
 }
@@ -174,7 +328,15 @@ pub(crate) async fn graph_payload(
     query: &str,
     limit: i64,
 ) -> Result<Value, String> {
-    let fact_rows = fetch_facts(state, query, limit).await?;
+    let limit = usize::try_from(limit.max(1)).map_err(|error| error.to_string())?;
+    let overview = dashboard_overview(state, 100, limit.min(1000)).await?;
+    let fact_rows: Vec<Value> = overview
+        .facts
+        .iter()
+        .filter_map(fact_summary_json)
+        .filter(|fact| fact_matches_query(fact, query))
+        .take(limit)
+        .collect();
 
     let mut nodes: Map<String, Value> = Map::new();
     let mut edges: Vec<Value> = Vec::new();
@@ -227,43 +389,49 @@ pub(crate) async fn graph_payload(
         category_counts.insert(category, json!(count + 1));
     }
 
-    for row in memory_queries::graph_entity_rows(state, &fact_ids).await? {
-        let entity_id = row.get("entity_id").and_then(Value::as_i64).unwrap_or(0);
-        let fact_id = row.get("fact_id").and_then(Value::as_i64).unwrap_or(0);
+    let entity_by_id: HashMap<i64, &CompatibilityDashboardEntityV1> = overview
+        .entities
+        .iter()
+        .map(|entity| (entity.target.legacy_entity_id(), entity))
+        .collect();
+    let fact_ids: HashSet<i64> = fact_ids.into_iter().collect();
+    for link in &overview.fact_entity_links {
+        let Some(fact_id) = target_legacy_fact_id(&link.fact) else {
+            continue;
+        };
+        if !fact_ids.contains(&fact_id) {
+            continue;
+        }
+        let entity_id = link.entity.legacy_entity_id();
+        let Some(entity) = entity_by_id.get(&entity_id) else {
+            continue;
+        };
         let entity_node = format!("entity:{entity_id}");
         let fact_node = format!("fact:{fact_id}");
         nodes.entry(entity_node.clone()).or_insert_with(|| {
             json!({
                 "id": entity_node,
                 "kind": "entity",
-                "label": row.get("name").cloned().unwrap_or(Value::Null),
+                "label": entity.name,
                 "entity_id": entity_id,
-                "entity_type": row.get("entity_type").cloned().unwrap_or(Value::Null),
+                "entity_type": entity.entity_type,
             })
         });
         edges.push(json!({ "source": fact_node, "target": entity_node, "kind": "mentions" }));
     }
 
-    for row in memory_queries::graph_bank_rows(state)
-        .await
-        .unwrap_or_default()
-    {
-        let Some(bank_name) = row.get("bank_name").and_then(Value::as_str) else {
-            continue;
-        };
-        let category = bank_name.to_string();
+    for bank in &overview.memory_banks {
+        let bank_name = bank.name.as_str();
+        let category = bank_name.to_owned();
         let bank_node_id = format!("bank:{bank_name}");
         let category_node_id = format!("category:{category}");
         if let Some(existing) = nodes.get_mut(&bank_node_id) {
             if let Some(obj) = existing.as_object_mut() {
-                obj.insert("dim".into(), row.get("dim").cloned().unwrap_or(Value::Null));
-                obj.insert(
-                    "fact_count".into(),
-                    row.get("fact_count").cloned().unwrap_or(Value::Null),
-                );
+                obj.insert("dim".into(), json!(bank.dimension));
+                obj.insert("fact_count".into(), json!(bank.fact_count));
                 obj.insert(
                     "updated_at".into(),
-                    row.get("updated_at").cloned().unwrap_or(Value::Null),
+                    json!(bank.updated_at.map(|value| value.0)),
                 );
             }
         } else if nodes.contains_key(&category_node_id) {
@@ -274,9 +442,9 @@ pub(crate) async fn graph_payload(
                     "kind": "bank",
                     "label": bank_name,
                     "category": category,
-                    "dim": row.get("dim").cloned().unwrap_or(Value::Null),
-                    "fact_count": row.get("fact_count").cloned().unwrap_or(Value::Null),
-                    "updated_at": row.get("updated_at").cloned().unwrap_or(Value::Null),
+                    "dim": bank.dimension,
+                    "fact_count": bank.fact_count,
+                    "updated_at": bank.updated_at.map(|value| value.0),
                 }),
             );
         }
@@ -305,16 +473,41 @@ pub(crate) async fn fact_detail_payload(
     state: &DashboardState,
     fact_id: i64,
 ) -> Result<Option<Value>, String> {
-    let Some(mut fact) = memory_queries::fact_detail_row(state, fact_id).await? else {
+    let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
+        .map_err(|error| error.to_string())?;
+    let Some(detail) = application
+        .dashboard_fact_detail_v1(fact_id)
+        .await
+        .map_err(|error| error.to_string())?
+    else {
         return Ok(None);
     };
-    let entities = memory_queries::fact_entities(state, fact_id)
+    let vector_state = application
+        .dashboard_vector_points_v1(None, PROJECTION_POINT_CAP as usize)
         .await
-        .unwrap_or_default();
-    if let Some(obj) = fact.as_object_mut() {
-        obj.insert("entities".into(), json!(entities));
+        .ok()
+        .map(|points| {
+            points.into_iter().find_map(|point| {
+                (legacy_fact_id(&point.fact.fact) == Some(fact_id))
+                    .then_some(point.vector.is_some())
+            })
+        });
+    let mut fact = fact_summary_json(&CompatibilityDashboardFactSummaryV1 {
+        fact: detail.fact,
+        has_hrr_vector: vector_state.flatten().unwrap_or(false),
+    });
+    if vector_state.is_none()
+        && let Some(fact) = fact.as_mut().and_then(Value::as_object_mut)
+    {
+        fact.remove("has_hrr");
     }
-    Ok(Some(json!({ "fact": fact, "error": "" })))
+    Ok(fact.map(|fact| {
+        json!({
+            "fact": fact,
+            "entities": detail.entities.iter().map(entity_json).collect::<Vec<_>>(),
+            "error": "",
+        })
+    }))
 }
 
 struct ProjectionComputation {
@@ -409,13 +602,29 @@ pub(crate) async fn projection_payload(state: &DashboardState, query: &str, limi
     obj.insert("points".into(), json!([]));
     obj.insert("error".into(), json!(""));
 
-    let fingerprint = match memory_queries::vector_state_fingerprint(state).await {
-        Ok(fingerprint) => fingerprint,
-        Err(e) => {
-            obj.insert("error".into(), json!(e));
+    let application = match memory_application_for_db(state.memory_owner.clone(), &state.mem_db) {
+        Ok(application) => application,
+        Err(error) => {
+            obj.insert("error".into(), json!(error.to_string()));
             return Value::Object(obj);
         }
     };
+    let points = match application
+        .dashboard_vector_points_v1(
+            (!query.trim().is_empty()).then(|| query.trim().to_owned()),
+            usize::try_from(limit.clamp(1, PROJECTION_POINT_CAP))
+                .unwrap_or(PROJECTION_POINT_CAP as usize),
+        )
+        .await
+    {
+        Ok(points) => points,
+        Err(error) => {
+            obj.insert("error".into(), json!(error.to_string()));
+            return Value::Object(obj);
+        }
+    };
+    let rows = vector_rows(points);
+    let fingerprint = vector_fingerprint(&rows);
     let key = (query.trim().to_string(), limit, fingerprint);
 
     let cache = PROJECTION_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
@@ -426,13 +635,6 @@ pub(crate) async fn projection_payload(state: &DashboardState, query: &str, limi
         return projection_response(existing, obj);
     }
 
-    let rows = match memory_queries::vector_facts(state, query, limit).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            obj.insert("error".into(), json!(e));
-            return Value::Object(obj);
-        }
-    };
     let computed = match tokio::task::spawn_blocking(move || compute_projection(key, rows)).await {
         Ok(computed) => Arc::new(computed),
         Err(e) => {
@@ -461,7 +663,16 @@ static SIMILARITY_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, Arc<Similar
 pub(crate) async fn similarity_computation(
     state: &DashboardState,
 ) -> Result<Arc<SimilarityComputation>, String> {
-    let key = memory_queries::vector_state_fingerprint(state).await?;
+    let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
+        .map_err(|error| error.to_string())?;
+    let vector_cap = usize::try_from(SIMILARITY_FACT_CAP).map_err(|error| error.to_string())?;
+    let rows = vector_rows(
+        application
+            .dashboard_vector_points_v1(None, vector_cap)
+            .await
+            .map_err(|error| error.to_string())?,
+    );
+    let key = vector_fingerprint(&rows);
     let cache = SIMILARITY_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
     let mut guard = cache.lock().await;
     if let Some(existing) = guard.get(&state.mem_db_path)
@@ -470,7 +681,6 @@ pub(crate) async fn similarity_computation(
         return Ok(existing.clone());
     }
 
-    let rows = memory_queries::vector_facts(state, "", SIMILARITY_FACT_CAP).await?;
     let computed = tokio::task::spawn_blocking(move || {
         let dim = rows.iter().map(|(_, v)| v.len()).next().unwrap_or(0);
         let decoded: Vec<_> = rows.into_iter().filter(|(_, v)| v.len() == dim).collect();
@@ -666,8 +876,8 @@ pub(crate) async fn curation_activity_payload(state: &DashboardState, limit: i64
 pub(crate) async fn build_delete_plan(
     state: &DashboardState,
 ) -> Result<(Vec<Value>, Value, Map<String, Value>, i64), String> {
-    let total =
-        super::util::query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_facts", ()).await;
+    let total = i64::try_from(dashboard_overview(state, 1, 1).await?.fact_count)
+        .map_err(|error| error.to_string())?;
     let computation = similarity_computation(state).await?;
 
     let actions = if computation.facts.len() < 2 || computation.dim == 0 {
@@ -701,13 +911,18 @@ pub(crate) async fn build_delete_plan(
 }
 
 pub(crate) async fn delete_fact(state: &DashboardState, fact_id: i64) -> Result<bool, String> {
-    let writer = state
-        .mem_db
-        .writer_connection("delete dashboard memory fact")
-        .await
+    let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
         .map_err(|error| error.to_string())?;
-    let store = writer.memory_store();
-    store.remove_fact(fact_id).await.map_err(|e| e.to_string())
+    let context = crate::application::memory::MemoryOperationContext::generated(
+        &state.memory_owner,
+        "dashboard-delete",
+        None,
+    )
+    .map_err(|error| error.to_string())?;
+    application
+        .remove_fact_v1(fact_id, context)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) async fn apply_delete_op(state: &DashboardState, op: &Value) -> (Value, bool) {
@@ -778,12 +993,14 @@ pub(crate) async fn apply_merge_op(state: &DashboardState, op: &Value) -> (Value
         parsed_loser_ids.push(loser_id);
     }
 
-    let writer = match state
-        .mem_db
-        .writer_connection("merge dashboard memory facts")
-        .await
-    {
-        Ok(writer) => writer,
+    let merged_content = op
+        .get("merged_content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let application = match memory_application_for_db(state.memory_owner.clone(), &state.mem_db) {
+        Ok(application) => application,
         Err(error) => {
             return (
                 json!({
@@ -796,23 +1013,34 @@ pub(crate) async fn apply_merge_op(state: &DashboardState, op: &Value) -> (Value
             );
         }
     };
-    let store = writer.memory_store();
-    let merged_content = op
-        .get("merged_content")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    match store
-        .merge_facts(winner_id, parsed_loser_ids, merged_content)
+    let context = match crate::application::memory::MemoryOperationContext::generated(
+        &state.memory_owner,
+        "dashboard-merge",
+        None,
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            return (
+                json!({
+                    "op": "merge",
+                    "winner_id": winner_id,
+                    "status": "error",
+                    "error": error.to_string(),
+                }),
+                false,
+            );
+        }
+    };
+    match application
+        .dashboard_merge_fact_ids_v1(winner_id, parsed_loser_ids, merged_content, context)
         .await
     {
-        Ok((content_updated, deleted)) => (
+        Ok(outcome) => (
             json!({
                 "op": "merge",
                 "winner_id": winner_id,
-                "content_updated": content_updated,
-                "deleted_loser_ids": deleted,
+                "content_updated": outcome.content_updated(),
+                "deleted_loser_ids": outcome.deleted_losers().iter().filter_map(|fact| fact.legacy_fact_id()).collect::<Vec<_>>(),
                 "failed_losers": [],
                 "status": "merged",
             }),
@@ -826,7 +1054,7 @@ pub(crate) async fn apply_merge_op(state: &DashboardState, op: &Value) -> (Value
                 "deleted_loser_ids": [],
                 "failed_losers": [],
                 "status": "error",
-                "error": e.to_string(),
+                "error": format!("{e:?}"),
             }),
             false,
         ),
@@ -898,21 +1126,6 @@ pub(crate) async fn curate_apply_payload(state: &DashboardState, ops: &[Value]) 
         )
         .await;
     }
-    if (deleted > 0 || merged > 0)
-        && let Ok(writer) = state
-            .mem_db
-            .writer_connection("record dashboard curation operation")
-            .await
-    {
-        let _ = writer
-            .memory_store()
-            .record_oplog(
-                "curate_apply",
-                None,
-                &json!({ "mode": "ops", "deleted": deleted, "merged": merged, "errors": errors }),
-            )
-            .await;
-    }
     push_curation_activity(
         state,
         "report",
@@ -949,21 +1162,35 @@ pub(crate) async fn curate_apply_payload(state: &DashboardState, ops: &[Value]) 
 }
 
 pub(crate) async fn oplog_payload(state: &DashboardState, limit: i64) -> Value {
-    match memory_queries::oplog_rows(state, limit).await {
-        Ok(rows) => {
-            let events: Vec<Value> = rows
-                .into_iter()
-                .map(|row| {
-                    let detail = row
-                        .get("detail_json")
-                        .and_then(Value::as_str)
-                        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-                        .unwrap_or_else(|| json!({}));
+    let bounded_limit = usize::try_from(limit.clamp(1, 300)).unwrap_or(300);
+    let result = match memory_application_for_db(state.memory_owner.clone(), &state.mem_db) {
+        Ok(application) => application
+            .dashboard_oplog_v1(bounded_limit)
+            .await
+            .map_err(|error| error.to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    match result {
+        Ok(entries) => {
+            let events: Vec<Value> = entries
+                .iter()
+                .map(|entry| {
+                    let detail = match &entry.details {
+                        CompatibilityDashboardOplogDetailsV1::Available { summary } => {
+                            json!({ "summary": summary })
+                        }
+                        CompatibilityDashboardOplogDetailsV1::Redacted => {
+                            json!({ "redacted": true })
+                        }
+                        CompatibilityDashboardOplogDetailsV1::Unknown => {
+                            json!({ "availability": "unknown" })
+                        }
+                    };
                     json!({
-                        "id": row.get("id").cloned().unwrap_or(Value::Null),
-                        "ts": row.get("ts").cloned().unwrap_or(Value::Null),
-                        "op": row.get("op").cloned().unwrap_or(Value::Null),
-                        "fact_id": row.get("fact_id").cloned().unwrap_or(Value::Null),
+                        "id": entry.id,
+                        "ts": entry.occurred_at.0,
+                        "op": entry.operation,
+                        "fact_id": entry.fact.as_ref().and_then(target_legacy_fact_id),
                         "detail": detail,
                     })
                 })
@@ -971,7 +1198,7 @@ pub(crate) async fn oplog_payload(state: &DashboardState, limit: i64) -> Value {
             let count = events.len();
             json!({ "events": events, "count": count, "limit": limit, "error": "" })
         }
-        Err(e) => json!({ "events": [], "count": 0, "limit": limit, "error": e }),
+        Err(error) => json!({ "events": [], "count": 0, "limit": limit, "error": error }),
     }
 }
 

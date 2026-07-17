@@ -37,7 +37,8 @@ pub(crate) use connection::{
 pub use fingerprints::StoredFingerprint;
 pub(crate) use memory_v2::{
     CapturedMemoryV2Frontiers, MemoryV2BackfillBatchOutcome, MemoryV2CutoverOutcome,
-    MemoryV2CutoverReceipt,
+    MemoryV2CutoverReceipt, MemoryV2FeedbackHistoryRepairBatchOutcome,
+    MemoryV2FeedbackHistoryRepairProgress,
 };
 pub use redundancy_pairs::{RedundancyPairRow, RedundancyPairWrite};
 pub use search::DependencyImportUse;

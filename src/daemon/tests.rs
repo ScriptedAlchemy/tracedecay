@@ -13,7 +13,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 
 #[cfg(unix)]
-use super::{AutomationSchedulerHandle, DaemonEngine, drain_client_tasks};
+use super::{
+    AutomationSchedulerHandle, DaemonEngine, MemoryRepairSchedulerHandle, drain_client_tasks,
+};
 use super::{
     DaemonClientIdentity, DaemonHandshake, DaemonLifecycle, DatabaseOwnerRegistry, ProjectRouteKey,
     ProjectServerKey, StoreAdministration, StoreOwnerKey,
@@ -633,6 +635,52 @@ async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
         engine
             .store_administration
             .automation_schedulers()
+            .lock()
+            .await
+            .is_empty()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_memory_repair_scheduler_shutdown_aborts_and_joins_every_loop() {
+    let engine = DaemonEngine::default();
+    let key = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profiles/memory-repair-shutdown-test"),
+            global_db_path: PathBuf::from("/profiles/memory-repair-shutdown-test/global.db"),
+            project_id: Some("memory-repair-shutdown-test".to_string()),
+            store_root: PathBuf::from("/stores/memory-repair-shutdown-test"),
+            graph_db_path: PathBuf::from("/stores/memory-repair-shutdown-test/graph.db"),
+        },
+        scope_prefix: None,
+    };
+    let task = tokio::spawn(std::future::pending::<()>());
+    engine
+        .store_administration
+        .memory_repair_schedulers()
+        .lock()
+        .await
+        .insert(
+            key,
+            MemoryRepairSchedulerHandle {
+                task,
+                completion: Arc::new(()),
+            },
+        );
+
+    engine.lifecycle.begin_draining();
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        engine.shutdown_memory_repair_schedulers(),
+    )
+    .await
+    .expect("memory-repair shutdown should not wait for its retry delay");
+
+    assert!(
+        engine
+            .store_administration
+            .memory_repair_schedulers()
             .lock()
             .await
             .is_empty()
@@ -2405,6 +2453,106 @@ async fn daemon_ensure_scheduler_skips_before_project_has_configured_work() {
         .lock()
         .await;
     assert!(!schedulers.contains_key(&key));
+}
+
+#[cfg(unix)]
+#[test]
+fn memory_repair_retries_only_incomplete_progress() {
+    use tracedecay_store::{
+        CompatibilityFeedbackRepairProgressV1, CompatibilityLegacyMemoryCutoverProgressV1,
+    };
+
+    assert_eq!(
+        super::memory_repair_tick_outcome(CompatibilityFeedbackRepairProgressV1::Incomplete {
+            processed: 1,
+            remaining: Some(1),
+        })
+        .expect("incomplete repair must retry"),
+        super::MemoryRepairTickOutcome::Incomplete,
+    );
+    assert_eq!(
+        super::memory_repair_tick_outcome(CompatibilityFeedbackRepairProgressV1::Complete {
+            processed: 1
+        })
+        .expect("complete repair must stop"),
+        super::MemoryRepairTickOutcome::Complete,
+    );
+    assert_eq!(
+        super::memory_repair_tick_outcome(CompatibilityFeedbackRepairProgressV1::NotRequired)
+            .expect("unneeded repair must stop"),
+        super::MemoryRepairTickOutcome::NotRequired,
+    );
+    assert!(
+        super::memory_repair_tick_outcome(CompatibilityFeedbackRepairProgressV1::Unknown).is_err()
+    );
+    assert!(super::legacy_memory_cutover_should_retry(
+        CompatibilityLegacyMemoryCutoverProgressV1::Incomplete { processed: 1 },
+    ));
+    assert!(!super::legacy_memory_cutover_should_retry(
+        CompatibilityLegacyMemoryCutoverProgressV1::Complete,
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn daemon_memory_repair_scheduler_starts_without_automation_configuration() {
+    let dir = TempDir::new().expect("temp dir");
+    let project = dir.path().canonicalize().expect("canonical temp dir");
+    let client_identity = test_client_identity_for(project.join("profile"));
+    std::fs::create_dir_all(project.join("src")).expect("src dir");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let cg = crate::tracedecay::TraceDecay::init_with_options(&project, handshake.open_options())
+        .await
+        .expect("project init");
+    let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
+    let engine = DaemonEngine::default();
+
+    engine
+        .ensure_memory_repair_scheduler(key.clone(), project.clone(), handshake.clone())
+        .await;
+    engine
+        .ensure_memory_repair_scheduler(key.clone(), project, handshake)
+        .await;
+
+    let schedulers = engine
+        .store_administration
+        .memory_repair_schedulers()
+        .lock()
+        .await;
+    assert!(schedulers.contains_key(&key));
+    assert_eq!(schedulers.len(), 1);
+    drop(schedulers);
+    engine.shutdown_all().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_memory_repair_tick_runs_without_automation_configuration() {
+    let dir = TempDir::new().expect("temp dir");
+    let project = dir.path().canonicalize().expect("canonical temp dir");
+    let client_identity = test_client_identity_for(project.join("profile"));
+    std::fs::create_dir_all(project.join("src")).expect("src dir");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let cg = crate::tracedecay::TraceDecay::init_with_options(&project, handshake.open_options())
+        .await
+        .expect("project init");
+    drop(cg);
+
+    let retry = super::run_memory_repair_scheduler_tick(&project, &handshake)
+        .await
+        .expect("memory repair tick must not depend on automation configuration");
+
+    assert!(!retry, "a fresh project has no repair backlog");
 }
 
 #[cfg(unix)]

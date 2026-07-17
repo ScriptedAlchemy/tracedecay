@@ -7,9 +7,10 @@ use serde_json::{Value, json};
 use super::DashboardState;
 use super::util::{JsonQuery, coerce_limit, http_detail};
 use crate::automation::fact_proposals::{
-    FactProposalRecord, FactProposalState, apply_fact_proposal, list_fact_proposals,
+    FactProposalRecord, FactProposalState, apply_fact_proposal_with_result, list_fact_proposals,
     load_fact_proposal, reject_fact_proposal,
 };
+use crate::tracedecay::facts::memory_application_for_db;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ListParams {
@@ -34,7 +35,19 @@ pub(crate) async fn list(
         None => None,
     };
     let limit = coerce_limit(params.limit, 50, 200) as usize;
-    match list_fact_proposals(&state.dashboard_root, proposal_state, limit).await {
+    let memory = match memory_application_for_db(state.memory_owner.clone(), state.mem_db.as_ref())
+    {
+        Ok(memory) => memory,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(http_detail(&format!(
+                    "Failed to initialize fact proposal authority: {err}"
+                ))),
+            );
+        }
+    };
+    match list_fact_proposals(&memory, &state.dashboard_root, proposal_state, limit).await {
         Ok(proposals) => {
             let count = proposals.len();
             (
@@ -60,7 +73,19 @@ pub(crate) async fn view(
     State(state): State<DashboardState>,
     AxumPath(id): AxumPath<String>,
 ) -> (StatusCode, Json<Value>) {
-    match load_fact_proposal(&state.dashboard_root, &id).await {
+    let memory = match memory_application_for_db(state.memory_owner.clone(), state.mem_db.as_ref())
+    {
+        Ok(memory) => memory,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(http_detail(&format!(
+                    "Failed to initialize fact proposal authority: {err}"
+                ))),
+            );
+        }
+    };
+    match load_fact_proposal(&memory, &state.dashboard_root, &id).await {
         Ok(Some(proposal)) => (StatusCode::OK, Json(proposal_payload(&proposal))),
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -77,21 +102,35 @@ pub(crate) async fn apply(
     State(state): State<DashboardState>,
     AxumPath(id): AxumPath<String>,
 ) -> (StatusCode, Json<Value>) {
-    match apply_fact_proposal(
+    let memory = match memory_application_for_db(state.memory_owner.clone(), state.mem_db.as_ref())
+    {
+        Ok(memory) => memory,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(http_detail(&format!(
+                    "Failed to initialize fact proposal authority: {err}"
+                ))),
+            );
+        }
+    };
+    match apply_fact_proposal_with_result(
+        &memory,
         &state.dashboard_root,
-        &state.mem_db,
         &id,
         Some("dashboard".to_string()),
     )
     .await
     {
-        Ok(proposal) => {
-            crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-                &state.mem_conn,
-                &state.project_root,
-            )
-            .await;
-            (StatusCode::OK, Json(proposal_payload(&proposal)))
+        Ok(result) => {
+            if result.newly_promoted {
+                crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+                    &memory,
+                    &state.project_root,
+                )
+                .await;
+            }
+            (StatusCode::OK, Json(proposal_payload(&result.record)))
         }
         Err(err) => (
             StatusCode::BAD_REQUEST,
@@ -108,7 +147,20 @@ pub(crate) async fn reject(
     body: Option<axum::extract::Json<RejectBody>>,
 ) -> (StatusCode, Json<Value>) {
     let reason = body.and_then(|body| body.0.reason);
+    let memory = match memory_application_for_db(state.memory_owner.clone(), state.mem_db.as_ref())
+    {
+        Ok(memory) => memory,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(http_detail(&format!(
+                    "Failed to initialize fact proposal authority: {err}"
+                ))),
+            );
+        }
+    };
     match reject_fact_proposal(
+        &memory,
         &state.dashboard_root,
         &id,
         Some("dashboard".to_string()),

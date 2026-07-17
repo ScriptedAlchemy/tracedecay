@@ -21,3 +21,39 @@ pub async fn open_user_memory_db(profile_root: &Path) -> Result<Database> {
         .await
         .map(|(db, _)| db)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn fresh_profile_memory_database_installs_latest_schema() {
+        let profile_root = tempfile::tempdir().expect("create profile root");
+        let database = open_user_memory_db(profile_root.path())
+            .await
+            .expect("open fresh profile memory database");
+        assert!(user_memory_db_path(profile_root.path()).is_file());
+
+        let mut rows = database
+            .conn()
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name IN (
+                       'memory_v2_fact_relations',
+                       'memory_v2_compatibility_banks',
+                       'memory_v2_compatibility_bank_dirty'
+                   )",
+                (),
+            )
+            .await
+            .expect("query fresh profile V23 tables");
+        let row = rows
+            .next()
+            .await
+            .expect("read fresh profile V23 table count")
+            .expect("fresh profile V23 table count row");
+        let count: i64 = row.get(0).expect("decode fresh profile V23 table count");
+        assert_eq!(count, 3);
+    }
+}

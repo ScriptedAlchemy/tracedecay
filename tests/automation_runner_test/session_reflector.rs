@@ -230,7 +230,13 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
         run.report["accepted_facts"][2]["add_fact_request"]["trust"],
         json!(0.85)
     );
+    let memory = tracedecay::application::memory::MemoryApplication::new(
+        project_memory_owner(&cg),
+        tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
+    )
+    .unwrap();
     let pending = list_fact_proposals(
+        &memory,
         &cg.store_layout().dashboard_root,
         Some(FactProposalState::PendingApproval),
         10,
@@ -239,6 +245,7 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
     .unwrap();
     assert!(pending.is_empty());
     let proposals = list_fact_proposals(
+        &memory,
         &cg.store_layout().dashboard_root,
         Some(FactProposalState::Applied),
         10,
@@ -360,6 +367,9 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
 
 #[tokio::test]
 async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
+    const HIGH_ENTROPY_RUN_ID: &str =
+        "Qm9vZ2llV29vZ2llMTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A4OTc2NTQzMjE";
+
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
@@ -401,7 +411,7 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
             provider: "cursor".to_string(),
             query: "durable session reflection".to_string(),
             evidence_limit: 5,
-            run_id: None,
+            run_id: Some(HIGH_ENTROPY_RUN_ID.to_string()),
             ..SessionReflectorAutomationOptions::default()
         },
     )
@@ -437,7 +447,14 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
         json!("auto_applied")
     );
 
+    let owner = project_memory_owner(&cg);
+    let memory = tracedecay::application::memory::MemoryApplication::new(
+        owner.clone(),
+        tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
+    )
+    .unwrap();
     let pending = list_fact_proposals(
+        &memory,
         &cg.store_layout().dashboard_root,
         Some(FactProposalState::PendingApproval),
         10,
@@ -446,6 +463,7 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
     .unwrap();
     assert!(pending.is_empty());
     let applied = list_fact_proposals(
+        &memory,
         &cg.store_layout().dashboard_root,
         Some(FactProposalState::Applied),
         10,
@@ -453,6 +471,47 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
     .await
     .unwrap();
     assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].run_id, HIGH_ENTROPY_RUN_ID);
+
+    let typed_proposal = memory
+        .get_compatibility_fact_proposal(
+            tracedecay_domain::ProvenanceId::new(applied[0].proposal_id.clone()).unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("auto-applied proposal remains in the canonical authority");
+    assert_eq!(
+        typed_proposal.automation_run_id(),
+        Some(HIGH_ENTROPY_RUN_ID)
+    );
+    let canonical_fact_id = typed_proposal
+        .applied_fact_id()
+        .expect("auto-applied proposal has a canonical fact id")
+        .clone();
+    let projection = memory
+        .get_compatibility_fact(tracedecay_store::CompatibilityFactTargetV1::Canonical(
+            tracedecay_store::CompatibilityFactIdV1::new(owner, canonical_fact_id).unwrap(),
+        ))
+        .await
+        .unwrap()
+        .expect("auto-applied canonical fact is readable");
+    let tracedecay_store::CompatibilityFactProjectionV1::Available(fact) = projection else {
+        panic!("auto-applied fact must retain an available V1 projection");
+    };
+    assert_eq!(
+        fact.fact().payload_access(),
+        tracedecay_domain::PayloadAccessState::Eligible
+    );
+    assert!(
+        fact.payload().is_some(),
+        "canonical active payload is retained"
+    );
+    assert!(!fact.fact().active_assertion_id().as_str().is_empty());
+    assert_eq!(fact.legacy_fact_id(), typed_proposal.legacy_fact_id());
+    assert!(
+        fact.legacy_fact_id().is_some(),
+        "legacy mirror mapping is retained"
+    );
 
     let facts = cg
         .search_facts(tracedecay::memory::types::SearchFactsRequest {
@@ -563,9 +622,16 @@ async fn session_reflector_runner_self_manages_partial_noops_without_review_gate
 }
 
 #[tokio::test]
-async fn session_fact_proposals_dedupe_repeated_pending_facts_across_runs() {
+async fn session_fact_proposals_replay_same_run_idempotently() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let cg = init_project(temp.path()).await;
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let owner = project_memory_owner(&cg);
+    let memory = tracedecay::application::memory::MemoryApplication::new(
+        owner,
+        tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
+    )
+    .unwrap();
     let accepted = json!({
         "add_fact_request": {
             "content": "Repeated session evidence should produce one durable fact action",
@@ -593,6 +659,7 @@ async fn session_fact_proposals_dedupe_repeated_pending_facts_across_runs() {
     });
 
     let first = record_session_fact_proposals(
+        &memory,
         &dashboard_root,
         "run-a",
         Some("evidence-a"),
@@ -602,26 +669,28 @@ async fn session_fact_proposals_dedupe_repeated_pending_facts_across_runs() {
     .await
     .unwrap();
     let second = record_session_fact_proposals(
+        &memory,
         &dashboard_root,
-        "run-b",
-        Some("evidence-b"),
+        "run-a",
+        Some("evidence-a"),
         std::slice::from_ref(&accepted),
         &[],
     )
     .await
     .unwrap();
-    let proposals = list_fact_proposals(
-        &dashboard_root,
-        Some(FactProposalState::PendingApproval),
-        10,
-    )
-    .await
-    .unwrap();
+    let proposals = memory
+        .list_compatibility_fact_proposals(
+            Some(tracedecay_store::CompatibilityFactProposalStateV1::PendingApproval),
+            None,
+            10,
+        )
+        .await
+        .unwrap();
 
     assert_eq!(first.len(), 1);
-    assert_eq!(second.len(), 0);
-    assert_eq!(proposals.len(), 1);
-    assert_eq!(proposals[0].run_id, "run-a");
+    assert_eq!(second.len(), 1);
+    assert_eq!(proposals.proposals().len(), 1);
+    assert_eq!(proposals.proposals()[0].automation_run_id(), Some("run-a"));
 }
 
 #[tokio::test]
@@ -1190,9 +1259,16 @@ async fn session_reflector_runner_records_noop_fallback_when_backend_run_task_fa
 }
 
 #[tokio::test]
-async fn session_fact_proposals_fold_paraphrases_into_one_proposal() {
+async fn session_fact_proposals_keep_paraphrases_distinct() {
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
+    let cg = init_project(temp.path()).await;
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let owner = project_memory_owner(&cg);
+    let memory = tracedecay::application::memory::MemoryApplication::new(
+        owner,
+        tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
+    )
+    .unwrap();
     let fact = |content: &str| {
         json!({
             "add_fact_request": {
@@ -1229,137 +1305,144 @@ async fn session_fact_proposals_fold_paraphrases_into_one_proposal() {
         ),
     ];
 
-    let recorded =
-        record_session_fact_proposals(&dashboard_root, "run-a", Some("evidence-a"), &batch, &[])
-            .await
-            .unwrap();
+    let recorded = record_session_fact_proposals(
+        &memory,
+        &dashboard_root,
+        "run-a",
+        Some("evidence-a"),
+        &batch,
+        &[],
+    )
+    .await
+    .unwrap();
     assert_eq!(
         recorded.len(),
-        2,
-        "paraphrases must fold into the first proposal"
+        4,
+        "each canonical proposal keeps its original evidence and identity"
     );
 
     let restated = vec![fact(
         "Require stable aggregate verification and live PR-state rechecks; never \
          merge the batch off one flaky green pass",
     )];
-    let second =
-        record_session_fact_proposals(&dashboard_root, "run-b", Some("evidence-b"), &restated, &[])
-            .await
-            .unwrap();
-    assert_eq!(second.len(), 0);
-
-    let proposals = list_fact_proposals(
+    let second = record_session_fact_proposals(
+        &memory,
         &dashboard_root,
-        Some(FactProposalState::PendingApproval),
-        10,
+        "run-b",
+        Some("evidence-b"),
+        &restated,
+        &[],
     )
     .await
     .unwrap();
-    assert_eq!(proposals.len(), 2);
-    let folded = proposals
-        .iter()
-        .find(|p| {
-            p.add_fact_request
-                .as_ref()
-                .is_some_and(|r| r.content.contains("flaky green"))
-        })
-        .expect("merge-discipline proposal present");
+    assert_eq!(second.len(), 1);
+
+    let proposals = memory
+        .list_compatibility_fact_proposals(
+            Some(tracedecay_store::CompatibilityFactProposalStateV1::PendingApproval),
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(proposals.proposals().len(), 5);
     assert_eq!(
-        folded.duplicate_count, 3,
-        "two in-batch paraphrases plus one cross-run restatement"
+        proposals
+            .proposals()
+            .iter()
+            .filter(|proposal| proposal.request().content().contains("flaky green"))
+            .count(),
+        4,
+        "paraphrases remain independently reviewable"
     );
-    assert_eq!(folded.last_duplicate_run_id.as_deref(), Some("run-b"));
+    assert!(
+        proposals
+            .proposals()
+            .iter()
+            .any(|proposal| proposal.request().content().contains("cursorDiskKV")),
+        "distinct proposal preserved"
+    );
     assert_eq!(
-        folded.folded_contents.len(),
-        3,
-        "each folded paraphrase is captured for reviewer recovery"
-    );
-    assert!(
-        folded
-            .folded_contents
+        proposals
+            .proposals()
             .iter()
-            .any(|c| c.contains("Before merging a PR batch")),
-        "first in-batch paraphrase captured verbatim"
+            .filter(|proposal| proposal.automation_run_id() == Some("run-a"))
+            .count(),
+        4
     );
-    assert!(
-        folded
-            .folded_contents
+    assert_eq!(
+        proposals
+            .proposals()
             .iter()
-            .any(|c| c.contains("A single flaky green pass is not enough")),
-        "second in-batch paraphrase captured verbatim"
+            .filter(|proposal| proposal.automation_run_id() == Some("run-b"))
+            .count(),
+        1
     );
-    assert!(
-        folded
-            .folded_contents
-            .iter()
-            .any(|c| c.contains("Require stable aggregate verification and live PR-state rechecks")),
-        "cross-run restatement captured verbatim"
-    );
-    let distinct = proposals
-        .iter()
-        .find(|p| {
-            p.add_fact_request
-                .as_ref()
-                .is_some_and(|r| r.content.contains("cursorDiskKV"))
-        })
-        .expect("distinct proposal preserved");
-    assert_eq!(distinct.duplicate_count, 0);
-    assert!(distinct.folded_contents.is_empty());
 }
 
 #[tokio::test]
 async fn session_fact_proposals_never_mutate_applied_records() {
-    use tracedecay::automation::fact_proposals::{
-        FactProposalRecord, FactProposalStore, load_fact_proposal_store, save_fact_proposal_store,
-    };
-
     let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
-
-    let applied_request = serde_json::from_value(json!({
-        "content": "Never merge a PR batch after a single flaky green pass; require stable \
-                    aggregate verification and a live PR-state recheck before merging",
-        "category": "project",
-        "source": "session_reflector",
-        "tags": ["session-reflector"],
-        "entities": ["merge discipline"],
-        "trust": 0.9,
-        "metadata": {
-            "source_span": { "session_id": "s", "message_id": "m" },
-            "trust_reason": "repeated evidence"
-        }
-    }))
+    let cg = init_project(temp.path()).await;
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let owner = project_memory_owner(&cg);
+    let memory = tracedecay::application::memory::MemoryApplication::new(
+        owner.clone(),
+        tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
+    )
     .unwrap();
-    let applied = FactProposalRecord {
-        schema_version: 1,
-        proposal_id: "fact_applied".to_string(),
-        run_id: "run-old".to_string(),
-        evidence_hash: Some("evidence-old".to_string()),
-        state: FactProposalState::Applied,
-        add_fact_request: Some(applied_request),
-        proposal: None,
-        validation_reason: None,
-        validation: None,
-        reviewer: Some("dashboard".to_string()),
-        applied_canonical_fact_id: None,
-        applied_fact_id: Some(42),
-        apply_outcome: None,
-        created_at: 1_000,
-        updated_at: 1_000,
-        duplicate_count: 0,
-        last_duplicate_run_id: None,
-        folded_contents: Vec::new(),
-    };
-    save_fact_proposal_store(
+    let applied = record_session_fact_proposals(
+        &memory,
         &dashboard_root,
-        &FactProposalStore {
-            schema_version: 1,
-            proposals: vec![applied],
-        },
+        "run-old",
+        Some("evidence-old"),
+        &[json!({
+            "add_fact_request": {
+                "content": "Never merge a PR batch after a single flaky green pass; require stable \
+                            aggregate verification and a live PR-state recheck before merging",
+                "category": "project",
+                "source": "session_reflector",
+                "tags": ["session-reflector"],
+                "entities": ["merge discipline"],
+                "trust": 0.9,
+                "metadata": {
+                    "source_span": { "session_id": "s", "message_id": "m" },
+                    "trust_reason": "repeated evidence"
+                }
+            }
+        })],
+        &[],
     )
     .await
     .unwrap();
+    assert_eq!(applied.len(), 1);
+    let applied_id = tracedecay_domain::ProvenanceId::new(applied[0].proposal_id.clone()).unwrap();
+    let submitted = memory
+        .get_compatibility_fact_proposal(applied_id.clone())
+        .await
+        .unwrap()
+        .expect("submitted authority proposal");
+    memory
+        .promote_compatibility_fact_proposal(
+            tracedecay_store::CompatibilityFactProposalPromotionV1::new(
+                owner,
+                applied_id.clone(),
+                submitted.revision(),
+                None,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let applied_before = memory
+        .get_compatibility_fact_proposal(applied_id.clone())
+        .await
+        .unwrap()
+        .expect("applied authority proposal");
+    assert_eq!(
+        applied_before.state(),
+        tracedecay_store::CompatibilityFactProposalStateV1::Applied
+    );
 
     let paraphrase = json!({
         "add_fact_request": {
@@ -1378,6 +1461,7 @@ async fn session_fact_proposals_never_mutate_applied_records() {
         "proposal": { "content": "paraphrase" }
     });
     let recorded = record_session_fact_proposals(
+        &memory,
         &dashboard_root,
         "run-new",
         Some("evidence-new"),
@@ -1393,21 +1477,22 @@ async fn session_fact_proposals_never_mutate_applied_records() {
     );
     assert_eq!(recorded[0].state, FactProposalState::PendingApproval);
 
-    let store = load_fact_proposal_store(&dashboard_root).await.unwrap();
-    assert_eq!(store.proposals.len(), 2, "new pending proposal enqueued");
-    let applied = store
-        .proposals
+    let proposals = memory
+        .list_compatibility_fact_proposals(None, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        proposals.proposals().len(),
+        2,
+        "new pending proposal enqueued"
+    );
+    let applied_after = proposals
+        .proposals()
         .iter()
-        .find(|p| p.proposal_id == "fact_applied")
+        .find(|proposal| proposal.proposal_id() == &applied_id)
         .expect("applied record preserved");
-    assert_eq!(applied.state, FactProposalState::Applied);
     assert_eq!(
-        applied.updated_at, 1_000,
-        "applied record's updated_at must not be corrupted by the fold path"
+        applied_after, &applied_before,
+        "recording a paraphrase must not mutate the applied authority record"
     );
-    assert_eq!(
-        applied.duplicate_count, 0,
-        "applied record must not be folded into"
-    );
-    assert!(applied.folded_contents.is_empty());
 }

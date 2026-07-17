@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::util::{JsonError, http_detail};
+use crate::application::memory::MemoryApplication;
 use crate::automation::backend::{AgentTaskKind, task_key};
 use crate::automation::config::{AutomationConfig, effective_config, load_project_config};
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, load_run_records};
@@ -15,6 +16,7 @@ use crate::automation::scheduler::{
     save_scheduler_control, schedule_decision, scheduler_control_path,
 };
 use crate::automation::staged_notice::{AutomationPendingCounts, count_pending_automation_output};
+use crate::store::DatabaseFactStore;
 use crate::tracedecay::current_timestamp;
 use crate::user_config::UserConfig;
 
@@ -59,13 +61,18 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
     let records = load_run_records(&state.dashboard_root, 200)
         .await
         .map_err(|err| internal_error(&err))?;
-    // Additive pending-output counts. Fact proposals stay telemetry/backcompat;
-    // pending skills are the only human-review badge input.
-    let pending = match crate::storage::default_profile_root() {
-        Ok(profile_root) => {
-            count_pending_automation_output(&state.dashboard_root, &profile_root).await
+    // Pending fact proposals and skill drafts both require review.
+    let pending = match (
+        crate::storage::default_profile_root(),
+        MemoryApplication::new(
+            state.memory_owner.clone(),
+            DatabaseFactStore::new(state.mem_db.as_ref()),
+        ),
+    ) {
+        (Ok(profile_root), Ok(memory)) => {
+            count_pending_automation_output(&memory, &profile_root).await
         }
-        Err(_) => AutomationPendingCounts::default(),
+        _ => AutomationPendingCounts::default(),
     };
     let now = current_timestamp();
     let activity =
