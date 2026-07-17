@@ -57,21 +57,38 @@ pub enum TraceDecayError {
 /// Convenience alias for results using `TraceDecayError`.
 pub type Result<T> = std::result::Result<T, TraceDecayError>;
 
+/// Flatten an error and its [`std::error::Error::source`] chain into one
+/// message string.
+///
+/// Many error families embed their source's `Display` inside their own — e.g.
+/// `#[error("libsql error: {0}")]` paired with `#[from]` (the displayed field
+/// *is* the `#[source]`), or every `std::io::Error::other` wrapper (its
+/// `Display` delegates straight to the wrapped error). Naively appending each
+/// layer's `to_string()` would then double the tail into `"...: E: E"` or
+/// `"...: msg: msg"`. To avoid that, a layer is only appended when the
+/// accumulated message does not already end with that layer's text.
+fn flatten_error_chain(source: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = source.to_string();
+    let mut layer = source.source();
+    while let Some(current) = layer {
+        let text = current.to_string();
+        if !message.ends_with(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+        layer = current.source();
+    }
+    message
+}
+
 impl TraceDecayError {
     pub(crate) fn database_operation(
         operation: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        let mut message = source.to_string();
-        let mut layer: Option<&(dyn std::error::Error + 'static)> = source.source();
-        while let Some(current) = layer {
-            message.push_str(": ");
-            message.push_str(&current.to_string());
-            layer = current.source();
-        }
         Self::Database {
             operation: operation.into(),
-            message,
+            message: flatten_error_chain(&source),
         }
     }
 
@@ -165,6 +182,87 @@ mod tests {
         assert_eq!(message, "database unavailable");
         assert!(err.is_database_error());
         assert!(err.to_string().contains("SELECT observations"));
+    }
+
+    #[test]
+    fn database_operation_does_not_double_self_displaying_chain() {
+        use std::error::Error;
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct Inner;
+        impl fmt::Display for Inner {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "disk full")
+            }
+        }
+        impl Error for Inner {}
+
+        // Mimics the reachable self-displaying families (e.g.
+        // `#[error("libsql error: {0}")]` + `#[from]`, or `io::Error::other`):
+        // `Display` embeds the source's own `Display`, and `source()` returns
+        // that same error, so the outer text already ends with the inner text.
+        #[derive(Debug)]
+        struct Outer(Inner);
+        impl fmt::Display for Outer {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "libsql error: {}", self.0)
+            }
+        }
+        impl Error for Outer {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let err = TraceDecayError::database_operation("SELECT nodes", Outer(Inner));
+        let TraceDecayError::Database { operation, message } = &err else {
+            panic!("expected Database variant");
+        };
+        assert_eq!(operation, "SELECT nodes");
+        // Without the ends-with guard this would be "libsql error: disk full: disk full".
+        assert_eq!(message, "libsql error: disk full");
+        assert_eq!(
+            message.matches("disk full").count(),
+            1,
+            "source layer must not be doubled: {message}"
+        );
+    }
+
+    #[test]
+    fn database_operation_appends_distinct_chain_layers() {
+        use std::error::Error;
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct Root;
+        impl fmt::Display for Root {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "connection refused")
+            }
+        }
+        impl Error for Root {}
+
+        // A layer whose Display does NOT embed its source must still contribute
+        // the deeper cause, so genuinely distinct chains are preserved.
+        #[derive(Debug)]
+        struct Middle(Root);
+        impl fmt::Display for Middle {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "query failed")
+            }
+        }
+        impl Error for Middle {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let err = TraceDecayError::database_operation("UPDATE nodes", Middle(Root));
+        let TraceDecayError::Database { message, .. } = &err else {
+            panic!("expected Database variant");
+        };
+        assert_eq!(message, "query failed: connection refused");
     }
 
     #[test]
