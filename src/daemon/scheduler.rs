@@ -9,7 +9,7 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::{
     DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event,
-    open_existing_project_with_options,
+    open_existing_project_with_options, spawn_lifecycle_automation_scheduler_activation,
 };
 
 pub(super) fn scheduler_task_log_fields(
@@ -158,6 +158,7 @@ impl DaemonEngine {
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
+        cg: Arc<crate::tracedecay::TraceDecay>,
     ) {
         if !self.lifecycle.accepting() {
             return;
@@ -173,14 +174,15 @@ impl DaemonEngine {
             }
         }
 
-        // Configuration discovery is read-only but can open a large project
-        // store and run branch resolution. Keep that work outside the
-        // daemon-wide writer gate so an ancillary scheduler check cannot
-        // starve an unrelated worktree's first project-server open.
-        let configured = match Box::pin(automation_scheduler_has_work_for_project(
-            &project_path,
-            &handshake,
-        ))
+        // Discover configuration from the project server that is already
+        // registered for this owner. This keeps writable project opening and
+        // identity repair under the project-server coordination path while
+        // avoiding the daemon-wide writer gate for read-only discovery.
+        let configured = match async {
+            let config =
+                effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
+            automation_scheduler_has_work(&cg, &config).await
+        }
         .await
         {
             Ok(configured) => configured,
@@ -241,10 +243,24 @@ impl DaemonEngine {
             let current_key = Arc::clone(&current_key);
             let project_path = project_path.clone();
             let handshake = handshake.clone();
-            tokio::spawn(async move {
+            let lifecycle = engine.lifecycle.clone();
+            spawn_lifecycle_automation_scheduler_activation(lifecycle, async move {
                 let key = current_key.lock().await.clone();
+                let server = {
+                    engine
+                        .store_administration
+                        .project_servers()
+                        .lock()
+                        .await
+                        .get(&key)
+                        .cloned()
+                };
+                let Some(server) = server else {
+                    return;
+                };
+                let cg = server.cg().await;
                 engine
-                    .ensure_automation_scheduler(key.clone(), project_path, handshake)
+                    .ensure_automation_scheduler(key.clone(), project_path, handshake, cg)
                     .await;
                 if let Some(handle) = engine
                     .store_administration

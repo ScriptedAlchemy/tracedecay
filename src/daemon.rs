@@ -2427,14 +2427,17 @@ impl DaemonEngine {
         // A freshly-handshaken project should be watched even on a cache hit
         // (the watcher may have started after this server was cached).
         self.git_watcher.ensure_watching(&project_path).await;
-        // Scheduler discovery is ancillary and reacquires the daemon writer
-        // gate, so it must not make a cached MCP server wait behind unrelated
-        // store administration.
+        // Scheduler discovery is ancillary, so it must not make a cached MCP
+        // server wait. Reuse the already-open project instead of opening the
+        // same writable store again, and count the detached task as lifecycle
+        // activity so shutdown cancels it before taking server snapshots.
         let engine = self.clone();
         let handshake = handshake.clone();
-        let _scheduler_activation = tokio::spawn(async move {
+        let scheduler_server = Arc::clone(&server);
+        spawn_lifecycle_automation_scheduler_activation(self.lifecycle.clone(), async move {
+            let cg = scheduler_server.cg().await;
             engine
-                .ensure_automation_scheduler(key, project_path, handshake)
+                .ensure_automation_scheduler(key, project_path, handshake, cg)
                 .await;
         });
         server
@@ -2664,6 +2667,25 @@ fn spawn_lifecycle_project_server_warmup<OpenFuture>(
                     ("error", error.to_string()),
                 ],
             ),
+        }
+    });
+}
+
+fn spawn_lifecycle_automation_scheduler_activation<ActivationFuture>(
+    lifecycle: DaemonLifecycle,
+    activation: ActivationFuture,
+) where
+    ActivationFuture: std::future::Future<Output = ()> + Send + 'static,
+{
+    let Some(activity) = lifecycle.try_enter() else {
+        return;
+    };
+    tokio::spawn(async move {
+        let _activity = activity;
+        tokio::select! {
+            biased;
+            () = lifecycle.wait_for_draining() => {}
+            () = activation => {}
         }
     });
 }

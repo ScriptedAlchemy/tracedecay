@@ -657,6 +657,36 @@ async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
     idle_while_writer_held.expect("draining must cancel project warmup before writer release");
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn scheduler_activation_drain_wins_when_discovery_is_simultaneously_ready() {
+    for _ in 0..32 {
+        let lifecycle = DaemonLifecycle::default();
+        let discovery_polled = Arc::new(tokio::sync::Notify::new());
+        let discovery_polled_by_future = Arc::clone(&discovery_polled);
+        let discovery_lifecycle = lifecycle.clone();
+        let discovery_won = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let discovery_won_by_future = Arc::clone(&discovery_won);
+        super::spawn_lifecycle_automation_scheduler_activation(lifecycle.clone(), async move {
+            discovery_polled_by_future.notify_one();
+            discovery_lifecycle.wait_for_draining().await;
+            discovery_won_by_future.store(true, std::sync::atomic::Ordering::Release);
+        });
+        discovery_polled.notified().await;
+
+        lifecycle.begin_draining();
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(1),
+            lifecycle.wait_for_idle(),
+        )
+        .await
+        .expect("simultaneous scheduler discovery drain timed out");
+        assert!(
+            !discovery_won.load(std::sync::atomic::Ordering::Acquire),
+            "draining must win when scheduler discovery becomes ready on the same tick"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn portable_project_warmup_cancels_before_shutdown_snapshot() {
     let temp = TempDir::new().expect("temp dir");
@@ -2867,14 +2897,16 @@ async fn daemon_ensure_scheduler_skips_before_project_has_configured_work() {
         client_identity,
         ..test_handshake_defaults()
     };
-    let cg = crate::tracedecay::TraceDecay::init_with_options(&project, handshake.open_options())
-        .await
-        .expect("project init");
+    let cg = Arc::new(
+        crate::tracedecay::TraceDecay::init_with_options(&project, handshake.open_options())
+            .await
+            .expect("project init"),
+    );
     let engine = super::DaemonEngine::default();
     let key = super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
 
     engine
-        .ensure_automation_scheduler(key.clone(), project, handshake)
+        .ensure_automation_scheduler(key.clone(), project, handshake, cg)
         .await;
 
     let schedulers = engine
@@ -2898,12 +2930,13 @@ async fn daemon_scheduler_discovery_without_work_does_not_wait_for_writer_gate()
         client_identity,
         ..test_handshake_defaults()
     };
-    let cg = crate::tracedecay::TraceDecay::init_with_options(&project, handshake.open_options())
-        .await
-        .expect("project init");
+    let cg = Arc::new(
+        crate::tracedecay::TraceDecay::init_with_options(&project, handshake.open_options())
+            .await
+            .expect("project init"),
+    );
     let engine = super::DaemonEngine::default();
     let key = super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
-    drop(cg);
 
     let store_administration = engine.store_administration.clone();
     let writer_held = Arc::new(tokio::sync::Notify::new());
@@ -2921,7 +2954,7 @@ async fn daemon_scheduler_discovery_without_work_does_not_wait_for_writer_gate()
 
     let discovery = tokio::time::timeout(
         tokio::time::Duration::from_secs(2),
-        engine.ensure_automation_scheduler(key, project, handshake),
+        engine.ensure_automation_scheduler(key, project, handshake, cg),
     )
     .await;
 
@@ -2942,15 +2975,17 @@ async fn daemon_ensure_scheduler_starts_after_project_configures_work() {
     let client_identity = test_client_identity_for(project.join("profile"));
     std::fs::create_dir_all(project.join("src")).expect("src dir");
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    let cg = crate::tracedecay::TraceDecay::init_with_options(
-        &project,
-        crate::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(client_identity.profile_root.clone()),
-            global_db_path: Some(client_identity.global_db_path.clone()),
-        },
-    )
-    .await
-    .expect("project init");
+    let cg = Arc::new(
+        crate::tracedecay::TraceDecay::init_with_options(
+            &project,
+            crate::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(client_identity.profile_root.clone()),
+                global_db_path: Some(client_identity.global_db_path.clone()),
+            },
+        )
+        .await
+        .expect("project init"),
+    );
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
@@ -2960,7 +2995,12 @@ async fn daemon_ensure_scheduler_starts_after_project_configures_work() {
     let key = super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
 
     engine
-        .ensure_automation_scheduler(key.clone(), project.clone(), handshake.clone())
+        .ensure_automation_scheduler(
+            key.clone(),
+            project.clone(),
+            handshake.clone(),
+            Arc::clone(&cg),
+        )
         .await;
     assert!(
         !engine
@@ -2987,15 +3027,21 @@ async fn daemon_ensure_scheduler_starts_after_project_configures_work() {
     .await
     .expect("save automation config");
 
-    engine
-        .ensure_automation_scheduler(key.clone(), project, handshake)
-        .await;
+    let first = engine.ensure_automation_scheduler(
+        key.clone(),
+        project.clone(),
+        handshake.clone(),
+        Arc::clone(&cg),
+    );
+    let second = engine.ensure_automation_scheduler(key.clone(), project, handshake, cg);
+    tokio::join!(first, second);
 
     let schedulers = engine
         .store_administration
         .automation_schedulers()
         .lock()
         .await;
+    assert_eq!(schedulers.len(), 1);
     assert!(schedulers.contains_key(&key));
     drop(schedulers);
     engine.shutdown_all().await;
