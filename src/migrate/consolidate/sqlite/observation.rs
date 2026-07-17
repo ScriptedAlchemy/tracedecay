@@ -40,7 +40,17 @@ pub(super) async fn merge_observation_authority(conn: &Connection) -> Result<()>
                 source_only.receipt_id, source_only.observation_json,
                 source_only.committed_cursor_json
          FROM source_only CROSS JOIN target_frontier
-         ORDER BY source_only.ordinal;",
+         ORDER BY source_only.ordinal;
+
+         INSERT OR IGNORE INTO retrieval_anchors(
+             anchor_id, anchor_json, owner_json, projection_generation
+         )
+         SELECT anchor_id, anchor_json, owner_json, projection_generation
+         FROM source.retrieval_anchors;
+
+         INSERT OR IGNORE INTO observation_retrieval_anchors(observation_id, anchor_id)
+         SELECT observation_id, anchor_id
+         FROM source.observation_retrieval_anchors;",
     )
     .await
     .map_err(|error| db_error("merge_observation_authority", error))?;
