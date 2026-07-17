@@ -720,20 +720,50 @@ pub(super) fn session_rows_compatible(
     reconcile_session_rows(actual, expected).is_some()
 }
 
-/// True when two stored project-path strings name the same live directory —
-/// e.g. one recorded through a symlinked family root and one through the
-/// canonical mount. Non-paths and vanished paths never match, so identity is
-/// only widened by verifiable filesystem evidence.
-fn same_live_project_path(left: &str, right: &str) -> Option<String> {
-    if left == right {
-        return Some(left.to_owned());
+/// Apply-side ingest normalization boundary. Resolves a freshly ingested
+/// session row's project path to its canonical on-disk form so that symlinked
+/// family roots (e.g. `/home/zack/projects` vs `/fast/projects`) converge to a
+/// single stored spelling before they are persisted.
+///
+/// Filesystem access is confined here, at the point a session path first
+/// enters projection state via [`apply_session`](super::apply). The
+/// verify/audit and rebuild paths reach [`reconcile_session_rows`] on stored
+/// strings alone and never canonicalize, so projection output and authority
+/// audits stay reproducible from stored evidence: deleting the project
+/// directory or removing a symlink can no longer turn healthy observations into
+/// durable output-collision disposals.
+pub(super) fn canonicalize_session_project_paths(
+    session: &crate::sessions::SessionRecord,
+) -> crate::sessions::SessionRecord {
+    let Some(canonical) = canonical_project_path(&session.project_path) else {
+        return session.clone();
+    };
+    let mut normalized = session.clone();
+    // A path-shaped key must track the canonical path so downstream pure
+    // reconciliation keeps recognizing the two spellings as one family root.
+    if session.project_key == session.project_path {
+        normalized.project_key.clone_from(&canonical);
     }
-    let (left_path, right_path) = (std::path::Path::new(left), std::path::Path::new(right));
-    let left_canonical = left_path.canonicalize().ok()?;
-    let right_canonical = right_path.canonicalize().ok()?;
-    (left_canonical == right_canonical).then(|| left_canonical.to_string_lossy().into_owned())
+    normalized.project_path = canonical;
+    normalized
 }
 
+/// Resolve a project-path string to its canonical on-disk form, returning
+/// `Some` only when the path exists and its canonical spelling differs. Non
+/// paths and vanished paths yield `None`, so identity is only widened by
+/// verifiable filesystem evidence.
+fn canonical_project_path(path: &str) -> Option<String> {
+    let canonical = std::path::Path::new(path).canonicalize().ok()?;
+    let canonical = canonical.to_string_lossy().into_owned();
+    (canonical != path).then_some(canonical)
+}
+
+/// Reconcile two stored session rows into one merged row using pure
+/// string/shape logic only. Project-path family identity is resolved earlier,
+/// at the apply-side ingest boundary ([`canonicalize_session_project_paths`]),
+/// so this function — reached from the verify/audit and rebuild paths as well
+/// as apply — never touches the filesystem and stays reproducible from stored
+/// evidence.
 pub(super) fn reconcile_session_rows(
     actual: &crate::sessions::SessionRecord,
     expected: &crate::sessions::SessionRecord,
@@ -741,7 +771,6 @@ pub(super) fn reconcile_session_rows(
     if actual.provider != expected.provider || actual.session_id != expected.session_id {
         return None;
     }
-    let paths_same_family = same_live_project_path(&actual.project_path, &expected.project_path);
     let project_key = if actual.project_key == expected.project_key {
         actual.project_key.clone()
     } else if actual.project_key == "user" {
@@ -756,21 +785,11 @@ pub(super) fn reconcile_session_rows(
         && expected.project_path == actual.project_path
     {
         actual.project_key.clone()
-    } else if let Some(canonical) = paths_same_family.as_ref().filter(|_| {
-        actual.project_key == actual.project_path && expected.project_key == expected.project_path
-    }) {
-        // Both keys are path-shaped and both paths name the same live
-        // directory (symlinked family roots); converge on the canonical form.
-        canonical.clone()
     } else {
         return None;
     };
     let project_path = if actual.project_path == expected.project_path {
         actual.project_path.clone()
-    } else if let Some(canonical) = paths_same_family {
-        // Verified same-directory evidence outranks the shape heuristics:
-        // both spellings converge on the canonical form regardless of order.
-        canonical
     } else if actual.project_path == actual.project_key {
         expected.project_path.clone()
     } else if expected.project_path == expected.project_key {
@@ -902,7 +921,7 @@ pub(super) fn message_rows_compatible(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod reconcile_tests {
-    use super::reconcile_session_rows;
+    use super::{canonicalize_session_project_paths, reconcile_session_rows};
 
     fn record(project_path: &str) -> crate::sessions::SessionRecord {
         crate::sessions::SessionRecord {
@@ -924,7 +943,7 @@ mod reconcile_tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlinked_family_roots_reconcile_to_the_canonical_path() {
+    fn symlinked_family_roots_reconcile_after_ingest_normalization() {
         let tmp = tempfile::TempDir::new().unwrap();
         let real = tmp.path().join("fast-projects").join("repo");
         std::fs::create_dir_all(&real).unwrap();
@@ -933,21 +952,33 @@ mod reconcile_tests {
         let real = real.canonicalize().unwrap();
         let aliased = alias_parent.join("repo");
 
-        let merged = reconcile_session_rows(
-            &record(&aliased.to_string_lossy()),
-            &record(&real.to_string_lossy()),
-        )
-        .expect("symlinked roots naming the same directory must reconcile");
+        // The apply-side ingest boundary resolves each family spelling to the
+        // canonical on-disk form; reconciliation itself is pure string logic.
+        let normalized_alias =
+            canonicalize_session_project_paths(&record(&aliased.to_string_lossy()));
+        let normalized_real = canonicalize_session_project_paths(&record(&real.to_string_lossy()));
+        assert_eq!(normalized_alias.project_path, real.to_string_lossy());
+        assert_eq!(normalized_alias.project_key, real.to_string_lossy());
+
+        let merged = reconcile_session_rows(&normalized_alias, &normalized_real)
+            .expect("normalized symlink families naming one directory must reconcile");
         assert_eq!(merged.project_path, real.to_string_lossy());
         assert_eq!(merged.project_key, real.to_string_lossy());
 
         // Symmetric: order must not change the merged identity.
-        let merged_reversed = reconcile_session_rows(
-            &record(&real.to_string_lossy()),
-            &record(&aliased.to_string_lossy()),
-        )
-        .unwrap();
+        let merged_reversed = reconcile_session_rows(&normalized_real, &normalized_alias).unwrap();
         assert_eq!(merged_reversed.project_path, merged.project_path);
+
+        // The audit path stays pure: two live family spellings that were never
+        // normalized at ingest do not silently merge via filesystem probing.
+        assert!(
+            reconcile_session_rows(
+                &record(&aliased.to_string_lossy()),
+                &record(&real.to_string_lossy()),
+            )
+            .is_none(),
+            "reconcile must not canonicalize; family identity is an ingest concern"
+        );
     }
 
     #[test]

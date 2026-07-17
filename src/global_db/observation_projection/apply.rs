@@ -20,8 +20,8 @@ use crate::sessions::cursor::{cursor_dispatch_model, dispatch_text, is_subagent_
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 
 use super::state::{
-    message_rows_compatible, read_message, read_output_state, read_session, reconcile_session_rows,
-    storage, storage_message, verify_output_state,
+    canonicalize_session_project_paths, message_rows_compatible, read_message, read_output_state,
+    read_session, reconcile_session_rows, storage, storage_message, verify_output_state,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -1345,6 +1345,11 @@ pub(super) async fn apply_session(
     conn: &Connection,
     session: &SessionRecord,
 ) -> ProjectionStoreResult<()> {
+    // Resolve symlinked project-path family roots to their canonical on-disk
+    // form once, here at the ingest boundary, and persist that canonical form.
+    // Downstream reconciliation, verify/audit, and rebuild then operate on
+    // stored strings alone without touching the filesystem.
+    let session = &canonicalize_session_project_paths(session);
     match read_session(conn, &session.provider, &session.session_id).await? {
         Some(actual) => {
             let Some(merged) = reconcile_session_rows(&actual, session) else {
