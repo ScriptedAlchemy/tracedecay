@@ -86,7 +86,7 @@ artifact.
 ## Measured summary
 
 Captured from the dirty PR7 worktree at commit
-`2d7e9a4c92a141469e641e5c3b25a2a281310db4` (dirty, so no commit attestation),
+`93c3535824514f16829b3a4ff4627399cfc36179` (dirty, so no commit attestation),
 release test profile (`debug_assertions: false`), on an AMD EPYC 7742 under
 Linux 6.8.0-134-generic, rustc/cargo 1.95.0, 3 warmups and 30 measured
 repetitions of 8 records per record phase (30 x 8 = 240 records) and 30
@@ -95,26 +95,26 @@ additive v23 PR7 migration while this baseline was recorded). The raw artifact
 records the Linux kernel, CPU, memory, Rust/Cargo toolchains, every
 repetition, and the nearest-rank/sample-standard-deviation method.
 
-- Fact write (8 facts/repetition): p50 16,493,075 ns; p95 40,616,955 ns; p99
-  40,638,946 ns; 342.4 facts/s. Timed CPU: 510 ms; process write I/O:
-  85,409,792 bytes; database growth: 2,703,960 bytes; peak RSS: 25,196 KiB.
-- Anchor create (8 anchored observations/repetition): p50 25,463,272 ns; p95
-  30,565,487 ns; p99 32,426,713 ns; 303.6 records/s. Timed CPU: 420 ms;
+- Fact write (8 facts/repetition): p50 16,708,474 ns; p95 42,237,988 ns; p99
+  44,601,039 ns; 335.6 facts/s. Timed CPU: 520 ms; process write I/O:
+  85,409,792 bytes; database growth: 2,703,960 bytes; peak RSS: 25,012 KiB.
+- Anchor create (8 anchored observations/repetition): p50 25,054,451 ns; p95
+  29,870,004 ns; p99 30,088,794 ns; 310.1 records/s. Timed CPU: 430 ms;
   process write I/O: 25,460,736 bytes; database growth: 3,337,400 bytes; peak
-  RSS: 30,144 KiB.
-- Anchor resolution (8 resolutions/repetition): p50 11,384,800 ns; p95
-  11,581,402 ns; p99 11,616,742 ns; 701.3 resolutions/s. Timed CPU: 350 ms;
-  zero process write bytes and database growth; peak RSS: 30,228 KiB.
-- Anchor replay (8 exact repeat persists/repetition): p50 11,206,147 ns; p95
-  11,430,460 ns; p99 11,459,280 ns; 712.7 replays/s; every sample returned the
+  RSS: 29,896 KiB.
+- Anchor resolution (8 resolutions/repetition): p50 11,591,542 ns; p95
+  11,774,762 ns; p99 11,827,073 ns; 689.4 resolutions/s. Timed CPU: 360 ms;
+  zero process write bytes and database growth; peak RSS: 29,980 KiB.
+- Anchor replay (8 exact repeat persists/repetition): p50 11,430,571 ns; p95
+  11,582,682 ns; p99 11,595,842 ns; 699.2 replays/s; every sample returned the
   originally created anchor as an exact duplicate and durable observation
   cardinality stayed at 264. Timed CPU: 340 ms; zero process write bytes and
-  database growth; peak RSS: 30,228 KiB.
+  database growth; peak RSS: 29,980 KiB.
 - Migration v19-to-v23 (one production `migrate()` run per repetition, 5
-  applied steps): p50 23,924,710 ns; p95 24,361,313 ns; p99 24,404,904 ns;
-  209.1 migration steps/s. Timed CPU: 660 ms; process write I/O: 12,902,400
+  applied steps): p50 24,241,729 ns; p95 24,662,740 ns; p99 25,053,902 ns;
+  205.9 migration steps/s. Timed CPU: 640 ms; process write I/O: 12,902,400
   bytes; database growth: 12,854,400 bytes across the 30 independent fixture
-  databases; peak RSS: 29,732 KiB.
+  databases; peak RSS: 29,484 KiB.
 
 ## Developer build feedback
 
