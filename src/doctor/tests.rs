@@ -236,7 +236,14 @@ fn database_recovery_guidance_names_the_preserved_recovery_set() {
     );
     assert!(guidance.contains("`sessions.db` is separate and must not be removed"));
     assert!(guidance.contains("Facts are stored in the graph database"));
-    assert!(guidance.contains("automatic rebuild is intentionally blocked"));
+    assert!(guidance.contains("automatic default-store rebuild is intentionally blocked"));
+    assert!(guidance.contains("Derived branch indexes are preserved"));
+
+    let branch_db = PathBuf::from("/profile/projects/proj_test/branches/feature.db");
+    let branch_guidance = database_recovery_guidance(&branch_db);
+    assert!(branch_guidance.contains("/profile/projects/proj_test/dirty"));
+    assert!(branch_guidance.contains("/profile/projects/proj_test/sessions.db"));
+    assert!(!branch_guidance.contains("/branches/sessions.db"));
 }
 
 #[tokio::test]

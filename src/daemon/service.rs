@@ -1078,9 +1078,9 @@ mod tests {
     #[cfg(unix)]
     use tempfile::TempDir;
 
-    use super::{
-        DaemonServiceSpec, DaemonServiceState, LaunchctlFailureMode, LaunchdCommand, ServiceRunner,
-    };
+    use super::{DaemonServiceSpec, LaunchctlFailureMode, LaunchdCommand};
+    #[cfg(target_os = "linux")]
+    use super::{DaemonServiceState, ServiceRunner};
     use crate::config::lock_user_data_dir_test_env;
 
     struct EnvVarGuard {
