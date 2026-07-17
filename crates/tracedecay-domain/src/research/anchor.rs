@@ -920,6 +920,40 @@ mod tests {
     }
 
     #[test]
+    fn copied_prompt_attribution_survives_replay() {
+        let source = RetrievalAnchorRecordV2::new(record_parts(
+            entity_target("document.source"),
+            owner("project.fixture"),
+        ))
+        .unwrap();
+        let mut copied_parts =
+            record_parts(entity_target("document.copy"), owner("project.fixture"));
+        copied_parts.source_anchors = vec![
+            AnchorLineageRefV2::new(
+                AnchorProvenanceRelationV2::CopiedFrom,
+                source.anchor_id().clone(),
+                owner("project.fixture"),
+            )
+            .unwrap(),
+        ];
+
+        // Replaying the derivation from identical inputs is idempotent: the
+        // copied-prompt identity is stable across re-derivation.
+        let copied = RetrievalAnchorRecordV2::new(copied_parts.clone()).unwrap();
+        let replayed = RetrievalAnchorRecordV2::new(copied_parts).unwrap();
+        assert_eq!(copied.anchor_id(), replayed.anchor_id());
+
+        // The copied identity stays distinct from the source it was copied
+        // from, yet the replayed record retains the source in its lineage.
+        assert_ne!(replayed.anchor_id(), source.anchor_id());
+        assert_eq!(
+            replayed.source_anchors()[0].relation(),
+            AnchorProvenanceRelationV2::CopiedFrom
+        );
+        assert_eq!(replayed.source_anchors()[0].anchor_id(), source.anchor_id());
+    }
+
+    #[test]
     fn repository_capture_requires_a_project_owner() {
         let capture_id = RepositoryCaptureId::new("capture.fixture").unwrap();
         let target = RetrievalAnchorTargetV2::RepositoryCapture {

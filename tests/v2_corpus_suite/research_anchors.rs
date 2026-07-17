@@ -832,6 +832,58 @@ fn expired_response_handle_is_tombstoned_and_resolves_deterministically() {
 }
 
 #[test]
+fn ambiguous_target_is_tombstoned_and_resolves_deterministically() {
+    // A9: exercise the `Ambiguous` payload-access typed state as a resolved
+    // tombstone outcome. The committed fixture carries no ambiguous record, so
+    // we drive an existing tombstoned anchor into the ambiguous state in memory
+    // (its target maps to more than one candidate) and refresh the catalog
+    // snapshot digests so the frozen catalog stays internally consistent,
+    // mirroring `tombstones_reject_retrieval_records_from_a_different_snapshot`.
+    let mut fixture = valid_fixture();
+    let tombstone = fixture.tombstones[0].clone();
+    let anchor_id = tombstone.retrieval_anchors.iter().next().unwrap().clone();
+    fixture
+        .envelope
+        .retrieval_catalog
+        .records
+        .get_mut(&anchor_id)
+        .unwrap()
+        .payload_access = PayloadAccessState::Ambiguous;
+    refresh_catalog_snapshot_digest(&mut fixture);
+
+    // The ambiguous tombstone still validates against the catalog and never
+    // surfaces payload material: the anchor is not payload-eligible.
+    tombstone
+        .validate_against(&fixture.envelope.retrieval_catalog)
+        .unwrap();
+    let record = fixture
+        .envelope
+        .retrieval_catalog
+        .get(&anchor_id)
+        .expect("ambiguous tombstone catalog record");
+    assert_eq!(record.payload_access, PayloadAccessState::Ambiguous);
+    assert_ne!(record.payload_access, PayloadAccessState::Eligible);
+
+    // Resolution against the frozen snapshot is deterministic: identical inputs
+    // resolve to the same exact result every time.
+    let resolution =
+        FrozenWatermarkResolutionV1::new(record.snapshot.clone(), tombstone.snapshot.clone());
+    assert_eq!(resolution.drift, WatermarkDriftV1::Exact);
+    assert_eq!(
+        resolution,
+        FrozenWatermarkResolutionV1::new(record.snapshot.clone(), tombstone.snapshot.clone())
+    );
+
+    // Payload material carried on the tombstone wire is rejected outright.
+    let payload_bearing = fixture_json().replacen(
+        "\"reason\": \"deleted\",",
+        "\"reason\": \"deleted\",\n      \"payload\": \"synthetic payload must not be retained\",",
+        1,
+    );
+    assert!(decode_fixture(&payload_bearing).is_err());
+}
+
+#[test]
 fn private_chronological_exports_and_judgments_require_external_owner_only_storage() {
     fn allowed(path: &Path, repository: &Path, unix_mode: Option<u32>) -> bool {
         // `None` is the portable fail-closed result when a platform cannot prove
