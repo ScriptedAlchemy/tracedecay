@@ -176,12 +176,31 @@ impl ServerStats {
     }
 }
 
-#[derive(Default)]
+/// Per-connection routing and identity context, constructed once per client
+/// connection (or per initialize-replay dispatch) and threaded through
+/// [`McpServer::handle_request_for_connection`]. Bundling these values makes
+/// the memory-replay scope unconditionally present: there is no "no scope"
+/// state, so a memory operation identity can never silently degrade to a
+/// generated fallback.
 struct ConnectionRouteState {
     implicit_project_path: Option<PathBuf>,
+    /// Connection-scoped prefix (`{mcp_instance_id}-c{seq}`) that widens
+    /// client-chosen, connection-local envelope ids into store-unique memory
+    /// operation identities.
+    memory_request_scope: String,
+    /// Hook workspace routing cache, refreshed per request.
+    route_cache: HookProjectRouteCache,
 }
 
 impl ConnectionRouteState {
+    fn new(memory_request_scope: String, route_cache: HookProjectRouteCache) -> Self {
+        Self {
+            implicit_project_path: None,
+            memory_request_scope,
+            route_cache,
+        }
+    }
+
     async fn observe_initialize(&mut self, params: Option<&Value>, registry_db: Option<&GlobalDb>) {
         self.implicit_project_path =
             resolve_initialize_roots_project_path(params, registry_db).await;
@@ -189,6 +208,10 @@ impl ConnectionRouteState {
 
     fn implicit_project_path(&self) -> Option<&Path> {
         self.implicit_project_path.as_deref()
+    }
+
+    fn memory_request_scope(&self) -> &str {
+        &self.memory_request_scope
     }
 }
 
@@ -2452,8 +2475,6 @@ impl McpServer {
         timings_override: Option<bool>,
         request_lifecycle: Option<&crate::daemon::DaemonLifecycle>,
     ) -> Result<()> {
-        let mut route_cache = self.hook_project_routes.snapshot();
-
         // Register the SIGTERM listener once before entering the loop so
         // there is no window between iterations where a SIGTERM is delivered
         // but no handler is installed (which would cause silent loss of the
@@ -2465,16 +2486,7 @@ impl McpServer {
                 .expect("failed to register SIGTERM handler")
         });
 
-        let mut connection_route = ConnectionRouteState::default();
-        // One replay-identity scope per client connection: envelope ids are
-        // client-chosen and connection-local, so the daemon widens them here
-        // before they become persistent memory operation identities.
-        let memory_request_scope = format!(
-            "{}-c{}",
-            self.mcp_instance_id,
-            self.connection_scope_seq
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
+        let mut connection_route = self.new_connection_route_state();
 
         loop {
             let line: String = {
@@ -2607,9 +2619,7 @@ impl McpServer {
                         Box::pin(self.handle_request_for_connection(
                             &request,
                             timings_override.unwrap_or_else(|| self.timings_enabled()),
-                            &mut route_cache,
-                            connection_route.implicit_project_path(),
-                            Some(memory_request_scope.as_str()),
+                            &mut connection_route,
                         ))
                         .await
                     }
@@ -2745,38 +2755,42 @@ impl McpServer {
     ///
     /// Returns `None` for notifications (requests without an `id`).
     pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
-        let mut route_cache = self.hook_project_routes.snapshot();
-        Box::pin(self.handle_request_with_timings(
+        // The initialize-replay entry point builds its own per-connection
+        // context so replay dispatches carry a real memory-request scope,
+        // exactly like the live connection loop. These callers never dispatch
+        // memory tools, but the scope is unconditionally present rather than an
+        // absent-scope special case.
+        let mut connection = self.new_connection_route_state();
+        Box::pin(self.handle_request_for_connection(
             request,
             self.timings_enabled(),
-            &mut route_cache,
+            &mut connection,
         ))
         .await
     }
 
-    async fn handle_request_with_timings(
-        &self,
-        request: &JsonRpcRequest,
-        timings_enabled: bool,
-        route_cache: &mut HookProjectRouteCache,
-    ) -> Option<JsonRpcResponse> {
-        Box::pin(self.handle_request_for_connection(
-            request,
-            timings_enabled,
-            route_cache,
-            None,
-            None,
-        ))
-        .await
+    /// Builds a fresh per-connection routing/identity context. Each call
+    /// allocates a new connection scope sequence, so the derived
+    /// `{mcp_instance_id}-c{seq}` prefix is unique across connections and
+    /// initialize-replay dispatches alike.
+    fn new_connection_route_state(&self) -> ConnectionRouteState {
+        // One replay-identity scope per client connection: envelope ids are
+        // client-chosen and connection-local, so the daemon widens them here
+        // before they become persistent memory operation identities.
+        let memory_request_scope = format!(
+            "{}-c{}",
+            self.mcp_instance_id,
+            self.connection_scope_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        ConnectionRouteState::new(memory_request_scope, self.hook_project_routes.snapshot())
     }
 
     async fn handle_request_for_connection(
         &self,
         request: &JsonRpcRequest,
         timings_enabled: bool,
-        route_cache: &mut HookProjectRouteCache,
-        implicit_project_path: Option<&Path>,
-        memory_request_scope: Option<&str>,
+        connection: &mut ConnectionRouteState,
     ) -> Option<JsonRpcResponse> {
         debug_assert!(
             !request.method.is_empty(),
@@ -2787,11 +2801,15 @@ impl McpServer {
             *counts.entry(request.method.clone()).or_insert(0) += 1;
         }
         if matches!(classify_mcp_method(&request.method), McpMethod::HookEvent) {
-            Box::pin(self.handle_hook_event_notification(request.params.as_ref(), route_cache))
-                .await;
+            Box::pin(self.handle_hook_event_notification(
+                request.params.as_ref(),
+                &mut connection.route_cache,
+            ))
+            .await;
             return None;
         }
-        self.hook_project_routes.refresh_into(route_cache);
+        self.hook_project_routes
+            .refresh_into(&mut connection.route_cache);
         let id = request.id.clone()?;
 
         let result = match classify_mcp_method(&request.method) {
@@ -2807,9 +2825,9 @@ impl McpServer {
                     id,
                     request.params.as_ref(),
                     timings_enabled,
-                    route_cache,
-                    implicit_project_path,
-                    memory_request_scope,
+                    &connection.route_cache,
+                    connection.implicit_project_path(),
+                    connection.memory_request_scope(),
                 ))
                 .await,
             ),
@@ -3570,7 +3588,7 @@ impl McpServer {
         timings_enabled: bool,
         route_cache: &HookProjectRouteCache,
         implicit_project_path: Option<&Path>,
-        memory_request_scope: Option<&str>,
+        memory_request_scope: &str,
     ) -> JsonRpcResponse {
         let Some(params) = params else {
             return JsonRpcResponse::error(
@@ -4231,7 +4249,7 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
 fn inject_trusted_memory_request_id(
     tool_name: &str,
     id: &Value,
-    memory_request_scope: Option<&str>,
+    memory_request_scope: &str,
     arguments: &mut Value,
 ) {
     // The memory handler module owns the action taxonomy; the dispatcher only
@@ -4247,17 +4265,14 @@ fn inject_trusted_memory_request_id(
     // caller-controlled arguments for the handler fallback path.
     map.remove("__mcp_request_id");
     // Envelope ids are client-chosen and only unique within one connection,
-    // while operation receipts persist in the store. Without a connection
-    // scope to widen the id there is no safe replay identity; the handler then
-    // falls back to a fresh generated identity instead of risking a collision
-    // with an unrelated call's receipt.
-    let Some(scope) = memory_request_scope else {
-        return;
-    };
+    // while operation receipts persist in the store. The connection scope
+    // widens the id into a store-unique replay identity; it is always present
+    // (every dispatch is constructed with a connection context), so there is
+    // no unscoped path that could collide with an unrelated call's receipt.
     if let Some(request_id) = json_rpc_request_id_string(id) {
         map.insert(
             "__mcp_request_id".to_string(),
-            json!(format!("{scope}:{request_id}")),
+            json!(format!("{memory_request_scope}:{request_id}")),
         );
     }
 }
@@ -4281,7 +4296,7 @@ mod trusted_memory_request_id_tests {
             inject_trusted_memory_request_id(
                 "tracedecay_fact_store",
                 &json!("json-rpc-17"),
-                Some("conn-scope"),
+                "conn-scope",
                 &mut arguments,
             );
 
@@ -4302,7 +4317,7 @@ mod trusted_memory_request_id_tests {
         inject_trusted_memory_request_id(
             "tracedecay_fact_store",
             &json!(17),
-            Some("conn-scope"),
+            "conn-scope",
             &mut arguments,
         );
 
@@ -4316,7 +4331,7 @@ mod trusted_memory_request_id_tests {
         inject_trusted_memory_request_id(
             "tracedecay_fact_feedback",
             &json!("json-rpc-17"),
-            Some("conn-scope"),
+            "conn-scope",
             &mut arguments,
         );
 
@@ -4336,7 +4351,7 @@ mod trusted_memory_request_id_tests {
         inject_trusted_memory_request_id(
             "tracedecay_fact_store",
             &Value::Null,
-            Some("conn-scope"),
+            "conn-scope",
             &mut arguments,
         );
 
@@ -4350,24 +4365,7 @@ mod trusted_memory_request_id_tests {
         inject_trusted_memory_request_id(
             "tracedecay_fact_store",
             &json!("json-rpc-17"),
-            Some("conn-scope"),
-            &mut arguments,
-        );
-
-        assert!(arguments.get("__mcp_request_id").is_none());
-    }
-
-    #[test]
-    fn missing_connection_scope_clears_call_supplied_request_id() {
-        let mut arguments = json!({
-            "action": "add",
-            "__mcp_request_id": "caller-controlled",
-        });
-
-        inject_trusted_memory_request_id(
-            "tracedecay_fact_store",
-            &json!("json-rpc-17"),
-            None,
+            "conn-scope",
             &mut arguments,
         );
 
