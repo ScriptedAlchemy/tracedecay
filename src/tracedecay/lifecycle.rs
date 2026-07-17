@@ -256,6 +256,29 @@ impl TraceDecay {
 
         let selected_inventory = store_identity_inventory(&selected).await;
         let candidate_inventory = store_identity_inventory(&candidate).await;
+        let manifest_matches_project_root = |layout: &StoreLayout| {
+            let manifest_path = layout.manifest_path.as_deref()?;
+            let manifest = storage::read_store_manifest(manifest_path).ok()?;
+            Some(
+                manifest.project_root == project_root
+                    || match (
+                        manifest.project_root.canonicalize(),
+                        project_root.canonicalize(),
+                    ) {
+                        (Ok(manifest_root), Ok(project_root)) => manifest_root == project_root,
+                        _ => false,
+                    },
+            )
+        };
+        if manifest_matches_project_root(&candidate) == Some(true)
+            && manifest_matches_project_root(&selected) == Some(false)
+            && candidate_inventory.is_healthy()
+            && !candidate_inventory.is_pristine()
+            && selected_inventory.is_healthy()
+            && !selected_inventory.is_pristine()
+        {
+            return Ok(Some(candidate));
+        }
         if selected_inventory.is_pristine() && candidate_inventory.is_healthy() {
             if !allow_repair {
                 return Err(identity_cutover_conflict(

@@ -1325,6 +1325,76 @@ async fn worktree_profile_stores_prefer_the_exact_manifest_root() {
 }
 
 #[tokio::test]
+async fn linked_worktree_exact_manifest_overrides_healthy_shared_identity_store() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let worktree = dir.path().join("repo-wt");
+    let candidate_source = dir.path().join("candidate-source");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
+    let _home_guard = HomeGuard::set(&home);
+
+    for root in [&project, &candidate_source] {
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn indexed() {}\n").unwrap();
+        init_repo_with_commit(root);
+    }
+
+    let main = TraceDecay::init(&project).await.unwrap();
+    main.index_all().await.unwrap();
+    let main_project_id = main.store_layout().identity.project_id.clone().unwrap();
+    main.close();
+
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/exact-over-shared",
+            worktree.to_str().unwrap(),
+        ],
+    );
+
+    let candidate = TraceDecay::init(&candidate_source).await.unwrap();
+    candidate.index_all().await.unwrap();
+    let candidate_root = candidate.store_layout().data_root.clone();
+    candidate.close();
+
+    let exact_project_id = "proj_linked_exact_over_shared";
+    let exact_root = profile_root.join(format!("projects/{exact_project_id}"));
+    relocate_store_as_legacy(&candidate_root, &exact_root, &worktree, exact_project_id);
+    assert_eq!(
+        read_repository_identity_marker(&worktree)
+            .unwrap()
+            .unwrap()
+            .project_id,
+        main_project_id
+    );
+
+    let layout = TraceDecay::resolve_store_layout_for_identity_with_options(
+        &worktree,
+        &TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        },
+    )
+    .await
+    .expect("the healthy exact-root worktree shard must override the healthy shared shard");
+
+    assert_ne!(
+        layout.identity.project_id.as_deref(),
+        Some(main_project_id.as_str())
+    );
+    assert_eq!(
+        layout.identity.project_id.as_deref(),
+        Some(exact_project_id)
+    );
+    assert_path_eq(&layout.data_root, &exact_root);
+}
+
+#[tokio::test]
 async fn registered_exact_root_ignores_sibling_worktree_manifests() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
