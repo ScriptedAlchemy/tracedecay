@@ -159,6 +159,55 @@ impl DaemonEngine {
         project_path: PathBuf,
         handshake: DaemonHandshake,
     ) {
+        if !self.lifecycle.accepting() {
+            return;
+        }
+        {
+            let schedulers = self
+                .store_administration
+                .automation_schedulers()
+                .lock()
+                .await;
+            if schedulers.contains_key(&key) {
+                return;
+            }
+        }
+
+        // Configuration discovery is read-only but can open a large project
+        // store and run branch resolution. Keep that work outside the
+        // daemon-wide writer gate so an ancillary scheduler check cannot
+        // starve an unrelated worktree's first project-server open.
+        let configured = match Box::pin(automation_scheduler_has_work_for_project(
+            &project_path,
+            &handshake,
+        ))
+        .await
+        {
+            Ok(configured) => configured,
+            Err(e) => {
+                log_daemon_event(
+                    "scheduler_config",
+                    &[
+                        ("project", project_path.display().to_string()),
+                        ("outcome", "error".to_string()),
+                        ("error", e.to_string()),
+                    ],
+                );
+                false
+            }
+        };
+        if !configured {
+            log_daemon_event(
+                "scheduler_config",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "skipped".to_string()),
+                    ("reason", "not_configured".to_string()),
+                ],
+            );
+            return;
+        }
+
         self.store_administration
             .with_writer(|| async move {
                 if !self.lifecycle.accepting() {
@@ -174,38 +223,6 @@ impl DaemonEngine {
                         return;
                     }
                 }
-
-                let configured = match Box::pin(automation_scheduler_has_work_for_project(
-                    &project_path,
-                    &handshake,
-                ))
-                .await
-                {
-                    Ok(configured) => configured,
-                    Err(e) => {
-                        log_daemon_event(
-                            "scheduler_config",
-                            &[
-                                ("project", project_path.display().to_string()),
-                                ("outcome", "error".to_string()),
-                                ("error", e.to_string()),
-                            ],
-                        );
-                        false
-                    }
-                };
-                if !configured {
-                    log_daemon_event(
-                        "scheduler_config",
-                        &[
-                            ("project", project_path.display().to_string()),
-                            ("outcome", "skipped".to_string()),
-                            ("reason", "not_configured".to_string()),
-                        ],
-                    );
-                    return;
-                }
-
                 self.start_automation_scheduler(key, project_path, handshake)
                     .await;
             })

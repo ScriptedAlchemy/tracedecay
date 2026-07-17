@@ -205,7 +205,7 @@ impl TraceDecay {
         let selected_id = selected
             .as_ref()
             .and_then(|layout| layout.identity.project_id.as_deref());
-        let selected_exact_root_is_authoritative = if let Some(selected) = selected.as_ref() {
+        let selected_layout_is_authoritative = if let Some(selected) = selected.as_ref() {
             let inventory = store_identity_inventory(selected).await;
             inventory.is_healthy() && !inventory.is_pristine()
         } else {
@@ -215,7 +215,7 @@ impl TraceDecay {
             project_root,
             &profile_root,
             selected_id,
-            selected_exact_root_is_authoritative,
+            selected_layout_is_authoritative,
         )?;
         Self::choose_identity_layout(
             project_root,

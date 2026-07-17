@@ -2276,6 +2276,38 @@ impl DaemonEngine {
         );
     }
 
+    fn spawn_direct_project_server_open(
+        &self,
+        handshake: DaemonHandshake,
+    ) -> JoinHandle<Result<Arc<crate::mcp::McpServer>>> {
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let Some(activity) = engine.lifecycle.try_enter() else {
+                return Err(TraceDecayError::Config {
+                    message: "daemon is draining before project warm-up".to_string(),
+                });
+            };
+            let _activity = activity;
+            let result = tokio::select! {
+                biased;
+                () = engine.lifecycle.wait_for_draining() => Err(TraceDecayError::Config {
+                    message: "daemon began draining during project warm-up".to_string(),
+                }),
+                result = Box::pin(engine.project_server(&handshake)) => result,
+            };
+            if let Err(error) = &result {
+                log_daemon_event(
+                    "project_server_warmup",
+                    &[
+                        ("outcome", "error".to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
+            }
+            result
+        })
+    }
+
     /// Opens or resolves a project server while writer administration is held.
     /// Watcher and scheduler activation happen only after this returns so those
     /// components can acquire the same coordinator without recursive locking.
@@ -2777,12 +2809,36 @@ async fn serve_broker_socket_client(
         }
         return Ok(());
     }
-    let server = if handshake.project_path.is_some() {
-        let server = match Box::pin(engine.project_server(&handshake)).await {
-            Ok(server) => server,
-            Err(e) => {
-                write_project_open_error(&mut transport, &first_request_line, &e).await?;
-                return Err(e);
+    let server = if let Some(project_path) = handshake.project_path.as_ref() {
+        let mut project_open = engine.spawn_direct_project_server_open(handshake.clone());
+        let server = match tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            &mut project_open,
+        )
+        .await
+        {
+            Ok(Ok(Ok(server))) => server,
+            Ok(Ok(Err(error))) => {
+                write_project_open_error(&mut transport, &first_request_line, &error).await?;
+                return Err(error);
+            }
+            Ok(Err(error)) => {
+                let error = TraceDecayError::Config {
+                    message: format!("project warm-up task failed: {error}"),
+                };
+                write_project_open_error(&mut transport, &first_request_line, &error).await?;
+                return Err(error);
+            }
+            Err(_) => {
+                let error = TraceDecayError::Config {
+                    message: format!(
+                        "TraceDecay project '{}' is warming in the background; retry the same tool shortly",
+                        project_path.display()
+                    ),
+                };
+                drop(setup_activity);
+                write_project_open_error(&mut transport, &first_request_line, &error).await?;
+                return Ok(());
             }
         };
         Some(server)

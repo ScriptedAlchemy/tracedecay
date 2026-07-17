@@ -447,13 +447,13 @@ pub(crate) fn matching_legacy_profile_layouts(
     project_root: &Path,
     profile_root: &Path,
     excluded_project_id: Option<&str>,
-    selected_exact_root_is_authoritative: bool,
+    selected_layout_is_authoritative: bool,
 ) -> Result<(Vec<StoreLayout>, bool)> {
     matching_legacy_profile_layouts_with_git_resolver(
         project_root,
         profile_root,
         excluded_project_id,
-        selected_exact_root_is_authoritative,
+        selected_layout_is_authoritative,
         crate::worktree::is_detached_linked_worktree,
         crate::worktree::git_common_dir,
     )
@@ -463,7 +463,7 @@ fn matching_legacy_profile_layouts_with_git_resolver<D, G>(
     project_root: &Path,
     profile_root: &Path,
     excluded_project_id: Option<&str>,
-    selected_exact_root_is_authoritative: bool,
+    selected_layout_is_authoritative: bool,
     mut is_detached_linked_worktree: D,
     mut git_common_dir: G,
 ) -> Result<(Vec<StoreLayout>, bool)>
@@ -503,14 +503,13 @@ where
 
     // A linked worktree may have its own profile shard while sharing a Git
     // common directory with every sibling checkout. A non-excluded exact
-    // manifest is authoritative. The selected exact manifest is authoritative
-    // only when its inventory is healthy and populated; a pristine or
-    // unhealthy selection must retain the shared-Git recovery path.
+    // manifest overrides the selected identity. Otherwise, a healthy and
+    // populated marker/registry-selected layout is authoritative without
+    // probing historical roots. A pristine or unhealthy selection retains
+    // the shared-Git recovery path.
     let selected_is_sole_exact_root =
         selected_manifest_matches_exact_root && exact_manifests.is_empty();
-    let matching_manifests = if !exact_manifests.is_empty()
-        || (selected_is_sole_exact_root && selected_exact_root_is_authoritative)
-    {
+    let matching_manifests = if !exact_manifests.is_empty() || selected_layout_is_authoritative {
         exact_manifests
     } else {
         let project_git_common_dir = (!is_detached_linked_worktree(project_root))
@@ -1420,6 +1419,82 @@ mod tests {
             resolver_calls.borrow().as_slice(),
             [project_root, unrelated_root],
             "a non-authoritative selected exact root must retain shared-Git recovery"
+        );
+    }
+
+    #[test]
+    fn authoritative_shared_identity_skips_historical_git_discovery() {
+        fn write_manifest(profile_root: &Path, project_id: &str, project_root: &Path) {
+            let data_root = profile_root.join("projects").join(project_id);
+            fs::create_dir_all(&data_root).unwrap();
+            write_store_manifest_to_path(
+                &data_root.join(STORE_MANIFEST_FILENAME),
+                &StoreManifest {
+                    schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+                    project_id: Some(project_id.to_string()),
+                    store_kind: StoreKind::CodeProject,
+                    storage_mode: StorageMode::ProfileSharded,
+                    project_root: project_root.to_path_buf(),
+                    data_root,
+                    graph_db_relpath: "tracedecay.db".into(),
+                    sessions_db_relpath: "sessions.db".into(),
+                    branch_meta_relpath: "branch-meta.json".into(),
+                },
+            )
+            .unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let main_root = dir.path().join("repo");
+        let worktree_root = dir.path().join("repo-worktree");
+        let historical_root = dir.path().join("historical-worktree");
+        let profile_root = dir.path().join("profile");
+        for root in [&main_root, &worktree_root, &historical_root] {
+            fs::create_dir_all(root).unwrap();
+        }
+        write_manifest(&profile_root, "proj_selected", &main_root);
+        write_manifest(&profile_root, "proj_historical", &historical_root);
+
+        let resolver_calls = RefCell::new(Vec::new());
+        let (layouts, selected_is_sole_exact_root) =
+            matching_legacy_profile_layouts_with_git_resolver(
+                &worktree_root,
+                &profile_root,
+                Some("proj_selected"),
+                true,
+                |_| false,
+                |root| {
+                    resolver_calls.borrow_mut().push(root.to_path_buf());
+                    Some(dir.path().join("shared.git"))
+                },
+            )
+            .unwrap();
+
+        assert!(layouts.is_empty());
+        assert!(!selected_is_sole_exact_root);
+        assert!(
+            resolver_calls.borrow().is_empty(),
+            "a healthy selected shared identity must not probe historical roots"
+        );
+
+        resolver_calls.borrow_mut().clear();
+        let (layouts, _) = matching_legacy_profile_layouts_with_git_resolver(
+            &worktree_root,
+            &profile_root,
+            Some("proj_selected"),
+            false,
+            |_| false,
+            |root| {
+                resolver_calls.borrow_mut().push(root.to_path_buf());
+                Some(dir.path().join("shared.git"))
+            },
+        )
+        .unwrap();
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(
+            resolver_calls.borrow().as_slice(),
+            [worktree_root, historical_root],
+            "an unhealthy or pristine selection must retain shared-Git recovery"
         );
     }
 

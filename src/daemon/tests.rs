@@ -1111,6 +1111,112 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
 }
 
 #[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_background() {
+    const PHASE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let project = project.canonicalize().expect("canonical project");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    let options = crate::tracedecay::TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(client_identity.global_db_path.clone()),
+    };
+    drop(
+        crate::tracedecay::TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize project"),
+    );
+    let mut config = crate::config::load_config(&project).expect("load project config");
+    config.sync.session_start_sync = false;
+    crate::config::save_config(&project, &config)
+        .expect("disable unrelated startup transcript ingestion");
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 1, "direct-warmup-test")
+            .expect("daemon database scope");
+    let engine = DaemonEngine::default();
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+
+    let store_administration = engine.store_administration.clone();
+    let writer_held = Arc::new(tokio::sync::Notify::new());
+    let writer_held_by_blocker = Arc::clone(&writer_held);
+    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(async move {
+        store_administration
+            .with_writer(|| async move {
+                writer_held_by_blocker.notify_one();
+                writer_release.await.expect("release writer gate");
+            })
+            .await;
+    });
+    writer_held.notified().await;
+
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_status",
+            "arguments": {"format": "json"}
+        }
+    });
+    let request_engine = engine.clone();
+    let request_handshake = handshake.clone();
+    let mut request_task = tokio::spawn(async move {
+        daemon_round_trip(request_engine, &request_handshake, request).await
+    });
+    let response_within_bound =
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut request_task).await;
+
+    release_writer.send(()).expect("signal writer gate release");
+    blocker.await.expect("writer gate blocker task");
+    if response_within_bound.is_err() {
+        let _ = request_task.await;
+    }
+
+    let responses = response_within_bound
+        .expect("direct tool cache miss must return a bounded warming response")
+        .expect("direct tool client task");
+    let response = responses
+        .iter()
+        .find(|response| response["id"] == json!(3))
+        .expect("direct tool response");
+    let message = response["error"]["message"]
+        .as_str()
+        .expect("warming error message");
+    assert!(message.contains("warming in the background"), "{message}");
+    assert!(message.contains("retry"), "{message}");
+
+    let route = ProjectRouteKey::from_handshake(&project, &handshake).expect("project route");
+    tokio::time::timeout(PHASE_TIMEOUT, async {
+        loop {
+            let warmed = engine
+                .store_administration
+                .project_servers()
+                .lock()
+                .await
+                .get_route(&route)
+                .is_some();
+            if warmed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached project warmup timed out");
+    tokio::time::timeout(PHASE_TIMEOUT, engine.shutdown_all())
+        .await
+        .expect("direct warmup shutdown timed out");
+}
+
+#[cfg(unix)]
 #[test]
 fn store_owner_key_collapses_profile_and_store_aliases() {
     let temp = TempDir::new().expect("temp dir");
@@ -2777,6 +2883,51 @@ async fn daemon_ensure_scheduler_skips_before_project_has_configured_work() {
         .lock()
         .await;
     assert!(!schedulers.contains_key(&key));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_scheduler_discovery_without_work_does_not_wait_for_writer_gate() {
+    let dir = TempDir::new().expect("temp dir");
+    let project = dir.path().canonicalize().expect("canonical temp dir");
+    let client_identity = test_client_identity_for(project.join("profile"));
+    std::fs::create_dir_all(project.join("src")).expect("src dir");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let cg = crate::tracedecay::TraceDecay::init_with_options(&project, handshake.open_options())
+        .await
+        .expect("project init");
+    let engine = super::DaemonEngine::default();
+    let key = super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
+    drop(cg);
+
+    let store_administration = engine.store_administration.clone();
+    let writer_held = Arc::new(tokio::sync::Notify::new());
+    let writer_held_by_blocker = Arc::clone(&writer_held);
+    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(async move {
+        store_administration
+            .with_writer(|| async move {
+                writer_held_by_blocker.notify_one();
+                writer_release.await.expect("release writer gate");
+            })
+            .await;
+    });
+    writer_held.notified().await;
+
+    let discovery = tokio::time::timeout(
+        tokio::time::Duration::from_secs(2),
+        engine.ensure_automation_scheduler(key, project, handshake),
+    )
+    .await;
+
+    release_writer.send(()).expect("signal writer gate release");
+    blocker.await.expect("writer gate blocker task");
+    discovery.expect("read-only scheduler discovery must not wait for the writer gate");
 }
 
 #[cfg(unix)]
