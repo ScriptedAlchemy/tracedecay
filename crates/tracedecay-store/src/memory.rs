@@ -3154,7 +3154,7 @@ impl CompatibilityMemoryFeedbackFunnelV1 {
             rated_fact_count,
             feedback_total,
             seen_to_feedback_ratio: (feedback_total != 0)
-                .then_some((retrieval_count_total + access_count_total) / feedback_total),
+                .then(|| (retrieval_count_total + access_count_total) / feedback_total),
         }
     }
 

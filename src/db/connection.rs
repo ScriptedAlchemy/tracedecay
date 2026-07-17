@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use libsql::{Builder, Connection, OpenFlags, Transaction, TransactionBehavior};
-use tracedecay_domain::{FactEventId, FactId, FactOwnerV1, SourceStoreId, UtcMicros};
+use tracedecay_domain::{FactOwnerV1, SourceStoreId, UtcMicros};
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -88,9 +88,6 @@ impl DatabaseWriterConnection<'_> {
         crate::memory::store::MemoryStore::new(&self.conn)
     }
 
-    pub(crate) fn fact_retriever(&self) -> crate::memory::retrieval::FactRetriever<'_> {
-        crate::memory::retrieval::FactRetriever::new(&self.conn)
-    }
 }
 
 impl DatabaseMemoryWriter<'_> {
@@ -447,6 +444,11 @@ impl Database {
 
     /// Reads the daemon-owned V22 repair snapshot for legacy feedback already
     /// imported before the history/map projection existed.
+    ///
+    /// Standalone writer-connection reader retained for owner-bound repair
+    /// tests; production reads progress inside a caller-owned authority
+    /// transaction via `*_in_transaction`.
+    #[cfg(test)]
     pub(crate) async fn feedback_history_repair_progress(
         &self,
         owner: &FactOwnerV1,
@@ -468,25 +470,6 @@ impl Database {
     ) -> Result<Option<MemoryV2FeedbackHistoryRepairProgress>> {
         self.require_active_write_scope("read memory v2 feedback history in writer transaction")?;
         memory_v2::feedback_history_repair_progress(&**transaction, owner, source_store_id).await
-    }
-
-    /// Repairs one bounded, owner-bound V22 legacy-feedback projection batch.
-    pub(crate) async fn repair_memory_v2_feedback_history_batch(
-        &self,
-        owner: &FactOwnerV1,
-        source_store_id: &SourceStoreId,
-        batch_size: i64,
-    ) -> Result<MemoryV2FeedbackHistoryRepairBatchOutcome> {
-        let writer = self
-            .writer_connection("repair one memory v2 feedback history batch")
-            .await?;
-        memory_v2::repair_memory_v2_feedback_history_batch(
-            &writer.conn,
-            owner,
-            source_store_id,
-            batch_size,
-        )
-        .await
     }
 
     /// Repairs one bounded V22 feedback-history batch inside an already-open
@@ -609,26 +592,6 @@ impl Database {
     ) -> Result<MemoryV2CutoverOutcome> {
         let writer = self.writer_connection("finalize memory v2 cutover").await?;
         memory_v2::finalize_memory_v2_cutover(&writer.conn, receipt).await
-    }
-
-    pub(crate) async fn purge_memory_v2_fact(
-        &self,
-        owner: &FactOwnerV1,
-        source_store_id: &SourceStoreId,
-        fact_id: &FactId,
-        expected_last_event_id: &FactEventId,
-        occurred_at: UtcMicros,
-    ) -> Result<bool> {
-        let writer = self.writer_connection("purge memory v2 fact").await?;
-        memory_v2::purge_memory_v2_fact(
-            &writer.conn,
-            owner,
-            source_store_id,
-            fact_id,
-            expected_last_event_id,
-            occurred_at,
-        )
-        .await
     }
 
     /// Starts a query-only snapshot on a separate connection that cannot join

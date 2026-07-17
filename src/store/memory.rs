@@ -78,6 +78,11 @@ const DEFAULT_TRUST: f64 = 0.5;
 const COMPATIBILITY_RETENTION_CLASS: &str = "compatibility-runtime-v1";
 const COMPATIBILITY_SOURCE_STORE: &str = "legacy-memory-v1";
 const COMPATIBILITY_LEGACY_CUTOVER_BATCH_SIZE: i64 = 500;
+/// Upper bound on empty backfill-phase transitions drained inside one cutover
+/// pass. The phase walk is feedback → oplog → facts → awaiting_cutover, so a
+/// small bound comfortably covers draining every empty phase in a single tick
+/// while still guaranteeing the loop terminates.
+const COMPATIBILITY_LEGACY_CUTOVER_MAX_EMPTY_PHASE_DRAIN: usize = 8;
 
 /// Canonical fact authority over one already-open, authority-bound database.
 ///
@@ -651,59 +656,79 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
                     error,
                 ))
             })?;
-        match self
-            .db
-            .backfill_memory_v2_batch(
-                request.owner(),
-                &source_store_id,
-                frontiers,
-                COMPATIBILITY_LEGACY_CUTOVER_BATCH_SIZE,
-            )
-            .await
-            .map_err(|error| {
-                FactCompatibilityStoreError::Store(storage_error(
-                    COMPATIBILITY_WRITE_OPERATION,
-                    error,
-                ))
-            })? {
-            MemoryV2BackfillBatchOutcome::Advanced { processed } => {
-                Ok(CompatibilityLegacyMemoryCutoverProgressV1::Incomplete {
-                    processed: processed as u64,
-                })
-            }
-            MemoryV2BackfillBatchOutcome::AwaitingCutover => {
-                let receipt = MemoryV2CutoverReceipt::new(
-                    request.receipt_id().clone(),
-                    request.owner().clone(),
-                    source_store_id,
+        // Drain empty backfill phases within a single cutover pass so a fresh
+        // (or fully imported) owner reaches finalization on one tick instead of
+        // spending an idle tick per empty phase. The bounded feedback → oplog →
+        // facts → awaiting_cutover walk means at most a handful of empty-phase
+        // transitions before a batch does real work or the frontier is drained;
+        // real work still commits exactly one bounded batch per pass.
+        let mut total_processed = 0_u64;
+        for _ in 0..COMPATIBILITY_LEGACY_CUTOVER_MAX_EMPTY_PHASE_DRAIN {
+            match self
+                .db
+                .backfill_memory_v2_batch(
+                    request.owner(),
+                    &source_store_id,
                     frontiers,
-                    compatibility_now()?,
+                    COMPATIBILITY_LEGACY_CUTOVER_BATCH_SIZE,
                 )
+                .await
                 .map_err(|error| {
                     FactCompatibilityStoreError::Store(storage_error(
                         COMPATIBILITY_WRITE_OPERATION,
                         error,
                     ))
-                })?;
-                match self
-                    .db
-                    .finalize_memory_v2_cutover(&receipt)
-                    .await
+                })? {
+                MemoryV2BackfillBatchOutcome::Advanced { processed } => {
+                    total_processed = total_processed.saturating_add(processed as u64);
+                    if processed > 0 {
+                        return Ok(CompatibilityLegacyMemoryCutoverProgressV1::Incomplete {
+                            processed: total_processed,
+                        });
+                    }
+                    // Empty phase transition; keep draining within this pass.
+                }
+                MemoryV2BackfillBatchOutcome::AwaitingCutover => {
+                    let receipt = MemoryV2CutoverReceipt::new(
+                        request.receipt_id().clone(),
+                        request.owner().clone(),
+                        source_store_id,
+                        frontiers,
+                        compatibility_now()?,
+                    )
                     .map_err(|error| {
                         FactCompatibilityStoreError::Store(storage_error(
                             COMPATIBILITY_WRITE_OPERATION,
                             error,
                         ))
-                    })? {
-                    MemoryV2CutoverOutcome::TailPending(_) => {
-                        Ok(CompatibilityLegacyMemoryCutoverProgressV1::Incomplete { processed: 0 })
-                    }
-                    MemoryV2CutoverOutcome::Complete => {
-                        Ok(CompatibilityLegacyMemoryCutoverProgressV1::Complete)
-                    }
+                    })?;
+                    return match self
+                        .db
+                        .finalize_memory_v2_cutover(&receipt)
+                        .await
+                        .map_err(|error| {
+                            FactCompatibilityStoreError::Store(storage_error(
+                                COMPATIBILITY_WRITE_OPERATION,
+                                error,
+                            ))
+                        })? {
+                        MemoryV2CutoverOutcome::TailPending(_) => {
+                            Ok(CompatibilityLegacyMemoryCutoverProgressV1::Incomplete {
+                                processed: total_processed,
+                            })
+                        }
+                        MemoryV2CutoverOutcome::Complete => {
+                            Ok(CompatibilityLegacyMemoryCutoverProgressV1::Complete)
+                        }
+                    };
                 }
             }
         }
+        // The bounded phase walk did not settle this pass; report incomplete so
+        // the daemon retries rather than spinning here unbounded.
+        Ok(CompatibilityLegacyMemoryCutoverProgressV1::Incomplete {
+            processed: total_processed,
+        })
     }
 
     async fn dashboard_compatibility_memory_overview(
@@ -2288,6 +2313,18 @@ async fn compatibility_rank_facts_tx(
             let tokens = compatibility_tokens(text);
             for fact in facts.drain(..) {
                 let (scores, why) = compatibility_search_scores(text, &tokens, &fact, now)?;
+                // Mirror the legacy retriever's relevance floor: a non-empty
+                // query only returns facts with a real textual signal (FTS/term
+                // overlap). Facts surfaced solely by the dense holographic
+                // baseline or trust are never relevant matches, so scoring them
+                // above zero must not pull unrelated facts into the results (or
+                // bump their access counts).
+                if !tokens.is_empty()
+                    && scores.fts_score_millionths() == 0
+                    && scores.jaccard_score_millionths() == 0
+                {
+                    continue;
+                }
                 if query
                     .filter()
                     .threshold_millionths()
@@ -4601,7 +4638,7 @@ async fn compatibility_link_facts_tx(
     operation: &CompatibilityFactLinkV1,
     now: UtcMicros,
 ) -> FactStoreResult<(Vec<FactId>, Option<FactEventId>)> {
-    let (source_fact_id, _, source_mapping) =
+    let (source_fact_id, source_fact, source_mapping) =
         compatibility_available_curation_fact_tx(transaction, operation.source()).await?;
     let (target_fact_id, _, target_mapping) =
         compatibility_available_curation_fact_tx(transaction, operation.target()).await?;
@@ -4685,7 +4722,7 @@ async fn compatibility_link_facts_tx(
                 Vec::new(),
                 Vec::new(),
                 None,
-                None,
+                Some(source_fact.last_event_id().clone()),
             )?;
             let (receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
             Some(receipt.last_event_id().clone())
@@ -4753,7 +4790,7 @@ fn compatibility_curated_correction_batch(
         Vec::new(),
         Vec::new(),
         None,
-        None,
+        Some(fact.last_event_id().clone()),
     )
 }
 
@@ -5545,6 +5582,7 @@ fn compatibility_merge_removal_batch(
     owner: &FactOwnerV1,
     fact_id: &FactId,
     previous: PayloadAccessState,
+    expected_last_event_id: Option<FactEventId>,
     winner: &FactId,
     actor: Option<ActorId>,
     now: UtcMicros,
@@ -5579,7 +5617,7 @@ fn compatibility_merge_removal_batch(
         Vec::new(),
         Vec::new(),
         None,
-        None,
+        expected_last_event_id,
     )
 }
 
@@ -6037,9 +6075,18 @@ async fn merge_compatibility_facts_tx(
         let loser_id = resolve_compatibility_target_tx(transaction, target)
             .await?
             .ok_or_else(|| {
+                let loser_label = target
+                    .legacy_query()
+                    .map(|query| query.legacy_fact_id().to_string())
+                    .or_else(|| {
+                        target
+                            .canonical_fact_id()
+                            .map(|fact_id| fact_id.as_str().to_string())
+                    })
+                    .unwrap_or_else(|| "unknown".to_string());
                 storage_message(
                     COMPATIBILITY_WRITE_OPERATION,
-                    "compatibility merge loser is missing",
+                    format!("compatibility merge loser fact {loser_label} not found"),
                 )
             })?;
         if loser_id == winner_id {
@@ -6064,7 +6111,13 @@ async fn merge_compatibility_facts_tx(
         if projection.access != PayloadAccessState::Deleted {
             let category =
                 compatibility_mirror_category_tx(transaction, mapping.legacy_fact_id()).await?;
-            pending_deletes.push((loser_id, projection.access, mapping, category));
+            pending_deletes.push((
+                loser_id,
+                projection.access,
+                projection.last_event_id.clone(),
+                mapping,
+                category,
+            ));
         }
     }
     compatibility_rewire_merge_relations_tx(
@@ -6080,11 +6133,12 @@ async fn merge_compatibility_facts_tx(
     )
     .await?;
     let mut deleted_ids = Vec::new();
-    for (loser_id, previous_access, mapping, category) in pending_deletes {
+    for (loser_id, previous_access, expected_last_event_id, mapping, category) in pending_deletes {
         let batch = compatibility_merge_removal_batch(
             request.owner(),
             &loser_id,
             previous_access,
+            expected_last_event_id,
             &winner_id,
             request.actor().cloned(),
             now,
@@ -6579,7 +6633,12 @@ async fn compatibility_owner_status_counts_tx(
                AND current_facts.project_id = ?2
                AND facts.owner_json = ?3
                AND current_facts.active_assertion_id IS NOT NULL",
-            params![key.kind, key.project_id.as_str(), key.json.as_str(), DEFAULT_TRUST],
+            params![
+                key.kind,
+                key.project_id.as_str(),
+                key.json.as_str(),
+                crate::memory::trust::DEFAULT_MIN_TRUST
+            ],
         )
         .await
         .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
@@ -7942,7 +8001,7 @@ async fn dashboard_compatibility_memory_oplog_tx(
     })?;
     let mut rows = transaction
         .query(
-            "SELECT oplog.id, oplog.ts, oplog.op, mappings.fact_id, oplog.detail_json
+            "SELECT oplog.id, oplog.ts, oplog.op, oplog.fact_id, oplog.detail_json
              FROM memory_oplog AS oplog
              JOIN memory_v2_legacy_map AS mappings
                ON mappings.legacy_fact_id = oplog.fact_id
@@ -7968,8 +8027,7 @@ async fn dashboard_compatibility_memory_oplog_tx(
         .await
         .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
     {
-        let fact_id = FactId::new(row_string(&row, 3, COMPATIBILITY_READ_OPERATION)?)
-            .map_err(FactStoreError::from)?;
+        let legacy_fact_id = row_i64(&row, 3, COMPATIBILITY_READ_OPERATION)?;
         entries.push(CompatibilityDashboardOplogEntryV1::new(
             row_i64(&row, 0, COMPATIBILITY_READ_OPERATION)?,
             UtcMicros(row_i64(&row, 1, COMPATIBILITY_READ_OPERATION)?),
@@ -7978,9 +8036,11 @@ async fn dashboard_compatibility_memory_oplog_tx(
                 2,
                 COMPATIBILITY_READ_OPERATION,
             )?),
-            Some(CompatibilityFactTargetV1::Canonical(
-                CompatibilityFactIdV1::new(query.owner().clone(), fact_id)?,
-            )),
+            Some(CompatibilityFactTargetV1::Legacy(LegacyFactQuery::new(
+                query.owner().clone(),
+                source_store_id.clone(),
+                legacy_fact_id,
+            )?)),
             dashboard_compatibility_oplog_details(row_optional_string(
                 &row,
                 4,
@@ -10851,6 +10911,27 @@ async fn publish_current_projection(
         transaction
             .execute(
                 "DELETE FROM memory_v2_assertion_payloads
+                 WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3",
+                params![
+                    batch.fact_id().as_str(),
+                    owner.kind,
+                    owner.project_id.as_str()
+                ],
+            )
+            .await
+            .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
+        // A live transition to a terminal payload access must erase the same
+        // free-text feedback surface as the canonical purge path
+        // (`purge_payload_rows`), so a deleted fact never retains
+        // API-reachable feedback source/note text.
+        transaction
+            .execute(
+                "UPDATE memory_v2_feedback_history
+                 SET source = NULL, note = NULL,
+                     details_availability = CASE
+                         WHEN details_availability = 'available' THEN 'legacy_redacted'
+                         ELSE details_availability
+                     END
                  WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3",
                 params![
                     batch.fact_id().as_str(),

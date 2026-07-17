@@ -2144,9 +2144,17 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         fact_id: i64,
         context: MemoryOperationContext,
     ) -> Result<bool, MemoryApplicationError> {
+        let target = self.legacy_compatibility_target(fact_id)?;
+        // Removing a fact that was never stored is an idempotent no-op, mirroring
+        // the legacy MemoryStore contract. Callers (e.g. the dashboard curate
+        // handler) surface this `false` as a per-op "fact not found" result
+        // rather than an authority failure.
+        if self.get_compatibility_fact(target.clone()).await?.is_none() {
+            return Ok(false);
+        }
         let outcome = self
             .remove_compatibility_fact(CompatibilityFactRemoveCommandV1::new(
-                self.legacy_compatibility_target(fact_id)?,
+                target,
                 context.operation_id().clone(),
                 None,
                 context.actor().cloned(),
@@ -2276,13 +2284,29 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
 
     /// One authority status read projected both into legacy fields and the
     /// finite feedback-history repair state.
+    ///
+    /// The legacy `memory_status` surface repaired derived vectors and rebuilt
+    /// dirty banks as a side effect of reading, and reported the repair counts.
+    /// Preserve that contract: run one bounded authoritative repair, then read
+    /// the post-repair status so the projected counts reflect the repair.
     pub async fn memory_status_with_repair_v1(
         &self,
     ) -> Result<V1MemoryStatusWithRepairV1, MemoryApplicationError> {
+        let context =
+            MemoryOperationContext::generated(&self.owner, "memory-status-repair", None)?;
+        let repair = self.dashboard_repair_v1(context).await?;
         let status = self.compatibility_memory_status().await?;
         let feedback_history_repair = status.feedback_history_repair();
+        let mut projected = project_memory_status_v1(&status)?;
+        projected.repair = MemoryRepairStats {
+            missing_vectors_repaired: legacy_usize(
+                repair.missing_vectors_repaired(),
+                "legacy memory repaired vectors",
+            )?,
+            banks_rebuilt: legacy_usize(repair.banks_rebuilt(), "legacy memory rebuilt banks")?,
+        };
         Ok(V1MemoryStatusWithRepairV1 {
-            status: project_memory_status_v1(&status)?,
+            status: projected,
             feedback_history_repair,
         })
     }

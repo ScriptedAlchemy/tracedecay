@@ -2101,6 +2101,11 @@ pub(super) async fn feedback_history_repair_progress(
 /// imported. Rows without an owner-matched legacy mapping are excluded because
 /// V1 feedback is unscoped; eligible malformed rows are quarantined and still
 /// advance.
+///
+/// Standalone transaction wrapper retained for owner-bound batch tests; the
+/// production repair tick drives `*_in_transaction` inside a caller-owned
+/// authority transaction.
+#[cfg(test)]
 pub(super) async fn repair_memory_v2_feedback_history_batch(
     conn: &Connection,
     owner: &FactOwnerV1,
@@ -2514,6 +2519,11 @@ pub(super) async fn finalize_memory_v2_cutover(
 
 /// Purges payload, FTS, and vector material for one exact owner/store/fact.
 /// Immutable identity, assertion headers, mapping, and typed lineage remain.
+///
+/// Standalone transaction wrapper retained for owner-bound purge tests; the
+/// production purge path drives `purge_memory_v2_fact_inner` inside a
+/// caller-owned authority transaction.
+#[cfg(test)]
 pub(super) async fn purge_memory_v2_fact(
     conn: &Connection,
     owner: &FactOwnerV1,
@@ -6198,7 +6208,7 @@ mod tests {
             scalar(
                 &conn,
                 "SELECT COUNT(*) FROM memory_v2_assertion_payloads_fts
-                 WHERE memory_v2_assertion_payloads_fts MATCH 'raw-quarantine-canary'"
+                 WHERE memory_v2_assertion_payloads_fts MATCH '\"raw-quarantine-canary\"'"
             )
             .await,
             0
@@ -6433,7 +6443,7 @@ mod tests {
             scalar(
                 &conn,
                 "SELECT COUNT(*) FROM memory_v2_assertion_payloads_fts
-                 WHERE memory_v2_assertion_payloads_fts MATCH 'runtime-purge-canary'"
+                 WHERE memory_v2_assertion_payloads_fts MATCH '\"runtime-purge-canary\"'"
             )
             .await,
             0
