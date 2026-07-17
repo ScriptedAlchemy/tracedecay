@@ -73,6 +73,19 @@ fn target_legacy_fact_id(target: &CompatibilityFactTargetV1) -> Option<i64> {
         .map(tracedecay_store::LegacyFactQuery::legacy_fact_id)
 }
 
+/// Resolves a fact target to its legacy numeric id, accepting either a legacy
+/// query target or a canonical target (mapped through `canonical_to_legacy`).
+fn link_legacy_fact_id(
+    target: &CompatibilityFactTargetV1,
+    canonical_to_legacy: &HashMap<String, i64>,
+) -> Option<i64> {
+    if let Some(legacy) = target_legacy_fact_id(target) {
+        return Some(legacy);
+    }
+    let canonical = target.canonical_fact_id()?;
+    canonical_to_legacy.get(canonical.as_str()).copied()
+}
+
 /// Converts only an available, mapped compatibility fact. Unavailable or
 /// redacted payload fields stay omitted; dashboard handlers never invent them.
 fn fact_summary_json(summary: &CompatibilityDashboardFactSummaryV1) -> Option<Value> {
@@ -394,9 +407,21 @@ pub(crate) async fn graph_payload(
         .iter()
         .map(|entity| (entity.target.legacy_entity_id(), entity))
         .collect();
+    // Fact-entity links carry canonical fact targets; map them back to the
+    // legacy numeric ids the graph nodes are keyed on.
+    let canonical_to_legacy: HashMap<String, i64> = overview
+        .facts
+        .iter()
+        .filter_map(|summary| match &summary.fact {
+            CompatibilityFactProjectionV1::Available(fact) => {
+                Some((fact.fact_id().as_str().to_owned(), fact.legacy_fact_id()?))
+            }
+            CompatibilityFactProjectionV1::Unavailable(_) => None,
+        })
+        .collect();
     let fact_ids: HashSet<i64> = fact_ids.into_iter().collect();
     for link in &overview.fact_entity_links {
-        let Some(fact_id) = target_legacy_fact_id(&link.fact) else {
+        let Some(fact_id) = link_legacy_fact_id(&link.fact, &canonical_to_legacy) else {
             continue;
         };
         if !fact_ids.contains(&fact_id) {
@@ -501,10 +526,13 @@ pub(crate) async fn fact_detail_payload(
     {
         fact.remove("has_hrr");
     }
-    Ok(fact.map(|fact| {
+    Ok(fact.map(|mut fact| {
+        let entities: Vec<Value> = detail.entities.iter().map(entity_json).collect();
+        if let Some(obj) = fact.as_object_mut() {
+            obj.insert("entities".into(), json!(entities));
+        }
         json!({
             "fact": fact,
-            "entities": detail.entities.iter().map(entity_json).collect::<Vec<_>>(),
             "error": "",
         })
     }))

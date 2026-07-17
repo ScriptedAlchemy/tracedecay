@@ -1,5 +1,6 @@
 use crate::dashboard_api_support::*;
 use std::path::PathBuf;
+use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
 
 async fn setup_target_project(fixture: &DashboardFixture) -> (PathBuf, TraceDecay) {
     let target_root = fixture
@@ -136,27 +137,23 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
 
         let (_target_root, target_cg) = setup_target_project(&fixture).await;
         let target_project_id = project_id(&target_cg);
+        // Seed through the canonical fact facade so the compatibility
+        // projection and its owner-bound legacy mapping stay coherent. The
+        // post-cutover dashboard reads facts through that projection, so a
+        // manufactured legacy `memory_facts` row (without a
+        // `memory_v2_legacy_map` mapping) is intentionally invisible.
         target_cg
-            .db()
-            .execute_write(
-                "seed dashboard project fact fixture",
-                "INSERT INTO memory_facts
-                    (fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                libsql::params![
-                    201_i64,
-                    "Target daemon project selector fact",
-                    "project",
-                    "[\"selector\"]",
-                    0.91_f64,
-                    1_i64,
-                    1_i64,
-                    1_700_010_000_i64,
-                    1_700_010_100_i64
-                ],
-            )
+            .add_fact(AddFactRequest {
+                content: "Target daemon project selector fact".to_string(),
+                category: MemoryCategory::Project,
+                source: Some("dashboard-fixture".to_string()),
+                tags: vec!["selector".to_string()],
+                entities: Vec::new(),
+                trust: Some(0.91),
+                metadata: serde_json::json!({}),
+            })
             .await
-            .expect("target fact should insert");
+            .expect("target fact should seed via canonical add");
         target_cg
             .checkpoint()
             .await
