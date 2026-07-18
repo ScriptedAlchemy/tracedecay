@@ -108,6 +108,32 @@ regression discovered by an earlier slice.
 - Cancellation, disk-full, stale input, and concurrent rebuilds publish one
   complete verified generation or leave the prior generation authoritative.
 
+### Database query performance
+
+General discipline for every SQL surface, not only the search path:
+
+- Review `EXPLAIN QUERY PLAN` for each measured hot statement; full scans and
+  temp b-trees on hot paths need either a supporting index or a recorded
+  justification. Indexes are added and removed from measured evidence, and
+  each shipped index names the statements it serves.
+- Batch per-row lookups: a page or collection assembled by issuing one query
+  per element is a named regression class (PR7's fact-list path hydrated each
+  projection with a separate per-id query). Prefer one set-based statement,
+  `IN`/join pushdown, or a single pass over a cursor.
+- Reuse prepared statements and connections on hot paths; per-request
+  prepare, open, or schema-ensure work is the regression class recorded
+  above.
+- Push filters, ordering, and limits into SQL rather than fetching wide and
+  filtering in Rust; pagination executes as indexed range scans on the cursor
+  ordering, never OFFSET walks.
+- Multi-join projection counts (e.g. status backlog counts) carry measured
+  budgets; when a count is hot and its joins are stable, maintain it
+  incrementally instead of recomputing the join per read.
+- Durable-write paths batch fsyncs deliberately: group commits within one
+  transaction where atomicity allows, and never issue per-item sync in a loop
+  a single transaction could cover (PR7's spool measurements: wall time was
+  `items x ambient fsync latency` under load).
+
 ### Query execution
 
 - Use measured selectivity and costs to prune shards/candidates, avoid repeated
