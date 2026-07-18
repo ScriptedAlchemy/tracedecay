@@ -1515,6 +1515,28 @@ async fn build_skill_writer_evidence(
         tool_usage,
         coverage,
     } = serialized;
+    // Fail closed before any profile/skill-store I/O when temporal evidence is
+    // empty: list_managed_skills creates the managed-skill root under
+    // profile_root, which must not happen for denied/empty terminal skips.
+    if hits.is_empty()
+        && recent_session_slices
+            .as_ref()
+            .and_then(|slices| slices.pointer("/sessions").and_then(Value::as_array))
+            .is_none_or(|sessions| sessions.is_empty())
+    {
+        return Ok(SkillWriterEvidenceOutcome::Skipped {
+            reason: "no_skill_writer_evidence",
+            evidence_hash: Some(canonical_evidence_hash(&json!({
+                "evidence_mode": evidence_mode_label(recent_session_slices.is_some()),
+                "temporal_mode": "forensic",
+                "temporal_coverage": coverage,
+                "provider": provider,
+                "query": query,
+                "recent_session_slices": recent_session_slices,
+                "hits": hits,
+            }))),
+        });
+    }
     let existing_skills = list_managed_skills(&profile_root).await?;
     if let Some(project_root) = analytics_project_root {
         let global_db_path = crate::global_db::global_db_path();

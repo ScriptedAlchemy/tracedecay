@@ -1138,7 +1138,7 @@ async fn session_reflector_suppresses_replay_for_filtered_runs() {
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
     assert_eq!(
         run.ledger_record.error.as_deref(),
-        Some("no_session_evidence")
+        Some("session_evidence_filter_unavailable")
     );
 }
 
@@ -1146,23 +1146,8 @@ async fn session_reflector_suppresses_replay_for_filtered_runs() {
 async fn session_reflector_skips_when_replay_disabled_and_no_grep_hits() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    seed_session_message_in_db(
-        &GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-            .await
-            .expect("session db open"),
-        cg.project_root(),
-        SeedSessionMessage {
-            provider: "cursor",
-            session_id: "session-replay-2",
-            message_id: "session-replay-2-message-001",
-            role: "user",
-            timestamp: 1_715_000_060,
-            text: "Always pass the offline flag to cargo nextest on this machine.",
-            source: None,
-        },
-    )
-    .await;
     let backend = SessionJsonBackend::new(json!({"facts": []}));
+    let retrieval = EmptyAutomationSessionRetrieval::new();
     let config = AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
@@ -1178,10 +1163,11 @@ async fn session_reflector_skips_when_replay_disabled_and_no_grep_hits() {
         ..AutomationConfig::default()
     };
 
-    let run = run_session_reflector_with_backend(
+    let run = tracedecay::automation::runner::run_session_reflector_with_backend_and_retrieval(
         &cg,
         &config,
         &backend,
+        &retrieval,
         SessionReflectorAutomationOptions {
             include_recent_sessions: false,
             ..SessionReflectorAutomationOptions::default()
@@ -1240,22 +1226,35 @@ async fn session_reflector_replay_respects_include_summaries_false() {
     let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
         .await
         .expect("session db open");
-    db.lcm_insert_summary_node(tracedecay::sessions::lcm::LcmSummaryNodeDraft {
-        provider: "cursor".to_string(),
-        conversation_id: "session-reflect-1".to_string(),
-        session_id: "session-reflect-1".to_string(),
-        depth: 1,
-        summary_text: "summary that should not be replayed when summaries are disabled".to_string(),
-        source_refs: Vec::new(),
-        source_token_count: 10,
-        summary_token_count: 5,
-        source_time_start: Some(1_715_000_001),
-        source_time_end: Some(1_715_000_001),
-        expand_hint: None,
-        metadata_json: None,
-    })
+    let source = db
+        .lcm_load_raw_message("cursor", "session-reflect-1-message-001")
+        .await
+        .expect("seeded raw message provides summary ownership");
+    db.lcm_publish_immutable_summary(
+        tracedecay::sessions::lcm::types::LcmImmutableSummaryPublication {
+            summary_id: "summary.session-reflect-1.no-replay".to_string(),
+            predecessor_summary_id: None,
+            draft: tracedecay::sessions::lcm::LcmSummaryNodeDraft {
+                provider: "cursor".to_string(),
+                conversation_id: "session-reflect-1".to_string(),
+                session_id: "session-reflect-1".to_string(),
+                depth: 0,
+                summary_text: "summary that should not be replayed when summaries are disabled"
+                    .to_string(),
+                source_refs: vec![tracedecay::sessions::lcm::LcmSourceRef::RawMessage {
+                    store_id: source.store_id,
+                }],
+                source_token_count: 10,
+                summary_token_count: 5,
+                source_time_start: Some(1_715_000_001),
+                source_time_end: Some(1_715_000_001),
+                expand_hint: None,
+                metadata_json: None,
+            },
+        },
+    )
     .await
-    .expect("summary fixture should insert");
+    .expect("summary fixture should publish through production constructor");
     let config = AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
