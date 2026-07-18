@@ -7,7 +7,7 @@ use tracedecay_store::{
 };
 
 use super::super::{global_db_operation_error, global_db_operation_message};
-use super::persist::{AnchorAliasCollisionPolicy, persist_observation_retrieval_anchor};
+use super::persist::persist_observation_retrieval_anchor;
 use super::provenance_backfill::backfill_observation_repository_provenance;
 
 const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical-autoincrement";
@@ -290,14 +290,17 @@ pub(in crate::global_db) async fn backfill_observation_retrieval_anchors(
             authorization,
         )
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-        persist_observation_retrieval_anchor(
-            conn,
-            observation.observation_id(),
-            &anchor,
-            AnchorAliasCollisionPolicy::PreserveExisting,
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        let (_, _, alias_collisions) =
+            persist_observation_retrieval_anchor(conn, observation.observation_id(), &anchor)
+                .await
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        for collision in alias_collisions {
+            tracing::warn!(
+                existing_anchor_id = collision.existing_anchor_id.as_str(),
+                candidate_anchor_id = collision.candidate_anchor_id.as_str(),
+                "anchor backfill preserved alias binding; candidate stays reachable by id only"
+            );
+        }
     }
     conn.execute(
         "INSERT OR REPLACE INTO global_schema_migrations(migration) VALUES (?1)",
