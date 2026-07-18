@@ -30,6 +30,7 @@ use self::retrieval::GlobalDbTemporalReadPort;
 
 pub(crate) use doctor_health::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
+    session_temporal_doctor_health_at,
 };
 pub(in crate::global_db) use projection::record_canonical_observation_effect;
 pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
