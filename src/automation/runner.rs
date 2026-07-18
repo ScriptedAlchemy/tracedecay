@@ -2074,26 +2074,14 @@ async fn run_combined_review_for_retrieval(
         },
     )
     .await?;
+    // Finalize both halves before either ledger append. Non-empty proposal
+    // sets already failed closed above; empty arrays may append both successes.
+    let reflector_record = reflector_finalizer
+        .append_success_record(&request, &response, reflector_record)
+        .await?;
     let skill_record = skill_finalizer
         .append_success_record(&request, &response, skill_record)
         .await?;
-    let reflector_record = match reflector_finalizer
-        .append_success_record(&request, &response, reflector_record)
-        .await
-    {
-        Ok(record) => record,
-        Err(error) => {
-            let _ = skill_finalizer
-                .append_failed_record(
-                    response.model.clone(),
-                    skill_bundle.evidence_hash.clone(),
-                    Some(output.clone()),
-                    format!("combined reflector ledger append failed: {error}"),
-                )
-                .await;
-            return Err(error);
-        }
-    };
 
     Ok(CombinedReviewDispatch::Ran(Box::new(
         CombinedReviewAutomationRun {
@@ -2246,6 +2234,12 @@ fn normalized_non_empty(value: &str) -> Option<String> {
     }
 }
 
+fn project_registry_db_path(cg: &TraceDecay) -> Option<PathBuf> {
+    cg.open_options()
+        .global_db_path
+        .or_else(crate::global_db::global_db_path)
+}
+
 async fn production_project_automation_retrieval(
     cg: &TraceDecay,
 ) -> Box<dyn AutomationSessionRetrieval> {
@@ -2254,7 +2248,7 @@ async fn production_project_automation_retrieval(
     else {
         return fallback();
     };
-    let Some(registry_path) = crate::global_db::global_db_path() else {
+    let Some(registry_path) = project_registry_db_path(cg) else {
         return fallback();
     };
     let Some(registry) = GlobalDb::open_read_only_at(&registry_path).await else {
@@ -2475,7 +2469,10 @@ fn accept_automation_temporal_outcome(
     outcome: SessionRetrievalOutcome<TemporalKernelResult>,
 ) -> AutomationTemporalRetrieval {
     match outcome {
-        SessionRetrievalOutcome::Complete { items, .. } => {
+        SessionRetrievalOutcome::Complete { items, freshness } => {
+            if !SessionFreshnessPolicy::RequireFresh.accepts(freshness) {
+                return AutomationTemporalRetrieval::Rejected("session_evidence_stale");
+            }
             let mut evidence_items = Vec::new();
             let mut coverage = TemporalCoverageCountsV1::default();
             for item in items {
@@ -2553,7 +2550,13 @@ fn accept_automation_temporal_outcome(
                 })
             }
         }
-        SessionRetrievalOutcome::CompleteZero { .. } => AutomationTemporalRetrieval::CompleteZero,
+        SessionRetrievalOutcome::CompleteZero { freshness } => {
+            if !SessionFreshnessPolicy::RequireFresh.accepts(freshness) {
+                AutomationTemporalRetrieval::Rejected("session_evidence_stale")
+            } else {
+                AutomationTemporalRetrieval::CompleteZero
+            }
+        }
         SessionRetrievalOutcome::Stale { .. } => {
             AutomationTemporalRetrieval::Rejected("session_evidence_stale")
         }
@@ -3226,6 +3229,14 @@ mod tests {
                 SessionRetrievalOutcome::Cancelled,
                 "session_evidence_cancelled",
             ),
+            (
+                SessionRetrievalOutcome::CompleteZero {
+                    freshness: crate::application::session::SessionDataFreshness::Stored {
+                        generation_lag: 2,
+                    },
+                },
+                "session_evidence_stale",
+            ),
         ] {
             assert!(matches!(
                 accept_automation_temporal_outcome(outcome),
@@ -3240,6 +3251,43 @@ mod tests {
             ),
             AutomationTemporalRetrieval::CompleteZero
         ));
+    }
+
+    #[test]
+    fn complete_temporal_outcome_independently_requires_fresh_coverage() {
+        let stale = SessionRetrievalOutcome::<TemporalKernelResult>::Complete {
+            items: Vec::new(),
+            freshness: crate::application::session::SessionDataFreshness::Stored {
+                generation_lag: 1,
+            },
+        };
+        // Empty Complete is invalid at the type layer, but stale freshness must
+        // still fail closed before any serialization or write path.
+        assert!(matches!(
+            accept_automation_temporal_outcome(stale),
+            AutomationTemporalRetrieval::Rejected("session_evidence_stale")
+        ));
+    }
+
+    #[test]
+    fn private_tests_do_not_accept_lcm_grep_evidence_paths() {
+        let source = include_str!("runner.rs");
+        let tests_start = source
+            .rfind("#[cfg(test)]\nmod tests {")
+            .expect("private automation runner tests");
+        let private_tests = &source[tests_start..];
+        assert!(
+            !private_tests.contains(".lcm_grep("),
+            "private runner tests must not accept legacy lcm_grep evidence"
+        );
+        assert!(
+            !private_tests.contains("LcmGrepRequest"),
+            "private runner tests must not construct legacy lcm_grep requests"
+        );
+        assert!(
+            private_tests.contains("accept_automation_temporal_outcome"),
+            "private runner tests must exercise temporal acceptance"
+        );
     }
 
     #[test]
