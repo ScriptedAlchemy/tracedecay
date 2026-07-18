@@ -54,6 +54,11 @@ Renderers cannot query stores, infer missing state, mutate results, or traverse 
 - CLI defaults to deterministic human output. `--json` emits canonical JSON only.
 - JSON is never embedded as an escaped string inside another JSON result.
 - Empty, partial, unavailable, denied, stale, redacted, ambiguous, pending, and failed remain distinct.
+- Canonical problems preserve semantic code, layer, terminality, retryability
+  and retry scope, legal next actions, cancellation stage, saturation, stream
+  gap, resume expiry, provider availability, and partial coverage across
+  protocol-native mappings. A transport error never substitutes for one of
+  these application states.
 - Collections use stable ordering and an opaque cursor. Truncation either returns a resumable anchor or a typed budget error.
 - Human output keeps identifiers, coverage, blockers, and next actions needed to continue safely.
 - Terminal controls, Markdown, paths, labels, and errors pass the shared output-safety boundary.
@@ -218,6 +223,19 @@ explicit `Unsupported`, `Absent`, `Stale`, `Cancelled`, `TimedOut`, `Failed`,
 or `Partial` outcome. These are PR17 semantic surface families, not frozen
 PR18 command, MCP-tool, route, or SDK method names.
 
+Every opaque `TaskId`/`WorkItemId` remains the durable authorized retrieval
+root across compact lookup/context, current/as-of/evolution/forensic history,
+thread/attempt traversal, impact and affected tests, handoff, escalation,
+governed experience recall, proposal review, and runtime control. Oversized
+output uses reversible response handles, but durable identity remains the
+TaskId/finding ID plus Plan 13 anchors. Summaries and handles never replace
+exact evidence or widen access.
+
+Task, proposal-decision, and runtime-control operations preserve distinct
+capability/effect classes. No binding introduces a generic task DSL,
+adapter-local query kernel, status setter, scheduler, Doctor probe, or hidden
+alias.
+
 Pinned Hermes CLI/dashboard evidence at `c48d53413aa2c`
 (`hermes_cli/kanban.py`, `plugins/kanban/dashboard/plugin_api.py`) establishes
 the minimum practical Work UX, not names to copy. CLI/MCP/HTTP must offer
@@ -329,6 +347,16 @@ Parity is verified from public behavior, not from a generated inventory:
     watch/statistics, skills/hints, artifacts, terminal receipt, cancellation,
     and restart recovery. Fixtures compare semantic results rather than copying
     Hermes command names, status writes, profile routing, or free-form fields.
+18. prove metamorphic parity: concatenated pages equal the bounded full result;
+    resume equals the uninterrupted suffix; cancellation suppresses later
+    publication while reporting its true execution stage; redaction is
+    monotonic; and TaskId summary expansion returns exact anchored evidence
+    without granting authority.
+19. compare canonical semantic identity, scope/generation, data/receipt,
+    ordering/continuation, coverage/freshness/redaction, problem code, legal
+    action, cancellation stage, and terminal state across CLI Markdown, MCP
+    content, HTTP JSON, and LSP JSON-RPC. Byte-identical envelopes and pixels
+    are not required.
 
 ## PR12 core and PR17 extension deliverables
 

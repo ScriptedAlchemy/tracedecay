@@ -62,12 +62,36 @@ The daemon remains the only process that reads or writes product storage.
    - Additive changes preserve compatibility within a major version.
    - Breaking changes require a new major protocol version and an actionable negotiation error.
    - Unknown fields are handled consistently and documented per protocol version.
+   - Compatibility policy classifies required/optional fields, defaults,
+     nullability, open objects, unions/enums, numeric narrowing, identifiers,
+     errors, stream events, cursors, operation rename/removal, retry class, and
+     capability removal. Unknown enum, error, and event behavior is explicit;
+     retired identifiers and codes remain reserved.
    - The LSP bridge session negotiates protocol, catalog, project, and client
      revisions before document content is accepted, and preserves ordered
      bidirectional events, cancellation, backpressure, and bounded terminal
      errors without exposing arbitrary daemon invocation.
 
-5. Usable SDKs
+5. Executable conformance and retry contracts
+   - Structural conformance covers schemas and generated types. Semantic
+     conformance covers operation identity, authorization, redaction, coverage,
+     legal actions, and receipts. Lifecycle conformance covers negotiation,
+     ordering, progress, backpressure, cancellation, reconnect/resume,
+     saturation, and exactly one canonical terminal outcome.
+   - Each operation declares `Never`, `SafeRead`, `IdempotentWithKey`, or
+     `ResumeOnly`. SDKs auto-retry only the declared classes under bounded
+     policy and retain durable idempotency receipts; non-idempotent mutations
+     are never silently retried.
+   - Cancellation exposes typed requested, accepted, before-start,
+     publication-suppressed, upstream-acknowledged, execution-stopped,
+     too-late/committed, unsupported, failed, and terminal outcomes. It never
+     promises rollback of committed effects or exactly-once transport
+     delivery.
+   - Effective capability is the intersection of client support, gateway
+     guarantee, upstream capability, admitted project/language,
+     policy/configuration, and active profile, all bound to explicit revisions.
+
+6. Usable SDKs
    - Rust, TypeScript, and Python expose typed sync or async APIs idiomatic to each ecosystem.
    - Pagination, streaming, cancellation, timeouts, and structured errors are first-class.
    - SDKs provide connection setup and operation calls, not independent business logic.
@@ -84,7 +108,7 @@ The daemon remains the only process that reads or writes product storage.
      scheduling, or completion; accepts shell strings/raw environment; or
      executes Claude Code/Codex locally.
 
-6. Safe output
+7. Safe output
    - Privacy enforcement runs before every public response, stream item, log, and diagnostic payload.
    - Credential material remains opaque and is never returned by read APIs.
 
@@ -105,6 +129,14 @@ The daemon remains the only process that reads or writes product storage.
   task/work and auxiliary-provider operations. PR17 semantic concepts and
   internal IDs do not freeze public method/tool/route names before this gate.
 - The three SDK suites pass the same contract fixtures against one daemon build.
+- Release gates run current and oldest-supported client/daemon combinations,
+  schema-derived positive and negative cases, hand-authored stateful lifecycle
+  fixtures, generated-package smoke tests, and executable Rust, TypeScript, and
+  Python documentation examples. Schema generation or compilation alone is
+  not semantic conformance.
+- Generated low-level bindings and reviewed idiomatic façades share the same
+  contract fixtures; façades adapt paging, streams, cancellation, and errors
+  but contain no product decisions or generic invocation tunnel.
 - Cancellation, reconnect, idempotent retry, pagination, and streaming tests pass.
 - LSP bridge contract tests cover negotiation, ordered bidirectional delivery,
   cancellation, backpressure, reconnect, stale revisions, and authentication

@@ -19,13 +19,19 @@ Every public surface resolves stable capability IDs to the same application use 
 ## Owns
 
 - Stable CapabilityId, UseCaseId, and BindingId values.
-- Small immutable definitions for capability identity, user-facing description, input/output schema references, effect class, scope requirements, privacy class, availability, deprecation, and surface binding.
+- Small immutable definitions for capability identity, user-facing description,
+  input/output schema references, effect class, scope requirements, privacy
+  class, availability, deprecation, surface binding, protocol revision range,
+  required negotiated features, result-schema revision, lifecycle class
+  (`stateless | connection_stateful | session_stateful | resumable`),
+  streaming support, cancellation semantics, and deprecation window.
 - PR17 auxiliary-provider descriptors for backend/executable/protocol identity
   and version, model/reasoning selectors, typed argv/stdin and structured-event
   support, sandbox/approval/environment/egress classes, tool and artifact
   capabilities, deadline/cancellation/kill behavior, progress/heartbeat,
   resume/reconnect, and explicit fallback eligibility.
-- Explicit surface profiles, including bounded MCP profiles and their capability ceilings.
+- Explicit surface profiles, including bounded MCP profiles whose ceilings are
+  reviewed per profile/model and never treated as universal tool-count truth.
 - Typed standard-LSP bindings from navigation and diagnostic methods to the
   existing code and diagnostic capabilities and application handlers defined
   for [35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
@@ -64,6 +70,10 @@ Every public surface resolves stable capability IDs to the same application use 
   Similar presentation does not merge their authorization or effects.
 - **PR11 — contributions:** register catalog records beside their owning application feature, then assemble one immutable snapshot at composition. No central file duplicates every request/response definition.
 - **PR11 — validation:** reject duplicate IDs/bindings, missing handlers, incompatible schema references, invalid scope/effect/privacy combinations, profile overflow, and dependency cycles.
+- **PR11 — agent-facing contracts:** treat names, descriptions, and examples as
+  versioned routing contract fields. Validate same-profile discriminability
+  with positive, negative, ambiguous, and insufficient-capability fixtures;
+  no paper-derived fixed 10/20/30-tool ceiling becomes product policy.
 - **PR11 — policy:** expose read-only capability metadata to policy routing. Availability and effect metadata inform a decision but never execute it.
 - **PR11 — daemon:** bind each executable capability to the single tracedecayd/application authority. Catalog consumers never open a database or bypass application authorization.
 - **PR11 — profiles:** define explicit capability sets and hard ceilings for default, compact, administrative, and host-limited surfaces. Absence is explicit, not a hidden fallback.
@@ -125,6 +135,13 @@ Every public surface resolves stable capability IDs to the same application use 
   CLI descriptor, and fallback eligibility never means automatic fallback.
   Catalog IDs are internal PR17 capability identity and do not freeze PR18
   public SDK operation names.
+- **PR17 — TaskId retrieval:** keep distinct typed capabilities for TaskId
+  lookup, compact context, current/as-of/evolution/forensic history,
+  thread/attempt traversal, impact and affected tests, handoff, proposal
+  review, escalation, governed experience recall, and runtime control. Read,
+  proposal-decision, and runtime-effect grants remain separate; no generic
+  task query DSL, invoke-anything operation, task-local scheduler, or hidden
+  alias is admitted.
 - **PR18 — SDK bindings:** add Rust, TypeScript, and Python SDK BindingIds only
   with the shipped typed methods and conformance fixtures. PR12 may describe
   future SDK availability as unavailable protocol metadata but cannot advertise
@@ -147,6 +164,10 @@ Every public surface resolves stable capability IDs to the same application use 
   capabilities are read-only, proposal decisions are explicit versioned
   commands, and active-executor profiles cannot grade themselves or accept a
   split/merge/resize/re-route proposal.
+- Task retrieval tests prove compact summaries expand losslessly through
+  Plan 13 anchors, authorization is rechecked on every page/hydration, and no
+  catalog binding introduces task, query, scheduling, policy, or Doctor
+  semantics beside its owning plan.
 - PR17 provider-descriptor fixtures cover missing executables, version drift,
   unsupported model/reasoning/sandbox/event/resume capabilities, explicit
   app-server-versus-CLI fallback eligibility, native Claude Code selection,

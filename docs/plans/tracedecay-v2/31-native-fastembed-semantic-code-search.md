@@ -37,11 +37,13 @@ unsupported content has an explicit classification.
 
 A vector-generation identity includes the ordered eligible-document manifest,
 model/tokenizer/runtime manifest, dimension, metric, normalization, chunker,
-privacy domain/key epoch, and source watermark. Builds checkpoint in bounded
-batches. Partial or mixed generations are never queryable. Publication verifies
-membership, dimensions, finite values, digests, and watermark before one atomic
-pointer swap; deletion creates a tombstone and unchanged inputs do no embedding
-work.
+privacy domain/key epoch, and source watermark. The manifest also pins query
+and document instructions/prefixes, pooling, truncation side and length,
+precision/quantization, runtime/backend/thread/device identity, and search or
+ANN parameters when present. Builds checkpoint in bounded batches. Partial or
+mixed generations are never queryable. Publication verifies membership,
+dimensions, finite values, digests, and watermark before one atomic pointer
+swap; deletion creates a tombstone and unchanged inputs do no embedding work.
 
 ## Model and offline lifecycle
 
@@ -62,9 +64,17 @@ silently selecting another model.
 
 Search resolves exact scope and frozen generation first, runs lexical/graph
 channels first, then adds compatible semantic candidates. Fusion is stable and
-explainable; exact hits keep their tier. Optional reranking is bounded to a
-configured top-N candidate set and preserves the pre-rerank list byte-for-byte
-when unavailable. Strict semantic requests return a typed unavailable result.
+explainable; exact lexical identifiers, paths, quoted phrases, errors, tool
+names, and configuration keys keep a non-demotable tier. The first production
+semantic baseline is deterministic exact flat-vector search unless measured
+current/10x evidence shows it violates a reviewed resource budget. Optional
+reranking is bounded to a configured top-N candidate set, is admitted only
+after candidate-controlled gain with no protected-stratum regression, and
+preserves the pre-rerank list byte-for-byte when unavailable. Raw similarity,
+logits, margins, or fused scores are not confidence; calibrated abstention
+requires a versioned cohort/generation-bound profile and reports invalid or
+shifted calibration explicitly. Strict semantic requests return a typed
+unavailable result.
 
 `code.redundancy` reuses the same active generation. It canonicalizes pairs,
 removes self/overlapping chunks, and reports `exact_clone`,
@@ -86,6 +96,13 @@ regression, demonstrated semantic gain, and declared current/10x resource
 budgets. Sensitive or ineligible bytes never enter documents, artifacts,
 metrics, explanations, or model-assisted routes.
 
+Late interaction, quantization, and specialized ANN remain measured candidate
+profiles, not PR10 defaults. ANN is admitted only when it beats exact search's
+reviewed resource budget while meeting exact-oracle average, tail, minimum,
+and zero-recall-query gates under immutable-generation compatibility. No HNSW,
+DiskANN, ScaNN, vector database, precision, or quantization choice is
+mandatory. Public benchmark rank cannot select a production profile.
+
 Legacy vectors are never trusted or republished. Migration records
 `rebuild_from_retained_eligible_code | drop_with_receipt | quarantine_unreadable`
 and proves every active generation was rebuilt from canonical documents.
@@ -97,4 +114,6 @@ fusion/reranking/redundancy, artifact/offline lifecycle, configuration,
 status/Doctor, API/CLI/MCP/dashboard parity, corpus/resource/privacy gates,
 fault recovery, and rebuild-only migration pass direct tests. No separate
 semantic endpoint, vector database, browser inference runtime, or model-specific
-transport is introduced.
+transport is introduced. Queries never silently substitute a model/revision,
+download at query time, cascade to an unmeasured representation, or treat
+semantic similarity as identity, impact, lineage, or equivalence.

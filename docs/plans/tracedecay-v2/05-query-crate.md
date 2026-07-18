@@ -44,6 +44,14 @@ Every product surface can run the same bounded query use case and receive determ
 ## Owns
 
 - Shared query primitives: explicit scope, page request, opaque cursor, cost budget, cancellation, frozen watermark, coverage, timing, and safe explanation metadata.
+- Shared renderer- and transport-neutral `MeasurementEnvelope` value
+  primitives: descriptor and revision, entity occurrence, raw value and unit,
+  numerator and denominator, eligible/covered/unknown/excluded counts,
+  coverage state, uncertainty kind, cohort identity, optional normalization,
+  temporal baseline and delta, provenance anchors, explanation components, and
+  availability state. Plan 26 owns descriptor, cohort, calibration, and label
+  semantics; these shared values define neither a universal health score nor a
+  universal query AST.
 - Planning against application-resolved scope and store-advertised read capabilities.
 - Execution coordination, deterministic merge, and stable tie-breaking; bounded
   shard selection activates with PR15 multi-root execution (Plan 16).
@@ -107,10 +115,17 @@ Every product surface can run the same bounded query use case and receive determ
   single-root frozen watermarks and authenticated cursors, cost budgets, and
   reusable query execution for the temporal kernel and its compatibility
   bindings.
-- **PR15 — multi-root execution (Plan 16):** introduce frozen multi-root
-  watermarks, authenticated distributed cursors, shard selection/merge,
-  canonical multi-root composition, and federation for retrieval slices that
-  require cross-root scope.
+- **PR15 — multi-root execution (Plan 16):** consume Plan 16's
+  `ResolvedScopeSet`, then execute source selection, bounded per-shard
+  retrieval, duplicate collapse, fusion, hydration, and coverage as separate
+  phases. Capture a repeatable per-shard snapshot/watermark vector.
+  Incomparable shard scores use a versioned deterministic rank-based fallback;
+  raw scores are compared only under an evaluated compatible fusion profile.
+  Distributed cursors bind the query digest, authorized scope-set digest,
+  sorted shard identities, per-shard snapshot/index generation and
+  continuation/exhaustion state, fusion/ranking/dedup revisions, last
+  total-order key, authorization epoch, schema/catalog revision, expiry, and a
+  policy-safe coverage summary.
 - **PR7 — facts/provenance:** add typed fact, assertion, evidence, contradiction, supersession, trust, and as-of requests. Preserve source and privacy-domain identity through merge and hydration.
 - **PR7 — immutable Git evidence:** anchors may identify retained commit, tree,
   blob, index, and captured-worktree evidence. Mutable ref names and ambient
@@ -125,7 +140,20 @@ Every product surface can run the same bounded query use case and receive determ
   PR8 temporal kernel and this slice; same-host compile-graph measurement).
   Either outcome, PR9 code lands against the same typed-request/port contract
   the PR8 kernel modules already enforce — location changes, contracts do not.
-- **PR9 — lexical code:** add exact identifier, phrase, token, field, bounded fuzzy, relation, path, impact, affected-test, facet, and timeline requests. Exact identifiers precede approximate candidates. Impact and affected-test requests may merge only explicit typed reference/dispatch evidence inputs alongside graph, Git, and test inputs; that evidence never proves a test executed or a change was delivered.
+- **PR9 — lexical code:** add exact identifier, phrase, token, field, bounded
+  fuzzy, relation, path, impact, affected-test, facet, and timeline requests.
+  Preserve a non-demotable exact tier for identifiers, paths, quoted phrases,
+  error text, tool names, and configuration keys. Index whole identifiers and
+  language-profiled subtokens separately. Return each channel's raw score,
+  rank, normalized feature, fusion contribution, pre/post-rerank rank, and
+  calibration identity where applicable; none is a probability unless a
+  valid, cohort-bound calibrator says so. Impact and affected-test requests may
+  merge only explicit typed reference/dispatch evidence inputs alongside
+  graph, Git, and test inputs; graph paths preserve edge authority and their
+  weakest coverage state. Affected tests are typed as
+  `conservative_dependency_candidates`, `observed_coverage_candidates`,
+  `predictive_ranked_candidates`, or `unknown_unsupported`; no mode proves a
+  test executed, a change was delivered, or universal safety.
 - **PR9 — Git queries:** add typed working-tree, staged, and arbitrary revision-
   range diff requests plus status, history, blame, and `HunkRef` resolution.
   Native Git remains authoritative for objects, revision traversal, status,
@@ -167,8 +195,12 @@ Every product surface can run the same bounded query use case and receive determ
 - **PR17 — task/work reuse:** accept Plan 24-owned typed request and projection
   descriptors through narrow consumer-owned ports, then provide only shared
   scope resolution inputs, budgets, cancellation, pagination, watermarks,
-  deterministic merge, coverage, and explanations. Do not add `TaskQuery`,
-  board filter DSL, task entity semantics, or a universal cross-domain AST.
+  deterministic merge, coverage, and explanations. Execute Plan 24-owned task
+  lookup, context, history, thread, impact, attempt, and evidence requests
+  through those primitives. `TaskId` is a stable authorized retrieval root;
+  Plan 05 neither defines task identity nor copies task evidence into a
+  query-owned store. Do not add `TaskQuery`, board filter DSL, task entity
+  semantics, or a universal cross-domain AST.
 
 ## Acceptance
 
@@ -194,6 +226,9 @@ Every product surface can run the same bounded query use case and receive determ
 - PR17 contract tests prove Plan 24 requests retain identical selected entity
   IDs, versions, scope, watermarks, coverage, and ordering when run through
   shared execution primitives, while no task/board/request semantics enter
-  Plan 05.
+  Plan 05. Counterexamples prove unknown coverage never becomes zero or
+  healthy, exact tiers are never demoted, cursor replay cannot change
+  cohort/shard/profile identity, and task summaries cannot replace exact Plan
+  13 anchors.
 - Benchmarks record corpus and watermark with p50/p95, candidate counts, allocations, peak RSS, shard opens, and quality deltas. No ranking change ships without direct held-out evidence and worst-stratum checks.
 - Architecture tests reject storage, transport, UI, policy, task-executor, and model-runtime dependencies from tracedecay-query, plus any LSP-private query engine or fallback.

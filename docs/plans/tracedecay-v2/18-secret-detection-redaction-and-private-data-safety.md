@@ -61,7 +61,14 @@ durable or external sink enforces the same policy.
    - Combine exact credential formats, entropy and context signals, configured private patterns,
      structured sensitive keys, and known-value fingerprints.
    - Bound scanning cost and payload size without silently accepting an unscanned remainder.
-   - Findings include detector, location, confidence, and remediation class, never the secret value.
+   - Findings include detector origin/revision, location, remediation class,
+     evidence anchors, scanned coverage, and an optional typed assessment:
+     `ordinal_rank`, `heuristic_score`, `calibrated_probability`, or
+     `calibrated_interval`. Rank names its comparison set and deterministic
+     components; a heuristic names its versioned scale and never renders as a
+     probability. Probability or interval output requires a valid held-out
+     calibration profile naming detector cohort, horizon, support, error, and
+     drift validity. No finding or assessment contains the secret value.
 
 5. Audit safely
    - Record policy version, source class, detector, action, timestamps, and opaque record identifiers.
@@ -71,7 +78,19 @@ durable or external sink enforces the same policy.
    - Scan legacy records and their derivatives.
    - Quarantine unsafe records before they can be served.
    - Redact, delete, or replace sources according to policy, then rebuild affected derivatives.
-   - Resume safely after interruption and report bounded progress.
+   - Maintain a deletion/quarantine/correction overlay whose lineage is applied
+     before migrated, restored, cached, indexed, or derived data can serve.
+     Restore and archive recovery replay every newer disposition and rebuild
+     affected derivatives; provenance never overrides erasure.
+   - Preserve opaque source and derivative identity, transformation/privacy
+     revisions, receipts, corrections, tombstones, quarantine, and derivative
+     ownership. Do not retain raw sensitive payload merely to make a migration
+     reversible.
+   - Resume safely after interruption by consuming
+     [Plan 12](12-root-compatibility-migration.md)'s
+     destination-committed checkpoints bound to the privacy revision, and
+     report bounded progress. A missing or incompatible overlay/checkpoint
+     fails closed.
 
 7. Expose operational state
    - Doctor detects disabled protection, stale policy markers, unsafe legacy rows, failed remediation,
@@ -90,5 +109,16 @@ durable or external sink enforces the same policy.
   only authorized analyzers, and cannot reach remote analyzers without the
   required capability and disclosure.
 - Remediation tests quarantine unsafe legacy data and rebuild clean derivatives after repair.
+- Migration, backup, and restore fixtures prove newer deletion, quarantine,
+  correction, and policy state is replayed before serving and that raw
+  sensitive payload is not retained for reversibility.
+- Direct detector-contract tests reject findings with a numeric assessment but
+  no origin, score kind, scale/calibration revision, evidence anchors, or
+  scanned coverage. Checked-in positive/negative evaluation corpora report
+  precision, recall, false-positive/false-negative counts, and coverage by
+  detector/source cohort; held-out calibration tests report probability and
+  interval error/support and force stale, shifted, or under-supported
+  calibration to heuristic output or abstention without weakening the sink
+  firewall.
 - Doctor and UI expose actionable state without reproducing sensitive values.
 - Performance limits fail visibly and safely instead of skipping protection.

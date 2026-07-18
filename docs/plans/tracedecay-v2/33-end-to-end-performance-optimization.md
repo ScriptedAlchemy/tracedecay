@@ -27,11 +27,16 @@ regression discovered by an earlier slice.
 
 ## Measurement contract
 
-- Before tuning or publishing results, review and freeze a versioned benchmark
-  workload manifest per path containing the baseline build and commit, corpus and generation inputs,
-  platform/hardware class, cold/warm preparation and warmup count, measured
-  repetitions, variance method, concurrency/load schedule, and per-path
-  regression thresholds. Changing it creates a new named baseline comparison.
+- Before tuning or publishing results, review and freeze a concise versioned
+  measurement record per path containing the supported decision and estimand,
+  population/unit, baseline and candidate builds, corpus/generation and
+  environment/oracle digests, platform/hardware class, cache preparation,
+  arrival model (`open` or `closed` loop), distribution and bursts, scheduled
+  arrival timestamp, timeout/retry/think-time policy, harness/clock revision,
+  sample count, balanced/randomized run order, A/A noise floor, uncertainty
+  method, stopping/outlier rule, named strata/support, and practical regression
+  margin. Changing these inputs creates a new named comparison; this remains an
+  artifact in existing observability, not a benchmark service or leaderboard.
 - Pin workload, corpus/generation, schema, configuration, platform, hardware
   class, cold/warm state, concurrency, and coverage for every comparison.
 - Report p50/p95/p99 latency and throughput for ingest, sync/catch-up,
@@ -69,17 +74,26 @@ regression discovered by an earlier slice.
   scope, feature/evidence/cohort/censoring coverage, exact executable/protocol/
   model-version cardinality, concurrent executors, candidate/proposal count,
   stream/artifact volume and coverage, and view/result cardinality.
-- Report peak and steady memory, CPU time/utilization, database and generation
-  bytes, temporary space, bytes read/written, and write amplification.
+- Report peak and steady memory, separating anonymous/file-backed RSS, live
+  heap, allocation churn, retained/fragmented bytes, SQLite cache, result/
+  queue/generation bytes, and profiler overhead where supported, plus CPU
+  time/utilization, database and generation bytes, temporary space, bytes
+  read/written, and write amplification.
 - Separate queue, lock, I/O, parse, projection, model, merge, hydration, and
   rendering time where the production trace can attribute them safely.
-- Compare baseline and candidate with repeated runs and visible variance.
-  Missing, partial, sampled, capped, or noisy evidence cannot claim a win.
+- Compare baseline and candidate with paired relative effect sizes,
+  confidence/credible intervals, A/A noise floors, and predeclared practical
+  margins. Randomize or interleave run order where valid and retain raw run
+  aggregates. A p-value or point estimate alone never gates promotion.
+  Missing, partial, sampled, capped, survivor-biased, or noisy evidence cannot
+  claim a win.
 - Developer-build workloads use stock Cargo commands with an explicit package,
-  target, feature set, test target, toolchain, and source change. Record clean,
-  warm incremental, and exact no-op cases where applicable, including wall
-  time, CPU time/utilization, peak memory, rebuilt units, codegen/link time,
-  build-script execution, and cache outcome when the toolchain exposes them.
+  target, feature set, test target, toolchain, and fixed edit class: clean,
+  exact no-op, private leaf/body, public signature/type, macro/proc-macro
+  input, build-script/generated asset, feature/dependency/manifest, or
+  integration-test edit. Record wall time, CPU time/utilization, peak memory,
+  rebuilt/reused units, critical path, codegen/link time, build-script
+  execution, and cache outcome when the toolchain exposes them.
 - Compare developer-build results on the same host and toolchain with equivalent
   source and build state. Local wrappers, target locations, concurrent-lane
   allocation, and Rust Analyzer processes are environmental context, not
@@ -114,6 +128,16 @@ regression discovered by an earlier slice.
   and vectors justified by versioned dependency evidence.
 - Reuse compatible immutable generations and caches by complete content,
   schema, grammar/model, privacy, scope, and configuration identity.
+- Distinguish OS page cache, SQLite page cache/mmap, prepared-statement/
+  connection cache, immutable application/generation cache, and model/vector
+  cache. “Cold” and “warm” are invalid labels without the exact per-layer
+  preparation protocol.
+- Every maintained view defines signed insert, update, delete, and retraction
+  deltas plus watermark identity. Compare full, incremental, and batched
+  recomputation across change fraction, fan-out, read/write ratio, state bytes,
+  and freshness. Mixed deltas must equal clean recomputation; incompatible or
+  over-break-even frontiers use explicit bounded recomputation rather than a
+  new general incremental-view engine.
 - Bound cache memory and disk, define admission/eviction and idle lifecycle,
   delete superseded generations only after authority and recovery checks, and
   prevent rebuild storms or mixed-generation reads.
@@ -160,6 +184,12 @@ General discipline for every SQL surface, not only the search path:
 - Preserve deterministic order, exact-match tiers, temporal truth, stable
   cursors, coverage, explanations, and lexical fallback byte-for-byte where
   their owning contracts require it.
+- Cache raw extraction separately from cohort normalization and optional
+  calibrated outcome models; invalidate by source, edge, descriptor, cohort,
+  and model digest. Exact vector scan remains the oracle and a valid production
+  candidate; ANN is admitted only after a measured break-even and must report
+  average/tail/minimum recall and zero-recall queries. Expensive community or
+  centrality views are asynchronous with explicit stale/partial state.
 - Bound cross-project fan-out, graph traversal, reranking, result buffering,
   and per-client concurrency with explicit partial or unavailable coverage.
 - Incremental task-readiness, critical-path, history, and workload projections
@@ -233,6 +263,10 @@ General discipline for every SQL surface, not only the search path:
 - Do not solve repository build cost by pausing analyzers, prescribing a local
   cache wrapper, hard-coding machine-specific target locations, reproducing the
   local shim's lane policy, or serializing independent developer operations.
+- Learned indexes, allocator changes, crate splits, and concurrency policies
+  from individual papers remain experiments. Promotion requires same-host,
+  workload-stratified evidence plus correctness and recovery parity; no paper
+  headline or benchmark rank selects a production mechanism.
 
 ## Benchmark and regression gate
 
@@ -245,6 +279,10 @@ General discipline for every SQL surface, not only the search path:
 - Include crash/restart, daemon reconnect, WAL/checkpoint interruption,
   projector replay, generation publication, cache loss, cancellation, and
   overload while load is active.
+- Open-loop overload fixtures measure latency from scheduled arrival and report
+  offered, admitted, started, completed, cancelled, timed-out, shed, and
+  retried counts, queue age, saturation, recovery, and survivor bias so the
+  harness cannot hide coordinated omission.
 - Include large multi-repository task DAGs, deep/fan-out/fan-in dependencies,
   long attempt history, overlapping saved projections, stale lease receipts,
   route-policy version changes, sparse/shifted model cohorts, bounded
@@ -262,7 +300,8 @@ General discipline for every SQL surface, not only the search path:
   telemetry database, benchmark service, or performance-only product path.
 - Gate material regressions in p95/p99 latency, throughput, memory, CPU, disk,
   write amplification, no-op work, and startup/recovery time using reviewed
-  workload-specific thresholds rather than one universal score.
+  workload-specific practical margins and intervals rather than one universal
+  score, default threshold, or transferred paper result.
 - Gate material regressions in representative same-host clean, warm
   incremental, no-op, and focused-test compilation. Reuse a matching PR7–PR19
   baseline where one exists and establish a PR20 baseline before optimization

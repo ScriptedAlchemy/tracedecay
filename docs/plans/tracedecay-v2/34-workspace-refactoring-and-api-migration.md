@@ -44,6 +44,11 @@ It does not expose one symbol-aware apply operation that carries a preview acros
 - The tools do not edit generated output, macro expansions without source spans, or unresolved text by guessing.
 - The tools do not advertise a language or symbol kind as supported until its resolver and edit adapter pass the corresponding fixtures.
 - The migration workflow is not a general-purpose patch language, autonomous rewrite framework, or replacement for compiler diagnostics.
+- Source/API migration does not migrate database rows or schemas, run dual
+  writes, shadow reads, lazy read migration, cutover, or rollback protocols, or
+  authorize protected persisted-value edits. Those changes require the
+  separately owned storage migration contract in
+  [Plan 12](12-root-compatibility-migration.md).
 
 ## Ownership
 
@@ -139,6 +144,13 @@ A migration plan supports only explicit operation kinds:
 - `remove_delivery_name`: remove delivery-history terminology, including PR-numbered source identifiers, from production APIs while leaving protected persisted values unchanged; and
 - `assert_stable_value`: prove that selected persisted, wire, schema, or hash-domain values remain byte-for-byte unchanged.
 
+Every compatibility alias or wrapper also declares
+`retention: stable_public_contract | temporary`, its external consumer and
+owner, deprecation policy, and, for a temporary surface, the exact deletion
+gate and latest delivery slice. A missing disposition blocks apply; this
+manifest is review evidence for PR19 cleanup, not a permanent generated
+inventory.
+
 Operations declare dependencies. For example, a compatibility wrapper is planned after the new primary function exists, and production call sites are moved before the migration verifies that only approved compatibility boundaries still reference the old name.
 
 The provider-neutral promotion use case must support one plan containing the related request, outcome, error, function, projection, session-message projection, and projector-version identifier changes. The plan distinguishes:
@@ -225,6 +237,11 @@ The default protected categories are:
 - protocol method names and externally stable command/tool names;
 - snapshots or golden data that encode a stable external contract; and
 - arbitrary string or byte literals not proven to be source-symbol references.
+
+Migration IDs, schema epochs, table/column/index names, serialized
+discriminators, deletion-lineage identifiers, and hash domains remain
+byte-identical unless Plan 12's separately owned storage migration explicitly
+changes and verifies them.
 
 Matching text in these categories is reported but not edited. A caller that intentionally changes one must select exact site identifiers, expected old bytes, and the protected category, and must set an explicit stable-value-change acknowledgement. Such a change is shown as a separate migration operation and requires its own verification gate. Broad `replace all strings` behavior is not accepted.
 
@@ -333,6 +350,8 @@ The Rust fixture corpus must cover:
 - supported macro definitions/invocations plus an unsupported macro case with an explicit reason;
 - generated and unlinked files;
 - compatibility wrapper generation and preservation;
+- stable-public-contract versus temporary compatibility dispositions, including
+  a blocked missing disposition and a satisfied temporary deletion gate;
 - family migration with operation dependencies;
 - selected error/documentation terminology updates;
 - removal of a PR-numbered or other delivery-history production identifier;

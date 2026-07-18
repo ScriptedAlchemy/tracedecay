@@ -102,6 +102,25 @@ optionally compose already-shipped read-only operations in workflows through
 never enables a GitHub write path. LCM and summary payloads remain
 session-narrative authority only with no write-side GitHub path.
 
+## TaskId-rooted reuse without task authority
+
+At PR17, an authorized
+[Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md) `TaskId`
+may select task-linked session, Thread, Turn, message, agent, and tool narrative
+through this sole temporal kernel in `current`, `as_of`, `evolution`, or
+`forensic` mode. Plan 24 remains task identity and graph authority. GitHub, CI,
+diagnostic, Git, code-generation, review, artifact, and runtime evidence
+resolves through Plan 13 anchors and its owning stores; no task evidence is
+copied into LCM.
+
+The PR8 kernel stays task-agnostic. PR17 application composition supplies the
+authorized selector and reuses PR8's scope, temporal, hydration, cursor,
+coverage, and expansion contracts without changing PR8 storage or sequencing.
+A handoff-oriented assembly profile returns coverage and unresolved gaps first,
+compact task-linked narrative second, and exact chronology only by authorized
+expansion. Summaries accelerate retrieval but cannot replace raw messages or
+external anchored evidence.
+
 ## Side-effect-free reads and freshness
 
 Search, LCM expansion, hydration, and replay never ingest provider history, repair a store, open a writable fallback, or advance a cursor. They report the watermark and truthful fresh/stale/partial/unavailable coverage they observed.
@@ -129,6 +148,13 @@ Compact context contains only the selected Turns, exact supporting evidence, sum
 - stable pagination rejects changed-watermark cursors;
 - deletion, redaction, retention, authorization, and prompt-injection fixtures fail closed;
 - compact output stays within its budget and preserves anchors and coverage;
+- authorization is equivalent across search, direct anchor lookup, expansion,
+  hydration, and cursor continuation;
+- contradiction admission occurs before near-duplicate rejection;
+- source discovery, successor rediscovery, correction/retirement, and harmful
+  replay remain distinct outcomes;
+- TaskId/handoff context stays bounded and losslessly expands to raw messages
+  and external Plan 13 anchors without copying task evidence into LCM;
 - GitHub, CI, diagnostic, and Git evidence referenced from session context resolve only
   through Plan 13 anchors, never through LCM payloads, summary nodes, or `rh_` handles;
 - Plan 37 session-context reuse exercises this kernel without a second retrieval engine.

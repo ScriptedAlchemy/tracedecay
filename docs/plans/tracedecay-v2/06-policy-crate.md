@@ -27,6 +27,10 @@ runtime performs its effects.
   gateway in [35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 - Pure Plan 24 task sizing/decomposition and executor/provider/model/effort
   recommendations, including bounded exploration and deterministic fallback.
+- Immutable capability-grant input identity: issuer, subject, exact scope,
+  allowed typed operations, sinks and disclosure classes, constraints,
+  revision, explicit issue/expiry inputs, and digest. Policy consumes grants
+  but cannot issue, renew, widen, or reinterpret them.
 - Replay comparison over immutable recorded inputs and outputs.
 - One delivery arbiter that resolves eligible guidance by priority, relevance, repetition, cooldown, token budget, and host capability.
 - Deterministic conflict handling when several rules propose incompatible effects.
@@ -49,6 +53,16 @@ runtime performs its effects.
 
 - **PR11 — runtime:** define small evaluator traits/functions over immutable typed inputs. Each evaluator returns a decision, reasons, evidence references, version, config digest, and optional ProposedEffect.
 - **PR11 — determinism:** identical canonical input and evaluator/config versions produce identical output. Time and host state arrive as explicit input fields.
+- **PR11 — grant non-expansion:** every `ProposedEffect` proves it is a subset
+  of the pinned immutable grant. Missing, expired, stale, ambiguous, or
+  expanded authority denies or abstains; any expansion requires a new grant
+  issued outside policy and revalidated by application immediately before the
+  effect.
+- **PR11 — decision trace:** every decision records input digest,
+  evaluator/policy/config/grant revisions, ordered matched and excluded stable
+  reason IDs, evidence and coverage, and exactly one
+  `allow | deny | abstain | not_applicable | indeterminate` disposition.
+  Natural-language explanation only renders this trace and adds no authority.
 - **PR11 — replay:** ExactDeterministic reruns the same implemented evaluator against complete recorded inputs; RecordedResult displays the recorded decision; CurrentBestEffort runs the current evaluator and names every substitution.
 - **PR11 — no VM:** implement all required product rules as reviewed Rust. A custom VM is not part of V2 unless PR11 contains a directly proven requirement, full implementation, direct tests, and a simpler-Rust comparison.
 - **PR11 — hinting:** evaluate candidate eligibility, sensitivity, scope, relevance, repetition, cooldown, prior outcome, and token cost. The delivery arbiter emits at most the host- and budget-allowed set.
@@ -109,6 +123,16 @@ runtime performs its effects.
   uncertainty, coarsen only to an eligible declared parent cohort, select the
   baseline, or abstain. There is no opaque online weight mutation, hidden
   self-training, self-authored reward, or single-proxy optimization.
+- **PR17 — score and route semantics:** every numeric policy output declares
+  `ordinal_rank`, `heuristic_score`, `calibrated_probability`, or
+  `calibrated_interval`; uncalibrated values never render as probabilities.
+  Calibration binds estimator/calibrator, cohort, horizon, support, held-out
+  error, and drift validity, with invalid or shifted calibration abstaining.
+  Route evidence records eligible routes, exclusions, score vector,
+  deterministic baseline, exploration reason and propensity when randomized,
+  override, fallback, delayed horizon, and censoring. Correctness, safety,
+  privacy, latency, cost, and autonomy remain separate outcomes rather than a
+  scalar reward, and no live autonomous contextual bandit ships in PR17.
 
 ## Acceptance
 
@@ -136,3 +160,7 @@ runtime performs its effects.
   selection/override bias, task inflation, self-grading, non-causal
   correlation, confidence/calibration error, and explicit abstention without
   mutating policy or graph/runtime state.
+- Capability fixtures prove non-expansion, expiry and stale-grant rejection,
+  replayable stable reason IDs, heuristic-versus-calibrated rendering, and
+  route-propensity logging without policy-owned scheduling, Doctor logic,
+  graph mutation, provider invocation, or hidden online learning.

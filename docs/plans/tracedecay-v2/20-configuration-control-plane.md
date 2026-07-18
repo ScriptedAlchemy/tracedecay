@@ -4,6 +4,9 @@
 
 - Required V2 control plane.
 - PR11 delivers the typed configuration core and daemon operations.
+- PR13 registers Plan 37's threshold-tier proximity settings and their
+  scale/profile/cohort revisions through this same control plane; the immediate
+  tier remains unconditional.
 - PR14 fully delivers the canonical Doctor/UI integration and observed
   activation state; PR17 extends it with auxiliary-provider configuration
   evidence through the same kernel.
@@ -25,6 +28,9 @@ opaque and operators can see which revision the running system actually uses.
 - Typed setting definitions, defaults, validation, and deprecation metadata.
 - Configuration layers, precedence, provenance, and effective-value resolution.
 - Atomic mutation, revision history, compare-and-set conflict handling, and audit metadata.
+- One `ConfigurationSnapshotId` with separate
+  `effective_behavior_digest` and `resolution_provenance_digest`; this plan
+  alone defines their resolution and identity semantics.
 - Direct activation and observed daemon/component revision state.
 - Opaque credential references and write-only credential mutation surfaces.
 - One typed analyzer configuration source for enablement, executable reference,
@@ -42,10 +48,20 @@ opaque and operators can see which revision the running system actually uses.
   floors, exploration share, latency/token/cost limits, rollback thresholds,
   circuit breakers, privacy/egress ceilings, and deterministic fallback;
   task-shape scales and unknown thresholds; calibrated size bands and
-  interval/confidence floors; decomposition/parallelism and integration-gate
-  limits; independent-review requirements; estimator/cohort/horizon and
-  model-version drift rules; censoring ceilings; live proposal triggers and
-  cooldown/dedupe; and human-override/approval requirements.
+  calibrated-probability/interval validity, support, error, and coverage
+  floors; ordinal-rank and heuristic-scale revisions;
+  decomposition/parallelism and integration-gate limits; independent-review
+  requirements; estimator/cohort/horizon and model-version drift rules;
+  censoring ceilings; live proposal triggers and cooldown/dedupe; and
+  human-override/approval requirements.
+- The sole typed PR13 configuration definitions and resolution rules for
+  [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s
+  threshold-tier proximity risk threshold, versioned risk-score scale and
+  input profile, authorization-scoped eligible-cohort revision, freshness
+  decay, warning expiry, and suppression/dedupe windows. Plan 37 retains
+  proximity inputs, tier, warning, and advisory-delivery semantics; Plan 20
+  alone owns these setting definitions, defaults, precedence, validation,
+  revisions, and effective snapshot.
 - The sole typed PR17 auxiliary-provider configuration definitions and
   resolution rules for executable references; allowed executable/protocol/
   model version ranges; provider/backend enablement and preference; sandbox,
@@ -106,11 +122,29 @@ opaque and operators can see which revision the running system actually uses.
      registration artifacts.
    - Untrusted LSP requests cannot select analyzer commands, arguments,
      initialization options, settings, or environment values.
+   - Every Plan 37 threshold-tier evaluation pins the
+     `ConfigurationSnapshotId`, threshold key revision, risk-scale/input-profile
+     revision, and eligible-cohort revision it consumed. A numeric risk
+     assessment declares `ordinal_rank`, `heuristic_score`,
+     `calibrated_probability`, or `calibrated_interval` plus producer/origin,
+     scale or calibration revision, evidence anchors, and coverage. A heuristic
+     never renders as probability, and probability/interval semantics require
+     held-out cohort, horizon, support, error, and drift-validity metadata.
+     Configuration cannot disable or delay Plan 37's immediate tier or widen
+     authorization/privacy scope.
    - Unknown and deprecated keys produce structured, actionable diagnostics.
 
 2. Deterministic resolution
    - Explicit layers have one documented precedence order.
-   - Reads return the effective value, source layer, revision, and whether a restart is required.
+   - Reads return setting-schema and resolver revisions, effective/redacted
+     value, ordered candidate-layer revisions, winning reason,
+     overridden/defaulted/rejected layers with safe reasons,
+     validation/deprecation state, restart requirement, desired/observed
+     revisions, sensitivity metadata, and the snapshot identity.
+   - `effective_behavior_digest` is the behavior/cache identity;
+     `resolution_provenance_digest` is audit/replay identity. Moving an
+     unchanged value between layers may change provenance without changing
+     behavior; changing the effective winner changes both.
    - Resolution is pure and testable; adapters do not implement precedence independently.
 
 3. Atomic direct activation
@@ -166,6 +200,18 @@ opaque and operators can see which revision the running system actually uses.
      affected future admissions and observed activation state. They never
      rewrite or silently re-route an admitted attempt.
 
+9. Adjudicated settings
+   - Register dashboard renderer selection/capability with a permissive
+     default and optional adapter; no renderer setting selects graph/query
+     semantics.
+   - Register Scout/feedback quiet mode, delivery interval/window limits, and
+     typed phase/boundary timing policy. Paper-reported timing and rate
+     constants are not defaults.
+   - Register PR17 topology-assessment, selective-escalation, minimal-repair,
+     task-recall quarantine/retirement, role-isolation, and bounded-exploration
+     controls. These settings constrain Plan 24 proposals and Plan 32
+     execution; they never create either authority.
+
 ## Acceptance
 
 - PR11 ships the typed registry, deterministic resolver, revisioned store, atomic daemon operations,
@@ -176,6 +222,21 @@ opaque and operators can see which revision the running system actually uses.
 - PR14 ships complete configuration UI, Doctor read-only checks, explicit configuration
   remediation operations, and desired-versus-observed state.
 - Restart-required and failed-activation scenarios preserve the last working runtime configuration.
+- Resolution fixtures are byte-stable across winning, overridden-only,
+  layer-move, invalid/deprecated, and secret-reference-rotation cases; they
+  prove behavior and provenance digests change only for their declared
+  purposes and no cycle/attempt rereads mutable configuration after pinning.
+- PR13 direct proximity-configuration tests prove CLI/API/MCP/UI parity for
+  threshold, scale/input-profile, eligible-cohort, freshness, expiry, and
+  suppression/dedupe settings; byte-stable above/below-threshold evaluation
+  against pinned evidence; immediate-tier emission regardless of threshold;
+  exact configuration/cohort revision capture; stale-revision rejection; and
+  no adapter-local default, mutable reread, or authorization widening.
+- Score-schema validation rejects numeric outputs missing producer/origin,
+  score kind, scale/calibration revision, evidence anchors, or coverage.
+  Held-out evaluation reports ranking quality and probability/interval
+  calibration error, support, coverage, horizon, and drift by eligible cohort;
+  incomparable score kinds or scale revisions cannot be ordered or averaged.
 - PR17 tests prove task/model-routing limits resolve identically across
   surfaces, activation is versioned/audited, unsafe widening is rejected, and
   missing or invalid settings select the declared deterministic fallback.

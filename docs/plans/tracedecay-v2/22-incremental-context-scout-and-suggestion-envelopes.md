@@ -60,8 +60,16 @@ No unsaved source-derived hover, signature, diagnostic, or reference content may
 4. Deterministic policy produces candidates from retrieved evidence.
 5. When configured and eligible, the model gateway may propose or refine a structured candidate using only approved bounded reads.
 6. Policy checks relevance, novelty, authority, privacy, timing, dedupe, token, latency, and cost budgets.
-7. At most one ready envelope is committed for the address and eligibility window.
-8. Delivery claim, revalidation, delivery receipt, and outcome feedback are atomic or idempotent.
+7. A typed interruption/receptivity decision selects
+   `immediate | next_boundary | idle_window | on_request | suppressed` from
+   host-declared phase/boundary, user quiet mode, recent delivery interval,
+   unresolved prior interaction, capability state, urgency, expiry, and
+   authorized content-free activity only. A model never decides receptivity;
+   missing evidence suppresses unsolicited delivery but not an explicit
+   request. Exact windows, rates, and timing are versioned Plan 20
+   configuration validated on TraceDecay evidence, not paper constants.
+8. At most one ready envelope is committed for the address and eligibility window.
+9. Delivery claim, revalidation, delivery receipt, and outcome feedback are atomic or idempotent.
 
 ## Silence and dedupe
 
@@ -77,9 +85,24 @@ Tests cover configured success, disabled mode, unavailable capability, timeout, 
 
 ## Product surface
 
-Expose concise status, recent runs, pending/delivered/suppressed envelopes, explanation, feedback, pause/resume, cancellation, and budget health through existing typed application surfaces. No approval queue, item apply/reject flow, Orchestration Lab, task board, or separate evaluation product is created.
+Expose concise status, recent runs, pending/delivered/suppressed envelopes,
+explanation, feedback, pause/resume, cancellation, and budget state through
+existing typed application surfaces. No approval queue, item apply/reject
+flow, Orchestration Lab, task board, or separate evaluation product is created.
 
-PR 13 emits typed Scout and host finding and conformance state only. The unqualified Doctor kernel, UI, dashboard views, and remediation are owned by PR 14 in [Plan 11](11-dashboard-frontend.md); PR 13 does not own Doctor presentation or repair orchestration.
+Outcome state distinguishes attempted, delayed, displayed, expanded,
+explicitly accepted, explicitly rejected, dismissed, expired unseen,
+corrected, and unknown. Display, temporal adjacency, later edits, or overall
+session success never imply adoption, correctness, or authority. Human
+deferral/override remains explicit and preserves the original evidence,
+timing decision, and reason.
+
+PR 13 emits typed Scout/host diagnostic and conformance inputs plus remediation
+references only. [Plan 14](14-historical-failure-regression-matrix.md) owns the
+sole Doctor/health/remediation kernel, while
+[Plan 11](11-dashboard-frontend.md) only renders the canonical findings and
+legal actions it supplies. PR 13 owns no Doctor kernel, Doctor/dashboard UI, or
+repair orchestration.
 
 ## Direct verification
 
@@ -92,6 +115,13 @@ PR 13 direct tests must satisfy every requirement below. These are acceptance ga
 - wrong session, Turn, agent, project, or privacy domain always suppresses;
 - silence, dedupe, expiry, token, latency, and cost limits are enforced;
 - feedback and outcomes attach to the exact delivered envelope without treating adjacency as adoption;
+- context-order fixtures vary decisive-evidence position and distractor count,
+  preserve the full eligible/delayed/suppressed denominator, and prove
+  immediate conflicts versus boundary-delayed nonurgent guidance without
+  fixed literature-derived timing thresholds;
+- every outcome state, quiet-mode choice, deferral, expiry, correction, and
+  explicit override remains distinct through replay; no online personalized
+  Scout model or prompt/source/path/symbol/tool-payload telemetry is created;
 - disabled or unavailable Scout leaves capture and ordinary hints healthy;
 - a **positive** saved-content/clean-generation semantic-evidence fixture proves committed evidence remains bound to the exact saved-content/clean-generation identity through envelope, checkpoint, delivery receipt, feedback state, telemetry metadata, and every durable spool, cache, replica, and export representation; no sink may drop, substitute, or relabel that identity;
 - a **negative** unsaved-secret dirty-overlay fixture proves no durable envelope, checkpoint, receipt, feedback record, observation, fact, memory entry, telemetry payload, spool, cache, replica, or export contains overlay-derived hover, signature, diagnostic, reference, or implementation source/evidence; durable delivery requests for such evidence return typed suppressed or unavailable state.
@@ -101,9 +131,9 @@ PR 13 direct tests must satisfy every requirement below. These are acceptance ga
 - daemon event consumer and bounded queue;
 - deterministic candidate path;
 - configured model-assisted path;
-- durable envelope, checkpoint, delivery, feedback, and health state;
+- durable envelope, checkpoint, delivery, feedback, and budget/capability state;
 - hook ready-envelope handshake;
-- status, feedback, controls, and typed Scout/host finding and conformance state emission;
+- status, feedback, controls, and typed Scout/host diagnostic and conformance input emission;
 - fault, privacy, latency, deterministic, and model-path tests;
 - required positive and negative semantic-evidence acceptance fixtures.
 

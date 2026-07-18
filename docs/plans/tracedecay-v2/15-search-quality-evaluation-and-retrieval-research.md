@@ -33,37 +33,66 @@ latency, and calibrated abstention.
 ## Required behavior
 
 1. PR9 preserves exact IDs, quoted phrases, error text, paths, symbols, tool names, and
-   config keys before fuzzy or semantic ranking.
+   config keys in a non-demotable tier before fuzzy or semantic ranking.
 2. PR9 provides fielded BM25 over typed result grains, character-level typo recovery,
    query/tool/protocol echo penalties, representative-copy clustering, bounded diversity,
    deterministic pagination, and concise rank explanations.
-3. Evaluation uses chronological cutoffs and real sanitized query episodes spanning
-   multiple local projects, providers, exact queries, paraphrases, typos, temporal cases,
-   wrong-scope near matches, hard negatives, and expected no-result cases.
-4. Labels distinguish relevance, duplicate/echo noise, wrong scope, stale or superseded
+3. Before tuning, the concise report freezes the supported decision, target
+   population and unit, inclusion/exclusion/horizon, baseline and candidate
+   revisions, outcome/oracle, primary metric, hard guardrails, named strata and
+   support floors, uncertainty method, practical margin, and stopping rule. It
+   appends immutable result anchors; it does not create a benchmark service,
+   leaderboard, plan compiler, scheduler, or separate evaluation database.
+4. Evaluation separates development, locked chronological and
+   repository-disjoint evaluation, and forward confirmation. It records
+   contamination and prior-access risk; near duplicates, forks, generated
+   copies, and repeated issue families cannot cross partitions unnoticed. Real
+   sanitized query episodes span multiple local projects, providers, exact
+   queries, paraphrases, typos, temporal cases, wrong-scope near matches, hard
+   negatives, and expected no-result cases.
+5. Labels distinguish relevance, duplicate/echo noise, wrong scope, stale or superseded
    evidence, privacy eligibility, and correct abstention. Corrections append or supersede;
    they do not rewrite an already reported run.
-5. Reports include Precision@1/3/5, Recall@5/10, MRR, nDCG@10, first-useful rank,
+6. Reports include Precision@1/3/5, Recall@5/10, MRR, nDCG@10, first-useful rank,
    no-answer precision, duplicate rate, wrong-scope rate, p50/p95 latency, peak RSS,
-   index size, and incremental rebuild cost by meaningful stratum.
-6. PR10 implements native in-process FastEmbed search with no Python, WASM, llama.cpp,
+   index size, and incremental rebuild cost by meaningful stratum. Candidate
+   retrieval reports oracle Recall@N before reranker metrics, channel ablations
+   use equal candidate budgets, and abstention reports risk/coverage and AURC.
+   Raw similarity, logits, score margins, and fused scores are not confidence.
+7. Retrieval gates include per-query-family, language, repository,
+   exact/no-answer/wrong-scope, stale, privacy, and low-coverage strata with
+   intervals. Exact flat-vector scan is a production candidate and the quality
+   oracle for any measured ANN candidate. Human or fixture labels remain
+   promotion authority; LLM judges are secondary diagnostics only.
+8. PR10 implements native in-process FastEmbed search with no Python, WASM, llama.cpp,
    external inference process, or separate model service. Disabled semantic configuration
    remains a fully supported lexical mode, but does not excuse missing PR10 implementation.
-7. PR10 benchmarks `JinaEmbeddingsV2BaseCode`, a strong general FastEmbed comparator such
-   as `GTELargeENV15Q`, and Jina candidates reranked over a configured bounded top set with
-   `BGERerankerV2M3`.
-8. Models load once and reuse sessions. Document embeddings batch during indexing;
+9. PR10 treats the currently supported Jina code model, one general FastEmbed
+   comparator, and `BGERerankerV2M3` as reproducible candidates rather than
+   predetermined winners. One current compatible code-specialized challenger
+   may enter with pinned license/runtime evidence. Selection follows the locked
+   TraceDecay report; public leaderboard rank cannot promote a model.
+10. Models load once and reuse sessions. Document embeddings batch during indexing;
    unchanged documents reuse compatible vectors. Stored vectors record model, revision,
    dimensions, normalization, chunking, and schema version.
-9. Model absence, corruption, incompatibility, refusal, timeout, or budget failure returns
+11. Model absence, corruption, incompatibility, refusal, timeout, or budget failure returns
    the declared lexical/pre-rerank order with a visible reason. It never substitutes an
    unmeasured model or crosses a privacy domain.
-10. Configuration and dashboard controls expose lexical-only, semantic, and reranking
+12. Configuration and dashboard controls expose lexical-only, semantic, and reranking
     modes plus resource limits. Activation changes are versioned and running queries stay
     pinned to their starting profile.
-11. A semantic profile is promoted only when the locked real-project test improves the
+13. A semantic profile is promoted only when the locked real-project test improves the
     declared quality frontier without material exact-match, no-answer, wrong-scope,
     privacy, worst-stratum, latency, or memory regression.
+14. Every code quantifier descriptor used by retrieval evaluation has a compact
+    metric card: construct, formula, units, intended decision, confounds,
+    supported languages, coverage, datasets, uncertainty, and prohibited
+    interpretations. Extraction, clone, architecture, defect/rework, and
+    test-impact claims use separate validation sets. Predictive claims require
+    chronological and project holdouts, LOC/churn/prior-defect baselines,
+    calibration, abstention, and worst-stratum results. Aggregate correlation
+    never promotes a universal quality truth or a causal defect-reduction
+    claim.
 
 ## Acceptance
 
@@ -71,6 +100,10 @@ latency, and calibrated abstention.
   evidence, wrong project/time, pagination, explanations, and no-result behavior.
 - The same frozen queries compare production baseline, PR9 lexical, PR10 embedding, and
   PR10 reranked profiles with channel ablations.
+- Candidate Recall@N precedes reranker evaluation; exact flat scan remains the
+  oracle when ANN is evaluated, and protected exact/no-answer/wrong-scope,
+  privacy, minority-language, calibration, and tail strata cannot be hidden by
+  an aggregate score.
 - PR10 tests model lifecycle, offline reuse after initial installation, batching,
   incremental reuse, vector incompatibility/rebuild, bounded reranking, cancellation,
   configuration, and truthful fallback.
@@ -78,3 +111,5 @@ latency, and calibrated abstention.
   payloads remain in their authorized stores.
 - The report is reproducible from one documented command and contains enough raw aggregate
   evidence to verify the selected quality/resource frontier without a benchmark bureaucracy.
+- No public leaderboard, universal rollout count, mandatory ANN algorithm, or
+  uncalibrated score is a promotion gate.

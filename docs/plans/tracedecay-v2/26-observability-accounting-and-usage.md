@@ -16,6 +16,11 @@ Every operational and product metric states what was measured, over which popula
 
 - Canonical accounting, usage, latency, outcome, and health event contracts.
 - Metric descriptors, units, populations, horizons, coverage, and aggregation semantics.
+- Versioned quantifier descriptors, cohort definitions, coverage/uncertainty
+  semantics, temporal baselines/deltas, calibration/drift observations,
+  privacy-safe outcome linkage, and optional decision-policy evidence. A
+  universal code-health/quality/reward score is explicitly not an SLO or
+  product-success denominator.
 - Denominator-safe projections and Observatory/Costs read models.
 - Product-wide lag, SLO, adoption, hint-outcome, and automation-outcome definitions.
 - Plan 24 task/model outcome observations, comparable evaluation cohorts, and
@@ -64,19 +69,26 @@ Every operational and product metric states what was measured, over which popula
   evaluation stage, per-trigger terminal reason, budget-exceeded state,
   duplicate-trigger dedupe, suppression, and stage/total latency; PR12 emits
   CLI/MCP/HTTP/LSP delivery, truncation, and expansion state without payloads;
-  PR13 emits GitHub ingest/remap/thread lifecycle
-  (ingested, remapped, outdated, resolved, deleted, suppressed),
+  PR13 emits GitHub item/thread lifecycle
+  (`current`, `outdated`, `resolved`, `edited`, `deleted`) separately from
+  GitHub ingress provider outcome (`complete`, `partial`, `unavailable`,
+  `denied`, `rate_limited`, `stale`, `failed`),
   CI-failure localization states and typed provenance without log content,
   concurrent-agent proximity warning emission/suppression/expiry/risk class,
+  pinned Plan 20 `feedback.proximity.risk_threshold` revision/digest,
   host-adapter delivery state, and truncation/expansion handle/anchor usage
   and failures without payloads; PR14 owns Observatory/Doctor read models and
-  dashboard projections over those events. GitHub ingestion lifecycle and
-  provider outcomes remain two separate exhaustive sets — lifecycle states
-  never include posted, updated, resolved-as-write, dismissed, or replied;
-  provider outcomes follow the Plan 35 set (unsupported, absent, indexing,
-  stale, cancelled, timed-out, failed, partial versus supported plus completed
-  plus complete-coverage zero-findings) with unavailable and denied where
-  coverage or authorization blocks surfacing. All metrics remain
+  dashboard projections over those events. The GitHub lifecycle and ingress
+  outcome sets are exhaustive and orthogonal: lifecycle describes observed
+  item/thread state, while ingress outcomes describe refresh, coverage,
+  availability, rate-limit, staleness, failure, or read authorization
+  (`denied`) only. Plan 35 semantic-evidence provider states (unsupported,
+  absent, indexing, stale, cancelled, timed-out, failed, partial versus
+  supported plus completed plus complete-coverage zero-findings) remain a
+  third set. Attempted outbound GitHub writes emit separate `policy=denied`
+  and `effect=suppressed` observations before any call, never a lifecycle or
+  ingress value. No `posted`, `updated`, `dismissed`, or `replied` lifecycle
+  exists; `resolved` is the observed read-only lifecycle value. All metrics remain
   denominator-safe. Telemetry contains no source, path, diagnostic message,
   comment body, CI log content, or private session content.
 - Identify scope, capability, operation, result, event and observation time, duration or quantity, unit, producer revision, trace, and privacy classification.
@@ -105,6 +117,20 @@ Every operational and product metric states what was measured, over which popula
   `Completed`, `Unsupported`, `Absent`, `Stale`, `Cancelled`, `TimedOut`,
   `Failed`, or `Partial` outcome. Events never contain argv/stdin values, raw
   output, environment values, secrets, prompts, paths, or private context.
+- PR17 topology/routing observations include selected and actual topology,
+  partition count, edge cut, coupling, critical path, serial fraction, hubs,
+  barriers, runnable/actual concurrency, saturation, scheduler overhead,
+  context transfer, coordination/integration/review/rework; plus eligible
+  route set, exclusions, score vector, randomized propensity when applicable,
+  deterministic baseline, exploration/override/fallback reason, horizon,
+  censoring, and defensible counterfactual coverage.
+- Escalation, recall, handoff, and verifier observations include blocker
+  recall, question precision and over-asking, intervention outcome,
+  helpful/neutral/harmful/unknown precedent utility, quarantine/retirement
+  effectiveness, rediscovery reads/searches/tests/tokens/time-to-first-valid-
+  action, accepted correctness/rework, checkpoint grounding, no-progress
+  precision, verifier exploit success, false accept/reject, legitimate-solver
+  retention, and reviewer independence/conflict.
 
 ### Canonical review and outcome labels
 
@@ -155,6 +181,12 @@ queryable.
   interval, observed value, error/coverage, horizon, sample/censoring counts,
   and estimator revision. Never collapse correctness, safety, latency, tokens,
   cost, and autonomy into one reward score.
+- Compact immutable evaluation read models record eligible, attempted,
+  answered, abstained, denied, unknown, excluded and censored counts;
+  per-stratum support/results; intervals; calibration and risk/coverage;
+  flaky/indeterminate evidence; deviations; and exactly one
+  `promote | reject | insufficient_evidence` disposition. They reuse canonical
+  events and anchors and do not form a benchmark service or separate database.
 
 ### Required product views
 
@@ -162,6 +194,10 @@ queryable.
 - Latency and availability SLOs with explicit eligible populations and failure classes.
 - Capability and surface adoption with active-user, active-project, and invocation denominators.
 - Hint emission, delivery, action, usefulness, dismissal, and unknown-outcome funnels.
+- Appropriate-reliance views keep accepted-correct, accepted-incorrect,
+  rejected-correct, rejected-incorrect, independently verified, override with
+  rationale, no eligible verification, and unknown/censored separate.
+  Acceptance, clicks, display, or subjective trust are not correctness.
 - Automation admission, execution, useful work, effect, recovery, and terminal outcome funnels.
 - Task/work graph throughput and quality by eligible task-shape cohort,
   decomposition policy, executor/provider/model/effort, while preserving
@@ -263,6 +299,12 @@ decision with collision, ambiguity, maintenance, and privacy review.
   shifted, or high-censoring populations produce bounded fallback/abstention
   rather than a success rank; task splitting and cheap self-reports cannot
   improve quality denominators.
+- Topology, route, escalation, recall, handoff, verifier, and
+  appropriate-reliance fixtures preserve the dimensions above, exact
+  model/version cohorts, intervals/set width, selection propensity,
+  calibration validity, drift and censoring. They prove Plan 26 supplies
+  labels and measurements only: it never recommends policy, mutates Plan 24,
+  schedules Plan 32, or creates another Doctor.
 - Review/outcome schema fixtures exhaust every label, legal evidence
   requirement, independence/judgment combination, runtime-versus-outcome
   distinction, censored-versus-unknown case, late correction, schema-version
@@ -306,16 +348,20 @@ decision with collision, ambiguity, maintenance, and privacy review.
 - [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
   fixtures reconcile staged emission: PR11 cycle trigger/stage/terminal/budget/
   dedupe/latency events; PR12 CLI/MCP/HTTP/LSP delivery/truncation/expansion
-  events; PR13 GitHub lifecycle (ingested, remapped, outdated, resolved,
-  deleted, suppressed), CI localization provenance without log payloads,
-  proximity emitted/suppressed/expired/risk-class dimensions, and host-adapter
+  events; PR13 GitHub item/thread lifecycle (`current`, `outdated`, `resolved`,
+  `edited`, `deleted`) and ingress provider outcome (`complete`, `partial`,
+  `unavailable`, `denied`, `rate_limited`, `stale`, `failed`), CI localization
+  provenance without log payloads, proximity emitted/suppressed/expired/risk-
+  class dimensions plus pinned Plan 20 threshold revision/digest, and host-adapter
   state; PR14 Observatory/Doctor read-model parity across transports. Table-driven
-  fixtures cover the two separate exhaustive state sets — GitHub ingestion
-  lifecycle and provider outcomes (unsupported, absent, indexing, stale,
+  fixtures cover the separate exhaustive GitHub lifecycle and ingress outcome
+  sets, plus the Plan 35 provider states (unsupported, absent, indexing, stale,
   cancelled, timed-out, failed, partial versus supported plus completed plus
-  complete-coverage zero-findings) plus unavailable and denied outcomes, and
+  complete-coverage zero-findings), and
   LSP projection lifecycle/outcome labels consistent with Plans 37 and 35.
   Truncation/expansion handle/anchor usage and failure counts carry explicit
-  denominators; no metric claims a posted, updated, resolved-as-write,
-  dismissed, or replied GitHub comment.
+  denominators. Outbound-write fixtures emit only separate `policy=denied` and
+  `effect=suppressed` observations before any GitHub call, never ingress state;
+  no metric claims a posted, updated, dismissed, or replied GitHub comment,
+  while observed read-only `resolved` remains a required lifecycle value.
 - Repository checks reject alternate counter writers, UI-local formulas, and meta-plan instrumentation.

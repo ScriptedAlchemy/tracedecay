@@ -54,7 +54,11 @@ owns the one suggestion/policy channel that renders this cycle's inert
 suggested next actions; [Plan 27](27-cross-host-agent-plugin-bundles.md) owns
 host hook/native delivery mechanics and the read-only GitHub ingestion
 adapter's transport; [Plan 26](26-observability-accounting-and-usage.md) owns
-telemetry; [Plan 16](16-cross-project-repository-worktree-scope.md) owns scope
+telemetry; [Plan 20](20-configuration-control-plane.md) owns the typed
+`feedback.proximity.risk_threshold` setting, its default, validation,
+layered resolution, provenance, and effective revision/digest, while this plan
+owns the proximity-risk computation that consumes its pinned effective value;
+[Plan 16](16-cross-project-repository-worktree-scope.md) owns scope
 resolution; [Plan 28](28-remote-multi-machine-shared-brain.md) owns remote
 authority and node-local overlay fencing;
 [Plan 32](32-dynamic-workflow-runtime-and-sdk.md) owns the optional PR17
@@ -213,6 +217,12 @@ GitHub, applies a fix, or continues an agent automatically.
   `RetrievalAnchorId`. It never copies source text or a GitHub comment body
   into a new durable representation and never invents a second finding model
   alongside Plan 09's/Plan 35's diagnostic identity.
+- When requested, the cycle evaluates the same change against exact origin and
+  destination snapshots plus merge base. It reports each impact set and
+  independent coverage, then typed added/removed/changed delta-impact
+  relations. Missing or stale destination evidence is partial/stale, never
+  clean; commit-granular source history and PR/merge grouping remain separate
+  evidence.
 - Cycle-request inputs bind: project/repository/worktree/branch/ref/HEAD SHA;
   clean source-generation identity or an explicitly tagged
   ephemeral-overlay identity; file digest and document version;
@@ -245,12 +255,16 @@ GitHub, applies a fix, or continues an agent automatically.
   are inert: text and evidence references only, never auto-executed and never
   auto-applied. Silence remains a normal successful outcome exactly as Plan
   22 already requires for suggestions.
-- Exhaustive termination taxonomy: clean, blocked, incomplete coverage,
+- Exhaustive termination taxonomy: clean, duplicate_noop, blocked, incomplete coverage,
   stale/replan required, budget exceeded (deadline, token, latency, or cost),
   cancellation, user stop, and daemon unavailable. There is no max-iterations
   state because there is no loop to bound; the one-shot budget fields above
   are retained and every cycle result names exactly one termination reason —
   none is inferred from adapter-side silence.
+- `duplicate_noop` means the exact trigger/address/content/branch/generation/
+  evidence identity was already evaluated with no new evidence; it is neither
+  `clean` nor adapter silence. `clean` requires supported, completed, complete
+  coverage and zero active findings.
 - Dedupe/idempotency keys bind trigger, address
   (project/branch/file/range/symbol), diagnostic/evidence/finding identity,
   and delivery channel so that hook, MCP, LSP, dashboard, and CLI delivery of
@@ -289,14 +303,17 @@ GitHub, applies a fix, or continues an agent automatically.
 - **Threshold tier:** same package/crate, shared callers/dependencies/tests,
   incompatible branch/worktree state, and overlapping planned workspace
   changes emit only when a typed, configurable proximity risk threshold is
-  met. Below that
-  threshold, the daemon stays silent — silence is a normal, expected outcome,
-  not a missing feature.
+  met. The threshold is the pinned effective value of Plan 20's
+  `feedback.proximity.risk_threshold` setting; the cycle records that setting's
+  effective revision/digest and never reads an adapter-local default or
+  override. Below that threshold, the daemon stays silent — silence is a
+  normal, expected outcome, not a missing feature.
 - Risk-threshold inputs are typed and explicit: overlap/blast-radius size,
   relation strength (direct call/dependency versus transitive), branch/worktree
   incompatibility class, and freshness decay of the underlying observation.
-  Configuration may raise or lower the threshold; it never removes the
-  distinction between the two tiers.
+  Plan 20 configuration may raise or lower the threshold; it never removes the
+  distinction between the two tiers, and the immediate tier does not consult
+  the setting.
 - Every warning carries `observed_at` and `expires_at`, participates in
   suppression/dedupe by address and warning class so repeated observation of
   the same conflict does not re-emit, and respects existing privacy scoping
@@ -314,6 +331,12 @@ GitHub, applies a fix, or continues an agent automatically.
 
 ### 4. Read-only GitHub PR review ingestion (never an LSP transport, never a write path)
 
+- PR titles/descriptions, commit messages, review bodies/replies, claimed
+  severity, author labels, and statements such as “bug-free”, “security fix”,
+  or “approved” are untrusted observed framing. Frame-neutral
+  diff/graph/compiler/test/CI/policy/config evidence is evaluated first.
+  Narrative remains losslessly anchored for humans but cannot lower severity,
+  establish correctness, or upgrade coverage.
 - The GitHub REST/GraphQL API is read-only ingress in this architecture.
   TraceDecay ingests **existing** review comments, threads, and replies from
   bots and maintainers; it never posts, updates, resolves, dismisses, or
@@ -374,6 +397,13 @@ GitHub, applies a fix, or continues an agent automatically.
   - `stale` — cached ETag, cursor, or head-SHA drift makes the retained
     snapshot stale relative to the current repository state;
   - `failed` — fetch failed for a reason not covered above.
+  `denied` here means denial of read-ingress authorization only. Coverage,
+  refresh, availability, rate-limit, staleness, failure, and read-authorization
+  outcomes never become item/thread lifecycle values. Conversely, an attempted
+  outbound GitHub write is not ingress: policy records `denied` and effect
+  handling records `suppressed` before any GitHub call, in the separate
+  policy/effect outcome contract, without emitting either an item/thread
+  lifecycle value or an ingress provider outcome.
   Lifecycle and provider outcome are never collapsed: for example, a
   `complete` fetch may return items in any lifecycle state, and an item in
   `current` lifecycle may be surfaced under a `partial`, `stale`, or
@@ -406,6 +436,13 @@ GitHub, applies a fix, or continues an agent automatically.
   per §2: TraceDecay never triggers a rerun, never re-executes CI, and never
   schedules a retry.
 
+All confidence-like values in this plan declare
+`ordinal_rank | heuristic_score | calibrated_probability |
+calibrated_interval`. Evidence coverage is separate from model confidence;
+shifted, sparse, or inapplicable calibration abstains. Canonical results retain
+every authorized finding. Delivery may rank, dedupe, or suppress only while
+reporting total/returned/omitted counts, reasons, and authorized expansion.
+
 ### 6. Delivery across five surfaces over one result
 
 - Every pillar (post-edit diagnostics+impact, CI localization, GitHub
@@ -426,6 +463,11 @@ GitHub, applies a fix, or continues an agent automatically.
 - No surface requires the IDE to be open. Hook, MCP, dashboard, and CLI
   delivery all function with no LSP session connected; LSP delivery is an
   additional projection when a session exists, never the only path.
+- The shared result carries typed `delivery_timing`, observed task
+  phase/boundary, `why_now`, expiry, interruption reason, and explicit human
+  deferral/override provenance. Acknowledgement, inspection, deferral,
+  dismissal, verification, action, contradiction, and unknown remain separate;
+  none implies correctness, adoption, or authority.
 - [Plan 21](21-cli-mcp-tool-surface-and-output-unification.md) owns the
   CLI/MCP/HTTP/LSP binding taxonomy and rendering; [Plan 27](27-cross-host-agent-plugin-bundles.md)
   owns host hook/native transport mechanics; this plan only defines which
@@ -466,8 +508,9 @@ GitHub, applies a fix, or continues an agent automatically.
     never fabricates a severity the underlying evidence does not support.
   - Clearing and removal are deterministic on thread resolution, comment
     deletion, head-SHA or content/generation change that invalidates the
-    remap, or supersession, following the same "clear or republish exactly
-    once" rule
+    remap, or supersession. Publication is idempotent and version-monotone:
+    duplicates converge, stale updates cannot overwrite newer state, and
+    reconnect may redeliver current state, following the same rule
     [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) already
     requires for other diagnostic sources.
 
@@ -554,6 +597,11 @@ GitHub, applies a fix, or continues an agent automatically.
   typed and distinct, with a safe tombstone where Plan 13's retention policy
   allows one — never a silent empty result standing in for any of those
   states.
+- PR15 multi-root results bind one Plan 16 scope-set digest and retain
+  per-root subresults before Plan 05 merge. GitHub/CI routing verifies
+  canonical repository plus immutable commit before graph enrichment.
+  Cross-root proximity exposes only policy-approved coarse conflict shape;
+  hidden-root identities, counts, and content remain private.
 
 ### 9. Lint/CI/hints and other opportunities
 
@@ -601,10 +649,22 @@ PR6 boundary.
   09/35 states.
 - Branch/worktree/head changes, duplicate triggers, cancellation, budget
   exhaustion, analyzer restart, and stale-generation fixtures each produce
-  their exact typed termination reason (§2) — clean, blocked, incomplete
+  their exact typed termination reason (§2) — clean, duplicate_noop, blocked, incomplete
   coverage, stale/replan required, budget exceeded, cancellation, user stop,
   or daemon unavailable — rather than a guessed clean result or a
   max-iterations state, which does not exist.
+- Adversarial PR-framing fixtures prove narrative cannot suppress or lower a
+  frame-neutral finding. Origin-only and destination-only impact fixtures keep
+  independent coverage and typed deltas; missing destination evidence never
+  becomes clean.
+- Ranked-omission fixtures preserve every canonical finding and losslessly
+  expand omitted results. Calibration fixtures distinguish heuristic rank from
+  held-out probability/interval and abstain under sparse or shifted evidence.
+- Delivery fixtures compare exact conflict immediate delivery with nonurgent
+  next-boundary/idle/on-request behavior, user deferral and expiry, explicit
+  override, and authorization loss between page and expansion. They measure
+  appropriate reliance without treating display, acknowledgement, click,
+  acceptance, or override as correctness.
 - A fixture proves no cycle result ever fires a host `followup_message` or
   otherwise causes an agent to act without an explicit new trigger; a
   suggested next action remains inert text/evidence across every delivery
@@ -631,8 +691,9 @@ PR6 boundary.
   - Bot-versus-maintainer author-class reporting without invented trust;
     remap never mutates the original ingested thread record; and every
     attempted GitHub write operation is rejected before any outbound GitHub
-    call, producing a typed `denied` ingress outcome rather than any partial
-    write.
+    call, producing separate `policy=denied` and `effect=suppressed` outcomes,
+    never an item/thread lifecycle value or ingress provider outcome and never
+    any partial write.
 - **CI-localization fixtures** map a structured failure to symbol/branch
   generation/callers and a targeted rerun hint using the typed input contract
   (§5), including stale, partial, unavailable, and denied log/artifact states
@@ -642,8 +703,10 @@ PR6 boundary.
   file/range/symbol) and the threshold tier (same package/crate, shared
   callers/dependencies/tests, incompatible branch/worktree state, overlapping
   planned workspace changes) both above and below the configured risk
-  threshold,
-  proving below-threshold silence is a normal outcome. Fixtures also prove
+  threshold. They pin Plan 20's effective
+  `feedback.proximity.risk_threshold` value plus revision/digest and prove no
+  adapter-local threshold participates; below-threshold silence is a normal
+  outcome. Fixtures also prove
   advisory-only semantics, `observed_at`/`expires_at` freshness, suppression/
   dedupe, and privacy scoping across sessions/agents without creating a lock
   or schedule.
@@ -677,7 +740,8 @@ PR6 boundary.
   `feedback_expand`; severity never exceeds what the source evidence supports;
   and resolution, deletion, head-SHA/content/generation change that
   invalidates a remap, or supersession clears or republishes the diagnostic
-  exactly once.
+  idempotently and version-monotonically, permitting reconnect redelivery while
+  rejecting stale publication.
 - [Plan 14](14-historical-failure-regression-matrix.md) names this plan's
   PR11–PR17 rows before any owning PR is considered complete.
 

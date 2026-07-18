@@ -11,7 +11,9 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 ## Owns
 
 - Typed request, response, and error contracts for product use cases.
-- `RequestContext`: actor, project/repository/worktree scope, capabilities, request ID, deadline, and cancellation.
+- `RequestContext`: actor, project/repository/worktree scope, capabilities,
+  immutable capability-grant ID/revision/digest, issuer, expiry and exact scope
+  constraints, request ID, deadline, and cancellation.
 - Read orchestration across query and store ports.
 - Command orchestration, validation, authorization, idempotency, and transaction boundaries.
 - Freshness, coverage, provenance, pagination, and partial-result semantics.
@@ -104,6 +106,9 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - Define one explicit service method or use-case type per product operation; prefer ordinary Rust calls over indirection.
 - Depend only on domain types and narrow port traits. No adapter or root-crate imports.
 - Validate scope and capability before reads or writes; never infer authority from transport origin.
+- Revalidate capability grant, policy, configuration, evidence, expected
+  versions, and operation/sink/disclosure subset immediately before every
+  command, page expansion, hydration, or effect.
 - Preserve repository, worktree, branch, project, and user scope through every call.
 - LSP-facing operations preserve authorized workspace scope, deadline,
   cancellation, document version, source generation, freshness, and coverage
@@ -209,11 +214,36 @@ Every user-visible operation has one direct typed application entry point. CLI, 
   evidence. Durable findings require exact saved-content/clean-generation
   identity.
 - PR11 feedback-cycle results name exactly one termination reason from Plan
-  37's taxonomy, distinguish new versus pre-existing diagnostics, preserve
+  37's taxonomy, including `duplicate_noop` when the exact trigger/address/
+  content/branch/generation/evidence identity was already evaluated with no
+  new evidence. It is neither `clean` nor adapter silence. Results distinguish
+  new versus pre-existing diagnostics, preserve
   complete provider-state sets without collapsing unavailable/partial coverage
   to clean empty results, and expose finding lifecycle state
   (active/superseded/resolved/cleared) keyed by stable finding IDs plus Plan 13
   anchors when present.
+- Feedback findings keep score kind (`ordinal_rank`, `heuristic_score`,
+  `calibrated_probability`, or `calibrated_interval`), calibration validity,
+  deterministic rank components, source lifecycle, delivery disposition,
+  human outcome, and total/returned/omitted counts as orthogonal fields.
+  Ranking or suppression never deletes canonical evidence or adjudicates it
+  false.
+- Branch-relative impact optionally binds exact origin and destination
+  `RepositorySnapshot`s plus merge base, each impact set and coverage, and
+  added/removed/changed delta-impact relations. Missing destination evidence
+  is partial or stale and can never produce `clean`.
+- PR17 resolves an authorized `TaskId`/`WorkItemId` into bounded task context,
+  dependencies, attempts, independent reviews, temporal outcomes, sessions,
+  Threads, Turns, messages, agents, tool calls, artifacts, receipts, handoffs,
+  and other-agent work, plus Plan 13-anchored code, Git, CI, diagnostic,
+  generation, impact, and affected-test evidence. Plan 23 supplies the sole
+  current/as-of/evolution/forensic session narrative kernel; summaries
+  accelerate retrieval but never replace exact source anchors or owning-store
+  evidence.
+- Promotion or calibration results may reference compact immutable Plan 15/26
+  evaluation records and anchors. Statistical formulas, benchmark
+  orchestration, and a second evaluation platform do not enter application
+  contracts.
 - Keep the application's direct dependency graph narrow and feature-minimal.
   Concrete stores, transports, providers, model runtimes, dashboard assets, and
   their build scripts must not enter its normal check or test graph.
@@ -266,3 +296,8 @@ Every user-visible operation has one direct typed application entry point. CLI, 
   pagination/continuation metadata, dirty-overlay non-durability, and exact
   termination reasons for branch/head/content/generation change, duplicate
   triggers, cancellation, and budget exhaustion.
+- PR17 TaskId fixtures prove authorization parity across lookup, paging,
+  hydration, history modes and exact expansion; lossless source recovery;
+  origin/destination impact disagreement; calibrated-versus-heuristic output;
+  and no application-local task store, scheduler, query kernel, label
+  vocabulary, or Doctor authority.

@@ -22,6 +22,9 @@ Enrolled machines share one logical Brain through authenticated TraceDecay APIs 
 - Network-filesystem access to SQLite, WAL, SHM, payload roots, or generation files.
 - Client-side SQL, database credentials, database URLs, or a database fallback mode.
 - Multi-primary writes, last-write-wins merging, clock-based conflict resolution, or automatic offline promotion.
+- CRDT, Merkle-DAG, wall-clock, or replicated-SQLite convergence as canonical
+  mutation authority. Content-addressed structures may support immutable spool
+  integrity, deduplication, or gap evidence only.
 - A mandatory connectivity vendor or hosted control plane.
 - Hidden replication, coverage, privacy, or authority degradation.
 
@@ -30,6 +33,12 @@ Enrolled machines share one logical Brain through authenticated TraceDecay APIs 
 ### Single-writer authority
 
 - Place every mutable shard under one daemon authority identified by Brain, shard, generation, placement revision, and monotonically increasing fence epoch.
+- Acquire a higher epoch through the authority store's compare-and-swap
+  transition and install that fence at every durable mutation and publication
+  sink required by the selected durability model before admitting writes.
+  Every mutation, replay, receipt, publication, cache/replica, and backup
+  manifest binds the epoch; wall-clock lease expiry supports liveness but is
+  never fencing proof.
 - Admit writes only through authenticated application commands carrying the expected authority and idempotency identity.
 - Persist lease, epoch, outbox, checkpoint, and publication evidence before acknowledging authority changes.
 - Reject stale, partitioned, revoked, or previously authoritative writers after promotion.
@@ -66,7 +75,15 @@ diagnostics.
 - Remote offline-capture spool frames carry deterministic observation identity,
   node identity, repository/worktree identity, privacy policy, ordering evidence,
   and integrity checks.
-- Reconnect replays idempotently through the current authority and deletes frames only after durable acknowledgement.
+- Frames follow `captured -> pending -> admitted | duplicate | rejected |
+  quarantined -> acknowledged -> eligible_for_gc` and bind deterministic event
+  ID, enrollment, repository/worktree/ref, sequence/causal context, schema and
+  kind, sanitizer/privacy revision, payload digest/length, integrity
+  chain/segment root, capture evidence, replay attempt, and authority receipt.
+- Reconnect replays idempotently through the current authority. Admission
+  deduplication and canonical effect commit are atomic; duplicate delivery
+  returns the original durable outcome receipt. Frames become GC-eligible only
+  after durable acknowledgement.
 - Overflow, corruption, policy change, revocation, and rejected replay remain visible and recoverable; no empty local database is created as fallback.
 
 ### Repository and scope identity
@@ -86,8 +103,16 @@ diagnostics.
 
 ### Backup and failover
 
-- Create authority-owned consistent backups with manifests covering database families, payloads, generations, epochs, checkpoints, and repository identities.
-- Restore into isolated staging, verify integrity and references, then publish under a higher fenced epoch.
+- Create authority-owned consistent backups with authenticated manifests
+  covering artifact inventory/root, per-artifact digests and byte/count
+  totals, database families, payloads, generations, source epoch/frontier,
+  checkpoints, coverage, repository identities, creation/verification/
+  expiry/refresh evidence, key revisions, lineage, and typed stale/partial
+  reasons. Integrity, authenticity, freshness, completeness, authorization,
+  and coverage remain separate claims.
+- Restore into non-serving isolated staging, verify destination bytes and
+  reference closure, reapply current deletion/quarantine/privacy state, then
+  publish atomically under a newly installed higher fenced epoch.
 - Promote a standby only after proving the old authority is fenced and the standby has the required durable frontier.
 - Rejoining old authorities remain read-only until explicitly reseeded.
 - Node revocation immediately blocks commands, replay, cache refresh, and promotion credentials.
@@ -106,7 +131,10 @@ diagnostics.
 
 - Multi-process and multi-host fixtures prove exactly one accepted writer across startup races, partitions, lease expiry, process death, reconnect, and promotion.
 - A stale authority cannot commit or publish after any higher epoch is visible.
-- Offline events replay exactly once in order; crash, duplicate, corruption, overflow, revocation, and privacy-change cases preserve evidence.
+- Offline delivery may duplicate. Fixtures prove idempotent ordered replay and
+  exactly one admitted canonical effect/receipt across crash, duplicate,
+  corruption, overflow, revocation, lost acknowledgement, restart, and
+  privacy-change cases.
 - Remote LSP fixtures prove overlays and analyzers stay on the workspace node,
   clean diagnostic publication is fenced through the owning shard authority,
   and authority loss never places unsaved content in the remote offline-capture
@@ -114,6 +142,9 @@ diagnostics.
 - Cache and replica fixtures reject wrong Brain, shard, generation, epoch, schema, policy, digest, and watermark claims.
 - Repository fixtures correlate verified clones while separating unrelated repositories, worktrees, refs, and local-only scopes.
 - Backup, staged restore, promotion, rollback, and old-authority rejoin tests never expose a partial generation or two writers.
+- Delayed old-writer packets, competing epochs, stale authenticated manifests,
+  interrupted publication, and restore with newer deletion/quarantine state
+  fail closed without relying on a literature-derived quorum or lease timeout.
 - All surfaces shipped by PR16 report identical topology and coverage truth,
   including partial, stale, unknown, and unavailable states; PR18 SDK
   conformance proves the same values when SDK bindings ship.

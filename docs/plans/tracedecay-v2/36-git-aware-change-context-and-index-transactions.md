@@ -39,8 +39,14 @@ PR7 records canonical repository identity and immutable source provenance on
 captured observations and published generations. Provenance includes repository
 identity, checkout/worktree identity, canonical root, current ref when attached,
 HEAD object ID, index tree identity when available, path identity, dirty-state
-classification, and capture time. Missing, unborn, detached, conflicted, or
-partially readable state is represented explicitly rather than guessed.
+classification. It also records Git executable/version and
+object format, the fixed adapter operation and normalized options, mailmap,
+rename/copy thresholds and follow mode, first/all-parent traversal,
+pathspec/attributes/filters, sparse/submodule state, author time, committer
+time, provider-fetch time, capture time, and topological order as distinct
+evidence. No timestamp determines identity or causality. Missing, unborn,
+detached, conflicted, or partially readable state is represented explicitly
+rather than guessed.
 
 PR7 is evidence only. It does not add status, diff, staging, or commit tools and
 does not copy Git objects into TraceDecay storage.
@@ -90,6 +96,10 @@ comparison at fetch time. It contains:
 Snapshots are evidence, not mutation authority. They may be retained and referenced
 by [Plan 13](13-research-provenance-and-context-anchors.md) anchors but do not
 replace `RepositorySnapshot`, `HunkRef`, or native Git object identity.
+Currentness binds exact object/content identity and the provider observation
+epoch. Base, head, merge base, provider coordinates, and review positions are
+observations at fetch time, not timeless properties; no later path, line,
+timestamp, or provider label can fuzzily upgrade them.
 
 #### `ReviewThreadAnchor` and `CommentAnchor`
 
@@ -123,6 +133,14 @@ contains:
 - **No fuzzy upgrade:** TraceDecay never silently refreshes, relocates, or
   replaces source history. Remapped evidence remains remapped until an exact
   content-and-anchor match is proven.
+
+#### Branch-relative impact
+
+When requested, compute origin impact and destination/target impact against
+exact `RepositorySnapshot` identities. Return both impact sets and their
+added/removed/changed delta relations with independent graph-edge authority and
+coverage. Missing or stale destination evidence is partial/stale, never clean,
+and neither side establishes a causal outcome.
 
 ### PR11: daemon-serialized index transactions
 
@@ -283,6 +301,10 @@ Acceptance requires fixtures and end-to-end tests for:
   rename/mode/content combinations;
 - deterministic status, diff, history, blame, hunk ordering, pagination,
   truncation, Markdown/JSON parity, and graph-enrichment provenance;
+- differential comparison of every typed adapter operation with pinned native
+  Git plumbing, including normalized option sets, path encoding, truncation,
+  first/all-parent history, mailmap/rename/follow behavior, and exact
+  origin/destination impact identity and coverage;
 - every `HunkRef` field drifting independently between preview and apply, with
   proof that the index and ref remain byte-for-byte unchanged;
 - concurrent clients previewing and applying overlapping and disjoint changes,
@@ -306,7 +328,10 @@ Acceptance requires fixtures and end-to-end tests for:
   drift, diff-side moves, reply threading, stale/outdated classification, and
   proof that remapped coordinates without exact content never report `current`;
 - diff-remap and symbol-remap fixtures proving preserved source history, no fuzzy
-  upgrade, and explicit stale/outdated results when head or generation drifts; and
+  upgrade, and explicit stale/outdated results when head or generation drifts;
+- branch-relative fixtures proving origin-only and destination-only impact,
+  independent coverage, and missing destination evidence remain partial rather
+  than clean; and
 - rejection fixtures proving PR9 identity operations remain read-only identity
   and remap only and never perform GitHub API ingress or comment writes now or
   at PR17.

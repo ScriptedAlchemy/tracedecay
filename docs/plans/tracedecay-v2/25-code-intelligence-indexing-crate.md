@@ -19,8 +19,17 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
   structural search, outline, rewrite, analyzer routing, and host LSP
   projection.
 - Canonical symbol, occurrence, relationship, diagnostic, and test-attribution records.
+- Canonical raw quantifier inputs: decision/control-flow facts, typed
+  dependency/test/change relations, extraction coverage, ambiguity, and
+  language-validation revision. Preserve raw evidence sufficient to recompute
+  compatible Plan 26 descriptors without reparsing; this plan does not define
+  a universal quality score or outcome policy.
 - Generation-exact mappings from native Git file and hunk evidence to canonical
   symbols, callers, change-hazard evidence, and affected-test candidates.
+- At PR17, exact code-generation, occurrence, relationship, diagnostic, and
+  test-attribution evidence may be selected from an authorized Plan 24
+  `TaskId` only through Plan 13 anchors and typed application joins. The index
+  stores no task identity, task summary, or copied task evidence.
 - Content-addressed incremental reuse and bounded sanitized dirty-worktree
   indexing overlays captured from repository state. Unsaved per-client LSP
   document overlays are separate Plan 35 daemon session state.
@@ -63,6 +72,11 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
   pinned grammar and source generation; no host `ast-grep` binary is authority.
 - Produce stable canonical rows and digests for identical input, registry, and extractor revisions on every supported host.
 - Preserve parse errors and unsupported constructs as evidence; never invent successful structure.
+- Record descriptor, grammar, and extractor revisions; parse outcome; parsed,
+  error, and unsupported ranges; timeout/cancellation; content digest; edge
+  authority (`syntax_exact | name_resolved | compiler_or_lsp_resolved |
+  dynamic_observed | heuristic_candidate | unknown_unsupported`); ambiguity;
+  and coverage. Bounded traversal or extraction caps propagate as partial.
 - Keep language-specific logic behind a small extractor interface while sharing identity, lineage, and output contracts.
 - Keep parser and grammar dependencies behind the code-intelligence ownership
   boundary so unrelated domain, store, application, and adapter checks do not
@@ -81,15 +95,26 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 ### Generations and incremental reuse
 
 - Build one immutable logical generation from one fenced snapshot.
-- Reuse file and symbol results only when content, grammar, extractor, identity, and sanitizer inputs match.
+- Reparse only changed sanitized content or descriptor inputs. Reuse file and
+  symbol results only when content, grammar, extractor, identity, and sanitizer
+  inputs match; recompute relation and attribution rows only for dependency
+  closures invalidated by versioned evidence.
+- Report parse work, resolution work, invalidation fan-out, extracted-row
+  reuse, and conservative full-rebuild fallback separately. Tree-sitter node
+  reuse is performance evidence, never product identity or lineage.
 - Force a full rebuild for incompatible schema, grammar, identity, or privacy changes and for quarantined corruption.
 - Seal the generation before handing rows and the expected digest to the store publication port.
 - Never mutate a published generation or substitute the active checkout for the selected snapshot.
 
 ### Identity and lineage
 
-- Derive stable symbol identities from repository identity, language, qualified structure, and source evidence.
-- Record rename, move, split, and merge candidates with evidence and confidence.
+- Generation-local occurrence identity is exact. Logical identity remains
+  stable only while its declared repository, language, qualified-structure,
+  and source-evidence tuple is unchanged.
+- Record rename, move, split, merge, and structural-continuity candidates with
+  method, evidence, confidence kind, alternatives, and abstention.
+  Tree-sitter object reuse, path, line, qualified-name similarity, or embedding
+  similarity never proves lineage.
 - Keep ambiguous lineage explicit; do not silently merge unrelated symbols.
 
 ### Git evidence joins
@@ -124,7 +149,12 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
   cannot publish as current. Plan 35's daemon gateway is the only host-facing
   analyzer broker and cannot create a parallel diagnostic authority.
 - Map test definitions and runs to the generation, source revision, and candidate production symbols they cover.
-- Distinguish direct evidence, inferred candidates, stale evidence, and unknown attribution.
+- Version test definitions, observed execution, coverage, candidate-production
+  edges, and predictive selection independently.
+- Distinguish conservative dependency candidates, observed-coverage
+  candidates, predictive ranked candidates, stale evidence, and
+  unknown/unsupported attribution. No candidate mode proves execution,
+  correctness, or universal safety.
 
 ### V1 migration
 
@@ -135,8 +165,14 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 ## Acceptance
 
 - Identical sanitized fixtures produce byte-identical logical rows and generation digests across repeated and supported-host runs.
-- One-file edits re-extract only affected files and dependents; unchanged results are reused without changing their identities.
+- One-file edits reparse only changed sanitized content/descriptor inputs and
+  recompute only evidence-invalidated relation/attribution closures; reports
+  separate parse work, resolution work, invalidation fan-out, reuse, and any
+  conservative full rebuild without changing unchanged occurrence identities.
 - Rename, move, split, merge, ambiguous-lineage, parse-error, deletion, and unsupported-language fixtures remain truthful.
+- Fixtures prove Tree-sitter reuse never becomes lineage, parse/extraction caps
+  remain partial, every graph path preserves its weakest edge authority and
+  coverage, and unresolved dispatch cannot become semantic fact.
 - Diagnostic and test attribution never crosses snapshots, never upgrades
   inference to fact, and never publishes stale or cleared evidence as current.
 - Working, staged, and committed-range fixtures prove native Git hunk identity
@@ -144,6 +180,9 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
   rename, deletion, ambiguous lineage, and missing-generation cases remain
   explicit. Caller, hazard, and affected-test results retain their own graph and
   test-evidence provenance rather than inheriting certainty from the Git hunk.
+- TaskId-linked fixtures resolve exact generation/occurrence evidence through
+  Plan 13 anchors, remain losslessly expandable, and introduce no task-owned
+  rows or task authority into the code index.
 - Canonical descriptor fixtures prove analyzer routing and host LSP projection
   use the same extension, language-ID, root-marker, and capability facts without
   copying executable commands or settings into this boundary.

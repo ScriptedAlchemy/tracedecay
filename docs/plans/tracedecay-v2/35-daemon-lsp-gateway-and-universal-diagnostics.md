@@ -11,7 +11,9 @@ behavior consumed by Plan 27 packaging, and PR14 owns dashboard consumption and 
 canonical Doctor kernel/UI. PR15 replaces the
 bounded single-project admission with canonical multi-root project/worktree
 scope, and PR16 defines remote-node placement without exporting unsaved
-workspace authority accidentally.
+workspace authority accidentally. PR17 may add opaque TaskId join keys to
+advisory editor projection; it does not add task authority or make LSP a task
+retrieval transport.
 
 This plan extends, rather than replaces, the code-intelligence ownership in
 [25](25-code-intelligence-indexing-crate.md), the daemon and binding rules in
@@ -67,7 +69,11 @@ architecture.
 - Merging current upstream diagnostics with current TraceDecay-managed
   diagnostics without losing source, provenance, freshness, or severity.
 - Field-level LSP projection of [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
-  advisory feedback findings for IDE Problems publication.
+  advisory feedback findings for IDE Problems publication. When a finding is
+  task-linked, the projection carries the opaque
+  [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md) `TaskId`
+  and Plan 13 anchor IDs only as authorized join keys; LSP never stores task
+  evidence or becomes a task-retrieval transport.
 - Exact clean-snapshot diagnostic reuse and isolated unsaved-document overlays.
 - Typed gateway requirements, finding, and engine-state schema consumed by
   [27](27-cross-host-agent-plugin-bundles.md) host plugin projection, PR13
@@ -152,6 +158,21 @@ architecture.
   actionable startup failure. The bridge never starts an embedded TraceDecay
   database or private analyzer fallback.
 
+### Protocol lifecycle and publication
+
+- Formalize initialize/negotiation, initialized, synchronization, request,
+  cancellation, shutdown, exit, reconnect, and stale-revision states.
+  Cancellation guarantees suppression of stale downstream publication and
+  only best-effort upstream execution stop.
+- Publish diagnostics and semantic state idempotently and monotonically by
+  session, document, and generation epoch. Duplicate or replayed updates
+  converge, stale updates cannot overwrite newer state, and reconnect or
+  restart may redeliver current state. Track produced, queued,
+  bridge-acknowledged, superseded, and unknown-delivery states without claiming
+  exactly-once network delivery.
+- A bounded session TTL deterministically releases overlays, pending requests,
+  and analyzer references without changing durable clean-generation evidence.
+
 ### Session and workspace model
 
 - Every client connection receives an isolated LSP session identity tied to an
@@ -161,8 +182,11 @@ architecture.
   root. Multiple workspace folders are explicitly unavailable; the gateway
   cannot select CWD, the first folder, or an active checkout as a substitute.
 - PR15 resolves every workspace folder through the canonical scope service.
-  Multi-root admission succeeds with explicit per-folder scope and coverage or
-  fails with bounded ambiguity/unavailability; no LSP-private resolver exists.
+  Each request pins one canonical workspace-set revision and per-folder
+  snapshot vector. Folder-set transitions are atomic or explicitly partial.
+  Plan 16 resolves one owner or ambiguity for each document; no longest-prefix,
+  CWD, first-folder, or active-checkout fallback exists. Workspace-wide fan-out
+  merges through Plan 05 with per-root coverage.
 - Open-document state is keyed by client session, canonical file identity,
   document version, content digest, language descriptor revision, and analyzer
   configuration revision.
@@ -216,6 +240,11 @@ architecture.
 
 - The gateway implements the standard LSP lifecycle and document synchronization
   methods required by Claude Code and other supported hosts.
+- Effective capability is the intersection of client support, gateway
+  guarantee, upstream analyzer support, admitted project/language,
+  policy/configuration, and active profile. Negotiation binds
+  protocol/catalog/project/workspace/gateway/analyzer/config/policy/client
+  revisions; incompatible drift renegotiates or fails typed-stale before work.
 - The supported semantic capability set is: `textDocument/declaration`,
   `textDocument/definition`, `textDocument/typeDefinition`,
   `textDocument/implementation`, `textDocument/references`,
@@ -236,10 +265,13 @@ architecture.
   unsupported, returns an explicit typed capability-unavailable outcome. The
   gateway never guesses a fallback result or synthesizes a plausible-looking
   answer for a method it cannot truthfully answer.
-- Upstream analyzer results are authoritative for language-specific type
-  semantics. TraceDecay may add graph results only when they carry exact
-  generation, file, symbol, and span evidence. It never upgrades a heuristic
-  relationship into an analyzer fact.
+- An admitted analyzer is authoritative only for the typed capability, exact
+  workspace/document/configuration snapshot, and coverage it successfully
+  completed. It is not authority for unsupported files, unreported generated,
+  macro, or dynamic behavior, test execution, or another analyzer's domain.
+  TraceDecay may add graph results only when they carry exact generation, file,
+  symbol, span, edge-authority, and coverage evidence. It never upgrades a
+  heuristic relationship into an analyzer fact.
 - Results are normalized to canonical paths and UTF-16 LSP positions, deduped
   without erasing distinct provenance, deterministically ordered, bounded, and
   returned only for the requesting session's workspace and document version.
@@ -342,7 +374,8 @@ not forced into fake editor positions.
   enclosing-function mapping when available; `source` naming the producer;
   stable `code`; `codeDescription.href` to the original review or CI URL only
   when authorized; `data` carrying stable finding ID plus Plan 13
-  `RetrievalAnchorId`, lifecycle/coverage state, and no full payload;
+  `RetrievalAnchorId`, optional authorized Plan 24 `TaskId`,
+  lifecycle/coverage state, and no full payload;
   `relatedInformation` with typed locations and bounded messages where the
   finding references additional sites.
 - Severity is conservative: preserve upstream/analyzer severity where scored;
@@ -353,9 +386,15 @@ not forced into fake editor positions.
   ([Plan 21](21-cli-mcp-tool-surface-and-output-unification.md)
   `feedback_get`/`feedback_expand` and Plan 13 anchor resolution), never as
   hidden LSP payload.
-- Clearing is deterministic: resolution, deletion, head SHA drift, content or
-  generation change, or supersession removes or republishes the prior
-  diagnostic exactly once for that client document version.
+- Clearing is deterministic and version-monotone: resolution, deletion, head
+  SHA drift, content or generation change, or supersession removes or
+  republishes the prior diagnostic idempotently for that client document
+  version. Duplicates converge and stale updates cannot overwrite newer state.
+- Diagnostics default to a concise cue plus bounded related locations and
+  authorized expansion. Long explanations, chronology, and task narrative are
+  pulled through typed application operations that compose Plan 05/23
+  retrieval with Plan 24 identity, not pushed during execution; LSP remains an
+  editor projection rather than query, task, or Doctor authority.
 - Dirty-overlay feedback findings remain session-only for the authorized
   overlay owner and are never published as durable LSP diagnostics.
 
@@ -573,7 +612,9 @@ not forced into fake editor positions.
   or visible to the other client.
 - Save, close, rename, delete, ref switch, workspace-folder change, analyzer
   crash, restart, cancellation, timeout, daemon restart, and bridge reconnect
-  fixtures clear or republish diagnostics exactly once.
+  fixtures prove idempotent, version-monotone convergence: duplicate delivery
+  is harmless, stale publication cannot overwrite newer state, and reconnect
+  may redeliver current diagnostics.
 - Missing analyzers degrade only their languages. TraceDecay graph-backed
   operations remain truthful, engine coverage remains visible, and no fallback
   invents semantic or type information.
@@ -591,9 +632,11 @@ not forced into fake editor positions.
   never spool or cache unsaved source.
 - Plan 37 feedback-projection fixtures cover ingested PR comments, CI findings,
   and proximity warnings surfacing through Problems with conservative severity,
-  stable finding/anchor IDs in `data`, bounded `relatedInformation`, authorized
-  `codeDescription.href`, deterministic clear/remap on head/content/generation
-  change, truncation without hidden payload, and dirty-overlay non-durability.
+  stable finding/anchor IDs and optional authorized `TaskId` in `data`, bounded
+  `relatedInformation`, authorized `codeDescription.href`, deterministic
+  clear/remap on head/content/generation change, lossless expansion through
+  owning retrieval operations, truncation without hidden payload, and
+  dirty-overlay non-durability.
 - Linux, macOS, and Windows fixtures cover URI normalization, UTF-16 positions,
   process lifecycle, command discovery, socket/stdio behavior, path safety, and
   shutdown.

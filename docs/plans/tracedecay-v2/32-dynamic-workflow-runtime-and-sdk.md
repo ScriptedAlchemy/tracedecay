@@ -235,6 +235,12 @@ or applies an effect. Revalidation after graph, scope, policy, or evidence
 change uses one explicit cancel/pause/continue decision against the pinned
 runtime node; neither side silently rewrites admitted work.
 
+An admission may carry an accepted Plan 24 topology/partition revision. Plan
+32 releases nodes only from committed dependency readiness, enforces useful
+concurrency and capacity classes, serializes or isolates shared-authority
+hubs, records requested versus actual topology/concurrency and defer reasons,
+and never invents a partition or recomputes Plan 24's assessment.
+
 Plan 24 task intelligence may use committed run/step/attempt/effect/artifact/
 receipt evidence to propose split, merge, resize, re-review, or re-route. A
 proposal is not a runtime event, queue update, lease change, retry decision, or
@@ -243,6 +249,24 @@ admitted work, Plan 09 submits a separate typed Plan 32
 pause/cancel/continue/re-admit command with expected authority/runtime
 versions. Plan 32 applies only that command and records its own receipt; it
 never watches recommendations or recalibration outputs for implicit control.
+
+A version-checked command may apply an accepted Plan 24 minimal-repair
+proposal: pause and fence the invalidated subgraph, reconcile in-flight
+effects, continue only nodes proved unaffected, create new attempts for changed
+nodes, preserve old history, and fail closed on stale proof or unknown effect.
+No proposal directly changes runtime state.
+
+`AwaitingDecision` references an authorized Plan 24 escalation proposal and
+records affected node/attempt, effect reconciliation, deadline, human answer
+or override provenance, and cancellation semantics. The runtime never infers
+an answer, treats timeout as approval, or creates a cron unblock.
+
+Typed checkpoint evidence may be validated for identity, order and grounding,
+but cannot renew a lease, prove task completion, or mutate the graph. Reviewer
+roles cannot mutate executor work; adversarial hackers and evaluator fixers
+run in isolated fixtures; legitimate solvers validate hardened evaluators;
+synthesizers preserve disagreements and minority evidence; and no role
+recursively dispatches. Generic debate or consensus is not independent review.
 
 ## Remote and host behavior
 
@@ -315,6 +339,16 @@ Plan 24 integration tests additionally prove one runtime mapping per admitted
 task step, stale graph/readiness rejection, exact versioned runtime projection,
 and the absence of any second runtime clock/scheduler/lease/attempt/effect
 authority.
+Topology fixtures compare admitted single, sequential, parallel, hierarchical
+and hybrid revisions; shared-authority serialization, requested-versus-actual
+concurrency, capacity deferral, and refusal to invent an unreviewed partition.
+Minimal-repair and decision fixtures cover invalidation fencing, unaffected
+proof, unknown-effect reconciliation, stale proposals, new-attempt history,
+explicit human override, cancellation, and timeout without approval or
+implicit graph/runtime change. Checkpoint and role-isolation fixtures prove
+checkpoints cannot renew leases or establish completion, minority review
+survives synthesis, hacker/fixer/legitimate-solver roles stay isolated, and no
+debate, consensus, recursive dispatch, or second scheduler appears.
 Task-intelligence integration tests additionally prove runtime evidence can
 produce an anchored advisory proposal without changing run state, and that an
 accepted proposal still requires a separately authorized, version-checked

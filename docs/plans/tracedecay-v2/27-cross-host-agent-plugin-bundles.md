@@ -11,9 +11,11 @@ packaging, registration, conflict handling, install/repair/uninstall, one
 configured-language TraceDecay LSP plugin for Claude Code, the Cursor desktop
 native-diagnostics adapter, Cursor cloud/Codex/Hermes/Kiro hook/MCP/CLI or typed
 unavailable paths, host install/registration/protocol conformance findings and
-fixtures, and cutover for every supported host. PR14 owns canonical Doctor
-presentation, diagnosis, and remediation orchestration that invokes PR13
-lifecycle operations without redefining repair mechanics.
+fixtures, and cutover for every supported host.
+[Plan 14](14-historical-failure-regression-matrix.md) owns the sole
+Doctor/health/remediation kernel; [Plan 11](11-dashboard-frontend.md) renders
+its canonical findings and legal actions. This plan supplies typed diagnostic,
+conformance, and remediation-operation inputs to that kernel.
 PR17 extends the same catalog/bundles with Plan 24 task context and Plan 32
 runtime execution adapters; it does not create a host-local board or scheduler.
 
@@ -35,13 +37,9 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
 - Capability negotiation and explicit host-difference reporting.
 - Host lifecycle operation mechanics: install, update, repair, uninstall,
   backup/restore, explicit confirmation, receipts, and rollback/recovery for
-  TraceDecay-owned host configuration (PR13). PR13 owns the operations; it does
-  not own canonical Doctor presentation.
+  TraceDecay-owned host configuration (PR13).
 - Host install, registration, and protocol-conformance findings/state and
-  cross-host conformance fixtures (PR13). PR14 in
-  [Plan 11](11-dashboard-frontend.md) owns the canonical Doctor kernel/UI,
-  dashboard views, diagnosis, and remediation orchestration that invokes these
-  PR13 lifecycle operations without redefining repair mechanics.
+  cross-host conformance fixtures (PR13), as inputs to the Plan 14 kernel.
 
 ## Does not own
 
@@ -57,6 +55,7 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
 - GitHub REST/GraphQL identity, finding ownership, comment posting, or a
   second durable finding store; ingestion delegates to the read-only adapter
   path and Plan 09/Plan 37 advisory findings.
+- Any Doctor, health, remediation-kernel, or dashboard UI authority.
 
 ## Required behavior
 
@@ -101,6 +100,13 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
 ### Capability differences
 
 - Publish a tested capability view for each host using `supported`, `degraded`, or `unavailable` with a reason.
+- Project `task_boundary_signal`, `busy_or_composition_signal`,
+  `user_quiet_mode`, `passive_diagnostic_projection`,
+  `active_message_projection`, `local_expansion`, and
+  `explicit_feedback_receipt` independently as
+  `supported | degraded | unavailable`, with native provenance. Missing LSP,
+  boundary, quiet-mode, feedback, or projection capabilities never inherit or
+  silently emulate another host's behavior.
 - Report host-specific LSP capability differences explicitly, following
   [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)'s
   capability-specific host model: Claude Code gets one configured-language
@@ -124,6 +130,11 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
   receive hooks/MCP/CLI paths. This plan owns transport and registration
   mechanics; Plan 09 owns the result contract and Plan 37 owns the
   architecture.
+- Delivery evidence is content-free and bounded: opaque envelope/finding ID,
+  host surface, attempted/displayed/delayed/suppressed disposition and reason,
+  latency, expiry, and explicit host interaction when natively available.
+  Adapters never infer intent or adoption, inspect prompt/source/path/symbol/
+  tool payloads for receptivity, or train a host-local delivery model.
 - Existing GitHub PR review comments are ingested through a read-only GitHub
   adapter/application path at PR13 and surfaced as advisory findings. This
   plan does not post, update, or resolve GitHub comments and does not claim
@@ -136,6 +147,10 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
   discovery, registration, and conformance. A host may expose richer native UI
   or subagents, but it cannot schedule another canonical task, widen grants, or
   advance graph state locally.
+- Project-addressed TaskId context, handoff, escalation, and progress use these
+  native capability projections while Plan 32 remains sole execution
+  authority. Capability differences may alter presentation and timing, never
+  task semantics, grants, labels, scheduling, or evidence identity.
 - PR17 host bundles and skills present the same application-backed task-shape,
   decomposition-review, routing-recommendation, resize/re-route proposal,
   outcome, and calibration concepts where the host supports them. They may
@@ -182,17 +197,18 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
 - Make install and update idempotent; make repair explicit and receipt-backed; remove only TraceDecay-owned state during uninstall.
 - Keep service-manager ownership and daemon lifecycle separate from host registration files.
 
-### Host/provider findings (PR13/PR17) and Doctor remediation (PR14)
+### Host/provider inputs (PR13/PR17) to Doctor remediation (PR14)
 
-- PR13 emits read-only host install, registration, version skew, endpoint
+- PR13 emits read-only host install, registration, version-skew, endpoint
   reachability, hook delivery, capability availability, and protocol-conformance
-  findings with stable identities and remediation references consumable by PR14
-  Doctor.
+  inputs with stable source identities and remediation references consumable by
+  the Plan 14 Doctor kernel.
 - PR13 owns confirmed repair/install/update/uninstall operation mechanics—preflight
   evidence, explicit confirmation, receipts, backup/restore, and
-  rollback/recovery. PR14 owns canonical Doctor presentation, diagnosis, and
-  remediation orchestration that invokes those PR13 operations; PR14 does not
-  redefine repair mechanics.
+  rollback/recovery. Plan 14 owns canonical finding identity, diagnosis,
+  aggregation, severity, health state, and remediation orchestration, and
+  invokes those operations without redefining their mechanics. Plan 11 renders
+  only the supplied findings and legal actions.
 - Conformance uses native host fixtures and processes rather than source-text
   inspection of host applications.
 - PR13 LSP conformance, limited to LSP-capable hosts (Claude Code), runs against
@@ -206,9 +222,8 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
   version drift, invalid configured fallback, sandbox/environment/capability
   mismatch, provider availability, and reconnect/resume failure. Plan 27 owns
   those probes and confirmed install/update/repair/rollback mechanics only.
-  Plan 14's canonical Doctor kernel owns finding identity, diagnosis,
-  aggregation, severity, legal remediation presentation, and health state;
-  Plan 27 creates no provider-specific Doctor or health formula.
+  The same Plan 14/Plan 11 kernel/rendering boundary applies; Plan 27 creates no
+  provider-specific Doctor, health formula, or UI.
 - Stuck lease/attempt detection remains Plan 32 runtime evidence consumed by
   Plan 14 Doctor. Plan 27 may collect typed external executable/host diagnostic
   evidence and offer a confirmed repair operation, but only Plan 14 turns that
@@ -224,10 +239,17 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
   the native-diagnostics adapter; Cursor cloud, Codex, Hermes, and Kiro fixtures
   prove hook/MCP/CLI or typed unavailable paths without assuming full LSP
   registration.
-- Every supported native event reaches one canonical observation exactly once; unavailable events remain explicit.
+- Duplicate native deliveries and replays converge idempotently to one logical
+  canonical observation keyed by stable event identity; transport or network
+  exactly-once delivery is neither required nor claimed. Unavailable events
+  remain explicit.
 - Host processes and hooks pass negative tests proving they cannot open stores or become daemon writers.
 - MCP-present and CLI-only paths produce equivalent authorized product behavior.
-- Version-skew, missing binary, dead daemon, stale registration, ownership conflict, and partial-install host-conformance fixtures return stable causes without mutation; PR14 Doctor consumes the same finding identities for kernel/UI presentation and remediation orchestration that invokes PR13 lifecycle operations.
+- Version-skew, missing binary, dead daemon, stale registration, ownership
+  conflict, and partial-install host-conformance fixtures return stable causes
+  without mutation. The Plan 14 Doctor kernel consumes their stable input
+  identities for canonical finding construction and remediation orchestration;
+  the Plan 11 dashboard renders the result.
 - Cross-host handoff preserves repository/worktree, session, parent/subagent, privacy, and provenance identity.
 - PR17 cross-host task execution fixtures preserve exact Plan 24/32 identity,
   reject stale lease/graph versions and wrong worktrees, report requested versus
@@ -236,6 +258,11 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
   access. Equivalent hosts preserve proposal/abstention/fallback and
   independent-review semantics; unsupported host interactions return a typed
   unavailable path rather than silently narrowing the contract.
+- Host-capability fixtures independently exercise each boundary, quiet,
+  passive/active projection, local-expansion, and explicit-feedback capability;
+  verify content-free delivery evidence and explicit human deferral/override;
+  and prove no prompt/source/path/symbol/tool telemetry, hidden host
+  personalization, recursive dispatch, or fallback emulation.
 - PR17 provider conformance runs bounded fake and supported native Claude Code
   and Codex protocol fixtures for executable absence, version/capability drift,
   model/reasoning negotiation, structured and malformed streams, typed

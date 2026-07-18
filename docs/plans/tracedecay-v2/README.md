@@ -63,6 +63,28 @@ requirements and boundaries, not separate crate-first work queues.
 - One typed kernel owns each mechanism. Public names and compatibility aliases
   are bindings, never alternate query, edit, storage, rendering, health, or
   workflow implementations.
+- Consumers compose owner results without duplicating authority: Plan 05 owns
+  shared query execution, Plan 23 temporal session/LCM retrieval, Plan 14 the
+  Doctor/health/remediation kernel, Plan 20 configuration resolution and
+  snapshots, Plan 26 measurements and labels, and Plan 32 workflow clocks,
+  scheduling, attempts, effects, and runtime receipts. Plan 11 renders Plan 14
+  findings and legal actions without becoming another health or remediation
+  authority.
+- High-confidence architecture and explicit rejection findings are normative.
+  Medium-confidence model, ranking, topology, renderer, calibration, and
+  optimization mechanisms are versioned candidates that ship only after
+  TraceDecay-specific locked evidence. Low-confidence or causal product-effect
+  claims are neither requirements nor acceptance gates without direct
+  intervention evidence.
+- Code and product quantifiers retain raw values, units, denominators,
+  coverage, cohort, temporal delta, provenance, uncertainty kind, and
+  calibration validity. Universal quality/health/reward/readiness scores,
+  uncalibrated probabilities, and dashboard-local truth are prohibited.
+- PR9 exact identifiers, paths, quoted phrases, errors, tool names, and
+  configuration keys form a non-demotable lexical tier. PR10 semantic search
+  starts with an exact flat-vector baseline/oracle; rerankers, ANN, late
+  interaction, and quantization remain measured candidates, never mandatory
+  defaults or identity/equivalence evidence.
 - [Git intelligence and safe repository operations](36-git-aware-change-context-and-index-transactions.md)
   progress from PR7 provenance anchors through PR9 read-only semantic evidence,
   PR11 daemon-serialized index/commit transactions, and PR12 shared surface
@@ -72,8 +94,12 @@ requirements and boundaries, not separate crate-first work queues.
   causal/workload projections](24-canonical-task-plan-graph-and-multi-agent-executor.md)
   plus advisory task-shape/decomposition/sizing/model-routing intelligence,
   independent outcomes/calibration, and human-reviewed live resize/re-route
-  proposals. [Plan 32](32-dynamic-workflow-runtime-and-sdk.md) remains the sole
-  runtime clock, scheduler, history, lease, attempt, and effect authority.
+  proposals. Every opaque `TaskId` is an authorized retrieval root whose compact
+  context losslessly expands through Plan 23 narrative retrieval, Plan 13
+  anchors, Plan 25 code generations, and owning Git, CI, diagnostic, review,
+  artifact, and runtime stores. [Plan 32](32-dynamic-workflow-runtime-and-sdk.md)
+  remains the sole runtime clock, scheduler, history, lease, attempt, effect,
+  and artifact authority.
   Recommendations never auto-mutate the graph or silently choose a model.
   These are typed product data, never an execution model for this developer
   roadmap.
@@ -97,8 +123,29 @@ requirements and boundaries, not separate crate-first work queues.
   an automatic rewrite, workflow, agent, or no-progress timeout.
 - Keep privacy, recovery, concurrency, cross-platform, migration, and deletion
   gates with the product behavior they protect.
+- PR12 transport and PR18 SDK contracts are revisioned and tested for
+  structural, semantic, and lifecycle compatibility. Generated schemas,
+  clients, or successful compilation do not establish product conformance.
+- PR14 ships Plan 11's shared shell and original twelve workspaces, including
+  renderer-neutral flagship Brain/Explorer/Loom surfaces, with a permissive
+  default renderer and accessible semantic parity. PR17 adds the Work task-
+  graph/Kanban/DAG/timeline/causal/workload UI. Optional GPU or commercial
+  adapters draw and accelerate only; they never own graph, query, storage,
+  health, readiness, scheduling, ranking, or remediation.
+- PR15 freezes one authorized scope-set digest and per-shard state vector for
+  federation. PR16 enforces a higher fence at every durable mutation/publication
+  sink and admits duplicate offline delivery through idempotent receipts; CRDT,
+  wall-clock, or replicated-SQLite convergence never becomes mutation authority.
+- PR19 migration is forward-only after publication: V1 archives are bounded
+  recovery input, restoration produces verified V2 under a new fence, and no
+  reverse cutover, long-lived dual write, lazy read migration, or production
+  shadow read remains.
 - Instrument each production path when it ships and retain a representative
   baseline for [PR20 performance optimization](33-end-to-end-performance-optimization.md).
+  Promotion uses frozen workloads, A/A noise floors, paired effects and
+  intervals, practical margins, worst-stratum/resource/tail evidence,
+  open-loop overload accounting, and recomputation equivalence—not a universal
+  score, public benchmark rank, or paper-derived threshold.
 - PR #421 merges only after PR20 completes and aggregate verification is stable.
 
 ## Removed permanently

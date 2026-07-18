@@ -76,7 +76,21 @@ The minimum typed model includes:
 - acceptance, review, decision, exception, artifact, outcome, and cost records;
   and
 - typed relations to every project/session/code/Git/delivery entity listed
-  above, with provenance, confidence, temporal validity, and retrieval anchors.
+  above, with provenance, temporal validity, retrieval anchors, coverage, and
+  any `ordinal_rank`, `heuristic_score`, `calibrated_probability`, or
+  `calibrated_interval` assessment carrying explicit producer/origin and
+  scale/calibration revision.
+
+Every opaque `TaskId`/`WorkItemId` is also a stable authorized retrieval root.
+It resolves typed dependencies, versions, attempts, independent reviews,
+temporal outcomes, sessions/Threads/Turns/messages/agents/tool calls,
+artifacts, receipts, handoffs, and other-agent work, plus exact Plan 13
+anchored project/repository/worktree/branch, file/symbol, diagnostic,
+code-generation, Git/commit/PR/check, impact, and affected-test evidence.
+Task-linked session narrative reuses Plan 23's current/as-of/evolution/forensic
+kernel; GitHub, CI, diagnostic, Git, and code evidence stays in its owning
+store. Summaries accelerate bounded context but never replace exact evidence,
+and every page, hydration, or expansion rechecks authorization.
 
 Gating edges form a DAG. Informational and evidence relations may contain
 cycles but never unlock work or enter critical-path calculations. Readiness is
@@ -144,7 +158,9 @@ observations and denominator-safe metrics for:
 
 - decomposition quality and task-shape fit;
 - first-pass scope completion and accepted correctness;
-- tests executed, review findings, escaped defects, and outcome confidence;
+- tests executed, review findings, escaped defects, and calibrated outcome
+  probability/interval or explicitly ordinal/heuristic outcome assessment,
+  each with producer/origin, scale/calibration revision, evidence, and coverage;
 - rework count, successor/remediation work, retries, and failure causes;
 - queue and execution latency, tokens, measured/estimated cost, and resource use;
 - autonomy, human interventions and overrides, cancellation, and unknown
@@ -206,11 +222,33 @@ policy/config/catalog/privacy revisions. Its typed feature set includes:
   ranges.
 
 Each feature records value or interval, unit/scale, provenance class
-(`declared`, `derived`, or `observed`), evidence anchors, coverage, confidence,
-and unknown reasons. Calibrated size is a distribution or ordinal band with
-prediction interval, not a synthetic story-point precision claim. Estimates
-for execution effort, wall time, tokens, cost, and review load remain separate
-because concurrency, queueing, and model route affect them differently.
+(`declared`, `derived`, or `observed`), producer/origin, evidence anchors,
+coverage, unknown reasons, and any numeric assessment's score kind:
+`ordinal_rank`, `heuristic_score`, `calibrated_probability`, or
+`calibrated_interval`. Ordinal rank names its comparison set and deterministic
+components; a heuristic names its versioned scale and never renders as a
+probability. Probability or interval output names estimator/calibrator, cohort,
+horizon, support, held-out error, and drift validity. Raw values from different
+kinds, scales, or revisions are incomparable. Calibrated size is a distribution
+or ordinal band with prediction interval, not a synthetic story-point precision
+claim. Estimates for execution effort, wall time, tokens, cost, and review load
+remain separate because concurrency, queueing, and model route affect them
+differently.
+
+### Orchestration topology assessment
+
+`OrchestrationTopologyAssessmentRevision` binds the exact
+work/graph/evidence horizon and records candidate topology
+(`Single | Sequential | Parallel | Hierarchical | Hybrid`), width, critical
+path, serial fraction, depth, fan-in/out, hubs, typed coupling, edge-cut,
+context/coordination cost, shared-authority conflicts,
+speculative-interface risk, proposed partition, integration/review barriers,
+useful concurrency, capacity/budget feasibility, and a no-decomposition
+alternative. Correctness, latency, cost, and rework ranges remain separate.
+The assessment preserves evidence, alternatives, coverage, exclusions,
+calibration identity, uncertainty, and abstention; paper thresholds and agent
+availability never determine topology. It is advisory and separately
+accepted.
 
 ### Decomposition and live revision proposals
 
@@ -219,8 +257,12 @@ versions, typed parent/child and gating/non-gating edges, child acceptance
 contracts, scope and context boundaries, suggested integration/review gates,
 parallelism constraints, estimated ranges, and evidence for every cut. It must
 also explain why the proposed boundary is safer or more efficient than leaving
-the parent intact. Shared-state or cross-cutting work is not falsely labeled
-parallel merely because several agents are available.
+the parent intact. It records edge cut, retained cohesion, hub isolation,
+speculative contracts, context/integration/review overhead, serial and naive
+parallel baselines, an alternative cut, why separate attempts are justified,
+and the condition that collapses work to single/sequential execution.
+Shared-state or cross-cutting work is not falsely labeled parallel merely
+because several agents are available.
 
 Committed graph/runtime evidence may produce a new split, merge, resize,
 reorder, re-scope, re-review, or re-route proposal when, for example:
@@ -237,11 +279,45 @@ reorder, re-scope, re-review, or re-route proposal when, for example:
   or makes a planned integration gate unsafe.
 
 The proposal cites the old estimate, new evidence, changed dimensions,
-predicted consequence, confidence, coverage, and legal choices. It cannot
+predicted consequence, score kind, producer/origin, scale or calibration
+revision, evidence coverage, and legal choices. It cannot
 pause, cancel, split, merge, resize, or re-route admitted work. Plan 09
 revalidates it; only an explicit human-authorized command chooses a graph
 version and, where runtime work exists, a separate explicit Plan 32
 pause/cancel/continue/re-admit action.
+
+### Minimal repair and decision-point escalation
+
+Every live repair proposal records changed evidence and assumptions, the
+invalid node/edge set and downstream invalidation cone, explicitly unaffected
+nodes with proof, local repair boundary, effect reconciliation, alternatives
+(`continue | local_repair | full_restart | cancel`), and expiry. It changes no
+graph or runtime state; Plan 32 can execute only an accepted, version-checked
+proposal.
+
+`EscalationProposalRevision` records blocker kind, progressively disclosed
+evidence, affected identities, the smallest answerable question, alternatives,
+risk of guessing or waiting, legal continue/pause/cancel/rescope choices,
+deadline, fail-closed default, actor, answer, and human override provenance.
+An agent may propose escalation but cannot answer or approve itself, and a
+timeout is never approval.
+
+### Governed task experience and handoff evidence
+
+`TaskExperienceRecallRevision` records matched dimensions and mismatches,
+exact prior task/attempt/model/acceptance/outcome identities, review, rework,
+intervention, censoring and drift, helpful and harmful precedents, later
+utility, quarantine, supersession, retirement, privacy, and bounded anchors.
+Prior text, summaries, or aggregate similarity never becomes authority or an
+automatic route.
+
+Immutable `HandoffArtifactRevision` binds source/target actor, attempt,
+session, exact work/scope/code/worktree/evidence watermarks, objective and
+acceptance, completed/in-progress state, attempted approaches and negative
+evidence, next action and alternatives, blockers, decisions, required
+authority, changed artifacts, observed tests/diagnostics, coverage/unknowns,
+anchors, acknowledgement, and supersession. Acknowledgement proves receipt,
+not correctness.
 
 ### Model capability profiles and routing
 
@@ -262,7 +338,8 @@ recalculate profile metrics. The profile separates:
 - route unavailability, hidden or explicit provider fallback, timeout,
   cancellation, policy denial, and outcome still unknown; and
 - sample size, censoring, selection/override/exploration exposure, horizon,
-  freshness, calibration error, and confidence interval.
+  freshness, held-out calibration error, and calibrated-interval bounds and
+  declared level.
 
 Profiles learn across authorized sessions and attempts by joining canonical
 task, route, attempt, review, remediation, and outcome identities—not by
@@ -296,7 +373,7 @@ insufficient eligible evidence, incomplete coverage, ambiguity above policy,
 no eligible route, privacy/authorization denial, stale/invalidated inputs,
 budget/cancellation, evaluator unavailable, or model/version drift. A
 deterministic baseline result is `FallbackRecommended`, not a disguised
-high-confidence recommendation.
+calibrated recommendation.
 
 Plan 24's outcome-dependent graph transitions consume the exact versioned
 Plan 26 label schema; Plan 24 does not define another outcome vocabulary.
@@ -347,11 +424,27 @@ PR17 must provide typed product operation concepts for:
 - outcome recording and later evidence attachment; and
 - calibration reports by estimate dimension, task-shape cohort, route, and
   horizon.
+- topology assessment, minimal-repair comparison, selective escalation,
+  governed experience recall, and typed handoff inspection/review.
 
 These are semantic operation families, not frozen PR18 public method, command,
 or MCP-tool names. Plan 09 owns the transport-neutral use cases, Plan 08 the
 capability definitions, Plan 21 the compact CLI/MCP bindings, and Plan 17 the
 later stabilized public API/SDK names.
+
+Optional process checkpoints use only external typed receipts: evidence
+acquired, exact-generation diagnostic/test, artifact
+existence/reachability, dependency contract, reconciled effect, independent
+review, or delivery. They never inspect hidden reasoning, score chain of
+thought, renew leases, prove completion by themselves, or mutate graph/runtime
+state.
+
+Auxiliary roles are explicit—planner, executor, reviewer, synthesizer,
+adversarial hacker, evaluator fixer, legitimate solver, or monitor. Review and
+adversarial roles receive isolated evidence; synthesizers preserve
+disagreement and minority evidence. Generic debate, majority vote, consensus,
+and same-attempt self-grading do not satisfy independent review, and no role
+may recursively dispatch.
 
 ### Auxiliary-agent request semantics
 
@@ -414,7 +507,7 @@ outcomes after admission.
 There is no opaque online weight mutation, hidden model fine-tuning, or
 self-authored reward function. PR17 uses reviewed, versioned, replayable
 estimators over explicit features and labels. Formulas, cohort filters,
-priors, thresholds, confidence/coverage rules, evidence horizons, and
+priors, thresholds, score-kind/calibration/coverage rules, evidence horizons, and
 calibration error are inspectable and configuration/policy bounded.
 
 - **Cold start:** use declared capability constraints and conservative reviewed
@@ -631,16 +724,20 @@ canonical tasks, scheduling, leases, policy, or storage.
 PR17 delivers one coherent **advisory task-intelligence loop** with Plan 32,
 not a scoring-only backend or UI-only prototype:
 
-1. create explicit product work and an immutable task-shape assessment;
-2. propose and review a parent/child decomposition with calibrated ranges;
+1. create explicit product work plus immutable task-shape and topology
+   assessments;
+2. propose and review a parent/child decomposition with calibrated ranges,
+   serial/no-decomposition alternatives, and collapse conditions;
 3. recommend an eligible executor/model/effort and independent reviewer with
-   explanation, confidence/coverage, abstention, and deterministic fallback;
+   explanation, typed score/uncertainty origin and scale semantics, coverage,
+   abstention, and deterministic fallback;
 4. explicitly accept a graph version, emit one typed auxiliary-attempt request,
    and admit one mapped Plan 32 task step through a negotiated provider adapter;
 5. record requested/actual route, attempt/runtime evidence, independent review,
    outcome, rework, latency, tokens/cost, and autonomy through Plan 26; and
 6. replay a calibration report and generate—but never auto-apply—a justified
-   split/merge/resize/re-route proposal after evidence changes.
+   split/merge/resize/re-route or minimal-repair proposal after evidence
+   changes, with typed escalation when a decision is required.
 
 The slice includes domain/store contracts, graph projections/query, typed
 application commands, runtime mapping, pure policy inputs/results, Plan 26
@@ -673,6 +770,14 @@ Acceptance requires direct tests proving:
 - task-shape fixtures cover complexity, ambiguity, blast radius, context/tool
   burden, concurrency, security/privacy risk, calibrated size intervals, and
   unknown feature coverage without a universal opaque score;
+- score-contract fixtures reject a numeric assessment missing score kind,
+  producer/origin, comparison set or scale/calibration revision, evidence
+  anchors, or coverage; prove ordinal ranks and heuristics never render as
+  probabilities; reject ordering or averaging across incomparable kinds,
+  scales, or revisions; and require invalid, stale, shifted, or under-supported
+  calibration to abstain or select the deterministic fallback. Held-out
+  evaluation reports ranking quality and probability/interval calibration
+  error, support, coverage, horizon, and drift by eligible task/model cohort;
 - decomposition fixtures cover parent/child identity, gating versus
   informational edges, independent work versus unsafe overlap, integration
   overhead, cycle rejection, explicit review, and no mutation before
@@ -698,8 +803,8 @@ Acceptance requires direct tests proving:
   fixtures produce transparent fallback, abstention, suppression, or bounded
   claims;
 - outcome/calibration rebuilds preserve first-pass identity, independent-review
-  status, parent-normalized rework, unknown/censored denominators, confidence
-  intervals, Plan 26 label/schema revision, and
+  status, parent-normalized rework, unknown/censored denominators, calibrated
+  intervals with declared level/coverage, Plan 26 label/schema revision, and
   estimator/policy/config/evidence revisions; fixtures prove Plan 24 accepts no
   locally invented/coerced outcome label and Plan 32 completion alone cannot
   satisfy a graph acceptance transition;
@@ -707,6 +812,18 @@ Acceptance requires direct tests proving:
   parity in PR18;
 - restart, concurrency, partial coverage, stale evidence, denied scope,
   secret canaries, and remote authority loss remain truthful and recoverable;
-  and
+- TaskId-rooted current/as-of/evolution/forensic retrieval traverses task,
+  attempt, review, session, tool, artifact, code, Git, CI, diagnostic, impact,
+  and affected-test evidence with authorization parity and lossless Plan 13
+  expansion;
+- single, sequential, naive-parallel, cohesion-aware, and hybrid topology
+  baselines; coupling abstention; local repair versus restart; transient,
+  semantic, and permanent perturbation; targeted escalation; harmful recall
+  quarantine; and no-auxiliary baselines remain direct fixtures;
+- hacker/fixer/legitimate-solver evaluator hardening preserves false-reject
+  checks, role isolation, minority review and external verification; handoff
+  fixtures measure rediscovery and appropriate reliance without treating
+  acknowledgement, tests alone, self-grades, artifact existence, process exit,
+  or runtime terminal state as accepted completion; and
 - no source, test, tool, or runtime path parses or executes these V2 roadmap
   Markdown files, completion state, PR sequence, or developer plan.

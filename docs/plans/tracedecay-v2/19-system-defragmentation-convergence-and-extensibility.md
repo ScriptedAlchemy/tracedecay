@@ -56,7 +56,11 @@ policy, lifecycle, or transport logic.
 4. Canonical operations
    - Storage, configuration, privacy, identity, query, and lifecycle behavior each have one owner.
    - Adapters call those operations rather than reimplementing them.
-   - Extensions use typed capabilities and cannot reach around policy or daemon authority.
+   - Extensions use typed, revisioned capabilities and cannot reach around
+     policy or daemon authority. Each adapter declares the canonical operation,
+     compatible capability/protocol/schema revision range, lifecycle class,
+     and unsupported behavior; generated schemas or successful compilation do
+     not establish semantic or lifecycle conformance.
    - A compatibility alias may translate wire shape only. Availability, errors,
      authorization, effects, health, and cancellation come from its canonical operation.
    - Reads never repair. Status and read projections report stored state;
@@ -81,6 +85,10 @@ policy, lifecycle, or transport logic.
 
 6. Convergence and deletion
    - Each replacement identifies its canonical owner and removes the superseded path.
+   - Every alias, wrapper, or adapter is classified
+     `stable_public_contract` or `temporary`, names its external consumer and
+     owner, and for temporary surfaces records the exact deletion gate and
+     latest delivery slice. Missing disposition blocks convergence.
    - Temporary adapters have an explicit deletion condition within the delivering PR sequence.
    - PR19 removes all satisfied shims, duplicate paths, dead feature flags, and obsolete dependencies.
    - After [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)
@@ -113,6 +121,9 @@ policy, lifecycle, or transport logic.
 - Concurrent clients cannot become additional database authorities.
 - Every surviving crate has a documented ownership or dependency reason beyond file organization.
 - PR19 removes superseded implementations, compatibility shims, dead flags, and unused dependencies.
+- Every surviving compatibility surface has a stable-public-contract
+  disposition; every removed temporary surface has passed its named
+  conformance and deletion gate without changing PR ownership or sequencing.
 - No client, dashboard, root compatibility path, or host plugin starts
   analyzers, opens writable stores, owns diagnostic state, or bypasses the
   canonical daemon gateway after cutover.

@@ -36,12 +36,25 @@ the defined recovery window, and then deleted under explicit policy.
 - Refuse concurrent migration for the same store and record a durable migration ID and phase.
 - Preflight identifies every supported V1 data family, schema/version, source path, destination scope, required space, and blocking corruption.
 - Create and verify a recoverable backup before mutation; never overwrite the only usable copy.
-- Import into isolated V2 staging in bounded transactions with deterministic identity mapping and restart-safe checkpoints.
+- Import into isolated V2 staging in bounded transactions with deterministic
+  identity mapping and durable range/family checkpoints. A checkpoint is
+  written only after the destination commit and binds migration/source/checksum
+  epoch, family, deterministic order/range, transform and privacy revisions,
+  destination identity, counts, and digest. Resume revalidates those inputs and
+  is idempotent or fails closed.
 - Migrate all detected supported families in PR19; an unknown or corrupt required family blocks cutover with actionable Doctor output.
-- Verify counts, identities, referential integrity, content hashes where applicable, scope mapping, searchability, and representative reads.
+- Verify counts, identities, referential integrity, content hashes where
+  applicable, deletion/correction lineage, scope mapping, quarantine,
+  searchability, normalized query results, and representative reads. Any
+  shadow comparison is read-only and isolated from production reads and
+  effects while V1 remains sole authority.
 - Cut over atomically only after verification. Before cutover, V1 remains authoritative; failed staging is safely discardable or resumable.
 - After cutover, clients reconnect to the V2 daemon without opening stores directly.
-- Archive the V1 store with version, checksum, timestamp, migration ID, and restore instructions for one defined recovery window.
+- Archive the V1 store with version, checksum, timestamp, migration ID, and
+  restore instructions for one defined recovery window. Archive eligibility is
+  blocked until deletion, correction, quarantine, and derivative ownership are
+  captured. Restore replays every newer disposition and rebuilds affected
+  derivatives before serving; provenance never overrides erasure.
 - Doctor can diagnose preflight, incomplete migration, archive, daemon-version, lock, corruption, and recovery states without unsafe automatic deletion.
 - Doctor classifies corruption by data family before prescribing recovery.
   Derived, deterministically rebuildable structures — external-content
@@ -59,6 +72,10 @@ the defined recovery window, and then deleted under explicit policy.
   upgrade replaces the binary and rolls forward; it never re-admits the old
   authority over migrated state (a PR7 upgrade wedged exactly this way when an
   old daemon rejected a newer schema it still claimed to own).
+- After publication, rollback means forward restoration into a verified V2
+  schema epoch under a new fence. The V1 archive is bounded recovery input,
+  never renewed writer authority; no reverse cutover, lazy read migration,
+  production shadow read, or long-lived dual-write path is admitted.
 - Sensitive store operations hold a maintenance fence that pauses scheduled
   sync and ingest for the affected store until the operation commits and
   verifies: integrity repair, index rebuild, migration, cutover, and offline
@@ -86,7 +103,12 @@ the defined recovery window, and then deleted under explicit policy.
 ## Acceptance
 
 - End-to-end fixtures migrate every supported V1 data family and prove representative V2 reads and searches.
-- Crash/restart tests cover each migration phase, daemon upgrade, pre-cutover failure, post-cutover recovery, and archive restoration.
+- Crash/restart tests cover each migration phase and checkpoint boundary,
+  daemon upgrade, pre-cutover failure, post-cutover forward restoration, and
+  archive restoration with newer deletion/quarantine overlays.
+- Parity fixtures compare complete families, identities, references,
+  normalized digests, query results, quarantines, and representative reads
+  without letting shadow execution write or serve production traffic.
 - Multi-client tests prove only the daemon accesses live databases and concurrent hooks/clients cannot corrupt them.
 - Doctor reports actionable states and performs only explicitly selected safe repairs.
 - PR19 leaves no dual-write path, generated inventory, compatibility runtime, obsolete direct DB client, skipped family, or migration TODO.
