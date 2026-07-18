@@ -490,7 +490,9 @@ where
             continue;
         };
         let exact_root = same_local_path(&manifest.project_root, project_root);
-        if manifest.project_id.as_deref() == excluded_project_id {
+        if manifest.project_id.is_some()
+            && manifest.project_id.as_deref() == excluded_project_id
+        {
             selected_manifest_matches_exact_root |= exact_root;
             continue;
         }
@@ -1420,6 +1422,42 @@ mod tests {
             [project_root, unrelated_root],
             "a non-authoritative selected exact root must retain shared-Git recovery"
         );
+    }
+
+    #[test]
+    fn exact_root_manifest_without_project_id_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_root = dir.path().join("repo");
+        let profile_root = dir.path().join("profile");
+        let data_root = profile_root.join("projects").join("legacy-missing-id");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::create_dir_all(&data_root).unwrap();
+        write_store_manifest_to_path(
+            &data_root.join(STORE_MANIFEST_FILENAME),
+            &StoreManifest {
+                schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+                project_id: None,
+                store_kind: StoreKind::CodeProject,
+                storage_mode: StorageMode::ProfileSharded,
+                project_root: project_root.clone(),
+                data_root,
+                graph_db_relpath: "tracedecay.db".into(),
+                sessions_db_relpath: "sessions.db".into(),
+                branch_meta_relpath: "branch-meta.json".into(),
+            },
+        )
+        .unwrap();
+
+        let error = matching_legacy_profile_layouts_with_git_resolver(
+            &project_root,
+            &profile_root,
+            None,
+            false,
+            |_| false,
+            |_| None,
+        )
+        .expect_err("missing project_id must fail closed");
+        assert!(error.to_string().contains("project_id is missing"));
     }
 
     #[test]

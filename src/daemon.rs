@@ -18,7 +18,10 @@ use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
 use crate::mcp::server::{McpMethod, SERVER_INSTRUCTIONS, classify_mcp_method, initialize_result};
-use crate::mcp::tools::{explore_call_budget, get_tool_definitions_with_budget};
+use crate::mcp::tools::{
+    explore_call_budget, get_tool_definitions_with_budget,
+    get_tool_definitions_with_warming_budget,
+};
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, StdioTransport};
 use branch_add::{branch_add_response, coordinated_hook_branch_writer, parse_branch_add_request};
 use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
@@ -2617,6 +2620,7 @@ fn attach_initialize_route_metadata(
 fn daemon_bootstrap_response(
     request: &JsonRpcRequest,
     route: Option<&InitializeRouteMetadata>,
+    project_node_count: Option<u64>,
 ) -> Option<Option<JsonRpcResponse>> {
     match classify_mcp_method(&request.method) {
         McpMethod::Initialize => Some(request.id.clone().map(|id| {
@@ -2628,13 +2632,35 @@ fn daemon_bootstrap_response(
         })),
         McpMethod::InitializedAck => Some(None),
         McpMethod::ToolsList => Some(request.id.clone().map(|id| {
-            let node_count = 0;
-            let budget = explore_call_budget(node_count);
-            let tools = get_tool_definitions_with_budget(node_count, budget);
+            let tools = project_node_count.map_or_else(
+                || get_tool_definitions_with_warming_budget(10),
+                |node_count| {
+                    let budget = explore_call_budget(node_count);
+                    get_tool_definitions_with_budget(node_count, budget)
+                },
+            );
             JsonRpcResponse::success(id, json!({ "tools": tools }))
         })),
         _ => None,
     }
+}
+
+async fn cached_project_node_count(
+    store_administration: &StoreAdministration,
+    handshake: &DaemonHandshake,
+) -> Option<u64> {
+    let project_path = handshake.project_path.as_ref()?;
+    let canonical_project_path = project_path
+        .canonicalize()
+        .unwrap_or_else(|_| project_path.clone());
+    let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake).ok()?;
+    let server = {
+        let servers = store_administration.project_servers().lock().await;
+        servers
+            .get_route(&route)
+            .map(|(_, server)| Arc::clone(server))
+    }?;
+    server.cg().await.get_stats().await.ok().map(|stats| stats.node_count)
 }
 
 fn spawn_lifecycle_project_server_warmup<OpenFuture>(
@@ -2813,23 +2839,43 @@ async fn serve_broker_socket_client(
         return Ok(());
     }
     if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim())
-        && let Some(response) = daemon_bootstrap_response(&request, initialize_route.as_ref())
     {
-        // Keep catalog-refresh bookkeeping consistent with the regular MCP
-        // server path: initialize and tools/list mark this catalog current.
-        let _ = engine
-            .claim_catalog_refresh(&handshake, &first_request_line)
-            .await;
-        if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
-            && handshake.project_path.is_some()
-        {
-            engine.spawn_project_server_warmup(handshake.clone(), request);
+        let project_node_count =
+            if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
+                if handshake.project_path.is_some() {
+                    cached_project_node_count(&engine.store_administration, &handshake).await
+                } else {
+                    Some(0)
+                }
+            } else {
+                None
+            };
+        if let Some(response) = daemon_bootstrap_response(
+            &request,
+            initialize_route.as_ref(),
+            project_node_count,
+        ) {
+            // Keep catalog-refresh bookkeeping consistent with the regular MCP
+            // server path: initialize and tools/list mark this catalog current.
+            if let Some(key) = engine
+                .claim_catalog_refresh(&handshake, &first_request_line)
+                .await
+                && let Err(error) = write_tool_list_changed_notification(&mut transport).await
+            {
+                engine.release_catalog_refresh(key).await;
+                return Err(error);
+            }
+            if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+                && handshake.project_path.is_some()
+            {
+                engine.spawn_project_server_warmup(handshake.clone(), request);
+            }
+            drop(setup_activity);
+            if let Some(response) = response {
+                write_json_rpc_response(&mut transport, &response).await?;
+            }
+            return Ok(());
         }
-        drop(setup_activity);
-        if let Some(response) = response {
-            write_json_rpc_response(&mut transport, &response).await?;
-        }
-        return Ok(());
     }
     let server = if let Some(project_path) = handshake.project_path.as_ref() {
         let mut project_open = engine.spawn_direct_project_server_open(handshake.clone());
@@ -2974,26 +3020,41 @@ async fn serve_windows_broker_client(
         return Ok(());
     }
     if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim())
-        && let Some(response) = daemon_bootstrap_response(&request, initialize_route.as_ref())
     {
-        if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
-            && handshake.project_path.is_some()
-        {
-            spawn_portable_project_server_warmup(
-                lifecycle.clone(),
-                store_administration.clone(),
-                Arc::clone(&project_open_gates),
-                handshake.clone(),
-                request,
-                #[cfg(test)]
-                project_open_attempts.clone(),
-            );
+        let project_node_count =
+            if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
+                if handshake.project_path.is_some() {
+                    cached_project_node_count(&store_administration, &handshake).await
+                } else {
+                    Some(0)
+                }
+            } else {
+                None
+            };
+        if let Some(response) = daemon_bootstrap_response(
+            &request,
+            initialize_route.as_ref(),
+            project_node_count,
+        ) {
+            if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+                && handshake.project_path.is_some()
+            {
+                spawn_portable_project_server_warmup(
+                    lifecycle.clone(),
+                    store_administration.clone(),
+                    Arc::clone(&project_open_gates),
+                    handshake.clone(),
+                    request,
+                    #[cfg(test)]
+                    project_open_attempts.clone(),
+                );
+            }
+            drop(setup_activity);
+            if let Some(response) = response {
+                write_json_rpc_response(&mut transport, &response).await?;
+            }
+            return Ok(());
         }
-        drop(setup_activity);
-        if let Some(response) = response {
-            write_json_rpc_response(&mut transport, &response).await?;
-        }
-        return Ok(());
     }
     if let Some(project_path) = handshake.project_path.as_deref() {
         let canonical_project_path = project_path

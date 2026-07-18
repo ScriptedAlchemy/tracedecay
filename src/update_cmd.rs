@@ -144,9 +144,11 @@ where
     // The managed daemon holds a shared lifecycle lease while serving its
     // databases. Stop it first, then acquire exclusive ownership before the
     // service unit is rewritten and restarted.
-    let previous_state = quiesce()?;
+    quiesce()?;
     let _lifecycle_lease = acquire()?;
-    refresh(previous_state)
+    // `daemon restart` is an explicit request to bring the installed service
+    // up, even when it was stopped before restart began.
+    refresh(tracedecay::daemon::DaemonServiceState::RunningEnabled)
 }
 
 pub(crate) fn restart_daemon_service() -> tracedecay::errors::Result<()> {
@@ -628,6 +630,24 @@ mod tests {
             Some((PathBuf::from("service"), PathBuf::from("socket")))
         );
         assert_eq!(order.into_inner(), ["quiesce", "acquire", "refresh"]);
+    }
+
+    #[test]
+    fn daemon_restart_forces_stopped_service_running() {
+        let result = restart_daemon_service_with(
+            || Ok(tracedecay::daemon::DaemonServiceState::StoppedEnabled),
+            || Ok(()),
+            |state| {
+                assert_eq!(
+                    state,
+                    tracedecay::daemon::DaemonServiceState::RunningEnabled
+                );
+                Ok(Some((PathBuf::from("service"), PathBuf::from("socket"))))
+            },
+        )
+        .expect("restart orchestration");
+
+        assert!(result.is_some());
     }
 
     #[test]

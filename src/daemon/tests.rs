@@ -31,6 +31,29 @@ fn daemon_lifecycle_rejects_new_work_after_draining() {
     assert!(!lifecycle.accepting());
 }
 
+#[test]
+fn bootstrap_tool_catalog_uses_project_node_count() {
+    let request: super::JsonRpcRequest = serde_json::from_value(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list"
+    }))
+    .expect("tools/list request");
+    let response = super::daemon_bootstrap_response(&request, None, Some(65_395))
+        .expect("bootstrap response")
+        .expect("tools/list response");
+    let context_description = response.result.expect("tools/list result")["tools"]
+        .as_array()
+        .expect("tool catalog")
+        .iter()
+        .find(|tool| tool["name"] == serde_json::json!("tracedecay_context"))
+        .and_then(|tool| tool["description"].as_str())
+        .expect("context tool description");
+
+    assert!(context_description.contains("5 calls maximum"));
+    assert!(context_description.contains("65395 nodes"));
+}
+
 #[tokio::test]
 async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -334,6 +357,17 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
             .is_some_and(|tools| !tools.is_empty()),
         "portable bootstrap tool catalog must not be empty"
     );
+    let portable_context_description = tools_list_response["result"]["tools"]
+        .as_array()
+        .and_then(|tools| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == serde_json::json!("tracedecay_context"))
+        })
+        .and_then(|tool| tool["description"].as_str())
+        .expect("portable context tool description");
+    assert!(portable_context_description.contains("10 calls maximum"));
+    assert!(portable_context_description.contains("project graph is warming"));
 
     tokio::time::timeout(PHASE_TIMEOUT, async {
         loop {
@@ -1107,6 +1141,13 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
         !tools.is_empty(),
         "bootstrap tool catalog must not be empty"
     );
+    let context_description = tools
+        .iter()
+        .find(|tool| tool["name"] == json!("tracedecay_context"))
+        .and_then(|tool| tool["description"].as_str())
+        .expect("context tool description");
+    assert!(context_description.contains("10 calls maximum"));
+    assert!(context_description.contains("project graph is warming"));
 
     let project_path = handshake.project_path.as_ref().expect("project path");
     let route = ProjectRouteKey::from_handshake(project_path, &handshake).expect("project route");
@@ -2648,6 +2689,37 @@ async fn daemon_refreshes_once_only_after_generation_change() {
     .await;
     assert_eq!(second.len(), 1, "the refresh must not loop");
     assert_eq!(second[0]["id"], json!(4));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn initialized_ack_preserves_pending_catalog_refresh_notification() {
+    let engine = super::DaemonEngine::default();
+    let mut handshake = test_handshake_defaults();
+    handshake.client_instance_id = test_client_instance_id(5);
+    handshake.tool_list_changed_capable = true;
+    handshake.catalog_version = "0.0.0-old".to_string();
+
+    let initialized = daemon_round_trip(
+        engine.clone(),
+        &handshake,
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    )
+    .await;
+    assert_eq!(initialized.len(), 1);
+    assert_eq!(
+        initialized[0]["method"],
+        json!("notifications/tools/list_changed")
+    );
+
+    let ping = daemon_round_trip(
+        engine,
+        &handshake,
+        json!({"jsonrpc": "2.0", "id": 6, "method": "ping"}),
+    )
+    .await;
+    assert_eq!(ping.len(), 1, "refresh notification must be deduplicated");
+    assert_eq!(ping[0]["id"], json!(6));
 }
 
 #[cfg(unix)]
