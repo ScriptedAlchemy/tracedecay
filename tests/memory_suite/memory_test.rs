@@ -29,6 +29,10 @@ mod compatibility_authority;
 #[path = "memory_test/legacy_store.rs"]
 mod legacy_store;
 
+// PR20 candidate: seed from the cross-process store template like
+// `make_memory_store` below and tests/mcp_suite/fixture.rs do, instead of
+// paying full schema creation per test. Only worth it once that fixture
+// moves to tests/common — seven call sites run in parallel today.
 async fn make_project() -> (TempDir, TraceDecay) {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn hello() {}").unwrap();
