@@ -1,3 +1,4 @@
+mod compatibility;
 mod cursor_keys;
 mod doctor_health;
 mod hydration;
@@ -29,6 +30,7 @@ use self::cursor_keys::GlobalDbCursorKeyProvider;
 use self::hydration::GlobalDbTemporalHydrationPort;
 use self::retrieval::GlobalDbTemporalReadPort;
 
+pub(crate) use compatibility::{AuthorizedSessionExpandCursorBinding, CompatibilityCursorError};
 pub(crate) use doctor_health::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
@@ -59,6 +61,32 @@ impl<'db> GlobalDbSessionTemporalExecution<'db> {
         hydration::hydrate_authorized_occurrence(&read, &self.db.storage_root, snapshot, anchor_id)
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)
+    }
+
+    pub(crate) async fn encode_expand_cursor(
+        &self,
+        binding: AuthorizedSessionExpandCursorBinding,
+        source_offset: usize,
+    ) -> Result<String, CompatibilityCursorError> {
+        let read = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| CompatibilityCursorError::Unavailable)?;
+        compatibility::encode_expand_cursor(&read, binding, source_offset).await
+    }
+
+    pub(crate) async fn decode_expand_cursor(
+        &self,
+        binding: &AuthorizedSessionExpandCursorBinding,
+        encoded: &str,
+    ) -> Result<usize, CompatibilityCursorError> {
+        let read = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| CompatibilityCursorError::Unavailable)?;
+        compatibility::decode_expand_cursor(&read, binding, encoded).await
     }
 
     async fn freeze(

@@ -145,6 +145,14 @@ async fn open_test_db_connection(db_path: &Path) -> TestDbConnection {
 }
 
 async fn activate_test_temporal_generation(conn: &libsql::Connection, session_id: &str) -> i64 {
+    conn.execute(
+        "INSERT OR IGNORE INTO session_query_cursor_keys (
+             key_id, key_version, key_material, created_at, retired_at
+         ) VALUES ('cursor.test', 1, ?1, 1, NULL)",
+        [vec![0x45_u8; 32]],
+    )
+    .await
+    .unwrap();
     let mut rows = conn
         .query(
             "SELECT MAX(generation) FROM session_temporal_generations WHERE session_id = ?1",
@@ -14165,6 +14173,36 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     let cursor = payload["next_cursor"]
         .as_str()
         .expect("summary source page should return an opaque cursor");
+
+    let tampered = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "target": {"kind": "summary_node", "node_id": summary_id},
+            "source_limit": 2,
+            "cursor": format!("{cursor}00")
+        }),
+    )
+    .await;
+    let tampered: Value = serde_json::from_str(extract_real_server_text(&tampered)).unwrap();
+    assert_eq!(tampered["status"], "denied", "{tampered}");
+
+    let rebound = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "target": {"kind": "summary_node", "node_id": summary_id},
+            "source_limit": 1,
+            "cursor": cursor
+        }),
+    )
+    .await;
+    let rebound: Value = serde_json::from_str(extract_real_server_text(&rebound)).unwrap();
+    assert_eq!(rebound["status"], "denied", "{rebound}");
 
     let continued = handle_real_server_tool_call(
         &server,

@@ -51,7 +51,8 @@ use project_registry::{
 };
 pub use session_temporal::GlobalDbSessionTemporalExecution;
 pub(crate) use session_temporal::{
-    SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
+    AuthorizedSessionExpandCursorBinding, SessionTemporalHealthFindingKind,
+    SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
 pub(crate) use transcript::TranscriptPersistenceError;
 

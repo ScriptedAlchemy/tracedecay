@@ -37,7 +37,10 @@ use crate::application::session::{
     SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
 };
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{GlobalDb, GlobalDbSessionTemporalExecution, ProjectRegistryContext};
+use crate::global_db::{
+    AuthorizedSessionExpandCursorBinding, GlobalDb, GlobalDbSessionTemporalExecution,
+    ProjectRegistryContext,
+};
 use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
@@ -2092,53 +2095,49 @@ impl DaemonSessionRetrievalService {
         }
     }
 
-    fn lcm_expand_cursor_signature(&self, provider: &str, payload: &[u8]) -> String {
-        let mut digest = Sha256::new();
-        digest.update(message_search_digest(
-            b"tracedecay.mcp.lcm-expand.cursor.v1\0",
-            &self.root.identity,
-            Some(provider),
-        ));
-        digest.update(payload);
-        hex::encode(digest.finalize())
+    fn lcm_expand_cursor_binding(
+        &self,
+        command: &LcmExpandServiceCommand,
+    ) -> Option<AuthorizedSessionExpandCursorBinding> {
+        let authorization_digest = format!(
+            "sha256:{}",
+            hex::encode(message_search_digest(
+                b"tracedecay.mcp.lcm-expand.authorization.v1\0",
+                &self.root.identity,
+                Some(command.provider()),
+            ))
+        );
+        AuthorizedSessionExpandCursorBinding::new(
+            command.provider(),
+            command.session_id().as_str(),
+            Self::lcm_expand_target_key(command.target()),
+            command.grain(),
+            command.content_slice().offset,
+            command.content_slice().limit,
+            command.source_limit(),
+            authorization_digest,
+        )
+        .ok()
     }
 
-    fn encode_lcm_expand_cursor(
+    async fn encode_lcm_expand_cursor(
         &self,
         command: &LcmExpandServiceCommand,
         source_offset: usize,
-    ) -> String {
-        let payload = json!({
-            "provider": command.provider(),
-            "session_id": command.session_id().as_str(),
-            "target": Self::lcm_expand_target_key(command.target()),
-            "source_offset": source_offset,
-        })
-        .to_string();
-        let signature = self.lcm_expand_cursor_signature(command.provider(), payload.as_bytes());
-        format!("lcm.v1.{}.{}", hex::encode(payload), signature)
+    ) -> Option<String> {
+        let binding = self.lcm_expand_cursor_binding(command)?;
+        GlobalDbSessionTemporalExecution::new(self.database.as_ref())
+            .encode_expand_cursor(binding, source_offset)
+            .await
+            .ok()
     }
 
-    fn decode_lcm_expand_cursor(&self, command: &LcmExpandServiceCommand) -> Option<usize> {
-        let cursor = command.cursor()?;
-        let mut parts = cursor.split('.');
-        if parts.next()? != "lcm" || parts.next()? != "v1" || parts.clone().count() != 2 {
-            return None;
-        }
-        let payload = hex::decode(parts.next()?).ok()?;
-        let signature = parts.next()?;
-        if self.lcm_expand_cursor_signature(command.provider(), &payload) != signature {
-            return None;
-        }
-        let payload: Value = serde_json::from_slice(&payload).ok()?;
-        let target_key = Self::lcm_expand_target_key(command.target());
-        if payload["provider"].as_str() != Some(command.provider())
-            || payload["session_id"].as_str() != Some(command.session_id().as_str())
-            || payload["target"].as_str() != Some(target_key.as_str())
-        {
-            return None;
-        }
-        usize::try_from(payload["source_offset"].as_u64()?).ok()
+    async fn decode_lcm_expand_cursor(&self, command: &LcmExpandServiceCommand) -> Option<usize> {
+        let binding = self.lcm_expand_cursor_binding(command)?;
+        GlobalDbSessionTemporalExecution::new(self.database.as_ref())
+            .decode_expand_cursor(&binding, command.cursor()?)
+            .await
+            .ok()
     }
 
     async fn execute_lcm_expand(
@@ -2149,6 +2148,14 @@ impl DaemonSessionRetrievalService {
         if command.store_scope() != self.root.store_scope {
             return LcmExpandServiceOutcome::WrongScope;
         }
+        let source_offset = if command.cursor().is_some() {
+            let Some(offset) = self.decode_lcm_expand_cursor(&command).await else {
+                return LcmExpandServiceOutcome::Denied;
+            };
+            offset
+        } else {
+            command.source_offset()
+        };
         let authority = match command.target() {
             LcmExpandTarget::RawMessage { .. } => {
                 self.lcm_occurrence_anchor(
@@ -2180,14 +2187,6 @@ impl DaemonSessionRetrievalService {
         if state != HydrationStateV1::Available {
             return hydration_state_to_expand_outcome(state);
         }
-        let source_offset = if command.cursor().is_some() {
-            let Some(offset) = self.decode_lcm_expand_cursor(&command) else {
-                return LcmExpandServiceOutcome::Denied;
-            };
-            offset
-        } else {
-            command.source_offset()
-        };
         let expansion = match self
             .database
             .lcm_expand(LcmExpandRequest {
@@ -2212,11 +2211,16 @@ impl DaemonSessionRetrievalService {
         else {
             return LcmExpandServiceOutcome::Unavailable;
         };
-        temporal.cursor = expansion
+        if let Some(offset) = expansion
             .source_pagination
             .as_ref()
             .and_then(|pagination| pagination.next_source_offset)
-            .map(|offset| self.encode_lcm_expand_cursor(&command, offset));
+        {
+            let Some(cursor) = self.encode_lcm_expand_cursor(&command, offset).await else {
+                return LcmExpandServiceOutcome::Unavailable;
+            };
+            temporal.cursor = Some(cursor);
+        }
         LcmExpandServiceOutcome::Complete {
             expansion,
             temporal,
