@@ -13,6 +13,7 @@ use compatibility::validate_lineage;
 mod anchors;
 mod compatibility;
 mod context;
+mod converge;
 mod dashboard;
 mod error;
 mod sanitize;

@@ -612,7 +612,12 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         self.ensure_owner(request.target().owner())?;
         let target = request.target().clone();
         let outcome = self.authority.remove_compatibility_fact(request).await?;
-        validate_compatibility_projection(&self.owner, &target, outcome.fact())?;
+        // A `None` fact is the idempotent no-op disposition for a target that
+        // never resolved within the authority's single remove transaction;
+        // there is no projection to validate in that case.
+        if let Some(fact) = outcome.fact() {
+            validate_compatibility_projection(&self.owner, &target, fact)?;
+        }
         Ok(outcome)
     }
 

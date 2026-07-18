@@ -708,23 +708,28 @@ pub(in crate::store::memory) async fn remove_compatibility_fact_tx(
             .await;
     }
     let now = compatibility_now()?;
-    let fact_id = resolve_compatibility_target_tx(transaction, request.target())
-        .await?
-        .ok_or_else(|| {
-            storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
-                "compatibility remove target is missing",
-            )
-        })?;
+    // Resolving the target and loading its current projection inside this
+    // same transaction lets an absent fact -- whether it was never added, or
+    // was concurrently removed by another operation just before this one --
+    // surface as the idempotent no-op outcome below instead of a hard
+    // authority error. Callers no longer need a separate pre-read
+    // transaction to get that idempotency (see `remove_fact_v1`).
+    let Some(fact_id) = resolve_compatibility_target_tx(transaction, request.target()).await?
+    else {
+        let remaining_fact_count =
+            compatibility_active_fact_count_tx(transaction, request.target().owner()).await?;
+        return Ok(CompatibilityFactRemoveOutcomeV1::not_found(
+            remaining_fact_count,
+        ));
+    };
     let owner_key = OwnerKey::new(request.target().owner())?;
-    let current = load_current_projection(transaction, &owner_key, &fact_id)
-        .await?
-        .ok_or_else(|| {
-            storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
-                "compatibility remove projection is missing",
-            )
-        })?;
+    let Some(current) = load_current_projection(transaction, &owner_key, &fact_id).await? else {
+        let remaining_fact_count =
+            compatibility_active_fact_count_tx(transaction, request.target().owner()).await?;
+        return Ok(CompatibilityFactRemoveOutcomeV1::not_found(
+            remaining_fact_count,
+        ));
+    };
     let removed = current.access != PayloadAccessState::Deleted;
     let event_id = if removed {
         let stored =

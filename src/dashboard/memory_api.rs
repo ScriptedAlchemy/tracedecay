@@ -91,30 +91,6 @@ async fn largest_bank_fact_count(state: &DashboardState) -> Result<i64, String> 
         .unwrap_or_default())
 }
 
-pub(crate) async fn repair_derived_memory(
-    state: &DashboardState,
-) -> Result<MemoryRepairStats, String> {
-    let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
-        .map_err(|error| error.to_string())?;
-    let context = crate::application::memory::MemoryOperationContext::generated(
-        &state.memory_owner,
-        "dashboard-repair",
-        None,
-    )
-    .map_err(|error| error.to_string())?;
-    let repair = application
-        .dashboard_repair_v1(context)
-        .await
-        .map_err(|error| error.to_string())?;
-
-    Ok(MemoryRepairStats {
-        missing_vectors_repaired: usize::try_from(repair.missing_vectors_repaired())
-            .map_err(|error| error.to_string())?,
-        banks_rebuilt: usize::try_from(repair.banks_rebuilt())
-            .map_err(|error| error.to_string())?,
-    })
-}
-
 async fn memory_status_payload(state: &DashboardState) -> Result<Value, String> {
     let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
         .map_err(|error| error.to_string())?;

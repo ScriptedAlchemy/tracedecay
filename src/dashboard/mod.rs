@@ -74,6 +74,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{GlobalDb, GlobalDbReadConnection};
 use crate::storage::StorageMode;
 use crate::tracedecay::TraceDecay;
+use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 
 /// Default port for `tracedecay dashboard` (chosen to avoid common dev-server
@@ -543,34 +544,24 @@ where
     // Converge derived memory projections (missing vectors, HRR banks) before
     // serving. Fact writes defer bank rebuilds to the repair pass, and a
     // standalone dashboard has no daemon scheduler to drive that convergence,
-    // so without this pass the overview reports stale or empty banks.
+    // so without this call the overview reports stale or empty banks.
     //
-    // This bounded-retry convergence policy intentionally lives here
-    // temporarily, next to the standalone dashboard's only caller of the
-    // repair pass. It should collapse into a single call against the
-    // application-layer repair API once that layer's in-flight refactor
-    // (see src/application/memory.rs) lands.
-    const REPAIR_PASS_BOUND: usize = 8;
-    let mut repair_bound_exhausted = true;
-    for _ in 0..REPAIR_PASS_BOUND {
-        match memory_api::repair_derived_memory(&state).await {
-            Ok(repair) if repair.missing_vectors_repaired > 0 || repair.banks_rebuilt > 0 => {}
-            Ok(_) => {
-                repair_bound_exhausted = false;
-                break;
-            }
-            Err(message) => {
-                tracing::warn!("Derived memory startup repair skipped: {message}");
-                repair_bound_exhausted = false;
-                break;
+    // The dashboard is a one-shot caller of the single application-layer
+    // convergence policy (`MemoryApplication::converge_derived_memory`);
+    // that policy owns the retry-until-saturated-or-bounded loop, not this
+    // route.
+    match memory_application_for_db(state.memory_owner.clone(), &state.mem_db) {
+        Ok(application) => {
+            if let Err(error) = application
+                .converge_derived_memory("dashboard-startup-repair")
+                .await
+            {
+                tracing::warn!("Derived memory startup repair skipped: {error}");
             }
         }
-    }
-    if repair_bound_exhausted {
-        tracing::warn!(
-            "Derived memory startup repair exhausted {REPAIR_PASS_BOUND} passes while still \
-             making progress; serving possibly-stale banks"
-        );
+        Err(error) => {
+            tracing::warn!("Derived memory startup repair skipped: {error}");
+        }
     }
     if options.start_session_catch_up {
         if let Some(db) = state.lcm_db.as_ref() {

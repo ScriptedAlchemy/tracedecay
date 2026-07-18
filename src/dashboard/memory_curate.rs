@@ -24,7 +24,7 @@ use super::memory_service::{
 use super::{DashboardState, code_diagnostics_broker, storage_mode_label, token_count};
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
-use crate::memory::types::MemoryGroomingOperation;
+use crate::memory::types::{MemoryGroomingOperation, MemoryRepairStats};
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::facts::memory_application_for_db;
 
@@ -364,11 +364,31 @@ async fn run_memory_curate_with_state(
     report.insert("actions".to_string(), Value::Array(actions));
 
     if options.apply {
-        let repair = super::memory_api::repair_derived_memory(state)
-            .await
-            .map_err(|message| TraceDecayError::Config {
-                message: format!("memory derived-state repair failed: {message}"),
+        // One-shot caller of the single application-layer convergence policy
+        // (`MemoryApplication::converge_derived_memory`): that policy owns
+        // the retry-until-saturated-or-bounded loop, not this route.
+        let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("memory derived-state repair failed: {error}"),
             })?;
+        let repair = application
+            .converge_derived_memory("dashboard-curate-repair")
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("memory derived-state repair failed: {error}"),
+            })?;
+        let repair = MemoryRepairStats {
+            missing_vectors_repaired: usize::try_from(repair.missing_vectors_repaired()).map_err(
+                |error| TraceDecayError::Config {
+                    message: format!("memory derived-state repair failed: {error}"),
+                },
+            )?,
+            banks_rebuilt: usize::try_from(repair.banks_rebuilt()).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("memory derived-state repair failed: {error}"),
+                }
+            })?,
+        };
         report.insert(
             "derived_memory_repair".to_string(),
             serde_json::to_value(repair).map_err(|e| TraceDecayError::Config {

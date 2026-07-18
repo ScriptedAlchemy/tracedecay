@@ -15,15 +15,15 @@ use tracedecay_store::{
 use crate::memory::hygiene::detect_secret_like;
 use crate::memory::types::{
     AddFactDiff, AddFactDiffKind, AddFactOutcome, AddFactRequest, ContradictionResult, FactRecord,
-    FactSearchResult, FeedbackAction, FeedbackRequest, MemoryCategory, MemoryRepairStats,
-    MemoryStatus, SearchFactsRequest, TrustHistoryEntry, UpdateFactRequest,
+    FactSearchResult, FeedbackAction, FeedbackRequest, MemoryCategory, MemoryStatus,
+    SearchFactsRequest, TrustHistoryEntry, UpdateFactRequest,
 };
 
 use super::MemoryApplication;
 use super::compatibility::{
     compatibility_add_command, compatibility_confidence, compatibility_fact_record,
     compatibility_projection_record, compatibility_projection_targets, fact_category, legacy_i64,
-    legacy_usize, project_memory_status_v1,
+    project_memory_status_v1,
 };
 use super::context::MemoryOperationContext;
 use super::error::MemoryApplicationError;
@@ -374,13 +374,16 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         context: MemoryOperationContext,
     ) -> Result<bool, MemoryApplicationError> {
         let target = self.legacy_compatibility_target(fact_id)?;
-        // Removing a fact that was never stored is an idempotent no-op, mirroring
-        // the legacy MemoryStore contract. Callers (e.g. the dashboard curate
-        // handler) surface this `false` as a per-op "fact not found" result
-        // rather than an authority failure.
-        if self.get_compatibility_fact(target.clone()).await?.is_none() {
-            return Ok(false);
-        }
+        // Removing a fact that was never stored (or was concurrently removed
+        // just before this call) is an idempotent no-op, mirroring the legacy
+        // MemoryStore contract. The authority resolves that disposition
+        // inside its single remove transaction and reports it as
+        // `removed() == false`; callers (e.g. the dashboard curate handler)
+        // surface this as a per-op "fact not found" result rather than an
+        // authority failure. This deliberately avoids a separate pre-read
+        // transaction: two independent authority round trips would leave a
+        // window where a concurrent remove between them could still surface
+        // an authority error instead of the idempotent no-op.
         let outcome = self
             .remove_compatibility_fact(CompatibilityFactRemoveCommandV1::new(
                 target,
@@ -514,25 +517,20 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     /// One authority status read projected both into legacy fields and the
     /// finite feedback-history repair state.
     ///
-    /// The legacy `memory_status` surface repaired derived vectors and rebuilt
-    /// dirty banks as a side effect of reading, and reported the repair counts.
-    /// Preserve that contract: run one bounded authoritative repair, then read
-    /// the post-repair status so the projected counts reflect the repair.
+    /// This is a pure read: it reports the backlog and last-repair counters
+    /// already carried on the status snapshot (`status.repair()`,
+    /// `status.feedback_history_repair()`) and never triggers a repair pass as
+    /// a side effect. Repair remains owned by the daemon's bounded memory-
+    /// repair scheduler and the explicit [`Self::dashboard_repair_v1`] entry
+    /// point; a status read must not race or duplicate that work. The legacy
+    /// `MemoryStatus`/`V1MemoryStatusWithRepairV1` field shapes are unchanged,
+    /// so existing consumers keep the same reporting contract.
     pub async fn memory_status_with_repair_v1(
         &self,
     ) -> Result<V1MemoryStatusWithRepairV1, MemoryApplicationError> {
-        let context = MemoryOperationContext::generated(&self.owner, "memory-status-repair", None)?;
-        let repair = self.dashboard_repair_v1(context).await?;
         let status = self.compatibility_memory_status().await?;
         let feedback_history_repair = status.feedback_history_repair();
-        let mut projected = project_memory_status_v1(&status)?;
-        projected.repair = MemoryRepairStats {
-            missing_vectors_repaired: legacy_usize(
-                repair.missing_vectors_repaired(),
-                "legacy memory repaired vectors",
-            )?,
-            banks_rebuilt: legacy_usize(repair.banks_rebuilt(), "legacy memory rebuilt banks")?,
-        };
+        let projected = project_memory_status_v1(&status)?;
         Ok(V1MemoryStatusWithRepairV1 {
             status: projected,
             feedback_history_repair,
