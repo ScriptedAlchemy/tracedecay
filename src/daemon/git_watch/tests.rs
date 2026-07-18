@@ -175,18 +175,46 @@ async fn writer_administration_blocks_until_the_gate_is_released() {
 // these crate-private internals because `git_watch` is not re-exported. ----
 
 /// A test config with a tiny debounce so the real debounce path settles fast.
+///
+/// Production defaults (`SyncConfig::default()` in `src/config.rs`) are
+/// `watch_debounce_ms = 2_000` and `watch_max_delay_ms = 30_000` — a healthy
+/// production watcher may legitimately hold a sync for up to 30s to coalesce
+/// a busy rebase. Tests have no reason to wait out that budget: they only
+/// need the debounce/max-delay *shape* (a short quiet period bounded by a
+/// hard cap), so this constructor is the injection point (shape: `#[cfg(test)]`
+/// config values passed into the existing `GitWatcher::new` constructor)
+/// that swaps the production windows for millisecond-scale ones while never
+/// touching the production defaults themselves.
 fn fast_watch_config() -> SyncConfig {
     let mut config = SyncConfig {
         auto_watch: true,
         ..SyncConfig::default()
     };
-    config.watch_debounce_ms = 50;
-    config.watch_max_delay_ms = 500;
+    config.watch_debounce_ms = 25;
+    config.watch_max_delay_ms = 200;
     config.watch_max_projects = 32;
     config.backstop_interval_mins = 0; // no backstop noise in these tests
     config.max_concurrent_syncs = 2;
     config
 }
+
+/// Ceiling for [`ensure_watching_or_skip`]'s readiness race and for
+/// [`debounce_loop_coalesces_and_drains_events`]'s drain wait.
+///
+/// This has no production counterpart — `GitWatcher` never itself waits on
+/// "has a task become ready"; it is purely a test diagnostic bound: how long
+/// we are willing to wait for the real watch task to signal `entered_debounce`
+/// or flip `degraded` before concluding the watch task is genuinely hung (a
+/// regression) rather than merely slow to schedule (real inotify install +
+/// a couple of tokio task hops, normally low milliseconds). It used to be a
+/// flat `Duration::from_secs(30)` inlined at each call site, which is why a
+/// scheduler-starved run could burn the full 30s on every one of these tests
+/// before either resolving or panicking. Kept short-but-generous rather than
+/// matching the 100-500ms debounce-scale windows above: unlike the debounce
+/// windows, this ceiling absorbs *real* OS/scheduler contention (sibling
+/// tests racing for the same inotify watch slots), not a modeled production
+/// duration, so it needs real wall-clock slack.
+const TEST_READY_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn git(dir: &Path, args: &[&str]) {
     let output = Command::new(crate::git::git_program())
@@ -285,16 +313,17 @@ fn currently_watch_limited(repo: &Path) -> bool {
 /// against those siblings a moment later — still fails. Instead, we let the
 /// real watch task run and race its readiness signal against a fast poll of
 /// `degraded`: as soon as EITHER fires we react, rather than always waiting
-/// out the full 30s budget first. That matters here specifically because the
-/// contention is often a brief spike — confirming "is the OS out of watches"
-/// only *after* burning the whole timeout would check long after sibling
-/// tests released theirs, wrongly concluding the install was healthy. Once
-/// `degraded` flips we confirm the cause immediately (within one ~20ms poll
-/// tick of the real failure) with a fresh `install_watches` attempt on the
-/// same repo: `MaxFilesWatch` there means the OS is still (or again) out of
-/// watches, so we skip. Any other outcome — the 30s budget elapsing with
-/// neither signal, or degraded for an unconfirmed reason — is treated as a
-/// real regression and panics, exactly as the unconditional wait did before.
+/// out the full [`TEST_READY_TIMEOUT`] budget first. That matters here
+/// specifically because the contention is often a brief spike — confirming
+/// "is the OS out of watches" only *after* burning the whole timeout would
+/// check long after sibling tests released theirs, wrongly concluding the
+/// install was healthy. Once `degraded` flips we confirm the cause
+/// immediately (within one ~20ms poll tick of the real failure) with a fresh
+/// `install_watches` attempt on the same repo: `MaxFilesWatch` there means
+/// the OS is still (or again) out of watches, so we skip. Any other outcome —
+/// the [`TEST_READY_TIMEOUT`] budget elapsing with neither signal, or
+/// degraded for an unconfirmed reason — is treated as a real regression and
+/// panics, exactly as the unconditional wait did before.
 async fn ensure_watching_or_skip(watcher: &GitWatcher, repo: &Path) -> Option<Arc<WatchState>> {
     watcher.ensure_watching(repo).await;
     let state = ready_registered_state(watcher, repo).await;
@@ -303,7 +332,7 @@ async fn ensure_watching_or_skip(watcher: &GitWatcher, repo: &Path) -> Option<Ar
         Debounce,
         Degraded,
     }
-    let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+    let outcome = tokio::time::timeout(TEST_READY_TIMEOUT, async {
         tokio::select! {
             () = state.entered_debounce.notified() => Ready::Debounce,
             () = poll_until_degraded(&state) => Ready::Degraded,
@@ -509,7 +538,7 @@ async fn debounce_loop_coalesces_and_drains_events() {
 
     tokio::time::advance(Duration::from_millis(max_delay_ms + 1)).await;
 
-    let drained = tokio::time::timeout(Duration::from_secs(30), state.plan_drained.notified())
+    let drained = tokio::time::timeout(TEST_READY_TIMEOUT, state.plan_drained.notified())
         .await
         .is_ok();
     assert!(
