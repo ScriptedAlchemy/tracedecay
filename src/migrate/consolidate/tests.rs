@@ -4453,9 +4453,43 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
         | "turns"
         | "workflow_agents"
         | "workflow_index_meta"
-        | "workflow_runs" => Some("merged"),
-        "authority_audit_checkpoints" | "global_schema_migrations" => {
-            Some("target-local schema ledger")
+        | "workflow_runs"
+        | "session_agents"
+        | "session_agent_hierarchy_edges"
+        | "session_assertions"
+        | "session_assertion_supersession"
+        | "session_current_entities"
+        | "session_external_payload_manifests"
+        | "session_logical_copy_edges"
+        | "session_occurrences"
+        | "session_query_cursor_keys"
+        | "session_refresh_batch_bindings"
+        | "session_refresh_bindings"
+        | "session_refresh_operations"
+        | "session_refresh_progress"
+        | "session_refresh_receipts"
+        | "session_summary_availability"
+        | "session_summary_nodes"
+        | "session_summary_sources"
+        | "session_summary_successors"
+        | "session_temporal_generations"
+        | "session_temporal_migration_dispositions"
+        | "session_temporal_migration_receipts"
+        | "session_temporal_observation_effects"
+        | "session_temporal_projection_receipts"
+        | "session_threads"
+        | "session_thread_hierarchy_edges"
+        | "session_turn_members"
+        | "session_turns" => Some("merged"),
+        "authority_audit_checkpoints"
+        | "global_schema_migrations"
+        | "session_temporal_schema_migrations" => Some("target-local schema ledger"),
+        name if name == "session_occurrences_fts"
+            || name.starts_with("session_occurrences_fts_")
+            || name == "session_summary_nodes_fts"
+            || name.starts_with("session_summary_nodes_fts_") =>
+        {
+            Some("derived/rebuilt")
         }
         "observation_projection_checkpoints"
         | "observation_projection_migrations"
@@ -4796,7 +4830,8 @@ async fn temporal_refresh_replays_running_to_terminal() {
              ) VALUES (
                  'session-refresh', 'operation-1', 0,
                  '{{\"observed_through\":1,\"committed_through\":0}}',
-                 '{{}}', 0, 0, 15
+                 '{{\"visible\":0,\"hidden\":0,\"unknown\":0,\"redacted\":0}}',
+                 0, 0, 15
              );
              UPDATE session_temporal_generations
              SET state = 'cancelled', completed_at = 20
@@ -4810,7 +4845,8 @@ async fn temporal_refresh_replays_running_to_terminal() {
              ) VALUES (
                  'session-refresh', 'operation-1', 'cancelled',
                  '{{\"observed_through\":1,\"committed_through\":0}}',
-                 '{{}}', NULL, 20
+                 '{{\"visible\":0,\"hidden\":0,\"unknown\":0,\"redacted\":0}}',
+                 NULL, 20
              );"
         ),
     )
@@ -5314,9 +5350,11 @@ async fn temporal_forward_migrates_eligible_legacy_sources_with_receipts() {
             )
             .await
             .unwrap();
-        let row = rows.next().await.unwrap().expect(
-            "projected observation must bind provenance to eligible lcm_raw_messages",
-        );
+        let row = rows
+            .next()
+            .await
+            .unwrap()
+            .expect("projected observation must bind provenance to eligible lcm_raw_messages");
         row.get::<String>(0).unwrap()
     };
     db.checkpoint().await;
@@ -5353,9 +5391,32 @@ async fn temporal_forward_migrates_eligible_legacy_sources_with_receipts() {
     assert_eq!(
         temporal_scalar(
             &target,
+            "SELECT COUNT(*) FROM session_temporal_migration_dispositions
+             WHERE session_id = 'session.legacy.forward'
+               AND disposition = 'eligible'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        temporal_scalar(
+            &target,
             "SELECT COUNT(*) FROM session_current_entities
              WHERE session_id = 'session.legacy.forward'
                AND entity_kind = 'occurrence_anchor'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        temporal_scalar(
+            &target,
+            "SELECT COUNT(*)
+             FROM session_occurrences AS occurrence
+             JOIN session_occurrences_fts AS fts ON fts.rowid = occurrence.rowid
+             WHERE occurrence.session_id = 'session.legacy.forward'
+               AND fts.index_text = occurrence.index_text
+               AND fts.snippet_text = occurrence.snippet_text"
         )
         .await,
         1
@@ -5430,11 +5491,22 @@ async fn temporal_forward_migrate_skips_quarantined_legacy_sources() {
     assert_eq!(
         temporal_scalar(
             &target,
-            "SELECT COUNT(*) FROM session_temporal_migration_receipts
-             WHERE session_id = 'session.quarantined'"
+            "SELECT COUNT(*) FROM session_temporal_migration_dispositions
+             WHERE session_id = 'session.quarantined'
+               AND disposition = 'quarantined'
+               AND reason = 'payload_access'"
         )
         .await,
-        0
+        1
+    );
+    assert_eq!(
+        temporal_scalar(
+            &target,
+            "SELECT COUNT(*) FROM session_temporal_migration_receipts
+             WHERE session_id = 'session.quarantined' AND imported_items = 0"
+        )
+        .await,
+        1
     );
 }
 
@@ -5552,6 +5624,356 @@ async fn temporal_forward_migrate_recovers_after_partial_failure_rematch() {
         )
         .await,
         1
+    );
+    assert_eq!(
+        temporal_scalar(
+            &target,
+            "SELECT COUNT(*) FROM session_temporal_migration_dispositions
+             WHERE session_id = 'session.legacy.recover'
+               AND disposition = 'eligible'"
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn temporal_forward_migrate_emits_typed_skip_dispositions() {
+    let temp = TempDir::new().unwrap();
+    let target = temp.path().join("target.db");
+    let empty = temp.path().join("empty.db");
+    let db = GlobalDb::open_at_without_structured_backfill(&target)
+        .await
+        .unwrap();
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "claude".to_string(),
+            session_id: "session.dispositions".to_string(),
+            project_key: "fixture".to_string(),
+            project_path: "/fixture".to_string(),
+            title: None,
+            started_at: Some(1),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    for (message_id, metadata, legacy_source, legacy_truncated) in [
+        ("message.policy", "{}", 1_i64, 0_i64),
+        ("message.unbound", "{}", 0, 0),
+        (
+            "message.ineligible",
+            "{\"migration_origin\":\"temporal_compatibility\"}",
+            0,
+            0,
+        ),
+    ] {
+        db.writer_connection()
+            .await
+            .unwrap()
+            .execute(
+                "INSERT INTO lcm_raw_messages (
+                    provider, message_id, session_id, role, ordinal, timestamp,
+                    content, content_hash, storage_kind, payload_ref,
+                    snippet_text, index_text, metadata_json, legacy_source, legacy_truncated
+                 ) VALUES (
+                    'claude', ?1, 'session.dispositions',
+                    'user', 1, 1, 'body', 'deadbeef', 'inline', NULL,
+                    'body', 'body', ?2, ?3, ?4
+                 )",
+                libsql::params![message_id, metadata, legacy_source, legacy_truncated],
+            )
+            .await
+            .unwrap();
+    }
+    db.checkpoint().await;
+    db.close();
+
+    GlobalDb::open_at_without_structured_backfill(&empty)
+        .await
+        .unwrap()
+        .close();
+
+    sqlite::merge_temporal_for_test(&target, &empty)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        temporal_scalar(
+            &target,
+            "SELECT COUNT(*) FROM session_temporal_migration_dispositions
+             WHERE session_id = 'session.dispositions' AND disposition = 'policy_excluded'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        temporal_scalar(
+            &target,
+            "SELECT COUNT(*) FROM session_temporal_migration_dispositions
+             WHERE session_id = 'session.dispositions' AND disposition = 'unbound'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        temporal_scalar(
+            &target,
+            "SELECT COUNT(*) FROM session_temporal_migration_dispositions
+             WHERE session_id = 'session.dispositions' AND disposition = 'ineligible'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        temporal_scalar(
+            &target,
+            "SELECT COUNT(*) FROM session_occurrences
+             WHERE session_id = 'session.dispositions'"
+        )
+        .await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn temporal_forward_migrate_preserves_multi_output_ordinals() {
+    let temp = TempDir::new().unwrap();
+    let target = temp.path().join("target.db");
+    let empty = temp.path().join("empty.db");
+    let first = migration_observation_for(
+        "session.multi.output",
+        "receipt.multi.output.a",
+        "message.multi.a",
+        "first multi-output body",
+    );
+    let second = migration_observation_range(
+        "session.multi.output",
+        10,
+        20,
+        "receipt.multi.output.b",
+        "message.multi.b",
+        "second multi-output body",
+    );
+    let first_id = first.observation_id().as_str().to_owned();
+    let second_id = second.observation_id().as_str().to_owned();
+
+    let db = GlobalDb::open_at_without_structured_backfill(&target)
+        .await
+        .unwrap();
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "claude".to_string(),
+            session_id: "session.multi.output".to_string(),
+            project_key: "fixture".to_string(),
+            project_path: "/fixture".to_string(),
+            title: None,
+            started_at: Some(1),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    persist_migration_observation(&db, first, None).await;
+    assert_eq!(project_all_migration_observations(&db).await, 1);
+    persist_migration_observation(
+        &db,
+        second,
+        Some(migration_cursor_for("session.multi.output", 10)),
+    )
+    .await;
+    assert_eq!(project_all_migration_observations(&db).await, 1);
+
+    // Distinct projected outputs remain distinct after forward-migrate, and each
+    // occurrence preserves the provenance output ordinal rather than collapsing
+    // to a hard-coded zero.
+    for (observation_id, expected_ordinal) in [(&first_id, 0_i64), (&second_id, 0_i64)] {
+        let mut rows = db
+            .read_connection()
+            .query(
+                "SELECT output_ordinal
+                 FROM observation_projection_provenance
+                 WHERE observation_id = ?1",
+                libsql::params![observation_id.clone()],
+            )
+            .await
+            .unwrap();
+        let row = rows
+            .next()
+            .await
+            .unwrap()
+            .expect("projected provenance ordinal");
+        assert_eq!(row.get::<i64>(0).unwrap(), expected_ordinal);
+    }
+    db.checkpoint().await;
+    db.close();
+
+    GlobalDb::open_at_without_structured_backfill(&empty)
+        .await
+        .unwrap()
+        .close();
+
+    sqlite::merge_temporal_for_test(&target, &empty)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        temporal_scalar(
+            &target,
+            "SELECT COUNT(*) FROM session_occurrences
+             WHERE session_id = 'session.multi.output'"
+        )
+        .await,
+        2
+    );
+    assert_eq!(
+        temporal_scalar(
+            &target,
+            "SELECT COUNT(*) FROM session_occurrences AS occurrence
+             JOIN observation_projection_provenance AS provenance
+               ON provenance.observation_id = occurrence.source_observation_id
+              AND provenance.output_ordinal = occurrence.projection_output_ordinal
+             WHERE occurrence.session_id = 'session.multi.output'"
+        )
+        .await,
+        2
+    );
+    assert_eq!(
+        temporal_scalar(
+            &target,
+            "SELECT COUNT(*) FROM session_temporal_migration_dispositions
+             WHERE session_id = 'session.multi.output'
+               AND disposition = 'eligible'"
+        )
+        .await,
+        2
+    );
+}
+
+#[tokio::test]
+async fn temporal_merge_rolls_back_across_supersession_and_fts_phases() {
+    let temp = TempDir::new().unwrap();
+    let target = temp.path().join("target.db");
+    let source = temp.path().join("source.db");
+    let empty = temp.path().join("empty.db");
+    let watermarks = r#"{"active_generation":1,"cursor_key":null,"projection_frontier":0,"source_frontier":0,"summary_frontier":0}"#;
+    let setup = |session_id: &str| {
+        format!(
+            "INSERT INTO session_temporal_generations(
+                 session_id, generation, state, frozen_watermarks_json, created_at,
+                 ready_at, activated_at, completed_at
+             ) VALUES (
+                 '{session_id}', 1, 'building', '{watermarks}', 1, NULL, NULL, NULL
+             );
+             UPDATE session_temporal_generations
+             SET state = 'ready', ready_at = 2
+             WHERE session_id = '{session_id}' AND generation = 1;
+             UPDATE session_temporal_generations
+             SET state = 'active', activated_at = 3
+             WHERE session_id = '{session_id}' AND generation = 1;",
+            session_id = session_id,
+            watermarks = watermarks,
+        )
+    };
+
+    temporal_execute_batch(&target, &setup("session.phase.target")).await;
+    temporal_execute_batch(&source, &setup("session.phase.source")).await;
+    GlobalDb::open_at_without_structured_backfill(&empty)
+        .await
+        .unwrap()
+        .close();
+
+    sqlite::set_temporal_merge_fault_phase("after_supersession_merge");
+    let error = sqlite::merge_temporal_for_test(&target, &source)
+        .await
+        .unwrap_err();
+    sqlite::set_temporal_merge_fault_phase("");
+    assert!(
+        error
+            .to_string()
+            .contains("injected temporal merge fault after supersession"),
+        "{error}"
+    );
+    assert_eq!(
+        temporal_scalar(
+            &target,
+            "SELECT COUNT(*) FROM session_temporal_generations
+             WHERE session_id = 'session.phase.source'"
+        )
+        .await,
+        0
+    );
+
+    let observation = migration_observation_for(
+        "session.phase.fts",
+        "receipt.phase.fts",
+        "message.phase.fts",
+        "fts phase rollback body",
+    );
+    let db = GlobalDb::open_at_without_structured_backfill(&target)
+        .await
+        .unwrap();
+    assert!(
+        db.upsert_session(&SessionRecord {
+            provider: "claude".to_string(),
+            session_id: "session.phase.fts".to_string(),
+            project_key: "fixture".to_string(),
+            project_path: "/fixture".to_string(),
+            title: None,
+            started_at: Some(1),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await
+    );
+    persist_migration_observation(&db, observation, None).await;
+    assert_eq!(project_all_migration_observations(&db).await, 1);
+    db.checkpoint().await;
+    db.close();
+
+    sqlite::set_temporal_merge_fault_phase("after_fts_parity");
+    let error = sqlite::merge_temporal_for_test(&target, &empty)
+        .await
+        .unwrap_err();
+    sqlite::set_temporal_merge_fault_phase("");
+    assert!(
+        error
+            .to_string()
+            .contains("injected temporal merge fault after fts parity"),
+        "{error}"
+    );
+    assert_eq!(
+        temporal_scalar(
+            &target,
+            "SELECT COUNT(*) FROM session_occurrences
+             WHERE session_id = 'session.phase.fts'"
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        temporal_scalar(
+            &target,
+            "SELECT COUNT(*) FROM session_temporal_migration_receipts
+             WHERE session_id = 'session.phase.fts'"
+        )
+        .await,
+        0
     );
 }
 
