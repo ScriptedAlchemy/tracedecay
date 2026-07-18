@@ -645,10 +645,36 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
     }
 }
 
-/// Owned-or-borrowed project-memory database backing a [`ProjectFactStore`].
-enum ProjectFactStoreDb<'a> {
-    Borrowed(&'a Database),
+/// The single owned-or-borrowed handle shape for the shared project-memory
+/// database. Every project-memory route — the core fact-store accessors in
+/// [`crate::tracedecay::facts`] and the MCP memory handlers alike — resolves
+/// through this one type and its `db_path() == graph_db_path` routing
+/// predicate, instead of each maintaining its own near-duplicate enum kept in
+/// sync only by hand.
+pub(crate) enum ProjectMemoryDbHandle<'a> {
+    /// The database this instance already serves, when it already is the
+    /// shared project store rather than a branch shard.
+    Active(&'a Database),
+    /// A separately opened handle to the shared project store, owned by the
+    /// resolution because the active database is a branch shard.
     Owned(Box<Database>),
+}
+
+impl<'a> ProjectMemoryDbHandle<'a> {
+    /// Borrows the resolved database regardless of ownership.
+    pub(crate) fn as_db(&self) -> &Database {
+        match self {
+            Self::Active(db) => db,
+            Self::Owned(db) => db.as_ref(),
+        }
+    }
+
+    /// Consumes the resolved handle into a fact store that owns it, so a
+    /// single accessor can build a memory application whose authority
+    /// outlives the resolving call.
+    pub(crate) fn into_fact_store(self) -> ProjectFactStore<'a> {
+        ProjectFactStore { db: self }
+    }
 }
 
 /// Canonical fact authority that *owns* its resolved project-memory database.
@@ -660,30 +686,26 @@ enum ProjectFactStoreDb<'a> {
 /// the resolved handle so one accessor can build the whole memory application,
 /// delegating each fact-store operation to a borrowed [`DatabaseFactStore`].
 pub struct ProjectFactStore<'a> {
-    db: ProjectFactStoreDb<'a>,
+    db: ProjectMemoryDbHandle<'a>,
 }
 
 impl<'a> ProjectFactStore<'a> {
     /// Wraps the active database without taking ownership.
     pub const fn borrowed(db: &'a Database) -> Self {
         Self {
-            db: ProjectFactStoreDb::Borrowed(db),
+            db: ProjectMemoryDbHandle::Active(db),
         }
     }
 
     /// Takes ownership of a separately opened project-store handle.
     pub const fn owned(db: Box<Database>) -> Self {
         Self {
-            db: ProjectFactStoreDb::Owned(db),
+            db: ProjectMemoryDbHandle::Owned(db),
         }
     }
 
     fn store(&self) -> DatabaseFactStore<'_> {
-        let db = match &self.db {
-            ProjectFactStoreDb::Borrowed(db) => *db,
-            ProjectFactStoreDb::Owned(db) => db.as_ref(),
-        };
-        DatabaseFactStore::new(db)
+        DatabaseFactStore::new(self.db.as_db())
     }
 }
 

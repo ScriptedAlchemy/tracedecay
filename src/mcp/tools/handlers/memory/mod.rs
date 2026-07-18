@@ -14,6 +14,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::memory::user::open_user_memory_db;
 use crate::store::DatabaseFactStore;
+use crate::store::memory::ProjectMemoryDbHandle;
 use crate::tracedecay::TraceDecay;
 
 use super::support::{
@@ -49,13 +50,8 @@ use fact_store::handle_fact_store_for_target;
 #[cfg(test)]
 use status::feedback_history_repair_payload;
 
-enum TargetMemoryDbHandle<'a> {
-    Active(&'a Database),
-    Owned(Box<Database>),
-}
-
 pub(super) struct TargetMemoryDb<'a> {
-    db: TargetMemoryDbHandle<'a>,
+    db: ProjectMemoryDbHandle<'a>,
     pub(super) project_root: PathBuf,
     pub(super) user_scope: bool,
     owner: FactOwnerV1,
@@ -63,10 +59,7 @@ pub(super) struct TargetMemoryDb<'a> {
 
 impl TargetMemoryDb<'_> {
     fn db(&self) -> &Database {
-        match &self.db {
-            TargetMemoryDbHandle::Active(db) => db,
-            TargetMemoryDbHandle::Owned(db) => db,
-        }
+        self.db.as_db()
     }
 
     pub(super) fn conn(&self) -> &libsql::Connection {
@@ -80,7 +73,7 @@ impl TargetMemoryDb<'_> {
 
 async fn open_user_memory_target(profile_root: &Path) -> Result<TargetMemoryDb<'static>> {
     Ok(TargetMemoryDb {
-        db: TargetMemoryDbHandle::Owned(Box::new(open_user_memory_db(profile_root).await?)),
+        db: ProjectMemoryDbHandle::Owned(Box::new(open_user_memory_db(profile_root).await?)),
         project_root: profile_root.to_path_buf(),
         user_scope: true,
         owner: FactOwnerV1::Profile,
@@ -126,13 +119,8 @@ pub(super) async fn open_target_memory_db<'a>(
     )
     .await?
     else {
-        let db = if cg.db_path() == cg.store_layout().graph_db_path {
-            TargetMemoryDbHandle::Active(cg.db())
-        } else {
-            TargetMemoryDbHandle::Owned(Box::new(cg.open_project_store_db().await?))
-        };
         return Ok(TargetMemoryDb {
-            db,
+            db: cg.project_memory_db().await?,
             project_root: cg.project_root().to_path_buf(),
             user_scope: false,
             owner: active_project_memory_owner(cg)?,
@@ -161,7 +149,7 @@ pub(super) async fn open_target_memory_db<'a>(
     let authority = crate::db::DatabaseAuthority::for_runtime(&db_path, "open memory target")?;
     let (db, _) = Database::open(&db_path, &authority).await?;
     Ok(TargetMemoryDb {
-        db: TargetMemoryDbHandle::Owned(Box::new(db)),
+        db: ProjectMemoryDbHandle::Owned(Box::new(db)),
         project_root: PathBuf::from(context.project.display_root),
         user_scope: false,
         owner: project_memory_owner(&context.project.project_id)?,
@@ -319,7 +307,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(target.db, TargetMemoryDbHandle::Active(_)));
+        assert!(matches!(target.db, ProjectMemoryDbHandle::Active(_)));
         assert!(std::ptr::eq(target.conn(), cg.db().conn()));
         assert_eq!(
             target.owner(),
@@ -426,7 +414,7 @@ mod tests {
             .await
             .unwrap();
         let target = TargetMemoryDb {
-            db: TargetMemoryDbHandle::Active(cg.db()),
+            db: ProjectMemoryDbHandle::Active(cg.db()),
             project_root: cg.project_root().to_path_buf(),
             user_scope: true,
             owner: active_project_memory_owner(&cg).unwrap(),
@@ -453,7 +441,7 @@ mod tests {
     async fn local_fact_search_records_retrieval_without_snapshot_deadlock() {
         let (_tmp, cg, fact_id) = seeded_memory().await;
         let target = TargetMemoryDb {
-            db: TargetMemoryDbHandle::Active(cg.db()),
+            db: ProjectMemoryDbHandle::Active(cg.db()),
             project_root: cg.project_root().to_path_buf(),
             user_scope: true,
             owner: active_project_memory_owner(&cg).unwrap(),
@@ -489,7 +477,7 @@ mod tests {
             .await
             .unwrap();
         let target = TargetMemoryDb {
-            db: TargetMemoryDbHandle::Active(cg.db()),
+            db: ProjectMemoryDbHandle::Active(cg.db()),
             project_root: cg.project_root().to_path_buf(),
             user_scope: true,
             owner: active_project_memory_owner(&cg).unwrap(),
@@ -526,7 +514,7 @@ mod tests {
             .await
             .unwrap();
         let target = TargetMemoryDb {
-            db: TargetMemoryDbHandle::Active(cg.db()),
+            db: ProjectMemoryDbHandle::Active(cg.db()),
             project_root: cg.project_root().to_path_buf(),
             user_scope: true,
             owner: active_project_memory_owner(&cg).unwrap(),
@@ -569,7 +557,7 @@ mod tests {
         let (_tmp, cg, fact_id) = seeded_memory().await;
         for _ in 0..2 {
             let target = TargetMemoryDb {
-                db: TargetMemoryDbHandle::Active(cg.db()),
+                db: ProjectMemoryDbHandle::Active(cg.db()),
                 project_root: cg.project_root().to_path_buf(),
                 user_scope: true,
                 owner: active_project_memory_owner(&cg).unwrap(),
@@ -599,7 +587,7 @@ mod tests {
     async fn cross_project_memory_retrieval_is_untracked() {
         let (_tmp, cg, fact_id) = seeded_memory().await;
         let target = TargetMemoryDb {
-            db: TargetMemoryDbHandle::Active(cg.db()),
+            db: ProjectMemoryDbHandle::Active(cg.db()),
             project_root: cg.project_root().to_path_buf(),
             user_scope: true,
             owner: active_project_memory_owner(&cg).unwrap(),

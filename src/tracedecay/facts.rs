@@ -3,14 +3,13 @@
 use crate::application::memory::{
     MemoryApplication, MemoryApplicationError, MemoryOperationContext, V1UpdateFactOutcome,
 };
-use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::types::{
     AddFactOutcome, AddFactRequest, ContradictionResult, FactRecord, FactSearchResult,
     FeedbackRequest, FeedbackResult, MemoryCategory, MemoryStatus, SearchFactsRequest,
     TrustHistoryEntry, UpdateFactRequest,
 };
-use crate::store::memory::{DatabaseFactStore, ProjectFactStore};
+use crate::store::memory::{DatabaseFactStore, ProjectFactStore, ProjectMemoryDbHandle};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 
 use super::TraceDecay;
@@ -39,26 +38,6 @@ fn project_memory_owner_from_layout_id(project_id: Option<&str>) -> Result<FactO
     Ok(FactOwnerV1::Project { project_id })
 }
 
-/// A resolved handle to the project-wide memory database: the active database
-/// when it already is the shared project store, or a separately opened
-/// project-store handle when the active database is a branch shard.
-pub(crate) enum ProjectMemoryDb<'a> {
-    Active(&'a Database),
-    Owned(Box<Database>),
-}
-
-impl<'a> ProjectMemoryDb<'a> {
-    /// Consumes the resolved handle into a fact store that owns it, so a single
-    /// accessor can build a memory application whose authority outlives the
-    /// resolving call.
-    fn into_fact_store(self) -> ProjectFactStore<'a> {
-        match self {
-            Self::Active(db) => ProjectFactStore::borrowed(db),
-            Self::Owned(db) => ProjectFactStore::owned(db),
-        }
-    }
-}
-
 impl TraceDecay {
     /// Returns the only project-memory owner accepted by core routes.
     ///
@@ -70,14 +49,16 @@ impl TraceDecay {
 
     /// Opens the project-wide memory store. Project facts are project-wide by
     /// contract; when this instance serves a branch-sharded database, memory
-    /// reads and writes must still target the shared project store — the MCP
-    /// memory handlers route the same way — or branch shards accumulate
-    /// diverging fact stores and the daemon repairs the wrong file.
-    pub(crate) async fn project_memory_db(&self) -> Result<ProjectMemoryDb<'_>> {
+    /// reads and writes must still target the shared project store, or
+    /// branch shards accumulate diverging fact stores and the daemon repairs
+    /// the wrong file. This is the single resolver for that routing
+    /// decision — the MCP memory handlers' no-selector arm calls this method
+    /// directly instead of re-deriving the predicate.
+    pub(crate) async fn project_memory_db(&self) -> Result<ProjectMemoryDbHandle<'_>> {
         if self.db_path() == self.store_layout.graph_db_path {
-            Ok(ProjectMemoryDb::Active(&self.db))
+            Ok(ProjectMemoryDbHandle::Active(&self.db))
         } else {
-            Ok(ProjectMemoryDb::Owned(Box::new(
+            Ok(ProjectMemoryDbHandle::Owned(Box::new(
                 self.open_project_store_db().await?,
             )))
         }
