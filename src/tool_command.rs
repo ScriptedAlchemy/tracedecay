@@ -38,7 +38,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 
-use tracedecay::daemon::{DaemonHandshake, call_default_tool};
+use tracedecay::daemon::{DaemonHandshake, call_default_tool_within};
 use tracedecay::errors::{Result, TraceDecayError};
 use tracedecay::mcp::tools::{
     RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, render_tool_cli_help,
@@ -101,6 +101,46 @@ fn tool_timeout_error(tool_name: &str) -> TraceDecayError {
             "tool request timed out before deadline: {tool_name}; request outcome may be unknown"
         ),
     }
+}
+
+fn is_truncation_envelope(value: &Value) -> bool {
+    value.get("truncated").and_then(Value::as_bool) == Some(true)
+}
+
+fn reject_truncation_envelope(value: &Value, tool_name: &str) -> Result<()> {
+    if !is_truncation_envelope(value) {
+        return Ok(());
+    }
+    let original_chars = value.get("original_chars").and_then(Value::as_u64);
+    let handle = value.get("handle").and_then(Value::as_str);
+    let message = match (original_chars, handle) {
+        (Some(chars), Some(handle)) => format!(
+            "daemon tool {tool_name} returned truncated JSON ({chars} chars); \
+             recover with tracedecay_retrieve handle={handle}"
+        ),
+        (Some(chars), None) => format!(
+            "daemon tool {tool_name} returned truncated JSON ({chars} chars) \
+             without a retrieval handle"
+        ),
+        _ => format!("daemon tool {tool_name} returned truncated JSON"),
+    };
+    Err(TraceDecayError::Config { message })
+}
+
+fn reject_tool_result_truncation(result_value: &Value, tool_name: &str) -> Result<()> {
+    reject_truncation_envelope(result_value, tool_name)?;
+    let Some(blocks) = result_value.get("content").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for block in blocks {
+        let Some(text) = block.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Ok(payload) = serde_json::from_str::<Value>(text) {
+            reject_truncation_envelope(&payload, tool_name)?;
+        }
+    }
+    Ok(())
 }
 
 /// Entry point for `tracedecay tool ...`.
@@ -187,9 +227,18 @@ impl DaemonToolDispatch {
         DaemonHandshake::for_current_client(self.project_path.clone(), None, false, self.allow_init)
     }
 
-    async fn call(&self, tool_name: &str, tool_args: Value) -> Result<Value> {
+    async fn call(&self, tool_name: &str, tool_args: Value, deadline: Instant) -> Result<Value> {
         let handshake = self.handshake()?;
-        call_default_tool(&handshake, tool_name, tool_args).await
+        call_default_tool_within(&handshake, tool_name, tool_args, deadline).await
+    }
+}
+
+fn map_tool_deadline_error(tool_name: &str, error: TraceDecayError) -> TraceDecayError {
+    let message = error.to_string();
+    if message.contains("before deadline") || message.contains("deadline already elapsed") {
+        tool_timeout_error(tool_name)
+    } else {
+        error
     }
 }
 
@@ -200,12 +249,16 @@ async fn dispatch_daemon_tool(
     raw_json: bool,
     deadline: Instant,
 ) -> Result<()> {
-    let result_value = timeout_at(deadline, dispatch.call(tool_name, tool_args))
-        .await
-        .map_err(|_| tool_timeout_error(tool_name))??;
+    let result_value =
+        match timeout_at(deadline, dispatch.call(tool_name, tool_args, deadline)).await {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => return Err(map_tool_deadline_error(tool_name, error)),
+            Err(_) => return Err(tool_timeout_error(tool_name)),
+        };
     if Instant::now() >= deadline {
         return Err(tool_timeout_error(tool_name));
     }
+    reject_tool_result_truncation(&result_value, tool_name)?;
     print_tool_output(&result_value, raw_json);
     Ok(())
 }
