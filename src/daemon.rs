@@ -929,24 +929,36 @@ where
     R: tokio::io::AsyncBufRead + Unpin,
 {
     use crate::application::host_admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
+
+    // Pin one frame-read future for the whole wait. Liveness polls must not
+    // recreate `read_bounded_mcp_line`: that future owns the partial-frame
+    // accumulator after bytes have already been consumed from `reader`.
+    let read = read_bounded_mcp_line(reader);
+    tokio::pin!(read);
     loop {
-        match timeout(liveness_poll_interval, read_bounded_mcp_line(reader)).await {
-            Ok(Ok(line)) => return Ok(line),
-            Ok(Err(error)) if is_wire_oversized_io_error(&error) => {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "daemon {request_label} response exceeded wire message bound ({})",
-                        crate::application::host_admission::WIRE_RECORD_TOO_LARGE
-                    ),
-                });
+        tokio::select! {
+            result = &mut read => {
+                return match result {
+                    Ok(line) => Ok(line),
+                    Err(error) if is_wire_oversized_io_error(&error) => {
+                        Err(TraceDecayError::Config {
+                            message: format!(
+                                "daemon {request_label} response exceeded wire message bound ({})",
+                                crate::application::host_admission::WIRE_RECORD_TOO_LARGE
+                            ),
+                        })
+                    }
+                    Err(error) => Err(error.into()),
+                };
             }
-            Ok(Err(error)) => return Err(error.into()),
-            Err(_) => ensure_daemon_connection_live(connection, request_label).await?,
+            () = tokio::time::sleep(liveness_poll_interval) => {
+                ensure_daemon_connection_live(connection, request_label).await?;
+            }
         }
     }
 }
 
-// Windows discovers the current daemon through a fallible endpoint lookup;
+// Windows discovers// Windows discovers the current daemon through a fallible endpoint lookup;
 // Unix keeps the same cross-platform contract even though its path is infallible.
 #[allow(clippy::unnecessary_wraps)]
 fn client_connection(socket_path: &Path) -> Result<DaemonConnection> {
