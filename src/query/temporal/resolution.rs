@@ -2142,7 +2142,9 @@ mod tests {
             vec![SummaryOmission {
                 summary_id: summary.summary_id().clone(),
                 anchor_id: summary.summary_anchor_id().clone(),
-                rejection: SummaryLineageRejection::UnauthorizedSource,
+                rejection: SummaryLineageRejection::UnauthorizedSource {
+                    anchor_id: anchor("source-privacy-state"),
+                },
             }]
         );
         assert_eq!(
@@ -2205,7 +2207,9 @@ mod tests {
                 eligibility
                     .rejections
                     .get(&SessionSummaryIdV1::new("mixed").expect("valid id")),
-                Some(&SummaryLineageRejection::UnauthorizedSource)
+                Some(&SummaryLineageRejection::UnauthorizedSource {
+                    anchor_id: anchor("unauthorized"),
+                })
             );
         }
     }
@@ -2314,7 +2318,9 @@ mod tests {
             eligibility
                 .rejections
                 .get(&SessionSummaryIdV1::new("horizon-private").expect("valid id")),
-            Some(&SummaryLineageRejection::UnauthorizedSource)
+            Some(&SummaryLineageRejection::UnauthorizedSource {
+                anchor_id: anchor("source-horizon-private"),
+            })
         );
     }
 
