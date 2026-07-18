@@ -645,6 +645,22 @@ const SESSION_RECEIPT_IMMUTABILITY: &[Trigger] = &[
                 SELECT RAISE(ABORT, 'session temporal migration receipts are immutable');
             END",
     },
+    Trigger {
+        name: "session_temporal_migration_dispositions_immutable_update_v1",
+        table: "session_temporal_migration_dispositions",
+        create_sql: "CREATE TRIGGER session_temporal_migration_dispositions_immutable_update_v1
+            BEFORE UPDATE ON session_temporal_migration_dispositions BEGIN
+                SELECT RAISE(ABORT, 'session temporal migration dispositions are immutable');
+            END",
+    },
+    Trigger {
+        name: "session_temporal_migration_dispositions_immutable_delete_v1",
+        table: "session_temporal_migration_dispositions",
+        create_sql: "CREATE TRIGGER session_temporal_migration_dispositions_immutable_delete_v1
+            BEFORE DELETE ON session_temporal_migration_dispositions BEGIN
+                SELECT RAISE(ABORT, 'session temporal migration dispositions are immutable');
+            END",
+    },
 ];
 
 const SESSION_REFRESH_STATE_GUARDS: &[Trigger] = &[
@@ -872,7 +888,9 @@ const SESSION_REFRESH_STATE_GUARDS: &[Trigger] = &[
                             AND (
                               (
                                 NEW.progress_ordinal = 0
-                                AND receipt.source_through = binding.source_frontier
+                                AND receipt.source_through =
+                                    json_extract(NEW.frontier_json, '$.committed_through')
+                                AND receipt.source_through > binding.source_frontier
                                 AND NOT EXISTS (
                                     SELECT 1
                                     FROM session_refresh_progress AS first_previous
@@ -903,7 +921,7 @@ const SESSION_REFRESH_STATE_GUARDS: &[Trigger] = &[
                                         previous.frontier_json, '$.committed_through'
                                     )
                                     AND receipt.source_through = json_extract(
-                                        previous.frontier_json, '$.committed_through'
+                                        NEW.frontier_json, '$.committed_through'
                                     )
                                     AND json_extract(NEW.coverage_json, '$.visible')
                                         >= json_extract(previous.coverage_json, '$.visible')
@@ -917,6 +935,7 @@ const SESSION_REFRESH_STATE_GUARDS: &[Trigger] = &[
                             )
                       )
                   )
+            )
             )
             BEGIN SELECT RAISE(ABORT, 'invalid session refresh progress'); END",
     },

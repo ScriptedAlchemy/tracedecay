@@ -1226,6 +1226,8 @@ pub(super) const TABLES: &[Table] = &[
             column("occurrence_id", "TEXT", true, None, 3),
             column("copied_from_occurrence_id", "TEXT", true, None, 4),
             column("proof_json", "TEXT", true, None, 0),
+            column("knowledge_at", "INTEGER", true, None, 0),
+            column("valid_time_json", "TEXT", true, None, 0),
             column("created_at", "INTEGER", true, None, 0),
         ],
         [
@@ -1525,6 +1527,38 @@ pub(super) const TABLES: &[Table] = &[
                 "session_summary_nodes",
                 "summary_id",
                 "NO ACTION"
+            ),
+        ]
+    ),
+    table!(
+        "session_temporal_migration_dispositions",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("batch_ordinal", "INTEGER", true, None, 3),
+            column("disposition_ordinal", "INTEGER", true, None, 4),
+            column("provider", "TEXT", true, None, 0),
+            column("message_id", "TEXT", true, None, 0),
+            column("output_ordinal", "INTEGER", true, None, 0),
+            column("observation_id", "TEXT", false, None, 0),
+            column("retrieval_anchor_id", "TEXT", false, None, 0),
+            column("disposition", "TEXT", true, None, 0),
+            column("reason", "TEXT", true, None, 0),
+            column("row_digest", "TEXT", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "session_id",
+                "session_temporal_generations",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_temporal_generations",
+                "generation",
+                "CASCADE",
+                1
             ),
         ]
     ),
@@ -2036,6 +2070,20 @@ pub(super) const INDEXES: &[Index] = &[
         unique: false,
         origin: "c",
         columns: &["session_id", "source_digest", "generation"],
+    },
+    Index {
+        table: "session_temporal_migration_dispositions",
+        name: Some("idx_session_temporal_migration_dispositions_row"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "provider", "message_id", "output_ordinal"],
+    },
+    Index {
+        table: "session_temporal_migration_dispositions",
+        name: Some("idx_session_temporal_migration_dispositions_kind"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "disposition", "generation"],
     },
 ];
 

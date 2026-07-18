@@ -66,6 +66,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "session_summary_sources",
     "session_summary_successors",
     "session_temporal_generations",
+    "session_temporal_migration_dispositions",
     "session_temporal_migration_receipts",
     "session_temporal_observation_effects",
     "session_temporal_projection_receipts",
