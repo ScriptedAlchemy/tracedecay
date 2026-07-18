@@ -28,6 +28,8 @@ use self::cursor_keys::GlobalDbCursorKeyProvider;
 use self::hydration::GlobalDbTemporalHydrationPort;
 use self::retrieval::GlobalDbTemporalReadPort;
 
+// Consumed by the pr8/transport cold-Doctor route when that branch is integrated.
+#[allow(unused_imports)]
 pub(crate) use doctor_health::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
     session_temporal_doctor_health_at,
