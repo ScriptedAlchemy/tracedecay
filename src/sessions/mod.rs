@@ -8,6 +8,7 @@ pub(crate) mod claude_observation;
 mod claude_observation_benchmark;
 pub mod cline_like;
 pub mod codex;
+pub mod session_temporal_benchmark;
 pub mod codex_app_server;
 pub mod cursor;
 pub mod cursor_agent;
