@@ -8,29 +8,62 @@ authorized result back to the exact retained evidence that supports it.
 
 ## Current branch status
 
-The branch delivers the PR7 slice end to end: the domain fact and anchor
-contracts, the `retrieval_anchors`/`retrieval_anchor_aliases`/binding schema
-with owner-bound identity and immutability triggers, the
-`AnchoredObservationWrite` persist path, the `memory_v2` fact store with
-assertions, supersession, trust, and proposals, the `v19`-`v23` migrations,
-the repository-provenance evidence path, and the compatibility fact authority
-that carries legacy V1 memory-tool facts forward through the same owner-bound
-contract. The legacy cutover is daemon-scheduled (decision-driven ticks on the
-shared bounded backoff curve), preserves legacy usage counters into the
-canonical projection, and memory replay identities are scoped per client
-connection so persistent operation receipts never collide across hosts.
+PR7 is complete and dogfood-verified. The branch delivers the PR7 slice end
+to end: the domain fact and anchor contracts, the
+`retrieval_anchors`/`retrieval_anchor_aliases`/binding schema with owner-bound
+identity and immutability triggers, the `AnchoredObservationWrite` persist
+path, the `memory_v2` fact store with assertions, supersession, trust, and
+proposals, the `v19`-`v23` migrations, the repository-provenance evidence
+path, and the compatibility fact authority that carries legacy V1 memory-tool
+facts forward through the same owner-bound contract. The legacy cutover is
+daemon-scheduled (decision-driven ticks on the shared bounded backoff curve),
+preserves legacy usage counters into the canonical projection, and memory
+replay identities are scoped per client connection so persistent operation
+receipts never collide across hosts.
+
+The post-review hardening wave closed every finding from four independent
+structural reviews (projection convergence, memory/daemon/application,
+operations/tests, and the decomposition commits): output-collision handling is
+one disposition-aware derivation mechanism; session-path canonicalization is
+confined to ingest so audits are pure over stored evidence; derived-memory
+convergence has exactly one application-layer owner
+(`converge_derived_memory`) with the dashboard, curation, and scheduler as
+one-shot callers; status reads are pure (live backlog, no repair side
+effects) with `repair_project_memory_once` as the public explicit entry;
+fact removal resolves its idempotent no-op disposition inside a single
+authority transaction; the project-memory DB handle and its routing predicate
+exist once (`ProjectMemoryDbHandle`); anchor alias collisions are reported as
+data with fail-closed mapping at the live-write caller; registry listings use
+typed per-row verdicts instead of swallowing storage errors; the store owns
+repair-batch saturation (`CompatibilityMemoryRepairStatsV1::saturated()`);
+error chains render without doubled text; the daemon service wait is
+wall-clock bounded; ingest futures are boxed at chokepoints rather than per
+frame; and the oversized modules from the size audit are decomposed
+(`crud`, `curation`, `proposals`, `memory_v2` schema/writers, store-crate
+compatibility curation). Suite health work made the tests hermetic to
+checkout path, collapsed hand-rolled deadline polls onto one `poll_until`
+helper, shrank fsync- and fixture-bound outliers, and moved test scratch to
+tmpfs via the machine-local build shim (which now passes `cargo dogfood`
+through untouched). A live FTS5 shard corruption recovered loss-free via
+external-content rebuild; that incident and the daemon client-saturation
+episode are now normative requirements in plans 12, 19, 21, and 33.
 
 Acceptance evidence: the plan 13/36/05 PR7 matrix passes (anchor atomicity,
 idempotent replay, retargeting immunity, typed tombstones with deletion
 lineage, authorization recheck, compatibility migration parity including the
 behavioral memory-hygiene evals); the deletion path redacts feedback
 free text; Linux `cargo check`/`clippy --all-features --all-targets` are
-error-free, formatting is clean, and the full workspace nextest suite passes.
-Structural debt and deferred alignments are cataloged in
-`docs/PR7-STRUCTURAL-QUALITY-REPORT.md` (P2 decomposition wave, P3 planned-PR
-items). Release-profile memory/anchor/migration baselines are recorded as
-provisional evidence under `benchmarks/pr7-memory/` (dirty-worktree runs carry
-no commit attestation by design), and developer build feedback is captured via
+error-free, formatting is clean, and the full workspace nextest suite passes
+(6,071 tests). Dogfood verification on the live profile: single managed
+daemon under the new binary, doctor fully green including current-project DB
+integrity checked by the daemon owner, and daemon-brokered status and
+memory-status calls answering through the new read-only path. Structural debt
+and deferred alignments are cataloged in
+`docs/PR7-STRUCTURAL-QUALITY-REPORT.md` (P2 decomposition wave — since
+executed, P3 planned-PR items). Release-profile memory/anchor/migration
+baselines are recorded as provisional evidence under
+`benchmarks/pr7-memory/` (dirty-worktree runs carry no commit attestation by
+design), and developer build feedback is captured via
 `scripts/dev/pr7-build-feedback.sh`.
 
 Forward note for PR11: `build_resolution_authorization_v1` snapshots are
