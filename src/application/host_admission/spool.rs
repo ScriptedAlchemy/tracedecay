@@ -2181,7 +2181,13 @@ mod tests {
 
     #[test]
     fn ack_watermark_defers_full_rewrite_until_waste_threshold() {
-        const N: usize = 4096;
+        // Every append and every ack publish is a durable `sync_all`, so this
+        // test's wall time is `(N + N/2) x ambient fsync latency`. The
+        // waste-threshold behavior under test is ratio-based (compact fires
+        // when waste crosses the multiplier at N/2), so a modest N proves the
+        // same contract; 4096 turned this into a multi-minute fsync storm on
+        // a loaded disk.
+        const N: usize = 256;
         let frame_len = encode_frame(1, b"s", b"").unwrap().len();
         let bounds = SpoolBounds::new(16, 8, frame_len.saturating_mul(N), N);
         let temp = tempfile::tempdir().unwrap();
