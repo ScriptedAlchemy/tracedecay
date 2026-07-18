@@ -1,6 +1,7 @@
 {
   "schema_version": 2,
   "current_acceptance": null,
-  "blocked": "result-provisional.json",
+  "blocked": null,
+  "provisional": "result-provisional.json",
   "historical_stale": []
 }
