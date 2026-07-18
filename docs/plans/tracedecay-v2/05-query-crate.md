@@ -7,6 +7,17 @@
   existing store and application modules. Extract `tracedecay-query` only when
   PR8-or-later reuse, dependency isolation, or compile-time savings justify the
   boundary.
+- PR8 builds the temporal kernel as root-package modules that honor this
+  crate's ownership contract in place: typed domain requests, read-only port
+  traits implemented by root store/projector adapters, no SQL/transport/policy
+  imports in kernel modules, and architecture tests asserting those boundaries
+  from PR8 onward. At PR8 the kernel has no consumer outside the root package,
+  so a physical crate isolates nothing yet; the in-place contract keeps later
+  extraction mechanical.
+- The extraction decision is re-evaluated at PR9, when lexical code retrieval
+  becomes the first second consumer of the shared execution primitives. It
+  proceeds only with the Plan 19 evidence: named reuse across slices and a
+  same-host measurement showing a smaller frequently touched compile graph.
 - PR7 adds facts and provenance, PR8 adds LCM/session retrieval, PR9 adds
   lexical code search, code navigation, and current diagnostics, and PR10 adds
   semantic search.
@@ -101,6 +112,11 @@ Every product surface can run the same bounded query use case and receive determ
   logical-copy, summary-DAG, current, as-of, evolution, and forensic requests
   over current-project/single-root scope. Native rows remain addressable;
   representative views report hidden and unknown counts.
+- **PR9 — extraction gate:** before adding the lexical surface, decide the
+  `tracedecay-query` extraction with the Plan 19 evidence (reuse across the
+  PR8 temporal kernel and this slice; same-host compile-graph measurement).
+  Either outcome, PR9 code lands against the same typed-request/port contract
+  the PR8 kernel modules already enforce — location changes, contracts do not.
 - **PR9 — lexical code:** add exact identifier, phrase, token, field, bounded fuzzy, relation, path, impact, affected-test, facet, and timeline requests. Exact identifiers precede approximate candidates. Impact and affected-test requests may merge only explicit typed reference/dispatch evidence inputs alongside graph, Git, and test inputs; that evidence never proves a test executed or a change was delivered.
 - **PR9 — Git queries:** add typed working-tree, staged, and arbitrary revision-
   range diff requests plus status, history, blame, and `HunkRef` resolution.
