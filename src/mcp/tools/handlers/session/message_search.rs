@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CompactContextLineageEdgeV1, HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId,
     TemporalCoverageCountsV1, TemporalModeV1,
@@ -171,6 +172,8 @@ impl SessionRetrievalCommand {
         goals: bool,
         store_scope: SessionRetrievalStoreScope,
     ) -> Self {
+        let query =
+            query.with_compatibility_filter_digest(compatibility_filter_digest(&filters, goals));
         Self {
             query,
             filters,
@@ -199,6 +202,27 @@ impl SessionRetrievalCommand {
     pub(crate) fn project_selector(&self) -> Option<&SessionRetrievalProjectSelector> {
         self.project_selector.as_ref()
     }
+}
+
+fn compatibility_filter_digest(filters: &SessionRetrievalFilters, goals: bool) -> String {
+    let mut roles = filters.roles.clone();
+    roles.sort();
+    roles.dedup();
+    let encoded = serde_json::to_vec(&json!({
+        "version": 1,
+        "project_key": filters.project_key,
+        "parent_session_id": filters.parent_session_id,
+        "scope": filters.scope.as_str(),
+        "message_type": filters.message_type.as_str(),
+        "roles": roles,
+        "start_time": filters.time_range.start_time,
+        "end_time": filters.time_range.end_time,
+        "git": filters.git_filter,
+        "workflow": filters.workflow_scope,
+        "goals": goals,
+    }))
+    .expect("compatibility filter bindings are serializable");
+    format!("sha256:{}", hex::encode(Sha256::digest(encoded)))
 }
 
 pub(crate) type SessionRetrievalServiceFuture<'a> =
@@ -1056,6 +1080,56 @@ mod cutover_tests {
             Some("wf_123")
         );
         assert!(!command.goals());
+    }
+
+    #[tokio::test]
+    async fn compatibility_filters_bind_the_temporal_cursor_request() {
+        let first = RecordingService::default();
+        handle_message_search_with_service(
+            Some(Path::new("/repo")),
+            SessionRetrievalStoreScope::Project,
+            json!({
+                "query": "database backup",
+                "scope": "parents_only",
+                "message_type": "direct_user",
+                "since": 10,
+                "until": 20,
+                "format": "json"
+            }),
+            Some(&first),
+        )
+        .await
+        .unwrap();
+
+        let changed = RecordingService::default();
+        handle_message_search_with_service(
+            Some(Path::new("/repo")),
+            SessionRetrievalStoreScope::Project,
+            json!({
+                "query": "database backup",
+                "scope": "subagents_only",
+                "message_type": "tool_result",
+                "since": 11,
+                "until": 21,
+                "format": "json"
+            }),
+            Some(&changed),
+        )
+        .await
+        .unwrap();
+
+        let first = first.command();
+        let changed = changed.command();
+        assert_ne!(
+            first.query().compatibility_filter_digest(),
+            changed.query().compatibility_filter_digest()
+        );
+        assert!(
+            first
+                .query()
+                .compatibility_filter_digest()
+                .is_some_and(|digest| digest.starts_with("sha256:"))
+        );
     }
 
     #[tokio::test]

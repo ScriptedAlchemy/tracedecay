@@ -63,6 +63,7 @@ pub struct SessionTemporalQuery {
     retrieval_scope: SessionRetrievalScope,
     provider: Option<String>,
     query: String,
+    compatibility_filter_digest: Option<String>,
     cursor: Option<String>,
     temporal_mode: TemporalModeV1,
     grain: RetrievalGrainV1,
@@ -112,6 +113,7 @@ impl SessionTemporalQuery {
             retrieval_scope,
             provider,
             query: query.into(),
+            compatibility_filter_digest: None,
             cursor,
             temporal_mode,
             grain,
@@ -144,6 +146,12 @@ impl SessionTemporalQuery {
         self
     }
 
+    #[must_use]
+    pub(crate) fn with_compatibility_filter_digest(mut self, digest: String) -> Self {
+        self.compatibility_filter_digest = Some(digest);
+        self
+    }
+
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
     }
@@ -158,6 +166,10 @@ impl SessionTemporalQuery {
 
     pub fn query(&self) -> &str {
         &self.query
+    }
+
+    pub(crate) fn compatibility_filter_digest(&self) -> Option<&str> {
+        self.compatibility_filter_digest.as_deref()
     }
 
     pub fn cursor(&self) -> Option<&str> {
@@ -721,6 +733,7 @@ fn digest_request(
         session_id: Option<&'a str>,
         provider: Option<&'a str>,
         query: &'a str,
+        compatibility_filter_digest: Option<&'a str>,
         temporal_mode: &'static str,
         cutoff_micros: Option<i64>,
         grain: &'static str,
@@ -751,6 +764,7 @@ fn digest_request(
         session_id: query.retrieval_scope.session_id().map(SessionId::as_str),
         provider: query.provider.as_deref(),
         query: &query.query,
+        compatibility_filter_digest: query.compatibility_filter_digest.as_deref(),
         temporal_mode: query.temporal_mode.as_str(),
         cutoff_micros: match query.temporal_mode {
             TemporalModeV1::AsOf { cutoff } => Some(cutoff.0),
