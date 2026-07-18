@@ -13257,8 +13257,13 @@ fn message_search_provider_schema_matches_ingested_providers() {
     );
 }
 
+/// A plain `tracedecay_memory_status` read must never repair derived vectors
+/// or rebuild dirty banks as a side effect (repair is owned by the daemon's
+/// bounded memory-repair scheduler and the explicit repair entry point). The
+/// status projection must still report the repair/backlog fields from stored
+/// state once an explicit repair has actually run.
 #[tokio::test]
-async fn memory_status_repairs_dirty_banks_before_reporting() {
+async fn memory_status_reports_repair_state_without_repairing() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let added = handle_tool_call(
         &cg,
@@ -13266,7 +13271,7 @@ async fn memory_status_repairs_dirty_banks_before_reporting() {
         json!({
             "action": "add",
             "format": "json",
-            "content": "Status should repair dirty holographic banks",
+            "content": "Status should report repair state without repairing it",
             "category": "project",
             "entity": "Holographic Banks"
         }),
@@ -13290,31 +13295,74 @@ async fn memory_status_repairs_dirty_banks_before_reporting() {
     .unwrap();
     db.close();
 
-    let status = handle_tool_call(&cg, "tracedecay_memory_status", json!({}), None, None)
+    // A status read alone must not repair the missing vector or rebuild banks.
+    let unrepaired = handle_tool_call(&cg, "tracedecay_memory_status", json!({}), None, None)
         .await
         .unwrap();
-    let status: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
-    assert_eq!(status["status"], "ok");
-    assert!(
-        status["memory"]["bank_count"].as_u64().unwrap_or_default() >= 2,
-        "memory_status should rebuild all and category banks before reporting: {status}"
-    );
+    let unrepaired: Value = serde_json::from_str(extract_text(&unrepaired.value)).unwrap();
+    assert_eq!(unrepaired["status"], "ok");
     assert_eq!(
-        status["memory"]["missing_vector_count"].as_u64(),
-        Some(0),
-        "status-triggered bank repair should not leave missing vectors"
-    );
-    assert_eq!(
-        status["memory"]["repair"]["missing_vectors_repaired"].as_u64(),
+        unrepaired["memory"]["missing_vector_count"].as_u64(),
         Some(1),
-        "status should report derived vector repairs: {status}"
+        "a status read must not repair the missing vector as a side effect: {unrepaired}"
     );
+    assert_eq!(
+        unrepaired["memory"]["repair"]["missing_vectors_repaired"].as_u64(),
+        Some(0),
+        "a status read must not report repair work it never performed: {unrepaired}"
+    );
+
+    // Seed the repaired state via the explicit repair entry point instead of
+    // relying on a status read to trigger it.
+    let project_id = resolve_layout_for_current_profile(cg.project_root())
+        .unwrap()
+        .identity
+        .project_id
+        .expect("test project has a resolved project id");
+    let owner = tracedecay_domain::FactOwnerV1::Project {
+        project_id: tracedecay_domain::ProjectId::new(project_id).unwrap(),
+    };
+    let (repair_db, _) = crate::common::open_test_database(&db_path).await.unwrap();
+    let memory = tracedecay::application::memory::MemoryApplication::new(
+        owner.clone(),
+        tracedecay::store::memory::DatabaseFactStore::new(&repair_db),
+    )
+    .unwrap();
+    let repair = memory
+        .dashboard_repair_v1(
+            tracedecay::application::memory::MemoryOperationContext::generated(
+                &owner,
+                "explicit-status-test-repair",
+                None,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
     assert!(
-        status["memory"]["repair"]["banks_rebuilt"]
+        repair.missing_vectors_repaired() >= 1,
+        "explicit repair should have repaired the seeded missing vector"
+    );
+    repair_db.close();
+
+    // Now a plain status read must report the already-repaired stored state,
+    // without needing to repair anything itself.
+    let repaired = handle_tool_call(&cg, "tracedecay_memory_status", json!({}), None, None)
+        .await
+        .unwrap();
+    let repaired: Value = serde_json::from_str(extract_text(&repaired.value)).unwrap();
+    assert_eq!(repaired["status"], "ok");
+    assert!(
+        repaired["memory"]["bank_count"]
             .as_u64()
             .unwrap_or_default()
-            >= 1,
-        "status should report bank repair work after vector repair: {status}"
+            >= 2,
+        "status should report the banks the explicit repair rebuilt: {repaired}"
+    );
+    assert_eq!(
+        repaired["memory"]["missing_vector_count"].as_u64(),
+        Some(0),
+        "status should report the vector the explicit repair fixed: {repaired}"
     );
 }
 

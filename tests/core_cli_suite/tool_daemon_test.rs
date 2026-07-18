@@ -121,17 +121,17 @@ fn tool_status_server_tool_calls(home: &Path, project: &Path) -> u64 {
 
 fn wait_for_daemon_socket(socket_path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if UnixStream::connect(socket_path).is_ok() {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for daemon socket at {}",
-            socket_path.display()
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    common::poll_until(
+        deadline,
+        Duration::from_millis(25),
+        || UnixStream::connect(socket_path).is_ok().then_some(()),
+        || {
+            format!(
+                "timed out waiting for daemon socket at {}",
+                socket_path.display()
+            )
+        },
+    );
 }
 
 fn wait_for_child_exit(child: &mut std::process::Child, timeout: Duration) -> bool {
@@ -188,18 +188,16 @@ fn spawn_sentinel_daemon_with_notification(
         ready_tx.send(()).expect("notify fake daemon readiness");
 
         let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
-        let (stream, _) = loop {
-            match listener.accept() {
-                Ok(accepted) => break accepted,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        panic!("timed out waiting for tool CLI to connect to fake daemon");
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
+        let (stream, _) = common::poll_until(
+            deadline,
+            Duration::from_millis(10),
+            || match listener.accept() {
+                Ok(accepted) => Some(accepted),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
                 Err(e) => panic!("accept fake daemon client: {e}"),
-            }
-        };
+            },
+            || "timed out waiting for tool CLI to connect to fake daemon".to_string(),
+        );
         stream
             .set_nonblocking(false)
             .expect("set accepted stream blocking");
@@ -279,18 +277,16 @@ fn spawn_hook_event_daemon(socket_path: PathBuf) -> mpsc::Receiver<Value> {
         ready_tx.send(()).expect("notify fake daemon readiness");
 
         let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
-        let (stream, _) = loop {
-            match listener.accept() {
-                Ok(accepted) => break accepted,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        panic!("timed out waiting for hook to connect to fake daemon");
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
+        let (stream, _) = common::poll_until(
+            deadline,
+            Duration::from_millis(10),
+            || match listener.accept() {
+                Ok(accepted) => Some(accepted),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
                 Err(e) => panic!("accept fake daemon client: {e}"),
-            }
-        };
+            },
+            || "timed out waiting for hook to connect to fake daemon".to_string(),
+        );
         // The listener above is intentionally nonblocking so the accept loop
         // can poll against a deadline. The accepted stream must be switched
         // back to blocking (matching spawn_sentinel_daemon_with_notification)

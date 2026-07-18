@@ -72,17 +72,21 @@ fn daemon_recovers_killed_writer_dirty_wal_before_serving_clients() {
             .expect("spawn writer fixture"),
     );
     let deadline = Instant::now() + PROCESS_TIMEOUT;
-    while !ready_path.exists() {
-        assert!(
-            writer.try_wait().expect("writer status").is_none(),
-            "writer exited early"
-        );
-        assert!(
-            Instant::now() < deadline,
-            "writer fixture did not become ready"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    common::poll_until(
+        deadline,
+        Duration::from_millis(25),
+        || {
+            if ready_path.exists() {
+                return Some(());
+            }
+            assert!(
+                writer.try_wait().expect("writer status").is_none(),
+                "writer exited early"
+            );
+            None
+        },
+        || "writer fixture did not become ready".to_string(),
+    );
     assert!(
         PathBuf::from(format!("{}-wal", db_path.display())).exists(),
         "writer fixture must leave committed WAL frames"

@@ -662,56 +662,56 @@ async fn serve_started_during_daemon_restart_window_proxies_to_restarted_daemon(
             .set_nonblocking(true)
             .expect("nonblocking fake daemon listener");
         let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for serve to proxy a request to the restarted daemon"
-            );
-            let mut stream = match listener.accept() {
-                Ok((stream, _addr)) => stream,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(10));
-                    continue;
+        common::poll_until(
+            deadline,
+            Duration::from_millis(10),
+            || {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _addr)) => stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return None,
+                    Err(e) => panic!("accept serve connection: {e}"),
+                };
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking fake daemon stream");
+                let mut reader =
+                    BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+                let mut handshake_line = String::new();
+                if reader
+                    .read_line(&mut handshake_line)
+                    .expect("read handshake")
+                    == 0
+                {
+                    // The transport probe connects and hangs up without a handshake.
+                    return None;
                 }
-                Err(e) => panic!("accept serve connection: {e}"),
-            };
-            stream
-                .set_nonblocking(false)
-                .expect("blocking fake daemon stream");
-            let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
-            let mut handshake_line = String::new();
-            if reader
-                .read_line(&mut handshake_line)
-                .expect("read handshake")
-                == 0
-            {
-                // The transport probe connects and hangs up without a handshake.
-                continue;
-            }
-            let mut request_line = String::new();
-            if reader.read_line(&mut request_line).expect("read request") == 0 {
-                continue;
-            }
-            let request: Value = serde_json::from_str(request_line.trim()).expect("request json");
-            let response = json!({
-                "jsonrpc": "2.0",
-                "id": request["id"],
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": { "tools": {} },
-                    "serverInfo": {
-                        "name": "sentinel-restarted-daemon",
-                        "version": "0.0.1-sentinel"
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).expect("read request") == 0 {
+                    return None;
+                }
+                let request: Value =
+                    serde_json::from_str(request_line.trim()).expect("request json");
+                let response = json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": { "tools": {} },
+                        "serverInfo": {
+                            "name": "sentinel-restarted-daemon",
+                            "version": "0.0.1-sentinel"
+                        }
                     }
-                }
-            });
-            writeln!(stream, "{response}").expect("write fake daemon response");
-            // Drain until the proxy hangs up so the response is not lost to a
-            // connection reset.
-            let mut scratch = [0_u8; 64];
-            while matches!(reader.read(&mut scratch), Ok(n) if n > 0) {}
-            return;
-        }
+                });
+                writeln!(stream, "{response}").expect("write fake daemon response");
+                // Drain until the proxy hangs up so the response is not lost to a
+                // connection reset.
+                let mut scratch = [0_u8; 64];
+                while matches!(reader.read(&mut scratch), Ok(n) if n > 0) {}
+                Some(())
+            },
+            || "timed out waiting for serve to proxy a request to the restarted daemon".to_string(),
+        );
     });
 
     let mut child = tracedecay_command_with_home(home.path())

@@ -641,36 +641,42 @@ pub fn spawn_tracedecay_daemon_with(
     let mut daemon = DaemonProcess { child };
 
     let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        #[cfg(unix)]
-        let ready = std::os::unix::net::UnixStream::connect(&socket_path).is_ok();
-        #[cfg(not(unix))]
-        let ready = portable_daemon_connectable();
-        if ready {
-            daemon.drain_stderr();
-            return daemon;
-        }
-        if let Some(status) = daemon
-            .child
-            .try_wait()
-            .expect("daemon status should be readable")
-        {
-            let mut stderr = String::new();
-            if let Some(mut child_stderr) = daemon.child.stderr.take() {
-                let _ = child_stderr.read_to_string(&mut stderr);
+    poll_until(
+        deadline,
+        Duration::from_millis(25),
+        || {
+            #[cfg(unix)]
+            let ready = std::os::unix::net::UnixStream::connect(&socket_path).is_ok();
+            #[cfg(not(unix))]
+            let ready = portable_daemon_connectable();
+            if ready {
+                return Some(());
             }
-            panic!(
-                "tracedecay daemon exited before accepting connections: {status}; stderr: {}",
-                stderr.trim()
-            );
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for daemon authority at {}",
-            authority_path.display()
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
+            if let Some(status) = daemon
+                .child
+                .try_wait()
+                .expect("daemon status should be readable")
+            {
+                let mut stderr = String::new();
+                if let Some(mut child_stderr) = daemon.child.stderr.take() {
+                    let _ = child_stderr.read_to_string(&mut stderr);
+                }
+                panic!(
+                    "tracedecay daemon exited before accepting connections: {status}; stderr: {}",
+                    stderr.trim()
+                );
+            }
+            None
+        },
+        || {
+            format!(
+                "timed out waiting for daemon authority at {}",
+                authority_path.display()
+            )
+        },
+    );
+    daemon.drain_stderr();
+    daemon
 }
 
 pub fn response_to_json(mut response: ureq::http::Response<ureq::Body>) -> (u16, Value) {

@@ -79,19 +79,20 @@ pub(super) fn assert_command_success(label: &str, output: &std::process::Output)
 
 fn wait_for_socket(socket_path: &Path, child: &mut Child) {
     let deadline = Instant::now() + PROCESS_TIMEOUT;
-    loop {
-        if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
-            return;
-        }
-        if let Some(status) = child.try_wait().expect("read daemon status") {
-            panic!("daemon exited before opening socket: {status}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "daemon socket did not become ready"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    common::poll_until(
+        deadline,
+        Duration::from_millis(25),
+        || {
+            if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
+                return Some(());
+            }
+            if let Some(status) = child.try_wait().expect("read daemon status") {
+                panic!("daemon exited before opening socket: {status}");
+            }
+            None
+        },
+        || "daemon socket did not become ready".to_string(),
+    );
 }
 
 pub(super) fn spawn_daemon(home: &Path, socket_path: &Path) -> ChildGuard {
