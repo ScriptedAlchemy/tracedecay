@@ -14,7 +14,7 @@ use tokio::net::UnixStream;
 #[cfg(unix)]
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
@@ -49,6 +49,48 @@ const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_CONCURRENT_DAEMON_CLIENTS: usize = 64;
 const DAEMON_SATURATION_RESPONSE_DEADLINE: Duration = Duration::from_millis(250);
+
+/// One monotonic wall-clock budget shared across daemon client connect, write,
+/// read, and decode stages. Outer CLI wrappers pass their Instant so a timeout
+/// cancels the in-flight stage rather than starting a fresh Duration clock.
+#[derive(Clone, Copy, Debug)]
+struct DaemonClientDeadline {
+    deadline: Instant,
+}
+
+impl DaemonClientDeadline {
+    fn until(deadline: Instant) -> Result<Self> {
+        if Instant::now() >= deadline {
+            return Err(TraceDecayError::Config {
+                message: "daemon client deadline already elapsed".to_string(),
+            });
+        }
+        Ok(Self { deadline })
+    }
+
+    fn remaining(&self) -> Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "daemon client deadline already elapsed".to_string(),
+            })
+    }
+
+    async fn run<F, T>(&self, stage: &'static str, request_label: &str, fut: F) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        match timeout_at(self.deadline, fut).await {
+            Ok(result) => result,
+            Err(_) => Err(TraceDecayError::Config {
+                message: format!(
+                    "daemon {request_label} timed out during {stage} before deadline; request outcome may be unknown"
+                ),
+            }),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct DaemonClientAdmission {
@@ -958,7 +1000,7 @@ where
     }
 }
 
-// Windows discovers// Windows discovers the current daemon through a fallible endpoint lookup;
+// Windows discovers the current daemon through a fallible endpoint lookup;
 // Unix keeps the same cross-platform contract even though its path is infallible.
 #[allow(clippy::unnecessary_wraps)]
 fn client_connection(socket_path: &Path) -> Result<DaemonConnection> {
@@ -1025,12 +1067,18 @@ fn is_transient_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
 }
 
 async fn connect_to_daemon_connection(connection: &DaemonConnection) -> Result<BrokerStream> {
-    connect_with_restart_grace(
-        connection,
-        DAEMON_RESTART_GRACE,
-        DAEMON_RESTART_POLL_INTERVAL,
-    )
-    .await
+    connect_to_daemon_connection_within(connection, None).await
+}
+
+async fn connect_to_daemon_connection_within(
+    connection: &DaemonConnection,
+    client_deadline: Option<DaemonClientDeadline>,
+) -> Result<BrokerStream> {
+    let grace = match client_deadline {
+        Some(deadline) => deadline.remaining()?.min(DAEMON_RESTART_GRACE),
+        None => DAEMON_RESTART_GRACE,
+    };
+    connect_with_restart_grace(connection, grace, DAEMON_RESTART_POLL_INTERVAL).await
 }
 
 /// Connects to the daemon socket, tolerating a short restart outage.
@@ -1042,14 +1090,12 @@ async fn connect_with_restart_grace(
     grace: Duration,
     poll_interval: Duration,
 ) -> Result<BrokerStream> {
-    let deadline = tokio::time::Instant::now() + grace;
+    let deadline = Instant::now() + grace;
     loop {
         match BrokerStream::connect(&connection.endpoint).await {
             Ok(stream) => return Ok(stream),
             Err(TraceDecayError::Io(err)) => {
-                if !is_transient_daemon_connect_error(err.kind())
-                    || tokio::time::Instant::now() >= deadline
-                {
+                if !is_transient_daemon_connect_error(err.kind()) || Instant::now() >= deadline {
                     return Err(TraceDecayError::Config {
                         message: format!(
                             "could not connect to TraceDecay daemon endpoint '{}': {err}. The daemon may be restarting (e.g. after `tracedecay update`) — retry shortly, or check `tracedecay daemon status`.",
@@ -1399,6 +1445,7 @@ async fn send_daemon_request_line(
         handshake,
         line,
         DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+        None,
     )
     .await
 }
@@ -1408,45 +1455,84 @@ async fn send_daemon_request_line_with_liveness_poll(
     handshake: &DaemonHandshake,
     line: &str,
     liveness_poll_interval: Duration,
+    client_deadline: Option<DaemonClientDeadline>,
 ) -> Result<Vec<String>> {
     let connection = client_connection(socket_path)?;
-    let stream = connect_to_daemon_connection(&connection).await?;
-    let (reader, mut writer) = stream.into_split();
-
-    write_daemon_preamble(&mut writer, &connection, handshake).await?;
-    writer.write_all(line.as_bytes()).await?;
-    if !line.ends_with('\n') {
-        writer.write_all(b"\n").await?;
-    }
-    writer.flush().await?;
-    writer.shutdown().await?;
-
-    let mut reader = tokio::io::BufReader::new(reader);
     let request = serde_json::from_str::<JsonRpcRequest>(line).ok();
     let request_id = request.as_ref().and_then(|request| request.id.clone());
     let request_label = request
         .as_ref()
-        .map_or("daemon request", |request| request.method.as_str());
+        .map_or("daemon request", |request| request.method.as_str())
+        .to_string();
+    let stream = match client_deadline {
+        Some(deadline) => {
+            deadline
+                .run("connect", &request_label, async {
+                    connect_to_daemon_connection_within(&connection, Some(deadline)).await
+                })
+                .await?
+        }
+        None => connect_to_daemon_connection(&connection).await?,
+    };
+    let (reader, mut writer) = stream.into_split();
+
+    let write = async {
+        write_daemon_preamble(&mut writer, &connection, handshake).await?;
+        writer.write_all(line.as_bytes()).await?;
+        if !line.ends_with('\n') {
+            writer.write_all(b"\n").await?;
+        }
+        writer.flush().await?;
+        writer.shutdown().await?;
+        Ok(())
+    };
+    match client_deadline {
+        Some(deadline) => deadline.run("write", &request_label, write).await?,
+        None => write.await?,
+    }
+
+    let mut reader = tokio::io::BufReader::new(reader);
     let mut responses = Vec::new();
     let mut matched_response = request_id.is_none();
-    while let Some(response_line) = next_daemon_response_line(
-        &mut reader,
-        &connection,
-        request_label,
-        liveness_poll_interval,
-    )
-    .await?
-    {
+    loop {
+        let read = next_daemon_response_line(
+            &mut reader,
+            &connection,
+            &request_label,
+            liveness_poll_interval,
+        );
+        let response_line = match client_deadline {
+            Some(deadline) => deadline.run("read", &request_label, read).await?,
+            None => read.await?,
+        };
+        let Some(response_line) = response_line else {
+            break;
+        };
         if response_line.trim().is_empty() {
             continue;
         }
-        let is_matching_response = request_id.as_ref().is_some_and(|id| {
-            serde_json::from_str::<serde_json::Value>(&response_line)
-                .ok()
-                .and_then(|value| value.get("id").cloned())
-                .as_ref()
-                == Some(id)
-        });
+        let is_matching_response = match client_deadline {
+            Some(deadline) => {
+                deadline
+                    .run("decode", &request_label, async {
+                        Ok(request_id.as_ref().is_some_and(|id| {
+                            serde_json::from_str::<serde_json::Value>(&response_line)
+                                .ok()
+                                .and_then(|value| value.get("id").cloned())
+                                .as_ref()
+                                == Some(id)
+                        }))
+                    })
+                    .await?
+            }
+            None => request_id.as_ref().is_some_and(|id| {
+                serde_json::from_str::<serde_json::Value>(&response_line)
+                    .ok()
+                    .and_then(|value| value.get("id").cloned())
+                    .as_ref()
+                    == Some(id)
+            }),
+        };
         responses.push(format!("{response_line}\n"));
         if is_matching_response {
             matched_response = true;
@@ -1596,6 +1682,25 @@ pub async fn call_tool(
         tool_name,
         arguments,
         DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+        None,
+    )
+    .await
+}
+
+pub async fn call_tool_within(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    tool_name: &str,
+    arguments: serde_json::Value,
+    deadline: Instant,
+) -> Result<serde_json::Value> {
+    call_tool_with_liveness_poll(
+        socket_path,
+        handshake,
+        tool_name,
+        arguments,
+        DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+        Some(DaemonClientDeadline::until(deadline)?),
     )
     .await
 }
@@ -1606,9 +1711,19 @@ async fn call_tool_with_liveness_poll(
     tool_name: &str,
     arguments: serde_json::Value,
     liveness_poll_interval: Duration,
+    client_deadline: Option<DaemonClientDeadline>,
 ) -> Result<serde_json::Value> {
     let connection = client_connection(socket_path)?;
-    let stream = connect_to_daemon_connection(&connection).await?;
+    let stream = match client_deadline {
+        Some(deadline) => {
+            deadline
+                .run("connect", tool_name, async {
+                    connect_to_daemon_connection_within(&connection, Some(deadline)).await
+                })
+                .await?
+        }
+        None => connect_to_daemon_connection(&connection).await?,
+    };
     let (reader, mut writer) = stream.into_split();
     let id = json!(1);
     let request = JsonRpcRequest {
@@ -1621,30 +1736,60 @@ async fn call_tool_with_liveness_poll(
         })),
     };
 
-    write_daemon_preamble(&mut writer, &connection, handshake).await?;
-    writer
-        .write_all(serde_json::to_string(&request)?.as_bytes())
-        .await?;
-    writer.write_all(b"\n").await?;
-    writer.flush().await?;
-    writer.shutdown().await?;
+    let write = async {
+        write_daemon_preamble(&mut writer, &connection, handshake).await?;
+        writer
+            .write_all(serde_json::to_string(&request)?.as_bytes())
+            .await?;
+        writer.write_all(b"\n").await?;
+        writer.flush().await?;
+        writer.shutdown().await?;
+        Ok(())
+    };
+    match client_deadline {
+        Some(deadline) => deadline.run("write", tool_name, write).await?,
+        None => write.await?,
+    }
 
     let mut reader = tokio::io::BufReader::new(reader);
     loop {
-        let line =
-            next_daemon_response_line(&mut reader, &connection, tool_name, liveness_poll_interval)
-                .await?;
+        let read =
+            next_daemon_response_line(&mut reader, &connection, tool_name, liveness_poll_interval);
+        let line = match client_deadline {
+            Some(deadline) => deadline.run("read", tool_name, read).await?,
+            None => read.await?,
+        };
         let Some(line) = line else {
             return Err(TraceDecayError::Config {
                 message: "daemon closed the connection after the tool request was sent but before returning a result; the outcome is unknown and the request was not retried"
                     .to_string(),
             });
         };
-        let value: serde_json::Value = serde_json::from_str(&line)?;
-        if value.get("id") != Some(&id) {
+        let response = match client_deadline {
+            Some(deadline) => {
+                deadline
+                    .run("decode", tool_name, async {
+                        let value: serde_json::Value = serde_json::from_str(&line)?;
+                        if value.get("id") != Some(&id) {
+                            return Ok(None);
+                        }
+                        let response: JsonRpcResponse = serde_json::from_value(value)?;
+                        Ok(Some(response))
+                    })
+                    .await?
+            }
+            None => {
+                let value: serde_json::Value = serde_json::from_str(&line)?;
+                if value.get("id") != Some(&id) {
+                    None
+                } else {
+                    Some(serde_json::from_value(value)?)
+                }
+            }
+        };
+        let Some(response) = response else {
             continue;
-        }
-        let response: JsonRpcResponse = serde_json::from_value(value)?;
+        };
         if let Some(error) = response.error {
             return Err(TraceDecayError::Config {
                 message: format!("daemon tool call failed: {}", error.message),
@@ -1663,6 +1808,16 @@ pub async fn call_default_tool(
 ) -> Result<serde_json::Value> {
     let socket_path = default_available_socket_path()?;
     call_tool(&socket_path, handshake, tool_name, arguments).await
+}
+
+pub async fn call_default_tool_within(
+    handshake: &DaemonHandshake,
+    tool_name: &str,
+    arguments: serde_json::Value,
+    deadline: Instant,
+) -> Result<serde_json::Value> {
+    let socket_path = default_available_socket_path()?;
+    call_tool_within(&socket_path, handshake, tool_name, arguments, deadline).await
 }
 
 pub async fn call_default_doctor_runtime(
@@ -3283,6 +3438,10 @@ async fn doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value 
 }
 
 async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
+    // Cold Doctor must not start workers or apply schema. Prefer the
+    // runtime-owned read-only API once `pr8/runtime` exports:
+    //   crate::doctor::cold_read_only_runtime_value(handshake) -> Value
+    // Until that symbol lands, keep the transport-local read-only open path.
     // Database access scopes are process-local capabilities. A cold Doctor has
     // no daemon process from which to inherit one, so install a bounded scope
     // only while the explicitly read-only handles below are alive.

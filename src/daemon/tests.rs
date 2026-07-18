@@ -223,6 +223,7 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
             "tracedecay_status",
             json!({}),
             std::time::Duration::from_millis(10),
+            None,
         ),
     )
     .await
@@ -443,6 +444,7 @@ async fn one_shot_tool_call_aborts_when_daemon_liveness_fails_after_write() {
             "tracedecay_status",
             json!({}),
             std::time::Duration::from_millis(10),
+            None,
         ),
     )
     .await
@@ -484,6 +486,7 @@ async fn proxied_request_uses_shared_liveness_boundary_after_write() {
             &test_handshake_defaults(),
             &request,
             std::time::Duration::from_millis(10),
+            None,
         ),
     )
     .await
@@ -534,6 +537,7 @@ async fn post_write_disconnect_reports_ambiguous_outcome_without_retry() {
             &test_handshake_defaults(),
             &request,
             std::time::Duration::from_millis(10),
+            None,
         ),
     )
     .await
@@ -592,6 +596,7 @@ async fn one_shot_tool_call_allows_long_response_while_daemon_stays_live() {
             "tracedecay_status",
             json!({}),
             std::time::Duration::from_millis(10),
+            None,
         ),
     )
     .await
@@ -654,6 +659,7 @@ async fn one_shot_tool_call_preserves_response_split_across_liveness_poll() {
             "tracedecay_status",
             json!({}),
             std::time::Duration::from_millis(10),
+            None,
         ),
     )
     .await
