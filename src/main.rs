@@ -629,12 +629,14 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             no_reinstall,
             lifecycle_lease_token,
             strict,
+            mode,
         } => {
             update_cmd::run_post_update_command(
                 no_heal,
                 no_reinstall,
                 lifecycle_lease_token.as_deref(),
                 strict,
+                mode,
             )
             .await?;
         }

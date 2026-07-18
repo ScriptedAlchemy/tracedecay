@@ -15,10 +15,14 @@ pub mod memory;
 #[cfg(test)]
 mod memory_benchmark;
 pub mod observation;
+pub mod session;
 
 pub use global_db::GlobalDbTranscriptStore;
 pub use memory::DatabaseFactStore;
 pub use observation::GlobalDbObservationStore;
+pub use session::{
+    GlobalDbSessionTemporalStore, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
+};
 
 /// Application boundary required by production transcript ingestion.
 ///

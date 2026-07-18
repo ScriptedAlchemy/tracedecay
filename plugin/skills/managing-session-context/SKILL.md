@@ -24,43 +24,67 @@ with `tracedecay_project_search`/`tracedecay_project_context`, then pass
 `project_id`, `project_path`, or `project_selector` to
 `tracedecay_message_search` instead of searching the active project by accident.
 
-1. **Fast full-text recall → `tracedecay_message_search`** (`query`, optional
-   `provider`, `scope`: `all`|`parents_only`|`subagents_only`, `limit`;
-   optional `project_id`/`project_path`/`project_selector` for registered
-   projects): FTS over ingested transcripts; returns messages with their
-   session ids — the entry point into the ladder below.
-2. **Scoped/filtered grep → `tracedecay_lcm_grep`** (`query`, `scope`:
-   `current`|`session`|`all` — `current`/`session` require `session_id`; `role`,
-   `source`, `start_time`/`end_time`, `sort`: `recency`|`relevance`|`hybrid`):
-   bounded raw-message snippets plus summary text when recall needs
-   role/time/session precision.
-3. **Lossless replay → `tracedecay_lcm_load_session`** (`session_id`,
-   `after_store_id` + `limit` for stable pagination, `roles`,
-   `content_offset`/`content_limit`): ordered raw messages of one session; page
-   with `next_cursor` instead of asking for everything at once.
-4. **Summary-DAG drill-down:** `tracedecay_lcm_describe` (`session_id`) for the
-   session's raw/summary shape; `tracedecay_lcm_expand` (`target.kind`:
-   `raw_message`|`summary_node`|`external_payload`) to open one node, paging
-   sources via `source_offset`/`source_limit`; `tracedecay_lcm_expand_query`
-   (`query`) to assemble bounded retrieval context for a prompt in one call.
-5. **Store inspection → `tracedecay_lcm_status`** (counts, token estimates, DAG
-   depth/compression ratio) when you need to know what the store contains before
-   searching it.
-6. **Git-scoped session lookup → `tracedecay_sessions_for`** (`git_ref`:
-   `branch`|`worktree`|`commit`, `value`, optional `since`/`until`, `limit`):
-   find sessions active on a branch or worktree, or sessions that produced a
-   commit; feed returned session ids back into grep/replay/drill-down above.
-7. **Workflow-run recovery → `tracedecay_workflows`**: recover multi-agent
-   workflow (`wf_*`) runs and their per-phase agents. List runs for a thread
-   with `session_id`, or every run on a branch/worktree/commit with
-   `branch`/`worktree`/`commit` (a run inherits its parent session's git
-   spans). Show one run's result summary + phases + agent roster with
-   `run_id`, then drill into a single agent with `run_id` + `agent_label`.
-   To read that agent's messages, scope `tracedecay_message_search` with
-   `workflow_run` (+ optional `workflow_agent`), or replay via rungs 3–4.
+1. **Fast full-text recall → `tracedecay_message_search`:** FTS over ingested
+   transcripts, returning messages and session ids. Its defaults are
+   `provider=all`, `include_subagents=true`, `scope=all`, `message_type=all`,
+   `limit=10`, and `catch_up=false`; it never ingests or refreshes data.
+2. **Scoped temporal grep → `tracedecay_lcm_grep`:** bounded raw-message
+   snippets with `query`, `scope` (`current`|`session`|`all`), `session_id`,
+   role/source/time filters, and an opaque cursor. It defaults to
+   `temporal_mode=current`, `relationship_scope=all`, `message_type=all`,
+   `include_summaries=false`, and `sort=relevance`.
+3. **Lossless temporal replay → `tracedecay_lcm_load_session`:** ordered raw
+   messages for one `session_id`, with `roles` and bounded
+   `content_offset`/`content_limit` slices. It defaults to
+   `temporal_mode=forensic`. Continue only with the returned opaque
+   `next_cursor` unchanged; never manufacture a continuation from an offset or
+   row number.
+4. **Summary-DAG drill-down:** use `tracedecay_lcm_describe` (`provider`,
+   `session_id`, optional target) to inspect a session or node without opening
+   its body, then `tracedecay_lcm_expand` (`provider`, `session_id`, target) to
+   open one raw message, summary node, or external payload. Page immediate
+   summary sources with `source_offset`/`source_limit`. For a bounded prompt
+   context, `tracedecay_lcm_expand_query` takes `provider`, `session_id`, and
+   `prompt`: when it returns `needs_synthesis=true`, the host must synthesize
+   from the bounded context; use its direct answer only when synthesis is not
+   needed.
+5. **Read temporal bounds:** inspect every response's `coverage`, `anchors`,
+   watermarks, and explanations. Partial, hidden, or redacted coverage is not
+   evidence that content never existed; retain anchors when citing or drilling
+   further.
+6. **Git-scoped session lookup → `tracedecay_sessions_for`:** use `git_ref`
+   (`branch`|`worktree`|`commit`) and `value`, optionally `since`/`until`.
+   Commit queries default to `relation=produced` and `limit=20`; feed returned
+   session ids back into rungs 2–4.
+7. **Workflow-run recovery → `tracedecay_workflows`:** recover multi-agent
+   `wf_*` runs and their per-phase agents. List a parent thread with
+   `session_id`, list by `branch`/`worktree`/`commit`, inspect a `run_id`, or
+   drill into `run_id` + `agent_label`; its default is `limit=20`. Then scope
+   `tracedecay_message_search` with `workflow_run` and optional
+   `workflow_agent`, or replay with rungs 3–4.
+
+Use `tracedecay_lcm_status` to inspect counts, token estimates, DAG
+depth/compression ratio, and GC state before making a lifecycle decision.
+
+On Hermes, the context engine exposes native aliases `lcm_grep`,
+`lcm_load_session`, `lcm_describe`, `lcm_expand`, `lcm_expand_query`,
+`lcm_status`, and `lcm_doctor` for the matching `tracedecay_lcm_*` commands.
+Use the native alias's schema when it is offered: for example,
+`lcm_grep` uses `session_scope` and `time_from`/`time_to`, while
+`lcm_load_session` uses `max_content_chars`. Do not mix those host aliases with
+canonical command fields, and do not assume the aliases exist in another host.
 
 After a compaction, if prior-session context seems missing, run this ladder
 before assuming the compacted summary is complete.
+
+## Freshness is explicit
+
+Recall never performs catch-up. If a read returns `refresh_required`, get clear
+host or user lifecycle intent before invoking `tracedecay_session_refresh`.
+Its actions are `begin`, `status`, and `cancel`: `begin` returns an opaque
+handle that `status` and `cancel` require. Use the authoritative selectors
+provided by the host/runtime; do not reconstruct refresh identity from chat
+text or a filesystem path.
 
 ## Lifecycle tools (mutating — host/lifecycle intent only)
 
@@ -100,7 +124,7 @@ on explicit user intent.
 
 ## Guardrails
 
-- Retrieval (steps 1–5 above), `preflight`, `status`, and doctor
+- Retrieval rungs above, `preflight`, `status`, and doctor
   `diagnose`/`retention` are read-only (grep/status may touch access counters).
   `compress`, `session_boundary`, and doctor `repair`/`clean`/`gc` + `apply`
   **mutate** durable session state — run them only with clear lifecycle or user
@@ -123,8 +147,8 @@ on explicit user intent.
 ## If tools are deferred or MCP fails
 
 - Deferred (names listed without schemas): load once with ToolSearch —
-  `select:tracedecay_message_search,tracedecay_lcm_grep,tracedecay_lcm_load_session,tracedecay_lcm_status,tracedecay_lcm_compress,tracedecay_sessions_for,tracedecay_workflows,tracedecay_project_search,tracedecay_project_context`
-  (one batched call, add others needed) — then call normally.
+  `select:tracedecay_message_search,tracedecay_lcm_grep,tracedecay_lcm_load_session,tracedecay_lcm_describe,tracedecay_lcm_expand,tracedecay_lcm_expand_query,tracedecay_lcm_status,tracedecay_lcm_compress,tracedecay_sessions_for,tracedecay_workflows,tracedecay_session_refresh,tracedecay_project_search,tracedecay_project_context`
+  (one batched call, add only the rungs needed) — then call normally.
 - MCP error/timeout/disconnect: same tool, same args, via shell:
   `tracedecay tool <name>` (see `tracedecay:using-the-cli`). Never
   query `.tracedecay` databases directly; never abandon the graph over transport.

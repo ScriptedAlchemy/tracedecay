@@ -45,11 +45,6 @@ pub async fn try_registered_project_roots() -> Option<Vec<PathBuf>> {
     registered_project_roots_from(&global).await
 }
 
-async fn try_registered_project_roots_at(profile_root: &Path) -> Option<Vec<PathBuf>> {
-    let global = GlobalDb::open_at(&profile_root.join("global.db")).await?;
-    registered_project_roots_from(&global).await
-}
-
 pub(crate) async fn registered_project_roots_from(global: &GlobalDb) -> Option<Vec<PathBuf>> {
     let log_unavailable = |surface: &'static str, error: &dyn std::fmt::Display| {
         tracing::warn!(surface, %error, "project registry read failed during user-global ingest");
@@ -280,8 +275,8 @@ pub(super) fn provider_selected(
     scope.is_none() || scope == Some(candidate)
 }
 
-/// Keeps the profile-level session store current without touching providers
-/// outside an explicitly requested message-search scope.
+/// Admits profile-level sources without touching providers outside an
+/// explicitly requested legacy source-admission scope.
 pub async fn ingest_user_global_sources_for_provider(
     provider: Option<SessionProvider>,
 ) -> TranscriptIngestStats {
@@ -297,25 +292,6 @@ pub async fn ingest_user_global_sources_for_provider(
     ingest_user_global_sources_for_provider_with_roots(&db, &profile_root, provider, roots)
         .await
         .stats
-}
-
-pub(crate) async fn ingest_user_global_sources_for_provider_at_with_db(
-    db: &GlobalDb,
-    profile_root: &Path,
-    provider: Option<SessionProvider>,
-) -> TranscriptIngestOutcome {
-    let Some(roots) = try_registered_project_roots_at(profile_root).await else {
-        return TranscriptIngestOutcome::new(
-            TranscriptIngestStats::default(),
-            vec![TranscriptCatchUpFailure::new(
-                provider.map_or("all", SessionProvider::id),
-                "project_registry",
-                "project_registry_unavailable",
-                true,
-            )],
-        );
-    };
-    ingest_user_global_sources_for_provider_with_roots(db, profile_root, provider, roots).await
 }
 
 pub(crate) async fn ingest_user_global_sources_for_provider_with_authorities(

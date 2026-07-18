@@ -1,5 +1,5 @@
 use super::{
-    Commands, SilentReinstallAction, is_local_install_command,
+    Commands, PostUpdateMode, SilentReinstallAction, is_local_install_command,
     should_skip_agent_install_maintenance, should_skip_startup_maintenance,
     silent_reinstall_action,
 };
@@ -37,6 +37,7 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
         no_reinstall: false,
         lifecycle_lease_token: None,
         strict: false,
+        mode: PostUpdateMode::Normal,
     }));
     assert!(should_skip_startup_maintenance(&Commands::Uninstall {
         agent: Some("kiro".to_string()),
@@ -103,6 +104,7 @@ fn agent_install_maintenance_is_selective() {
             no_reinstall: false,
             lifecycle_lease_token: None,
             strict: false,
+            mode: PostUpdateMode::Normal,
         }
     ));
     // Also skip for uninstall (about to remove configs) and doctor (a

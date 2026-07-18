@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 target_dir=${CARGO_TARGET_DIR:-"$repo_root/target"}
@@ -9,9 +10,26 @@ install_dir=${TRACEDECAY_DOGFOOD_INSTALL_DIR:-"$HOME/.local/bin"}
 staged_binary="$stage_dir/tracedecay"
 installed_binary="$install_dir/tracedecay"
 profile_dir=${TRACEDECAY_DOGFOOD_PROFILE_DIR:-"$HOME/.tracedecay"}
+boundary_state="$profile_dir/dogfood-migration-boundary.state"
 
+if [[ -L "$profile_dir" ]]; then
+  printf 'dogfood profile directory must not be a symlink: %s\n' "$profile_dir" >&2
+  exit 1
+fi
 mkdir -p "$profile_dir"
-exec {dogfood_lock_fd}>"$profile_dir/dogfood.lock"
+if [[ ! -d "$profile_dir" || ! -O "$profile_dir" ]]; then
+  printf 'dogfood profile directory must be an owned directory: %s\n' "$profile_dir" >&2
+  exit 1
+fi
+chmod 0700 "$profile_dir"
+
+dogfood_lock="$profile_dir/dogfood.lock"
+if [[ -L "$dogfood_lock" ]]; then
+  printf 'dogfood lock must not be a symlink: %s\n' "$dogfood_lock" >&2
+  exit 1
+fi
+exec {dogfood_lock_fd}>"$dogfood_lock"
+chmod 0600 "$dogfood_lock"
 flock -x "$dogfood_lock_fd"
 
 cd "$repo_root"
@@ -26,26 +44,256 @@ fi
 
 mkdir -p "$stage_dir" "$install_dir"
 
+sync_path() {
+  sync -f -- "$1"
+}
+
+marker_checksum() {
+  local payload=$1
+  local output
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    output=$(printf '%s' "$payload" | sha256sum)
+  elif command -v shasum >/dev/null 2>&1; then
+    output=$(printf '%s' "$payload" | shasum -a 256)
+  else
+    printf 'dogfood requires sha256sum or shasum for recovery markers\n' >&2
+    return 1
+  fi
+  printf '%s' "${output%% *}"
+}
+
+file_mode() {
+  local path=$1
+  local mode
+
+  if mode=$(stat -c '%a' -- "$path" 2>/dev/null); then
+    printf '%s' "$mode"
+  else
+    stat -f '%Lp' -- "$path"
+  fi
+}
+
+marker_transition_is_valid() {
+  local outcome=$1
+  local boundary=$2
+  local policy=$3
+  local daemon=$4
+
+  case "$outcome:$boundary:$policy:$daemon" in
+    preparing:not-reached:allowed:unchanged | \
+      preparing:not-reached:forbidden:unchanged | \
+      safe-rollback-complete:not-reached:allowed:unchanged | \
+      post-update-starting:reached:forbidden:inactivity-pending | \
+      forward-recovery-required:reached:forbidden:inactive | \
+      forward-recovery-required:reached:forbidden:inactivity-unproven | \
+      validated:reached:forbidden:verified-new-version)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+marker_outcome=none
+marker_attempt_id=
+marker_boundary=not-reached
+marker_policy=allowed
+marker_daemon=unchanged
+
+load_boundary_state() {
+  local lines=()
+  local payload
+  local expected_checksum
+
+  if [[ ! -e "$boundary_state" && ! -L "$boundary_state" ]]; then
+    return 0
+  fi
+  if [[ -L "$boundary_state" ]]; then
+    printf 'dogfood migration marker must not be a symlink: %s\n' "$boundary_state" >&2
+    return 1
+  fi
+  if [[ ! -f "$boundary_state" ]]; then
+    printf 'invalid dogfood migration marker: not a regular file: %s\n' "$boundary_state" >&2
+    return 1
+  fi
+  if [[ "$(file_mode "$boundary_state")" != 600 ]]; then
+    printf 'dogfood migration marker must have mode 0600: %s\n' "$boundary_state" >&2
+    return 1
+  fi
+
+  mapfile -t lines <"$boundary_state"
+  if ((${#lines[@]} != 7)) ||
+    [[ "${lines[0]}" != format=2 ]] ||
+    [[ "${lines[1]}" != attempt_id=* ]] ||
+    [[ "${lines[2]}" != outcome=* ]] ||
+    [[ "${lines[3]}" != attempt_boundary=* ]] ||
+    [[ "${lines[4]}" != old_binary_policy=* ]] ||
+    [[ "${lines[5]}" != managed_daemon=* ]] ||
+    [[ "${lines[6]}" != checksum=* ]]; then
+    printf 'invalid dogfood migration marker structure: %s\n' "$boundary_state" >&2
+    return 1
+  fi
+
+  marker_attempt_id=${lines[1]#attempt_id=}
+  marker_outcome=${lines[2]#outcome=}
+  marker_boundary=${lines[3]#attempt_boundary=}
+  marker_policy=${lines[4]#old_binary_policy=}
+  marker_daemon=${lines[5]#managed_daemon=}
+  if [[ ! "$marker_attempt_id" =~ ^[A-Za-z0-9._-]{16,128}$ ]]; then
+    printf 'invalid dogfood migration marker attempt id: %s\n' "$boundary_state" >&2
+    return 1
+  fi
+  if ! marker_transition_is_valid \
+    "$marker_outcome" "$marker_boundary" "$marker_policy" "$marker_daemon"; then
+    printf 'invalid dogfood migration marker transition: %s\n' "$boundary_state" >&2
+    return 1
+  fi
+
+  printf -v payload '%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "${lines[0]}" "${lines[1]}" "${lines[2]}" "${lines[3]}" "${lines[4]}" "${lines[5]}"
+  expected_checksum=$(marker_checksum "$payload")
+  if [[ "${lines[6]#checksum=}" != "$expected_checksum" ]]; then
+    printf 'invalid dogfood migration marker checksum: %s\n' "$boundary_state" >&2
+    return 1
+  fi
+}
+
+validate_marker_transition() {
+  local next=$1
+
+  case "$marker_outcome:$next" in
+    none:preparing | \
+      preparing:preparing | \
+      safe-rollback-complete:preparing | \
+      post-update-starting:preparing | \
+      forward-recovery-required:preparing | \
+      validated:preparing | \
+      preparing:safe-rollback-complete | \
+      preparing:post-update-starting | \
+      post-update-starting:forward-recovery-required | \
+      post-update-starting:validated)
+      return 0
+      ;;
+    *)
+      printf 'invalid dogfood migration marker state transition: %s -> %s\n' \
+        "$marker_outcome" "$next" >&2
+      return 1
+      ;;
+  esac
+}
+
 install_atomically() {
   local source=$1
   local destination=$2
+  local status
   local temporary
   temporary=$(mktemp "${destination}.new.XXXXXX")
-  trap 'rm -f "$temporary"' RETURN
-  install -m 0755 "$source" "$temporary"
-  mv -f "$temporary" "$destination"
-  trap - RETURN
+  install -m 0755 "$source" "$temporary" || {
+    status=$?
+    rm -f -- "$temporary"
+    return "$status"
+  }
+  sync_path "$temporary" || {
+    status=$?
+    rm -f -- "$temporary"
+    return "$status"
+  }
+  mv -f "$temporary" "$destination" || {
+    status=$?
+    rm -f -- "$temporary"
+    return "$status"
+  }
+  sync_path "$(dirname "$destination")"
 }
 
+record_boundary_outcome() {
+  local outcome=$1
+  local attempt_boundary=$2
+  local binary_policy=$3
+  local managed_daemon=$4
+  local checksum
+  local payload
+  local temporary
+
+  marker_transition_is_valid \
+    "$outcome" "$attempt_boundary" "$binary_policy" "$managed_daemon" ||
+    return 1
+  validate_marker_transition "$outcome" || return 1
+  printf -v payload \
+    'format=2\nattempt_id=%s\noutcome=%s\nattempt_boundary=%s\nold_binary_policy=%s\nmanaged_daemon=%s\n' \
+    "$attempt_id" "$outcome" "$attempt_boundary" "$binary_policy" "$managed_daemon"
+  checksum=$(marker_checksum "$payload") || return
+  temporary=$(mktemp "${boundary_state}.new.XXXXXX") || return
+  if ! {
+    printf '%s' "$payload"
+    printf 'checksum=%s\n' "$checksum"
+  } >"$temporary" ||
+    ! chmod 0600 "$temporary" ||
+    ! sync_path "$temporary" ||
+    ! mv -f -- "$temporary" "$boundary_state" ||
+    ! sync_path "$profile_dir"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  marker_outcome=$outcome
+  marker_attempt_id=$attempt_id
+  marker_boundary=$attempt_boundary
+  marker_policy=$binary_policy
+  marker_daemon=$managed_daemon
+}
+
+load_boundary_state
+rm -f -- "${boundary_state}".new.*
+
+# A valid reached/forbidden pending marker means a prior attempt already crossed
+# the migration boundary. Never overwrite preparing until the installed new
+# binary's typed inactive-recovery command proves the managed unit is inactive.
+require_inactive_recovery_before_preparing() {
+  case "$marker_outcome" in
+    post-update-starting | forward-recovery-required) ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  if [[ ! -x "$installed_binary" ]]; then
+    printf '%s\n' \
+      "dogfood retry from $marker_outcome requires the installed new binary." \
+      "Missing executable at $installed_binary" \
+      'The migration marker was left unchanged.' >&2
+    return 1
+  fi
+
+  if ! "$installed_binary" post-update --mode dogfood-recover-inactive; then
+    printf '%s\n' \
+      "dogfood inactive recovery failed while a $marker_outcome marker is pending." \
+      'The migration marker was left unchanged.' \
+      'Keep the managed service stopped, then rerun cargo dogfood with a schema-compatible newer binary.' \
+      'Do not execute any prior TraceDecay binary against the live stores.' >&2
+    return 1
+  fi
+}
+
+require_inactive_recovery_before_preparing
+
+old_binary_policy=$marker_policy
+if [[ "$marker_boundary" == reached ]]; then
+  old_binary_policy=forbidden
+fi
+attempt_id="$(date +%s)-$$-$RANDOM-$RANDOM"
+record_boundary_outcome preparing not-reached "$old_binary_policy" unchanged
+
 candidate=$(mktemp "$stage_dir/tracedecay.candidate.XXXXXX")
-previous_runtime=$(command -v tracedecay || true)
 previous_installed=
 previous_staged=
 had_installed=0
 had_staged=0
 replacement_active=0
-post_update_started=0
+boundary_reached=0
 committed=0
+active_child=
 
 restore_path() {
   local backup=$1
@@ -53,84 +301,140 @@ restore_path() {
   local destination=$3
 
   if ((had_previous)); then
-    mv -f "$backup" "$destination"
+    mv -f -- "$backup" "$destination"
   else
-    rm -f "$destination"
+    rm -f -- "$destination"
   fi
+}
+
+terminate_active_child() {
+  if [[ -n "$active_child" ]] && kill -0 "$active_child" 2>/dev/null; then
+    kill -TERM "$active_child" 2>/dev/null || true
+    wait "$active_child" 2>/dev/null || true
+  fi
+  active_child=
+}
+
+handle_signal() {
+  local status=$1
+  trap - HUP INT TERM
+  terminate_active_child
+  exit "$status"
+}
+
+run_new_binary() {
+  local status
+
+  "$installed_binary" "$@" &
+  active_child=$!
+  set +e
+  wait "$active_child"
+  status=$?
+  set -e
+  active_child=
+  return "$status"
 }
 
 cleanup_install() {
   local status=$?
-  local rollback_binary=
-  local rollback_status=0
+  local cleanup_binary=
+  local cleanup_status=0
+  local daemon_outcome=inactive
 
   trap - EXIT HUP INT TERM
   set +e
+  terminate_active_child
 
   if ((replacement_active && ! committed)); then
-    if ((had_installed || had_staged)) || [[ -n "$previous_runtime" ]]; then
-      restore_path "$previous_installed" "$had_installed" "$installed_binary" || rollback_status=$?
-      restore_path "$previous_staged" "$had_staged" "$staged_binary" || rollback_status=$?
-      if ((had_installed)); then
-        rollback_binary=$installed_binary
-      elif ((had_staged)); then
-        rollback_binary=$staged_binary
-      elif [[ -x "$previous_runtime" ]]; then
-        rollback_binary=$previous_runtime
+    if ((boundary_reached)); then
+      if [[ -x "$installed_binary" ]]; then
+        cleanup_binary=$installed_binary
+      elif [[ -x "$staged_binary" ]]; then
+        cleanup_binary=$staged_binary
+      elif [[ -x "$candidate" ]]; then
+        cleanup_binary=$candidate
       fi
-      if ((post_update_started)) && [[ -n "$rollback_binary" ]]; then
-        PATH="$(dirname "$rollback_binary"):$PATH" \
-          "$rollback_binary" post-update --strict || rollback_status=$?
+
+      if [[ -n "$cleanup_binary" ]]; then
+        "$cleanup_binary" post-update --mode dogfood-recover-inactive ||
+          cleanup_status=$?
+      else
+        cleanup_status=1
       fi
-      printf 'Dogfood validation failed; restored previous installation\n' >&2
+      if ((cleanup_status != 0)); then
+        daemon_outcome=inactivity-unproven
+      fi
+      record_boundary_outcome \
+        forward-recovery-required reached forbidden "$daemon_outcome" ||
+        printf 'Could not persist the dogfood migration-boundary outcome\n' >&2
+
+      printf '%s\n' \
+        'Dogfood crossed the forward-only migration boundary and failed.' \
+        'The previous binary was not restored or executed.' >&2
+      if ((cleanup_status == 0)); then
+        printf '%s\n' \
+          'The managed daemon is disabled and inactive under the retained new service unit.' >&2
+      else
+        printf '%s\n' \
+          'Automatic daemon stop failed; keep the managed service stopped before recovery.' >&2
+      fi
+      printf '%s\n' \
+        'Recover forward: fix or build a schema-compatible newer binary, then rerun cargo dogfood.' \
+        'Do not execute any prior TraceDecay binary against the live stores.' >&2
+      printf 'New installed binary retained at %q\n' "$installed_binary" >&2
+      printf 'New staged binary retained at %q\n' "$staged_binary" >&2
+      printf 'Boundary outcome recorded at %q\n' "$boundary_state" >&2
     else
-      if ((post_update_started)); then
-        "$candidate" uninstall || rollback_status=$?
-        "$candidate" daemon uninstall-service || rollback_status=$?
-      fi
-      restore_path "$previous_installed" 0 "$installed_binary" || rollback_status=$?
-      restore_path "$previous_staged" 0 "$staged_binary" || rollback_status=$?
-      printf 'Dogfood validation failed; removed first-time installation\n' >&2
+      restore_path "$previous_installed" "$had_installed" "$installed_binary" ||
+        cleanup_status=$?
+      restore_path "$previous_staged" "$had_staged" "$staged_binary" ||
+        cleanup_status=$?
+      record_boundary_outcome \
+        safe-rollback-complete not-reached "$old_binary_policy" unchanged ||
+        printf 'Could not persist the dogfood migration-boundary outcome\n' >&2
+      printf 'Dogfood failed before the migration boundary; restored prior binaries\n' >&2
     fi
   fi
 
-  rm -f "$candidate"
-  rm -f "$previous_installed" "$previous_staged"
-  if ((rollback_status != 0)); then
-    printf 'Dogfood rollback also failed with status %d (original status %d)\n' \
-      "$rollback_status" "$status" >&2
+  rm -f -- "$candidate"
+  rm -f -- "$previous_installed" "$previous_staged"
+  if ((cleanup_status != 0)); then
+    printf 'Dogfood recovery action also failed with status %d (original status %d)\n' \
+      "$cleanup_status" "$status" >&2
   fi
   exit "$status"
 }
 trap cleanup_install EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'handle_signal 129' HUP
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
 
 install -m 0755 "$source_binary" "$candidate"
 if [[ -e "$installed_binary" || -L "$installed_binary" ]]; then
   previous_installed=$(mktemp "$install_dir/tracedecay.previous.XXXXXX")
-  cp -p "$installed_binary" "$previous_installed"
+  rm -f -- "$previous_installed"
+  cp -a -- "$installed_binary" "$previous_installed"
   had_installed=1
 fi
 if [[ -e "$staged_binary" || -L "$staged_binary" ]]; then
   previous_staged=$(mktemp "$stage_dir/tracedecay.previous.XXXXXX")
-  cp -p "$staged_binary" "$previous_staged"
+  rm -f -- "$previous_staged"
+  cp -a -- "$staged_binary" "$previous_staged"
   had_staged=1
 fi
 replacement_active=1
+install_atomically "$candidate" "$staged_binary"
 install_atomically "$candidate" "$installed_binary"
 
 # Cargo-launched commands use an isolated development profile. The staged
 # executable must refresh the real user installation instead.
 unset TRACEDECAY_DATA_DIR TRACEDECAY_DISABLE_GLOBAL_DB
 
-post_update_started=1
-"$installed_binary" post-update --strict
-"$installed_binary" doctor
-"$installed_binary" --version
+boundary_reached=1
+record_boundary_outcome post-update-starting reached forbidden inactivity-pending
+run_new_binary post-update --strict --mode dogfood-forward-only
 
-install_atomically "$candidate" "$staged_binary"
+record_boundary_outcome validated reached forbidden verified-new-version
 committed=1
 
 printf 'Dogfood binary installed at %s\n' "$installed_binary"

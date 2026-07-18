@@ -502,9 +502,9 @@ async fn corrupt_tombstone_does_not_block_healthy_pending_delete() -> Result<(),
     fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     fs::write(dir.join(SECONDARY_REF), b"healthy pending payload")
         .map_err(|err| err.to_string())?;
-    let (hash, bytes) =
+    let (hash, bytes, chars) =
         payload::payload_file_fingerprint(&dir, SECONDARY_REF).map_err(|err| err.to_string())?;
-    stage_payload_delete(&store.conn, SECONDARY_REF, Some(&hash), bytes)
+    stage_payload_delete(&store.conn, SECONDARY_REF, Some(&hash), bytes, chars)
         .await
         .map_err(|err| err.to_string())?;
     schema::set_gc_meta(
@@ -775,29 +775,6 @@ async fn delete_external_payload_rejects_invalid_refs() -> Result<(), String> {
         };
         assert_eq!(err, LcmError::InvalidPayloadRef, "invalid ref {invalid}");
     }
-    Ok(())
-}
-
-#[cfg(unix)]
-#[test]
-fn safe_remove_payload_file_rejects_symlink_and_directory_payloads() -> Result<(), String> {
-    let temp = tempfile::tempdir().map_err(|err| err.to_string())?;
-    let dir = temp.path();
-    let outside = temp.path().join("outside.txt");
-    fs::write(&outside, b"outside").map_err(|err| err.to_string())?;
-    std::os::unix::fs::symlink(&outside, dir.join(PRIMARY_REF)).map_err(|err| err.to_string())?;
-    let Err(err) = payload::safe_remove_payload_file(dir, PRIMARY_REF) else {
-        return Err("symlink payload should not be removed".to_string());
-    };
-    assert_eq!(err, LcmError::InvalidPayloadRef);
-    assert!(outside.is_file());
-
-    fs::create_dir(dir.join(SECONDARY_REF)).map_err(|err| err.to_string())?;
-    let Err(err) = payload::safe_remove_payload_file(dir, SECONDARY_REF) else {
-        return Err("directory payload should not be removed".to_string());
-    };
-    assert_eq!(err, LcmError::InvalidPayloadRef);
-    assert!(dir.join(SECONDARY_REF).is_dir());
     Ok(())
 }
 
@@ -1331,6 +1308,7 @@ fn committed_delete_quarantine_preserves_rename_replacement() -> Result<(), Stri
         PRIMARY_REF,
         Some(&expected_hash),
         original.len() as u64,
+        Some(original.len() as u64),
         |original_path, _quarantine| {
             fs::write(original_path, b"replacement payload")
                 .map_err(|err| LcmError::Io(err.to_string()))
@@ -1364,6 +1342,7 @@ fn committed_delete_quarantine_restores_in_place_rewrite() -> Result<(), String>
         PRIMARY_REF,
         Some(&expected_hash),
         original.len() as u64,
+        Some(original.len() as u64),
         |_original_path, quarantine| {
             fs::write(quarantine, b"rewritten payload").map_err(|err| LcmError::Io(err.to_string()))
         },
@@ -1378,5 +1357,105 @@ fn committed_delete_quarantine_restores_in_place_rewrite() -> Result<(), String>
         fs::read(&path).map_err(|err| err.to_string())?,
         b"rewritten payload"
     );
+    Ok(())
+}
+
+#[test]
+fn committed_delete_requires_exact_hash_byte_and_char_sizes() -> Result<(), String> {
+    let original = "héllo 雪";
+    let expected_hash = util::sha256_hex(original.as_bytes());
+    let expected_bytes = original.len() as u64;
+    let expected_chars = original.chars().count() as u64;
+    for (hash, bytes, chars) in [
+        ("wrong".to_string(), expected_bytes, expected_chars),
+        (expected_hash.clone(), expected_bytes + 1, expected_chars),
+        (expected_hash.clone(), expected_bytes, expected_chars + 1),
+    ] {
+        let temp = tempfile::tempdir().map_err(|err| err.to_string())?;
+        let dir = payload::payload_dir(temp.path());
+        fs::create_dir(&dir).map_err(|err| err.to_string())?;
+        let path = dir.join(PRIMARY_REF);
+        fs::write(&path, original).map_err(|err| err.to_string())?;
+
+        let removal = payload::remove_committed_payload_file(
+            temp.path(),
+            PRIMARY_REF,
+            Some(&hash),
+            bytes,
+            Some(chars),
+        )
+        .map_err(|err| err.to_string())?;
+
+        assert!(matches!(
+            removal,
+            payload::CommittedPayloadRemoval::ReplacementPreserved
+        ));
+        assert_eq!(
+            fs::read_to_string(&path).map_err(|err| err.to_string())?,
+            original
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn committed_delete_has_no_digest_or_size_fallback() -> Result<(), String> {
+    let temp = tempfile::tempdir().map_err(|err| err.to_string())?;
+    let dir = payload::payload_dir(temp.path());
+    fs::create_dir(&dir).map_err(|err| err.to_string())?;
+    let path = dir.join(PRIMARY_REF);
+    fs::write(&path, b"preserve").map_err(|err| err.to_string())?;
+
+    let removal = payload::remove_committed_payload_file(temp.path(), PRIMARY_REF, None, 8, None)
+        .map_err(|err| err.to_string())?;
+
+    assert!(matches!(
+        removal,
+        payload::CommittedPayloadRemoval::ReplacementPreserved
+    ));
+    assert_eq!(fs::read(&path).map_err(|err| err.to_string())?, b"preserve");
+    Ok(())
+}
+
+#[test]
+fn committed_delete_retry_succeeds_after_same_id_content_restore() -> Result<(), String> {
+    let temp = tempfile::tempdir().map_err(|err| err.to_string())?;
+    let dir = payload::payload_dir(temp.path());
+    fs::create_dir(&dir).map_err(|err| err.to_string())?;
+    let path = dir.join(PRIMARY_REF);
+    let original = b"original";
+    let expected_hash = util::sha256_hex(original);
+    fs::write(&path, original).map_err(|err| err.to_string())?;
+
+    let first = payload::remove_committed_payload_file_with(
+        temp.path(),
+        PRIMARY_REF,
+        Some(&expected_hash),
+        original.len() as u64,
+        Some(original.len() as u64),
+        |_original_path, quarantine| {
+            fs::write(quarantine, b"mutated!").map_err(|err| LcmError::Io(err.to_string()))
+        },
+    )
+    .map_err(|err| err.to_string())?;
+    assert!(matches!(
+        first,
+        payload::CommittedPayloadRemoval::ReplacementPreserved
+    ));
+
+    fs::write(&path, original).map_err(|err| err.to_string())?;
+    let retry = payload::remove_committed_payload_file(
+        temp.path(),
+        PRIMARY_REF,
+        Some(&expected_hash),
+        original.len() as u64,
+        Some(original.len() as u64),
+    )
+    .map_err(|err| err.to_string())?;
+    assert!(matches!(
+        retry,
+        payload::CommittedPayloadRemoval::Removed(bytes) if bytes == original.len() as u64
+    ));
+    assert!(!path.exists());
     Ok(())
 }

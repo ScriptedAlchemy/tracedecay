@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{future::Future, time::Duration};
 
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -16,14 +17,57 @@ use tracedecay_store::{
     CompatibilityFeedbackRepairProgressV1, CompatibilityLegacyMemoryCutoverProgressV1,
 };
 
+use super::branch_admin::MaintenanceReaperKind;
+use super::scheduler::{MaintenanceTaskTermination, same_scheduler_owner};
 use super::{
     DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event,
     open_existing_project_with_options,
 };
 
 pub(super) struct MemoryRepairSchedulerHandle {
-    pub(super) task: JoinHandle<()>,
+    pub(super) task: Option<JoinHandle<()>>,
     pub(super) completion: Arc<()>,
+    pub(super) generation: Arc<std::sync::atomic::AtomicU64>,
+    pub(super) lifecycle: MemoryRepairSchedulerLifecycle,
+    termination: Arc<MaintenanceTaskTermination>,
+}
+
+#[cfg(test)]
+impl MemoryRepairSchedulerHandle {
+    pub(super) fn for_test(task: JoinHandle<()>) -> Self {
+        Self {
+            task: Some(task),
+            completion: Arc::new(()),
+            generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            lifecycle: MemoryRepairSchedulerLifecycle::Running,
+            termination: Arc::new(MaintenanceTaskTermination::pending()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum MemoryRepairSchedulerLifecycle {
+    Running,
+    Finished,
+    Retiring,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum MemoryRepairSchedulerReconcileOutcome {
+    Started,
+    Running,
+    Retiring,
+    LifecycleInactive,
+}
+
+pub(super) struct MemoryRepairSchedulerRetirement {
+    termination: Arc<MaintenanceTaskTermination>,
+}
+
+impl MemoryRepairSchedulerRetirement {
+    pub(super) async fn wait(self) {
+        self.termination.wait().await;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,80 +96,303 @@ const MEMORY_REPAIR_BACKOFF_SHIFT_CAP: u32 = 6;
 impl DaemonEngine {
     /// Starts one daemon-owned compatibility-memory repair loop for this exact
     /// project owner. Unlike automation, repair is never configuration-gated.
+    #[cfg(test)]
     pub(super) async fn ensure_memory_repair_scheduler(
         &self,
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-    ) {
+    ) -> MemoryRepairSchedulerReconcileOutcome {
+        let transition = self.maintenance_transition_gate(&key).await;
+        let _transition = transition.lock().await;
         self.store_administration
             .with_writer(|| async move {
-                self.start_memory_repair_scheduler(key, project_path, handshake)
-                    .await;
+                self.reconcile_memory_repair_scheduler_locked(key, project_path, handshake)
+                    .await
             })
-            .await;
+            .await
     }
 
-    async fn start_memory_repair_scheduler(
+    pub(super) async fn start_memory_repair_scheduler(
         &self,
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-    ) {
-        if !self.lifecycle.accepting() {
-            return;
-        }
-        let mut schedulers = self
-            .store_administration
-            .memory_repair_schedulers()
-            .lock()
-            .await;
-        if !self.lifecycle.accepting() || schedulers.contains_key(&key) {
-            return;
-        }
-
-        let completion = Arc::new(());
-        let completed = Arc::clone(&completion);
-        let administration = self.store_administration.clone();
-        let task = tokio::spawn(async move {
-            Box::pin(run_memory_repair_scheduler_loop(project_path, handshake)).await;
-            administration
-                .memory_repair_schedulers()
-                .lock()
-                .await
-                .retain(|_, handle| !Arc::ptr_eq(&handle.completion, &completed));
-        });
-        schedulers.insert(key, MemoryRepairSchedulerHandle { task, completion });
-    }
-
-    pub(super) async fn shutdown_memory_repair_schedulers(&self) {
-        let scheduler_handles: Vec<JoinHandle<()>> = self
-            .store_administration
-            .with_writer(|| async {
+    ) -> MemoryRepairSchedulerReconcileOutcome {
+        loop {
+            if !self.lifecycle.accepting() {
+                return MemoryRepairSchedulerReconcileOutcome::LifecycleInactive;
+            }
+            let finished = {
                 let mut schedulers = self
                     .store_administration
                     .memory_repair_schedulers()
                     .lock()
                     .await;
-                schedulers.drain().map(|(_, handle)| handle.task).collect()
+                if !self.lifecycle.accepting() {
+                    return MemoryRepairSchedulerReconcileOutcome::LifecycleInactive;
+                }
+                let owner = schedulers
+                    .get_key_value(&key)
+                    .map(|(owner, _)| owner.clone())
+                    .or_else(|| {
+                        schedulers
+                            .keys()
+                            .find(|candidate| same_scheduler_owner(candidate, &key))
+                            .cloned()
+                    });
+                if let Some(owner) = owner {
+                    let Some(handle) = schedulers.get_mut(&owner) else {
+                        continue;
+                    };
+                    match observed_memory_repair_lifecycle(handle) {
+                        MemoryRepairSchedulerLifecycle::Running => {
+                            handle
+                                .generation
+                                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                            return MemoryRepairSchedulerReconcileOutcome::Running;
+                        }
+                        MemoryRepairSchedulerLifecycle::Finished => schedulers.remove(&owner),
+                        MemoryRepairSchedulerLifecycle::Retiring => {
+                            return MemoryRepairSchedulerReconcileOutcome::Retiring;
+                        }
+                    }
+                } else {
+                    #[cfg(test)]
+                    self.memory_repair_start_attempts
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let completion = Arc::new(());
+                    let completed = Arc::clone(&completion);
+                    let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let termination = Arc::new(MaintenanceTaskTermination::pending());
+                    let administration = self.store_administration.clone();
+                    let (published, start) = tokio::sync::oneshot::channel();
+                    let task = tokio::spawn(async move {
+                        let _ = start.await;
+                        Box::pin(run_memory_repair_scheduler_loop(project_path, handshake)).await;
+                        administration
+                            .memory_repair_schedulers()
+                            .lock()
+                            .await
+                            .retain(|_, handle| {
+                                !Arc::ptr_eq(&handle.completion, &completed)
+                                    || handle.lifecycle == MemoryRepairSchedulerLifecycle::Retiring
+                            });
+                    });
+                    schedulers.insert(
+                        key,
+                        MemoryRepairSchedulerHandle {
+                            task: Some(task),
+                            completion,
+                            generation,
+                            lifecycle: MemoryRepairSchedulerLifecycle::Running,
+                            termination,
+                        },
+                    );
+                    let _ = published.send(());
+                    return MemoryRepairSchedulerReconcileOutcome::Started;
+                }
+            };
+            if let Some(mut handle) = finished
+                && let Some(task) = handle.task.take()
+            {
+                let _ = task.await;
+            }
+        }
+    }
+
+    pub(super) async fn reconcile_memory_repair_scheduler_locked(
+        &self,
+        key: ProjectServerKey,
+        project_path: PathBuf,
+        handshake: DaemonHandshake,
+    ) -> MemoryRepairSchedulerReconcileOutcome {
+        if !self.lifecycle.accepting() {
+            return MemoryRepairSchedulerReconcileOutcome::LifecycleInactive;
+        }
+        let finished = {
+            let mut schedulers = self
+                .store_administration
+                .memory_repair_schedulers()
+                .lock()
+                .await;
+            let owner = schedulers
+                .get_key_value(&key)
+                .map(|(owner, _)| owner.clone())
+                .or_else(|| {
+                    schedulers
+                        .keys()
+                        .find(|candidate| same_scheduler_owner(candidate, &key))
+                        .cloned()
+                });
+            match owner {
+                Some(owner) => {
+                    let Some(handle) = schedulers.get_mut(&owner) else {
+                        return MemoryRepairSchedulerReconcileOutcome::Running;
+                    };
+                    match observed_memory_repair_lifecycle(handle) {
+                        MemoryRepairSchedulerLifecycle::Running => {
+                            handle
+                                .generation
+                                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                            return MemoryRepairSchedulerReconcileOutcome::Running;
+                        }
+                        MemoryRepairSchedulerLifecycle::Finished => schedulers.remove(&owner),
+                        MemoryRepairSchedulerLifecycle::Retiring => {
+                            return MemoryRepairSchedulerReconcileOutcome::Retiring;
+                        }
+                    }
+                }
+                None => None,
+            }
+        };
+        if let Some(mut handle) = finished
+            && let Some(task) = handle.task.take()
+        {
+            let _ = task.await;
+        }
+        self.start_memory_repair_scheduler(key, project_path, handshake)
+            .await
+    }
+
+    pub(super) async fn retire_memory_repair_scheduler_locked(
+        &self,
+        key: &ProjectServerKey,
+    ) -> Option<MemoryRepairSchedulerRetirement> {
+        let reservation = self.store_administration.reserve_retirement_reaper()?;
+        let (task, completion, termination) = {
+            let mut schedulers = self
+                .store_administration
+                .memory_repair_schedulers()
+                .lock()
+                .await;
+            let owner = if schedulers.contains_key(key) {
+                key.clone()
+            } else {
+                schedulers
+                    .keys()
+                    .find(|candidate| same_scheduler_owner(candidate, key))
+                    .cloned()?
+            };
+            let handle = schedulers.get_mut(&owner)?;
+            handle.lifecycle = MemoryRepairSchedulerLifecycle::Retiring;
+            handle
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let task = handle.task.take();
+            (
+                task.map(|task| (owner, task)),
+                Arc::clone(&handle.completion),
+                Arc::clone(&handle.termination),
+            )
+        };
+        if let Some((owner, task)) = task {
+            let completed = Arc::clone(&completion);
+            let reaper_administration = self.store_administration.clone();
+            let reaper_owner = owner.clone();
+            self.store_administration.spawn_retirement_reaper(
+                reservation,
+                MaintenanceReaperKind::MemoryRepair,
+                owner,
+                task,
+                Arc::clone(&termination),
+                async move {
+                    {
+                        reaper_administration
+                            .memory_repair_schedulers()
+                            .lock()
+                            .await
+                            .retain(|candidate, handle| {
+                                candidate != &reaper_owner
+                                    || !Arc::ptr_eq(&handle.completion, &completed)
+                                    || handle.lifecycle != MemoryRepairSchedulerLifecycle::Retiring
+                            });
+                    }
+                },
+            );
+        }
+        Some(MemoryRepairSchedulerRetirement { termination })
+    }
+
+    pub(super) async fn shutdown_memory_repair_schedulers(&self) {
+        let retirements = self
+            .store_administration
+            .with_writer(|| async {
+                let owners: Vec<ProjectServerKey> = self
+                    .store_administration
+                    .memory_repair_schedulers()
+                    .lock()
+                    .await
+                    .keys()
+                    .cloned()
+                    .collect();
+                let mut retirements = Vec::with_capacity(owners.len());
+                for owner in owners {
+                    if let Some(retirement) =
+                        self.retire_memory_repair_scheduler_locked(&owner).await
+                    {
+                        retirements.push(retirement);
+                    }
+                }
+                retirements
             })
             .await;
-        for handle in &scheduler_handles {
-            handle.abort();
-        }
         let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
-            for handle in scheduler_handles {
-                let _ = handle.await;
+            for retirement in retirements {
+                retirement.wait().await;
             }
         })
         .await;
+        self.store_administration
+            .with_writer(|| async {
+                self.store_administration
+                    .memory_repair_schedulers()
+                    .lock()
+                    .await
+                    .clear();
+            })
+            .await;
     }
 }
 
+fn observed_memory_repair_lifecycle(
+    handle: &mut MemoryRepairSchedulerHandle,
+) -> MemoryRepairSchedulerLifecycle {
+    if handle.lifecycle == MemoryRepairSchedulerLifecycle::Running
+        && handle.task.as_ref().is_none_or(JoinHandle::is_finished)
+    {
+        handle.lifecycle = MemoryRepairSchedulerLifecycle::Finished;
+    }
+    handle.lifecycle
+}
+
 async fn run_memory_repair_scheduler_loop(project_path: PathBuf, handshake: DaemonHandshake) {
+    let tick_project = project_path.clone();
+    run_memory_repair_scheduler_loop_with(
+        &project_path,
+        move || {
+            let project_path = tick_project.clone();
+            let handshake = handshake.clone();
+            async move { run_memory_repair_scheduler_tick(&project_path, &handshake).await }
+        },
+        tokio::time::sleep,
+    )
+    .await;
+}
+
+async fn run_memory_repair_scheduler_loop_with<Tick, TickFuture, Wait, WaitFuture>(
+    project_path: &Path,
+    mut tick: Tick,
+    mut wait: Wait,
+) where
+    Tick: FnMut() -> TickFuture,
+    TickFuture: Future<Output = Result<MemoryRepairPassDecision>>,
+    Wait: FnMut(Duration) -> WaitFuture,
+    WaitFuture: Future<Output = ()>,
+{
     let mut attempt = 0u32;
     loop {
-        match Box::pin(run_memory_repair_scheduler_tick(&project_path, &handshake)).await {
+        match tick().await {
             Ok(MemoryRepairPassDecision::Advanced) => {
                 attempt = attempt.saturating_add(1);
                 let delay = crate::application::host_admission::replay_backoff(
@@ -136,22 +403,41 @@ async fn run_memory_repair_scheduler_loop(project_path: PathBuf, handshake: Daem
                     "memory_repair_scheduler",
                     &[
                         ("project", project_path.display().to_string()),
+                        ("outcome", "advanced".to_string()),
+                        ("attempt", attempt.to_string()),
                         ("next_tick_secs", delay.as_secs().to_string()),
                     ],
                 );
-                tokio::time::sleep(delay).await;
+                wait(delay).await;
             }
-            Ok(MemoryRepairPassDecision::Idle) => return,
-            Err(error) => {
+            Ok(MemoryRepairPassDecision::Idle) => {
                 log_daemon_event(
                     "memory_repair_scheduler",
                     &[
                         ("project", project_path.display().to_string()),
-                        ("outcome", "error".to_string()),
-                        ("error", error.to_string()),
+                        ("outcome", "idle".to_string()),
+                        ("attempt", attempt.to_string()),
                     ],
                 );
                 return;
+            }
+            Err(error) => {
+                attempt = attempt.saturating_add(1);
+                let delay = crate::application::host_admission::replay_backoff(
+                    attempt,
+                    MEMORY_REPAIR_BACKOFF_SHIFT_CAP,
+                );
+                log_daemon_event(
+                    "memory_repair_scheduler",
+                    &[
+                        ("project", project_path.display().to_string()),
+                        ("outcome", "retry_scheduled".to_string()),
+                        ("attempt", attempt.to_string()),
+                        ("next_tick_ms", delay.as_millis().to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
+                wait(delay).await;
             }
         }
     }
@@ -256,7 +542,15 @@ pub(super) fn legacy_memory_cutover_should_retry(
 
 #[cfg(test)]
 mod tests {
-    use super::{MemoryRepairTickOutcome, memory_repair_pass_advanced};
+    use std::collections::VecDeque;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    use super::{
+        MemoryRepairPassDecision, MemoryRepairTickOutcome, memory_repair_pass_advanced,
+        run_memory_repair_scheduler_loop_with,
+    };
+    use crate::errors::TraceDecayError;
 
     #[test]
     fn saturation_flips_the_repair_decision_for_finished_passes() {
@@ -284,5 +578,69 @@ mod tests {
                 "{outcome:?} must keep ticking when the store reports saturation"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn transient_failure_retries_until_terminal_idle() {
+        let outcomes = Arc::new(Mutex::new(VecDeque::from([
+            Err(TraceDecayError::Config {
+                message: "transient repair failure".to_string(),
+            }),
+            Ok(MemoryRepairPassDecision::Idle),
+        ])));
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waits = Arc::new(Mutex::new(Vec::new()));
+
+        run_memory_repair_scheduler_loop_with(
+            Path::new("/project"),
+            {
+                let outcomes = Arc::clone(&outcomes);
+                let attempts = Arc::clone(&attempts);
+                move || {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let outcome = outcomes.lock().unwrap().pop_front().unwrap();
+                    async move { outcome }
+                }
+            },
+            {
+                let waits = Arc::clone(&waits);
+                move |delay| {
+                    waits.lock().unwrap().push(delay);
+                    std::future::ready(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(waits.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_idle_stops_without_retry() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        run_memory_repair_scheduler_loop_with(
+            Path::new("/project"),
+            {
+                let attempts = Arc::clone(&attempts);
+                move || {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    std::future::ready(Ok(MemoryRepairPassDecision::Idle))
+                }
+            },
+            {
+                let waits = Arc::clone(&waits);
+                move |_| {
+                    waits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    std::future::ready(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(waits.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 }

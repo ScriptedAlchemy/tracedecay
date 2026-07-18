@@ -28,11 +28,11 @@ use tracedecay_store::{
     CompatibilityFactUpdateCommandV1, CompatibilityFactUpdateOutcomeV1,
     CompatibilityLegacyMemoryCutoverCommandV1, CompatibilityLegacyMemoryCutoverProgressV1,
     CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
-    CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome,
-    FactCompatibilityResult, FactCompatibilityStore, FactCurrentQuery, FactLineageQuery,
-    FactProposalStore, FactProposalStoreError, FactStore, FactStoreResult, FactWriteBatch,
-    LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery,
-    StoredFactV1,
+    CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
+    FactCommitOutcome, FactCompatibilityResult, FactCompatibilityStore, FactCurrentQuery,
+    FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactProposalStore,
+    FactProposalStoreError, FactStore, FactStoreResult, FactWriteBatch, LegacyFactQuery,
+    PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
 };
 
 use crud::{
@@ -41,8 +41,9 @@ use crud::{
     get_compatibility_fact_tx, get_retrieval_anchor_tx, inspect_compatibility_fact_tx,
     list_compatibility_facts_tx, promote_compatibility_fact_proposal_tx,
     promote_compatibility_fact_proposal_with_disposition_tx, promote_fact_proposal_tx,
-    query_current_facts_tx, query_fact_as_of_tx, query_fact_current_tx, query_fact_lineage_tx,
-    record_compatibility_fact_feedback_tx, remove_compatibility_fact_tx,
+    query_current_facts_tx, query_fact_as_of_response_tx, query_fact_as_of_tx,
+    query_fact_current_response_tx, query_fact_current_tx, query_fact_lineage_response_tx,
+    query_fact_lineage_tx, record_compatibility_fact_feedback_tx, remove_compatibility_fact_tx,
     update_compatibility_fact_tx,
 };
 use curation::{apply_compatibility_fact_curation_tx, merge_compatibility_facts_tx};
@@ -142,6 +143,19 @@ impl FactStore for DatabaseFactStore<'_> {
         finish_read_snapshot(snapshot, result).await
     }
 
+    async fn query_fact_current_response(
+        &self,
+        query: FactCurrentQuery,
+    ) -> FactStoreResult<FactCurrentResponseV1> {
+        let snapshot = self
+            .db
+            .begin_isolated_read_snapshot(QUERY_OPERATION)
+            .await
+            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+        let result = query_fact_current_response_tx(&snapshot, &query).await;
+        finish_read_snapshot(snapshot, result).await
+    }
+
     async fn query_fact_as_of(
         &self,
         query: FactAsOfQuery,
@@ -155,6 +169,19 @@ impl FactStore for DatabaseFactStore<'_> {
         finish_read_snapshot(snapshot, result).await
     }
 
+    async fn query_fact_as_of_response(
+        &self,
+        query: FactAsOfQuery,
+    ) -> FactStoreResult<FactAsOfResponseV1> {
+        let snapshot = self
+            .db
+            .begin_isolated_read_snapshot(QUERY_OPERATION)
+            .await
+            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+        let result = query_fact_as_of_response_tx(&snapshot, &query).await;
+        finish_read_snapshot(snapshot, result).await
+    }
+
     async fn query_fact_lineage(
         &self,
         query: FactLineageQuery,
@@ -165,6 +192,19 @@ impl FactStore for DatabaseFactStore<'_> {
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
         let result = query_fact_lineage_tx(&snapshot, &query).await;
+        finish_read_snapshot(snapshot, result).await
+    }
+
+    async fn query_fact_lineage_response(
+        &self,
+        query: FactLineageQuery,
+    ) -> FactStoreResult<FactLineageResponseV1> {
+        let snapshot = self
+            .db
+            .begin_isolated_read_snapshot(QUERY_OPERATION)
+            .await
+            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+        let result = query_fact_lineage_response_tx(&snapshot, &query).await;
         finish_read_snapshot(snapshot, result).await
     }
 

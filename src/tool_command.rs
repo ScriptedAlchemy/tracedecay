@@ -33,8 +33,10 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde_json::Value;
+use tokio::time::{Instant, timeout_at};
 
 use tracedecay::daemon::{DaemonHandshake, call_default_tool};
 use tracedecay::errors::{Result, TraceDecayError};
@@ -69,6 +71,37 @@ const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
     "tracedecay_lcm_compress",
     "tracedecay_lcm_session_boundary",
 ];
+
+const DEFAULT_TOOL_DEADLINE: Duration = Duration::from_secs(30);
+const MAX_TOOL_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
+const TOOL_DEADLINE_ENV: &str = "TRACEDECAY_TOOL_DEADLINE_MS";
+
+fn tool_deadline_range_error() -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("{TOOL_DEADLINE_ENV} exceeds the supported monotonic deadline range"),
+    }
+}
+
+fn tool_command_deadline() -> Result<Duration> {
+    let deadline = std::env::var(TOOL_DEADLINE_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_TOOL_DEADLINE);
+    if deadline > MAX_TOOL_DEADLINE {
+        return Err(tool_deadline_range_error());
+    }
+    Ok(deadline)
+}
+
+fn tool_timeout_error(tool_name: &str) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "tool request timed out before deadline: {tool_name}; request outcome may be unknown"
+        ),
+    }
+}
 
 /// Entry point for `tracedecay tool ...`.
 pub(crate) async fn run(
@@ -117,11 +150,15 @@ pub(crate) async fn run(
     }
 
     let explicit_project = project.or(parsed_project);
+    let deadline = Instant::now()
+        .checked_add(tool_command_deadline()?)
+        .ok_or_else(tool_deadline_range_error)?;
     dispatch_daemon_tool(
         DaemonToolDispatch::project_scoped(explicit_project, &def.name),
         &def.name,
         tool_args,
         raw_json,
+        deadline,
     )
     .await
 }
@@ -161,8 +198,14 @@ async fn dispatch_daemon_tool(
     tool_name: &str,
     tool_args: Value,
     raw_json: bool,
+    deadline: Instant,
 ) -> Result<()> {
-    let result_value = dispatch.call(tool_name, tool_args).await?;
+    let result_value = timeout_at(deadline, dispatch.call(tool_name, tool_args))
+        .await
+        .map_err(|_| tool_timeout_error(tool_name))??;
+    if Instant::now() >= deadline {
+        return Err(tool_timeout_error(tool_name));
+    }
     print_tool_output(&result_value, raw_json);
     Ok(())
 }

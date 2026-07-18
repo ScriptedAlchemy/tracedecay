@@ -35,6 +35,8 @@ mod observation_store;
 mod project_registry;
 mod schema_contract;
 pub(crate) mod schema_stages;
+pub(crate) mod session_temporal;
+pub(crate) use session_temporal::operations as session_temporal_operations;
 mod transcript;
 
 pub use observation_store::{ProjectObservationStoreError, ProjectObservationStoreResolution};
@@ -46,6 +48,10 @@ use project_registry::{
 use project_registry::{
     NATIVE_PROJECT_PATH_ALIAS_PREFIX, decode_native_project_path, decode_native_project_path_alias,
     encode_native_project_path_alias,
+};
+pub use session_temporal::GlobalDbSessionTemporalExecution;
+pub(crate) use session_temporal::{
+    SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
 pub(crate) use transcript::TranscriptPersistenceError;
 
@@ -4223,21 +4229,54 @@ impl GlobalDb {
     ) -> Result<Vec<PendingCodexCompactionSummary>, crate::sessions::lcm::LcmError> {
         let limit = limit.clamp(1, 100) as i64;
         let mut sql = String::from(
-            "SELECT node_id, session_id
-             FROM lcm_summary_nodes
-             WHERE provider = 'codex'
-               AND json_extract(metadata_json, '$.source') = 'codex_context_compacted'
-               AND COALESCE(
-                     json_extract(metadata_json, '$.tracedecay_summary_source'),
-                     ''
-                   ) <> 'codex_app_server'",
+            "SELECT candidate.node_id, candidate.session_id
+             FROM lcm_summary_nodes AS candidate
+             JOIN session_summary_nodes AS authority
+               ON authority.summary_id = candidate.node_id
+              AND authority.session_id = candidate.session_id
+             WHERE candidate.provider = 'codex'
+               AND CASE
+                     WHEN json_valid(candidate.metadata_json) THEN
+                       json_extract(candidate.metadata_json, '$.source') =
+                         'codex_context_compacted'
+                       AND COALESCE(
+                             json_extract(
+                               candidate.metadata_json,
+                               '$.tracedecay_summary_source'
+                             ),
+                             ''
+                           ) <> 'codex_app_server'
+                     ELSE 0
+                   END
+               AND NOT EXISTS (
+                     SELECT 1
+                     FROM session_summary_successors AS lineage
+                     WHERE lineage.predecessor_summary_id = candidate.node_id
+                   )
+               AND EXISTS (
+                     SELECT 1
+                     FROM lcm_summary_sources AS source
+                     JOIN lcm_raw_messages AS raw
+                       ON source.source_kind = 'raw_message'
+                      AND CAST(source.source_id AS INTEGER) = raw.store_id
+                      AND raw.provider = candidate.provider
+                      AND raw.session_id = candidate.session_id
+                     WHERE source.node_id = candidate.node_id
+                   )",
         );
         let mut query_params = vec![Value::Integer(limit)];
         if let Some(session_id) = session_id {
-            sql.push_str(" AND session_id = ?2 ORDER BY depth DESC, created_at DESC LIMIT ?1");
+            sql.push_str(
+                " AND candidate.session_id = ?2
+                  ORDER BY candidate.depth DESC, candidate.created_at DESC, candidate.node_id
+                  LIMIT ?1",
+            );
             query_params.push(Value::Text(session_id.to_string()));
         } else {
-            sql.push_str(" ORDER BY created_at DESC, depth DESC LIMIT ?1");
+            sql.push_str(
+                " ORDER BY candidate.created_at DESC, candidate.depth DESC, candidate.node_id
+                  LIMIT ?1",
+            );
         }
 
         let mut rows = self.conn.query(&sql, query_params).await?;
@@ -4303,9 +4342,9 @@ impl GlobalDb {
         }))
     }
 
-    /// Replaces a deterministic Codex compaction placeholder summary with an
-    /// auxiliary summary while preserving the exact source lineage.
-    pub async fn replace_codex_compaction_summary(
+    /// Publishes a deterministic Codex auxiliary summary as an immutable
+    /// successor of the placeholder while preserving exact source lineage.
+    pub async fn publish_codex_compaction_summary_successor(
         &self,
         node_id: &str,
         summary_text: &str,
@@ -4340,23 +4379,34 @@ impl GlobalDb {
         draft.metadata_json = Some(JsonValue::Object(metadata).to_string());
 
         let transaction = self.begin_write_transaction().await?;
-        transaction
-            .execute(
-                "DELETE FROM lcm_summary_sources WHERE node_id = ?1",
-                params![node_id],
-            )
-            .await?;
-        transaction
-            .execute(
-                "DELETE FROM lcm_summary_nodes WHERE node_id = ?1",
-                params![node_id],
-            )
-            .await?;
-        let node =
-            crate::sessions::lcm::dag::insert_summary_node_in_transaction(&transaction, draft)
-                .await?;
+        let summary_hash = crate::sessions::lcm::raw::sha256_hex(&draft.summary_text);
+        let mut successor_id = crate::sessions::lcm::dag::summary_node_id(
+            &draft.provider,
+            &draft.session_id,
+            draft.depth,
+            &draft.source_refs,
+            &summary_hash,
+        );
+        if successor_id == node_id {
+            successor_id = format!(
+                "sum_{}",
+                crate::sessions::lcm::raw::sha256_hex(&format!(
+                    "{node_id}\0{}",
+                    draft.metadata_json.as_deref().unwrap_or_default()
+                ))
+            );
+        }
+        let receipt = session_temporal_operations::publish_immutable_summary(
+            &transaction,
+            crate::sessions::lcm::types::LcmImmutableSummaryPublication {
+                summary_id: successor_id,
+                predecessor_summary_id: Some(node_id.to_string()),
+                draft,
+            },
+        )
+        .await?;
         transaction.commit().await?;
-        Ok(node)
+        Ok(receipt.summary)
     }
 
     async fn codex_compaction_summary_draft(
@@ -4701,6 +4751,23 @@ impl GlobalDb {
                 .await?;
         transaction.commit().await?;
         Ok(summary)
+    }
+
+    /// Publishes an explicitly identified immutable summary and its legacy LCM
+    /// compatibility projection in one transaction.
+    pub async fn lcm_publish_immutable_summary(
+        &self,
+        publication: crate::sessions::lcm::types::LcmImmutableSummaryPublication,
+    ) -> Result<
+        crate::sessions::lcm::types::LcmSummaryPublicationReceipt,
+        crate::sessions::lcm::LcmError,
+    > {
+        let transaction = self.begin_write_transaction().await?;
+        let receipt =
+            session_temporal_operations::publish_immutable_summary(&transaction, publication)
+                .await?;
+        transaction.commit().await?;
+        Ok(receipt)
     }
 
     /// Expands one summary node to its direct raw-message or summary-node sources.

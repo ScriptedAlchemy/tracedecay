@@ -53,8 +53,10 @@ pub use error::{
 pub use queries::{
     CompatibilityFactContentDigestQueryV1, CompatibilityFactFeedbackHistoryQueryV1,
     CompatibilityFactHistoryQueryV1, CompatibilityFactListQueryV1, CompatibilityFactSearchQuery,
-    CurrentFactsQuery, FactAsOfQuery, FactCurrentQuery, FactLineageCursor, FactLineageQuery,
-    LegacyFactQuery, RetrievalAnchorQuery,
+    CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactContradictionStateV1,
+    FactCurrentQuery, FactCurrentResponseV1, FactLineageCursor, FactLineageQuery,
+    FactLineageResponseV1, FactQueryCoverageV1, LegacyFactQuery, MAX_FACT_QUERY_CONTRADICTIONS,
+    RetrievalAnchorQuery,
 };
 pub use telemetry::{
     CompatibilityFactFeedbackActionV1, CompatibilityFactFeedbackDetailsAvailabilityV1,

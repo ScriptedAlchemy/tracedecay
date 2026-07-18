@@ -1285,7 +1285,7 @@ fn test_hermes_plugin_init_snapshot_matches_embedded_asset() {
     hasher.update(body.as_bytes());
     assert_eq!(
         hex::encode(hasher.finalize()),
-        "eaaa993f8b0742deca03d7a6f53ffca797695a0423637fd33206bf80bbe0f57d",
+        "3fa315c9f2983244f77622debfd91ee5eff808b735dc0f9c1b41e6b5de36313a",
         "templates/plugin_init.py payload hash changed — verify the edit is intentional and update this snapshot"
     );
 }
@@ -1335,6 +1335,20 @@ fn test_hermes_generated_python_registers_lcm_context_engine() {
         assert!(
             init_py.contains(&format!("\"name\": \"{native}\"")),
             "__init__.py LCM_NATIVE_SCHEMAS must define a schema for {native}"
+        );
+    }
+    for adapter in [
+        "translated.setdefault(\"scope\", \"current\")",
+        "translated.setdefault(\"sort\", \"relevance\")",
+        "translated.setdefault(\"include_summaries\", False)",
+        "translated.setdefault(\"temporal_mode\", \"current\")",
+        "translated.setdefault(\"limit\", 100)",
+        "translated.setdefault(\"content_limit\", 4000)",
+        "translated.setdefault(\"temporal_mode\", \"forensic\")",
+    ] {
+        assert!(
+            init_py.contains(adapter),
+            "Hermes LCM alias must keep its surface default explicit: {adapter}"
         );
     }
 

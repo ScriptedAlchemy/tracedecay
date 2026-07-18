@@ -1239,7 +1239,7 @@ fn count_tree_files(root: &Path) -> u64 {
 /// graph's FTS5 index (e.g. "malformed inverted index for FTS5 table
 /// main.nodes_fts"). Such damage is fully derivable from the content table via
 /// [`crate::db::Database::rebuild_fts`] and never requires offline recovery.
-fn is_fts_only_corruption(problem: &str) -> bool {
+pub(crate) fn is_fts_only_corruption(problem: &str) -> bool {
     problem.contains("FTS5 table") && problem.contains("nodes_fts")
 }
 

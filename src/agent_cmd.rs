@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use tracedecay::automation::config::{
     AutomationBackend, AutomationConfigPatch, AutomationHostMode, AutomationTaskPatch,
-    apply_project_config_patch, project_config_path,
+    apply_project_config_patch, load_project_config, project_config_path,
 };
 
 /// How `install --agent codex --automation` should configure the daemon loop.
@@ -72,7 +72,11 @@ async fn install_codex_daemon_automation(
     };
 
     let global = tracedecay::user_config::UserConfig::load().automation;
-    apply_project_config_patch(&dashboard_root, &global, patch).await?;
+    let current = load_project_config(&dashboard_root).await?;
+    let (updated, _) = apply_project_config_patch(&dashboard_root, &global, patch).await?;
+    if crate::automation_cli::config::automation_config_changed(current.as_ref(), &updated) {
+        crate::automation_cli::config::notify_project_automation_scheduler(project_path).await?;
+    }
     let path = project_config_path(&dashboard_root);
     eprintln!(
         "\x1b[32m✔\x1b[0m Enabled TraceDecay daemon automation loop at {}",

@@ -1,4 +1,4 @@
-mod config;
+pub(crate) mod config;
 mod facts;
 mod runs;
 mod skills;
@@ -56,6 +56,7 @@ mod tests {
         runs::*,
     };
     use crate::cli::AutomationRunAction;
+    use tracedecay::automation::config::AutomationConfigPatch;
 
     #[test]
     fn automation_rpc_requests_preserve_fact_and_manual_run_arguments() {
@@ -191,5 +192,33 @@ mod tests {
             );
         }
         assert!(fact_source.contains("daemon_automation_action"));
+    }
+
+    #[test]
+    fn automation_config_reconcile_is_change_sensitive() {
+        let current = AutomationConfigPatch {
+            enabled: Some(true),
+            ..AutomationConfigPatch::default()
+        };
+        assert!(!super::config::automation_config_changed(
+            Some(&current),
+            &current
+        ));
+
+        let changed = AutomationConfigPatch {
+            scheduler_tick_secs: Some(17),
+            ..current.clone()
+        };
+        assert!(super::config::automation_config_changed(
+            Some(&current),
+            &changed
+        ));
+        let source = include_str!("config.rs");
+        assert!(source.contains("\"scope\": \"project\""));
+        assert!(source.contains("\"scope\": \"profile\""));
+        assert!(
+            source.contains("crate::commands::daemon_tool_json(\n        None"),
+            "global config reconciliation must use a projectless daemon request"
+        );
     }
 }

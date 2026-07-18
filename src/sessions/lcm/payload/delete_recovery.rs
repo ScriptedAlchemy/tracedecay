@@ -5,8 +5,7 @@ use libsql::{Connection, TransactionBehavior, params};
 
 use super::filesystem_authority::{
     ensure_contained, existing_payload_dir_opt, inspect_payload_file_for_delete,
-    open_verified_payload_file, read_payload_file_for_verify, safe_remove_payload_file_checked,
-    same_payload_file_identity,
+    read_payload_file_for_verify, remove_verified_payload_file, verify_payload_file_authority,
 };
 use super::{LcmError, gc, load_payload_metadata, util, validate_payload_ref};
 
@@ -114,20 +113,22 @@ pub(crate) async fn delete_external_payload_in_transaction(
         Err(LcmError::PayloadNotFound) => None,
         Err(err) => return Err(err),
     };
-    let (file_existed, file_identity, file_bytes) = match path.as_deref() {
+    let (file_existed, file_bytes) = match path.as_deref() {
         Some(path) => inspect_payload_file_for_delete(path)?,
-        None => (false, None, 0),
+        None => (false, 0),
     };
 
     if opts.verify_hash
         && file_existed
         && let (Some(metadata), Some(path)) = (metadata.as_ref(), path.as_deref())
     {
-        let (content, identity) =
-            read_payload_file_for_verify(path)?.ok_or(LcmError::PayloadMissing)?;
-        if Some(identity) != file_identity || util::sha256_hex(&content) != metadata.content_hash {
-            return Err(LcmError::PayloadIntegrityMismatch);
-        }
+        verify_payload_file_authority(
+            path,
+            &metadata.content_hash,
+            metadata.byte_count,
+            metadata.char_count,
+        )?
+        .ok_or(LcmError::PayloadMissing)?;
     }
 
     let file_fingerprint = if opts.remove_file && file_existed && metadata.is_none() {
@@ -143,9 +144,13 @@ pub(crate) async fn delete_external_payload_in_transaction(
         || {
             file_fingerprint
                 .as_ref()
-                .map_or(file_bytes, |(_, bytes)| *bytes)
+                .map_or(file_bytes, |(_, bytes, _)| *bytes)
         },
         |payload| payload.byte_count,
+    );
+    let expected_chars = metadata.as_ref().map_or_else(
+        || file_fingerprint.as_ref().map_or(0, |(_, _, chars)| *chars),
+        |payload| payload.char_count,
     );
     let mut placeholders_rewritten = 0usize;
 
@@ -181,8 +186,9 @@ pub(crate) async fn delete_external_payload_in_transaction(
             metadata
                 .as_ref()
                 .map(|payload| payload.content_hash.as_str())
-                .or_else(|| file_fingerprint.as_ref().map(|(hash, _)| hash.as_str())),
+                .or_else(|| file_fingerprint.as_ref().map(|(hash, _, _)| hash.as_str())),
             expected_bytes,
+            expected_chars,
         )
         .await?;
     }
@@ -207,12 +213,14 @@ pub(crate) fn remove_committed_payload_file(
     payload_ref: &str,
     expected_hash: Option<&str>,
     expected_bytes: u64,
+    expected_chars: Option<u64>,
 ) -> Result<CommittedPayloadRemoval, LcmError> {
     remove_committed_payload_file_with(
         storage_root,
         payload_ref,
         expected_hash,
         expected_bytes,
+        expected_chars,
         |_, _| Ok(()),
     )
 }
@@ -222,6 +230,7 @@ pub(crate) fn remove_committed_payload_file_with<F>(
     payload_ref: &str,
     expected_hash: Option<&str>,
     expected_bytes: u64,
+    expected_chars: Option<u64>,
     after_quarantine: F,
 ) -> Result<CommittedPayloadRemoval, LcmError>
 where
@@ -233,6 +242,15 @@ where
     };
     let path = dir.join(payload_ref);
     ensure_contained(&dir, &path)?;
+    let (Some(expected_hash), Some(expected_chars)) = (expected_hash, expected_chars) else {
+        return match fs::symlink_metadata(&path) {
+            Ok(_) => Ok(CommittedPayloadRemoval::ReplacementPreserved),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(CommittedPayloadRemoval::Missing)
+            }
+            Err(error) => Err(LcmError::Io(error.to_string())),
+        };
+    };
     let quarantine_name = format!(
         ".tracedecay-pending-delete-{}",
         util::sha256_hex(payload_ref.as_bytes())
@@ -254,56 +272,84 @@ where
         }
         Err(err) => return Err(LcmError::Io(err.to_string())),
     }
+
+    let authority = match verify_payload_file_authority(
+        &quarantine,
+        expected_hash,
+        expected_bytes,
+        expected_chars,
+    ) {
+        Ok(Some(authority)) => authority,
+        Ok(None) => {
+            return Err(LcmError::Io(format!(
+                "payload deletion quarantine disappeared for {payload_ref}"
+            )));
+        }
+        Err(LcmError::PayloadIntegrityMismatch | LcmError::InvalidPayloadRef) => {
+            restore_quarantined_payload(&path, &quarantine, payload_ref)?;
+            return Ok(CommittedPayloadRemoval::ReplacementPreserved);
+        }
+        Err(error) => return Err(error),
+    };
     after_quarantine(&path, &quarantine)?;
 
-    let Some((content, identity)) = read_payload_file_for_verify(&quarantine)? else {
-        return Err(LcmError::Io(format!(
+    match remove_verified_payload_file(&authority) {
+        Ok(true) => Ok(CommittedPayloadRemoval::Removed(expected_bytes)),
+        Ok(false) => Err(LcmError::Io(format!(
             "payload deletion quarantine disappeared for {payload_ref}"
-        )));
-    };
-    let bytes = content.len() as u64;
-    if expected_hash.is_none()
-        || bytes != expected_bytes
-        || expected_hash.is_some_and(|expected| util::sha256_hex(&content) != expected)
-    {
-        match fs::hard_link(&quarantine, &path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                let Some((_file, _opened, _lstat, destination_identity)) =
-                    open_verified_payload_file(&path)?
-                else {
-                    return Err(LcmError::Io(format!(
-                        "payload replacement raced quarantine restore for {payload_ref}"
-                    )));
-                };
-                if same_payload_file_identity(&destination_identity, &identity).is_err() {
-                    return Err(LcmError::Io(format!(
-                        "payload replacement preserved at {} while mismatched quarantine remains at {}",
-                        path.display(),
-                        quarantine.display()
-                    )));
-                }
-            }
-            Err(err) => return Err(LcmError::Io(err.to_string())),
+        ))),
+        Err(LcmError::PayloadIntegrityMismatch | LcmError::InvalidPayloadRef) => {
+            restore_quarantined_payload(&path, &quarantine, payload_ref)?;
+            Ok(CommittedPayloadRemoval::ReplacementPreserved)
         }
-        safe_remove_payload_file_checked(&dir, &quarantine_name, Some(&identity))?;
-        return Ok(CommittedPayloadRemoval::ReplacementPreserved);
+        Err(error) => Err(error),
     }
-    safe_remove_payload_file_checked(&dir, &quarantine_name, Some(&identity))?;
-    Ok(CommittedPayloadRemoval::Removed(bytes))
+}
+
+fn restore_quarantined_payload(
+    path: &Path,
+    quarantine: &Path,
+    payload_ref: &str,
+) -> Result<(), LcmError> {
+    match fs::symlink_metadata(quarantine) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LcmError::Io(format!(
+                "payload deletion quarantine disappeared for {payload_ref}"
+            )));
+        }
+        Err(error) => return Err(LcmError::Io(error.to_string())),
+    }
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            return Err(LcmError::Io(format!(
+                "payload replacement preserved at {} while mismatched quarantine remains at {}",
+                path.display(),
+                quarantine.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(LcmError::Io(error.to_string())),
+    }
+    fs::rename(quarantine, path).map_err(|error| LcmError::Io(error.to_string()))
 }
 
 pub(crate) fn payload_file_fingerprint(
     dir: &Path,
     payload_ref: &str,
-) -> Result<(String, u64), LcmError> {
+) -> Result<(String, u64, u64), LcmError> {
     validate_payload_ref(payload_ref)?;
     let path = dir.join(payload_ref);
     ensure_contained(dir, &path)?;
-    let Some((content, _identity)) = read_payload_file_for_verify(&path)? else {
+    let Some((content, _authority)) = read_payload_file_for_verify(&path)? else {
         return Err(LcmError::PayloadMissing);
     };
-    Ok((util::sha256_hex(&content), content.len() as u64))
+    let text = std::str::from_utf8(&content).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    Ok((
+        util::sha256_hex(&content),
+        content.len() as u64,
+        text.chars().count() as u64,
+    ))
 }
 
 async fn tombstone_residual_placeholders(

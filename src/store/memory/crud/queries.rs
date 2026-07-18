@@ -14,15 +14,17 @@ use libsql::{Transaction, params};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    Confidence, FactAssertionId, FactEventId, FactId, FactLineageEventV1, FactOwnerV1,
-    FactPayloadV1, LegacyFactMappingV1, PayloadAccessState, ProvenanceId, RetrievalAnchorRecordV2,
-    UtcMicros,
+    Confidence, CoverageUniverseKnowledgeV1, FactAssertionId, FactEventId, FactId,
+    FactLineageEventV1, FactOwnerV1, FactPayloadV1, LegacyFactMappingV1, LegacyHistoryCoverageV1,
+    PayloadAccessState, ProvenanceId, RetrievalAnchorRecordV2, ShardDispositionV1, UtcMicros,
 };
 use tracedecay_store::{
-    CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome, FactCommitReceipt, FactLineageQuery,
-    FactProposalPromotionStateV1, FactProposalStoreError, FactStoreError, FactStoreResult,
-    FactWriteBatch, PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery,
-    StoredFactV1,
+    CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome, FactCommitReceipt,
+    FactContradictionStateV1, FactCurrentQuery, FactCurrentResponseV1, FactLineageQuery,
+    FactLineageResponseV1, FactProposalPromotionStateV1, FactProposalStoreError,
+    FactQueryCoverageV1, FactStoreError, FactStoreResult, FactWriteBatch,
+    MAX_FACT_QUERY_CONTRADICTIONS, PromoteFactProposal, PromoteFactProposalOutcome,
+    RetrievalAnchorQuery, StoredFactV1,
 };
 pub(in crate::store::memory) async fn query_current_facts_tx(
     snapshot: &Transaction,
@@ -88,6 +90,26 @@ pub(in crate::store::memory) async fn query_fact_current_tx(
 ) -> FactStoreResult<Option<StoredFactV1>> {
     let key = OwnerKey::new(owner)?;
     load_current_fact_tx(snapshot, &key, owner, fact_id).await
+}
+
+pub(in crate::store::memory) async fn query_fact_current_response_tx(
+    snapshot: &Transaction,
+    query: &FactCurrentQuery,
+) -> FactStoreResult<FactCurrentResponseV1> {
+    let fact = query_fact_current_tx(snapshot, query.owner(), query.fact_id()).await?;
+    let metadata = query_fact_response_metadata_tx(
+        snapshot,
+        query.owner(),
+        query.fact_id(),
+        None,
+        fact.as_ref(),
+    )
+    .await?;
+    Ok(FactCurrentResponseV1::new(
+        fact,
+        metadata.coverage,
+        metadata.contradiction,
+    ))
 }
 
 pub(in crate::store::memory) async fn load_current_fact_tx(
@@ -257,6 +279,26 @@ pub(in crate::store::memory) async fn query_fact_as_of_tx(
     .map(Some)
 }
 
+pub(in crate::store::memory) async fn query_fact_as_of_response_tx(
+    snapshot: &Transaction,
+    query: &FactAsOfQuery,
+) -> FactStoreResult<FactAsOfResponseV1> {
+    let fact = query_fact_as_of_tx(snapshot, query).await?;
+    let metadata = query_fact_response_metadata_tx(
+        snapshot,
+        query.owner(),
+        query.fact_id(),
+        Some(query.as_of()),
+        fact.as_ref(),
+    )
+    .await?;
+    Ok(FactAsOfResponseV1::new(
+        fact,
+        metadata.coverage,
+        metadata.contradiction,
+    ))
+}
+
 async fn load_assertion_payload_tx(
     snapshot: &Transaction,
     owner: &OwnerKey,
@@ -347,6 +389,442 @@ pub(in crate::store::memory) async fn query_fact_lineage_tx(
         events.push(event);
     }
     Ok(events)
+}
+
+pub(in crate::store::memory) async fn query_fact_lineage_response_tx(
+    snapshot: &Transaction,
+    query: &FactLineageQuery,
+) -> FactStoreResult<FactLineageResponseV1> {
+    let events = query_fact_lineage_tx(snapshot, query).await?;
+    let current = query_fact_current_tx(snapshot, query.owner(), query.fact_id()).await?;
+    let metadata = query_fact_response_metadata_tx(
+        snapshot,
+        query.owner(),
+        query.fact_id(),
+        None,
+        current.as_ref(),
+    )
+    .await?;
+    Ok(FactLineageResponseV1::new(
+        events,
+        metadata.coverage,
+        metadata.contradiction,
+    ))
+}
+
+struct FactResponseMetadata {
+    coverage: FactQueryCoverageV1,
+    contradiction: FactContradictionStateV1,
+}
+
+async fn query_fact_response_metadata_tx(
+    snapshot: &Transaction,
+    typed_owner: &FactOwnerV1,
+    fact_id: &FactId,
+    as_of: Option<UtcMicros>,
+    fact: Option<&StoredFactV1>,
+) -> FactStoreResult<FactResponseMetadata> {
+    let owner = OwnerKey::new(typed_owner)?;
+    let observed_event = fact_lineage_event_exists_tx(snapshot, &owner, fact_id, as_of).await?;
+    let latest_assertion_id = latest_fact_assertion_id_tx(snapshot, &owner, fact_id, as_of).await?;
+    let effective_access = match fact {
+        Some(fact) => fact.payload_access(),
+        None => latest_fact_payload_access_tx(snapshot, &owner, fact_id, as_of)
+            .await?
+            .unwrap_or(PayloadAccessState::Eligible),
+    };
+    let legacy_unknown = fact
+        .and_then(StoredFactV1::legacy_mapping)
+        .is_some_and(|mapping| mapping.history_coverage() == LegacyHistoryCoverageV1::Unknown);
+    let coverage = query_fact_coverage_tx(
+        snapshot,
+        &owner,
+        typed_owner,
+        fact_id,
+        latest_assertion_id.as_ref(),
+        effective_access,
+        legacy_unknown,
+        observed_event,
+    )
+    .await?;
+    let contradicted_by =
+        fact_contradiction_ids_tx(snapshot, &owner, typed_owner, fact_id, as_of).await?;
+    let contradiction = if !contradicted_by.is_empty() {
+        FactContradictionStateV1::from_positive(contradicted_by)
+    } else if !observed_event || coverage.unknown() > 0 {
+        FactContradictionStateV1::Unknown
+    } else {
+        FactContradictionStateV1::NotObserved
+    };
+    Ok(FactResponseMetadata {
+        coverage,
+        contradiction,
+    })
+}
+
+async fn fact_lineage_event_exists_tx(
+    snapshot: &Transaction,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+    as_of: Option<UtcMicros>,
+) -> FactStoreResult<bool> {
+    let mut rows = match as_of {
+        Some(cutoff) => {
+            snapshot
+                .query(
+                    "SELECT 1 FROM memory_v2_lineage_events
+                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+                       AND occurred_at <= ?4
+                     LIMIT 1",
+                    params![
+                        fact_id.as_str(),
+                        owner.kind,
+                        owner.project_id.as_str(),
+                        cutoff.0,
+                    ],
+                )
+                .await
+        }
+        None => {
+            snapshot
+                .query(
+                    "SELECT 1 FROM memory_v2_lineage_events
+                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+                     LIMIT 1",
+                    params![fact_id.as_str(), owner.kind, owner.project_id.as_str()],
+                )
+                .await
+        }
+    }
+    .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+    let exists = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(QUERY_OPERATION, error))?
+        .is_some();
+    drop(rows);
+    Ok(exists)
+}
+
+async fn latest_fact_assertion_id_tx(
+    snapshot: &Transaction,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+    as_of: Option<UtcMicros>,
+) -> FactStoreResult<Option<FactAssertionId>> {
+    let mut rows = match as_of {
+        Some(cutoff) => {
+            snapshot
+                .query(
+                    "SELECT json_extract(event_json, '$.kind.assertion_id')
+                     FROM memory_v2_lineage_events
+                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+                       AND occurred_at <= ?4
+                       AND json_extract(event_json, '$.kind.kind') = 'assertion_recorded'
+                     ORDER BY occurred_at DESC, event_id DESC
+                     LIMIT 1",
+                    params![
+                        fact_id.as_str(),
+                        owner.kind,
+                        owner.project_id.as_str(),
+                        cutoff.0,
+                    ],
+                )
+                .await
+        }
+        None => {
+            snapshot
+                .query(
+                    "SELECT json_extract(event_json, '$.kind.assertion_id')
+                     FROM memory_v2_lineage_events
+                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+                       AND json_extract(event_json, '$.kind.kind') = 'assertion_recorded'
+                     ORDER BY occurred_at DESC, event_id DESC
+                     LIMIT 1",
+                    params![fact_id.as_str(), owner.kind, owner.project_id.as_str()],
+                )
+                .await
+        }
+    }
+    .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(QUERY_OPERATION, error))?
+    else {
+        return Ok(None);
+    };
+    let assertion_id = row_optional_string(&row, 0, QUERY_OPERATION)?.ok_or_else(|| {
+        storage_message(
+            QUERY_OPERATION,
+            "lineage assertion event is missing an assertion identifier",
+        )
+    })?;
+    drop(rows);
+    Ok(FactAssertionId::new(assertion_id).map(Some)?)
+}
+
+async fn latest_fact_payload_access_tx(
+    snapshot: &Transaction,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+    as_of: Option<UtcMicros>,
+) -> FactStoreResult<Option<PayloadAccessState>> {
+    let mut rows = match as_of {
+        Some(cutoff) => {
+            snapshot
+                .query(
+                    "SELECT json_extract(event_json, '$.kind.current')
+                     FROM memory_v2_lineage_events
+                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+                       AND occurred_at <= ?4
+                       AND json_extract(event_json, '$.kind.kind') = 'payload_access_changed'
+                     ORDER BY occurred_at DESC, event_id DESC
+                     LIMIT 1",
+                    params![
+                        fact_id.as_str(),
+                        owner.kind,
+                        owner.project_id.as_str(),
+                        cutoff.0,
+                    ],
+                )
+                .await
+        }
+        None => {
+            snapshot
+                .query(
+                    "SELECT json_extract(event_json, '$.kind.current')
+                     FROM memory_v2_lineage_events
+                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+                       AND json_extract(event_json, '$.kind.kind') = 'payload_access_changed'
+                     ORDER BY occurred_at DESC, event_id DESC
+                     LIMIT 1",
+                    params![fact_id.as_str(), owner.kind, owner.project_id.as_str()],
+                )
+                .await
+        }
+    }
+    .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(QUERY_OPERATION, error))?
+    else {
+        return Ok(None);
+    };
+    let payload_access = row_optional_string(&row, 0, QUERY_OPERATION)?.ok_or_else(|| {
+        storage_message(
+            QUERY_OPERATION,
+            "lineage payload access event is missing its current state",
+        )
+    })?;
+    drop(rows);
+    parse_payload_access(&payload_access).map(Some)
+}
+
+async fn fact_contradiction_ids_tx(
+    snapshot: &Transaction,
+    owner: &OwnerKey,
+    typed_owner: &FactOwnerV1,
+    fact_id: &FactId,
+    as_of: Option<UtcMicros>,
+) -> FactStoreResult<Vec<FactId>> {
+    let mut rows = match as_of {
+        Some(cutoff) => {
+            snapshot
+                .query(
+                    "SELECT DISTINCT json_extract(event_json, '$.kind.action.fact_id')
+                     FROM memory_v2_lineage_events
+                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+                       AND occurred_at <= ?4
+                       AND json_extract(event_json, '$.kind.kind') = 'curated'
+                       AND json_extract(event_json, '$.kind.action.kind') = 'contradicted_by'
+                     ORDER BY 1 ASC
+                     LIMIT ?5",
+                    params![
+                        fact_id.as_str(),
+                        owner.kind,
+                        owner.project_id.as_str(),
+                        cutoff.0,
+                        MAX_FACT_QUERY_CONTRADICTIONS as i64,
+                    ],
+                )
+                .await
+        }
+        None => {
+            snapshot
+                .query(
+                    "SELECT DISTINCT json_extract(event_json, '$.kind.action.fact_id')
+                     FROM memory_v2_lineage_events
+                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+                       AND json_extract(event_json, '$.kind.kind') = 'curated'
+                       AND json_extract(event_json, '$.kind.action.kind') = 'contradicted_by'
+                     ORDER BY 1 ASC
+                     LIMIT ?4",
+                    params![
+                        fact_id.as_str(),
+                        owner.kind,
+                        owner.project_id.as_str(),
+                        MAX_FACT_QUERY_CONTRADICTIONS as i64,
+                    ],
+                )
+                .await
+        }
+    }
+    .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+    let mut contradicted_by = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(QUERY_OPERATION, error))?
+    {
+        let contradicting_fact_id = FactId::new(row_string(&row, 0, QUERY_OPERATION)?)?;
+        contradicting_fact_id.validate_owner(typed_owner)?;
+        contradicted_by.push(contradicting_fact_id);
+    }
+    drop(rows);
+    Ok(contradicted_by)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn query_fact_coverage_tx(
+    snapshot: &Transaction,
+    owner: &OwnerKey,
+    typed_owner: &FactOwnerV1,
+    fact_id: &FactId,
+    assertion_id: Option<&FactAssertionId>,
+    effective_access: PayloadAccessState,
+    legacy_unknown: bool,
+    observed_event: bool,
+) -> FactStoreResult<FactQueryCoverageV1> {
+    let Some(assertion_id) = assertion_id else {
+        return Ok(if observed_event {
+            classify_fact_coverage(effective_access, legacy_unknown, None)
+        } else {
+            FactQueryCoverageV1::default()
+        });
+    };
+    let mut rows = snapshot
+        .query(
+            "SELECT evidence.anchor_id, anchors.anchor_json
+             FROM memory_v2_assertion_evidence AS assertion_evidence
+             JOIN memory_v2_evidence AS evidence
+               ON evidence.evidence_id = assertion_evidence.evidence_id
+              AND evidence.fact_id = assertion_evidence.fact_id
+              AND evidence.owner_kind = assertion_evidence.owner_kind
+              AND evidence.project_id = assertion_evidence.project_id
+             JOIN retrieval_anchors AS anchors
+               ON anchors.anchor_id = evidence.anchor_id
+              AND anchors.owner_json = evidence.owner_json
+             WHERE assertion_evidence.assertion_id = ?1
+               AND assertion_evidence.fact_id = ?2
+               AND assertion_evidence.owner_kind = ?3
+               AND assertion_evidence.project_id = ?4
+             ORDER BY assertion_evidence.ordinal ASC",
+            params![
+                assertion_id.as_str(),
+                fact_id.as_str(),
+                owner.kind,
+                owner.project_id.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+    let mut visible = 0;
+    let mut hidden = 0;
+    let mut unknown = 0;
+    let mut redacted = 0;
+    let mut saw_anchor = false;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(QUERY_OPERATION, error))?
+    {
+        let anchor_id = row_string(&row, 0, QUERY_OPERATION)?;
+        let anchor = from_json::<RetrievalAnchorRecordV2>(
+            &row_string(&row, 1, QUERY_OPERATION)?,
+            QUERY_OPERATION,
+        )?;
+        if anchor.anchor_id().as_str() != anchor_id
+            || FactOwnerV1::from(anchor.owner().clone()) != *typed_owner
+        {
+            return Err(storage_message(
+                QUERY_OPERATION,
+                "fact evidence anchor identity mismatch",
+            ));
+        }
+        saw_anchor = true;
+        let count = classify_fact_coverage(effective_access, legacy_unknown, Some(&anchor));
+        visible += count.visible();
+        hidden += count.hidden();
+        unknown += count.unknown();
+        redacted += count.redacted();
+    }
+    drop(rows);
+    if !saw_anchor && observed_event {
+        return Ok(classify_fact_coverage(
+            effective_access,
+            legacy_unknown,
+            None,
+        ));
+    }
+    Ok(FactQueryCoverageV1::new(visible, hidden, unknown, redacted))
+}
+
+fn classify_fact_coverage(
+    effective_access: PayloadAccessState,
+    legacy_unknown: bool,
+    anchor: Option<&RetrievalAnchorRecordV2>,
+) -> FactQueryCoverageV1 {
+    let (visible, hidden, unknown, mut redacted, frontier_count) = if legacy_unknown {
+        (0, 0, 1, 0, 1)
+    } else {
+        match anchor {
+            None => (0, 0, 1, 0, 1),
+            Some(anchor) if anchor.coverage().universe == CoverageUniverseKnowledgeV1::Unknown => {
+                (0, 0, 1, 0, 1)
+            }
+            Some(anchor) => {
+                let mut visible = 0;
+                let mut hidden = 0;
+                let mut redacted = 0;
+                for disposition in anchor.coverage().dispositions.values() {
+                    match disposition {
+                        ShardDispositionV1::Searched => visible += 1,
+                        ShardDispositionV1::Redacted => redacted += 1,
+                        ShardDispositionV1::Skipped
+                        | ShardDispositionV1::Stale
+                        | ShardDispositionV1::Unavailable
+                        | ShardDispositionV1::Incompatible
+                        | ShardDispositionV1::Locked
+                        | ShardDispositionV1::Truncated => hidden += 1,
+                    }
+                }
+                (
+                    visible,
+                    hidden,
+                    0,
+                    redacted,
+                    anchor.coverage().dispositions.len() as u64,
+                )
+            }
+        }
+    };
+    let anchor_access = anchor
+        .map(RetrievalAnchorRecordV2::payload_access)
+        .unwrap_or(PayloadAccessState::Eligible);
+    if effective_access == PayloadAccessState::Redacted
+        || anchor_access == PayloadAccessState::Redacted
+    {
+        redacted = redacted.max(frontier_count.max(1));
+        return FactQueryCoverageV1::new(visible, hidden, unknown, redacted);
+    }
+    if effective_access != PayloadAccessState::Eligible
+        || anchor_access != PayloadAccessState::Eligible
+    {
+        return FactQueryCoverageV1::new(0, 1, 0, 0);
+    }
+    FactQueryCoverageV1::new(visible, hidden, unknown, redacted)
 }
 
 pub(in crate::store::memory) async fn get_retrieval_anchor_tx(

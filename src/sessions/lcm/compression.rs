@@ -115,12 +115,11 @@ pub(crate) async fn lifecycle_state(
 /// Records a compression-boundary session start, mirroring hermes-lcm
 /// `_continue_compression_boundary`.
 ///
-/// Hermes carries all LCM data over when the host's `old_session_id` matches
-/// the bound session (finalize + reassign of messages, DAG nodes, and
-/// externalized payloads, engine.py:1902-1923); when it does not, the boundary
-/// skips carry-over and starts a short compression cooldown so the new session
-/// does not cascade straight back into compression while pressure is still
-/// unrelieved.
+/// When the host's `old_session_id` matches the bound session, TraceDecay
+/// appends a lifecycle boundary link and leaves message, summary, and payload
+/// ownership unchanged. A mismatched boundary starts a short compression
+/// cooldown so the new session does not cascade straight back into compression
+/// while pressure is still unrelieved.
 pub(crate) async fn record_session_boundary(
     conn: &Connection,
     request: LcmSessionBoundaryRequest,
@@ -133,7 +132,7 @@ pub(crate) async fn record_session_boundary(
             Ok(session_boundary_response(false, "not_compression_boundary"))
         }
         compression_decision::BoundaryTransitionDecision::CarryOver { old_session_id } => {
-            carry_over_session_boundary(conn, &request, &old_session_id).await
+            link_session_boundary(conn, &request, &old_session_id).await
         }
         compression_decision::BoundaryTransitionDecision::StartCooldown { boundary_skip_at } => {
             conn.execute(
@@ -160,47 +159,27 @@ pub(crate) async fn record_session_boundary(
     }
 }
 
-/// Carries all LCM data forward across a matching-bound compression boundary,
-/// mirroring the hermes-lcm happy path: finalize the old session, then
-/// transactionally reassign raw messages, DAG nodes, and externalized payload
-/// ownership to the new session id and rebind lifecycle state to it.
-async fn carry_over_session_boundary(
+/// Records an immutable boundary link across a matching-bound compression
+/// transition. Historical messages, summary nodes, payloads, and source
+/// lifecycle rows retain their original owner.
+async fn link_session_boundary(
     conn: &Connection,
     request: &LcmSessionBoundaryRequest,
     old_session_id: &str,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
-    carry_over_in_transaction(conn, request, old_session_id).await
+    link_in_transaction(conn, request, old_session_id).await
 }
 
-async fn carry_over_in_transaction(
+async fn link_in_transaction(
     conn: &Connection,
     request: &LcmSessionBoundaryRequest,
     old_session_id: &str,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
     ensure_session(conn, &request.provider, &request.session_id).await?;
-    let mut target_rows = conn
-        .query(
-            "SELECT COUNT(*)
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND session_id = ?2",
-            params![request.provider.as_str(), request.session_id.as_str()],
-        )
-        .await?;
-    let target_row = target_rows
-        .next()
-        .await?
-        .ok_or_else(|| LcmError::Db("carry-over guard query returned no rows".to_string()))?;
-    let target_message_count: i64 = target_row.get(0)?;
-    if target_message_count > 0 {
-        return Err(LcmError::Db(format!(
-            "compression boundary carry-over requires an empty target session; session {} already has {} raw message(s)",
-            request.session_id, target_message_count
-        )));
-    }
     let old_state =
         lifecycle_state_or_default(conn, &request.provider, old_session_id, old_session_id).await?;
-    // Mirrors hermes-lcm: the carried frontier is the strongest durable
-    // marker recorded for the source session.
+    // The link carries only frozen lifecycle coordinates. Authority rows keep
+    // their source-session identity.
     let carried_frontier = [
         old_state.current_frontier_store_id,
         old_state.last_finalized_frontier_store_id,
@@ -208,18 +187,6 @@ async fn carry_over_in_transaction(
     .into_iter()
     .flatten()
     .max();
-
-    raw::reassign_session_messages(conn, &request.provider, old_session_id, &request.session_id)
-        .await?;
-    dag::reassign_session_nodes(conn, &request.provider, old_session_id, &request.session_id)
-        .await?;
-    payload::reassign_session_payloads(
-        conn,
-        &request.provider,
-        old_session_id,
-        &request.session_id,
-    )
-    .await?;
 
     let update = LcmLifecycleUpdate {
         provider: request.provider.clone(),
@@ -236,13 +203,6 @@ async fn carry_over_in_transaction(
         &update.provider,
         &update.conversation_id,
         &update.maintenance_debt,
-    )
-    .await?;
-    // Every LCM call keys conversation_id = session_id in this port, so the
-    // old conversation row is fully superseded by the rebound one above.
-    conn.execute(
-        "DELETE FROM lcm_lifecycle_state WHERE provider = ?1 AND conversation_id = ?2",
-        params![request.provider.as_str(), old_session_id],
     )
     .await?;
 

@@ -55,7 +55,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     seed_session_evidence(&cg).await;
     let _global_db = isolate_global_db(&cg);
     let config = scheduler_config(Some(3600), None);
-    let backend = CombinedJsonBackend::new(combined_output_fixture());
+    let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
 
     let dispatch =
         run_combined_review_with_backend(&cg, &config, &backend, combined_options(&profile_root))
@@ -78,7 +78,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
         reflector.prompt_version.as_deref(),
         Some("combined_review:v1")
     );
-    assert_eq!(reflector.accepted_count, 1);
+    assert_eq!(reflector.accepted_count, 0);
 
     let skill = &run.skill_writer.ledger_record;
     assert_eq!(skill.run_id, "combined-run-1_skills");
@@ -87,7 +87,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     assert_eq!(skill.trigger, AutomationTrigger::Scheduler);
     assert_eq!(skill.status, AutomationRunStatus::Succeeded);
     assert_eq!(skill.prompt_version.as_deref(), Some("combined_review:v1"));
-    assert_eq!(skill.accepted_count, 1);
+    assert_eq!(skill.accepted_count, 0);
 
     // Both halves share the combined request's input hash and correlate
     // through report_ref.combined_run_id.
@@ -99,7 +99,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
         assert_eq!(report_ref["combined_task_key"], json!("combined_review"));
     }
 
-    // Session facts are self-managed by default; managed skills still stage drafts.
+    // Empty combined proposals can commit both ledgers without cross-authority writes.
     let memory = tracedecay::application::memory::MemoryApplication::new(
         project_memory_owner(&cg),
         tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
@@ -122,12 +122,12 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     )
     .await
     .unwrap();
-    assert_eq!(proposals.len(), 1);
-    assert_eq!(proposals[0].run_id, "combined-run-1_facts");
-    let draft = load_managed_skill(&profile_root, "automation-run-review")
-        .await
-        .unwrap();
-    assert_eq!(draft.metadata.state, ManagedSkillState::PendingApproval);
+    assert!(proposals.is_empty());
+    assert!(
+        !profile_root
+            .join("agent_managed/skills/automation-run-review")
+            .exists()
+    );
 
     // Per-task last-run bookkeeping sees the combined run: both tasks are
     // now inside their scheduler interval.
@@ -144,6 +144,47 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
             "{task:?} must count the combined run as its last scheduler run"
         );
     }
+}
+
+#[tokio::test]
+async fn combined_review_fails_closed_before_cross_authority_proposal_writes() {
+    let _env_lock = ENV_LOCK.lock().await;
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    let config = scheduler_config(Some(3600), None);
+    let backend = CombinedJsonBackend::new(combined_output_fixture());
+
+    let dispatch =
+        run_combined_review_with_backend(&cg, &config, &backend, combined_options(&profile_root))
+            .await
+            .unwrap();
+
+    let CombinedReviewDispatch::RecordedFailure { error, .. } = dispatch else {
+        panic!("non-atomic combined proposals must fail closed");
+    };
+    assert!(error.to_string().contains("atomic apply authority"));
+    let memory = tracedecay::application::memory::MemoryApplication::new(
+        project_memory_owner(&cg),
+        tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
+    )
+    .unwrap();
+    assert!(
+        list_fact_proposals(&memory, &cg.store_layout().dashboard_root, None, 10,)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!profile_root.join("agent_managed").exists());
+    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 2);
+    assert!(
+        records
+            .iter()
+            .all(|record| record.status == AutomationRunStatus::Failed)
+    );
 }
 
 #[tokio::test]
@@ -258,6 +299,81 @@ async fn combined_review_falls_back_when_evidence_is_unavailable() {
         panic!("expected combined dispatch to fall back, got {dispatch:?}");
     };
     assert_eq!(reason, "session_reflector_evidence_unavailable");
+}
+
+#[tokio::test]
+async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
+    for reason in [
+        "session_evidence_denied",
+        "session_evidence_stale",
+        "session_evidence_partial",
+        "session_evidence_unavailable",
+        "session_evidence_budget_exhausted",
+        "session_evidence_cancelled",
+    ] {
+        let temp = tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        let cg = init_project(temp.path()).await;
+        let config = scheduler_config(Some(3600), None);
+        let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
+        let retrieval = RejectedAutomationSessionRetrieval::new(reason);
+
+        let dispatch =
+            tracedecay::automation::runner::run_combined_review_with_backend_and_retrieval(
+                &cg,
+                &config,
+                &backend,
+                &retrieval,
+                combined_options(&profile_root),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            dispatch,
+            CombinedReviewDispatch::NotCombined {
+                reason: "session_reflector_evidence_unavailable"
+            }
+        ));
+        assert_eq!(backend.calls(), 0);
+        assert!(
+            load_run_records(&cg.store_layout().dashboard_root, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!profile_root.exists());
+    }
+
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("empty-profile");
+    let cg = init_project(temp.path()).await;
+    let config = scheduler_config(Some(3600), None);
+    let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
+    let retrieval = EmptyAutomationSessionRetrieval::new();
+    let dispatch = tracedecay::automation::runner::run_combined_review_with_backend_and_retrieval(
+        &cg,
+        &config,
+        &backend,
+        &retrieval,
+        combined_options(&profile_root),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        dispatch,
+        CombinedReviewDispatch::NotCombined {
+            reason: "session_reflector_evidence_unavailable"
+        }
+    ));
+    assert_eq!(backend.calls(), 0);
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!profile_root.exists());
 }
 
 #[tokio::test]

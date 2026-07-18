@@ -8,9 +8,11 @@ pub mod memory;
 pub mod observation;
 pub mod repository;
 pub mod research;
+pub mod session;
 
 pub use integration::*;
 pub use memory::*;
 pub use observation::*;
 pub use repository::*;
 pub use research::*;
+pub use session::*;

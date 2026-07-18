@@ -27,7 +27,7 @@ mod queries;
 mod scan;
 
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
-pub(crate) use lifecycle::git_remote_url;
+pub(crate) use lifecycle::{git_remote_url, is_fts_only_corruption};
 
 #[doc(hidden)]
 pub use locking::{SyncLockGuard, try_acquire_sync_lock, try_acquire_sync_lock_at};

@@ -2,8 +2,8 @@ use crate::support::*;
 use tracedecay::application::memory::{MemoryApplication, MemoryOperationContext};
 use tracedecay::automation::config::effective_user_automation_config;
 use tracedecay::automation::runner::{
-    run_user_memory_curator_with_backend, run_user_session_reflector_with_backend,
-    run_user_skill_writer_with_backend, user_automation_root,
+    run_user_memory_curator_with_backend, run_user_session_reflector_with_backend_and_retrieval,
+    run_user_skill_writer_with_backend_and_retrieval, user_automation_root,
 };
 use tracedecay::db::Database;
 use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
@@ -79,11 +79,18 @@ async fn projectless_reflection_reads_user_sessions_and_writes_user_memory() {
         effective_user_automation_config(profile_root, &AutomationConfig::default(), false)
             .await
             .unwrap();
+    let retrieval = StaticAutomationSessionRetrieval::message_for_provider(
+        "hermes",
+        "user-session-1",
+        "user-message-1",
+        "Remember this preference: always keep general conversations in user memory.",
+    );
 
-    let run = run_user_session_reflector_with_backend(
+    let run = run_user_session_reflector_with_backend_and_retrieval(
         profile_root,
         &config,
         &backend,
+        &retrieval,
         SessionReflectorAutomationOptions {
             provider: "hermes".to_string(),
             query: "user memory".to_string(),
@@ -127,11 +134,18 @@ async fn projectless_skill_writer_reads_user_sessions_and_uses_user_ledger() {
     let profile_root = temp.path();
     seed_user_session(profile_root).await;
     let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let retrieval = StaticAutomationSessionRetrieval::message_for_provider(
+        "hermes",
+        "user-session-1",
+        "user-message-1",
+        "Review recurring automation workflows.",
+    );
 
-    let run = run_user_skill_writer_with_backend(
+    let run = run_user_skill_writer_with_backend_and_retrieval(
         profile_root,
         &enabled_user_config(),
         &backend,
+        &retrieval,
         SkillWriterAutomationOptions {
             provider: "hermes".to_string(),
             query: "automation workflows".to_string(),
@@ -148,6 +162,87 @@ async fn projectless_skill_writer_reads_user_sessions_and_uses_user_ledger() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].task, AgentTaskKind::SkillWriter);
+}
+
+#[tokio::test]
+async fn projectless_reflector_and_skill_writer_reject_terminal_evidence_without_writes() {
+    for reason in [
+        "session_evidence_denied",
+        "session_evidence_stale",
+        "session_evidence_partial",
+        "session_evidence_unavailable",
+        "session_evidence_budget_exhausted",
+        "session_evidence_cancelled",
+    ] {
+        let temp = tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        let retrieval = RejectedAutomationSessionRetrieval::new(reason);
+        let reflector_backend = SessionJsonBackend::new(json!({"facts": []}));
+        let skill_backend = SkillJsonBackend::new(json!({"skills": []}));
+        let config = enabled_user_config();
+
+        let reflector = run_user_session_reflector_with_backend_and_retrieval(
+            &profile_root,
+            &config,
+            &reflector_backend,
+            &retrieval,
+            SessionReflectorAutomationOptions::default(),
+        )
+        .await
+        .unwrap();
+        let skill = run_user_skill_writer_with_backend_and_retrieval(
+            &profile_root,
+            &config,
+            &skill_backend,
+            &retrieval,
+            SkillWriterAutomationOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reflector.ledger_record.error.as_deref(), Some(reason));
+        assert_eq!(skill.ledger_record.error.as_deref(), Some(reason));
+        assert_eq!(reflector_backend.calls(), 0);
+        assert_eq!(skill_backend.calls(), 0);
+        assert!(
+            !profile_root.exists(),
+            "{reason} must not create profile stores or ledgers"
+        );
+    }
+
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("empty-profile");
+    let retrieval = EmptyAutomationSessionRetrieval::new();
+    let reflector_backend = SessionJsonBackend::new(json!({"facts": []}));
+    let skill_backend = SkillJsonBackend::new(json!({"skills": []}));
+    let config = enabled_user_config();
+    let reflector = run_user_session_reflector_with_backend_and_retrieval(
+        &profile_root,
+        &config,
+        &reflector_backend,
+        &retrieval,
+        SessionReflectorAutomationOptions::default(),
+    )
+    .await
+    .unwrap();
+    let skill = run_user_skill_writer_with_backend_and_retrieval(
+        &profile_root,
+        &config,
+        &skill_backend,
+        &retrieval,
+        SkillWriterAutomationOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reflector.ledger_record.error.as_deref(),
+        Some("no_session_evidence")
+    );
+    assert_eq!(
+        skill.ledger_record.error.as_deref(),
+        Some("no_skill_writer_evidence")
+    );
+    assert!(!profile_root.exists());
 }
 
 #[tokio::test]

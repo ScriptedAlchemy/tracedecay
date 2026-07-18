@@ -5,7 +5,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::sessions::lcm::payload::{DeleteOpts, delete_external_payload};
-use tracedecay::sessions::lcm::{LCM_SCHEMA_VERSION, LcmError, LcmStorageKind};
+use tracedecay::sessions::lcm::types::LcmImmutableSummaryPublication;
+use tracedecay::sessions::lcm::{
+    LCM_SCHEMA_VERSION, LcmError, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
+};
 
 use crate::common::{
     isolated_lcm_db_path as isolated_db_path, lcm_payload_message as raw_message,
@@ -1471,4 +1474,328 @@ async fn json_key_media_payload_externalizes_key_span_without_whole_message_exte
         .await
         .expect("media key payload should expand");
     assert_eq!(expanded.content, media_key);
+}
+
+#[tokio::test]
+async fn summary_publication_binds_external_payload_manifest_and_sanitization_receipt() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tracedecay");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+    let body = externalized_tool_payload("manifest payload ", 'M');
+    let mut message = raw_message("cursor", "manifest-source", "session-1", "tool", &body);
+    message.kind = Some("tool_result".to_string());
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&message)
+        .await
+        .unwrap();
+    let raw = db
+        .lcm_load_raw_message("cursor", "manifest-source")
+        .await
+        .unwrap();
+    let payload_ref = raw.payload_ref.clone().expect("external payload ref");
+
+    db.lcm_insert_summary_node(LcmSummaryNodeDraft {
+        provider: "cursor".to_string(),
+        conversation_id: "session-1".to_string(),
+        session_id: "session-1".to_string(),
+        depth: 0,
+        summary_text: "payload manifest summary".to_string(),
+        source_refs: vec![LcmSourceRef::RawMessage {
+            store_id: raw.store_id,
+        }],
+        source_token_count: 10,
+        summary_token_count: 4,
+        source_time_start: raw.timestamp,
+        source_time_end: raw.timestamp,
+        expand_hint: None,
+        metadata_json: Some(r#"{"route":"payload-test"}"#.to_string()),
+    })
+    .await
+    .unwrap();
+
+    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let conn = raw_db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT manifest.payload_ref, manifest.session_id,
+                    manifest.payload_digest, manifest.manifest_json,
+                    receipt.receipt_id, manifest.created_at, external.created_at
+             FROM session_external_payload_manifests manifest
+             JOIN sanitization_receipts receipt
+               ON receipt.receipt_id = manifest.receipt_id
+             JOIN lcm_external_payloads external
+               ON external.payload_ref = manifest.payload_ref
+             WHERE manifest.payload_ref = ?1",
+            libsql::params![payload_ref.as_str()],
+        )
+        .await
+        .unwrap();
+    let row = rows
+        .next()
+        .await
+        .unwrap()
+        .expect("canonical payload manifest");
+    assert_eq!(row.get::<String>(0).unwrap(), payload_ref);
+    assert_eq!(row.get::<String>(1).unwrap(), "session-1");
+    assert_eq!(row.get::<String>(2).unwrap(), raw.content_hash);
+    let manifest: Value = serde_json::from_str(&row.get::<String>(3).unwrap()).unwrap();
+    assert_eq!(manifest["provider"], "cursor");
+    assert_eq!(manifest["session_id"], "session-1");
+    assert!(!row.get::<String>(4).unwrap().is_empty());
+    assert_eq!(row.get::<i64>(5).unwrap(), row.get::<i64>(6).unwrap());
+}
+
+#[tokio::test]
+async fn external_payload_manifest_is_reused_by_successor_summary() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tracedecay");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-manifest-conflict"))
+            .await
+    );
+    let body = externalized_tool_payload("shared manifest payload ", 'S');
+    let mut message = raw_message(
+        "cursor",
+        "shared-manifest-source",
+        "session-manifest-conflict",
+        "tool",
+        &body,
+    );
+    message.kind = Some("tool_result".to_string());
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&message)
+        .await
+        .unwrap();
+    let raw = db
+        .lcm_load_raw_message("cursor", "shared-manifest-source")
+        .await
+        .unwrap();
+    let first_draft = LcmSummaryNodeDraft {
+        provider: "cursor".to_string(),
+        conversation_id: "session-manifest-conflict".to_string(),
+        session_id: "session-manifest-conflict".to_string(),
+        depth: 0,
+        summary_text: "first payload binding".to_string(),
+        source_refs: vec![LcmSourceRef::RawMessage {
+            store_id: raw.store_id,
+        }],
+        source_token_count: 10,
+        summary_token_count: 4,
+        source_time_start: raw.timestamp,
+        source_time_end: raw.timestamp,
+        expand_hint: None,
+        metadata_json: Some(r#"{"route":"payload-conflict"}"#.to_string()),
+    };
+    let first_publication = LcmImmutableSummaryPublication {
+        summary_id: "summary.payload.binding.v1".to_string(),
+        predecessor_summary_id: None,
+        draft: first_draft.clone(),
+    };
+    let first = db
+        .lcm_publish_immutable_summary(first_publication)
+        .await
+        .unwrap();
+    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let conn = raw_db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT receipt_id FROM session_external_payload_manifests
+             WHERE payload_ref = ?1",
+            libsql::params![raw.payload_ref.as_deref().unwrap()],
+        )
+        .await
+        .unwrap();
+    let first_receipt_id: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    drop(rows);
+    drop(conn);
+    drop(raw_db);
+
+    let mut second_draft = first_draft;
+    second_draft.summary_text = "second payload binding".to_string();
+    let successor_publication = LcmImmutableSummaryPublication {
+        summary_id: "summary.payload.binding.v2".to_string(),
+        predecessor_summary_id: Some(first.summary.node_id),
+        draft: second_draft,
+    };
+    db.lcm_publish_immutable_summary(successor_publication.clone())
+        .await
+        .expect("a successor may reuse payload-global authority");
+    db.lcm_publish_immutable_summary(successor_publication)
+        .await
+        .expect("the successor replay must reuse the same payload-global authority");
+
+    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let conn = raw_db.connect().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*), MIN(receipt_id), MAX(receipt_id)
+             FROM session_external_payload_manifests
+             WHERE payload_ref = ?1",
+            libsql::params![raw.payload_ref.as_deref().unwrap()],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 1);
+    assert_eq!(row.get::<String>(1).unwrap(), first_receipt_id);
+    assert_eq!(row.get::<String>(2).unwrap(), first_receipt_id);
+}
+
+#[tokio::test]
+async fn replay_and_successor_reuse_reject_mutated_payload_global_authority() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let storage_root = tmp.path().join(".tracedecay");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-manifest-replay"))
+            .await
+    );
+    let body = externalized_tool_payload("replay manifest payload ", 'R');
+    let mut message = raw_message(
+        "cursor",
+        "replay-manifest-source",
+        "session-manifest-replay",
+        "tool",
+        &body,
+    );
+    message.kind = Some("tool_result".to_string());
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&message)
+        .await
+        .unwrap();
+    let raw = db
+        .lcm_load_raw_message("cursor", "replay-manifest-source")
+        .await
+        .unwrap();
+    let publication = LcmImmutableSummaryPublication {
+        summary_id: "summary.payload.replay".to_string(),
+        predecessor_summary_id: None,
+        draft: LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "session-manifest-replay".to_string(),
+            session_id: "session-manifest-replay".to_string(),
+            depth: 0,
+            summary_text: "payload replay".to_string(),
+            source_refs: vec![LcmSourceRef::RawMessage {
+                store_id: raw.store_id,
+            }],
+            source_token_count: 10,
+            summary_token_count: 4,
+            source_time_start: raw.timestamp,
+            source_time_end: raw.timestamp,
+            expand_hint: None,
+            metadata_json: Some(r#"{"route":"payload-replay"}"#.to_string()),
+        },
+    };
+    let first = db
+        .lcm_publish_immutable_summary(publication.clone())
+        .await
+        .unwrap();
+    let mut successor_draft = publication.draft.clone();
+    successor_draft.summary_text = "payload replay successor".to_string();
+    let successor_publication = LcmImmutableSummaryPublication {
+        summary_id: "summary.payload.replay.successor".to_string(),
+        predecessor_summary_id: Some(first.summary.node_id),
+        draft: successor_draft,
+    };
+    let successor = db
+        .lcm_publish_immutable_summary(successor_publication)
+        .await
+        .unwrap();
+    let mut incompatible_reuse_draft = publication.draft.clone();
+    incompatible_reuse_draft.summary_text = "payload replay incompatible reuse".to_string();
+    let incompatible_reuse_publication = LcmImmutableSummaryPublication {
+        summary_id: "summary.payload.replay.incompatible".to_string(),
+        predecessor_summary_id: Some(successor.summary.node_id.clone()),
+        draft: incompatible_reuse_draft,
+    };
+
+    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let conn = raw_db.connect().unwrap();
+    conn.execute_batch("DROP TRIGGER session_external_payload_manifests_immutable_update_v1;")
+        .await
+        .unwrap();
+    let payload_ref = raw.payload_ref.as_deref().unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT session_id, payload_digest, manifest_json, receipt_id, created_at
+             FROM session_external_payload_manifests WHERE payload_ref = ?1",
+            libsql::params![payload_ref],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let original_session_id: String = row.get(0).unwrap();
+    let original_digest: String = row.get(1).unwrap();
+    let original_manifest: String = row.get(2).unwrap();
+    let original_receipt_id: String = row.get(3).unwrap();
+    let original_created_at: i64 = row.get(4).unwrap();
+    drop(rows);
+    let mut rows = conn
+        .query(
+            "SELECT json_extract(publication_json, '$.receipt_id')
+             FROM session_summary_nodes WHERE summary_id = ?1",
+            libsql::params![successor.summary.node_id.as_str()],
+        )
+        .await
+        .unwrap();
+    let alternate_receipt_id: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    drop(rows);
+
+    for mutation in [
+        "session_id = 'different-session'".to_string(),
+        "payload_digest = payload_digest || '-mutated'".to_string(),
+        "manifest_json = json_set(manifest_json, '$.kind', 'mutated')".to_string(),
+        format!("receipt_id = '{alternate_receipt_id}'"),
+        "created_at = created_at + 1".to_string(),
+    ] {
+        conn.execute(
+            &format!(
+                "UPDATE session_external_payload_manifests SET {mutation} WHERE payload_ref = ?1"
+            ),
+            libsql::params![payload_ref],
+        )
+        .await
+        .unwrap();
+        let error = db
+            .lcm_publish_immutable_summary(publication.clone())
+            .await
+            .expect_err("exact replay must verify every payload-global immutable field");
+        assert!(
+            matches!(error, LcmError::ImmutablePayloadConflict { .. }),
+            "unexpected replay error after mutating {mutation}: {error:?}"
+        );
+        let error = db
+            .lcm_publish_immutable_summary(incompatible_reuse_publication.clone())
+            .await
+            .expect_err("successor reuse must reject incompatible payload-global authority");
+        assert!(
+            matches!(error, LcmError::ImmutablePayloadConflict { .. }),
+            "unexpected successor error after mutating {mutation}: {error:?}"
+        );
+        conn.execute(
+            "UPDATE session_external_payload_manifests
+             SET session_id = ?2, payload_digest = ?3, manifest_json = ?4,
+                 receipt_id = ?5, created_at = ?6
+             WHERE payload_ref = ?1",
+            libsql::params![
+                payload_ref,
+                original_session_id.as_str(),
+                original_digest.as_str(),
+                original_manifest.as_str(),
+                original_receipt_id.as_str(),
+                original_created_at,
+            ],
+        )
+        .await
+        .unwrap();
+    }
 }

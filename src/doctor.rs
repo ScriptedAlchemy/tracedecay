@@ -14,6 +14,7 @@ use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 pub mod heal;
 pub(crate) mod registry_drift;
+mod temporal_health;
 
 /// Runs a comprehensive health check of the tracedecay installation.
 pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()> {
@@ -51,6 +52,7 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
             false
         }
     };
+    check_session_temporal_health(&mut dc, daemon_status.as_ref().ok());
 
     check_global_db(&mut dc);
     check_stale_stores(&mut dc, daemon_status.as_ref().ok());
@@ -261,8 +263,7 @@ async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<ser
         false,
     )?;
     let result =
-        crate::daemon::call_default_tool(&handshake, "tracedecay_runtime", daemon_runtime_args())
-            .await?;
+        crate::daemon::call_default_doctor_runtime(&handshake, daemon_runtime_args()).await?;
     daemon_runtime_status(&result)
 }
 
@@ -296,7 +297,11 @@ fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<se
         storage.insert("daemon_version".to_string(), version);
     }
     let mut status = serde_json::json!({ "storage_health": storage });
-    for key in ["cursor_session_ingest", "cursor_session_placeholder_paths"] {
+    for key in [
+        "cursor_session_ingest",
+        "cursor_session_placeholder_paths",
+        "session_temporal_health",
+    ] {
         if let Some(value) = runtime.get(key).cloned() {
             status[key] = value;
         }
@@ -336,11 +341,16 @@ fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
                 .get("quick_check_error")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("no problem detail reported");
+            let recovery = if crate::tracedecay::is_fts_only_corruption(detail) {
+                "derived FTS recovery is required"
+            } else {
+                "offline recovery is required"
+            };
             dc.fail(&format!(
-                "Database integrity check failed ({detail}); offline recovery is required"
+                "Database integrity check failed ({detail}); {recovery}"
             ));
             if let Some(path) = db_path.as_deref() {
-                print_database_recovery_guidance(dc, path);
+                print_database_recovery_guidance_for_problem(dc, path, detail);
             }
             false
         }
@@ -365,23 +375,19 @@ fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
             true
         }
         Some(false) => {
-            let detail = storage
-                .get("authority_audit_error")
+            let reason = storage
+                .get("authority_audit_reason")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or("daemon reported an authority audit failure without detail");
-            dc.fail(&format!(
-                "Observation database authority audit failed: {detail}"
-            ));
+                .unwrap_or("authority_invariant_failed");
+            dc.fail(authority_audit_failure_message(reason));
             false
         }
         None => {
-            let detail = storage
-                .get("authority_audit_error")
+            let reason = storage
+                .get("authority_audit_reason")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or("daemon did not return an authority audit result");
-            dc.fail(&format!(
-                "Observation database authority diagnostics unavailable: {detail}"
-            ));
+                .unwrap_or("authority_audit_unavailable");
+            dc.fail(authority_audit_unavailable_message(reason));
             false
         }
     };
@@ -397,6 +403,43 @@ fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
         dc.warn(&format!("Graph dirty marker present (state={state})"));
     }
     integrity_healthy && authority_healthy
+}
+
+fn authority_audit_failure_message(reason: &str) -> &'static str {
+    match reason {
+        "authority_invariant_failed" => {
+            "Observation database authority audit failed [authority_invariant_failed]"
+        }
+        _ => "Observation database authority audit failed [authority_audit_failed]",
+    }
+}
+
+fn authority_audit_unavailable_message(reason: &str) -> &'static str {
+    match reason {
+        "authority_store_missing" => {
+            "Observation database authority diagnostics unavailable [authority_store_missing]"
+        }
+        "authority_store_unavailable" => {
+            "Observation database authority diagnostics unavailable [authority_store_unavailable]"
+        }
+        "authority_audit_not_run" => {
+            "Observation database authority diagnostics unavailable [authority_audit_not_run]"
+        }
+        _ => "Observation database authority diagnostics unavailable [authority_audit_unavailable]",
+    }
+}
+
+fn check_session_temporal_health(dc: &mut DoctorCounters, status: Option<&serde_json::Value>) {
+    eprintln!("\n\x1b[1mSession temporal health\x1b[0m");
+    let diagnosis =
+        temporal_health::diagnose(status.and_then(|status| status.get("session_temporal_health")));
+    for line in diagnosis.lines() {
+        match line.level {
+            temporal_health::TemporalHealthLineLevel::Pass => dc.pass(&line.text),
+            temporal_health::TemporalHealthLineLevel::Warn => dc.warn(&line.text),
+            temporal_health::TemporalHealthLineLevel::Fail => dc.fail(&line.text),
+        }
+    }
 }
 
 fn report_daemon_diagnostics_unavailable(
@@ -458,8 +501,32 @@ fn database_recovery_guidance(db_path: &Path) -> String {
     )
 }
 
+fn database_recovery_guidance_for_problem(db_path: &Path, problem: &str) -> String {
+    if !crate::tracedecay::is_fts_only_corruption(problem) {
+        return database_recovery_guidance(db_path);
+    }
+
+    format!(
+        "The failure is confined to the derived `nodes_fts` index at {}; the authoritative `nodes` table and graph-resident facts must be preserved.\n\
+         Do not run `tracedecay init`, `tracedecay sync --force`, or `tracedecay wipe`, and do not delete the database.\n\
+         Once no sync is active, restart the TraceDecay daemon. Its sole-writer open path will rebuild it from the authoritative `nodes` table before serving requests.\n\
+         Then rerun `tracedecay tool runtime` and `tracedecay doctor`; if quick_check still fails, preserve the DB/WAL/SHM/dirty recovery set and follow the offline recovery guidance.",
+        db_path.display(),
+    )
+}
+
 fn print_database_recovery_guidance(dc: &DoctorCounters, db_path: &Path) {
     for line in database_recovery_guidance(db_path).lines() {
+        dc.info(line);
+    }
+}
+
+fn print_database_recovery_guidance_for_problem(
+    dc: &DoctorCounters,
+    db_path: &Path,
+    problem: &str,
+) {
+    for line in database_recovery_guidance_for_problem(db_path, problem).lines() {
         dc.info(line);
     }
 }

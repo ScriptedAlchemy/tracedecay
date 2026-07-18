@@ -225,18 +225,20 @@ async fn codex_compact(cg: &TraceDecay, args: &Value, db: &GlobalDb) -> Result<V
         &config,
     )
     .map_err(|error| config_error(format!("Codex summary failed: {error}")))?;
-    db.replace_codex_compaction_summary(
-        &pending.node_id,
-        &summary.text,
-        "codex_app_server",
-        summary.model.as_deref().or(config.model.as_deref()),
-    )
-    .await
-    .map_err(|error| config_error(format!("store Codex compaction summary failed: {error}")))?;
+    let published = db
+        .publish_codex_compaction_summary_successor(
+            &pending.node_id,
+            &summary.text,
+            "codex_app_server",
+            summary.model.as_deref().or(config.model.as_deref()),
+        )
+        .await
+        .map_err(|error| config_error(format!("store Codex compaction summary failed: {error}")))?;
     Ok(json!({
         "action": "codex_compact",
         "status": "completed",
-        "node_id": pending.node_id,
+        "node_id": published.node_id,
+        "predecessor_node_id": pending.node_id,
     }))
 }
 

@@ -5,7 +5,7 @@ use tracedecay::store::{GlobalDbObservationStore, GlobalDbSessionTemporalStore};
 use tracedecay_domain::{
     AnchorProvenanceRelationV2, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
-    CopyProofV1, DurableObservationV1, MessageOccurrenceIdV1, MessageOccurrenceRecordV1,
+    CopyProofV1, DurableObservationV1, MessageId, MessageOccurrenceIdV1, MessageOccurrenceRecordV1,
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId,
@@ -16,12 +16,12 @@ use tracedecay_domain::{
     TemporalValidityV1, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    SessionFrozenWatermarksV1, SessionGenerationActivationRequestV1,
-    SessionGenerationRebuildDispositionV1, SessionGenerationRebuildRequestV1, SessionStoreError,
-    SessionTemporalCapabilitiesV1, SessionTemporalCapabilityV1,
-    SessionTemporalProjectionBatchDispositionV1, SessionTemporalProjectionBatchV1,
-    SessionTemporalProjectionStore, SessionTemporalSnapshotV1,
+    AnchoredObservationWrite, MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS,
+    ObservationProjectionStore, ObservationStore, ObservationWrite, SessionFrozenWatermarksV1,
+    SessionGenerationActivationRequestV1, SessionGenerationRebuildDispositionV1,
+    SessionGenerationRebuildRequestV1, SessionStoreError, SessionTemporalCapabilitiesV1,
+    SessionTemporalCapabilityV1, SessionTemporalProjectionBatchDispositionV1,
+    SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore, SessionTemporalSnapshotV1,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
@@ -75,6 +75,22 @@ fn receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
 }
 
 fn observation(session_id: &SessionId, ordinal: u64, text: &str) -> DurableObservationV1 {
+    observation_with_message_ids(
+        session_id,
+        ordinal,
+        text,
+        &format!("message.temporal.{ordinal}"),
+        (ordinal > 0).then(|| format!("message.temporal.{}", ordinal - 1)),
+    )
+}
+
+fn observation_with_message_ids(
+    session_id: &SessionId,
+    ordinal: u64,
+    text: &str,
+    message_id: &str,
+    parent_message_id: Option<String>,
+) -> DurableObservationV1 {
     let provider = ProviderId::new(format!("temporal-test-{ordinal}")).unwrap();
     let source =
         ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone()).unwrap();
@@ -83,12 +99,11 @@ fn observation(session_id: &SessionId, ordinal: u64, text: &str) -> DurableObser
     let mut relations = CanonicalObservationRelationsV1::new(session_id.clone())
         .with_thread_id(ObservationId::new("thread.temporal").unwrap())
         .with_turn_id(ObservationId::new("turn.temporal").unwrap())
-        .with_message_id(ObservationId::new(format!("message.temporal.{ordinal}")).unwrap())
+        .with_message_id(ObservationId::new(message_id).unwrap())
         .with_agent_id(ObservationId::new("agent.temporal").unwrap());
-    if ordinal > 0 {
-        relations = relations.with_parent_message_id(
-            ObservationId::new(format!("message.temporal.{}", ordinal - 1)).unwrap(),
-        );
+    if let Some(parent_message_id) = parent_message_id {
+        relations =
+            relations.with_parent_message_id(ObservationId::new(parent_message_id).unwrap());
     }
     let envelope = CanonicalObservationEnvelopeV1::new(
         provider,
@@ -190,6 +205,44 @@ async fn persist_observation(
     observation
 }
 
+async fn persist_custom_observation(
+    db: &GlobalDb,
+    observation: DurableObservationV1,
+) -> DurableObservationV1 {
+    let store = GlobalDbObservationStore::new(db);
+    store
+        .persist_observation(anchored_write(observation.clone()))
+        .await
+        .unwrap();
+    store
+        .project_observation(observation.observation_id())
+        .await
+        .unwrap();
+    observation
+}
+
+async fn persist_custom_observation_with_lineage(
+    db: &GlobalDb,
+    observation: DurableObservationV1,
+    relation: AnchorProvenanceRelationV2,
+    object_anchor_id: RetrievalAnchorId,
+) -> DurableObservationV1 {
+    let store = GlobalDbObservationStore::new(db);
+    store
+        .persist_observation(anchored_write_with_lineage(
+            observation.clone(),
+            Some((relation, object_anchor_id)),
+            None,
+        ))
+        .await
+        .unwrap();
+    store
+        .project_observation(observation.observation_id())
+        .await
+        .unwrap();
+    observation
+}
+
 async fn persist_observation_with_lineage(
     db: &GlobalDb,
     session_id: &SessionId,
@@ -258,6 +311,16 @@ fn occurrence(
     .unwrap()
 }
 
+fn occurrence_with_message_id(
+    session_id: &SessionId,
+    observation: &DurableObservationV1,
+    message_id: &str,
+) -> MessageOccurrenceRecordV1 {
+    let mut occurrence = occurrence(session_id, observation);
+    occurrence.message_id = Some(MessageId::new(message_id).unwrap());
+    occurrence
+}
+
 fn copy(
     target: &MessageOccurrenceRecordV1,
     source: &MessageOccurrenceRecordV1,
@@ -272,6 +335,34 @@ fn copy(
                 source.projection_output_ordinal.value()
             ))
             .unwrap(),
+        },
+    }
+}
+
+fn parent_message_copy(
+    target: &MessageOccurrenceRecordV1,
+    source: &MessageOccurrenceRecordV1,
+) -> tracedecay_domain::LogicalCopyRecordV1 {
+    tracedecay_domain::LogicalCopyRecordV1 {
+        occurrence_id: target.occurrence_id.clone(),
+        copied_from_occurrence_id: source.occurrence_id.clone(),
+        proof: CopyProofV1::ParentMessageLinkage {
+            source_occurrence_id: source.occurrence_id.clone(),
+            parent_message_id: source.message_id.clone().expect("source message id"),
+        },
+    }
+}
+
+fn explicit_anchor_copy(
+    target: &MessageOccurrenceRecordV1,
+    source: &MessageOccurrenceRecordV1,
+) -> tracedecay_domain::LogicalCopyRecordV1 {
+    tracedecay_domain::LogicalCopyRecordV1 {
+        occurrence_id: target.occurrence_id.clone(),
+        copied_from_occurrence_id: source.occurrence_id.clone(),
+        proof: CopyProofV1::ExplicitAnchorAssertion {
+            source_occurrence_id: source.occurrence_id.clone(),
+            assertion_anchor_id: source.retrieval_anchor_id.clone(),
         },
     }
 }
@@ -1519,5 +1610,759 @@ async fn activation_is_pinned_to_the_snapshot_active_generation() {
         )
         .await,
         vec!["3:active"]
+    );
+}
+
+#[tokio::test]
+async fn parent_message_linkage_copy_proof_requires_exact_parent_id() {
+    let tmp = TempDir::new().unwrap();
+    let path = isolated_lcm_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let session_id = session("session.temporal.parent-linkage");
+    let first = persist_observation(&db, &session_id, 0, "parent").await;
+    let second = persist_observation(&db, &session_id, 1, "child").await;
+    let first = occurrence(&session_id, &first);
+    let second = occurrence(&session_id, &second);
+    let store = GlobalDbSessionTemporalStore::new(&db);
+    begin_candidate(&store, &session_id, 2, 2).await;
+    store
+        .persist_session_temporal_projection_batch(batch(
+            &session_id,
+            2,
+            2,
+            vec![first.clone(), second.clone()],
+            vec![],
+            vec![],
+        ))
+        .await
+        .unwrap();
+
+    let mut mismatched = parent_message_copy(&second, &first);
+    mismatched.proof = CopyProofV1::ParentMessageLinkage {
+        source_occurrence_id: first.occurrence_id.clone(),
+        parent_message_id: MessageId::new("message.temporal.forged").unwrap(),
+    };
+    assert!(
+        store
+            .persist_session_temporal_projection_batch(
+                batch(&session_id, 2, 2, vec![], vec![mismatched], vec![])
+                    .with_checkpoint(1, 2, 2)
+                    .unwrap(),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        scalar(&path, "SELECT COUNT(*) FROM session_logical_copy_edges").await,
+        0
+    );
+
+    store
+        .persist_session_temporal_projection_batch(
+            batch(
+                &session_id,
+                2,
+                2,
+                vec![],
+                vec![parent_message_copy(&second, &first)],
+                vec![],
+            )
+            .with_checkpoint(1, 2, 2)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(&path, "SELECT COUNT(*) FROM session_logical_copy_edges").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn begin_rejects_watermark_mismatch_and_stale_pin_after_activation() {
+    let tmp = TempDir::new().unwrap();
+    let path = isolated_lcm_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let session_id = session("session.temporal.begin-complete");
+    let store = GlobalDbSessionTemporalStore::new(&db);
+    let candidate = SessionGenerationRebuildRequestV1::new(
+        session_id.clone(),
+        generation(2),
+        snapshot(&session_id, 1, 1),
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .begin_session_generation_rebuild(candidate.clone())
+            .await
+            .unwrap()
+            .disposition(),
+        SessionGenerationRebuildDispositionV1::Started
+    );
+    assert!(matches!(
+        store
+            .begin_session_generation_rebuild(
+                SessionGenerationRebuildRequestV1::new(
+                    session_id.clone(),
+                    generation(2),
+                    snapshot(&session_id, 1, 0),
+                )
+                .unwrap(),
+            )
+            .await,
+        Err(SessionStoreError::FrozenWatermarkMismatch)
+    ));
+    assert_eq!(
+        store
+            .begin_session_generation_rebuild(candidate)
+            .await
+            .unwrap()
+            .disposition(),
+        SessionGenerationRebuildDispositionV1::Resumed
+    );
+    let observation = persist_observation(&db, &session_id, 0, "complete").await;
+    store
+        .persist_session_temporal_projection_batch(batch(
+            &session_id,
+            2,
+            1,
+            vec![occurrence(&session_id, &observation)],
+            vec![],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    store
+        .activate_session_temporal_generation(
+            SessionGenerationActivationRequestV1::new(
+                session_id.clone(),
+                generation(2),
+                snapshot(&session_id, 1, 1),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Frozen watermarks are immutable; Complete uses the rebuild-time snapshot
+    // while the live active pin has moved, so begin fails closed as stale.
+    assert!(matches!(
+        store
+            .begin_session_generation_rebuild(
+                SessionGenerationRebuildRequestV1::new(
+                    session_id.clone(),
+                    generation(2),
+                    snapshot(&session_id, 1, 1),
+                )
+                .unwrap(),
+            )
+            .await,
+        Err(SessionStoreError::StaleGeneration { .. })
+    ));
+    assert_eq!(
+        rows(
+            &path,
+            "SELECT generation || ':' || state || ':' ||
+                    json_extract(frozen_watermarks_json, '$.active_generation')
+             FROM session_temporal_generations
+             WHERE session_id = 'session.temporal.begin-complete'
+             ORDER BY generation"
+        )
+        .await,
+        vec!["1:superseded:1", "2:active:1"]
+    );
+}
+
+#[tokio::test]
+async fn activation_rejects_incomplete_frontier_and_receipt_digest_mismatch() {
+    let tmp = TempDir::new().unwrap();
+    let path = isolated_lcm_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let session_id = session("session.temporal.frontier-digest");
+    let first = persist_observation(&db, &session_id, 0, "one").await;
+    let second = persist_observation(&db, &session_id, 1, "two").await;
+    let first = occurrence(&session_id, &first);
+    let second = occurrence(&session_id, &second);
+    let store = GlobalDbSessionTemporalStore::new(&db);
+    begin_candidate(&store, &session_id, 2, 2).await;
+    store
+        .persist_session_temporal_projection_batch(batch(
+            &session_id,
+            2,
+            2,
+            vec![first.clone()],
+            vec![],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .activate_session_temporal_generation(
+                SessionGenerationActivationRequestV1::new(
+                    session_id.clone(),
+                    generation(2),
+                    snapshot(&session_id, 1, 2),
+                )
+                .unwrap(),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        rows(
+            &path,
+            "SELECT generation || ':' || state
+             FROM session_temporal_generations
+             WHERE state = 'active'"
+        )
+        .await,
+        vec!["1:active"]
+    );
+
+    begin_candidate(&store, &session_id, 3, 2).await;
+    store
+        .persist_session_temporal_projection_batch(batch(
+            &session_id,
+            3,
+            2,
+            vec![first.clone(), second.clone()],
+            vec![parent_message_copy(&second, &first)],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    let raw_db = libsql::Builder::new_local(&path).build().await.unwrap();
+    let conn = raw_db.connect().unwrap();
+    conn.execute(
+        "UPDATE session_occurrences
+         SET snippet_text = 'tampered'
+         WHERE session_id = ?1 AND generation = 3",
+        libsql::params![session_id.as_str()],
+    )
+    .await
+    .unwrap();
+    assert!(
+        store
+            .activate_session_temporal_generation(
+                SessionGenerationActivationRequestV1::new(
+                    session_id.clone(),
+                    generation(3),
+                    snapshot(&session_id, 1, 2),
+                )
+                .unwrap(),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        rows(
+            &path,
+            "SELECT generation || ':' || state
+             FROM session_temporal_generations
+             WHERE state = 'active'"
+        )
+        .await,
+        vec!["1:active"]
+    );
+}
+
+#[tokio::test]
+async fn mid_batch_abort_preserves_prior_receipt_frontier_for_resume() {
+    let tmp = TempDir::new().unwrap();
+    let path = isolated_lcm_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let session_id = session("session.temporal.mid-batch-abort");
+    let first = persist_observation(&db, &session_id, 0, "stable").await;
+    let second = persist_observation(&db, &session_id, 1, "pending").await;
+    let first = occurrence(&session_id, &first);
+    let second = occurrence(&session_id, &second);
+    let store = GlobalDbSessionTemporalStore::new(&db);
+    begin_candidate(&store, &session_id, 2, 2).await;
+    store
+        .persist_session_temporal_projection_batch(batch(
+            &session_id,
+            2,
+            2,
+            vec![first.clone(), second.clone()],
+            vec![],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM session_temporal_projection_receipts
+             WHERE session_id = 'session.temporal.mid-batch-abort'"
+        )
+        .await,
+        1
+    );
+
+    let raw_db = libsql::Builder::new_local(&path).build().await.unwrap();
+    let conn = raw_db.connect().unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER abort_copy_insert
+         BEFORE INSERT ON session_logical_copy_edges
+         BEGIN
+             SELECT RAISE(ABORT, 'forced mid-batch projector failure');
+         END;",
+    )
+    .await
+    .unwrap();
+    assert!(
+        store
+            .persist_session_temporal_projection_batch(
+                batch(
+                    &session_id,
+                    2,
+                    2,
+                    vec![],
+                    vec![parent_message_copy(&second, &first)],
+                    vec![],
+                )
+                .with_checkpoint(1, 2, 2)
+                .unwrap(),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        scalar(&path, "SELECT COUNT(*) FROM session_logical_copy_edges").await,
+        0
+    );
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM session_temporal_projection_receipts
+             WHERE session_id = 'session.temporal.mid-batch-abort'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        rows(
+            &path,
+            "SELECT generation || ':' || state
+             FROM session_temporal_generations
+             WHERE session_id = 'session.temporal.mid-batch-abort'
+             ORDER BY generation"
+        )
+        .await,
+        vec!["1:active", "2:building"]
+    );
+
+    conn.execute("DROP TRIGGER abort_copy_insert", ())
+        .await
+        .unwrap();
+    drop(conn);
+    drop(raw_db);
+
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbSessionTemporalStore::new(&db);
+    assert_eq!(
+        begin_candidate(&store, &session_id, 2, 2).await,
+        SessionGenerationRebuildDispositionV1::Resumed
+    );
+    assert_eq!(
+        store
+            .persist_session_temporal_projection_batch(
+                batch(
+                    &session_id,
+                    2,
+                    2,
+                    vec![],
+                    vec![parent_message_copy(&second, &first)],
+                    vec![],
+                )
+                .with_checkpoint(1, 2, 2)
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+            .disposition(),
+        SessionTemporalProjectionBatchDispositionV1::Applied
+    );
+    assert_eq!(
+        scalar(
+            &path,
+            "SELECT COUNT(*) FROM session_temporal_projection_receipts
+             WHERE session_id = 'session.temporal.mid-batch-abort'"
+        )
+        .await,
+        2
+    );
+}
+
+#[tokio::test]
+async fn interrupted_rebuild_resumes_building_then_activates_ready_to_active() {
+    let tmp = TempDir::new().unwrap();
+    let path = isolated_lcm_db_path(&tmp);
+    let session_id = session("session.temporal.interrupted-activate");
+    let request = SessionGenerationRebuildRequestV1::new(
+        session_id.clone(),
+        generation(2),
+        snapshot(&session_id, 1, 1),
+    )
+    .unwrap();
+    let observation = {
+        let db = open_lcm_db(&tmp).await;
+        let observation = persist_observation(&db, &session_id, 0, "resume-activate").await;
+        let store = GlobalDbSessionTemporalStore::new(&db);
+        assert_eq!(
+            store
+                .begin_session_generation_rebuild(request.clone())
+                .await
+                .unwrap()
+                .disposition(),
+            SessionGenerationRebuildDispositionV1::Started
+        );
+        store
+            .persist_session_temporal_projection_batch(batch(
+                &session_id,
+                2,
+                1,
+                vec![occurrence(&session_id, &observation)],
+                vec![],
+                vec![],
+            ))
+            .await
+            .unwrap();
+        observation
+    };
+    {
+        let db = open_lcm_db(&tmp).await;
+        let store = GlobalDbSessionTemporalStore::new(&db);
+        assert_eq!(
+            store
+                .begin_session_generation_rebuild(request)
+                .await
+                .unwrap()
+                .disposition(),
+            SessionGenerationRebuildDispositionV1::Resumed
+        );
+        assert_eq!(
+            store
+                .persist_session_temporal_projection_batch(batch(
+                    &session_id,
+                    2,
+                    1,
+                    vec![occurrence(&session_id, &observation)],
+                    vec![],
+                    vec![],
+                ))
+                .await
+                .unwrap()
+                .disposition(),
+            SessionTemporalProjectionBatchDispositionV1::ExactReplay
+        );
+        store
+            .activate_session_temporal_generation(
+                SessionGenerationActivationRequestV1::new(
+                    session_id.clone(),
+                    generation(2),
+                    snapshot(&session_id, 1, 1),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        rows(
+            &path,
+            "SELECT generation || ':' || state || ':' ||
+                    json_extract(frozen_watermarks_json, '$.active_generation')
+             FROM session_temporal_generations
+             WHERE session_id = 'session.temporal.interrupted-activate'
+             ORDER BY generation"
+        )
+        .await,
+        vec!["1:superseded:1", "2:active:1"]
+    );
+}
+
+#[tokio::test]
+async fn projection_batch_rejects_item_count_above_max() {
+    let session_id = session("session.temporal.batch-limit");
+    let observation = observation(&session_id, 0, "limit");
+    let projected = occurrence(&session_id, &observation);
+    let oversized = vec![projected; MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS + 1];
+    assert!(matches!(
+        SessionTemporalProjectionBatchV1::new(
+            session_id,
+            generation(2),
+            watermarks(1, 1),
+            oversized,
+            vec![],
+            vec![],
+        ),
+        Err(SessionStoreError::BatchLimitExceeded { max, .. })
+            if max == MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS
+    ));
+}
+
+#[tokio::test]
+async fn duplicate_message_ids_within_one_batch_are_rejected_deterministically() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let session_id = session("session.temporal.duplicate-within");
+    let duplicate = "message.temporal.duplicate";
+    let first = persist_custom_observation(
+        &db,
+        observation_with_message_ids(&session_id, 0, "first", duplicate, None),
+    )
+    .await;
+    let second = persist_custom_observation(
+        &db,
+        observation_with_message_ids(&session_id, 1, "second", duplicate, None),
+    )
+    .await;
+    let store = GlobalDbSessionTemporalStore::new(&db);
+    begin_candidate(&store, &session_id, 2, 2).await;
+    store
+        .persist_session_temporal_projection_batch(batch(
+            &session_id,
+            2,
+            2,
+            vec![
+                occurrence_with_message_id(&session_id, &first, duplicate),
+                occurrence_with_message_id(&session_id, &second, duplicate),
+            ],
+            vec![],
+            vec![],
+        ))
+        .await
+        .unwrap();
+
+    let error = store
+        .activate_session_temporal_generation(
+            SessionGenerationActivationRequestV1::new(
+                session_id.clone(),
+                generation(2),
+                snapshot(&session_id, 1, 2),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:?}").contains("resolves to 2 occurrences"),
+        "unexpected ambiguity error: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_message_ids_across_batches_are_rejected_deterministically() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let session_id = session("session.temporal.duplicate-across");
+    let duplicate = "message.temporal.duplicate";
+    let first = persist_custom_observation(
+        &db,
+        observation_with_message_ids(&session_id, 0, "first", duplicate, None),
+    )
+    .await;
+    let second = persist_custom_observation(
+        &db,
+        observation_with_message_ids(&session_id, 1, "second", duplicate, None),
+    )
+    .await;
+    let store = GlobalDbSessionTemporalStore::new(&db);
+    begin_candidate(&store, &session_id, 2, 2).await;
+    store
+        .persist_session_temporal_projection_batch(
+            batch(
+                &session_id,
+                2,
+                2,
+                vec![occurrence_with_message_id(&session_id, &first, duplicate)],
+                vec![],
+                vec![],
+            )
+            .with_checkpoint(0, 1, 1)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    store
+        .persist_session_temporal_projection_batch(
+            batch(
+                &session_id,
+                2,
+                2,
+                vec![occurrence_with_message_id(&session_id, &second, duplicate)],
+                vec![],
+                vec![],
+            )
+            .with_checkpoint(1, 2, 2)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let error = store
+        .activate_session_temporal_generation(
+            SessionGenerationActivationRequestV1::new(
+                session_id.clone(),
+                generation(2),
+                snapshot(&session_id, 1, 2),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:?}").contains("resolves to 2 occurrences"));
+}
+
+#[tokio::test]
+async fn duplicate_message_ids_remain_rejected_after_restart() {
+    let tmp = TempDir::new().unwrap();
+    let session_id = session("session.temporal.duplicate-restart");
+    let duplicate = "message.temporal.duplicate";
+    let second = {
+        let db = open_lcm_db(&tmp).await;
+        let first = persist_custom_observation(
+            &db,
+            observation_with_message_ids(&session_id, 0, "first", duplicate, None),
+        )
+        .await;
+        let second = persist_custom_observation(
+            &db,
+            observation_with_message_ids(&session_id, 1, "second", duplicate, None),
+        )
+        .await;
+        let store = GlobalDbSessionTemporalStore::new(&db);
+        begin_candidate(&store, &session_id, 2, 2).await;
+        store
+            .persist_session_temporal_projection_batch(
+                batch(
+                    &session_id,
+                    2,
+                    2,
+                    vec![occurrence_with_message_id(&session_id, &first, duplicate)],
+                    vec![],
+                    vec![],
+                )
+                .with_checkpoint(0, 1, 1)
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        second
+    };
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbSessionTemporalStore::new(&db);
+    assert_eq!(
+        begin_candidate(&store, &session_id, 2, 2).await,
+        SessionGenerationRebuildDispositionV1::Resumed
+    );
+    store
+        .persist_session_temporal_projection_batch(
+            batch(
+                &session_id,
+                2,
+                2,
+                vec![occurrence_with_message_id(&session_id, &second, duplicate)],
+                vec![],
+                vec![],
+            )
+            .with_checkpoint(1, 2, 2)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let error = store
+        .activate_session_temporal_generation(
+            SessionGenerationActivationRequestV1::new(
+                session_id.clone(),
+                generation(2),
+                snapshot(&session_id, 1, 2),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:?}").contains("resolves to 2 occurrences"));
+}
+
+#[tokio::test]
+async fn copied_from_requires_explicit_typed_copy_record() {
+    let tmp = TempDir::new().unwrap();
+    let path = isolated_lcm_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let session_id = session("session.temporal.copied-from-explicit");
+    let first = occurrence(
+        &session_id,
+        &persist_observation(&db, &session_id, 0, "source").await,
+    );
+    let second_observation = persist_custom_observation_with_lineage(
+        &db,
+        observation_with_message_ids(&session_id, 1, "copy", "message.temporal.copy", None),
+        AnchorProvenanceRelationV2::CopiedFrom,
+        first.retrieval_anchor_id.clone(),
+    )
+    .await;
+    let second =
+        occurrence_with_message_id(&session_id, &second_observation, "message.temporal.copy");
+    let store = GlobalDbSessionTemporalStore::new(&db);
+    begin_candidate(&store, &session_id, 2, 2).await;
+    store
+        .persist_session_temporal_projection_batch(batch(
+            &session_id,
+            2,
+            2,
+            vec![first.clone(), second.clone()],
+            vec![],
+            vec![],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(&path, "SELECT COUNT(*) FROM session_logical_copy_edges").await,
+        0,
+        "CopiedFrom lineage alone must not synthesize a copy edge"
+    );
+    store
+        .persist_session_temporal_projection_batch(
+            batch(
+                &session_id,
+                2,
+                2,
+                vec![],
+                vec![explicit_anchor_copy(&second, &first)],
+                vec![],
+            )
+            .with_checkpoint(1, 2, 2)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(&path, "SELECT COUNT(*) FROM session_logical_copy_edges").await,
+        1
+    );
+    store
+        .activate_session_temporal_generation(
+            SessionGenerationActivationRequestV1::new(
+                session_id.clone(),
+                generation(2),
+                snapshot(&session_id, 1, 2),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows(
+            &path,
+            "SELECT generation || ':' || state
+             FROM session_temporal_generations
+             WHERE session_id = 'session.temporal.copied-from-explicit'
+             ORDER BY generation"
+        )
+        .await,
+        vec!["1:superseded", "2:active"]
     );
 }

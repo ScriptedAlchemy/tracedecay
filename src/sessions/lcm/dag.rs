@@ -2,9 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use libsql::{Connection, Value, params};
 
+use crate::global_db::session_temporal_operations;
+
+use super::types::LcmImmutableSummaryPublication;
 use super::{
     LcmError, LcmExpandedSummarySource, LcmRawMessage, LcmSourceRef, LcmSummaryExpansion,
-    LcmSummaryNode, LcmSummaryNodeDraft, raw, util,
+    LcmSummaryNode, LcmSummaryNodeDraft, raw,
 };
 
 pub(crate) async fn insert_summary_node_in_transaction(
@@ -20,10 +23,16 @@ pub(crate) async fn insert_summary_node_in_transaction(
         &summary_hash,
     );
 
-    validate_summary_sources(conn, &draft, &node_id).await?;
-    upsert_summary_node(conn, &node_id, &summary_hash, &draft).await?;
-    replace_summary_sources(conn, &node_id, &draft.source_refs).await?;
-    load_summary_node(conn, &draft.provider, &draft.session_id, &node_id).await
+    session_temporal_operations::publish_immutable_summary(
+        conn,
+        LcmImmutableSummaryPublication {
+            summary_id: node_id,
+            predecessor_summary_id: None,
+            draft,
+        },
+    )
+    .await
+    .map(|receipt| receipt.summary)
 }
 
 pub(crate) async fn expand_summary_node(
@@ -199,28 +208,6 @@ pub(crate) async fn load_uncondensed_summary_nodes(
     Ok(nodes)
 }
 
-/// Moves all summary nodes from one session id to another inside the caller's
-/// transaction, preserving node ids and node-to-node lineage. Mirrors
-/// hermes-lcm `SummaryDAG.reassign_session_nodes`.
-pub(crate) async fn reassign_session_nodes(
-    conn: &Connection,
-    provider: &str,
-    old_session_id: &str,
-    new_session_id: &str,
-) -> Result<u64, LcmError> {
-    if old_session_id.is_empty() || new_session_id.is_empty() || old_session_id == new_session_id {
-        return Ok(0);
-    }
-    conn.execute(
-        "UPDATE lcm_summary_nodes
-         SET session_id = ?3, conversation_id = ?3
-         WHERE provider = ?1 AND session_id = ?2",
-        params![provider, old_session_id, new_session_id],
-    )
-    .await
-    .map_err(|err| LcmError::Db(err.to_string()))
-}
-
 pub fn summary_node_id(
     provider: &str,
     session_id: &str,
@@ -238,134 +225,7 @@ pub fn summary_node_id(
     format!("sum_{}", raw::sha256_hex(&input.to_string()))
 }
 
-async fn upsert_summary_node(
-    conn: &Connection,
-    node_id: &str,
-    summary_hash: &str,
-    draft: &LcmSummaryNodeDraft,
-) -> Result<(), LcmError> {
-    conn.execute(
-        "INSERT INTO lcm_summary_nodes (
-            node_id, provider, conversation_id, session_id, depth, summary_text,
-            summary_hash, summary_token_count, source_token_count, source_time_start,
-            source_time_end, expand_hint, metadata_json
-         )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-         ON CONFLICT(node_id) DO UPDATE SET
-            provider = excluded.provider,
-            conversation_id = excluded.conversation_id,
-            session_id = excluded.session_id,
-            depth = excluded.depth,
-            summary_text = excluded.summary_text,
-            summary_hash = excluded.summary_hash,
-            summary_token_count = excluded.summary_token_count,
-            source_token_count = excluded.source_token_count,
-            source_time_start = excluded.source_time_start,
-            source_time_end = excluded.source_time_end,
-            expand_hint = excluded.expand_hint,
-            metadata_json = excluded.metadata_json",
-        params![
-            node_id,
-            draft.provider.as_str(),
-            draft.conversation_id.as_str(),
-            draft.session_id.as_str(),
-            draft.depth,
-            draft.summary_text.as_str(),
-            summary_hash,
-            draft.summary_token_count,
-            draft.source_token_count,
-            util::opt_i64(draft.source_time_start),
-            util::opt_i64(draft.source_time_end),
-            util::opt_text(draft.expand_hint.as_deref()),
-            util::opt_text(draft.metadata_json.as_deref()),
-        ],
-    )
-    .await?;
-    Ok(())
-}
-
-async fn validate_summary_sources(
-    conn: &Connection,
-    draft: &LcmSummaryNodeDraft,
-    node_id: &str,
-) -> Result<(), LcmError> {
-    let mut raw_store_ids = Vec::new();
-    let mut child_node_ids = Vec::new();
-    for source_ref in &draft.source_refs {
-        match source_ref {
-            LcmSourceRef::RawMessage { store_id } => raw_store_ids.push(*store_id),
-            LcmSourceRef::SummaryNode {
-                node_id: child_node_id,
-            } => {
-                if child_node_id == node_id {
-                    return Err(LcmError::SummarySourceNotOwnedBySession);
-                }
-                child_node_ids.push(child_node_id.clone());
-            }
-        }
-    }
-
-    let raw_owners = load_raw_message_owners_by_store_ids(conn, &raw_store_ids).await?;
-    for store_id in raw_store_ids {
-        let Some((provider, session_id)) = raw_owners.get(&store_id) else {
-            return Err(LcmError::SummarySourceNotOwnedBySession);
-        };
-        if provider != &draft.provider || session_id != &draft.session_id {
-            return Err(LcmError::SummarySourceNotOwnedBySession);
-        }
-    }
-
-    let child_owners = load_summary_node_owners_by_ids(conn, &child_node_ids).await?;
-    for child_node_id in child_node_ids {
-        let Some((provider, session_id, child_depth)) = child_owners.get(child_node_id.as_str())
-        else {
-            return Err(LcmError::SummaryNodeNotFound);
-        };
-        if provider != &draft.provider || session_id != &draft.session_id {
-            return Err(LcmError::SummarySourceNotOwnedBySession);
-        }
-        if *child_depth >= draft.depth {
-            return Err(LcmError::SummarySourceNotOwnedBySession);
-        }
-    }
-    Ok(())
-}
-
-async fn replace_summary_sources(
-    conn: &Connection,
-    node_id: &str,
-    source_refs: &[LcmSourceRef],
-) -> Result<(), LcmError> {
-    conn.execute(
-        "DELETE FROM lcm_summary_sources WHERE node_id = ?1",
-        params![node_id],
-    )
-    .await?;
-
-    if source_refs.is_empty() {
-        return Ok(());
-    }
-
-    let placeholders = std::iter::repeat_n("(?, ?, ?, ?)", source_refs.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
-         VALUES {placeholders}"
-    );
-    let mut values = Vec::with_capacity(source_refs.len() * 4);
-    for (ordinal, source_ref) in source_refs.iter().enumerate() {
-        let (source_kind, source_id) = source_ref_to_db(source_ref);
-        values.push(Value::Text(node_id.to_string()));
-        values.push(Value::Text(source_kind.to_string()));
-        values.push(Value::Text(source_id));
-        values.push(Value::Integer(ordinal as i64));
-    }
-    conn.execute(&sql, values).await?;
-    Ok(())
-}
-
-async fn load_summary_node(
+pub(crate) async fn load_summary_node(
     conn: &Connection,
     provider: &str,
     session_id: &str,
@@ -545,94 +405,6 @@ async fn load_summary_nodes_by_ids(
         }
     }
     Ok(nodes)
-}
-
-async fn load_raw_message_owners_by_store_ids(
-    conn: &Connection,
-    store_ids: &[i64],
-) -> Result<BTreeMap<i64, (String, String)>, LcmError> {
-    let unique_store_ids = store_ids
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if unique_store_ids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let placeholders = std::iter::repeat_n("?", unique_store_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT store_id, provider, session_id
-         FROM lcm_raw_messages
-         WHERE store_id IN ({placeholders})"
-    );
-    let mut rows = conn
-        .query(
-            &sql,
-            unique_store_ids
-                .iter()
-                .map(|store_id| Value::Integer(*store_id))
-                .collect::<Vec<_>>(),
-        )
-        .await?;
-    let mut out = BTreeMap::new();
-    while let Some(row) = rows.next().await? {
-        let store_id: i64 = row.get(0)?;
-        let provider: String = row.get(1)?;
-        let session_id: String = row.get(2)?;
-        out.insert(store_id, (provider, session_id));
-    }
-    Ok(out)
-}
-
-async fn load_summary_node_owners_by_ids(
-    conn: &Connection,
-    node_ids: &[String],
-) -> Result<BTreeMap<String, (String, String, i64)>, LcmError> {
-    let unique_node_ids = node_ids
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if unique_node_ids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let placeholders = std::iter::repeat_n("?", unique_node_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT node_id, provider, session_id, depth
-         FROM lcm_summary_nodes
-         WHERE node_id IN ({placeholders})"
-    );
-    let mut rows = conn
-        .query(
-            &sql,
-            unique_node_ids
-                .iter()
-                .map(|node_id| Value::Text(node_id.clone()))
-                .collect::<Vec<_>>(),
-        )
-        .await?;
-    let mut out = BTreeMap::new();
-    while let Some(row) = rows.next().await? {
-        let node_id: String = row.get(0)?;
-        let provider: String = row.get(1)?;
-        let session_id: String = row.get(2)?;
-        let depth: i64 = row.get(3)?;
-        out.insert(node_id, (provider, session_id, depth));
-    }
-    Ok(out)
-}
-
-fn source_ref_to_db(source_ref: &LcmSourceRef) -> (&'static str, String) {
-    match source_ref {
-        LcmSourceRef::RawMessage { store_id } => ("raw_message", store_id.to_string()),
-        LcmSourceRef::SummaryNode { node_id } => ("summary_node", node_id.clone()),
-    }
 }
 
 fn source_ref_from_db(source_kind: &str, source_id: &str) -> Result<LcmSourceRef, LcmError> {

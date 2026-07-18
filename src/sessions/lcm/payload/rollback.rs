@@ -1,12 +1,12 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use super::{existing_payload_dir_opt, safe_remove_payload_file};
+use super::VerifiedPayloadAuthority;
+use super::filesystem_authority::remove_verified_payload_file;
 
 /// Tracks only payload files created by a caller-managed database transaction.
 /// Existing files are never journaled, making cleanup O(new files).
 pub(crate) struct PayloadFileRollback {
-    storage_root: PathBuf,
-    created_refs: Vec<String>,
+    created_files: Vec<VerifiedPayloadAuthority>,
     cleanup_on_drop: bool,
 }
 
@@ -14,10 +14,9 @@ impl PayloadFileRollback {
     /// Arms synchronous file cleanup when the owning database transaction is
     /// dropped before commit. The caller must disarm this guard only after the
     /// transaction has committed successfully.
-    pub(crate) fn begin_cancellation_safe(storage_root: &Path) -> Self {
+    pub(crate) fn begin_cancellation_safe(_storage_root: &Path) -> Self {
         Self {
-            storage_root: storage_root.to_path_buf(),
-            created_refs: Vec::new(),
+            created_files: Vec::new(),
             cleanup_on_drop: true,
         }
     }
@@ -26,21 +25,18 @@ impl PayloadFileRollback {
         self.cleanup_on_drop = false;
     }
 
-    pub(super) fn record_created(&mut self, payload_ref: &str) {
-        self.created_refs.push(payload_ref.to_string());
+    pub(super) fn record_created(&mut self, authority: VerifiedPayloadAuthority) {
+        self.created_files.push(authority);
     }
 }
 
 impl Drop for PayloadFileRollback {
     fn drop(&mut self) {
-        if !self.cleanup_on_drop || self.created_refs.is_empty() {
+        if !self.cleanup_on_drop || self.created_files.is_empty() {
             return;
         }
-        let Ok(Some(dir)) = existing_payload_dir_opt(&self.storage_root) else {
-            return;
-        };
-        for payload_ref in &self.created_refs {
-            let _ = safe_remove_payload_file(&dir, payload_ref);
+        for authority in &self.created_files {
+            let _ = remove_verified_payload_file(authority);
         }
     }
 }

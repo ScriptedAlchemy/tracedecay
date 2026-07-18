@@ -1,5 +1,8 @@
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::lcm::types::{
+    LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition,
+};
 use tracedecay::sessions::lcm::{
     LcmError, LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
 };
@@ -38,6 +41,44 @@ async fn summary_fts_count(db_path: &std::path::Path, query: &str) -> i64 {
         .await
         .unwrap();
     rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn scalar_i64(db_path: &std::path::Path, sql: &str) -> i64 {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn.query(sql, ()).await.unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn text_rows(db_path: &std::path::Path, sql: &str) -> Vec<String> {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn.query(sql, ()).await.unwrap();
+    let mut values = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        values.push(row.get(0).unwrap());
+    }
+    values
+}
+
+async fn lineage_effect_count(db_path: &std::path::Path) -> i64 {
+    scalar_i64(
+        db_path,
+        "SELECT
+            (SELECT COUNT(*) FROM session_summary_nodes)
+          + (SELECT COUNT(*) FROM session_summary_sources)
+          + (SELECT COUNT(*) FROM session_summary_successors)
+          + (SELECT COUNT(*) FROM session_external_payload_manifests)
+          + (SELECT COUNT(*) FROM session_temporal_generations)
+          + (SELECT COUNT(*) FROM session_summary_availability)
+          + (SELECT COUNT(*) FROM retrieval_anchors
+             WHERE projection_generation = 'lcm_summary_lineage_v1')
+          + (SELECT COUNT(*) FROM sanitization_receipts
+             WHERE sanitizer_version = 'tracedecay.lcm-summary-publication.v1')
+          + (SELECT COUNT(*) FROM lcm_summary_nodes)
+          + (SELECT COUNT(*) FROM lcm_summary_sources)",
+    )
+    .await
 }
 
 async fn insert_session(db: &GlobalDb, provider: &str, session_id: &str) {
@@ -206,6 +247,24 @@ async fn summary_dag_survives_reopen() {
     assert_eq!(expanded.sources.len(), 2);
     assert_eq!(expanded.sources[0].content, "alpha");
     assert_eq!(expanded.sources[1].content, "beta");
+    assert_eq!(
+        scalar_i64(
+            &db_path,
+            "SELECT COUNT(*) FROM session_summary_nodes
+             WHERE summary_id IN (SELECT node_id FROM lcm_summary_nodes)",
+        )
+        .await,
+        1,
+        "authoritative summary and compatibility projection survive restart together"
+    );
+    assert_eq!(
+        scalar_i64(
+            &db_path,
+            "SELECT COUNT(*) FROM session_temporal_generations WHERE state = 'active'",
+        )
+        .await,
+        1
+    );
 }
 
 #[tokio::test]
@@ -469,11 +528,425 @@ async fn summary_node_ids_are_stable_for_identical_drafts() {
     assert_eq!(first.node_id, second.node_id);
 }
 
-// Mirrors hermes-lcm `SummaryDAG.reassign_session_nodes`: a compression
-// boundary whose old_session_id matches the bound session moves DAG nodes
-// (with stable node ids and lineage) to the new session id.
 #[tokio::test]
-async fn boundary_carry_over_moves_summary_nodes_to_new_session() {
+async fn immutable_publication_replays_exactly_and_rejects_identity_conflicts() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha", "beta"]).await;
+    let draft = summary_draft(
+        "cursor",
+        "session-1",
+        0,
+        "immutable alpha beta",
+        store_ids
+            .iter()
+            .copied()
+            .map(|store_id| LcmSourceRef::RawMessage { store_id })
+            .collect(),
+    );
+    let publication = LcmImmutableSummaryPublication {
+        summary_id: "summary.identity-1".to_string(),
+        predecessor_summary_id: None,
+        draft: draft.clone(),
+    };
+
+    let first = db
+        .lcm_publish_immutable_summary(publication.clone())
+        .await
+        .expect("first publication");
+    assert_eq!(
+        first.disposition,
+        LcmSummaryPublicationDisposition::Published
+    );
+    let replay = db
+        .lcm_publish_immutable_summary(publication)
+        .await
+        .expect("exact replay");
+    assert_eq!(
+        replay.disposition,
+        LcmSummaryPublicationDisposition::ExactReplay
+    );
+    assert_eq!(replay.summary, first.summary);
+    assert_eq!(replay.generation, first.generation);
+    assert_eq!(replay.frozen_watermarks_json, first.frozen_watermarks_json);
+    assert_eq!(replay.published_at, first.published_at);
+    assert_eq!(
+        scalar_i64(&db_path, "SELECT COUNT(*) FROM session_summary_nodes").await,
+        1
+    );
+    assert_eq!(
+        scalar_i64(
+            &db_path,
+            "SELECT COUNT(*) FROM session_temporal_generations"
+        )
+        .await,
+        1,
+        "exact replay must not publish another generation"
+    );
+    assert_eq!(
+        scalar_i64(&db_path, "SELECT COUNT(*) FROM session_summary_sources").await,
+        scalar_i64(&db_path, "SELECT COUNT(*) FROM lcm_summary_sources").await,
+        "the legacy source projection must stay in parity with authority"
+    );
+
+    let mut changed_content = draft.clone();
+    changed_content.summary_text = "changed content".to_string();
+    let content_conflict = db
+        .lcm_publish_immutable_summary(LcmImmutableSummaryPublication {
+            summary_id: "summary.identity-1".to_string(),
+            predecessor_summary_id: None,
+            draft: changed_content,
+        })
+        .await
+        .expect_err("same identity with changed content must fail");
+    assert!(matches!(
+        content_conflict,
+        LcmError::ImmutableSummaryConflict { ref summary_id }
+            if summary_id == "summary.identity-1"
+    ));
+
+    let mut changed_order = draft;
+    changed_order.source_refs.reverse();
+    let order_conflict = db
+        .lcm_publish_immutable_summary(LcmImmutableSummaryPublication {
+            summary_id: "summary.identity-1".to_string(),
+            predecessor_summary_id: None,
+            draft: changed_order,
+        })
+        .await
+        .expect_err("same identity with changed source order must fail");
+    assert!(matches!(
+        order_conflict,
+        LcmError::ImmutableSummaryConflict { ref summary_id }
+            if summary_id == "summary.identity-1"
+    ));
+}
+
+#[tokio::test]
+async fn immutable_publication_preserves_order_and_stales_transitive_descendants() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let store_ids =
+        insert_raw_messages(&db, "cursor", "session-1", &["alpha", "beta", "gamma"]).await;
+
+    let leaf = db
+        .lcm_publish_immutable_summary(LcmImmutableSummaryPublication {
+            summary_id: "summary.leaf-v1".to_string(),
+            predecessor_summary_id: None,
+            draft: summary_draft(
+                "cursor",
+                "session-1",
+                0,
+                "leaf v1",
+                store_ids
+                    .iter()
+                    .copied()
+                    .map(|store_id| LcmSourceRef::RawMessage { store_id })
+                    .collect(),
+            ),
+        })
+        .await
+        .unwrap()
+        .summary;
+    let parent = db
+        .lcm_publish_immutable_summary(LcmImmutableSummaryPublication {
+            summary_id: "summary.parent".to_string(),
+            predecessor_summary_id: None,
+            draft: summary_draft(
+                "cursor",
+                "session-1",
+                1,
+                "parent",
+                vec![LcmSourceRef::SummaryNode {
+                    node_id: leaf.node_id.clone(),
+                }],
+            ),
+        })
+        .await
+        .unwrap()
+        .summary;
+    let grandparent = db
+        .lcm_publish_immutable_summary(LcmImmutableSummaryPublication {
+            summary_id: "summary.grandparent".to_string(),
+            predecessor_summary_id: None,
+            draft: summary_draft(
+                "cursor",
+                "session-1",
+                2,
+                "grandparent",
+                vec![LcmSourceRef::SummaryNode {
+                    node_id: parent.node_id.clone(),
+                }],
+            ),
+        })
+        .await
+        .unwrap()
+        .summary;
+
+    let successor = db
+        .lcm_publish_immutable_summary(LcmImmutableSummaryPublication {
+            summary_id: "summary.leaf-v2".to_string(),
+            predecessor_summary_id: Some(leaf.node_id.clone()),
+            draft: summary_draft(
+                "cursor",
+                "session-1",
+                0,
+                "leaf v2",
+                store_ids
+                    .iter()
+                    .copied()
+                    .map(|store_id| LcmSourceRef::RawMessage { store_id })
+                    .collect(),
+            ),
+        })
+        .await
+        .expect("successor publication")
+        .summary;
+
+    assert_eq!(
+        text_rows(
+            &db_path,
+            "SELECT authority.source_ordinal || ':' || authority.source_kind || ':'
+                    || compatibility.source_id
+             FROM session_summary_sources authority
+             JOIN lcm_summary_sources compatibility
+               ON compatibility.node_id = authority.summary_id
+              AND compatibility.ordinal = authority.source_ordinal
+             WHERE authority.summary_id = 'summary.leaf-v1'
+             ORDER BY authority.source_ordinal",
+        )
+        .await,
+        vec![
+            format!("0:anchor:{}", store_ids[0]),
+            format!("1:anchor:{}", store_ids[1]),
+            format!("2:anchor:{}", store_ids[2]),
+        ],
+        "the authoritative manifest and compatibility projection preserve source order"
+    );
+    assert_eq!(
+        text_rows(
+            &db_path,
+            "SELECT predecessor_summary_id || '>' || successor_summary_id
+             FROM session_summary_successors ORDER BY created_at",
+        )
+        .await,
+        vec![format!("{}>{}", leaf.node_id, successor.node_id)]
+    );
+    let active = text_rows(
+        &db_path,
+        "SELECT summary_id || ':' || availability
+         FROM session_summary_availability
+         WHERE (session_id, generation) = (
+             SELECT session_id, generation FROM session_temporal_generations
+             WHERE session_id = 'session-1' AND state = 'active'
+         )
+         ORDER BY summary_id",
+    )
+    .await;
+    assert!(active.contains(&format!("{}:stale", leaf.node_id)));
+    assert!(active.contains(&format!("{}:stale", parent.node_id)));
+    assert!(active.contains(&format!("{}:stale", grandparent.node_id)));
+    assert!(active.contains(&format!("{}:available", successor.node_id)));
+}
+
+#[tokio::test]
+async fn immutable_publication_rejects_cycles_and_rolls_back_every_projection() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha"]).await;
+    let _leaf = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-1",
+            0,
+            "leaf",
+            vec![LcmSourceRef::RawMessage {
+                store_id: store_ids[0],
+            }],
+        ))
+        .await
+        .unwrap();
+
+    let cycle = db
+        .lcm_publish_immutable_summary(LcmImmutableSummaryPublication {
+            summary_id: "summary.future".to_string(),
+            predecessor_summary_id: None,
+            draft: summary_draft(
+                "cursor",
+                "session-1",
+                1,
+                "cycle",
+                vec![LcmSourceRef::SummaryNode {
+                    node_id: "summary.future".to_string(),
+                }],
+            ),
+        })
+        .await
+        .expect_err("self/source cycle must fail");
+    assert!(matches!(cycle, LcmError::SummaryCycle { .. }));
+
+    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let conn = raw_db.connect().unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER reject_compatibility_summary
+         BEFORE INSERT ON lcm_summary_nodes
+         WHEN NEW.node_id = 'summary.rollback'
+         BEGIN SELECT RAISE(ABORT, 'forced compatibility failure'); END;",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(raw_db);
+    let before = lineage_effect_count(&db_path).await;
+    let rollback = db
+        .lcm_publish_immutable_summary(LcmImmutableSummaryPublication {
+            summary_id: "summary.rollback".to_string(),
+            predecessor_summary_id: None,
+            draft: summary_draft(
+                "cursor",
+                "session-1",
+                0,
+                "rollback",
+                vec![LcmSourceRef::RawMessage {
+                    store_id: store_ids[0],
+                }],
+            ),
+        })
+        .await;
+    assert!(rollback.is_err());
+    let after = lineage_effect_count(&db_path).await;
+    assert_eq!(
+        after, before,
+        "all authoritative and projection writes roll back"
+    );
+}
+
+#[tokio::test]
+async fn immutable_publication_rejects_redacted_deleted_and_expired_sources() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["sensitive"]).await;
+    let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let conn = raw_db.connect().unwrap();
+
+    for (identity, metadata, reason) in [
+        (
+            "summary.redacted",
+            r#"{"payload_access":"redacted"}"#,
+            "redacted",
+        ),
+        (
+            "summary.deleted",
+            r#"{"payload_access":"deleted"}"#,
+            "deleted",
+        ),
+        (
+            "summary.expired",
+            r#"{"retention_expires_at":1}"#,
+            "retention_expired",
+        ),
+    ] {
+        conn.execute(
+            "UPDATE lcm_raw_messages SET metadata_json = ?2 WHERE store_id = ?1",
+            libsql::params![store_ids[0], metadata],
+        )
+        .await
+        .unwrap();
+        let error = db
+            .lcm_publish_immutable_summary(LcmImmutableSummaryPublication {
+                summary_id: identity.to_string(),
+                predecessor_summary_id: None,
+                draft: summary_draft(
+                    "cursor",
+                    "session-1",
+                    0,
+                    "must not publish",
+                    vec![LcmSourceRef::RawMessage {
+                        store_id: store_ids[0],
+                    }],
+                ),
+            })
+            .await
+            .expect_err("ineligible source must fail closed");
+        assert!(matches!(
+            error,
+            LcmError::SummarySourceUnavailable {
+                reason: ref actual,
+                ..
+            } if actual == reason
+        ));
+    }
+    assert_eq!(
+        scalar_i64(&db_path, "SELECT COUNT(*) FROM session_summary_nodes").await,
+        0
+    );
+    assert_eq!(
+        scalar_i64(&db_path, "SELECT COUNT(*) FROM lcm_summary_nodes").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn codex_auxiliary_summary_appends_successor_without_replacement() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let store_ids = insert_raw_messages(&db, "codex", "session-1", &["alpha", "beta"]).await;
+    let mut draft = summary_draft(
+        "codex",
+        "session-1",
+        0,
+        "encrypted compaction placeholder",
+        store_ids
+            .iter()
+            .copied()
+            .map(|store_id| LcmSourceRef::RawMessage { store_id })
+            .collect(),
+    );
+    draft.metadata_json = Some(r#"{"source":"codex_context_compacted"}"#.to_string());
+    let original = db.lcm_insert_summary_node(draft).await.unwrap();
+
+    let successor = db
+        .publish_codex_compaction_summary_successor(
+            &original.node_id,
+            "visible Codex auxiliary summary",
+            "codex_app_server",
+            Some("gpt-test"),
+        )
+        .await
+        .expect("Codex replacement publishes an immutable successor");
+    assert_ne!(successor.node_id, original.node_id);
+    assert_eq!(successor.summary_text, "visible Codex auxiliary summary");
+    assert_eq!(
+        scalar_i64(&db_path, "SELECT COUNT(*) FROM session_summary_nodes").await,
+        2
+    );
+    assert_eq!(
+        scalar_i64(&db_path, "SELECT COUNT(*) FROM lcm_summary_nodes").await,
+        2
+    );
+    assert_eq!(
+        text_rows(
+            &db_path,
+            "SELECT predecessor_summary_id || '>' || successor_summary_id
+             FROM session_summary_successors",
+        )
+        .await,
+        vec![format!("{}>{}", original.node_id, successor.node_id)]
+    );
+    db.lcm_expand_summary_node("codex", "session-1", &original.node_id)
+        .await
+        .expect("original summary remains addressable");
+}
+
+// A boundary links sessions without changing summary authority or its
+// compatibility projection owner.
+#[tokio::test]
+async fn boundary_link_does_not_reassign_summary_nodes() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha", "beta"]).await;
@@ -507,16 +980,16 @@ async fn boundary_carry_over_moves_summary_nodes_to_new_session() {
     assert_eq!(boundary.reason, "compression_boundary_carried_over");
 
     let expanded = db
-        .lcm_expand_summary_node("cursor", "session-2", &node.node_id)
+        .lcm_expand_summary_node("cursor", "session-1", &node.node_id)
         .await
-        .expect("carried node should expand under the new session");
+        .expect("source-owned node remains addressable");
     assert_eq!(expanded.summary.node_id, node.node_id);
-    assert_eq!(expanded.summary.session_id, "session-2");
+    assert_eq!(expanded.summary.session_id, "session-1");
     assert_eq!(expanded.sources.len(), 2);
     assert_eq!(expanded.sources[0].content, "alpha");
 
-    let stale = db
-        .lcm_expand_summary_node("cursor", "session-1", &node.node_id)
+    let target = db
+        .lcm_expand_summary_node("cursor", "session-2", &node.node_id)
         .await;
-    assert!(matches!(stale, Err(LcmError::SummaryNodeNotFound)));
+    assert!(matches!(target, Err(LcmError::SummaryNodeNotFound)));
 }

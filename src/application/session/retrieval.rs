@@ -1,0 +1,814 @@
+use std::fmt;
+
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use tracedecay_domain::{ContextOmissionReasonV1, RetrievalGrainV1, SessionId, TemporalModeV1};
+
+use crate::application::context::{
+    PolicyDigest, RequestContext, ResolvedSessionIdentity, SessionOwner,
+};
+use crate::application::session::ports::{
+    AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError, SessionTemporalExecutionPort,
+};
+use crate::application::session::types::{
+    SessionAccess, SessionAuthorizationError, SessionDataFreshness, SessionFreshnessPolicy,
+    SessionRetrievalOutcome, SessionRetrievalScope, SessionScopeAuthorizationRequest,
+    SessionScopeAuthorizer,
+};
+use crate::query::temporal::context::{ContextBudget, ContextError, VersionedTokenEstimator};
+use crate::query::temporal::cursor::CursorError;
+use crate::query::temporal::hydration::HydrationError;
+use crate::query::temporal::ports::{
+    ExecutionControl, ExecutionLimits, TemporalPortError, TemporalRetrievalScope,
+};
+use crate::query::temporal::ranking::DiversityLimits;
+use crate::query::temporal::resolution::SummaryLineageRejection;
+use crate::query::temporal::{TemporalKernelError, TemporalKernelResult};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionRetrievalConfiguration {
+    schema_version: u32,
+    ranking_version: u32,
+}
+
+impl SessionRetrievalConfiguration {
+    pub fn new(
+        schema_version: u32,
+        ranking_version: u32,
+    ) -> Result<Self, SessionTemporalQueryError> {
+        if schema_version == 0 {
+            return Err(SessionTemporalQueryError::ZeroVersion("schema"));
+        }
+        if ranking_version == 0 {
+            return Err(SessionTemporalQueryError::ZeroVersion("ranking"));
+        }
+        Ok(Self {
+            schema_version,
+            ranking_version,
+        })
+    }
+
+    pub const fn schema_version(self) -> u32 {
+        self.schema_version
+    }
+
+    pub const fn ranking_version(self) -> u32 {
+        self.ranking_version
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionTemporalQuery {
+    session_id: SessionId,
+    retrieval_scope: SessionRetrievalScope,
+    provider: Option<String>,
+    query: String,
+    cursor: Option<String>,
+    temporal_mode: TemporalModeV1,
+    grain: RetrievalGrainV1,
+    limit: usize,
+    diversity: DiversityLimits,
+    context_budget: ContextBudget,
+    execution_limits: ExecutionLimits,
+    freshness_policy: SessionFreshnessPolicy,
+}
+
+impl SessionTemporalQuery {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        session_id: SessionId,
+        provider: Option<String>,
+        query: impl Into<String>,
+        cursor: Option<String>,
+        temporal_mode: TemporalModeV1,
+        grain: RetrievalGrainV1,
+        limit: usize,
+        diversity: DiversityLimits,
+        context_budget: ContextBudget,
+    ) -> Result<Self, SessionTemporalQueryError> {
+        if limit == 0 {
+            return Err(SessionTemporalQueryError::ZeroLimit);
+        }
+        if provider.as_deref().is_some_and(|value| {
+            value.is_empty()
+                || value.trim() != value
+                || value.len() > 512
+                || value.chars().any(char::is_control)
+        }) {
+            return Err(SessionTemporalQueryError::InvalidProvider);
+        }
+        if context_budget.estimator_version.is_empty()
+            || context_budget.estimator_version.len() > 512
+            || context_budget
+                .estimator_version
+                .chars()
+                .any(char::is_control)
+        {
+            return Err(SessionTemporalQueryError::InvalidEstimatorVersion);
+        }
+        let retrieval_scope = SessionRetrievalScope::Session(session_id.clone());
+        Ok(Self {
+            session_id,
+            retrieval_scope,
+            provider,
+            query: query.into(),
+            cursor,
+            temporal_mode,
+            grain,
+            limit,
+            diversity,
+            context_budget,
+            execution_limits: ExecutionLimits::default(),
+            freshness_policy: SessionFreshnessPolicy::AllowStored,
+        })
+    }
+
+    #[must_use]
+    pub fn with_execution_limits(mut self, execution_limits: ExecutionLimits) -> Self {
+        self.execution_limits = execution_limits;
+        self
+    }
+
+    #[must_use]
+    pub fn with_freshness_policy(mut self, freshness_policy: SessionFreshnessPolicy) -> Self {
+        self.freshness_policy = freshness_policy;
+        self
+    }
+
+    #[must_use]
+    pub fn with_retrieval_scope(mut self, retrieval_scope: SessionRetrievalScope) -> Self {
+        if let SessionRetrievalScope::Session(session_id) = &retrieval_scope {
+            self.session_id = session_id.clone();
+        }
+        self.retrieval_scope = retrieval_scope;
+        self
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    pub fn retrieval_scope(&self) -> &SessionRetrievalScope {
+        &self.retrieval_scope
+    }
+
+    pub fn provider(&self) -> Option<&str> {
+        self.provider.as_deref()
+    }
+
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    pub fn cursor(&self) -> Option<&str> {
+        self.cursor.as_deref()
+    }
+
+    pub const fn temporal_mode(&self) -> TemporalModeV1 {
+        self.temporal_mode
+    }
+
+    pub const fn grain(&self) -> RetrievalGrainV1 {
+        self.grain
+    }
+
+    pub const fn limit(&self) -> usize {
+        self.limit
+    }
+
+    pub const fn diversity(&self) -> DiversityLimits {
+        self.diversity
+    }
+
+    pub fn context_budget(&self) -> &ContextBudget {
+        &self.context_budget
+    }
+
+    pub const fn execution_limits(&self) -> ExecutionLimits {
+        self.execution_limits
+    }
+
+    pub const fn freshness_policy(&self) -> SessionFreshnessPolicy {
+        self.freshness_policy
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionTemporalQueryError {
+    ZeroLimit,
+    InvalidProvider,
+    InvalidEstimatorVersion,
+    ZeroVersion(&'static str),
+}
+
+impl fmt::Display for SessionTemporalQueryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroLimit => {
+                formatter.write_str("temporal query limit must be greater than zero")
+            }
+            Self::InvalidProvider => {
+                formatter.write_str("temporal query provider is not canonical")
+            }
+            Self::InvalidEstimatorVersion => {
+                formatter.write_str("temporal query estimator version is not canonical")
+            }
+            Self::ZeroVersion(field) => {
+                write!(formatter, "temporal query {field} version must be non-zero")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SessionTemporalQueryError {}
+
+pub struct SessionRetrievalService<A, P, E> {
+    authorizer: A,
+    execution: P,
+    estimator: E,
+    configuration: SessionRetrievalConfiguration,
+}
+
+impl<A, P, E> SessionRetrievalService<A, P, E> {
+    pub const fn new(
+        authorizer: A,
+        execution: P,
+        estimator: E,
+        configuration: SessionRetrievalConfiguration,
+    ) -> Self {
+        Self {
+            authorizer,
+            execution,
+            estimator,
+            configuration,
+        }
+    }
+}
+
+impl<A, P, E> SessionRetrievalService<A, P, E>
+where
+    A: SessionScopeAuthorizer,
+    P: SessionTemporalExecutionPort,
+    E: VersionedTokenEstimator + Sync,
+{
+    pub async fn retrieve(
+        &self,
+        context: &RequestContext,
+        query: SessionTemporalQuery,
+    ) -> SessionRetrievalOutcome<TemporalKernelResult> {
+        if context.cancellation().is_cancelled()
+            || context.deadline().is_elapsed_at(std::time::Instant::now())
+        {
+            return SessionRetrievalOutcome::Cancelled;
+        }
+        let authorization = match SessionScopeAuthorizationRequest::new(
+            context.actor_id().clone(),
+            context.identity().clone(),
+            query.session_id.clone(),
+            query.provider.clone(),
+            query.temporal_mode,
+            query.grain,
+            SessionAccess::Hydrate,
+        )
+        .map(|request| request.with_retrieval_scope(query.retrieval_scope.clone()))
+        {
+            Ok(request) => request,
+            Err(_) => return SessionRetrievalOutcome::Unavailable,
+        };
+        let grant = match self.authorizer.authorize(context, &authorization) {
+            Ok(grant) => grant,
+            Err(SessionAuthorizationError::Denied) => return SessionRetrievalOutcome::Denied,
+            Err(SessionAuthorizationError::WrongScope)
+            | Err(SessionAuthorizationError::WrongTarget)
+            | Err(SessionAuthorizationError::WrongAccess)
+            | Err(SessionAuthorizationError::UnresolvedGitRoute) => {
+                return SessionRetrievalOutcome::WrongScope;
+            }
+            Err(SessionAuthorizationError::WrongContext) => {
+                return SessionRetrievalOutcome::Denied;
+            }
+            Err(SessionAuthorizationError::Unavailable)
+            | Err(SessionAuthorizationError::InvalidGrantId)
+            | Err(SessionAuthorizationError::InvalidProviderScope)
+            | Err(SessionAuthorizationError::ZeroRevision) => {
+                return SessionRetrievalOutcome::Unavailable;
+            }
+        };
+        if let Err(error) = grant.validate(context, &authorization) {
+            return match error {
+                SessionAuthorizationError::WrongScope
+                | SessionAuthorizationError::WrongTarget
+                | SessionAuthorizationError::WrongAccess
+                | SessionAuthorizationError::UnresolvedGitRoute => {
+                    SessionRetrievalOutcome::WrongScope
+                }
+                SessionAuthorizationError::WrongContext | SessionAuthorizationError::Denied => {
+                    SessionRetrievalOutcome::Denied
+                }
+                SessionAuthorizationError::InvalidGrantId
+                | SessionAuthorizationError::InvalidProviderScope
+                | SessionAuthorizationError::ZeroRevision
+                | SessionAuthorizationError::Unavailable => SessionRetrievalOutcome::Unavailable,
+            };
+        }
+        if !within_request_budgets(context, &query)
+            || self.estimator.version() != query.context_budget.estimator_version
+        {
+            return SessionRetrievalOutcome::BudgetExhausted;
+        }
+        if context.cancellation().is_cancelled()
+            || context.deadline().is_elapsed_at(std::time::Instant::now())
+        {
+            return SessionRetrievalOutcome::Cancelled;
+        }
+
+        let root_digest = digest_root(context.identity());
+        let grant_digest = digest_grant(&grant);
+        let access_digest = digest_policy(grant.policy_digest());
+        let request_digest = digest_request(
+            context,
+            &query,
+            &grant,
+            self.configuration,
+            &root_digest,
+            &grant_digest,
+        );
+        let control = ExecutionControl::new(Some(context.deadline().instant())).with_work_limit(
+            usize::try_from(context.budgets().max_work_units()).unwrap_or(usize::MAX),
+        );
+        let cancellation_control = control.clone();
+        if context.cancellation().is_cancelled() {
+            control.cancel();
+        }
+        let snapshot_request = match crate::query::temporal::ports::TemporalSnapshotRequest::new(
+            query.session_id.clone(),
+            root_digest,
+            request_digest,
+            access_digest,
+            query.temporal_mode,
+            query.grain,
+        )
+        .map(|request| {
+            request.with_retrieval_scope(temporal_retrieval_scope(&query.retrieval_scope))
+        })
+        .and_then(|request| request.with_provider_scope(query.provider.clone()))
+        {
+            Ok(request) => request
+                .with_limits(query.execution_limits)
+                .with_execution_control(control),
+            Err(_) => return SessionRetrievalOutcome::Unavailable,
+        };
+        let configuration_digest = sha256_binding(context.configuration_digest().as_bytes());
+        let execution = AuthorizedTemporalExecutionRequest::new(
+            snapshot_request,
+            query.query.clone(),
+            query.cursor.clone(),
+            query.limit,
+            query.diversity,
+            query.context_budget.clone(),
+            self.configuration.schema_version,
+            self.configuration.ranking_version,
+            configuration_digest,
+        );
+        let execution = async { self.execution.execute(execution, &self.estimator).await };
+        tokio::pin!(execution);
+        let cancellation = context.cancellation().cancelled();
+        tokio::pin!(cancellation);
+        let deadline =
+            tokio::time::sleep_until(tokio::time::Instant::from_std(context.deadline().instant()));
+        tokio::pin!(deadline);
+
+        let result = tokio::select! {
+            biased;
+            _ = &mut cancellation => {
+                cancellation_control.cancel();
+                return SessionRetrievalOutcome::Cancelled;
+            }
+            _ = &mut deadline => {
+                cancellation_control.cancel();
+                return SessionRetrievalOutcome::Cancelled;
+            }
+            result = &mut execution => result,
+        };
+        match result {
+            Ok(report) => map_report(report, query.freshness_policy),
+            Err(error) => map_execution_error(error),
+        }
+    }
+}
+
+fn within_request_budgets(context: &RequestContext, query: &SessionTemporalQuery) -> bool {
+    let budgets = context.budgets();
+    let limits = query.execution_limits;
+    u64::try_from(query.limit).is_ok_and(|limit| limit <= budgets.max_results())
+        && query.limit <= limits.hydration_limit
+        && query.context_budget.max_bytes <= budgets.max_bytes()
+        && u64::try_from(limits.candidate_total_bytes)
+            .is_ok_and(|bytes| bytes <= budgets.max_bytes())
+        && u64::try_from(limits.record_total_bytes).is_ok_and(|bytes| bytes <= budgets.max_bytes())
+        && u64::try_from(limits.hydration_total_bytes)
+            .is_ok_and(|bytes| bytes <= budgets.max_bytes())
+}
+
+fn temporal_retrieval_scope(scope: &SessionRetrievalScope) -> TemporalRetrievalScope {
+    match scope {
+        SessionRetrievalScope::Session(session_id) => {
+            TemporalRetrievalScope::Session(session_id.clone())
+        }
+        SessionRetrievalScope::AllSessionsInAuthorizedRoot => {
+            TemporalRetrievalScope::AllSessionsInAuthorizedRoot
+        }
+    }
+}
+
+fn map_report(
+    report: crate::application::session::ports::SessionTemporalExecutionReport,
+    freshness_policy: SessionFreshnessPolicy,
+) -> SessionRetrievalOutcome<TemporalKernelResult> {
+    let (result, freshness) = report.into_parts();
+    let coverage = result.coverage;
+    let omissions = &result.context.bundle.omissions;
+    let coverage_omitted = coverage
+        .hidden
+        .saturating_add(coverage.unknown)
+        .saturating_add(coverage.redacted);
+    let explicit_omitted = u64::try_from(
+        omissions
+            .len()
+            .saturating_add(result.summary_omissions.len()),
+    )
+    .unwrap_or(u64::MAX);
+    let omitted = coverage_omitted.max(explicit_omitted);
+    let has_partial_coverage =
+        omitted != 0 || !omissions.is_empty() || !result.summary_omissions.is_empty();
+    if result.ranked.is_empty() {
+        let summary_rejections = result
+            .summary_omissions
+            .iter()
+            .map(|omission| &omission.rejection);
+        if omissions
+            .iter()
+            .any(|omission| omission.reason == ContextOmissionReasonV1::Locked)
+            || summary_rejections
+                .clone()
+                .any(|rejection| matches!(rejection, SummaryLineageRejection::LockedSource { .. }))
+        {
+            return SessionRetrievalOutcome::Locked;
+        }
+        if omissions.iter().any(|omission| {
+            matches!(
+                omission.reason,
+                ContextOmissionReasonV1::Deleted | ContextOmissionReasonV1::RetentionExpired
+            )
+        }) || summary_rejections.clone().any(|rejection| {
+            matches!(
+                rejection,
+                SummaryLineageRejection::DeletedSource { .. }
+                    | SummaryLineageRejection::ExpiredSource { .. }
+            )
+        }) {
+            return SessionRetrievalOutcome::Deleted;
+        }
+        if omissions
+            .iter()
+            .any(|omission| omission.reason == ContextOmissionReasonV1::Redacted)
+            || summary_rejections.clone().any(|rejection| {
+                matches!(rejection, SummaryLineageRejection::RedactedSource { .. })
+            })
+            || coverage.redacted != 0
+        {
+            return SessionRetrievalOutcome::Redacted;
+        }
+        if omissions
+            .iter()
+            .any(|omission| omission.reason == ContextOmissionReasonV1::Unauthorized)
+            || summary_rejections.clone().any(|rejection| {
+                matches!(
+                    rejection,
+                    SummaryLineageRejection::UnauthorizedSource { .. }
+                        | SummaryLineageRejection::SessionMismatch
+                )
+            })
+            || coverage.hidden != 0
+        {
+            return SessionRetrievalOutcome::Denied;
+        }
+        if omissions.iter().any(|omission| {
+            matches!(
+                omission.reason,
+                ContextOmissionReasonV1::ByteBudget | ContextOmissionReasonV1::TokenBudget
+            )
+        }) {
+            return SessionRetrievalOutcome::BudgetExhausted;
+        }
+        if !freshness_policy.accepts(freshness) {
+            return SessionRetrievalOutcome::Stale { freshness };
+        }
+        if has_partial_coverage || result.next_cursor.is_some() || coverage.visible != 0 {
+            return SessionRetrievalOutcome::Unavailable;
+        }
+        return SessionRetrievalOutcome::CompleteZero { freshness };
+    }
+    if !freshness_policy.accepts(freshness) {
+        return SessionRetrievalOutcome::Stale { freshness };
+    }
+    if has_partial_coverage || result.next_cursor.is_some() {
+        return SessionRetrievalOutcome::Partial {
+            items: vec![result],
+            freshness,
+            omitted: omitted.max(1),
+        };
+    }
+    SessionRetrievalOutcome::Complete {
+        items: vec![result],
+        freshness,
+    }
+}
+
+fn map_execution_error(
+    error: SessionTemporalExecutionError,
+) -> SessionRetrievalOutcome<TemporalKernelResult> {
+    match error {
+        SessionTemporalExecutionError::WrongScope => SessionRetrievalOutcome::WrongScope,
+        SessionTemporalExecutionError::Stale { generation_lag } => SessionRetrievalOutcome::Stale {
+            freshness: SessionDataFreshness::Stored { generation_lag },
+        },
+        SessionTemporalExecutionError::Locked => SessionRetrievalOutcome::Locked,
+        SessionTemporalExecutionError::Redacted => SessionRetrievalOutcome::Redacted,
+        SessionTemporalExecutionError::Deleted => SessionRetrievalOutcome::Deleted,
+        SessionTemporalExecutionError::Denied => SessionRetrievalOutcome::Denied,
+        SessionTemporalExecutionError::Unavailable => SessionRetrievalOutcome::Unavailable,
+        SessionTemporalExecutionError::BudgetExhausted => SessionRetrievalOutcome::BudgetExhausted,
+        SessionTemporalExecutionError::Cancelled => SessionRetrievalOutcome::Cancelled,
+        SessionTemporalExecutionError::Kernel(error) => map_kernel_error(error),
+    }
+}
+
+fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<TemporalKernelResult> {
+    match error {
+        TemporalKernelError::InvalidLimit | TemporalKernelError::BudgetExceeded => {
+            SessionRetrievalOutcome::BudgetExhausted
+        }
+        TemporalKernelError::Cancelled | TemporalKernelError::DeadlineExceeded => {
+            SessionRetrievalOutcome::Cancelled
+        }
+        TemporalKernelError::Port(error) => match error {
+            TemporalPortError::Cancelled | TemporalPortError::DeadlineExceeded => {
+                SessionRetrievalOutcome::Cancelled
+            }
+            TemporalPortError::BudgetExceeded { .. } => SessionRetrievalOutcome::BudgetExhausted,
+            TemporalPortError::UnauthorizedSnapshot => SessionRetrievalOutcome::Denied,
+            TemporalPortError::InvalidBinding { .. }
+            | TemporalPortError::ZeroGeneration
+            | TemporalPortError::ZeroVersion { .. }
+            | TemporalPortError::Read { .. } => SessionRetrievalOutcome::Unavailable,
+        },
+        TemporalKernelError::Cursor(error) => match error {
+            CursorError::RootMismatch
+            | CursorError::SessionMismatch
+            | CursorError::WrongAccess
+            | CursorError::TemporalModeMismatch
+            | CursorError::GrainMismatch => SessionRetrievalOutcome::WrongScope,
+            CursorError::Malformed | CursorError::Tampered | CursorError::SortKeyMismatch => {
+                SessionRetrievalOutcome::Denied
+            }
+            CursorError::WrongRequest
+            | CursorError::SchemaMismatch
+            | CursorError::RankingMismatch
+            | CursorError::ConfigurationMismatch
+            | CursorError::GenerationMismatch
+            | CursorError::SourceWatermarkMismatch
+            | CursorError::ProjectionWatermarkMismatch
+            | CursorError::IndexWatermarkMismatch
+            | CursorError::SummaryWatermarkMismatch
+            | CursorError::KeyIdMismatch
+            | CursorError::KeyVersionMismatch
+            | CursorError::KeyUnavailable
+            | CursorError::InvalidKeyMaterial => SessionRetrievalOutcome::Unavailable,
+        },
+        TemporalKernelError::Hydration(error) => match error {
+            HydrationError::BudgetExceeded { .. } => SessionRetrievalOutcome::BudgetExhausted,
+            HydrationError::Interrupted(TemporalPortError::Cancelled)
+            | HydrationError::Interrupted(TemporalPortError::DeadlineExceeded) => {
+                SessionRetrievalOutcome::Cancelled
+            }
+            HydrationError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
+                SessionRetrievalOutcome::BudgetExhausted
+            }
+            HydrationError::Unavailable
+            | HydrationError::InvalidDenial
+            | HydrationError::Interrupted(_) => SessionRetrievalOutcome::Unavailable,
+        },
+        TemporalKernelError::Context(error) => match error {
+            ContextError::BudgetExceeded { .. } => SessionRetrievalOutcome::BudgetExhausted,
+            ContextError::Interrupted(TemporalPortError::Cancelled)
+            | ContextError::Interrupted(TemporalPortError::DeadlineExceeded) => {
+                SessionRetrievalOutcome::Cancelled
+            }
+            ContextError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
+                SessionRetrievalOutcome::BudgetExhausted
+            }
+            ContextError::EstimatorVersionMismatch
+            | ContextError::InvalidBundle(_)
+            | ContextError::Interrupted(_) => SessionRetrievalOutcome::Unavailable,
+        },
+        TemporalKernelError::Ranking(_) => SessionRetrievalOutcome::Unavailable,
+    }
+}
+
+fn digest_root(identity: &ResolvedSessionIdentity) -> String {
+    #[derive(Serialize)]
+    struct RootBinding<'a> {
+        profile_id: &'a str,
+        project_id: Option<&'a str>,
+        store_id: &'a str,
+        root_id: &'a str,
+        repository_id: Option<&'a str>,
+        worktree_id: Option<&'a str>,
+        branch_id: Option<&'a str>,
+        owner_kind: &'static str,
+    }
+
+    let route = identity.git_route();
+    sha256_json(&RootBinding {
+        profile_id: identity.profile_id().as_str(),
+        project_id: identity.project_id().map(|value| value.as_str()),
+        store_id: identity.store_id().as_str(),
+        root_id: identity.root_id().as_str(),
+        repository_id: route.map(|value| value.repository_id().as_str()),
+        worktree_id: route.map(|value| value.worktree_id().as_str()),
+        branch_id: route.map(|value| value.branch_id().as_str()),
+        owner_kind: match identity.owner() {
+            SessionOwner::Profile { .. } => "profile",
+            SessionOwner::Project { .. } => "project",
+        },
+    })
+}
+
+fn digest_grant(grant: &crate::application::session::types::SessionAuthorizationGrant) -> String {
+    #[derive(Serialize)]
+    struct AccessBinding<'a> {
+        format_version: u8,
+        actor_id: &'a str,
+        grant_id: &'a str,
+        grant_revision: u64,
+        capability_digest: String,
+        policy_digest: String,
+        configuration_digest: String,
+        access: &'static str,
+        scope_kind: &'static str,
+        session_id: Option<&'a str>,
+        provider: Option<&'a str>,
+        temporal_mode: &'static str,
+        cutoff_micros: Option<i64>,
+        grain: &'static str,
+        root_digest: String,
+    }
+
+    sha256_json(&AccessBinding {
+        format_version: 2,
+        actor_id: grant.scope().actor_id().as_str(),
+        grant_id: grant.id().as_str(),
+        grant_revision: grant.revision(),
+        capability_digest: hex::encode(grant.capability_digest().as_bytes()),
+        policy_digest: hex::encode(grant.policy_digest().as_bytes()),
+        configuration_digest: hex::encode(grant.configuration_digest().as_bytes()),
+        access: match grant.scope().access() {
+            SessionAccess::Read => "read",
+            SessionAccess::Search => "search",
+            SessionAccess::Hydrate => "hydrate",
+        },
+        scope_kind: grant.scope().retrieval_scope().kind(),
+        session_id: grant
+            .scope()
+            .retrieval_scope()
+            .session_id()
+            .map(SessionId::as_str),
+        provider: grant.scope().provider_scope(),
+        temporal_mode: grant.scope().temporal_mode().as_str(),
+        cutoff_micros: match grant.scope().temporal_mode() {
+            TemporalModeV1::AsOf { cutoff } => Some(cutoff.0),
+            TemporalModeV1::Current | TemporalModeV1::Evolution | TemporalModeV1::Forensic => None,
+        },
+        grain: grant.scope().grain().as_str(),
+        root_digest: digest_root(grant.scope().identity()),
+    })
+}
+
+fn digest_policy(policy_digest: PolicyDigest) -> String {
+    format!("sha256:{}", hex::encode(policy_digest.as_bytes()))
+}
+
+fn digest_request(
+    context: &RequestContext,
+    query: &SessionTemporalQuery,
+    grant: &crate::application::session::types::SessionAuthorizationGrant,
+    configuration: SessionRetrievalConfiguration,
+    root_digest: &str,
+    grant_digest: &str,
+) -> String {
+    #[derive(Serialize)]
+    struct RequestBinding<'a> {
+        format_version: u8,
+        actor_id: &'a str,
+        grant_id: &'a str,
+        grant_revision: u64,
+        grant_capability_digest: String,
+        grant_policy_digest: String,
+        grant_configuration_digest: String,
+        access: &'static str,
+        scope_kind: &'static str,
+        session_id: Option<&'a str>,
+        provider: Option<&'a str>,
+        query: &'a str,
+        temporal_mode: &'static str,
+        cutoff_micros: Option<i64>,
+        grain: &'static str,
+        root_digest: &'a str,
+        grant_digest: &'a str,
+        limit: usize,
+        diversity: [usize; 5],
+        context_budget: (u64, u64, &'a str),
+        execution_limits: [usize; 15],
+        request_budgets: [u64; 3],
+        freshness_policy: &'static str,
+        schema_version: u32,
+        ranking_version: u32,
+        configuration_version: String,
+    }
+
+    let limits = query.execution_limits;
+    sha256_json(&RequestBinding {
+        format_version: 3,
+        actor_id: context.actor_id().as_str(),
+        grant_id: grant.id().as_str(),
+        grant_revision: grant.revision(),
+        grant_capability_digest: hex::encode(grant.capability_digest().as_bytes()),
+        grant_policy_digest: hex::encode(grant.policy_digest().as_bytes()),
+        grant_configuration_digest: hex::encode(grant.configuration_digest().as_bytes()),
+        access: "hydrate",
+        scope_kind: query.retrieval_scope.kind(),
+        session_id: query.retrieval_scope.session_id().map(SessionId::as_str),
+        provider: query.provider.as_deref(),
+        query: &query.query,
+        temporal_mode: query.temporal_mode.as_str(),
+        cutoff_micros: match query.temporal_mode {
+            TemporalModeV1::AsOf { cutoff } => Some(cutoff.0),
+            TemporalModeV1::Current | TemporalModeV1::Evolution | TemporalModeV1::Forensic => None,
+        },
+        grain: query.grain.as_str(),
+        root_digest,
+        grant_digest,
+        limit: query.limit,
+        diversity: [
+            query.diversity.per_logical_message,
+            query.diversity.per_turn,
+            query.diversity.per_session,
+            query.diversity.per_source,
+            query.diversity.per_evidence_role,
+        ],
+        context_budget: (
+            query.context_budget.max_bytes,
+            query.context_budget.max_tokens,
+            &query.context_budget.estimator_version,
+        ),
+        execution_limits: [
+            limits.candidate_limit,
+            limits.candidate_total_bytes,
+            limits.candidate_item_bytes,
+            limits.candidate_key_bytes,
+            limits.candidate_stable_id_bytes,
+            limits.candidate_anchor_id_bytes,
+            limits.candidate_metadata_field_bytes,
+            limits.record_limit,
+            limits.record_total_bytes,
+            limits.record_item_bytes,
+            limits.record_key_bytes,
+            limits.hydration_limit,
+            limits.hydration_total_bytes,
+            limits.hydration_payload_bytes,
+            limits.hydration_chunk_bytes,
+        ],
+        request_budgets: [
+            context.budgets().max_results(),
+            context.budgets().max_bytes(),
+            context.budgets().max_work_units(),
+        ],
+        freshness_policy: match query.freshness_policy {
+            SessionFreshnessPolicy::AllowStored => "allow_stored",
+            SessionFreshnessPolicy::RequireFresh => "require_fresh",
+        },
+        schema_version: configuration.schema_version,
+        ranking_version: configuration.ranking_version,
+        configuration_version: hex::encode(context.configuration_digest().as_bytes()),
+    })
+}
+
+fn sha256_json(value: &impl Serialize) -> String {
+    let encoded = serde_json::to_vec(value).expect("canonical request binding is serializable");
+    sha256_binding(&encoded)
+}
+
+fn sha256_binding(bytes: &[u8]) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}

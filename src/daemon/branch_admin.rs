@@ -14,7 +14,8 @@ use super::ProjectServerKey;
 use super::memory_repair_scheduler::MemoryRepairSchedulerHandle;
 use super::profile_host_admission_replay::ProfileHostAdmissionReplayRegistry;
 #[cfg(unix)]
-use super::scheduler::AutomationSchedulerHandle;
+use super::scheduler::{AutomationSchedulerHandle, MaintenanceTaskTermination};
+use super::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
 use super::{DaemonHandshake, DatabaseOwnerRegistry, authority, write_json_rpc_response};
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
@@ -48,6 +49,211 @@ impl HostAdmissionBrokerState {
 #[cfg(test)]
 type ExternalHolderVerifier = fn(&[PathBuf]) -> Result<()>;
 
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum MaintenanceReaperKind {
+    Automation,
+    MemoryRepair,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct MaintenanceReaperKey {
+    kind: MaintenanceReaperKind,
+    owner: ProjectServerKey,
+    generation: u64,
+}
+
+#[cfg(unix)]
+struct MaintenanceReaperHandle {
+    retired_task: tokio::task::AbortHandle,
+    termination: Arc<MaintenanceTaskTermination>,
+    _task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(unix)]
+struct MaintenanceReaperRegistryState {
+    accepting: bool,
+    pending: usize,
+    next_generation: u64,
+    reapers: HashMap<MaintenanceReaperKey, MaintenanceReaperHandle>,
+}
+
+#[cfg(unix)]
+struct MaintenanceReaperRegistry {
+    state: std::sync::Mutex<MaintenanceReaperRegistryState>,
+    changed: tokio::sync::Notify,
+    #[cfg(test)]
+    registration_barrier: std::sync::Mutex<Option<Arc<RetirementReaperRegistrationBarrier>>>,
+    #[cfg(test)]
+    shutdown_passes: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    shutdown_changed: tokio::sync::Notify,
+}
+
+#[cfg(unix)]
+impl Default for MaintenanceReaperRegistry {
+    fn default() -> Self {
+        Self {
+            state: std::sync::Mutex::new(MaintenanceReaperRegistryState {
+                accepting: true,
+                pending: 0,
+                next_generation: 1,
+                reapers: HashMap::new(),
+            }),
+            changed: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            registration_barrier: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            shutdown_passes: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            shutdown_changed: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl MaintenanceReaperRegistry {
+    fn state(&self) -> std::sync::MutexGuard<'_, MaintenanceReaperRegistryState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn reserve(self: &Arc<Self>) -> Option<MaintenanceReaperReservation> {
+        let mut state = self.state();
+        if !state.accepting {
+            return None;
+        }
+        state.pending += 1;
+        drop(state);
+        self.changed.notify_waiters();
+        Some(MaintenanceReaperReservation {
+            registry: Arc::clone(self),
+            active: true,
+        })
+    }
+
+    fn release_reservation(&self) {
+        let mut state = self.state();
+        debug_assert!(state.pending > 0);
+        state.pending = state.pending.saturating_sub(1);
+        drop(state);
+        self.changed.notify_waiters();
+    }
+
+    fn next_key(
+        state: &mut MaintenanceReaperRegistryState,
+        kind: MaintenanceReaperKind,
+        owner: &ProjectServerKey,
+    ) -> MaintenanceReaperKey {
+        loop {
+            let generation = state.next_generation;
+            state.next_generation = state.next_generation.wrapping_add(1).max(1);
+            let key = MaintenanceReaperKey {
+                kind,
+                owner: owner.clone(),
+                generation,
+            };
+            if !state.reapers.contains_key(&key) {
+                return key;
+            }
+        }
+    }
+
+    fn finish(&self, key: &MaintenanceReaperKey) {
+        self.state().reapers.remove(key);
+        self.changed.notify_waiters();
+    }
+}
+
+#[cfg(unix)]
+pub(super) struct MaintenanceReaperReservation {
+    registry: Arc<MaintenanceReaperRegistry>,
+    active: bool,
+}
+
+#[cfg(unix)]
+impl Drop for MaintenanceReaperReservation {
+    fn drop(&mut self) {
+        if self.active {
+            self.registry.release_reservation();
+        }
+    }
+}
+
+#[cfg(unix)]
+struct MaintenanceReaperFinalizer {
+    registry: Arc<MaintenanceReaperRegistry>,
+    key: MaintenanceReaperKey,
+    termination: Arc<MaintenanceTaskTermination>,
+}
+
+#[cfg(unix)]
+impl Drop for MaintenanceReaperFinalizer {
+    fn drop(&mut self) {
+        self.termination.finish();
+        self.registry.finish(&self.key);
+    }
+}
+
+#[cfg(test)]
+pub(super) struct RetirementReaperRegistrationBarrier {
+    reached: tokio::sync::watch::Sender<bool>,
+    released: std::sync::Mutex<bool>,
+    released_changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl RetirementReaperRegistrationBarrier {
+    fn new() -> Self {
+        let (reached, _) = tokio::sync::watch::channel(false);
+        Self {
+            reached,
+            released: std::sync::Mutex::new(false),
+            released_changed: std::sync::Condvar::new(),
+        }
+    }
+
+    fn block(&self) {
+        self.reached.send_replace(true);
+        let mut released = self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*released {
+            released = self
+                .released_changed
+                .wait(released)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    pub(super) async fn wait_until_reached(&self) {
+        let mut reached = self.reached.subscribe();
+        while !*reached.borrow_and_update() {
+            if reached.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    pub(super) fn release(&self) {
+        *self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.released_changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+impl Drop for RetirementReaperRegistrationBarrier {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 /// Coordinates every daemon operation that can create, rekey, or remove a
 /// database owner. There is intentionally one gate and one copy of each shared
 /// registry so branch administration cannot prove ownership against stale
@@ -70,6 +276,9 @@ pub(super) struct StoreAdministration {
     #[cfg(unix)]
     memory_repair_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, MemoryRepairSchedulerHandle>>>,
+    session_temporal_refresh_schedulers: Arc<SessionTemporalRefreshSchedulerRegistry>,
+    #[cfg(unix)]
+    retirement_reapers: Arc<MaintenanceReaperRegistry>,
     #[cfg(test)]
     external_holder_verifier: Option<ExternalHolderVerifier>,
 }
@@ -87,6 +296,11 @@ impl Default for StoreAdministration {
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             #[cfg(unix)]
             memory_repair_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            session_temporal_refresh_schedulers: Arc::new(
+                SessionTemporalRefreshSchedulerRegistry::default(),
+            ),
+            #[cfg(unix)]
+            retirement_reapers: Arc::new(MaintenanceReaperRegistry::default()),
             #[cfg(test)]
             external_holder_verifier: None,
         }
@@ -273,6 +487,195 @@ impl StoreAdministration {
         &self.memory_repair_schedulers
     }
 
+    pub(super) fn session_temporal_refresh_schedulers(
+        &self,
+    ) -> &Arc<SessionTemporalRefreshSchedulerRegistry> {
+        &self.session_temporal_refresh_schedulers
+    }
+
+    #[cfg(unix)]
+    pub(super) fn reserve_retirement_reaper(&self) -> Option<MaintenanceReaperReservation> {
+        self.retirement_reapers.reserve()
+    }
+
+    #[cfg(unix)]
+    pub(super) fn spawn_retirement_reaper<F>(
+        &self,
+        mut reservation: MaintenanceReaperReservation,
+        kind: MaintenanceReaperKind,
+        owner: ProjectServerKey,
+        task: tokio::task::JoinHandle<()>,
+        termination: Arc<MaintenanceTaskTermination>,
+        cleanup: F,
+    ) where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        debug_assert!(Arc::ptr_eq(&reservation.registry, &self.retirement_reapers));
+        #[cfg(test)]
+        if let Some(barrier) = self
+            .retirement_reapers
+            .registration_barrier
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            barrier.block();
+        }
+
+        let retired_task = task.abort_handle();
+        task.abort();
+        let mut state = self.retirement_reapers.state();
+        let key = MaintenanceReaperRegistry::next_key(&mut state, kind, &owner);
+        let finalizer = MaintenanceReaperFinalizer {
+            registry: Arc::clone(&self.retirement_reapers),
+            key: key.clone(),
+            termination: Arc::clone(&termination),
+        };
+        let (start, registered) = tokio::sync::oneshot::channel();
+        let reaper = tokio::spawn(async move {
+            let _finalizer = finalizer;
+            let _ = registered.await;
+            let _ = task.await;
+            cleanup.await;
+        });
+        let replaced = state.reapers.insert(
+            key,
+            MaintenanceReaperHandle {
+                retired_task,
+                termination,
+                _task: reaper,
+            },
+        );
+        debug_assert!(replaced.is_none());
+        debug_assert!(state.pending > 0);
+        state.pending = state.pending.saturating_sub(1);
+        reservation.active = false;
+        drop(state);
+        self.retirement_reapers.changed.notify_waiters();
+        let _ = start.send(());
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn shutdown_retirement_reapers(&self) {
+        loop {
+            let changed = self.retirement_reapers.changed.notified();
+            let (pending, reapers) = {
+                let mut state = self.retirement_reapers.state();
+                state.accepting = false;
+                (
+                    state.pending,
+                    state
+                        .reapers
+                        .values()
+                        .map(|handle| {
+                            (handle.retired_task.clone(), Arc::clone(&handle.termination))
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            };
+            #[cfg(test)]
+            if pending > 0 || !reapers.is_empty() {
+                self.retirement_reapers
+                    .shutdown_passes
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                self.retirement_reapers.shutdown_changed.notify_waiters();
+            }
+            if pending == 0 && reapers.is_empty() {
+                return;
+            }
+            for (retired_task, _) in &reapers {
+                retired_task.abort();
+            }
+            if reapers.is_empty() {
+                changed.await;
+                continue;
+            }
+            for (_, termination) in reapers {
+                termination.wait().await;
+            }
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) async fn retirement_reaper_count(&self) -> usize {
+        self.retirement_reapers.state().reapers.len()
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) async fn wait_for_retirement_reaper_count_for_test(&self, expected: usize) {
+        loop {
+            let changed = self.retirement_reapers.changed.notified();
+            if self.retirement_reapers.state().reapers.len() == expected {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn install_retirement_reaper_registration_barrier_for_test(
+        &self,
+    ) -> Arc<RetirementReaperRegistrationBarrier> {
+        let barrier = Arc::new(RetirementReaperRegistrationBarrier::new());
+        *self
+            .retirement_reapers
+            .registration_barrier
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&barrier));
+        barrier
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn retirement_reaper_shutdown_passes_for_test(&self) -> u64 {
+        self.retirement_reapers
+            .shutdown_passes
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) async fn wait_for_retirement_reaper_shutdown_pass_for_test(&self, after: u64) {
+        loop {
+            let changed = self.retirement_reapers.shutdown_changed.notified();
+            if self
+                .retirement_reapers
+                .shutdown_passes
+                .load(std::sync::atomic::Ordering::Acquire)
+                > after
+            {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn reconcile_cached_automation_for_profile(
+        &self,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::dashboard::AutomationSchedulerOwnerReconcileOutcome>> {
+        let profile_root = authority::canonical_identity_path(profile_root)?;
+        let servers = {
+            let registry = self.project_servers.lock().await;
+            registry
+                .servers
+                .iter()
+                .filter(|(key, _)| key.owner.profile_root == profile_root)
+                .map(|(key, server)| (key.clone(), Arc::clone(server)))
+                .collect::<Vec<_>>()
+        };
+        let mut outcomes = Vec::with_capacity(servers.len());
+        for (key, server) in servers {
+            outcomes.push(crate::dashboard::AutomationSchedulerOwnerReconcileOutcome {
+                project_id: key.owner.project_id,
+                store_root: key.owner.store_root,
+                graph_db_path: key.owner.graph_db_path,
+                scope_prefix: key.scope_prefix,
+                outcome: server.reconcile_automation_scheduler().await,
+            });
+        }
+        Ok(outcomes)
+    }
+
     #[cfg_attr(not(test), allow(clippy::unused_self))]
     fn prove_no_external_branch_store_holders(&self, database_paths: &[PathBuf]) -> Result<()> {
         #[cfg(test)]
@@ -342,6 +745,10 @@ impl StoreAdministration {
                     canonical_branch_database_paths(recovery.database_paths())?;
                 {
                     let project_servers = self.project_servers.lock().await;
+                    let refresh_scheduler_busy = self
+                        .session_temporal_refresh_schedulers
+                        .owns_project_database_paths(&database_paths)
+                        .await;
                     #[cfg(unix)]
                     let scheduler_busy = cached_scheduler_owns_selected(
                         &*self.automation_schedulers.lock().await,
@@ -349,9 +756,9 @@ impl StoreAdministration {
                     ) || cached_scheduler_owns_selected(
                         &*self.memory_repair_schedulers.lock().await,
                         &database_paths,
-                    );
+                    ) || refresh_scheduler_busy;
                     #[cfg(not(unix))]
-                    let scheduler_busy = false;
+                    let scheduler_busy = refresh_scheduler_busy;
                     ensure_no_cached_store_owners(
                         &project_servers,
                         scheduler_busy,
@@ -405,6 +812,10 @@ impl StoreAdministration {
 
             {
                 let project_servers = self.project_servers.lock().await;
+                let refresh_scheduler_busy = self
+                    .session_temporal_refresh_schedulers
+                    .owns_project_database_paths(&database_paths)
+                    .await;
                 #[cfg(unix)]
                 let scheduler_busy = cached_scheduler_owns_selected(
                     &*self.automation_schedulers.lock().await,
@@ -412,9 +823,9 @@ impl StoreAdministration {
                 ) || cached_scheduler_owns_selected(
                     &*self.memory_repair_schedulers.lock().await,
                     &database_paths,
-                );
+                ) || refresh_scheduler_busy;
                 #[cfg(not(unix))]
-                let scheduler_busy = false;
+                let scheduler_busy = refresh_scheduler_busy;
                 ensure_no_cached_store_owners(
                     &project_servers,
                     scheduler_busy,
@@ -507,9 +918,9 @@ fn ensure_no_cached_store_owners<Server>(
     }
 
     let cached_as = match (server_busy, scheduler_busy) {
-        (true, true) => "a project server and an automation scheduler",
+        (true, true) => "a project server and a background scheduler",
         (true, false) => "a project server",
-        (false, true) => "an automation scheduler",
+        (false, true) => "a background scheduler",
         (false, false) => return Ok(()),
     };
     let mut paths = database_paths

@@ -2,6 +2,41 @@ use super::daemon_project_dashboard_root;
 use crate::cli::{AutomationConfigAction, AutomationConfigScope};
 use crate::resolve_cli_project_root;
 
+pub(crate) fn automation_config_changed(
+    current: Option<&tracedecay::automation::config::AutomationConfigPatch>,
+    updated: &tracedecay::automation::config::AutomationConfigPatch,
+) -> bool {
+    current != Some(updated)
+}
+
+pub(crate) async fn notify_project_automation_scheduler(
+    project_path: &std::path::Path,
+) -> tracedecay::errors::Result<()> {
+    crate::commands::daemon_tool_json(
+        Some(project_path),
+        "tracedecay_admin_project",
+        serde_json::json!({
+            "action": "automation_reconcile",
+            "scope": "project"
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
+pub(crate) async fn notify_profile_automation_schedulers() -> tracedecay::errors::Result<()> {
+    crate::commands::daemon_tool_json(
+        None,
+        "tracedecay_admin_project",
+        serde_json::json!({
+            "action": "automation_reconcile",
+            "scope": "profile"
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
 pub(super) async fn handle_automation_config_command(
     action: AutomationConfigAction,
 ) -> tracedecay::errors::Result<()> {
@@ -28,9 +63,10 @@ pub(super) async fn handle_automation_config_command(
     let mut user_config = tracedecay::user_config::UserConfig::load();
     let global = user_config.automation.clone();
     let project_context = if scope == AutomationConfigScope::Project {
-        let project_path = resolve_cli_project_root(path, None, None).await?;
+        let project_path = resolve_cli_project_root(path.clone(), None, None).await?;
         let dashboard_root = daemon_project_dashboard_root(&project_path).await?;
         Some((
+            project_path,
             dashboard_root.clone(),
             load_project_config(&dashboard_root).await?,
         ))
@@ -42,7 +78,7 @@ pub(super) async fn handle_automation_config_command(
         AutomationConfigAction::Get { json, .. } => {
             let project = project_context
                 .as_ref()
-                .and_then(|(_, project)| project.as_ref());
+                .and_then(|(_, _, project)| project.as_ref());
             let effective = effective_config(&global, project)?;
             print_automation_config(&global, project, &effective, json, false)?;
             return Ok(());
@@ -50,7 +86,7 @@ pub(super) async fn handle_automation_config_command(
         AutomationConfigAction::Explain { json, .. } => {
             let project = project_context
                 .as_ref()
-                .and_then(|(_, project)| project.as_ref());
+                .and_then(|(_, _, project)| project.as_ref());
             let effective = effective_config(&global, project)?;
             print_automation_config(&global, project, &effective, json, true)?;
             return Ok(());
@@ -138,6 +174,10 @@ pub(super) async fn handle_automation_config_command(
 
     if scope == AutomationConfigScope::Global {
         let effective = effective_config(&global, Some(&patch))?;
+        let changed = effective != global;
+        if !changed {
+            return print_automation_config(&global, None, &effective, true, false);
+        }
         user_config.automation = effective.clone();
         match user_config.save_with_recovery() {
             Ok(Some(backup)) => {
@@ -153,11 +193,16 @@ pub(super) async fn handle_automation_config_command(
                 });
             }
         }
+        notify_profile_automation_schedulers().await?;
         return print_automation_config(&user_config.automation, None, &effective, true, false);
     }
 
-    let (dashboard_root, _) = project_context.expect("project scope has project context");
+    let (project_path, dashboard_root, current) =
+        project_context.expect("project scope has project context");
     let (project, effective) = apply_project_config_patch(&dashboard_root, &global, patch).await?;
+    if automation_config_changed(current.as_ref(), &project) {
+        notify_project_automation_scheduler(&project_path).await?;
+    }
     print_automation_config(&global, Some(&project), &effective, true, false)
 }
 

@@ -26,10 +26,10 @@ pub(crate) use tracedecay::automation::run_ledger::{
     load_run_records, read_run_artifact_payload,
 };
 pub(crate) use tracedecay::automation::runner::{
-    CombinedReviewAutomationOptions, CombinedReviewDispatch, MemoryCuratorAutomationOptions,
-    SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-    run_combined_review_with_backend, run_memory_curator_with_backend,
-    run_session_reflector_with_backend, run_skill_writer_with_backend,
+    AutomationSessionRetrieval, AutomationSessionRetrievalFuture, AutomationTemporalEvidence,
+    AutomationTemporalEvidenceItem, AutomationTemporalRetrieval, CombinedReviewAutomationOptions,
+    CombinedReviewDispatch, MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
+    SkillWriterAutomationOptions, run_memory_curator_with_backend,
 };
 pub(crate) use tracedecay::errors::TraceDecayError;
 pub(crate) use tracedecay::global_db::GlobalDb;
@@ -37,8 +37,256 @@ pub(crate) use tracedecay::memory::encoding::HolographicEncoder;
 pub(crate) use tracedecay::sessions::lcm::{LcmGrepSort, LcmScope};
 pub(crate) use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 pub(crate) use tracedecay::tracedecay::{TraceDecay, current_timestamp};
+use tracedecay_domain::{SessionId, TemporalCoverageCountsV1};
 
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+pub(crate) struct FixtureAutomationSessionRetrieval {
+    anchor_session_id: SessionId,
+}
+
+impl FixtureAutomationSessionRetrieval {
+    pub(crate) fn new(_cg: &TraceDecay) -> Self {
+        Self {
+            anchor_session_id: SessionId::new("session-reflect-1").unwrap(),
+        }
+    }
+}
+
+impl AutomationSessionRetrieval for FixtureAutomationSessionRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve<'a>(
+        &'a self,
+        query: tracedecay::application::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'a> {
+        assert_eq!(
+            query.temporal_mode(),
+            tracedecay_domain::TemporalModeV1::Forensic
+        );
+        assert_eq!(
+            query.freshness_policy(),
+            tracedecay::application::session::SessionFreshnessPolicy::RequireFresh
+        );
+        Box::pin(async move {
+            let provider = query.provider().unwrap_or("cursor").to_string();
+            let session_id = match query.retrieval_scope() {
+                tracedecay::application::session::SessionRetrievalScope::Session(session_id) => {
+                    session_id.as_str().to_string()
+                }
+                tracedecay::application::session::SessionRetrievalScope::AllSessionsInAuthorizedRoot => {
+                    "session-reflect-1".to_string()
+                }
+            };
+            let message_id = if session_id == "project-reflect-1" {
+                "project-reflect-1-message-001"
+            } else {
+                "session-reflect-1-message-001"
+            };
+            AutomationTemporalRetrieval::Complete(AutomationTemporalEvidence {
+                coverage: TemporalCoverageCountsV1 {
+                    visible: 1,
+                    hidden: 0,
+                    unknown: 0,
+                    redacted: 0,
+                },
+                items: vec![AutomationTemporalEvidenceItem {
+                    anchor_id: "fixture-anchor-1".to_string(),
+                    stable_id: "fixture-stable-1".to_string(),
+                    provider,
+                    session_id,
+                    message_id: Some(message_id.to_string()),
+                    source_id: Some("fixture-occurrence-1".to_string()),
+                    store_id: Some(1),
+                    role: Some("user".to_string()),
+                    ordinal: Some(1),
+                    session_total_messages: Some(1),
+                    knowledge_at_micros: 1_715_000_000_000_000,
+                    normalized_score_micros: 1_000_000,
+                    snippet: json!({
+                        "provider": query.provider().unwrap_or("cursor"),
+                        "ordinal": 1,
+                        "session_total_messages": 1,
+                        "store_id": 1,
+                        "text": query.query(),
+                        "tool_names": "bash",
+                        "metadata_json": "{\"cmd\":\"rg automation src\"}",
+                    })
+                    .to_string(),
+                }],
+            })
+        })
+    }
+}
+
+pub(crate) struct StaticAutomationSessionRetrieval {
+    anchor_session_id: SessionId,
+    item: AutomationTemporalEvidenceItem,
+}
+
+impl StaticAutomationSessionRetrieval {
+    pub(crate) fn message(session_id: &str, message_id: &str, text: &str) -> Self {
+        Self::message_for_provider("cursor", session_id, message_id, text)
+    }
+
+    pub(crate) fn message_for_provider(
+        provider: &str,
+        session_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> Self {
+        Self {
+            anchor_session_id: SessionId::new(session_id).unwrap(),
+            item: AutomationTemporalEvidenceItem {
+                anchor_id: "static-anchor".to_string(),
+                stable_id: "static-stable".to_string(),
+                provider: provider.to_string(),
+                session_id: session_id.to_string(),
+                message_id: Some(message_id.to_string()),
+                source_id: Some("static-occurrence".to_string()),
+                store_id: Some(1),
+                role: Some("user".to_string()),
+                ordinal: Some(1),
+                session_total_messages: Some(1),
+                knowledge_at_micros: 1_715_000_001_000_000,
+                normalized_score_micros: 1_000_000,
+                snippet: text.to_string(),
+            },
+        }
+    }
+}
+
+impl AutomationSessionRetrieval for StaticAutomationSessionRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve<'a>(
+        &'a self,
+        query: tracedecay::application::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'a> {
+        assert_eq!(
+            query.temporal_mode(),
+            tracedecay_domain::TemporalModeV1::Forensic
+        );
+        assert_eq!(
+            query.freshness_policy(),
+            tracedecay::application::session::SessionFreshnessPolicy::RequireFresh
+        );
+        Box::pin(async move {
+            AutomationTemporalRetrieval::Complete(AutomationTemporalEvidence {
+                items: vec![self.item.clone()],
+                coverage: TemporalCoverageCountsV1 {
+                    visible: 1,
+                    hidden: 0,
+                    unknown: 0,
+                    redacted: 0,
+                },
+            })
+        })
+    }
+}
+
+pub(crate) struct RejectedAutomationSessionRetrieval {
+    anchor_session_id: SessionId,
+    reason: &'static str,
+}
+
+pub(crate) struct EmptyAutomationSessionRetrieval {
+    anchor_session_id: SessionId,
+}
+
+impl EmptyAutomationSessionRetrieval {
+    pub(crate) fn new() -> Self {
+        Self {
+            anchor_session_id: SessionId::new("empty-automation-fixture").unwrap(),
+        }
+    }
+}
+
+impl AutomationSessionRetrieval for EmptyAutomationSessionRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve<'a>(
+        &'a self,
+        _query: tracedecay::application::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'a> {
+        Box::pin(async { AutomationTemporalRetrieval::CompleteZero })
+    }
+}
+
+impl RejectedAutomationSessionRetrieval {
+    pub(crate) fn new(reason: &'static str) -> Self {
+        Self {
+            anchor_session_id: SessionId::new("rejected-automation-fixture").unwrap(),
+            reason,
+        }
+    }
+}
+
+impl AutomationSessionRetrieval for RejectedAutomationSessionRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve<'a>(
+        &'a self,
+        query: tracedecay::application::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'a> {
+        assert_eq!(
+            query.temporal_mode(),
+            tracedecay_domain::TemporalModeV1::Forensic
+        );
+        assert_eq!(
+            query.freshness_policy(),
+            tracedecay::application::session::SessionFreshnessPolicy::RequireFresh
+        );
+        Box::pin(async move { AutomationTemporalRetrieval::Rejected(self.reason) })
+    }
+}
+
+pub(crate) async fn run_session_reflector_with_backend(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    options: SessionReflectorAutomationOptions,
+) -> tracedecay::errors::Result<tracedecay::automation::runner::SessionReflectorAutomationRun> {
+    let retrieval = FixtureAutomationSessionRetrieval::new(cg);
+    tracedecay::automation::runner::run_session_reflector_with_backend_and_retrieval(
+        cg, config, backend, &retrieval, options,
+    )
+    .await
+}
+
+pub(crate) async fn run_skill_writer_with_backend(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    options: SkillWriterAutomationOptions,
+) -> tracedecay::errors::Result<tracedecay::automation::runner::SkillWriterAutomationRun> {
+    let retrieval = FixtureAutomationSessionRetrieval::new(cg);
+    tracedecay::automation::runner::run_skill_writer_with_backend_and_retrieval(
+        cg, config, backend, &retrieval, options,
+    )
+    .await
+}
+
+pub(crate) async fn run_combined_review_with_backend(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    options: CombinedReviewAutomationOptions,
+) -> tracedecay::errors::Result<CombinedReviewDispatch> {
+    let retrieval = FixtureAutomationSessionRetrieval::new(cg);
+    tracedecay::automation::runner::run_combined_review_with_backend_and_retrieval(
+        cg, config, backend, &retrieval, options,
+    )
+    .await
+}
 
 pub(crate) fn project_memory_owner(cg: &TraceDecay) -> tracedecay_domain::FactOwnerV1 {
     let project_id = cg
@@ -640,7 +888,10 @@ impl AgentTaskBackend for SessionReplayEvidenceBackend {
         );
         let evidence = &request.context["session_reflection_evidence"];
         assert_eq!(evidence["evidence_mode"], json!("session_replay_with_grep"));
-        assert_eq!(evidence["hits"], json!([]));
+        assert_eq!(
+            evidence["hits"][0]["message_id"],
+            json!(self.expected_message_id)
+        );
         let slices = &evidence["recent_session_slices"];
         assert_eq!(slices["mode"], json!("recent_sessions"));
         assert_eq!(slices["session_selection"], json!("recent_activity"));
@@ -694,7 +945,10 @@ impl AgentTaskBackend for SkillWriterReplayEvidenceBackend {
         assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
         let evidence = &request.context["skill_writer_evidence"];
         assert_eq!(evidence["evidence_mode"], json!("session_replay_with_grep"));
-        assert_eq!(evidence["hits"], json!([]));
+        assert_eq!(
+            evidence["hits"][0]["session_id"],
+            json!(self.expected_session_id)
+        );
         let slices = &evidence["recent_session_slices"];
         assert_eq!(slices["mode"], json!("recent_sessions"));
         assert_eq!(slices["session_selection"], json!("recent_activity"));

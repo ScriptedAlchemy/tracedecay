@@ -24,13 +24,20 @@ pub(crate) use dispatch_policy::tool_dispatches_registered_project_reader;
 pub(crate) use handlers::hook_runtime::structured_hook_error_data;
 pub use handlers::memory::handle_user_memory_tool;
 pub(crate) use handlers::memory::needs_operation_context as memory_needs_operation_context;
+pub(crate) use handlers::{
+    LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
+    LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome, SessionRefreshAction,
+    SessionRefreshCommand, SessionRefreshCoverageView, SessionRefreshFrontierView,
+    SessionRefreshProgressView, SessionRefreshReceiptView, SessionRefreshServiceOutcome,
+    SessionRefreshServicePort, SessionRetrievalCommand, SessionRetrievalExplanationView,
+    SessionRetrievalPageView, SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome,
+    SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionTemporalMetadataView,
+    SessionTemporalWatermarksView, handle_projectless_admin_cli, handle_projectless_hook_runtime,
+    replay_projectless_hermes_host_admission, utc_micros_value,
+};
 pub use handlers::{
     SessionAuthorities, ToolCallRegistryOptions, handle_tool_call, handle_tool_call_with_registry,
     handle_tool_call_with_registry_and_implicit_project, handle_user_lcm_tool,
-};
-pub(crate) use handlers::{
-    handle_projectless_admin_cli, handle_projectless_hook_runtime,
-    replay_projectless_hermes_host_admission,
 };
 
 /// Maximum character length for a tool response before truncation.

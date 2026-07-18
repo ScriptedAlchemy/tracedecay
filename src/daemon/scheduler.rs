@@ -8,6 +8,7 @@ use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
+use super::branch_admin::MaintenanceReaperKind;
 use super::{
     DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event,
     open_existing_project_with_options,
@@ -154,9 +155,196 @@ async fn log_automation_staged_if_pending(project_path: &Path, cg: &TraceDecay) 
     );
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AutomationSchedulerLifecycle {
+    Running,
+    Exiting,
+    Finished,
+    Retiring,
+}
+
 pub(super) struct AutomationSchedulerHandle {
-    pub(super) task: JoinHandle<()>,
+    pub(super) task: Option<JoinHandle<()>>,
     pub(super) wake: Arc<tokio::sync::Notify>,
+    pub(super) completion: Arc<()>,
+    pub(super) generation: Arc<std::sync::atomic::AtomicU64>,
+    pub(super) lifecycle: AutomationSchedulerLifecycle,
+    termination: Arc<MaintenanceTaskTermination>,
+}
+
+#[cfg(test)]
+impl AutomationSchedulerHandle {
+    pub(super) fn for_test(task: JoinHandle<()>) -> Self {
+        Self {
+            task: Some(task),
+            wake: Arc::new(tokio::sync::Notify::new()),
+            completion: Arc::new(()),
+            generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            lifecycle: AutomationSchedulerLifecycle::Running,
+            termination: Arc::new(MaintenanceTaskTermination::pending()),
+        }
+    }
+}
+
+pub(super) struct MaintenanceTaskTermination {
+    finished: tokio::sync::watch::Sender<bool>,
+}
+
+impl MaintenanceTaskTermination {
+    pub(super) fn pending() -> Self {
+        let (finished, _) = tokio::sync::watch::channel(false);
+        Self { finished }
+    }
+
+    pub(super) async fn wait(&self) {
+        self.wait_for_finish(self.finished.subscribe()).await;
+    }
+
+    async fn wait_for_finish(&self, mut finished: tokio::sync::watch::Receiver<bool>) {
+        while !*finished.borrow_and_update() {
+            if finished.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    pub(super) fn finish(&self) {
+        self.finished.send_replace(true);
+    }
+}
+
+pub(super) struct AutomationSchedulerRetirement {
+    termination: Arc<MaintenanceTaskTermination>,
+}
+
+impl AutomationSchedulerRetirement {
+    pub(super) async fn wait(self) {
+        self.termination.wait().await;
+    }
+}
+
+#[cfg(test)]
+mod maintenance_task_termination_tests {
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
+    use super::MaintenanceTaskTermination;
+
+    #[tokio::test(start_paused = true)]
+    async fn finish_before_wait_is_latched() {
+        let termination = MaintenanceTaskTermination::pending();
+        termination.finish();
+
+        timeout(Duration::from_secs(1), termination.wait())
+            .await
+            .expect("finish before wait must not hang");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn finish_between_registration_and_condition_check_is_latched() {
+        let termination = MaintenanceTaskTermination::pending();
+        let registered = termination.finished.subscribe();
+        termination.finish();
+
+        timeout(
+            Duration::from_secs(1),
+            termination.wait_for_finish(registered),
+        )
+        .await
+        .expect("finish after waiter registration must not hang");
+    }
+}
+
+#[cfg(test)]
+pub(super) struct AutomationSchedulerExitBarrier {
+    state: tokio::sync::watch::Sender<u8>,
+}
+
+#[cfg(test)]
+impl AutomationSchedulerExitBarrier {
+    const UNDECIDED: u8 = 0;
+    pub(super) const EXIT: u8 = 1;
+    pub(super) const CONTINUE: u8 = 2;
+    const DECISION_MASK: u8 = Self::EXIT | Self::CONTINUE;
+    const REACHED: u8 = 1 << 2;
+    const RELEASED: u8 = 1 << 3;
+
+    pub(super) fn new() -> Self {
+        let (state, _) = tokio::sync::watch::channel(Self::UNDECIDED);
+        Self { state }
+    }
+
+    async fn pause_after_disabled_read(&self) {
+        self.state.send_modify(|state| *state |= Self::REACHED);
+        self.wait_for(|state| state & Self::RELEASED != 0).await;
+    }
+
+    fn record_decision(&self, decision: u8) {
+        debug_assert!(matches!(decision, Self::EXIT | Self::CONTINUE));
+        self.state
+            .send_modify(|state| *state = (*state & !Self::DECISION_MASK) | decision);
+    }
+
+    pub(super) async fn wait_until_reached(&self) {
+        self.wait_for(|state| state & Self::REACHED != 0).await;
+    }
+
+    pub(super) fn release(&self) {
+        self.state.send_modify(|state| *state |= Self::RELEASED);
+    }
+
+    pub(super) async fn wait_for_decision(&self) -> u8 {
+        self.wait_for(|state| state & Self::DECISION_MASK != Self::UNDECIDED)
+            .await
+            & Self::DECISION_MASK
+    }
+
+    async fn wait_for(&self, ready: impl Fn(u8) -> bool) -> u8 {
+        let mut state = self.state.subscribe();
+        loop {
+            let current = *state.borrow_and_update();
+            if ready(current) {
+                return current;
+            }
+            if state.changed().await.is_err() {
+                return *state.borrow();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod automation_scheduler_exit_barrier_tests {
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
+    use super::AutomationSchedulerExitBarrier;
+
+    #[tokio::test(start_paused = true)]
+    async fn preserves_release_and_decision_conditions() {
+        let barrier = AutomationSchedulerExitBarrier::new();
+
+        barrier.release();
+        timeout(Duration::from_secs(1), barrier.pause_after_disabled_read())
+            .await
+            .expect("release sent before the pause must be observed");
+        timeout(Duration::from_secs(1), barrier.wait_until_reached())
+            .await
+            .expect("reached state must survive release");
+
+        barrier.record_decision(AutomationSchedulerExitBarrier::CONTINUE);
+        assert_eq!(
+            timeout(Duration::from_secs(1), barrier.wait_for_decision())
+                .await
+                .expect("recorded decision must be observed"),
+            AutomationSchedulerExitBarrier::CONTINUE
+        );
+        timeout(Duration::from_secs(1), barrier.wait_until_reached())
+            .await
+            .expect("reached state must survive the decision");
+    }
 }
 
 impl DaemonEngine {
@@ -165,87 +353,178 @@ impl DaemonEngine {
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-    ) {
+    ) -> crate::dashboard::AutomationSchedulerReconcileOutcome {
+        let transition = self.maintenance_transition_gate(&key).await;
+        let _transition = transition.lock().await;
         self.store_administration
             .with_writer(|| async move {
-                if !self.lifecycle.accepting() {
-                    return;
-                }
-                {
-                    let schedulers = self
-                        .store_administration
-                        .automation_schedulers()
-                        .lock()
-                        .await;
-                    if schedulers.contains_key(&key) {
-                        return;
-                    }
-                }
-
-                let configured = match Box::pin(automation_scheduler_has_work_for_project(
-                    &project_path,
-                    &handshake,
-                ))
-                .await
-                {
-                    Ok(configured) => configured,
-                    Err(e) => {
-                        log_daemon_event(
-                            "scheduler_config",
-                            &[
-                                ("project", project_path.display().to_string()),
-                                ("outcome", "error".to_string()),
-                                ("error", e.to_string()),
-                            ],
-                        );
-                        false
-                    }
-                };
-                if !configured {
-                    log_daemon_event(
-                        "scheduler_config",
-                        &[
-                            ("project", project_path.display().to_string()),
-                            ("outcome", "skipped".to_string()),
-                            ("reason", "not_configured".to_string()),
-                        ],
-                    );
-                    return;
-                }
-
-                self.start_automation_scheduler(key, project_path, handshake)
-                    .await;
+                self.reconcile_automation_scheduler_locked(key, project_path, handshake)
+                    .await
             })
-            .await;
+            .await
+    }
+
+    pub(super) async fn reconcile_automation_scheduler_locked(
+        &self,
+        key: ProjectServerKey,
+        project_path: PathBuf,
+        handshake: DaemonHandshake,
+    ) -> crate::dashboard::AutomationSchedulerReconcileOutcome {
+        use crate::dashboard::AutomationSchedulerReconcileOutcome;
+
+        if !self.lifecycle.accepting() {
+            return AutomationSchedulerReconcileOutcome::LifecycleInactive;
+        }
+        let (finished, live) = {
+            let mut schedulers = self
+                .store_administration
+                .automation_schedulers()
+                .lock()
+                .await;
+            let logical_owner = schedulers
+                .iter()
+                .find(|(candidate, _)| same_scheduler_owner(candidate, &key))
+                .map(|(candidate, _)| candidate.clone());
+            match logical_owner {
+                Some(owner) => {
+                    let Some(handle) = schedulers.get_mut(&owner) else {
+                        return AutomationSchedulerReconcileOutcome::OwnerUnavailable;
+                    };
+                    match observed_scheduler_lifecycle(handle) {
+                        lifecycle @ (AutomationSchedulerLifecycle::Running
+                        | AutomationSchedulerLifecycle::Exiting) => (
+                            None,
+                            Some((owner, Arc::clone(&handle.completion), lifecycle)),
+                        ),
+                        AutomationSchedulerLifecycle::Finished => (schedulers.remove(&owner), None),
+                        AutomationSchedulerLifecycle::Retiring => {
+                            return AutomationSchedulerReconcileOutcome::Retiring;
+                        }
+                    }
+                }
+                None => (None, None),
+            }
+        };
+        if let Some(mut handle) = finished {
+            if let Some(task) = handle.task.take() {
+                let _ = task.await;
+            }
+        }
+
+        #[cfg(test)]
+        self.automation_config_probe_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let configured = match Box::pin(automation_scheduler_has_work_for_project(
+            &project_path,
+            &handshake,
+        ))
+        .await
+        {
+            Ok(configured) => configured,
+            Err(e) => {
+                log_daemon_event(
+                    "scheduler_config",
+                    &[
+                        ("project", project_path.display().to_string()),
+                        ("outcome", "error".to_string()),
+                        ("error", e.to_string()),
+                    ],
+                );
+                return AutomationSchedulerReconcileOutcome::NotConfigured;
+            }
+        };
+        if !configured {
+            if let Some((owner, completion, _)) = &live {
+                let schedulers = self
+                    .store_administration
+                    .automation_schedulers()
+                    .lock()
+                    .await;
+                if let Some(handle) = schedulers.get(owner)
+                    && Arc::ptr_eq(&handle.completion, completion)
+                {
+                    handle.wake.notify_one();
+                }
+            }
+            log_daemon_event(
+                "scheduler_config",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "skipped".to_string()),
+                    ("reason", "not_configured".to_string()),
+                ],
+            );
+            return AutomationSchedulerReconcileOutcome::NotConfigured;
+        }
+
+        if let Some((owner, completion, lifecycle)) = live {
+            let finished = {
+                let mut schedulers = self
+                    .store_administration
+                    .automation_schedulers()
+                    .lock()
+                    .await;
+                if let Some(handle) = schedulers.get_mut(&owner)
+                    && Arc::ptr_eq(&handle.completion, &completion)
+                {
+                    match observed_scheduler_lifecycle(handle) {
+                        AutomationSchedulerLifecycle::Running => {
+                            handle
+                                .generation
+                                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                            handle.wake.notify_one();
+                            return AutomationSchedulerReconcileOutcome::RunningNotified;
+                        }
+                        AutomationSchedulerLifecycle::Exiting => {
+                            handle
+                                .generation
+                                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                            handle.wake.notify_one();
+                            return AutomationSchedulerReconcileOutcome::Exiting;
+                        }
+                        AutomationSchedulerLifecycle::Finished => schedulers.remove(&owner),
+                        AutomationSchedulerLifecycle::Retiring => {
+                            return AutomationSchedulerReconcileOutcome::Retiring;
+                        }
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some(mut handle) = finished
+                && let Some(task) = handle.task.take()
+            {
+                let _ = task.await;
+            }
+            debug_assert!(matches!(
+                lifecycle,
+                AutomationSchedulerLifecycle::Running | AutomationSchedulerLifecycle::Exiting
+            ));
+        }
+
+        self.start_automation_scheduler(key, project_path, handshake)
+            .await
     }
 
     pub(super) fn automation_scheduler_reconciler(
         &self,
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
-        project_path: PathBuf,
+        current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
         handshake: DaemonHandshake,
     ) -> crate::dashboard::AutomationSchedulerReconciler {
         let engine = self.clone();
         std::sync::Arc::new(move || {
             let engine = engine.clone();
             let current_key = Arc::clone(&current_key);
-            let project_path = project_path.clone();
+            let current_project_path = Arc::clone(&current_project_path);
             let handshake = handshake.clone();
-            tokio::spawn(async move {
+            Box::pin(async move {
                 let key = current_key.lock().await.clone();
+                let project_path = current_project_path.lock().await.clone();
                 engine
-                    .ensure_automation_scheduler(key.clone(), project_path, handshake)
-                    .await;
-                if let Some(handle) = engine
-                    .store_administration
-                    .automation_schedulers()
-                    .lock()
+                    .ensure_automation_scheduler(key, project_path, handshake)
                     .await
-                    .get(&key)
-                {
-                    handle.wake.notify_one();
-                }
-            });
+            })
         })
     }
 
@@ -254,53 +533,291 @@ impl DaemonEngine {
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-    ) {
+    ) -> crate::dashboard::AutomationSchedulerReconcileOutcome {
+        use crate::dashboard::AutomationSchedulerReconcileOutcome;
+
         if !self.lifecycle.accepting() {
-            return;
+            return AutomationSchedulerReconcileOutcome::LifecycleInactive;
         }
         let mut schedulers = self
             .store_administration
             .automation_schedulers()
             .lock()
             .await;
-        if !self.lifecycle.accepting() || schedulers.contains_key(&key) {
-            return;
+        if !self.lifecycle.accepting() {
+            return AutomationSchedulerReconcileOutcome::LifecycleInactive;
+        }
+        let logical_owner = schedulers
+            .iter()
+            .find(|(candidate, _)| same_scheduler_owner(candidate, &key))
+            .map(|(candidate, _)| candidate.clone());
+        if let Some(handle) = logical_owner
+            .as_ref()
+            .and_then(|owner| schedulers.get_mut(owner))
+        {
+            return match observed_scheduler_lifecycle(handle) {
+                AutomationSchedulerLifecycle::Running => {
+                    handle
+                        .generation
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    handle.wake.notify_one();
+                    AutomationSchedulerReconcileOutcome::RunningNotified
+                }
+                AutomationSchedulerLifecycle::Exiting => {
+                    handle
+                        .generation
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    handle.wake.notify_one();
+                    AutomationSchedulerReconcileOutcome::Exiting
+                }
+                AutomationSchedulerLifecycle::Finished => {
+                    AutomationSchedulerReconcileOutcome::Finished
+                }
+                AutomationSchedulerLifecycle::Retiring => {
+                    AutomationSchedulerReconcileOutcome::Retiring
+                }
+            };
         }
         let wake = Arc::new(tokio::sync::Notify::new());
         let loop_wake = Arc::clone(&wake);
+        let completion = Arc::new(());
+        let completed = Arc::clone(&completion);
+        let loop_completion = Arc::clone(&completion);
+        let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let loop_generation = Arc::clone(&generation);
+        let termination = Arc::new(MaintenanceTaskTermination::pending());
+        let administration = self.store_administration.clone();
+        let scheduler_engine = self.clone();
+        let loop_key = key.clone();
+        #[cfg(test)]
+        let exit_barrier = self.automation_scheduler_exit_barrier.lock().await.clone();
+        let (published, start) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
+            let _ = start.await;
             Box::pin(run_automation_scheduler_loop(
                 project_path,
                 handshake,
                 loop_wake,
+                scheduler_engine,
+                loop_key,
+                loop_completion,
+                loop_generation,
+                #[cfg(test)]
+                exit_barrier,
             ))
             .await;
+            administration
+                .automation_schedulers()
+                .lock()
+                .await
+                .retain(|_, handle| {
+                    !Arc::ptr_eq(&handle.completion, &completed)
+                        || handle.lifecycle == AutomationSchedulerLifecycle::Retiring
+                });
         });
-        schedulers.insert(key, AutomationSchedulerHandle { task, wake });
+        schedulers.insert(
+            key,
+            AutomationSchedulerHandle {
+                task: Some(task),
+                wake,
+                completion,
+                generation,
+                lifecycle: AutomationSchedulerLifecycle::Running,
+                termination,
+            },
+        );
+        #[cfg(test)]
+        self.automation_scheduler_state_changed.notify_waiters();
+        let _ = published.send(());
+        AutomationSchedulerReconcileOutcome::Started
     }
 
-    pub(super) async fn shutdown_automation_schedulers(&self) {
-        let scheduler_handles: Vec<JoinHandle<()>> = self
-            .store_administration
+    async fn commit_automation_scheduler_exit(
+        &self,
+        key: &ProjectServerKey,
+        project_path: &Path,
+        handshake: &DaemonHandshake,
+        completion: &Arc<()>,
+        observed_generation: u64,
+    ) -> bool {
+        let transition = self.maintenance_transition_gate(key).await;
+        let _transition = transition.lock().await;
+        self.store_administration
             .with_writer(|| async {
+                {
+                    let mut schedulers = self
+                        .store_administration
+                        .automation_schedulers()
+                        .lock()
+                        .await;
+                    let Some(handle) = schedulers.get_mut(key) else {
+                        return true;
+                    };
+                    if !Arc::ptr_eq(&handle.completion, completion)
+                        || handle.lifecycle == AutomationSchedulerLifecycle::Retiring
+                    {
+                        return true;
+                    }
+                    handle.lifecycle = AutomationSchedulerLifecycle::Exiting;
+                }
+
+                let still_configured = match automation_scheduler_has_work_for_project(
+                    project_path,
+                    handshake,
+                )
+                .await
+                {
+                    Ok(configured) => configured,
+                    Err(error) => {
+                        log_daemon_event(
+                            "scheduler_project_open",
+                            &[
+                                ("project", project_path.display().to_string()),
+                                ("outcome", "error".to_string()),
+                                ("error", error.to_string()),
+                            ],
+                        );
+                        true
+                    }
+                };
                 let mut schedulers = self
                     .store_administration
                     .automation_schedulers()
                     .lock()
                     .await;
-                schedulers.drain().map(|(_, handle)| handle.task).collect()
+                let Some(handle) = schedulers.get_mut(key) else {
+                    return true;
+                };
+                if !Arc::ptr_eq(&handle.completion, completion)
+                    || handle.lifecycle == AutomationSchedulerLifecycle::Retiring
+                {
+                    return true;
+                }
+                if still_configured
+                    || handle.generation.load(std::sync::atomic::Ordering::Acquire)
+                        != observed_generation
+                {
+                    handle.lifecycle = AutomationSchedulerLifecycle::Running;
+                    return false;
+                }
+                schedulers.remove(key);
+                true
+            })
+            .await
+    }
+
+    pub(super) async fn retire_automation_scheduler_locked(
+        &self,
+        key: &ProjectServerKey,
+    ) -> Option<AutomationSchedulerRetirement> {
+        let reservation = self.store_administration.reserve_retirement_reaper()?;
+        let (task, completion, termination) = {
+            let mut schedulers = self
+                .store_administration
+                .automation_schedulers()
+                .lock()
+                .await;
+            let owner = if schedulers.contains_key(key) {
+                key.clone()
+            } else {
+                schedulers
+                    .keys()
+                    .find(|candidate| same_scheduler_owner(candidate, key))
+                    .cloned()?
+            };
+            let handle = schedulers.get_mut(&owner)?;
+            handle.lifecycle = AutomationSchedulerLifecycle::Retiring;
+            handle
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let task = handle.task.take().map(|task| (owner, task));
+            (
+                task,
+                Arc::clone(&handle.completion),
+                Arc::clone(&handle.termination),
+            )
+        };
+        if let Some((owner, task)) = task {
+            let completed = Arc::clone(&completion);
+            let reaper_administration = self.store_administration.clone();
+            let reaper_owner = owner.clone();
+            self.store_administration.spawn_retirement_reaper(
+                reservation,
+                MaintenanceReaperKind::Automation,
+                owner,
+                task,
+                Arc::clone(&termination),
+                async move {
+                    {
+                        let mut schedulers =
+                            reaper_administration.automation_schedulers().lock().await;
+                        if schedulers.get(&reaper_owner).is_some_and(|handle| {
+                            Arc::ptr_eq(&handle.completion, &completed)
+                                && handle.lifecycle == AutomationSchedulerLifecycle::Retiring
+                        }) {
+                            schedulers.remove(&reaper_owner);
+                        }
+                    }
+                },
+            );
+        }
+        Some(AutomationSchedulerRetirement { termination })
+    }
+
+    pub(super) async fn shutdown_automation_schedulers(&self) {
+        let retirements = self
+            .store_administration
+            .with_writer(|| async {
+                let owners: Vec<ProjectServerKey> = self
+                    .store_administration
+                    .automation_schedulers()
+                    .lock()
+                    .await
+                    .keys()
+                    .cloned()
+                    .collect();
+                let mut retirements = Vec::with_capacity(owners.len());
+                for owner in owners {
+                    if let Some(retirement) = self.retire_automation_scheduler_locked(&owner).await
+                    {
+                        retirements.push(retirement);
+                    }
+                }
+                retirements
             })
             .await;
         let _child_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
-        for handle in &scheduler_handles {
-            handle.abort();
-        }
         let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
-            for handle in scheduler_handles {
-                let _ = handle.await;
+            for retirement in retirements {
+                retirement.wait().await;
             }
         })
         .await;
+        self.store_administration
+            .with_writer(|| async {
+                self.store_administration
+                    .automation_schedulers()
+                    .lock()
+                    .await
+                    .clear();
+            })
+            .await;
+    }
+}
+
+pub(super) fn same_scheduler_owner(left: &ProjectServerKey, right: &ProjectServerKey) -> bool {
+    left.owner.profile_root == right.owner.profile_root
+        && left.owner.project_id == right.owner.project_id
+        && left.scope_prefix == right.scope_prefix
+}
+
+fn observed_scheduler_lifecycle(
+    handle: &AutomationSchedulerHandle,
+) -> AutomationSchedulerLifecycle {
+    if handle.task.as_ref().is_some_and(JoinHandle::is_finished) {
+        AutomationSchedulerLifecycle::Finished
+    } else {
+        handle.lifecycle
     }
 }
 
@@ -308,8 +825,14 @@ async fn run_automation_scheduler_loop(
     project_path: PathBuf,
     handshake: DaemonHandshake,
     wake: Arc<tokio::sync::Notify>,
+    engine: DaemonEngine,
+    key: ProjectServerKey,
+    completion: Arc<()>,
+    generation: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(test)] exit_barrier: Option<Arc<AutomationSchedulerExitBarrier>>,
 ) {
     loop {
+        let observed_generation = generation.load(std::sync::atomic::Ordering::Acquire);
         match Box::pin(automation_scheduler_has_work_for_project(
             &project_path,
             &handshake,
@@ -318,14 +841,38 @@ async fn run_automation_scheduler_loop(
         {
             Ok(true) => {}
             Ok(false) => {
-                log_daemon_event(
-                    "scheduler_exit",
-                    &[
-                        ("project", project_path.display().to_string()),
-                        ("reason", "not_configured".to_string()),
-                    ],
-                );
-                break;
+                #[cfg(test)]
+                if let Some(barrier) = &exit_barrier {
+                    barrier.pause_after_disabled_read().await;
+                }
+                let exit = engine
+                    .commit_automation_scheduler_exit(
+                        &key,
+                        &project_path,
+                        &handshake,
+                        &completion,
+                        observed_generation,
+                    )
+                    .await;
+                #[cfg(test)]
+                if let Some(barrier) = &exit_barrier {
+                    barrier.record_decision(if exit {
+                        AutomationSchedulerExitBarrier::EXIT
+                    } else {
+                        AutomationSchedulerExitBarrier::CONTINUE
+                    });
+                }
+                if exit {
+                    log_daemon_event(
+                        "scheduler_exit",
+                        &[
+                            ("project", project_path.display().to_string()),
+                            ("reason", "not_configured".to_string()),
+                        ],
+                    );
+                    break;
+                }
+                continue;
             }
             Err(e) => {
                 // A transient failure (e.g. a momentarily corrupt jobs file or

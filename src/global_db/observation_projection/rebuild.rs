@@ -8,6 +8,7 @@ use tracedecay_store::{
 };
 
 use super::super::GlobalDb;
+use super::super::session_temporal::record_canonical_observation_effect;
 use super::apply::{
     apply_effect, derive_projection_for_rebuild, derive_projection_with_alias, verify_effect,
     workflow_semantic_kind,
@@ -74,6 +75,8 @@ impl GlobalDb {
         let mut effect = derive_projection_with_alias(&transaction, &observation).await?;
         if sequence <= checkpoint.last_sequence() {
             verify_effect(&transaction, &observation, &effect).await?;
+            record_canonical_observation_effect(&transaction, sequence, &observation, &effect)
+                .await?;
             consume_projection_queue_item(&transaction, observation_id).await?;
             transaction
                 .commit()
@@ -100,6 +103,7 @@ impl GlobalDb {
             &mut effect,
         )
         .await?;
+        record_canonical_observation_effect(&transaction, sequence, &observation, &effect).await?;
         consume_projection_queue_item(&transaction, observation_id).await?;
         let checkpoint = write_checkpoint(&transaction, sequence).await?;
         transaction
@@ -350,6 +354,8 @@ impl GlobalDb {
                 &mut effect,
             )
             .await?;
+            record_canonical_observation_effect(&transaction, sequence, &observation, &effect)
+                .await?;
             match &effect {
                 ObservationProjection::Message(_) | ObservationProjection::Composite { .. } => {
                     projected_rows = projected_rows.saturating_add(effect.output_count());

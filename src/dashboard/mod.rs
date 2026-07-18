@@ -52,7 +52,9 @@ mod settings_api;
 mod token_count;
 mod util;
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -80,7 +82,53 @@ use tracedecay_domain::{FactOwnerV1, ProjectId};
 /// Default port for `tracedecay dashboard` (chosen to avoid common dev-server
 /// defaults; override with `--port`).
 pub const DEFAULT_PORT: u16 = 7341;
-pub(crate) type AutomationSchedulerReconciler = Arc<dyn Fn() + Send + Sync + 'static>;
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationSchedulerReconcileOutcome {
+    Started,
+    RunningNotified,
+    Exiting,
+    Finished,
+    Retiring,
+    NotConfigured,
+    LifecycleInactive,
+    OwnerUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AutomationReconcileScope {
+    Project,
+    Profile,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UncachedProjectReconcileOutcome {
+    DeferredUntilProjectStartup,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct AutomationSchedulerOwnerReconcileOutcome {
+    pub(crate) project_id: Option<String>,
+    pub(crate) store_root: PathBuf,
+    pub(crate) graph_db_path: PathBuf,
+    pub(crate) scope_prefix: Option<String>,
+    pub(crate) outcome: AutomationSchedulerReconcileOutcome,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct ProfileAutomationReconcileReport {
+    pub(crate) scope: AutomationReconcileScope,
+    pub(crate) cached_owners: usize,
+    pub(crate) outcomes: Vec<AutomationSchedulerOwnerReconcileOutcome>,
+    pub(crate) uncached_projects: UncachedProjectReconcileOutcome,
+}
+
+pub(crate) type AutomationSchedulerReconcileFuture =
+    Pin<Box<dyn Future<Output = AutomationSchedulerReconcileOutcome> + Send + 'static>>;
+pub(crate) type AutomationSchedulerReconciler =
+    Arc<dyn Fn() -> AutomationSchedulerReconcileFuture + Send + Sync + 'static>;
 
 #[derive(Clone)]
 pub(crate) struct DashboardState {
@@ -146,7 +194,10 @@ pub(crate) struct DashboardState {
 impl DashboardState {
     pub(crate) fn reconcile_automation_scheduler(&self) {
         if let Some(reconcile) = &self.automation_scheduler_reconciler {
-            reconcile();
+            let reconcile = Arc::clone(reconcile);
+            tokio::spawn(async move {
+                let _ = reconcile().await;
+            });
         }
     }
 }

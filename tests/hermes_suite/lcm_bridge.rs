@@ -2604,6 +2604,71 @@ assert set(expected).issubset(set(ctx.registered))
 }
 
 #[test]
+fn native_describe_and_expand_schemas_are_closed_and_conditional() {
+    run_generated_plugin_script(
+        "check_closed_lcm_target_schemas.py",
+        r#"
+schemas = {schema["name"]: schema["parameters"] for schema in plugin.LCM_NATIVE_SCHEMAS}
+
+describe = schemas["lcm_describe"]
+assert describe["additionalProperties"] is False
+assert len(describe["oneOf"]) == 3
+assert describe["properties"]["node_id"]["type"] == "string"
+assert describe["properties"]["externalized_ref"]["type"] == "string"
+
+expand = schemas["lcm_expand"]
+assert expand["additionalProperties"] is False
+assert len(expand["oneOf"]) == 3
+assert expand["properties"]["node_id"]["type"] == "string"
+assert expand["properties"]["source_limit"]["minimum"] == 1
+assert expand["properties"]["source_limit"]["maximum"] == 100
+assert expand["properties"]["source_limit"]["default"] == 50
+assert expand["properties"]["cursor"]["type"] == "string"
+
+target, error = plugin._native_expand_target({"store_id": 7})
+assert error is None
+assert target == {"kind": "raw_message", "store_id": 7}
+target, error = plugin._native_expand_target({"store_id": 7, "node_id": 8})
+assert target is None
+assert error == "lcm_expand expects exactly one of node_id, store_id, or externalized_ref"
+
+summary = plugin._translate_lcm_args(
+    "lcm_expand",
+    {
+        "node_id": "summary-v1:abc",
+        "source_offset": 4,
+        "source_limit": 7,
+        "content_offset": 3,
+        "cursor": "opaque-summary-page",
+    },
+)
+assert summary["target"] == {"kind": "summary_node", "node_id": "summary-v1:abc"}
+assert summary["source_offset"] == 4
+assert summary["source_limit"] == 7
+assert summary["content_offset"] == 3
+assert summary["cursor"] == "opaque-summary-page"
+
+raw = plugin._translate_lcm_args(
+    "lcm_expand",
+    {
+        "store_id": 7,
+        "source_offset": 4,
+        "source_limit": 7,
+        "content_offset": 3,
+        "cursor": "wrong-target-page",
+    },
+)
+assert raw["target"] == {"kind": "raw_message", "store_id": 7}
+assert raw["content_offset"] == 3
+assert "source_offset" not in raw
+assert "source_limit" not in raw
+assert "cursor" not in raw
+"#,
+        "generated Hermes schemas should close each compatibility target branch",
+    );
+}
+
+#[test]
 fn context_engine_lcm_expand_query_tolerates_forwarded_agent_kwarg() {
     run_generated_plugin_script(
         "check_expand_query_forwarded_agent.py",
@@ -4719,6 +4784,64 @@ assert ctx.skills[0][0] == "tracedecay", ctx.skills
 assert ctx.skills[0][1].name == "SKILL.md"
 "#,
         "generated registration must register the skill under the bare 'tracedecay' name",
+    );
+}
+
+#[test]
+fn generated_skill_mirrors_session_context_retrieval_contract() {
+    let template = include_str!("../../src/agents/hermes/templates/skill.md");
+    let installed =
+        std::fs::read_to_string(SHARED_INSTALL.plugin_dir.join("skills/tracedecay/SKILL.md"))
+            .unwrap();
+    let required_markers = [
+        "tracedecay_message_search",
+        "`provider=all`",
+        "`catch_up=false`",
+        "`limit=10`",
+        "lcm_grep",
+        "lcm_load_session",
+        "lcm_describe",
+        "lcm_expand",
+        "lcm_expand_query",
+        "`temporal_mode=current`",
+        "`temporal_mode=forensic`",
+        "`next_cursor`",
+        "`coverage`",
+        "`anchors`",
+        "needs_synthesis=true",
+        "host must synthesize",
+        "tracedecay_sessions_for",
+        "tracedecay_workflows",
+        "`limit=20`",
+        "tracedecay_session_refresh",
+        "`begin`",
+        "`status`",
+        "`cancel`",
+    ];
+
+    for (label, skill) in [
+        (
+            "repository managing-session-context skill",
+            include_str!("../../plugin/skills/managing-session-context/SKILL.md"),
+        ),
+        ("Hermes template", template),
+        ("installed Hermes skill snapshot", installed.as_str()),
+    ] {
+        for marker in required_markers {
+            assert!(
+                skill.contains(marker),
+                "{label} should document session retrieval marker {marker:?}",
+            );
+        }
+        assert!(
+            !skill.contains("after_store_id"),
+            "{label} must not teach deprecated numeric-cursor pagination",
+        );
+    }
+
+    assert_eq!(
+        installed, template,
+        "the installed Hermes skill snapshot should exactly match its template",
     );
 }
 

@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::cli::PostUpdateMode;
 use tracedecay::upgrade::UpgradeOutcome;
 use tracedecay::user_config::UserConfig;
 
@@ -89,6 +90,13 @@ fn refresh_daemon_service(
     }
     let tracedecay_bin = tracedecay_bin_on_path()?;
     let spec = tracedecay::daemon::service_spec(tracedecay_bin, None)?;
+    refresh_daemon_service_with_spec(previous_state, &spec)
+}
+
+fn refresh_daemon_service_with_spec(
+    previous_state: tracedecay::daemon::DaemonServiceState,
+    spec: &tracedecay::daemon::DaemonServiceSpec,
+) -> tracedecay::errors::Result<Option<(PathBuf, PathBuf)>> {
     let socket_path = tracedecay::daemon::installed_service_socket_path()?
         .unwrap_or_else(|| spec.socket_path.clone());
     Ok(
@@ -122,6 +130,33 @@ fn refresh_daemon_service_after_update(
         }
     }
     Ok(())
+}
+
+fn refresh_forward_only_daemon_service_after_update(
+    previous_state: tracedecay::daemon::DaemonServiceState,
+    spec: &tracedecay::daemon::DaemonServiceSpec,
+) -> tracedecay::errors::Result<()> {
+    match refresh_daemon_service_with_spec(previous_state, spec)? {
+        Some((service_path, socket_path)) => {
+            eprintln!(
+                "\x1b[32m✔\x1b[0m Forward-only daemon service refreshed at {}",
+                service_path.display()
+            );
+            eprintln!("Daemon socket: {}", socket_path.display());
+            Ok(())
+        }
+        None if tracedecay::daemon::daemon_reachable() => {
+            Err(tracedecay::errors::TraceDecayError::Config {
+                message:
+                    "forward-only post-update found a reachable unmanaged daemon after maintenance"
+                        .to_string(),
+            })
+        }
+        None => {
+            eprintln!("TraceDecay daemon service is not installed; skipping daemon restart.");
+            Ok(())
+        }
+    }
 }
 
 pub(crate) fn restart_daemon_service() -> tracedecay::errors::Result<()> {
@@ -315,7 +350,45 @@ pub(crate) async fn run_post_update_command(
     no_reinstall: bool,
     lifecycle_lease_token: Option<&str>,
     strict: bool,
+    mode: PostUpdateMode,
 ) -> tracedecay::errors::Result<()> {
+    if mode == PostUpdateMode::DogfoodRecoverInactive {
+        if lifecycle_lease_token.is_some() {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: "dogfood inactive recovery cannot inherit an updater lease".to_string(),
+            });
+        }
+        let current_exe = std::env::current_exe().map_err(|error| {
+            tracedecay::errors::TraceDecayError::Config {
+                message: format!("could not resolve the dogfood recovery executable: {error}"),
+            }
+        })?;
+        let spec = tracedecay::daemon::service_spec(current_exe, None)?;
+        let service_path = tracedecay::daemon::enforce_forward_only_service_recovery(&spec)?;
+        if let Some(path) = service_path {
+            eprintln!(
+                "Forward-only recovery retained the new inactive service unit at {}",
+                path.display()
+            );
+        }
+        return Ok(());
+    }
+
+    if mode == PostUpdateMode::DogfoodForwardOnly {
+        if lifecycle_lease_token.is_some() {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: "dogfood forward-only post-update cannot inherit an updater lease"
+                    .to_string(),
+            });
+        }
+        if !strict {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: "dogfood forward-only post-update requires --strict".to_string(),
+            });
+        }
+        return run_forward_only_post_update_command(no_heal, no_reinstall).await;
+    }
+
     if let Some(token) = lifecycle_lease_token {
         let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive_or_inherited(
             "post-update",
@@ -344,6 +417,115 @@ pub(crate) async fn run_post_update_command(
         readiness_result,
     );
     combine_operation_and_restore("post-update", operation_result, restoration_result)
+}
+
+async fn run_forward_only_post_update_command(
+    no_heal: bool,
+    no_reinstall: bool,
+) -> tracedecay::errors::Result<()> {
+    let current_exe =
+        std::env::current_exe().map_err(|error| tracedecay::errors::TraceDecayError::Config {
+            message: format!("could not resolve the dogfood post-update executable: {error}"),
+        })?;
+    let spec = tracedecay::daemon::service_spec(current_exe, None)?;
+    let guard = tracedecay::daemon::QuiescedDaemonLifecycle::acquire_forward_only(
+        "dogfood forward-only post-update",
+        &spec,
+    )
+    .map_err(|error| forward_only_failure(&spec, error))?;
+    let previous_daemon_state = guard.previous_state();
+    let operation_result = match guard.lifecycle_lease() {
+        Ok(lifecycle_lease) => {
+            run_forward_only_post_update_tasks(
+                no_heal,
+                no_reinstall,
+                lifecycle_lease,
+                previous_daemon_state,
+                &spec,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    guard.finish_without_restore();
+
+    if let Err(error) = operation_result {
+        return Err(forward_only_failure(&spec, error));
+    }
+    if let Err(error) = tracedecay::daemon::wait_for_installed_service_state(previous_daemon_state)
+    {
+        return Err(forward_only_failure(&spec, error));
+    }
+    if let Err(error) = verify_forward_only_binary_version(&spec.tracedecay_bin) {
+        return Err(forward_only_failure(&spec, error));
+    }
+    tracedecay::doctor::run_doctor(None)
+        .await
+        .map_err(|error| forward_only_failure(&spec, error))
+}
+
+async fn run_forward_only_post_update_tasks(
+    no_heal: bool,
+    no_reinstall: bool,
+    lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
+    previous_daemon_state: tracedecay::daemon::DaemonServiceState,
+    spec: &tracedecay::daemon::DaemonServiceSpec,
+) -> tracedecay::errors::Result<()> {
+    eprintln!("\nPreparing forward-only dogfood maintenance.");
+    tracedecay::daemon::verify_installed_service_quiesced_under_lease()?;
+
+    run_post_update_mutations(no_heal, no_reinstall, true, lifecycle_lease).await?;
+    refresh_forward_only_daemon_service_after_update(previous_daemon_state, spec)
+}
+
+fn verify_forward_only_binary_version(binary: &Path) -> tracedecay::errors::Result<()> {
+    let output = std::process::Command::new(binary)
+        .arg("--version")
+        .output()
+        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "could not execute retained dogfood binary '{}': {error}",
+                binary.display()
+            ),
+        })?;
+    let version = String::from_utf8_lossy(&output.stdout);
+    let expected = format!("tracedecay {}", env!("CARGO_PKG_VERSION"));
+    if output.status.success() && version.trim() == expected {
+        return Ok(());
+    }
+    Err(tracedecay::errors::TraceDecayError::Config {
+        message: format!(
+            "retained dogfood binary version check failed for '{}': status {}, output {:?}, expected {:?}",
+            binary.display(),
+            output.status,
+            version.trim(),
+            expected,
+        ),
+    })
+}
+
+fn forward_only_failure(
+    spec: &tracedecay::daemon::DaemonServiceSpec,
+    operation_error: tracedecay::errors::TraceDecayError,
+) -> tracedecay::errors::TraceDecayError {
+    match tracedecay::daemon::enforce_forward_only_service_recovery(spec) {
+        Ok(service_path) => tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "dogfood forward-only post-update failed: {operation_error}; managed daemon is inactive; retained new binary '{}'{}; recover only with this binary or a newer compatible build",
+                spec.tracedecay_bin.display(),
+                service_path.map_or_else(
+                    || ", no managed service unit was installed".to_string(),
+                    |path| format!(" and new service unit '{}'", path.display())
+                ),
+            ),
+        },
+        Err(recovery_error) => tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "dogfood forward-only post-update failed: {operation_error}; retained new binary '{}', but managed-daemon inactivity could not be proven: {recovery_error}; do not run an older binary",
+                spec.tracedecay_bin.display(),
+            ),
+        },
+    }
 }
 
 pub(crate) fn run_dogfood_command() -> tracedecay::errors::Result<()> {
@@ -677,13 +859,15 @@ fn reconcile_materialized_managed_skills_after_update() {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
     use super::{
         RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from, health_pass_failure_result,
         normalize_bin_path, partition_reinstall_results, post_update_binary,
         post_update_binary_from, prepare_post_update_lease, reinstall_failure_result,
-        run_install_then_refresh,
+        run_install_then_refresh, verify_forward_only_binary_version,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
@@ -706,6 +890,23 @@ mod tests {
         #[cfg(not(windows))]
         assert!(reacquired.is_err());
         drop(held);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forward_only_version_probe_rejects_a_retained_wrong_version() {
+        let dir = TempDir::new().expect("temp dir");
+        let binary = dir.path().join("new binary with spaces");
+        std::fs::write(&binary, "#!/bin/sh\nprintf 'tracedecay 0.0.0-wrong\\n'\n")
+            .expect("fake binary");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+            .expect("binary permissions");
+
+        let error = verify_forward_only_binary_version(&binary)
+            .expect_err("wrong retained version must fail");
+
+        assert!(error.to_string().contains("version check failed"));
+        assert!(error.to_string().contains("0.0.0-wrong"));
     }
     use tracedecay::user_config::UserConfig;
 

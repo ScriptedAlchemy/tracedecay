@@ -220,13 +220,14 @@ async fn validate_claims(conn: &Connection, operation: &'static str) -> Result<(
         ),
         (
             "SELECT COUNT(*) FROM (
-                 SELECT projector_version, observation_id
+                 SELECT projector_version, observation_id, output_ordinal
                  FROM consolidation_projection_provenance_claims
-                 GROUP BY projector_version, observation_id
+                 GROUP BY projector_version, observation_id, output_ordinal
                  HAVING MIN(receipt_id) IS NOT MAX(receipt_id)
                      OR MIN(output_provider) IS NOT MAX(output_provider)
                      OR MIN(output_message_id) IS NOT MAX(output_message_id)
                      OR MIN(output_digest) IS NOT MAX(output_digest)
+                     OR MIN(message_created) IS NOT MAX(message_created)
                      OR MIN(retrieval_anchor_id) IS NOT MAX(retrieval_anchor_id)
              )",
             "projection provenance collision cannot be represented losslessly",

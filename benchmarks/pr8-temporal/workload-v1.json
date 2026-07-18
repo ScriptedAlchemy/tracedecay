@@ -1,0 +1,132 @@
+{
+  "schema_version": 2,
+  "workload_id": "pr8-session-temporal-v1",
+  "status": "blocked",
+  "blocked_reason": "authentic_provider_capture_and_public_production_path_unavailable",
+  "implementation": {
+    "path": "benches/session_temporal.rs",
+    "sha256": "ab2e57c1143dcaba9585fca5528d99fa1bfa7bb52d21e919931271e8636aeac6"
+  },
+  "runner": {
+    "path": "scripts/run-pr8-temporal-benchmark.sh",
+    "sha256": "c9a45b1c4297eec7bb3af1447dfd6d48604f50b80da5cd7e21f3ba56dd075b0b"
+  },
+  "profile": {
+    "manifest_path": "Cargo.toml",
+    "manifest_sha256": "6cb3874c8c3e700beb72c291e7c9a19cdca5d049bad348c0de903591858ee450",
+    "cargo_profile": "bench",
+    "opt_level": 3,
+    "debug": false,
+    "debug_assertions": false,
+    "overflow_checks": false,
+    "incremental": false
+  },
+  "fixture_evidence": {
+    "status": "rejected_for_acceptance",
+    "independently_sourced": false,
+    "sanitization_receipt": null,
+    "introduction_commit": "c293df93ce063885580ea7145cc81e6dbdc8e9ec",
+    "reason": "repository history introduces these files as golden test shapes; the manifest says they mirror test helpers, timestamps 1800000000 and 1800000010 are future-dated, and no source-capture or sanitization receipt exists",
+    "files": [
+      {
+        "path": "tests/fixtures/transcript_golden/cline_like/manifest.json",
+        "sha256": "34a4d9ec384594fc205fc46af947a9c325106f2d0e807bb0f1bf9e1f12a82b87"
+      },
+      {
+        "path": "tests/fixtures/transcript_golden/cline_like/input/task_metadata.json",
+        "sha256": "65bd3ee594ae7b0e41f8fa36fa86e77046c2242b50375b93c61b2bdb705672a1"
+      },
+      {
+        "path": "tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json",
+        "sha256": "c4924499c40c4107e4535be1a111c9bd10c48cea86ad9e6fee4807454df53c6b"
+      },
+      {
+        "path": "tests/fixtures/transcript_golden/cline_like/input/api_messages.json",
+        "sha256": "c4924499c40c4107e4535be1a111c9bd10c48cea86ad9e6fee4807454df53c6b"
+      },
+      {
+        "path": "tests/fixtures/transcript_golden/cline_like/input/ui_messages.json",
+        "sha256": "bac5d2679a57202b6554440bc77bc6e24ae49e1c3ef9c7e195e731e7c2a74aa3"
+      },
+      {
+        "path": "tests/fixtures/transcript_golden/cline_like/expected/parser_provenance.json",
+        "sha256": "5618e5d4358e60f80e36489cb32146c2b014c087b407ce6c63c20d19d95f1b6e"
+      },
+      {
+        "path": "tests/fixtures/transcript_golden/cline_like/expected/assistant_tool_use.canonical.json",
+        "sha256": "fb6b80b1ade4dae68b6eeade6d67643441031af246f13467dc1229a1442345c2"
+      }
+    ]
+  },
+  "production_path": {
+    "required": [
+      "CanonicalSessionTemporalProjector",
+      "SessionRefreshService with production scheduler and store adapters",
+      "SessionRetrievalService with production authorizer, provenance, and execution adapters"
+    ],
+    "available_to_benchmark_target": false,
+    "reason": "the canonical projector and daemon-backed production adapters are private; duplicating them or constructing temporal records manually is not acceptance evidence"
+  },
+  "storage_isolation": {
+    "required_environment": [
+      "HOME",
+      "TRACEDECAY_DATA_DIR"
+    ],
+    "required_ownership": "benchmark-owned temporary storage with RAII cleanup",
+    "status": "not_exercised_while_blocked"
+  },
+  "statistics": {
+    "status": "not_measured",
+    "p95_label": "descriptive nearest-rank sample p95",
+    "p99_label": "descriptive nearest-rank sample p99 (sample maximum when n=30)",
+    "inferential_claim": false
+  },
+  "measurement_contract": null,
+  "file_inventory": [
+    {
+      "path": "benches/session_temporal.rs",
+      "sha256": "ab2e57c1143dcaba9585fca5528d99fa1bfa7bb52d21e919931271e8636aeac6"
+    },
+    {
+      "path": "scripts/run-pr8-temporal-benchmark.sh",
+      "sha256": "c9a45b1c4297eec7bb3af1447dfd6d48604f50b80da5cd7e21f3ba56dd075b0b"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "6cb3874c8c3e700beb72c291e7c9a19cdca5d049bad348c0de903591858ee450"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "60edac6e66c8300e2b0fb00dbeadbc818179cd274474deef8df6397f409dc7aa"
+    },
+    {
+      "path": "tests/fixtures/transcript_golden/cline_like/manifest.json",
+      "sha256": "34a4d9ec384594fc205fc46af947a9c325106f2d0e807bb0f1bf9e1f12a82b87"
+    },
+    {
+      "path": "tests/fixtures/transcript_golden/cline_like/input/task_metadata.json",
+      "sha256": "65bd3ee594ae7b0e41f8fa36fa86e77046c2242b50375b93c61b2bdb705672a1"
+    },
+    {
+      "path": "tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json",
+      "sha256": "c4924499c40c4107e4535be1a111c9bd10c48cea86ad9e6fee4807454df53c6b"
+    },
+    {
+      "path": "tests/fixtures/transcript_golden/cline_like/input/api_messages.json",
+      "sha256": "c4924499c40c4107e4535be1a111c9bd10c48cea86ad9e6fee4807454df53c6b"
+    },
+    {
+      "path": "tests/fixtures/transcript_golden/cline_like/input/ui_messages.json",
+      "sha256": "bac5d2679a57202b6554440bc77bc6e24ae49e1c3ef9c7e195e731e7c2a74aa3"
+    },
+    {
+      "path": "tests/fixtures/transcript_golden/cline_like/expected/parser_provenance.json",
+      "sha256": "5618e5d4358e60f80e36489cb32146c2b014c087b407ce6c63c20d19d95f1b6e"
+    },
+    {
+      "path": "tests/fixtures/transcript_golden/cline_like/expected/assistant_tool_use.canonical.json",
+      "sha256": "fb6b80b1ade4dae68b6eeade6d67643441031af246f13467dc1229a1442345c2"
+    }
+  ],
+  "command": "scripts/run-pr8-temporal-benchmark.sh --run"
+}

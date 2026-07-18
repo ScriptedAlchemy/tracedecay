@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use libsql::{Connection, params};
+use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, DurableClaudeObservationV1, ObservationScopeV1,
     SanitizationReceiptV1,
@@ -10,6 +11,19 @@ use tracedecay_domain::{
 use crate::errors::Result;
 
 use super::{db_error, db_message, projection, quote_identifier};
+
+const SUMMARY_PUBLICATION_SANITIZER_VERSION: &str = "tracedecay.lcm-summary-publication.v1";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct FrozenPublicationReceipt {
+    summary_id: String,
+    disposition: String,
+    published_at: i64,
+    generation: i64,
+    frozen_watermarks_json: String,
+    source_horizon_json: String,
+    publication_manifest_digest: String,
+}
 
 pub(super) async fn merge_observation_authority(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -375,25 +389,72 @@ async fn collect_receipt_repairs(conn: &Connection) -> Result<Vec<(String, Strin
         let target_json = row
             .get::<String>(6)
             .map_err(|error| db_error("compare_duplicate_receipts", error))?;
-        let source: SanitizationReceiptV1 =
-            decode_authority(&source_json, "decode_duplicate_receipt")?;
-        let target: SanitizationReceiptV1 =
-            decode_authority(&target_json, "decode_duplicate_receipt")?;
-        if source_version != target_version
-            || source_digest != target_digest
-            || source != target
-            || !receipt_matches_columns(&source, &receipt_id, &source_version, &source_digest)
-            || !receipt_matches_columns(&target, &receipt_id, &target_version, &target_digest)
-        {
+        if source_version != target_version || source_digest != target_digest {
             return Err(db_message(
                 "merge_observation_authority",
                 "sanitization receipt identity collision",
             ));
         }
-        let canonical = serde_json::to_string(&target)
-            .map_err(|error| db_error("canonicalize_duplicate_receipt", error))?;
-        if canonical != target_json {
-            receipt_repairs.push((receipt_id, canonical));
+        if source_version == SUMMARY_PUBLICATION_SANITIZER_VERSION {
+            let source: FrozenPublicationReceipt =
+                decode_authority(&source_json, "decode_duplicate_publication_receipt")?;
+            let target: FrozenPublicationReceipt =
+                decode_authority(&target_json, "decode_duplicate_publication_receipt")?;
+            if source != target
+                || target.disposition != "accepted"
+                || target.generation <= 0
+                || serde_json::from_str::<serde_json::Value>(&target.frozen_watermarks_json)
+                    .is_err()
+            {
+                return Err(db_message(
+                    "merge_observation_authority",
+                    "summary publication receipt identity collision",
+                ));
+            }
+            let canonical = serde_json::to_string(&target)
+                .map_err(|error| db_error("canonicalize_duplicate_publication_receipt", error))?;
+            if canonical != target_json {
+                receipt_repairs.push((receipt_id, canonical));
+            }
+            continue;
+        }
+
+        let source = serde_json::from_str::<SanitizationReceiptV1>(&source_json);
+        let target = serde_json::from_str::<SanitizationReceiptV1>(&target_json);
+        match (source, target) {
+            (Ok(source), Ok(target)) => {
+                if source != target
+                    || !receipt_matches_columns(
+                        &source,
+                        &receipt_id,
+                        &source_version,
+                        &source_digest,
+                    )
+                    || !receipt_matches_columns(
+                        &target,
+                        &receipt_id,
+                        &target_version,
+                        &target_digest,
+                    )
+                {
+                    return Err(db_message(
+                        "merge_observation_authority",
+                        "sanitization receipt identity collision",
+                    ));
+                }
+                let canonical = serde_json::to_string(&target)
+                    .map_err(|error| db_error("canonicalize_duplicate_receipt", error))?;
+                if canonical != target_json {
+                    receipt_repairs.push((receipt_id, canonical));
+                }
+            }
+            (Err(_), Err(_)) if source_json == target_json => {}
+            _ => {
+                return Err(db_message(
+                    "merge_observation_authority",
+                    "sanitization receipt identity collision",
+                ));
+            }
         }
     }
     drop(receipt_rows);

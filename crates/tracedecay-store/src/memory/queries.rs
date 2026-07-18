@@ -1,17 +1,193 @@
 use tracedecay_domain::{
-    Confidence, DomainError, FactCategoryV1, FactEventId, FactId, FactOwnerV1, LocatorDigest,
-    RetrievalAnchorId, SourceStoreId, UtcMicros,
+    Confidence, DomainError, FactCategoryV1, FactEventId, FactId, FactLineageEventV1, FactOwnerV1,
+    LocatorDigest, RetrievalAnchorId, SourceStoreId, UtcMicros,
 };
 
 use super::{
     CompatibilityFactSearchCursorV1, CompatibilityFactSearchFilterV1,
     CompatibilityFactSearchKindV1, CompatibilityFactTargetV1, FactStoreError, FactStoreResult,
-    MAX_COMPATIBILITY_SEARCH_BYTES, validate_owned_fact_id,
+    MAX_COMPATIBILITY_SEARCH_BYTES, StoredFactV1, validate_owned_fact_id,
 };
 
 pub(super) const MAX_CURRENT_LIMIT: usize = 1_000;
 
-pub(super) const MAX_LINEAGE_LIMIT: usize = 1_000;
+/// Maximum sorted, deduplicated contradiction identifiers in one response snapshot.
+pub const MAX_FACT_QUERY_CONTRADICTIONS: usize = 1_000;
+
+pub(super) const MAX_LINEAGE_LIMIT: usize = MAX_FACT_QUERY_CONTRADICTIONS;
+
+/// Exact frontier denominators plus redaction counts for one fact query snapshot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FactQueryCoverageV1 {
+    visible: u64,
+    hidden: u64,
+    unknown: u64,
+    redacted: u64,
+}
+
+impl FactQueryCoverageV1 {
+    pub const fn new(visible: u64, hidden: u64, unknown: u64, redacted: u64) -> Self {
+        Self {
+            visible,
+            hidden,
+            unknown,
+            redacted,
+        }
+    }
+
+    pub const fn visible(&self) -> u64 {
+        self.visible
+    }
+
+    pub const fn hidden(&self) -> u64 {
+        self.hidden
+    }
+
+    pub const fn unknown(&self) -> u64 {
+        self.unknown
+    }
+
+    pub const fn redacted(&self) -> u64 {
+        self.redacted
+    }
+}
+
+/// Explicit contradiction knowledge at the response snapshot.
+///
+/// Positive identifiers are sorted, deduplicated, and bounded by
+/// [`MAX_FACT_QUERY_CONTRADICTIONS`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FactContradictionStateV1 {
+    Unknown,
+    NotObserved,
+    Present { contradicted_by: Vec<FactId> },
+}
+
+impl FactContradictionStateV1 {
+    pub fn from_positive(mut contradicted_by: Vec<FactId>) -> Self {
+        contradicted_by.sort_unstable();
+        contradicted_by.dedup();
+        contradicted_by.truncate(MAX_FACT_QUERY_CONTRADICTIONS);
+        if contradicted_by.is_empty() {
+            Self::NotObserved
+        } else {
+            Self::Present { contradicted_by }
+        }
+    }
+
+    pub fn contradicted_by(&self) -> &[FactId] {
+        match self {
+            Self::Present { contradicted_by } => contradicted_by,
+            Self::Unknown | Self::NotObserved => &[],
+        }
+    }
+
+    pub const fn is_positive(&self) -> bool {
+        matches!(self, Self::Present { .. })
+    }
+}
+
+/// Current fact projection plus explicit coverage and contradiction state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FactCurrentResponseV1 {
+    fact: Option<StoredFactV1>,
+    coverage: FactQueryCoverageV1,
+    contradiction: FactContradictionStateV1,
+}
+
+impl FactCurrentResponseV1 {
+    pub fn new(
+        fact: Option<StoredFactV1>,
+        coverage: FactQueryCoverageV1,
+        contradiction: FactContradictionStateV1,
+    ) -> Self {
+        Self {
+            fact,
+            coverage,
+            contradiction,
+        }
+    }
+
+    pub fn fact(&self) -> Option<&StoredFactV1> {
+        self.fact.as_ref()
+    }
+
+    pub const fn coverage(&self) -> &FactQueryCoverageV1 {
+        &self.coverage
+    }
+
+    pub const fn contradiction(&self) -> &FactContradictionStateV1 {
+        &self.contradiction
+    }
+}
+
+/// As-of fact projection plus explicit coverage and contradiction state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FactAsOfResponseV1 {
+    fact: Option<StoredFactV1>,
+    coverage: FactQueryCoverageV1,
+    contradiction: FactContradictionStateV1,
+}
+
+impl FactAsOfResponseV1 {
+    pub fn new(
+        fact: Option<StoredFactV1>,
+        coverage: FactQueryCoverageV1,
+        contradiction: FactContradictionStateV1,
+    ) -> Self {
+        Self {
+            fact,
+            coverage,
+            contradiction,
+        }
+    }
+
+    pub fn fact(&self) -> Option<&StoredFactV1> {
+        self.fact.as_ref()
+    }
+
+    pub const fn coverage(&self) -> &FactQueryCoverageV1 {
+        &self.coverage
+    }
+
+    pub const fn contradiction(&self) -> &FactContradictionStateV1 {
+        &self.contradiction
+    }
+}
+
+/// Bounded lineage page plus snapshot-wide coverage and contradiction state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FactLineageResponseV1 {
+    events: Vec<FactLineageEventV1>,
+    coverage: FactQueryCoverageV1,
+    contradiction: FactContradictionStateV1,
+}
+
+impl FactLineageResponseV1 {
+    pub fn new(
+        events: Vec<FactLineageEventV1>,
+        coverage: FactQueryCoverageV1,
+        contradiction: FactContradictionStateV1,
+    ) -> Self {
+        Self {
+            events,
+            coverage,
+            contradiction,
+        }
+    }
+
+    pub fn events(&self) -> &[FactLineageEventV1] {
+        &self.events
+    }
+
+    pub const fn coverage(&self) -> &FactQueryCoverageV1 {
+        &self.coverage
+    }
+
+    pub const fn contradiction(&self) -> &FactContradictionStateV1 {
+        &self.contradiction
+    }
+}
 
 /// Page of current facts ordered by `(FactId)` after the exclusive cursor.
 #[derive(Clone, Debug, PartialEq, Eq)]

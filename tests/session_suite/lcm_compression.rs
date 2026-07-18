@@ -26,6 +26,13 @@ async fn open_lcm_conn(tmp: &TempDir) -> libsql::Connection {
     db.connect().expect("connect direct lcm db")
 }
 
+async fn scalar_i64(db_path: &std::path::Path, sql: &str) -> i64 {
+    let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let mut rows = conn.query(sql, ()).await.unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
 fn sample_session(provider: &str, session_id: &str) -> SessionRecord {
     common::session_record(
         provider,
@@ -793,6 +800,83 @@ async fn compress_rolls_back_summary_and_lifecycle_when_debt_write_fails() {
             .await
             .is_err(),
         "failed write should roll back lifecycle state"
+    );
+}
+
+#[tokio::test]
+async fn late_summary_projection_failure_rolls_back_payload_files_and_canonical_rows() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = isolated_db_path(&tmp);
+    let db = open_lcm_db(&tmp).await;
+    let conn = open_lcm_conn(&tmp).await;
+    conn.execute_batch(
+        "CREATE TRIGGER abort_late_summary_projection
+         BEFORE INSERT ON lcm_summary_nodes
+         BEGIN
+            SELECT RAISE(ABORT, 'forced late summary projection failure');
+         END;",
+    )
+    .await
+    .expect("install late projection trigger");
+    drop(conn);
+
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-late-payload-rollback",
+        LcmSummarizerMode::Fake {
+            summary_text: "must roll back".into(),
+        },
+        Some(1),
+        Some(1),
+        None,
+    );
+    request.threshold_tokens = Some(1);
+    request.fresh_tail_count = Some(2);
+    request.messages = vec![
+        json!({
+            "id": "large-tool-result",
+            "role": "tool",
+            "kind": "tool_result",
+            "content": format!("tool output\n{}", "P".repeat(300_000)),
+        }),
+        json!({"id": "middle-1", "role": "assistant", "content": "middle one"}),
+        json!({"id": "fresh-1", "role": "user", "content": "fresh one"}),
+        json!({"id": "fresh-2", "role": "assistant", "content": "fresh two"}),
+    ];
+
+    let error = db
+        .lcm_compress(request)
+        .await
+        .expect_err("late compatibility failure must abort the whole publication");
+    assert!(
+        format!("{error:?}").contains("forced late summary projection failure"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        scalar_i64(
+            &db_path,
+            "SELECT COUNT(*) FROM session_summary_nodes
+             WHERE session_id = 'session-late-payload-rollback'",
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        scalar_i64(
+            &db_path,
+            "SELECT COUNT(*) FROM lcm_raw_messages
+             WHERE session_id = 'session-late-payload-rollback'",
+        )
+        .await,
+        0
+    );
+    let payload_dir = tmp.path().join(".tracedecay").join("lcm-payloads");
+    let payload_count = std::fs::read_dir(payload_dir)
+        .map(|entries| entries.count())
+        .unwrap_or_default();
+    assert_eq!(
+        payload_count, 0,
+        "payload rollback must remove created files"
     );
 }
 
@@ -4843,12 +4927,10 @@ async fn overflow_recovery_without_backlog_evicts_droppable_tail() {
     );
 }
 
-// Mirrors hermes-lcm `_continue_compression_boundary` happy path
-// (engine.py:1902-1923): when the host old_session_id matches the bound
-// session, all LCM data is reassigned to the new session id and lifecycle
-// state is finalized + rebound instead of orphaning the old session.
+// Compression boundaries link immutable session authorities. Historical rows
+// keep their original owner; only lifecycle continuity is projected forward.
 #[tokio::test]
-async fn compression_boundary_carry_over_reassigns_lcm_data() {
+async fn compression_boundary_links_without_reassigning_lcm_data() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
@@ -4883,7 +4965,7 @@ async fn compression_boundary_carry_over_reassigns_lcm_data() {
     assert!(boundary.recorded);
     assert_eq!(boundary.reason, "compression_boundary_carried_over");
 
-    // Raw messages moved to the new session id.
+    // Raw messages retain their immutable source-session owner.
     let new_page = db
         .lcm_load_session(LcmLoadSessionRequest {
             provider: "cursor".into(),
@@ -4897,7 +4979,7 @@ async fn compression_boundary_carry_over_reassigns_lcm_data() {
         })
         .await
         .unwrap();
-    assert_eq!(new_page.messages.len(), 4);
+    assert!(new_page.messages.is_empty());
     let old_page = db
         .lcm_load_session(LcmLoadSessionRequest {
             provider: "cursor".into(),
@@ -4911,16 +4993,22 @@ async fn compression_boundary_carry_over_reassigns_lcm_data() {
         })
         .await
         .unwrap();
-    assert!(old_page.messages.is_empty());
+    assert_eq!(old_page.messages.len(), 4);
 
-    // Summary node moved with its lineage intact.
+    // Summary authority and compatibility projection retain their owner.
     let expanded = db
-        .lcm_expand_summary_node("cursor", "session-new", &node_id)
+        .lcm_expand_summary_node("cursor", "session-old", &node_id)
         .await
         .unwrap();
     assert_eq!(expanded.sources.len(), 2);
+    assert!(
+        db.lcm_expand_summary_node("cursor", "session-new", &node_id)
+            .await
+            .is_err()
+    );
 
-    // Lifecycle finalized for the old session and rebound to the new one.
+    // Lifecycle records an immutable boundary link without deleting the old
+    // lifecycle row.
     let state = db
         .lcm_lifecycle_state("cursor", "session-new")
         .await
@@ -4932,13 +5020,14 @@ async fn compression_boundary_carry_over_reassigns_lcm_data() {
         Some("session-old")
     );
     assert_eq!(state.last_finalized_frontier_store_id, Some(store_ids[1]));
-    assert!(
-        db.lcm_lifecycle_state("cursor", "session-old")
-            .await
-            .is_err()
-    );
+    let old_state = db
+        .lcm_lifecycle_state("cursor", "session-old")
+        .await
+        .expect("source lifecycle authority remains");
+    assert_eq!(old_state.current_session_id, "session-old");
 
-    // Carried summaries keep flowing into the new session's replay.
+    // The target session starts clean; linked history remains addressable only
+    // through its immutable source-session identity.
     let next = db
         .lcm_compress(compress_request(
             "cursor",
@@ -4950,44 +5039,59 @@ async fn compression_boundary_carry_over_reassigns_lcm_data() {
         .await
         .unwrap();
     assert_eq!(next.reason, "no_backlog_to_compress");
-    assert_eq!(
-        next.replay_messages
-            .iter()
-            .map(|message| message["content"].as_str().unwrap().to_string())
-            .collect::<Vec<_>>(),
-        vec![
-            "old summary".to_string(),
-            "fresh-1".to_string(),
-            "fresh-2".to_string(),
-        ]
-    );
+    assert!(next.replay_messages.is_empty());
 }
 
 #[tokio::test]
-async fn compression_boundary_carry_over_requires_empty_target_session() {
+async fn compression_boundary_link_does_not_require_empty_target_session() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_raw_messages(&db, "cursor", "session-old", &["old-1", "old-2"]).await;
     insert_raw_messages(&db, "cursor", "session-new", &["already-there"]).await;
 
-    let err = db
+    let boundary = db
         .lcm_session_boundary(boundary_request(
             "session-new",
             "session-old",
             Some("session-old"),
         ))
         .await
-        .expect_err("carry-over must fail when target session already has raw rows");
-    assert!(
-        matches!(err, tracedecay::sessions::lcm::LcmError::Db(message) if message.contains("empty target session"))
-    );
+        .expect("boundary link does not rewrite target ownership");
+    assert!(boundary.recorded);
+    let old_page = db
+        .lcm_load_session(LcmLoadSessionRequest {
+            provider: "cursor".into(),
+            session_id: "session-old".into(),
+            after_store_id: None,
+            limit: 10,
+            roles: Vec::new(),
+            start_time: None,
+            end_time: None,
+            content_slice: None,
+        })
+        .await
+        .unwrap();
+    let new_page = db
+        .lcm_load_session(LcmLoadSessionRequest {
+            provider: "cursor".into(),
+            session_id: "session-new".into(),
+            after_store_id: None,
+            limit: 10,
+            roles: Vec::new(),
+            start_time: None,
+            end_time: None,
+            content_slice: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(old_page.messages.len(), 2);
+    assert_eq!(new_page.messages.len(), 1);
 }
 
-// The carry-over moves externalized payload ownership and outstanding
-// maintenance debt to the new session id, mirroring Hermes
-// `reassign_externalized_payloads` and conversation-scoped debt continuity.
+// The boundary link projects maintenance debt but never rewrites external
+// payload ownership.
 #[tokio::test]
-async fn compression_boundary_carry_over_moves_payloads_and_maintenance_debt() {
+async fn compression_boundary_link_preserves_payload_owner_and_projects_debt() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
@@ -5067,7 +5171,7 @@ async fn compression_boundary_carry_over_moves_payloads_and_maintenance_debt() {
     let expansion = db
         .lcm_expand(tracedecay::sessions::lcm::LcmExpandRequest {
             provider: "cursor".into(),
-            session_id: "session-new".into(),
+            session_id: "session-old".into(),
             target: tracedecay::sessions::lcm::LcmExpandTarget::ExternalPayload {
                 payload_ref: payload_ref.clone(),
             },
@@ -5081,7 +5185,7 @@ async fn compression_boundary_carry_over_moves_payloads_and_maintenance_debt() {
     assert!(
         db.lcm_expand(tracedecay::sessions::lcm::LcmExpandRequest {
             provider: "cursor".into(),
-            session_id: "session-old".into(),
+            session_id: "session-new".into(),
             target: tracedecay::sessions::lcm::LcmExpandTarget::ExternalPayload { payload_ref },
             content_slice: None,
             source_offset: 0,
@@ -5092,12 +5196,10 @@ async fn compression_boundary_carry_over_moves_payloads_and_maintenance_debt() {
     );
 }
 
-// The carry-over runs in a single transaction; a rejected carry-over must
-// leave the source session fully usable (rows, payload ownership, lifecycle
-// frontier, and maintenance debt untouched) and write nothing for the target,
-// so a later boundary to a genuinely empty session can still succeed.
+// Boundary linking never mutates either session's authority, including when
+// the target already has its own data.
 #[tokio::test]
-async fn failed_carry_over_leaves_source_session_state_intact() {
+async fn boundary_link_to_existing_target_leaves_source_session_state_intact() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     let store_ids = insert_raw_messages(
@@ -5155,19 +5257,18 @@ async fn failed_carry_over_leaves_source_session_state_intact() {
         .await
         .unwrap();
 
-    // The target session already has rows, so the carry-over is rejected.
+    // The target session already has rows; linking is still safe because no
+    // ownership is reassigned.
     insert_raw_messages(&db, "cursor", "session-busy", &["already-there"]).await;
-    let err = db
+    let linked = db
         .lcm_session_boundary(boundary_request(
             "session-busy",
             "session-old",
             Some("session-old"),
         ))
         .await
-        .expect_err("carry-over into a non-empty session must fail");
-    assert!(
-        matches!(err, tracedecay::sessions::lcm::LcmError::Db(message) if message.contains("empty target session"))
-    );
+        .expect("boundary link must not require an empty target");
+    assert!(linked.recorded);
 
     // Source rows, payload ownership, and lifecycle state are untouched.
     let old_page = db
@@ -5210,15 +5311,16 @@ async fn failed_carry_over_leaves_source_session_state_intact() {
         .expect("payload must remain owned by the source session");
     assert!(payload_expansion.content.starts_with("tool output"));
 
-    // Nothing was written for the rejected target: no lifecycle rebind and
-    // no boundary-skip cooldown.
-    assert!(
-        db.lcm_lifecycle_state("cursor", "session-busy")
-            .await
-            .is_err()
+    let target_state = db
+        .lcm_lifecycle_state("cursor", "session-busy")
+        .await
+        .expect("target lifecycle records the immutable source link");
+    assert_eq!(
+        target_state.last_finalized_session_id.as_deref(),
+        Some("session-old")
     );
 
-    // The same source session can still carry over to an empty session.
+    // The same immutable source may be linked to another session.
     insert_session(&db, "cursor", "session-empty").await;
     let boundary = db
         .lcm_session_boundary(boundary_request(

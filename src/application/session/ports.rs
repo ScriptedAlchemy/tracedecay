@@ -1,0 +1,219 @@
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use crate::application::session::SessionDataFreshness;
+use crate::query::temporal::context::{ContextBudget, VersionedTokenEstimator};
+use crate::query::temporal::ports::{ExecutionLimits, TemporalSnapshotRequest};
+use crate::query::temporal::ranking::DiversityLimits;
+use crate::query::temporal::{TemporalKernelError, TemporalKernelResult};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizedTemporalExecutionRequest {
+    snapshot_request: TemporalSnapshotRequest,
+    query: String,
+    cursor: Option<String>,
+    limit: usize,
+    diversity: DiversityLimits,
+    context_budget: ContextBudget,
+    schema_version: u32,
+    ranking_version: u32,
+    configuration_digest: String,
+}
+
+impl AuthorizedTemporalExecutionRequest {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        snapshot_request: TemporalSnapshotRequest,
+        query: String,
+        cursor: Option<String>,
+        limit: usize,
+        diversity: DiversityLimits,
+        context_budget: ContextBudget,
+        schema_version: u32,
+        ranking_version: u32,
+        configuration_digest: String,
+    ) -> Self {
+        Self {
+            snapshot_request,
+            query,
+            cursor,
+            limit,
+            diversity,
+            context_budget,
+            schema_version,
+            ranking_version,
+            configuration_digest,
+        }
+    }
+
+    pub fn snapshot_request(&self) -> &TemporalSnapshotRequest {
+        &self.snapshot_request
+    }
+
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    pub fn cursor(&self) -> Option<&str> {
+        self.cursor.as_deref()
+    }
+
+    pub const fn limit(&self) -> usize {
+        self.limit
+    }
+
+    pub const fn diversity(&self) -> DiversityLimits {
+        self.diversity
+    }
+
+    pub fn context_budget(&self) -> &ContextBudget {
+        &self.context_budget
+    }
+
+    pub const fn execution_limits(&self) -> ExecutionLimits {
+        self.snapshot_request.limits()
+    }
+
+    pub const fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    pub const fn ranking_version(&self) -> u32 {
+        self.ranking_version
+    }
+
+    pub fn configuration_digest(&self) -> &str {
+        &self.configuration_digest
+    }
+
+    pub(crate) fn into_kernel_request(
+        self,
+        snapshot: crate::query::temporal::ports::TemporalExecutionSnapshot,
+    ) -> crate::query::temporal::TemporalKernelRequest {
+        crate::query::temporal::TemporalKernelRequest {
+            snapshot,
+            query: self.query,
+            cursor: self.cursor,
+            limit: self.limit,
+            diversity: self.diversity,
+            context_budget: self.context_budget,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionTemporalExecutionReport {
+    result: TemporalKernelResult,
+    freshness: SessionDataFreshness,
+}
+
+impl SessionTemporalExecutionReport {
+    pub fn new(result: TemporalKernelResult, freshness: SessionDataFreshness) -> Self {
+        Self { result, freshness }
+    }
+
+    pub fn result(&self) -> &TemporalKernelResult {
+        &self.result
+    }
+
+    pub const fn freshness(&self) -> SessionDataFreshness {
+        self.freshness
+    }
+
+    pub fn into_parts(self) -> (TemporalKernelResult, SessionDataFreshness) {
+        (self.result, self.freshness)
+    }
+}
+
+#[derive(Debug)]
+pub enum SessionTemporalExecutionError {
+    WrongScope,
+    Stale { generation_lag: u64 },
+    Locked,
+    Redacted,
+    Deleted,
+    Denied,
+    Unavailable,
+    BudgetExhausted,
+    Cancelled,
+    Kernel(TemporalKernelError),
+}
+
+impl fmt::Display for SessionTemporalExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::WrongScope => "temporal execution scope does not match the authorization grant",
+            Self::Stale { .. } => "temporal execution snapshot is stale",
+            Self::Locked => "temporal payload is locked",
+            Self::Redacted => "temporal payload is redacted",
+            Self::Deleted => "temporal payload was deleted",
+            Self::Denied => "temporal execution was denied",
+            Self::Unavailable => "temporal execution is unavailable",
+            Self::BudgetExhausted => "temporal execution budget was exhausted",
+            Self::Cancelled => "temporal execution was cancelled",
+            Self::Kernel(_) => "temporal kernel failed",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for SessionTemporalExecutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Kernel(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+pub type TemporalExecutionFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<SessionTemporalExecutionReport, SessionTemporalExecutionError>>
+            + Send
+            + 'a,
+    >,
+>;
+
+pub trait SessionTemporalExecutionPort: Send + Sync {
+    fn execute<'a, E>(
+        &'a self,
+        request: AuthorizedTemporalExecutionRequest,
+        estimator: &'a E,
+    ) -> TemporalExecutionFuture<'a>
+    where
+        E: VersionedTokenEstimator + Sync + 'a;
+}
+
+impl<T> SessionTemporalExecutionPort for &T
+where
+    T: SessionTemporalExecutionPort + ?Sized,
+{
+    fn execute<'a, E>(
+        &'a self,
+        request: AuthorizedTemporalExecutionRequest,
+        estimator: &'a E,
+    ) -> TemporalExecutionFuture<'a>
+    where
+        E: VersionedTokenEstimator + Sync + 'a,
+    {
+        (**self).execute(request, estimator)
+    }
+}
+
+impl<T> SessionTemporalExecutionPort for Arc<T>
+where
+    T: SessionTemporalExecutionPort + ?Sized,
+{
+    fn execute<'a, E>(
+        &'a self,
+        request: AuthorizedTemporalExecutionRequest,
+        estimator: &'a E,
+    ) -> TemporalExecutionFuture<'a>
+    where
+        E: VersionedTokenEstimator + Sync + 'a,
+    {
+        (**self).execute(request, estimator)
+    }
+}

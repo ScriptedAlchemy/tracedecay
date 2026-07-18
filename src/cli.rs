@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, builder::PossibleValuesParser};
+use clap::{Args, Parser, Subcommand, ValueEnum, builder::PossibleValuesParser};
 
 mod automation;
 mod help;
@@ -24,6 +24,14 @@ fn agent_value_parser() -> PossibleValuesParser {
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum PostUpdateMode {
+    #[default]
+    Normal,
+    DogfoodForwardOnly,
+    DogfoodRecoverInactive,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -345,6 +353,10 @@ pub enum Commands {
         /// that the managed daemon returns to its exact pre-update state.
         #[arg(long, hide = true)]
         strict: bool,
+        /// Select migration-boundary recovery semantics. Dogfood uses the
+        /// forward-only mode after installing the new binary.
+        #[arg(long, value_enum, default_value_t, hide = true)]
+        mode: PostUpdateMode,
     },
     /// Show or switch the update channel (stable or beta)
     #[command(long_about = CHANNEL_LONG_ABOUT, after_help = CHANNEL_AFTER_HELP)]
@@ -652,6 +664,80 @@ pub(crate) struct SessionsSearchArgs {
 }
 
 #[derive(Subcommand)]
+pub enum SessionsRefreshAction {
+    /// Start or join the durable refresh and return an opaque handle
+    Start(SessionRefreshBeginArgs),
+    /// Read-only progress or terminal receipt lookup using a refresh handle
+    Status(SessionRefreshOperationArgs),
+    /// Join or start the durable refresh and return an opaque handle
+    Join(SessionRefreshBeginArgs),
+    /// Resume, join, or start the durable refresh and return an opaque handle
+    Resume(SessionRefreshBeginArgs),
+    /// Durably cancel using a handle from start, join, resume, or begin
+    Cancel(SessionRefreshOperationArgs),
+    /// Compatibility spelling for start; returns an opaque handle
+    Begin(SessionRefreshBeginArgs),
+}
+
+#[derive(Args)]
+pub(crate) struct SessionRefreshSelectors {
+    /// Registered project id that owns the refresh operation
+    #[arg(
+        long,
+        conflicts_with_all = ["project_path", "profile_id"],
+        required_unless_present_any = ["project_path", "profile_id"]
+    )]
+    pub(crate) project_id: Option<String>,
+    /// Registered project root path or alias that owns the refresh operation
+    #[arg(
+        long,
+        conflicts_with_all = ["project_id", "profile_id"],
+        required_unless_present_any = ["project_id", "profile_id"]
+    )]
+    pub(crate) project_path: Option<String>,
+    /// Typed profile id that owns a profile-scoped refresh operation
+    #[arg(
+        long,
+        conflicts_with_all = ["project_id", "project_path"],
+        required_unless_present_any = ["project_id", "project_path"]
+    )]
+    pub(crate) profile_id: Option<String>,
+    /// Exact session id to refresh
+    #[arg(long)]
+    pub(crate) session_id: String,
+    /// Exact provider scope for the session
+    #[arg(long)]
+    pub(crate) provider: String,
+    /// Committed-through source frontier (must not exceed --target)
+    #[arg(long)]
+    pub(crate) source: u64,
+    /// Observed-through target frontier; mode=current, grain=logical_message
+    #[arg(long)]
+    pub(crate) target: u64,
+}
+
+#[derive(Args)]
+pub(crate) struct SessionRefreshBeginArgs {
+    #[command(flatten)]
+    pub(crate) selectors: SessionRefreshSelectors,
+    /// Output the typed refresh outcome as JSON
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Args)]
+pub(crate) struct SessionRefreshOperationArgs {
+    #[command(flatten)]
+    pub(crate) selectors: SessionRefreshSelectors,
+    /// Opaque daemon-local handle returned by start, join, resume, or begin; --operation-id is deprecated
+    #[arg(long, visible_alias = "operation-id")]
+    pub(crate) handle: String,
+    /// Output the typed refresh outcome as JSON
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Subcommand)]
 pub enum SessionsAction {
     /// Ingest all supported transcript providers into the project session DB
     Ingest {
@@ -667,6 +753,11 @@ pub enum SessionsAction {
     },
     /// Search previously ingested session messages
     Search(Box<SessionsSearchArgs>),
+    /// Run an explicit daemon-owned temporal refresh for one exact session scope
+    Refresh {
+        #[command(subcommand)]
+        action: SessionsRefreshAction,
+    },
     /// Backfill the session↔git correlation index from historical session,
     /// analytics, and reflog signals
     GitBackfill {

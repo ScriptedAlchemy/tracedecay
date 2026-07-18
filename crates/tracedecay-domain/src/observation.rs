@@ -893,12 +893,24 @@ impl CanonicalObservationRelationsV1 {
         &self.session_id
     }
 
+    pub fn thread_id(&self) -> Option<&ObservationId> {
+        self.thread_id.as_ref()
+    }
+
+    pub fn turn_id(&self) -> Option<&ObservationId> {
+        self.turn_id.as_ref()
+    }
+
     pub fn message_id(&self) -> Option<&ObservationId> {
         self.message_id.as_ref()
     }
 
     pub fn parent_session_id(&self) -> Option<&SessionId> {
         self.parent_session_id.as_ref()
+    }
+
+    pub fn parent_message_id(&self) -> Option<&ObservationId> {
+        self.parent_message_id.as_ref()
     }
 
     pub fn agent_id(&self) -> Option<&ObservationId> {

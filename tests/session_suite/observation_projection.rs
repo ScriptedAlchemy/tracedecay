@@ -1735,6 +1735,11 @@ async fn canonical_provider_incremental_and_rebuild_projection_converge() {
     }
 
     let incremental_texts = all_projected_message_texts(&tmp).await;
+    assert_eq!(
+        table_count(&tmp, "session_temporal_observation_effects").await,
+        PROVIDERS.len() as i64,
+        "canonical projection and temporal handoff must commit one authority row together"
+    );
     assert_eq!(incremental_texts.len(), PROVIDERS.len());
     for provider in PROVIDERS {
         assert!(
@@ -1754,6 +1759,11 @@ async fn canonical_provider_incremental_and_rebuild_projection_converge() {
     assert_eq!(rebuilt.projected_rows(), PROVIDERS.len());
     assert_eq!(rebuilt.skipped_observations(), 0);
     assert_eq!(all_projected_message_texts(&tmp).await, incremental_texts);
+    assert_eq!(
+        table_count(&tmp, "session_temporal_observation_effects").await,
+        PROVIDERS.len() as i64,
+        "rebuild must preserve the byte-stable temporal authority handoff"
+    );
     let rebuilt_provenance = projection_provenance_rows(&tmp).await;
     assert_eq!(rebuilt_provenance, incremental_provenance);
     assert_eq!(projection_ownership_rows(&tmp).await, incremental_ownership);

@@ -399,20 +399,35 @@ Examples:
 Related: tracedecay gain --json (scriptable equivalent).";
 
 pub(crate) const SESSIONS_LONG_ABOUT: &str = "\
-Ingests agent session transcripts (Cursor, Codex, Claude Code, and other \
-supported providers) into the project session store and searches them with \
-full-text queries. The MCP twin of search is tracedecay_message_search; \
-ingest usually runs automatically via agent hooks.";
+Searches daemon-owned session-temporal projections. The MCP twin of search is \
+tracedecay_message_search. `sessions ingest` is retained only as an explicit \
+legacy source-admission command: it admits provider records through canonical \
+observation ingest, leaves temporal projection to the durable scheduler, owns \
+no parallel temporal writer, and is never invoked by a read. `sessions refresh` \
+is the separate explicit, daemon-owned path for one exact temporal session scope; it \
+never defaults to the current directory. Refresh maps `--provider` to the \
+source scope, `--source`/`--target` to committed/observed frontiers, and uses \
+the application defaults temporal mode=current and grain=logical_message.";
 
 pub(crate) const SESSIONS_AFTER_HELP: &str = "\
 Examples:
-  tracedecay sessions ingest                     Sweep all supported providers
+  tracedecay sessions ingest                     Explicit legacy source admission
   tracedecay sessions search \"auth refactor\"     Full-text transcript search
   tracedecay sessions search \"bug\" --limit 5 --provider cursor
   tracedecay sessions search \"plan\" --project-path /path/to/repo
+  tracedecay sessions refresh begin --project-id project.id --session-id session.id --provider cursor --source 4 --target 9
+  tracedecay sessions refresh status --profile-id profile.id --session-id session.id --provider cursor --source 4 --target 9 --handle opaque.handle
+  tracedecay sessions refresh cancel --project-path /path/to/repo --session-id session.id --provider cursor --source 4 --target 9 --handle opaque.handle --json
+
+`--handle` is the opaque daemon-local capability returned by begin. The \
+deprecated `--operation-id` alias is accepted for migration only; an internal \
+operation id is not a refresh capability. The deprecated ingest `--provider` \
+option is accepted for migration only; source admission sweeps all supported \
+providers.
 
 Related: tracedecay tool message_search (MCP twin), tracedecay tool
-lcm_grep (scoped/time-filtered recall), tracedecay memory.";
+lcm_grep (scoped/time-filtered recall), tracedecay tool session_refresh,
+tracedecay memory.";
 
 pub(crate) const ANALYTICS_LONG_ABOUT: &str = "\
 Answers adoption and telemetry-health questions from the durable \

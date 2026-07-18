@@ -21,11 +21,13 @@ pub use delete_recovery::{DeleteOpts, DeleteOutcome, delete_external_payload};
 pub(crate) use delete_recovery::{
     reconcile_committed_payload_drain, remove_committed_payload_file_with,
 };
-pub use filesystem_authority::safe_remove_payload_file;
+pub use filesystem_authority::VerifiedPayloadAuthority;
+use filesystem_authority::{
+    PayloadFileWrite, prepare_payload_dir, read_verified_payload_file, write_private_file,
+};
 pub(crate) use filesystem_authority::{
     ensure_contained, existing_payload_dir, existing_payload_dir_opt,
 };
-use filesystem_authority::{prepare_payload_dir, read_payload_file, write_private_file};
 pub(crate) use rollback::PayloadFileRollback;
 
 pub(crate) async fn delete_external_payload_in_transaction(
@@ -158,9 +160,9 @@ pub(crate) fn write_external_payload_tracked(
     write: ExternalPayloadWrite<'_>,
     rollback: &mut PayloadFileRollback,
 ) -> Result<LcmPayloadRef, LcmError> {
-    let (payload, created) = write_external_payload_inner(storage_root, write)?;
-    if created {
-        rollback.record_created(&payload.payload_ref);
+    let (payload, file_write) = write_external_payload_inner(storage_root, write)?;
+    if file_write.created {
+        rollback.record_created(file_write.authority);
     }
     Ok(payload)
 }
@@ -186,13 +188,13 @@ pub(crate) fn write_external_payload(
             metadata_json,
         },
     )
-    .map(|(payload, _)| payload)
+    .map(|(payload, _file_write)| payload)
 }
 
 fn write_external_payload_inner(
     storage_root: &Path,
     write: ExternalPayloadWrite<'_>,
-) -> Result<(LcmPayloadRef, bool), LcmError> {
+) -> Result<(LcmPayloadRef, PayloadFileWrite), LcmError> {
     let ExternalPayloadWrite {
         provider,
         session_id,
@@ -211,7 +213,7 @@ fn write_external_payload_inner(
     let dir = prepare_payload_dir(storage_root)?;
     let path = dir.join(&payload_ref);
     ensure_contained(&dir, &path)?;
-    let created = write_private_file(&path, content.as_bytes())?;
+    let file_write = write_private_file(&path, content.as_bytes())?;
 
     Ok((
         LcmPayloadRef {
@@ -226,30 +228,8 @@ fn write_external_payload_inner(
             created_at: current_timestamp(),
             metadata_json,
         },
-        created,
+        file_write,
     ))
-}
-
-/// Moves externalized payload ownership from one session id to another inside
-/// the caller's transaction. Mirrors hermes-lcm `reassign_externalized_payloads`
-/// (payload files are keyed by ref, so only the DB ownership row moves).
-pub(crate) async fn reassign_session_payloads(
-    conn: &Connection,
-    provider: &str,
-    old_session_id: &str,
-    new_session_id: &str,
-) -> Result<u64, LcmError> {
-    if old_session_id.is_empty() || new_session_id.is_empty() || old_session_id == new_session_id {
-        return Ok(0);
-    }
-    conn.execute(
-        "UPDATE lcm_external_payloads
-         SET session_id = ?3
-         WHERE provider = ?1 AND session_id = ?2",
-        params![provider, old_session_id, new_session_id],
-    )
-    .await
-    .map_err(|err| LcmError::Db(err.to_string()))
 }
 
 pub(crate) async fn upsert_payload_metadata(
@@ -262,16 +242,7 @@ pub(crate) async fn upsert_payload_metadata(
             byte_count, char_count, created_at, metadata_json
          )
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-         ON CONFLICT(payload_ref) DO UPDATE SET
-            provider = excluded.provider,
-            session_id = excluded.session_id,
-            message_id = excluded.message_id,
-            kind = excluded.kind,
-            content_hash = excluded.content_hash,
-            byte_count = excluded.byte_count,
-            char_count = excluded.char_count,
-            created_at = excluded.created_at,
-            metadata_json = excluded.metadata_json",
+         ON CONFLICT(payload_ref) DO NOTHING",
         params![
             payload.payload_ref.as_str(),
             payload.provider.as_str(),
@@ -286,6 +257,31 @@ pub(crate) async fn upsert_payload_metadata(
         ],
     )
     .await?;
+    let mut rows = conn
+        .query(
+            "SELECT provider, session_id, message_id, kind, content_hash,
+                    byte_count, char_count, created_at, metadata_json
+             FROM lcm_external_payloads WHERE payload_ref = ?1",
+            params![payload.payload_ref.as_str()],
+        )
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or_else(|| LcmError::Db("payload manifest replay row disappeared".to_string()))?;
+    let matches = row.get::<String>(0)? == payload.provider
+        && row.get::<String>(1)? == payload.session_id
+        && row.get::<String>(2)? == payload.message_id
+        && row.get::<String>(3)? == payload.kind
+        && row.get::<String>(4)? == payload.content_hash
+        && row.get::<i64>(5)? == payload.byte_count as i64
+        && row.get::<i64>(6)? == payload.char_count as i64
+        && row.get::<Option<String>>(8)? == payload.metadata_json;
+    if !matches {
+        return Err(LcmError::ImmutablePayloadConflict {
+            payload_ref: payload.payload_ref.clone(),
+        });
+    }
     Ok(())
 }
 
@@ -314,10 +310,14 @@ pub(crate) async fn expand_payload(
     let dir = existing_payload_dir(storage_root)?;
     let path = dir.join(payload_ref);
     ensure_contained(&dir, &path)?;
-    let content = read_payload_file(&path)?;
-    if util::sha256_hex(content.as_bytes()) != payload.content_hash {
-        return Err(LcmError::PayloadIntegrityMismatch);
-    }
+    let (content, _authority) = read_verified_payload_file(
+        &path,
+        &payload.content_hash,
+        payload.byte_count,
+        payload.char_count,
+    )?
+    .ok_or(LcmError::PayloadMissing)?;
+    let content = String::from_utf8(content).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
 
     let total_char_count = content.chars().count();
     let start = offset.min(total_char_count);

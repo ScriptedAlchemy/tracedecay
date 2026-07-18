@@ -71,6 +71,31 @@ pub struct LcmSummaryNodeDraft {
     pub metadata_json: Option<String>,
 }
 
+/// Explicit identity and predecessor edge for one immutable summary
+/// publication. `draft` is also materialized into the legacy LCM tables as a
+/// compatibility projection in the authoritative transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LcmImmutableSummaryPublication {
+    pub summary_id: String,
+    pub predecessor_summary_id: Option<String>,
+    pub draft: LcmSummaryNodeDraft,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LcmSummaryPublicationDisposition {
+    Published,
+    ExactReplay,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LcmSummaryPublicationReceipt {
+    pub summary: LcmSummaryNode,
+    pub disposition: LcmSummaryPublicationDisposition,
+    pub generation: i64,
+    pub frozen_watermarks_json: String,
+    pub published_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmSummaryNode {
     pub node_id: String,
@@ -946,6 +971,31 @@ pub enum LcmError {
     StillReferenced,
     SummaryNodeNotFound,
     SummarySourceNotOwnedBySession,
+    ImmutableSummaryConflict {
+        summary_id: String,
+    },
+    ImmutablePayloadConflict {
+        payload_ref: String,
+    },
+    SummaryPredecessorRequired {
+        summary_id: String,
+        current_predecessor_id: String,
+    },
+    InvalidSummarySuccessor {
+        summary_id: String,
+        predecessor_summary_id: String,
+    },
+    SummaryCycle {
+        summary_id: String,
+    },
+    SummarySourceUnavailable {
+        source_id: String,
+        reason: String,
+    },
+    StaleSummaryGeneration {
+        expected: i64,
+        actual: i64,
+    },
     LifecycleStateNotFound,
     Db(String),
     Io(String),
@@ -970,6 +1020,45 @@ impl std::fmt::Display for LcmError {
             Self::SummaryNodeNotFound => write!(f, "summary node not found"),
             Self::SummarySourceNotOwnedBySession => {
                 write!(f, "summary source not owned by session")
+            }
+            Self::ImmutableSummaryConflict { summary_id } => {
+                write!(
+                    f,
+                    "immutable summary {summary_id} conflicts with its publication"
+                )
+            }
+            Self::ImmutablePayloadConflict { payload_ref } => {
+                write!(
+                    f,
+                    "immutable payload {payload_ref} conflicts with its manifest"
+                )
+            }
+            Self::SummaryPredecessorRequired {
+                summary_id,
+                current_predecessor_id,
+            } => write!(
+                f,
+                "summary {summary_id} must name current predecessor {current_predecessor_id}"
+            ),
+            Self::InvalidSummarySuccessor {
+                summary_id,
+                predecessor_summary_id,
+            } => write!(
+                f,
+                "summary {summary_id} cannot succeed incompatible predecessor \
+                 {predecessor_summary_id}"
+            ),
+            Self::SummaryCycle { summary_id } => {
+                write!(f, "summary {summary_id} would create a lineage cycle")
+            }
+            Self::SummarySourceUnavailable { source_id, reason } => {
+                write!(f, "summary source {source_id} is unavailable: {reason}")
+            }
+            Self::StaleSummaryGeneration { expected, actual } => {
+                write!(
+                    f,
+                    "summary generation compare-and-swap failed: expected {expected}, actual {actual}"
+                )
             }
             Self::LifecycleStateNotFound => {
                 write!(f, "payload database error: lifecycle state not found")

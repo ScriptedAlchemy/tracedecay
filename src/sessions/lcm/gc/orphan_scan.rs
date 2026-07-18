@@ -122,7 +122,7 @@ pub(super) async fn stage_orphan_files(
             report.batch_cap(1);
             continue;
         }
-        let (content_hash, verified_bytes) =
+        let (content_hash, verified_bytes, verified_chars) =
             match payload::payload_file_fingerprint(dir, &payload_ref) {
                 Ok(fingerprint) => fingerprint,
                 Err(err) => {
@@ -130,7 +130,14 @@ pub(super) async fn stage_orphan_files(
                     continue;
                 }
             };
-        stage_payload_delete(conn, &payload_ref, Some(&content_hash), verified_bytes).await?;
+        stage_payload_delete(
+            conn,
+            &payload_ref,
+            Some(&content_hash),
+            verified_bytes,
+            verified_chars,
+        )
+        .await?;
         report.orphans.add(&payload_ref, verified_bytes);
         *remaining -= 1;
     }

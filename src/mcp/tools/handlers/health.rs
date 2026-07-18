@@ -2,6 +2,7 @@
 //! tool handlers.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -451,6 +452,55 @@ pub(super) async fn handle_health(
     ))
 }
 
+/// Bound for the session-temporal doctor probe so a wedged sessions DB cannot
+/// monopolize a `tracedecay_runtime` request indefinitely.
+const SESSION_TEMPORAL_HEALTH_BUDGET: Duration = Duration::from_secs(8);
+
+async fn session_temporal_health_value(
+    project_session_db: Option<&crate::global_db::GlobalDb>,
+) -> Value {
+    match project_session_db {
+        Some(db) => match tokio::time::timeout(
+            SESSION_TEMPORAL_HEALTH_BUDGET,
+            db.session_temporal_doctor_health(),
+        )
+        .await
+        {
+            Ok(health) => serde_json::to_value(health).unwrap_or_else(|_| {
+                json!({
+                    "status": "unavailable",
+                    "findings": [],
+                    "message": "session temporal health serialization failed",
+                })
+            }),
+            Err(_) => json!({
+                "status": "timed_out",
+                "findings": [],
+                "message": "session temporal health exceeded deadline",
+            }),
+        },
+        None => json!({
+            "status": "unavailable",
+            "findings": [],
+        }),
+    }
+}
+
+async fn observation_authority_audit(
+    registry: Option<&crate::global_db::GlobalDb>,
+) -> (Option<bool>, Option<String>) {
+    match registry {
+        Some(registry) => match registry.audit_observation_authority().await {
+            Ok(()) => (Some(true), None),
+            Err(error) => (Some(false), Some(error.to_string())),
+        },
+        None => (
+            None,
+            Some("authoritative global registry is unavailable".to_string()),
+        ),
+    }
+}
+
 /// Handles `tracedecay_runtime` tool calls.
 ///
 /// Issue #80 — surface process and database telemetry so users hitting
@@ -464,27 +514,45 @@ pub(super) async fn handle_runtime(
 ) -> Result<ToolResult> {
     let snap = crate::runtime_telemetry::collect(cg).await?;
     let mut value = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
-    if args
+    let authority_audit = args
         .get("authority_audit")
         .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        let (authority_audit_ok, authority_audit_error) = match registry {
-            Some(registry) => match registry.audit_observation_authority().await {
-                Ok(()) => (Some(true), None),
-                Err(error) => (Some(false), Some(error.to_string())),
+        .unwrap_or(false);
+    // Doctor historically keys temporal health off `authority_audit`. Keep that
+    // coupling, and also allow an explicit independent opt-in.
+    let include_session_temporal_health = authority_audit
+        || args
+            .get("session_temporal_health")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    if authority_audit || include_session_temporal_health {
+        let (authority, temporal) = tokio::join!(
+            async {
+                if authority_audit {
+                    Some(observation_authority_audit(registry).await)
+                } else {
+                    None
+                }
             },
-            None => (
-                None,
-                Some("authoritative global registry is unavailable".to_string()),
-            ),
-        };
-        if let Some(database) = value.get_mut("database").and_then(Value::as_object_mut) {
-            database.insert("authority_audit_ok".to_string(), json!(authority_audit_ok));
-            database.insert(
-                "authority_audit_error".to_string(),
-                json!(authority_audit_error),
-            );
+            async {
+                if include_session_temporal_health {
+                    Some(session_temporal_health_value(project_session_db).await)
+                } else {
+                    None
+                }
+            }
+        );
+        if let Some((authority_audit_ok, authority_audit_error)) = authority {
+            if let Some(database) = value.get_mut("database").and_then(Value::as_object_mut) {
+                database.insert("authority_audit_ok".to_string(), json!(authority_audit_ok));
+                database.insert(
+                    "authority_audit_error".to_string(),
+                    json!(authority_audit_error),
+                );
+            }
+        }
+        if let Some(temporal) = temporal {
+            value["session_temporal_health"] = temporal;
         }
     }
     if args

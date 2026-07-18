@@ -59,29 +59,28 @@ pub(super) async fn handle_admin_sync(cg: &TraceDecay, args: Value) -> Result<To
     ))
 }
 
-/// Handles `tracedecay_status` tool calls.
-pub(super) async fn handle_status(
-    cg: &TraceDecay,
-    args: Value,
-    server_stats: Option<Value>,
-    scope_prefix: Option<&str>,
-    project_session_db: Option<&GlobalDb>,
-) -> Result<ToolResult> {
-    let stats = cg.get_stats().await?;
-    let mut output: Value = serde_json::to_value(&stats).unwrap_or(json!({}));
-    let mut storage_health =
-        serde_json::to_value(crate::runtime_telemetry::collect_database(cg).await?)
-            .unwrap_or_else(|_| json!({}));
-    if server_stats.is_some() {
-        storage_health["daemon_owner_pid"] = json!(std::process::id());
-        storage_health["daemon_generation"] = json!(crate::runtime_identity::process_run_id());
-    }
-    output["storage_health"] = storage_health;
-    if let Some(ss) = server_stats {
-        output["server"] = ss;
-    }
+fn status_arg_flag(args: &Value, key: &str, default: bool) -> bool {
+    args.get(key).and_then(Value::as_bool).unwrap_or(default)
+}
 
-    // Branch info
+fn attach_compact_branch_summary(cg: &TraceDecay, output: &mut Value) {
+    // Avoid `branch_diagnostics()` — it walks tracked-branch metadata, git
+    // ancestry, and per-branch filesystem stats. Compact CLI status only needs
+    // the already-resolved serving identity retained on TraceDecay.
+    // Do not alias open/active into current/live: those are distinct under drift.
+    if let Some(active) = cg.active_branch() {
+        output["active_branch"] = json!(active);
+    }
+    if let Some(serving) = cg.serving_branch() {
+        output["serving_branch"] = json!(serving);
+    }
+    if let Some(warning) = cg.fallback_warning() {
+        output["branch_fallback"] = json!(true);
+        output["branch_warning"] = json!(warning);
+    }
+}
+
+fn attach_full_branch_status(cg: &TraceDecay, args: &Value, output: &mut Value) {
     let branch_diagnostics = cg.branch_diagnostics();
     if let Some(open_branch) = branch_diagnostics.open_active_branch.as_deref() {
         output["active_branch"] = json!(open_branch);
@@ -106,7 +105,10 @@ pub(super) async fn handle_status(
     output["tracked_branch_count"] = json!(branch_diagnostics.tracked_branch_count);
     output["serving_db_path"] = json!(branch_diagnostics.serving_db_path);
     output["serving_db_exists"] = json!(branch_diagnostics.serving_db_exists);
-    output["branch_diagnostics"] = serde_json::to_value(&branch_diagnostics).unwrap_or(json!({}));
+    if status_arg_flag(args, "include_branch_diagnostics", true) {
+        output["branch_diagnostics"] =
+            serde_json::to_value(&branch_diagnostics).unwrap_or(json!({}));
+    }
     if branch_diagnostics.branch_drifted {
         output["branch_mismatch"] = json!({
             "git_branch": branch_diagnostics.current_branch,
@@ -126,52 +128,93 @@ pub(super) async fn handle_status(
     if !branch_diagnostics.warnings.is_empty() {
         output["branch_warnings"] = json!(branch_diagnostics.warnings);
     }
+}
+
+/// Handles `tracedecay_status` tool calls.
+pub(super) async fn handle_status(
+    cg: &TraceDecay,
+    args: Value,
+    server_stats: Option<Value>,
+    scope_prefix: Option<&str>,
+    project_session_db: Option<&GlobalDb>,
+) -> Result<ToolResult> {
+    let include_branch_diagnostics = status_arg_flag(&args, "include_branch_diagnostics", true);
+    let include_storage_health = status_arg_flag(&args, "include_storage_health", true);
+    let include_session_ingest = status_arg_flag(&args, "include_session_ingest", true);
+    let include_staleness = status_arg_flag(&args, "include_staleness", true);
+
+    let stats = cg.get_stats().await?;
+    let mut output: Value = serde_json::to_value(&stats).unwrap_or(json!({}));
+    if include_storage_health {
+        let mut storage_health =
+            serde_json::to_value(crate::runtime_telemetry::collect_database(cg).await?)
+                .unwrap_or_else(|_| json!({}));
+        if server_stats.is_some() {
+            storage_health["daemon_owner_pid"] = json!(std::process::id());
+            storage_health["daemon_generation"] = json!(crate::runtime_identity::process_run_id());
+        }
+        output["storage_health"] = storage_health;
+    }
+    if let Some(ss) = server_stats {
+        output["server"] = ss;
+    }
+
+    if include_branch_diagnostics {
+        attach_full_branch_status(cg, &args, &mut output);
+    } else {
+        attach_compact_branch_summary(cg, &mut output);
+    }
 
     // Session-transcript ingest health (recall trust): last ingest time and
     // any un-ingested transcript backlog from the project sessions.db.
-    let session_db_path = cg.store_layout().sessions_db_path.clone();
-    if session_db_path.exists() {
-        match project_session_db {
-            None => {
-                // The store exists but the daemon did not retain its authority;
-                // fail closed instead of opening a second connection here.
-                output["session_ingest"] = json!({
-                    "status": "unavailable",
-                    "message": "daemon project session authority is unavailable",
-                });
-            }
-            Some(db) => {
-                let ingest = db.session_ingest_health().await;
-                output["session_ingest"] = serde_json::to_value(&ingest).unwrap_or(json!({}));
-                if ingest.max_transcript_pending_bytes
-                    > crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES
-                {
-                    output["session_ingest_warning"] =
-                        json!(session_ingest_warning(&ingest, cg.project_root()));
+    if include_session_ingest {
+        let session_db_path = cg.store_layout().sessions_db_path.clone();
+        if session_db_path.exists() {
+            match project_session_db {
+                None => {
+                    // The store exists but the daemon did not retain its authority;
+                    // fail closed instead of opening a second connection here.
+                    output["session_ingest"] = json!({
+                        "status": "unavailable",
+                        "message": "daemon project session authority is unavailable",
+                    });
+                }
+                Some(db) => {
+                    let ingest = db.session_ingest_health().await;
+                    output["session_ingest"] = serde_json::to_value(&ingest).unwrap_or(json!({}));
+                    if ingest.max_transcript_pending_bytes
+                        > crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES
+                    {
+                        output["session_ingest_warning"] =
+                            json!(session_ingest_warning(&ingest, cg.project_root()));
+                    }
                 }
             }
         }
     }
 
-    // Git commit staleness: count commits since last index
-    let stale_commit_count = cg.git_commits_since(stats.last_updated as i64);
-    if stale_commit_count > 0 {
-        output["stale_commits"] = json!(stale_commit_count);
-        output["stale_warning"] = json!(format!(
-            "{} commit(s) since last sync. Run `tracedecay sync` to update the index.",
-            stale_commit_count
-        ));
-    }
+    if include_staleness {
+        // Git commit staleness: count commits since last index
+        let stale_commit_count = cg.git_commits_since(stats.last_updated as i64);
+        if stale_commit_count > 0 {
+            output["stale_commits"] = json!(stale_commit_count);
+            output["stale_warning"] = json!(format!(
+                "{} commit(s) since last sync. Run `tracedecay sync` to update the index.",
+                stale_commit_count
+            ));
+        }
 
-    // File-level staleness summary (sample up to 100 files for efficiency).
-    // A store failure here must surface as a tool error, not as "no stale
-    // files" — silently dropping the staleness section makes a broken store
-    // look healthy.
-    let all_files = cg.get_all_files().await?;
-    let sample_paths: Vec<String> = all_files.iter().take(100).map(|f| f.path.clone()).collect();
-    let stale_files = cg.check_file_staleness(&sample_paths).await;
-    if !stale_files.is_empty() {
-        output["stale_files"] = json!(stale_files.len());
+        // File-level staleness summary (sample up to 100 files for efficiency).
+        // A store failure here must surface as a tool error, not as "no stale
+        // files" — silently dropping the staleness section makes a broken store
+        // look healthy.
+        let all_files = cg.get_all_files().await?;
+        let sample_paths: Vec<String> =
+            all_files.iter().take(100).map(|f| f.path.clone()).collect();
+        let stale_files = cg.check_file_staleness(&sample_paths).await;
+        if !stale_files.is_empty() {
+            output["stale_files"] = json!(stale_files.len());
+        }
     }
 
     if let Some(prefix) = scope_prefix {
@@ -630,13 +673,9 @@ fn project_context_alias_path<'a>(cg: &'a TraceDecay, args: &'a Value) -> (PathB
         return (cg.project_root().to_path_buf(), true);
     };
     let path = Path::new(path);
-    let allow_git_identity =
-        GlobalDb::is_explicit_project_path_selector(path.to_string_lossy().as_ref());
-    if path.is_absolute() {
-        (path.to_path_buf(), allow_git_identity)
-    } else {
-        (cg.project_root().join(path), allow_git_identity)
-    }
+    let allow_git_identity = path.is_absolute()
+        && GlobalDb::is_explicit_project_path_selector(path.to_string_lossy().as_ref());
+    (path.to_path_buf(), allow_git_identity)
 }
 
 /// Handles `tracedecay_project_context` tool calls.

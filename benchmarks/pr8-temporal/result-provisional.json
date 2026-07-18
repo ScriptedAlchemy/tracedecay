@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "workload_id": "pr8-session-temporal-v1",
+  "capture_status": "blocked",
+  "acceptance_eligible": false,
+  "blocked_reason": "authentic_provider_capture_and_public_production_path_unavailable",
+  "workload_manifest": "benchmarks/pr8-temporal/workload-v1.json",
+  "workload_manifest_sha256": "d01d32799908ced3910875a53f7f4f8292ce4225ef51f2749c423fdc538d458c",
+  "source_attestation": null,
+  "runtime": null,
+  "measurement": null,
+  "claims": {
+    "performance_acceptance": {
+      "status": "not_eligible",
+      "reason": "no authentic sanitized provider capture or complete production application path is available to the benchmark target"
+    },
+    "database_query_latency": {
+      "status": "not_measured",
+      "reason": "production SessionRetrievalService path is unavailable to the benchmark target"
+    }
+  }
+}

@@ -151,7 +151,7 @@ LCM_NATIVE_SCHEMAS = [
                     "type": "string",
                     "enum": ["recency", "relevance", "hybrid"],
                     "description": "How to order matches.",
-                    "default": "recency",
+                    "default": "relevance",
                 },
                 "session_scope": {
                     "type": "string",
@@ -201,8 +201,12 @@ LCM_NATIVE_SCHEMAS = [
                 },
                 "after_store_id": {
                     "type": "integer",
-                    "description": "Exclusive cursor for pagination.",
+                    "description": "Deprecated unpinned first-page compatibility input. Continue with next_cursor.",
                     "default": 0,
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Authenticated opaque continuation cursor returned as next_cursor.",
                 },
                 "roles": {
                     "type": "array",
@@ -226,14 +230,26 @@ LCM_NATIVE_SCHEMAS = [
         "description": "Inspect a current-session summary node, externalized payload, or top-level DAG overview.",
         "parameters": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
-                "node_id": {"type": "integer", "description": "Summary node ID to inspect."},
+                "node_id": {"type": "string", "description": "Opaque summary node ID to inspect."},
                 "externalized_ref": {
                     "type": "string",
                     "description": "Externalized payload ref filename to inspect.",
                 },
             },
-            "required": [],
+            "oneOf": [
+                {
+                    "not": {
+                        "anyOf": [
+                            {"required": ["node_id"]},
+                            {"required": ["externalized_ref"]},
+                        ],
+                    },
+                },
+                {"required": ["node_id"], "not": {"required": ["externalized_ref"]}},
+                {"required": ["externalized_ref"], "not": {"required": ["node_id"]}},
+            ],
         },
     },
     {
@@ -241,8 +257,9 @@ LCM_NATIVE_SCHEMAS = [
         "description": "Recover detail behind a summary node, externalized payload, or raw message.",
         "parameters": {
             "type": "object",
+            "additionalProperties": False,
             "properties": {
-                "node_id": {"type": "integer", "description": "Summary node ID to expand."},
+                "node_id": {"type": "string", "description": "Opaque summary node ID to expand."},
                 "externalized_ref": {
                     "type": "string",
                     "description": "Externalized payload ref filename to expand.",
@@ -260,6 +277,9 @@ LCM_NATIVE_SCHEMAS = [
                 },
                 "source_limit": {
                     "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 50,
                     "description": "Maximum immediate sources to return from source_offset. If a returned source marks content_truncated=true, continue from its own store_id + content_offset.",
                 },
                 "content_offset": {
@@ -267,8 +287,40 @@ LCM_NATIVE_SCHEMAS = [
                     "description": "Character offset used to continue oversized content.",
                     "default": 0,
                 },
+                "cursor": {
+                    "type": "string",
+                    "description": "Authenticated opaque summary-source continuation cursor.",
+                },
             },
-            "required": [],
+            "oneOf": [
+                {
+                    "required": ["node_id"],
+                    "not": {
+                        "anyOf": [
+                            {"required": ["store_id"]},
+                            {"required": ["externalized_ref"]},
+                        ],
+                    },
+                },
+                {
+                    "required": ["store_id"],
+                    "not": {
+                        "anyOf": [
+                            {"required": ["node_id"]},
+                            {"required": ["externalized_ref"]},
+                        ],
+                    },
+                },
+                {
+                    "required": ["externalized_ref"],
+                    "not": {
+                        "anyOf": [
+                            {"required": ["node_id"]},
+                            {"required": ["store_id"]},
+                        ],
+                    },
+                },
+            ],
         },
     },
     {
@@ -281,7 +333,7 @@ LCM_NATIVE_SCHEMAS = [
                 "query": {"type": "string", "description": "Optional search query used to find candidate summaries."},
                 "node_ids": {
                     "type": "array",
-                    "items": {"type": "integer"},
+                    "items": {"type": "string"},
                     "description": "Optional explicit summary node IDs.",
                 },
                 "max_results": {"type": "integer", "description": "Max candidate summaries.", "default": 5},
@@ -2533,12 +2585,18 @@ def _translate_lcm_args(native_name: str, args: dict) -> dict:
             translated["scope"] = translated.pop("session_scope")
         else:
             translated.setdefault("scope", "current")
+        translated.setdefault("sort", "relevance")
+        translated.setdefault("include_summaries", False)
+        translated.setdefault("temporal_mode", "current")
         if "time_from" in translated:
             translated["start_time"] = translated.pop("time_from")
         if "time_to" in translated:
             translated["end_time"] = translated.pop("time_to")
         return translated
     if native_name == "lcm_load_session":
+        translated.setdefault("limit", 100)
+        translated.setdefault("content_limit", 4000)
+        translated.setdefault("temporal_mode", "forensic")
         if "max_content_chars" in translated:
             translated["content_limit"] = translated.pop("max_content_chars")
         if "time_from" in translated:
@@ -2564,6 +2622,10 @@ def _translate_lcm_args(native_name: str, args: dict) -> dict:
                 translated["target"] = target
         for public_key in ("node_id", "store_id", "externalized_ref"):
             translated.pop(public_key, None)
+        if translated["target"]["kind"] != "summary_node":
+            translated.pop("source_offset", None)
+            translated.pop("source_limit", None)
+            translated.pop("cursor", None)
         content_limit = _tokens_from_native_max(translated.pop("max_tokens", None))
         if content_limit is not None and "content_limit" not in translated:
             translated["content_limit"] = content_limit

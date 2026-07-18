@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use libsql::{Connection, params};
@@ -5,14 +6,15 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     AnchorProvenanceRelationV2, CanonicalObservationEnvelopeV1, CopyProofV1, LogicalCopyRecordV1,
-    MessageOccurrenceRecordV1, RetrievalAnchorRecord, SessionAuthorityClassV1,
-    TemporalAssertionKindV1, TemporalAssertionRecordV1, TemporalValidityV1,
-    derive_exact_observation_anchor_id,
+    MessageId, MessageOccurrenceIdV1, MessageOccurrenceRecordV1, RetrievalAnchorRecord,
+    SessionAuthorityClassV1, SessionId, TemporalAssertionKindV1, TemporalAssertionRecordV1,
+    TemporalCoverageCountsV1, TemporalValidityV1, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_store::{
-    ObservationProjection, ProjectionStoreError, ProjectionStoreResult, SessionStoreError,
-    SessionStoreResult, SessionTemporalDigestV1, SessionTemporalProjectionBatchReceiptV1,
-    SessionTemporalProjectionBatchV1,
+    MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS, ObservationProjection, ProjectionStoreError,
+    ProjectionStoreResult, SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1,
+    SessionRefreshProgressV1, SessionStoreError, SessionStoreResult, SessionTemporalDigestV1,
+    SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
 };
 
 use super::super::GlobalDb;
@@ -21,8 +23,184 @@ use super::query::{
     PERSIST_OPERATION, encode_watermarks, frontier_i64, generation_i64, now_micros,
     read_generation, read_observation, storage, storage_message,
 };
+use super::refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
+
+const DISCOVER_REFRESH: &str = "discover session temporal refresh";
+const MATERIALIZE_REFRESH: &str = "materialize session temporal refresh";
+
+#[derive(Default)]
+pub(super) struct ParentMessageResolver {
+    occurrences: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl ParentMessageResolver {
+    pub(super) fn register(&mut self, message_id: &str, occurrence_id: &str) {
+        self.occurrences
+            .entry(message_id.to_owned())
+            .or_default()
+            .insert(occurrence_id.to_owned());
+    }
+
+    pub(super) fn reject_ambiguity(&self, operation: &'static str) -> SessionStoreResult<()> {
+        if let Some((message_id, occurrences)) = self
+            .occurrences
+            .iter()
+            .find(|(_, occurrences)| occurrences.len() > 1)
+        {
+            return Err(storage_message(
+                operation,
+                format!(
+                    "session-scoped message id {message_id} resolves to {} occurrences",
+                    occurrences.len()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn resolve(&self, message_id: &str) -> Option<&str> {
+        self.occurrences
+            .get(message_id)
+            .and_then(|occurrences| occurrences.first())
+            .map(String::as_str)
+    }
+}
+
+pub(super) async fn canonical_parent_message_resolver(
+    conn: &Connection,
+    session_id: &str,
+    source_frontier: u64,
+    operation: &'static str,
+) -> SessionStoreResult<ParentMessageResolver> {
+    let mut resolver = ParentMessageResolver::default();
+    let mut rows = conn
+        .query(
+            "SELECT observation_json
+             FROM observations
+             WHERE sequence <= ?1
+             ORDER BY sequence, observation_id",
+            params![frontier_i64(source_frontier, operation)?],
+        )
+        .await
+        .map_err(|error| storage(operation, error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(operation, error))?
+    {
+        let encoded: String = row.get(0).map_err(|error| storage(operation, error))?;
+        let observation: tracedecay_domain::DurableObservationV1 =
+            serde_json::from_str(&encoded).map_err(|error| storage(operation, error))?;
+        let projection =
+            derive_projection(&observation).map_err(|error| storage(operation, error))?;
+        for output in projection
+            .messages()
+            .filter(|output| output.session().session_id == session_id)
+        {
+            let occurrence_id = MessageOccurrenceIdV1::derive(
+                observation.observation_id(),
+                tracedecay_domain::ProjectionOutputOrdinalV1::new(output.output_ordinal()),
+            );
+            resolver.register(&output.message().message_id, occurrence_id.as_str());
+        }
+    }
+    resolver.reject_ambiguity(operation)?;
+    Ok(resolver)
+}
 
 impl GlobalDb {
+    pub(crate) async fn pending_session_temporal_refresh_requests_result(
+        &self,
+        limit: usize,
+    ) -> SessionStoreResult<Vec<SessionRefreshBeginOrJoinRequestV1>> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+        let limit = i64::try_from(limit).map_err(|error| storage(DISCOVER_REFRESH, error))?;
+        let mut rows = snapshot
+            .query(
+                "WITH active AS (
+                    SELECT session_id, frozen_watermarks_json
+                    FROM session_temporal_generations
+                    WHERE state = 'active'
+                 ),
+                 running AS (
+                    SELECT session_id
+                    FROM session_refresh_operations
+                    WHERE state = 'running'
+                 )
+                 SELECT effect.session_id,
+                        MAX(effect.observation_sequence),
+                        COALESCE(
+                            CAST(json_extract(
+                                active.frozen_watermarks_json,
+                                '$.projection_frontier'
+                            ) AS INTEGER),
+                            0
+                        )
+                 FROM session_temporal_observation_effects AS effect
+                 LEFT JOIN active ON active.session_id = effect.session_id
+                 LEFT JOIN running ON running.session_id = effect.session_id
+                 WHERE running.session_id IS NULL
+                 GROUP BY effect.session_id
+                 HAVING MAX(CASE
+                     WHEN effect.output_count > 0 THEN effect.observation_sequence
+                     ELSE NULL
+                 END) > COALESCE(
+                    CAST(json_extract(
+                        active.frozen_watermarks_json,
+                        '$.projection_frontier'
+                    ) AS INTEGER),
+                    0
+                )
+                 ORDER BY effect.session_id
+                 LIMIT ?1",
+                params![limit],
+            )
+            .await
+            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+        let mut requests = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage(DISCOVER_REFRESH, error))?
+        {
+            let session_id = SessionId::new(
+                row.get::<String>(0)
+                    .map_err(|error| storage(DISCOVER_REFRESH, error))?,
+            )
+            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+            let observed_through = u64::try_from(
+                row.get::<i64>(1)
+                    .map_err(|error| storage(DISCOVER_REFRESH, error))?,
+            )
+            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+            let committed_through = u64::try_from(
+                row.get::<i64>(2)
+                    .map_err(|error| storage(DISCOVER_REFRESH, error))?,
+            )
+            .map_err(|error| storage(DISCOVER_REFRESH, error))?;
+            requests.push(SessionRefreshBeginOrJoinRequestV1::new(
+                session_id,
+                SessionRefreshFrontierV1::new(observed_through, committed_through)?,
+            ));
+        }
+        Ok(requests)
+    }
+
+    pub(crate) async fn materialize_session_temporal_refresh_batch_result(
+        &self,
+        recovery: &SessionRefreshRecoveryV1,
+    ) -> SessionStoreResult<Option<(SessionRefreshProgressV1, SessionTemporalProjectionBatchV1)>>
+    {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+        materialize_session_temporal_refresh_batch_in_transaction(&snapshot, recovery).await
+    }
+
     pub(crate) async fn persist_session_temporal_projection_batch_result(
         &self,
         batch: SessionTemporalProjectionBatchV1,
@@ -39,6 +217,405 @@ impl GlobalDb {
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
         Ok(receipt)
     }
+}
+
+async fn materialize_session_temporal_refresh_batch_in_transaction(
+    conn: &Connection,
+    recovery: &SessionRefreshRecoveryV1,
+) -> SessionStoreResult<Option<(SessionRefreshProgressV1, SessionTemporalProjectionBatchV1)>> {
+    let (
+        batch_ordinal,
+        committed_through,
+        previous_records,
+        previous_coverage,
+        previous_updated_at,
+    ) = match recovery.restart_state() {
+        SessionRefreshRestartStateV1::BeginProjection => {
+            let baseline_records = session_temporal_projection_record_count(
+                conn,
+                recovery.session_id(),
+                recovery.frozen_watermarks().active_generation(),
+            )
+            .await?;
+            (
+                0,
+                recovery.source_frontier(),
+                baseline_records,
+                TemporalCoverageCountsV1 {
+                    visible: baseline_records,
+                    hidden: 0,
+                    unknown: 0,
+                    redacted: 0,
+                },
+                None,
+            )
+        }
+        SessionRefreshRestartStateV1::ResumeProjection { next_batch_ordinal } => {
+            let progress =
+                recovery
+                    .progress()
+                    .ok_or(SessionStoreError::InvalidStateTransition {
+                        context: "refresh recovery progress",
+                    })?;
+            (
+                next_batch_ordinal,
+                progress.frontier().committed_through(),
+                progress.committed_records(),
+                *progress.coverage(),
+                Some(progress.updated_at()),
+            )
+        }
+        SessionRefreshRestartStateV1::ReadyToComplete => return Ok(None),
+    };
+    let target_through = recovery.target_frontier().observed_through();
+    let query_limit = i64::try_from(MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS.saturating_add(1))
+        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+    let mut rows = conn
+        .query(
+            "SELECT observation_id, observation_sequence, output_count
+             FROM session_temporal_observation_effects
+             WHERE session_id = ?1
+               AND observation_sequence > ?2
+               AND observation_sequence <= ?3
+               AND output_count > 0
+             ORDER BY observation_sequence, observation_id
+             LIMIT ?4",
+            params![
+                recovery.session_id().as_str(),
+                frontier_i64(committed_through, MATERIALIZE_REFRESH)?,
+                frontier_i64(target_through, MATERIALIZE_REFRESH)?,
+                query_limit,
+            ],
+        )
+        .await
+        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+    let mut effects = Vec::new();
+    let mut item_count = 0usize;
+    let mut has_more = false;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?
+    {
+        let observation_id = tracedecay_domain::CanonicalObservationIdV1::new(
+            row.get::<String>(0)
+                .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
+        )
+        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+        let sequence = u64::try_from(
+            row.get::<i64>(1)
+                .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
+        )
+        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+        let output_count = usize::try_from(
+            row.get::<i64>(2)
+                .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
+        )
+        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+        if item_count.saturating_add(output_count) > MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS {
+            if effects.is_empty() {
+                return Err(SessionStoreError::BatchLimitExceeded {
+                    field: "session temporal observation effect outputs",
+                    count: output_count,
+                    max: MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS,
+                });
+            }
+            has_more = true;
+            break;
+        }
+        item_count += output_count;
+        effects.push((observation_id, sequence, output_count));
+    }
+    drop(rows);
+    if effects.is_empty() {
+        return Ok(None);
+    }
+
+    let mut low = 1usize;
+    let mut high = effects.len();
+    let mut selected = None;
+    let mut single_effect_count = None;
+    while low <= high {
+        let prefix_len = low + (high - low) / 2;
+        let prefix_item_count = effects[..prefix_len]
+            .iter()
+            .fold(0usize, |count, (_, _, outputs)| {
+                count.saturating_add(*outputs)
+            });
+        let occurrences =
+            materialize_effect_occurrences(conn, &effects[..prefix_len], prefix_item_count).await?;
+        let (copies, assertions) = derive_retained_projection_relations(
+            conn,
+            recovery.session_id(),
+            target_through,
+            &occurrences,
+        )
+        .await?;
+        let derived_count = occurrences
+            .len()
+            .saturating_add(copies.len())
+            .saturating_add(assertions.len());
+        if derived_count <= MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS {
+            selected = Some((prefix_len, occurrences, copies, assertions));
+            low = prefix_len.saturating_add(1);
+        } else {
+            if prefix_len == 1 {
+                single_effect_count = Some(derived_count);
+            }
+            high = prefix_len.saturating_sub(1);
+        }
+    }
+    let Some((prefix_len, occurrences, copies, assertions)) = selected else {
+        return Err(SessionStoreError::BatchLimitExceeded {
+            field: "session temporal derived observation effect records",
+            count: single_effect_count
+                .unwrap_or(MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS.saturating_add(1)),
+            max: MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS,
+        });
+    };
+    if prefix_len < effects.len() {
+        effects.truncate(prefix_len);
+        has_more = true;
+    }
+    let source_through = if has_more {
+        effects.last().map(|(_, sequence, _)| *sequence).ok_or(
+            SessionStoreError::InvalidStateTransition {
+                context: "refresh projection source checkpoint",
+            },
+        )?
+    } else {
+        target_through
+    };
+    let batch = SessionTemporalProjectionBatchV1::new(
+        recovery.session_id().clone(),
+        recovery.candidate_generation(),
+        recovery.frozen_watermarks().clone(),
+        occurrences,
+        copies,
+        assertions,
+    )?
+    .with_checkpoint(batch_ordinal, source_through, source_through)?;
+    let batch_records =
+        u64::try_from(batch.item_count()).map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+    let committed_records = previous_records
+        .checked_add(batch_records)
+        .ok_or_else(|| storage_message(MATERIALIZE_REFRESH, "refresh record count overflow"))?;
+    let coverage = TemporalCoverageCountsV1 {
+        visible: previous_coverage
+            .visible
+            .checked_add(batch_records)
+            .ok_or_else(|| storage_message(MATERIALIZE_REFRESH, "refresh coverage overflow"))?,
+        hidden: previous_coverage.hidden,
+        unknown: previous_coverage.unknown,
+        redacted: previous_coverage.redacted,
+    };
+    let mut updated_at = now_micros(MATERIALIZE_REFRESH)?;
+    if let Some(previous_updated_at) = previous_updated_at
+        && updated_at <= previous_updated_at
+    {
+        updated_at = UtcMicros(previous_updated_at.0.saturating_add(1));
+    }
+    let progress = SessionRefreshProgressV1::new(
+        recovery.operation_id().clone(),
+        recovery.session_id().clone(),
+        SessionRefreshFrontierV1::new(target_through, source_through)?,
+        coverage,
+        batch_ordinal.saturating_add(1),
+        committed_records,
+        updated_at,
+    );
+    Ok(Some((progress, batch)))
+}
+
+async fn materialize_effect_occurrences(
+    conn: &Connection,
+    effects: &[(tracedecay_domain::CanonicalObservationIdV1, u64, usize)],
+    item_count: usize,
+) -> SessionStoreResult<Vec<MessageOccurrenceRecordV1>> {
+    let mut occurrences = Vec::with_capacity(item_count);
+    for (observation_id, _, output_count) in effects {
+        let (_, observation) = read_observation(conn, observation_id).await?;
+        for output_ordinal in 0..*output_count {
+            occurrences.push(
+                canonical_occurrence(
+                    conn,
+                    &observation,
+                    u32::try_from(output_ordinal)
+                        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
+                )
+                .await?,
+            );
+        }
+    }
+    Ok(occurrences)
+}
+
+fn derived_temporal_assertion_id(
+    occurrence_id: &MessageOccurrenceIdV1,
+    kind: TemporalAssertionKindV1,
+    object_anchor_id: &tracedecay_domain::RetrievalAnchorId,
+) -> String {
+    digest_bytes(
+        format!(
+            "session-temporal-assertion-v1\0{}\0{}\0{}",
+            occurrence_id.as_str(),
+            kind.as_str(),
+            object_anchor_id.as_str()
+        )
+        .as_bytes(),
+    )
+}
+
+/// Derive retained parent-message copies and typed assertion edges from canonical
+/// observation envelopes and retrieval-anchor lineage already stored for the batch.
+/// `CopiedFrom` is deliberately not auto-emitted: explicit typed copy records remain
+/// the authority until the domain/store copy-bitemporality contract exposes a
+/// canonical derivation identity for copied evidence.
+async fn derive_retained_projection_relations(
+    conn: &Connection,
+    session_id: &SessionId,
+    source_frontier: u64,
+    occurrences: &[MessageOccurrenceRecordV1],
+) -> SessionStoreResult<(Vec<LogicalCopyRecordV1>, Vec<TemporalAssertionRecordV1>)> {
+    let parents = canonical_parent_message_resolver(
+        conn,
+        session_id.as_str(),
+        source_frontier,
+        MATERIALIZE_REFRESH,
+    )
+    .await?;
+
+    let mut copies = BTreeMap::<(String, String), LogicalCopyRecordV1>::new();
+    let mut assertions = BTreeMap::<String, TemporalAssertionRecordV1>::new();
+    let mut seen_copy_keys = BTreeSet::new();
+
+    for occurrence in occurrences {
+        let (_, observation) = read_observation(conn, &occurrence.source_observation_id).await?;
+        let envelope: CanonicalObservationEnvelopeV1 =
+            serde_json::from_value(observation.payload().clone())
+                .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+        if let Some(parent_message_id) = envelope.relations().parent_message_id()
+            && let Some(parent_occurrence_id) = parents.resolve(parent_message_id.as_str())
+        {
+            let key = (
+                occurrence.occurrence_id.as_str().to_owned(),
+                parent_occurrence_id.to_owned(),
+            );
+            if seen_copy_keys.insert(key.clone()) {
+                let parent_message = MessageId::new(parent_message_id.as_str().to_owned())
+                    .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+                copies.insert(
+                    key,
+                    LogicalCopyRecordV1 {
+                        occurrence_id: occurrence.occurrence_id.clone(),
+                        copied_from_occurrence_id: MessageOccurrenceIdV1::new(
+                            parent_occurrence_id.to_owned(),
+                        )
+                        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
+                        proof: CopyProofV1::ParentMessageLinkage {
+                            source_occurrence_id: MessageOccurrenceIdV1::new(
+                                parent_occurrence_id.to_owned(),
+                            )
+                            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
+                            parent_message_id: parent_message,
+                        },
+                    },
+                );
+            }
+        }
+
+        let mut anchor_rows = conn
+            .query(
+                "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = ?1",
+                params![occurrence.retrieval_anchor_id.as_str()],
+            )
+            .await
+            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+        let anchor_json: Option<String> = match anchor_rows
+            .next()
+            .await
+            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?
+        {
+            Some(row) => Some(
+                row.get(0)
+                    .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
+            ),
+            None => None,
+        };
+        drop(anchor_rows);
+        let Some(anchor_json) = anchor_json else {
+            continue;
+        };
+        let anchor: RetrievalAnchorRecord = serde_json::from_str(&anchor_json)
+            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+        for lineage in anchor.source_anchors() {
+            // CopiedFrom edges are retained-evidence validated on persist, but
+            // activation frontier parity currently expects only parent-message
+            // copies; do not auto-emit CopiedFrom here.
+            let Some(kind) = assertion_kind_for_relation(lineage.relation()) else {
+                continue;
+            };
+            let assertion_id =
+                derived_temporal_assertion_id(&occurrence.occurrence_id, kind, lineage.anchor_id());
+            let assertion: TemporalAssertionRecordV1 = serde_json::from_value(json!({
+                "assertion_id": assertion_id,
+                "kind": kind.as_str(),
+                "subject_anchor_id": occurrence.retrieval_anchor_id,
+                "object_anchor_id": lineage.anchor_id(),
+                "knowledge_at": occurrence.knowledge_at,
+                "valid_time": occurrence.valid_time,
+                "evidence": {
+                    "authority": "explicit_anchor_assertion",
+                    "evidence_class": occurrence.evidence.evidence_class,
+                    "source_anchor_id": occurrence.retrieval_anchor_id,
+                    "sanitization_receipt": occurrence.evidence.sanitization_receipt,
+                }
+            }))
+            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+            assertions.insert(assertion.assertion_id.as_str().to_owned(), assertion);
+        }
+    }
+
+    Ok((
+        copies.into_values().collect(),
+        assertions.into_values().collect(),
+    ))
+}
+
+pub(super) async fn session_temporal_projection_record_count(
+    conn: &Connection,
+    session_id: &SessionId,
+    generation: tracedecay_domain::SessionProjectionGenerationV1,
+) -> SessionStoreResult<u64> {
+    let mut rows = conn
+        .query(
+            "SELECT
+                (SELECT COUNT(*) FROM session_occurrences
+                 WHERE session_id = ?1 AND generation = ?2)
+              + (SELECT COUNT(*) FROM session_logical_copy_edges
+                 WHERE session_id = ?1 AND generation = ?2)
+              + (SELECT COUNT(*) FROM session_assertions
+                 WHERE session_id = ?1 AND generation = ?2)",
+            params![
+                session_id.as_str(),
+                generation_i64(generation, MATERIALIZE_REFRESH)?,
+            ],
+        )
+        .await
+        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+    let count = rows
+        .next()
+        .await
+        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?
+        .ok_or_else(|| {
+            storage_message(
+                MATERIALIZE_REFRESH,
+                "projection record count returned no row",
+            )
+        })?
+        .get::<i64>(0)
+        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
+    u64::try_from(count).map_err(|error| storage(MATERIALIZE_REFRESH, error))
 }
 
 pub(super) async fn persist_session_temporal_projection_batch_in_transaction(
@@ -106,6 +683,102 @@ pub(super) async fn persist_session_temporal_projection_batch_in_transaction(
         batch.assertions().len(),
         committed_at,
     )
+}
+
+pub(super) async fn seed_active_projection_in_transaction(
+    conn: &Connection,
+    batch: &SessionTemporalProjectionBatchV1,
+) -> SessionStoreResult<()> {
+    if batch.batch_ordinal() != 0 || batch.watermarks().active_generation() == batch.generation() {
+        return Ok(());
+    }
+    let session_id = batch.session_id().as_str();
+    let candidate = generation_i64(batch.generation(), PERSIST_OPERATION)?;
+    let active = generation_i64(batch.watermarks().active_generation(), PERSIST_OPERATION)?;
+    const COPIES: &[&str] = &[
+        "INSERT INTO session_turns (
+            session_id, generation, turn_id, ordinal, grouping_provenance, created_at
+         )
+         SELECT session_id, ?2, turn_id, ordinal, grouping_provenance, created_at
+         FROM session_turns WHERE session_id = ?1 AND generation = ?3",
+        "INSERT INTO session_threads (
+            session_id, generation, thread_id, grouping_provenance, created_at
+         )
+         SELECT session_id, ?2, thread_id, grouping_provenance, created_at
+         FROM session_threads WHERE session_id = ?1 AND generation = ?3",
+        "INSERT INTO session_agents (
+            session_id, generation, agent_id, agent_json, created_at
+         )
+         SELECT session_id, ?2, agent_id, agent_json, created_at
+         FROM session_agents WHERE session_id = ?1 AND generation = ?3",
+        "INSERT INTO session_occurrences (
+            session_id, generation, occurrence_id, source_observation_id,
+            projection_output_ordinal, retrieval_anchor_id, thread_id,
+            thread_grouping_json, turn_id, turn_grouping_json, message_id,
+            agent_id, role, knowledge_at, valid_time_json, evidence_json,
+            snippet_text, index_text
+         )
+         SELECT session_id, ?2, occurrence_id, source_observation_id,
+                projection_output_ordinal, retrieval_anchor_id, thread_id,
+                thread_grouping_json, turn_id, turn_grouping_json, message_id,
+                agent_id, role, knowledge_at, valid_time_json, evidence_json,
+                snippet_text, index_text
+         FROM session_occurrences WHERE session_id = ?1 AND generation = ?3",
+        "INSERT INTO session_logical_copy_edges (
+            session_id, generation, occurrence_id, copied_from_occurrence_id,
+            proof_json, created_at
+         )
+         SELECT session_id, ?2, occurrence_id, copied_from_occurrence_id,
+                proof_json, created_at
+         FROM session_logical_copy_edges WHERE session_id = ?1 AND generation = ?3",
+        "INSERT INTO session_turn_members (
+            session_id, generation, turn_id, occurrence_id, ordinal
+         )
+         SELECT session_id, ?2, turn_id, occurrence_id, ordinal
+         FROM session_turn_members WHERE session_id = ?1 AND generation = ?3",
+        "INSERT INTO session_thread_hierarchy_edges (
+            session_id, generation, parent_thread_id, child_thread_id, ordinal
+         )
+         SELECT session_id, ?2, parent_thread_id, child_thread_id, ordinal
+         FROM session_thread_hierarchy_edges
+         WHERE session_id = ?1 AND generation = ?3",
+        "INSERT INTO session_agent_hierarchy_edges (
+            session_id, generation, parent_agent_id, child_agent_id, ordinal
+         )
+         SELECT session_id, ?2, parent_agent_id, child_agent_id, ordinal
+         FROM session_agent_hierarchy_edges
+         WHERE session_id = ?1 AND generation = ?3",
+        "INSERT INTO session_assertions (
+            session_id, generation, assertion_id, assertion_kind,
+            subject_anchor_id, object_anchor_id, knowledge_at,
+            valid_time_json, evidence_json
+         )
+         SELECT session_id, ?2, assertion_id, assertion_kind,
+                subject_anchor_id, object_anchor_id, knowledge_at,
+                valid_time_json, evidence_json
+         FROM session_assertions WHERE session_id = ?1 AND generation = ?3",
+        "INSERT INTO session_assertion_supersession (
+            session_id, generation, superseded_assertion_id,
+            superseding_assertion_id, created_at
+         )
+         SELECT session_id, ?2, superseded_assertion_id,
+                superseding_assertion_id, created_at
+         FROM session_assertion_supersession
+         WHERE session_id = ?1 AND generation = ?3",
+        "INSERT INTO session_current_entities (
+            session_id, generation, entity_kind, entity_id,
+            current_assertion_id, current_occurrence_id, coverage_json
+         )
+         SELECT session_id, ?2, entity_kind, entity_id,
+                current_assertion_id, current_occurrence_id, coverage_json
+         FROM session_current_entities WHERE session_id = ?1 AND generation = ?3",
+    ];
+    for sql in COPIES {
+        conn.execute(sql, params![session_id, candidate, active])
+            .await
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    }
+    Ok(())
 }
 
 #[derive(PartialEq, Eq)]
@@ -1980,4 +2653,381 @@ async fn rebuild_assertion_derivatives(
     .await
     .map_err(|error| storage(PERSIST_OPERATION, error))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tempfile::TempDir;
+    use tracedecay_domain::{
+        AnchorProvenanceRelationV2, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
+        CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
+        CanonicalObservationRelationsV1, DurableObservationV1, ObservationId,
+        ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+        ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+        ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId,
+        RetentionClass, RetrievalAnchorId, RetrievalAnchorRecordV2, SanitizationReceiptId,
+        SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    };
+    use tracedecay_store::{
+        AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
+        SessionRefreshCompletionRequestV1, SessionRefreshTerminalStateV1,
+    };
+
+    use super::*;
+    use crate::store::GlobalDbObservationStore;
+
+    fn fixture_session(value: &str) -> SessionId {
+        SessionId::new(value).unwrap()
+    }
+
+    fn fixture_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
+        SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new(receipt_id).unwrap(),
+                tracedecay_domain::ComponentVersion::new("sanitizer.projector-test.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(payload).unwrap()),
+        )
+        .unwrap()
+    }
+
+    fn fixture_observation(
+        session_id: &SessionId,
+        ordinal: u64,
+        lineage: Option<(AnchorProvenanceRelationV2, RetrievalAnchorId)>,
+        include_parent: bool,
+    ) -> (DurableObservationV1, AnchoredObservationWrite) {
+        let provider = ProviderId::new(format!("projector-test-{ordinal}")).unwrap();
+        let source =
+            ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone())
+                .unwrap();
+        let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).unwrap();
+        let record_id = ObservationId::new(format!("record.projector.{ordinal}")).unwrap();
+        let mut relations = CanonicalObservationRelationsV1::new(session_id.clone())
+            .with_thread_id(ObservationId::new("thread.projector").unwrap())
+            .with_turn_id(ObservationId::new("turn.projector").unwrap())
+            .with_message_id(ObservationId::new(format!("message.projector.{ordinal}")).unwrap())
+            .with_agent_id(ObservationId::new("agent.projector").unwrap());
+        if include_parent && ordinal > 0 {
+            relations = relations.with_parent_message_id(
+                ObservationId::new(format!("message.projector.{}", ordinal - 1)).unwrap(),
+            );
+        }
+        let envelope = CanonicalObservationEnvelopeV1::new(
+            provider,
+            "message",
+            record_id.clone(),
+            relations,
+            vec![CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!({"text": format!("projector {ordinal}")}),
+                model: Some("model.projector".to_owned()),
+                timestamp: Some(1_750_000_000 + i64::try_from(ordinal).unwrap()),
+            }],
+            CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+        )
+        .unwrap();
+        let payload = serde_json::to_value(envelope).unwrap();
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            source,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            record_id,
+        )
+        .unwrap();
+        let observation = DurableObservationV1::new(
+            identity,
+            fixture_receipt(&format!("receipt.projector.{ordinal}"), &payload),
+            RetentionClass::new("retention.projector-test").unwrap(),
+            payload,
+        )
+        .unwrap();
+        let next_cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            observation.identity().generation(),
+            observation.identity().ordering_domain(),
+            observation.identity().position().end(),
+        )
+        .unwrap();
+        let write = ObservationWrite::new(observation.clone(), None, next_cursor).unwrap();
+        let projection_generation =
+            ProjectionGenerationId::new("projection.projector-test.v1").unwrap();
+        let authorization = tracedecay_store::build_observation_resolution_authorization_v1(
+            write.observation(),
+            "projector-test",
+        )
+        .unwrap();
+        let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+            write.observation(),
+            projection_generation.clone(),
+            UtcMicros(1),
+            authorization,
+        )
+        .unwrap();
+        let mut anchor_json = serde_json::to_value(anchor).unwrap();
+        if let Some((relation, anchor_id)) = lineage {
+            anchor_json["source_anchors"] = json!([{
+                "relation": relation,
+                "anchor_id": anchor_id,
+                "owner": write.observation().scope(),
+            }]);
+        }
+        let anchor: RetrievalAnchorRecordV2 = serde_json::from_value(anchor_json).unwrap();
+        let anchored = AnchoredObservationWrite::new(write, anchor, projection_generation).unwrap();
+        (observation, anchored)
+    }
+
+    async fn persist_fixture(
+        db: &GlobalDb,
+        observation: DurableObservationV1,
+        anchored: AnchoredObservationWrite,
+    ) {
+        let store = GlobalDbObservationStore::new(db);
+        store.persist_observation(anchored).await.unwrap();
+        store
+            .project_observation(observation.observation_id())
+            .await
+            .unwrap();
+    }
+
+    async fn scalar(db: &GlobalDb, sql: &str) -> i64 {
+        let mut rows = db.read_connection().query(sql, ()).await.unwrap();
+        rows.next().await.unwrap().unwrap().get(0).unwrap()
+    }
+
+    #[tokio::test]
+    async fn relation_batch_persists_restarts_and_completes_without_duplicates() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("global.db");
+        let session_id = fixture_session("session.projector.relation-restart");
+        let operation_id;
+        {
+            let db = GlobalDb::open_at(&path).await.unwrap();
+            let (first, first_write) = fixture_observation(&session_id, 0, None, false);
+            let first_anchor =
+                derive_exact_observation_anchor_id(first.scope(), first.observation_id()).unwrap();
+            persist_fixture(&db, first, first_write).await;
+            let (second, second_write) = fixture_observation(
+                &session_id,
+                1,
+                Some((AnchorProvenanceRelationV2::Supersedes, first_anchor)),
+                true,
+            );
+            persist_fixture(&db, second, second_write).await;
+            let begin = db
+                .begin_or_join_session_refresh_result(SessionRefreshBeginOrJoinRequestV1::new(
+                    session_id.clone(),
+                    SessionRefreshFrontierV1::new(2, 0).unwrap(),
+                ))
+                .await
+                .unwrap();
+            operation_id = begin.operation_id().clone();
+            let recovery = db
+                .session_refresh_recovery_result(&session_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let (progress, batch) = db
+                .materialize_session_temporal_refresh_batch_result(&recovery)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(batch.occurrences().len(), 2);
+            assert_eq!(batch.copies().len(), 1);
+            assert_eq!(batch.assertions().len(), 1);
+            assert_eq!(batch.item_count(), 4);
+            assert_eq!(progress.committed_records(), 4);
+            assert_eq!(progress.coverage().visible, 4);
+            db.persist_session_refresh_projection_batch_result(progress, batch)
+                .await
+                .unwrap();
+        }
+
+        let db = GlobalDb::open_at(&path).await.unwrap();
+        let recovery = db
+            .session_refresh_recovery_result(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovery.restart_state(),
+            SessionRefreshRestartStateV1::ReadyToComplete
+        );
+        assert!(
+            db.materialize_session_temporal_refresh_batch_result(&recovery)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let progress = recovery.progress().unwrap();
+        let request = SessionRefreshCompletionRequestV1::new(
+            operation_id,
+            session_id,
+            progress.frontier(),
+            *progress.coverage(),
+        )
+        .unwrap();
+        let receipt = db
+            .complete_session_refresh_result(request.clone())
+            .await
+            .unwrap();
+        assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
+        assert_eq!(
+            db.complete_session_refresh_result(request).await.unwrap(),
+            receipt
+        );
+        assert_eq!(
+            scalar(
+                &db,
+                "SELECT COUNT(*) FROM session_temporal_projection_receipts"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            scalar(&db, "SELECT COUNT(*) FROM session_occurrences").await,
+            2
+        );
+        assert_eq!(
+            scalar(&db, "SELECT COUNT(*) FROM session_logical_copy_edges").await,
+            1
+        );
+        assert_eq!(
+            scalar(&db, "SELECT COUNT(*) FROM session_assertions").await,
+            1
+        );
+        assert_eq!(
+            scalar(&db, "SELECT COUNT(*) FROM session_refresh_receipts").await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn copied_from_lineage_is_not_auto_emitted_by_materializer() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("global.db");
+        let db = GlobalDb::open_at(&path).await.unwrap();
+        let session_id = fixture_session("session.projector.copied-from");
+        let (first, first_write) = fixture_observation(&session_id, 0, None, false);
+        let first_anchor =
+            derive_exact_observation_anchor_id(first.scope(), first.observation_id()).unwrap();
+        persist_fixture(&db, first, first_write).await;
+        let (second, second_write) = fixture_observation(
+            &session_id,
+            1,
+            Some((AnchorProvenanceRelationV2::CopiedFrom, first_anchor)),
+            false,
+        );
+        persist_fixture(&db, second, second_write).await;
+        db.begin_or_join_session_refresh_result(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(2, 0).unwrap(),
+        ))
+        .await
+        .unwrap();
+        let recovery = db
+            .session_refresh_recovery_result(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let (progress, batch) = db
+            .materialize_session_temporal_refresh_batch_result(&recovery)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch.occurrences().len(), 2);
+        assert!(batch.copies().is_empty());
+        assert!(batch.assertions().is_empty());
+        assert_eq!(progress.committed_records(), batch.item_count() as u64);
+    }
+
+    #[tokio::test]
+    async fn relation_derivation_backs_off_to_the_total_batch_limit() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("global.db");
+        let db = GlobalDb::open_at(&path).await.unwrap();
+        let session_id = fixture_session("session.projector.derived-limit");
+        for ordinal in 0..501 {
+            let (observation, write) = fixture_observation(&session_id, ordinal, None, ordinal > 0);
+            persist_fixture(&db, observation, write).await;
+        }
+        db.begin_or_join_session_refresh_result(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(501, 0).unwrap(),
+        ))
+        .await
+        .unwrap();
+        let recovery = db
+            .session_refresh_recovery_result(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let (first_progress, first_batch) = db
+            .materialize_session_temporal_refresh_batch_result(&recovery)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_batch.occurrences().len(), 500);
+        assert_eq!(first_batch.copies().len(), 499);
+        assert_eq!(first_batch.item_count(), 999);
+        assert_eq!(first_progress.frontier().committed_through(), 500);
+        assert_eq!(first_progress.committed_records(), 999);
+        db.persist_session_refresh_projection_batch_result(first_progress, first_batch)
+            .await
+            .unwrap();
+
+        let recovery = db
+            .session_refresh_recovery_result(&session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let (second_progress, second_batch) = db
+            .materialize_session_temporal_refresh_batch_result(&recovery)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second_batch.occurrences().len(), 1);
+        assert_eq!(second_batch.copies().len(), 1);
+        assert_eq!(second_batch.item_count(), 2);
+        assert_eq!(second_progress.frontier().committed_through(), 501);
+        assert_eq!(second_progress.committed_records(), 1001);
+        db.persist_session_refresh_projection_batch_result(second_progress, second_batch)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn assertion_identity_includes_the_object_anchor() {
+        let session_id = fixture_session("session.projector.assertion-identity");
+        let (first, _) = fixture_observation(&session_id, 0, None, false);
+        let (second, _) = fixture_observation(&session_id, 1, None, false);
+        let occurrence_id = MessageOccurrenceIdV1::derive(
+            first.observation_id(),
+            tracedecay_domain::ProjectionOutputOrdinalV1::new(0),
+        );
+        let first_anchor =
+            derive_exact_observation_anchor_id(first.scope(), first.observation_id()).unwrap();
+        let second_anchor =
+            derive_exact_observation_anchor_id(second.scope(), second.observation_id()).unwrap();
+        let first_id = derived_temporal_assertion_id(
+            &occurrence_id,
+            TemporalAssertionKindV1::Supports,
+            &first_anchor,
+        );
+        let second_id = derived_temporal_assertion_id(
+            &occurrence_id,
+            TemporalAssertionKindV1::Supports,
+            &second_anchor,
+        );
+        assert_ne!(first_id, second_id);
+        assert!(first_id.starts_with("sha256:"));
+        assert_eq!(first_id.len(), 71);
+    }
 }

@@ -1,7 +1,8 @@
 use super::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunAction,
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
-    Commands, DaemonAction, LspAction, MemoryAction, MigrateAction, SessionsAction,
+    Commands, DaemonAction, LspAction, MemoryAction, MigrateAction, PostUpdateMode, SessionsAction,
+    SessionsRefreshAction,
 };
 use clap::{Command, CommandFactory, Parser, error::ErrorKind};
 
@@ -286,6 +287,13 @@ fn update_and_post_update_parse_no_heal_flag() {
         .expect("post-update should parse without --no-heal");
     let post_update_strict = Cli::try_parse_from(["tracedecay", "post-update", "--strict"])
         .expect("post-update --strict should parse");
+    let post_update_forward_only = Cli::try_parse_from([
+        "tracedecay",
+        "post-update",
+        "--mode",
+        "dogfood-forward-only",
+    ])
+    .expect("typed dogfood forward-only mode should parse");
 
     assert!(matches!(
         update.command,
@@ -301,6 +309,7 @@ fn update_and_post_update_parse_no_heal_flag() {
             no_reinstall: false,
             lifecycle_lease_token: None,
             strict: false,
+            mode: PostUpdateMode::Normal,
         })
     ));
     assert!(matches!(
@@ -310,11 +319,19 @@ fn update_and_post_update_parse_no_heal_flag() {
             no_reinstall: false,
             lifecycle_lease_token: None,
             strict: false,
+            mode: PostUpdateMode::Normal,
         })
     ));
     assert!(matches!(
         post_update_strict.command,
         Some(Commands::PostUpdate { strict: true, .. })
+    ));
+    assert!(matches!(
+        post_update_forward_only.command,
+        Some(Commands::PostUpdate {
+            mode: PostUpdateMode::DogfoodForwardOnly,
+            ..
+        })
     ));
 }
 
@@ -371,6 +388,7 @@ fn upgrade_update_and_post_update_parse_no_reinstall_flag() {
             no_reinstall: true,
             lifecycle_lease_token: None,
             strict: false,
+            mode: PostUpdateMode::Normal,
         })
     ));
 
@@ -1663,4 +1681,304 @@ fn parses_sessions_ingest_and_search_commands() {
             && args.message_type == "direct_user"
             && args.parent_session_id.as_deref() == Some("parent-1")
     ));
+}
+
+#[test]
+fn sessions_help_keeps_ingest_as_legacy_source_admission_only() {
+    let command = Cli::command();
+    let sessions = command
+        .find_subcommand("sessions")
+        .expect("sessions command");
+    let long_about = sessions
+        .get_long_about()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let after_help = sessions
+        .get_after_help()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+
+    for needle in [
+        "explicit legacy source-admission command",
+        "canonical observation ingest",
+        "leaves temporal projection to the durable scheduler",
+        "owns no parallel temporal writer",
+        "never invoked by a read",
+    ] {
+        assert!(
+            long_about.contains(needle),
+            "sessions help must retain the ingest cutover contract; missing {needle:?}"
+        );
+    }
+    assert!(
+        after_help.contains("deprecated ingest `--provider` option"),
+        "sessions help must identify the retained ingest compatibility option"
+    );
+}
+
+#[test]
+fn sessions_refresh_parses_exact_lifecycle_selectors() {
+    let begin = Cli::try_parse_from([
+        "tracedecay",
+        "sessions",
+        "refresh",
+        "begin",
+        "--project-id",
+        "project.tracedecay",
+        "--session-id",
+        "session.refresh",
+        "--provider",
+        "cursor",
+        "--source",
+        "4",
+        "--target",
+        "9",
+        "--json",
+    ])
+    .expect("project-scoped refresh begin should parse");
+    assert!(matches!(
+        begin.command,
+        Some(Commands::Sessions {
+            action:
+                SessionsAction::Refresh {
+                    action: SessionsRefreshAction::Begin(args)
+                }
+        }) if args.selectors.project_id.as_deref() == Some("project.tracedecay")
+            && args.selectors.project_path.is_none()
+            && args.selectors.profile_id.is_none()
+            && args.selectors.session_id == "session.refresh"
+            && args.selectors.provider == "cursor"
+            && args.selectors.source == 4
+            && args.selectors.target == 9
+            && args.json
+    ));
+
+    let status = Cli::try_parse_from([
+        "tracedecay",
+        "sessions",
+        "refresh",
+        "status",
+        "--profile-id",
+        "profile.primary",
+        "--session-id",
+        "session.refresh",
+        "--provider",
+        "cursor",
+        "--source",
+        "4",
+        "--target",
+        "9",
+        "--handle",
+        "refresh.abc",
+    ])
+    .expect("profile-scoped refresh status should parse");
+    assert!(matches!(
+        status.command,
+        Some(Commands::Sessions {
+            action:
+                SessionsAction::Refresh {
+                    action: SessionsRefreshAction::Status(args)
+                }
+        }) if args.selectors.project_id.is_none()
+            && args.selectors.project_path.is_none()
+            && args.selectors.profile_id.as_deref() == Some("profile.primary")
+            && args.selectors.session_id == "session.refresh"
+            && args.selectors.provider == "cursor"
+            && args.selectors.source == 4
+            && args.selectors.target == 9
+            && args.handle == "refresh.abc"
+            && !args.json
+    ));
+
+    let cancel = Cli::try_parse_from([
+        "tracedecay",
+        "sessions",
+        "refresh",
+        "cancel",
+        "--project-path",
+        "/repo/tracedecay",
+        "--session-id",
+        "session.refresh",
+        "--provider",
+        "cursor",
+        "--source",
+        "4",
+        "--target",
+        "9",
+        "--operation-id",
+        "refresh.abc",
+        "--json",
+    ])
+    .expect("project-path refresh cancel should parse");
+    assert!(matches!(
+        cancel.command,
+        Some(Commands::Sessions {
+            action:
+                SessionsAction::Refresh {
+                    action: SessionsRefreshAction::Cancel(args)
+                }
+        }) if args.selectors.project_id.is_none()
+            && args.selectors.project_path.as_deref() == Some("/repo/tracedecay")
+            && args.selectors.profile_id.is_none()
+            && args.handle == "refresh.abc"
+            && args.json
+    ));
+}
+
+#[test]
+fn sessions_refresh_never_falls_back_to_the_current_directory() {
+    for args in [
+        vec![
+            "tracedecay",
+            "sessions",
+            "refresh",
+            "begin",
+            "--session-id",
+            "session.refresh",
+            "--provider",
+            "cursor",
+            "--source",
+            "4",
+            "--target",
+            "9",
+        ],
+        vec![
+            "tracedecay",
+            "sessions",
+            "refresh",
+            "status",
+            "--session-id",
+            "session.refresh",
+            "--provider",
+            "cursor",
+            "--source",
+            "4",
+            "--target",
+            "9",
+            "--operation-id",
+            "refresh.abc",
+        ],
+        vec![
+            "tracedecay",
+            "sessions",
+            "refresh",
+            "cancel",
+            "--session-id",
+            "session.refresh",
+            "--provider",
+            "cursor",
+            "--source",
+            "4",
+            "--target",
+            "9",
+            "--operation-id",
+            "refresh.abc",
+        ],
+    ] {
+        let error = match Cli::try_parse_from(args.clone()) {
+            Ok(_) => panic!("refresh must require a project or profile selector"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.kind(),
+            ErrorKind::MissingRequiredArgument,
+            "args: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn sessions_refresh_help_lists_modes_and_exact_selectors() {
+    let command = Cli::command();
+    let refresh = command
+        .find_subcommand("sessions")
+        .and_then(|sessions| sessions.find_subcommand("refresh"))
+        .expect("sessions refresh should be registered");
+    let modes = refresh
+        .get_subcommands()
+        .map(|subcommand| subcommand.get_name())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        modes,
+        ["start", "status", "join", "resume", "cancel", "begin"]
+    );
+
+    let begin = refresh
+        .find_subcommand("begin")
+        .expect("sessions refresh begin should be registered");
+    let flags = begin
+        .get_arguments()
+        .filter_map(|argument| argument.get_long())
+        .collect::<Vec<_>>();
+    for selector in [
+        "project-id",
+        "project-path",
+        "profile-id",
+        "session-id",
+        "provider",
+        "source",
+        "target",
+        "json",
+    ] {
+        assert!(
+            flags.contains(&selector),
+            "refresh begin help should expose --{selector}"
+        );
+    }
+
+    let target_help = begin
+        .get_arguments()
+        .find(|argument| argument.get_long() == Some("target"))
+        .and_then(|argument| argument.get_help())
+        .expect("refresh target help");
+    assert!(target_help.to_string().contains("mode=current"));
+    assert!(target_help.to_string().contains("grain=logical_message"));
+
+    for mode in ["status", "cancel"] {
+        let command = refresh
+            .find_subcommand(mode)
+            .unwrap_or_else(|| panic!("sessions refresh {mode} should be registered"));
+        let handle = command
+            .get_arguments()
+            .find(|argument| argument.get_long() == Some("handle"))
+            .expect("status/cancel should expose --handle");
+        assert!(
+            handle
+                .get_visible_aliases()
+                .is_some_and(|aliases| aliases.contains(&"operation-id")),
+            "--operation-id should remain a visible deprecated alias"
+        );
+        assert!(
+            handle
+                .get_help()
+                .is_some_and(|help| help.to_string().contains("daemon-local handle"))
+        );
+    }
+
+    let status = refresh.find_subcommand("status").unwrap();
+    assert!(
+        status
+            .get_about()
+            .is_some_and(|about| about.to_string().contains("read-only"))
+    );
+    let status_handle = status
+        .get_arguments()
+        .find(|argument| argument.get_long() == Some("handle"))
+        .and_then(|argument| argument.get_help())
+        .expect("status handle help");
+    for origin in ["start", "join", "resume", "begin"] {
+        assert!(
+            status_handle.to_string().contains(origin),
+            "status handle help must identify {origin} as a handle origin"
+        );
+    }
+    for mode in ["join", "resume"] {
+        assert!(
+            refresh
+                .find_subcommand(mode)
+                .and_then(|command| command.get_about())
+                .is_some_and(|about| about.to_string().contains("opaque handle")),
+            "{mode} help must explain that it returns an opaque handle"
+        );
+    }
 }

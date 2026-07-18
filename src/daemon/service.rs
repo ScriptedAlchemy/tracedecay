@@ -3,12 +3,13 @@ use std::fmt::Write;
 use std::io::{BufRead, BufReader, Write as IoWrite};
 #[cfg(not(unix))]
 use std::net::TcpStream as StdTcpStream;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -16,6 +17,7 @@ use super::SOCKET_ENV;
 
 const LAUNCHD_LABEL: &str = "com.tracedecay.daemon";
 const LAUNCHD_PLIST_NAME: &str = "com.tracedecay.daemon.plist";
+static SERVICE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonServiceSpec {
@@ -69,6 +71,48 @@ impl QuiescedDaemonLifecycle {
                 combine_operation_and_restore(operation, Err(operation_error), restore_result)
             }
         }
+    }
+
+    /// Publishes and reloads any installed service definition before stopping
+    /// the old process and acquiring an exclusive maintenance lease. Failures
+    /// never restore the captured pre-migration definition or running state.
+    pub fn acquire_forward_only(operation: &str, spec: &DaemonServiceSpec) -> Result<Self> {
+        let previous_state = match prepare_forward_only_service_before_lease(spec) {
+            Ok(state) => state,
+            Err(operation_error) => {
+                let recovery_result = enforce_forward_only_service_recovery(spec).map(drop);
+                return combine_operation_and_restore(
+                    operation,
+                    Err(operation_error),
+                    recovery_result,
+                );
+            }
+        };
+
+        let lifecycle_lease = match crate::lifecycle_lease::acquire_exclusive(operation) {
+            Ok(lease) => lease,
+            Err(operation_error) => {
+                let recovery_result = enforce_forward_only_service_recovery(spec).map(drop);
+                return combine_operation_and_restore(
+                    operation,
+                    Err(operation_error),
+                    recovery_result,
+                );
+            }
+        };
+        let guard = Self {
+            previous_state,
+            lifecycle_lease: Some(lifecycle_lease),
+            // Forward-only guards must never restore the pre-migration state,
+            // including from Drop during unwinding or signal-driven teardown.
+            restored: true,
+        };
+        if let Err(operation_error) = verify_installed_service_quiesced_under_lease() {
+            guard.finish_without_restore();
+            let recovery_result = enforce_forward_only_service_recovery(spec).map(drop);
+            return combine_operation_and_restore(operation, Err(operation_error), recovery_result);
+        }
+        Ok(guard)
     }
 
     pub fn lifecycle_lease(&self) -> Result<&crate::lifecycle_lease::LifecycleLease> {
@@ -645,32 +689,228 @@ fn restore_installed_service_after_failed_acquire(
     restore_installed_service_after_update(previous_state)
 }
 
-fn write_service_unit(spec: &DaemonServiceSpec) -> Result<PathBuf> {
+fn forward_only_service_spec(
+    spec: &DaemonServiceSpec,
+    service_path: &Path,
+) -> Result<DaemonServiceSpec> {
+    let service_is_symlink = std::fs::symlink_metadata(service_path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false);
+    let existing_unit = if service_is_symlink {
+        String::new()
+    } else {
+        read_service_unit(service_path)?
+    };
+    let mut recovered_spec = spec.clone();
+    if let Some(socket_path) = socket_path_from_unit_text(&existing_unit) {
+        recovered_spec.socket_path = socket_path;
+    }
+    if cfg!(target_os = "macos") {
+        recovered_spec.data_dir_override =
+            launchd_plist_env_value(&existing_unit, crate::config::USER_DATA_DIR_ENV)
+                .map(PathBuf::from);
+    }
+    Ok(recovered_spec)
+}
+
+fn commit_forward_only_definition_with(
+    write: impl FnOnce() -> Result<PathBuf>,
+    reload: impl FnOnce(&Path) -> Result<()>,
+    quiesce: impl FnOnce() -> Result<DaemonServiceState>,
+) -> Result<(PathBuf, DaemonServiceState)> {
+    let service_path = write()?;
+    reload(&service_path)?;
+    let previous_state = quiesce()?;
+    Ok((service_path, previous_state))
+}
+
+fn recover_forward_only_definition_with(
+    write: impl FnOnce() -> Result<PathBuf>,
+    reload: impl FnOnce(&Path) -> Result<()>,
+    deactivate: impl FnOnce() -> Result<()>,
+) -> Result<(PathBuf, Option<TraceDecayError>)> {
+    let service_path = write()?;
+    reload(&service_path)?;
+    let deactivate_error = deactivate().err();
+    Ok((service_path, deactivate_error))
+}
+
+fn prepare_forward_only_service_before_lease(
+    spec: &DaemonServiceSpec,
+) -> Result<DaemonServiceState> {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return quiesce_installed_service_before_lease();
+    }
     let service_path = service_unit_path()?;
+    if !service_path.exists() {
+        return quiesce_installed_service_before_lease();
+    }
+    let recovered_spec = forward_only_service_spec(spec, &service_path)?;
+    let runner = ServiceRunner::current()?;
+    commit_forward_only_definition_with(
+        || write_service_unit(&recovered_spec),
+        |path| runner.reload_forward_recovery_unit(path),
+        quiesce_installed_service_before_lease,
+    )
+    .map(|(_, state)| state)
+}
+
+/// Rewrites an installed managed-service definition to `spec`, forces it
+/// inactive, and verifies that neither the service nor its socket is live.
+///
+/// This is the failure sink for forward-only migrations: it never restores a
+/// prior unit or running state.
+#[doc(hidden)]
+pub fn enforce_forward_only_service_recovery(spec: &DaemonServiceSpec) -> Result<Option<PathBuf>> {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return Ok(None);
+    }
+    let service_path = service_unit_path()?;
+    if !service_path.exists() {
+        let socket_state = daemon_socket_state(&spec.socket_path);
+        if socket_state.is_proven_quiesced() {
+            return Ok(None);
+        }
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "forward-only recovery could not prove unmanaged daemon socket '{}' inactive: {socket_state}",
+                spec.socket_path.display()
+            ),
+        });
+    }
+
+    let recovered_spec = forward_only_service_spec(spec, &service_path)?;
+    let runner = ServiceRunner::current()?;
+    let (service_path, deactivate_error) = recover_forward_only_definition_with(
+        || write_service_unit(&recovered_spec),
+        |path| runner.reload_forward_recovery_unit(path),
+        || runner.deactivate_for_forward_recovery(),
+    )?;
+
+    let state = runner.service_state(&recovered_spec.socket_path);
+    let socket_state = daemon_socket_state(&recovered_spec.socket_path);
+    if state.is_running() || !socket_state.is_proven_quiesced() {
+        let command_failure = deactivate_error
+            .map(|error| format!("; service deactivation also failed: {error}"))
+            .unwrap_or_default();
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "forward-only recovery retained the new service unit at '{}' but could not prove the managed daemon inactive: service {state:?}, socket '{}' {socket_state}{command_failure}",
+                service_path.display(),
+                recovered_spec.socket_path.display(),
+            ),
+        });
+    }
+
+    Ok(Some(service_path))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtomicServiceWriteStep {
+    TempWrite,
+    TempFsync,
+    Rename,
+    ParentFsync,
+}
+
+fn atomic_replace_service_unit_with(
+    service_path: &Path,
+    unit: &str,
+    before_step: &mut impl FnMut(AtomicServiceWriteStep) -> Result<()>,
+) -> Result<()> {
     let parent = service_path
         .parent()
         .ok_or_else(|| TraceDecayError::Config {
             message: format!("service path '{}' has no parent", service_path.display()),
         })?;
-    std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
+    std::fs::create_dir_all(parent).map_err(|error| TraceDecayError::Config {
         message: format!(
-            "failed to create service directory '{}': {e}",
+            "failed to create service directory '{}': {error}",
             parent.display()
         ),
     })?;
-    std::fs::write(&service_path, spec.render_unit()?).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to write service '{}': {e}", service_path.display()),
-    })?;
-    #[cfg(target_os = "macos")]
-    std::fs::set_permissions(&service_path, std::fs::Permissions::from_mode(0o644)).map_err(
-        |e| TraceDecayError::Config {
-            message: format!(
-                "failed to set service permissions '{}': {e}",
-                service_path.display()
-            ),
-        },
-    )?;
 
+    before_step(AtomicServiceWriteStep::TempWrite)?;
+    let file_name = service_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("tracedecay-service");
+    let sequence = SERVICE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary_path = parent.join(format!(
+        ".{file_name}.tmp.{}.{sequence}",
+        std::process::id()
+    ));
+    let replacement_result = (|| {
+        let mut temporary = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to create temporary service unit '{}': {error}",
+                    temporary_path.display()
+                ),
+            })?;
+        std::io::Write::write_all(&mut temporary, unit.as_bytes()).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!(
+                    "failed to write temporary service unit '{}': {error}",
+                    temporary_path.display()
+                ),
+            }
+        })?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&temporary_path, std::fs::Permissions::from_mode(0o644)).map_err(
+            |error| TraceDecayError::Config {
+                message: format!(
+                    "failed to set temporary service permissions '{}': {error}",
+                    temporary_path.display()
+                ),
+            },
+        )?;
+
+        before_step(AtomicServiceWriteStep::TempFsync)?;
+        temporary
+            .sync_all()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to sync temporary service unit '{}': {error}",
+                    temporary_path.display()
+                ),
+            })?;
+        drop(temporary);
+
+        before_step(AtomicServiceWriteStep::Rename)?;
+        std::fs::rename(&temporary_path, service_path).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!(
+                    "failed to atomically replace service unit '{}': {error}",
+                    service_path.display()
+                ),
+            }
+        })?;
+
+        before_step(AtomicServiceWriteStep::ParentFsync)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to sync service directory '{}': {error}",
+                    parent.display()
+                ),
+            })?;
+        Ok(())
+    })();
+    if replacement_result.is_err() {
+        let _ = std::fs::remove_file(&temporary_path);
+    }
+    replacement_result
+}
+
+fn write_service_unit(spec: &DaemonServiceSpec) -> Result<PathBuf> {
+    let service_path = service_unit_path()?;
+    atomic_replace_service_unit_with(&service_path, &spec.render_unit()?, &mut |_| Ok(()))?;
     Ok(service_path)
 }
 
@@ -1267,6 +1507,46 @@ impl ServiceRunner {
         match self {
             Self::Systemd => run_systemctl(&["stop", super::SERVICE_NAME]),
             Self::Launchd => launchd_before_uninstall(true),
+        }
+    }
+
+    fn deactivate_for_forward_recovery(&self) -> Result<()> {
+        match self {
+            Self::Systemd => match run_systemctl(&["disable", "--now", super::SERVICE_NAME]) {
+                Ok(()) => Ok(()),
+                Err(primary_error) => {
+                    let stop_result = run_systemctl(&["stop", super::SERVICE_NAME]);
+                    let disable_result = run_systemctl(&["disable", super::SERVICE_NAME]);
+                    match (stop_result, disable_result) {
+                        (Ok(()), Ok(())) => Ok(()),
+                        (stop, disable) => Err(TraceDecayError::Config {
+                            message: format!(
+                                "could not deactivate TraceDecay daemon for forward-only recovery: {primary_error}; fallback stop: {}; fallback disable: {}",
+                                stop.err()
+                                    .map_or_else(|| "ok".to_string(), |error| error.to_string()),
+                                disable
+                                    .err()
+                                    .map_or_else(|| "ok".to_string(), |error| error.to_string()),
+                            ),
+                        }),
+                    }
+                }
+            },
+            Self::Launchd => launchd_before_uninstall(true),
+        }
+    }
+
+    fn reload_forward_recovery_unit(&self, service_path: &Path) -> Result<()> {
+        match self {
+            Self::Systemd => run_systemctl(&["daemon-reload"]),
+            Self::Launchd => {
+                // launchd has no in-place equivalent to daemon-reload. The
+                // durable plist becomes login/reboot authority before bootout;
+                // bootout is the manager boundary that makes the old loaded
+                // definition inactive.
+                let _ = service_path;
+                Ok(())
+            }
         }
     }
 
@@ -2128,6 +2408,241 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn atomic_service_write_faults_preserve_the_forward_boundary() {
+        use super::AtomicServiceWriteStep;
+
+        let dir = TempDir::new().expect("temp dir");
+        let service_path = dir.path().join("tracedecay.service");
+        let old_unit = "[Service]\nExecStart=/old/absolute/tracedecay daemon run\n";
+        let new_unit = "[Service]\nExecStart=/new/absolute/tracedecay daemon run\n";
+        let steps = [
+            AtomicServiceWriteStep::TempWrite,
+            AtomicServiceWriteStep::TempFsync,
+            AtomicServiceWriteStep::Rename,
+            AtomicServiceWriteStep::ParentFsync,
+        ];
+
+        for failed_step in steps {
+            std::fs::write(&service_path, old_unit).expect("old unit");
+            let mut observed = Vec::new();
+            let error =
+                super::atomic_replace_service_unit_with(&service_path, new_unit, &mut |step| {
+                    observed.push(step);
+                    if step == failed_step {
+                        Err(crate::errors::TraceDecayError::Config {
+                            message: format!("injected {step:?} failure"),
+                        })
+                    } else {
+                        Ok(())
+                    }
+                })
+                .expect_err("fault must stop the atomic replacement");
+
+            assert!(error.to_string().contains("injected"));
+            let selected = std::fs::read_to_string(&service_path).expect("selected unit");
+            if failed_step == AtomicServiceWriteStep::ParentFsync {
+                assert_eq!(selected, new_unit, "rename is the visibility boundary");
+            } else {
+                assert_eq!(selected, old_unit, "old unit must remain selected");
+            }
+            let leftovers = std::fs::read_dir(dir.path())
+                .expect("service parent")
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path() != service_path)
+                .count();
+            assert_eq!(leftovers, 0, "temporary unit must be cleaned up");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn atomic_service_write_sets_permissions_and_orders_durability_steps() {
+        use super::AtomicServiceWriteStep;
+
+        let dir = TempDir::new().expect("temp dir");
+        let service_path = dir.path().join("tracedecay.service");
+        let mut observed = Vec::new();
+
+        super::atomic_replace_service_unit_with(&service_path, "new unit\n", &mut |step| {
+            observed.push(step);
+            Ok(())
+        })
+        .expect("atomic service write");
+
+        assert_eq!(
+            observed,
+            vec![
+                AtomicServiceWriteStep::TempWrite,
+                AtomicServiceWriteStep::TempFsync,
+                AtomicServiceWriteStep::Rename,
+                AtomicServiceWriteStep::ParentFsync,
+            ]
+        );
+        assert_eq!(
+            std::fs::metadata(&service_path)
+                .expect("service metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn forward_only_commit_reloads_durable_unit_before_stop() {
+        let dir = TempDir::new().expect("temp dir");
+        let service_path = dir.path().join("tracedecay.service");
+        let old_unit = "[Service]\nExecStart=/old/absolute/tracedecay daemon run\n";
+        let new_unit = "[Service]\nExecStart=/new/absolute/tracedecay daemon run\n";
+        std::fs::write(&service_path, old_unit).expect("old unit");
+        let observed = std::cell::RefCell::new(Vec::new());
+
+        let (_, state) = super::commit_forward_only_definition_with(
+            || {
+                super::atomic_replace_service_unit_with(&service_path, new_unit, &mut |step| {
+                    observed.borrow_mut().push(format!("{step:?}"));
+                    Ok(())
+                })?;
+                Ok(service_path.clone())
+            },
+            |_| {
+                assert_eq!(
+                    std::fs::read_to_string(&service_path).expect("reloaded unit"),
+                    new_unit
+                );
+                observed.borrow_mut().push("Reload".to_string());
+                Ok(())
+            },
+            || {
+                observed.borrow_mut().push("Stop".to_string());
+                Ok(DaemonServiceState::RunningEnabled)
+            },
+        )
+        .expect("forward-only commit");
+
+        assert_eq!(state, DaemonServiceState::RunningEnabled);
+        assert_eq!(
+            observed.into_inner(),
+            vec![
+                "TempWrite",
+                "TempFsync",
+                "Rename",
+                "ParentFsync",
+                "Reload",
+                "Stop",
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn forward_only_reload_failure_keeps_old_process_and_new_unit() {
+        let dir = TempDir::new().expect("temp dir");
+        let service_path = dir.path().join("tracedecay.service");
+        let mut stopped = false;
+
+        let error = super::commit_forward_only_definition_with(
+            || {
+                super::atomic_replace_service_unit_with(
+                    &service_path,
+                    "ExecStart=/new/absolute/tracedecay\n",
+                    &mut |_| Ok(()),
+                )?;
+                Ok(service_path.clone())
+            },
+            |_| {
+                Err(crate::errors::TraceDecayError::Config {
+                    message: "injected reload failure".to_string(),
+                })
+            },
+            || {
+                stopped = true;
+                Ok(DaemonServiceState::RunningEnabled)
+            },
+        )
+        .expect_err("reload failure");
+
+        assert!(error.to_string().contains("reload"));
+        assert!(!stopped, "old process must not be stopped before reload");
+        assert!(
+            std::fs::read_to_string(service_path)
+                .expect("durable new unit")
+                .contains("/new/absolute/tracedecay")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn forward_only_stop_failure_retains_durable_reloaded_unit() {
+        let dir = TempDir::new().expect("temp dir");
+        let service_path = dir.path().join("tracedecay.service");
+        let reloaded = std::cell::Cell::new(false);
+
+        let error = super::commit_forward_only_definition_with(
+            || {
+                super::atomic_replace_service_unit_with(
+                    &service_path,
+                    "ExecStart=/new/absolute/tracedecay\n",
+                    &mut |_| Ok(()),
+                )?;
+                Ok(service_path.clone())
+            },
+            |_| {
+                reloaded.set(true);
+                Ok(())
+            },
+            || {
+                assert!(reloaded.get(), "reload must precede stop");
+                Err(crate::errors::TraceDecayError::Config {
+                    message: "injected stop failure".to_string(),
+                })
+            },
+        )
+        .expect_err("stop failure");
+
+        assert!(error.to_string().contains("stop"));
+        assert!(
+            std::fs::read_to_string(service_path)
+                .expect("durable new unit")
+                .contains("/new/absolute/tracedecay")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn forward_only_recovery_reloads_before_deactivate() {
+        let observed = std::cell::RefCell::new(Vec::new());
+
+        let (_, deactivate_error) = super::recover_forward_only_definition_with(
+            || {
+                observed.borrow_mut().push("Write".to_string());
+                Ok(PathBuf::from("/service/unit"))
+            },
+            |_| {
+                observed.borrow_mut().push("Reload".to_string());
+                Ok(())
+            },
+            || {
+                observed.borrow_mut().push("Deactivate".to_string());
+                Err(crate::errors::TraceDecayError::Config {
+                    message: "injected deactivate failure".to_string(),
+                })
+            },
+        )
+        .expect("durable write and reload are the recovery boundary");
+
+        assert_eq!(observed.into_inner(), vec!["Write", "Reload", "Deactivate"]);
+        assert!(
+            deactivate_error
+                .expect("deactivate error retained")
+                .to_string()
+                .contains("deactivate")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn refresh_service_rewrites_unit_and_restarts_daemon() {
         let _env_lock = lock_user_data_dir_test_env();
         let dir = TempDir::new().expect("temp dir");
@@ -2174,6 +2689,319 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(log).expect("systemctl log"),
             "--user daemon-reload\n--user enable tracedecay.service\n--user daemon-reload\n--user enable tracedecay.service\n--user start tracedecay.service\n"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn forward_only_recovery_rewrites_old_execstart_and_disables_service() {
+        let _env_lock = lock_user_data_dir_test_env();
+        let dir = TempDir::new().expect("temp dir");
+        let config_home = dir.path().join("config with spaces");
+        let fake_bin = dir.path().join("bin");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+        std::fs::create_dir_all(&home).expect("home dir");
+
+        let systemctl = fake_bin.join("systemctl");
+        let log = dir.path().join("systemctl.log");
+        let running = dir.path().join("running");
+        let enabled = dir.path().join("enabled");
+        std::fs::write(&running, "").expect("running marker");
+        std::fs::write(&enabled, "").expect("enabled marker");
+        std::fs::write(
+            &systemctl,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$TRACEDECAY_SYSTEMCTL_LOG"
+case "$2" in
+  is-active) test -f "$TRACEDECAY_SYSTEMCTL_RUNNING" ;;
+  is-enabled)
+    if test -f "$TRACEDECAY_SYSTEMCTL_ENABLED"; then
+      printf 'enabled\n'
+    else
+      printf 'disabled\n'
+    fi
+    ;;
+  disable)
+    /usr/bin/rm -f "$TRACEDECAY_SYSTEMCTL_RUNNING" "$TRACEDECAY_SYSTEMCTL_ENABLED"
+    ;;
+  stop) /usr/bin/rm -f "$TRACEDECAY_SYSTEMCTL_RUNNING" ;;
+esac
+"#,
+        )
+        .expect("fake systemctl");
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+            .expect("systemctl permissions");
+
+        let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _data_guard =
+            EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
+        let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+        let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+        let _running_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_RUNNING", &running);
+        let _enabled_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_ENABLED", &enabled);
+
+        let old_spec = DaemonServiceSpec {
+            tracedecay_bin: PathBuf::from("/old absolute/tracedecay"),
+            socket_path: dir.path().join("daemon.sock"),
+            data_dir_override: None,
+        };
+        let service_path = super::write_service_unit(&old_spec).expect("old service unit");
+        let new_spec = DaemonServiceSpec {
+            tracedecay_bin: dir.path().join("new install/tracedecay"),
+            socket_path: old_spec.socket_path.clone(),
+            data_dir_override: None,
+        };
+
+        let recovered =
+            super::enforce_forward_only_service_recovery(&new_spec).expect("forward-only recovery");
+
+        assert_eq!(recovered, Some(service_path.clone()));
+        let unit = std::fs::read_to_string(service_path).expect("rewritten service unit");
+        assert!(unit.contains(&new_spec.tracedecay_bin.display().to_string()));
+        assert!(!unit.contains("/old absolute/tracedecay"));
+        assert!(!running.exists(), "managed daemon must be inactive");
+        assert!(!enabled.exists(), "managed daemon must be disabled");
+        let commands = std::fs::read_to_string(log).expect("systemctl log");
+        let reload = commands
+            .find("--user daemon-reload")
+            .expect("manager reload");
+        let deactivate = commands
+            .find("--user disable --now tracedecay.service")
+            .expect("service deactivation");
+        assert!(reload < deactivate, "reload must precede deactivation");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn forward_only_recovery_replaces_service_symlink_without_following_it() {
+        let _env_lock = lock_user_data_dir_test_env();
+        let dir = TempDir::new().expect("temp dir");
+        let config_home = dir.path().join("config");
+        let fake_bin = dir.path().join("bin");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+        std::fs::create_dir_all(&home).expect("home dir");
+        let systemctl = fake_bin.join("systemctl");
+        std::fs::write(
+            &systemctl,
+            "#!/bin/sh\n[ \"$2\" = is-active ] && exit 3\n[ \"$2\" = is-enabled ] && printf 'disabled\\n'\nexit 0\n",
+        )
+        .expect("fake systemctl");
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+            .expect("systemctl permissions");
+
+        let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _data_guard =
+            EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
+        let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+        let service_path = config_home
+            .join("systemd/user")
+            .join(crate::daemon::SERVICE_NAME);
+        std::fs::create_dir_all(service_path.parent().expect("service parent"))
+            .expect("service parent");
+        let external = dir.path().join("external unit");
+        std::fs::write(&external, "external-old-unit\n").expect("external unit");
+        std::os::unix::fs::symlink(&external, &service_path).expect("service symlink");
+        let spec = DaemonServiceSpec {
+            tracedecay_bin: dir.path().join("new install/tracedecay"),
+            socket_path: dir.path().join("daemon.sock"),
+            data_dir_override: None,
+        };
+
+        super::enforce_forward_only_service_recovery(&spec).expect("symlink-safe forward recovery");
+
+        assert!(
+            !std::fs::symlink_metadata(&service_path)
+                .expect("service metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&external).expect("external unit"),
+            "external-old-unit\n"
+        );
+        assert!(
+            std::fs::read_to_string(service_path)
+                .expect("new service unit")
+                .contains(&spec.tracedecay_bin.display().to_string())
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn forward_only_acquire_failure_never_restores_old_execstart() {
+        let _env_lock = lock_user_data_dir_test_env();
+        let dir = TempDir::new().expect("temp dir");
+        let config_home = dir.path().join("config");
+        let fake_bin = dir.path().join("bin");
+        let home = dir.path().join("home");
+        let profile = dir.path().join("profile");
+        std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&profile).expect("profile dir");
+
+        let systemctl = fake_bin.join("systemctl");
+        let log = dir.path().join("systemctl.log");
+        let running = dir.path().join("running");
+        let enabled = dir.path().join("enabled");
+        std::fs::write(&running, "").expect("running marker");
+        std::fs::write(&enabled, "").expect("enabled marker");
+        std::fs::write(
+            &systemctl,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$TRACEDECAY_SYSTEMCTL_LOG"
+case "$2" in
+  is-active) test -f "$TRACEDECAY_SYSTEMCTL_RUNNING" ;;
+  is-enabled)
+    test -f "$TRACEDECAY_SYSTEMCTL_ENABLED" && printf 'enabled\n' || printf 'disabled\n'
+    ;;
+  stop) /usr/bin/rm -f "$TRACEDECAY_SYSTEMCTL_RUNNING" ;;
+  disable) /usr/bin/rm -f "$TRACEDECAY_SYSTEMCTL_RUNNING" "$TRACEDECAY_SYSTEMCTL_ENABLED" ;;
+esac
+"#,
+        )
+        .expect("fake systemctl");
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+            .expect("systemctl permissions");
+
+        let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _data_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, &profile);
+        let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+        let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+        let _running_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_RUNNING", &running);
+        let _enabled_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_ENABLED", &enabled);
+
+        let old_spec = DaemonServiceSpec {
+            tracedecay_bin: PathBuf::from("/old absolute/tracedecay"),
+            socket_path: dir.path().join("daemon.sock"),
+            data_dir_override: None,
+        };
+        let service_path = super::write_service_unit(&old_spec).expect("old service unit");
+        let new_spec = DaemonServiceSpec {
+            tracedecay_bin: dir.path().join("new install/tracedecay"),
+            socket_path: old_spec.socket_path.clone(),
+            data_dir_override: None,
+        };
+        let _shared_lease = crate::lifecycle_lease::acquire_shared_blocking("test lease holder")
+            .expect("shared lifecycle lease");
+
+        let error = match super::QuiescedDaemonLifecycle::acquire_forward_only(
+            "forward acquire test",
+            &new_spec,
+        ) {
+            Ok(_) => panic!("exclusive acquisition must fail while shared lease is held"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("forward acquire test"));
+        let unit = std::fs::read_to_string(service_path).expect("rewritten service unit");
+        assert!(unit.contains(&new_spec.tracedecay_bin.display().to_string()));
+        assert!(!unit.contains("/old absolute/tracedecay"));
+        assert!(!running.exists(), "managed daemon must remain inactive");
+        let commands = std::fs::read_to_string(log).expect("systemctl log");
+        assert!(!commands.contains(" start "));
+        assert!(!commands.contains(" restart "));
+        assert!(
+            commands
+                .find("--user daemon-reload")
+                .expect("manager reload")
+                < commands.find("--user stop").expect("old service stop"),
+            "new unit must be reloaded before the old process is stopped"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn forward_only_start_failure_is_recovered_inactive() {
+        let _env_lock = lock_user_data_dir_test_env();
+        let dir = TempDir::new().expect("temp dir");
+        let config_home = dir.path().join("config");
+        let fake_bin = dir.path().join("bin");
+        let home = dir.path().join("home");
+        let profile = dir.path().join("profile");
+        std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+        std::fs::create_dir_all(&home).expect("home dir");
+        std::fs::create_dir_all(&profile).expect("profile dir");
+        let systemctl = fake_bin.join("systemctl");
+        let log = dir.path().join("systemctl.log");
+        let running = dir.path().join("running");
+        let enabled = dir.path().join("enabled");
+        std::fs::write(&running, "").expect("running marker");
+        std::fs::write(&enabled, "").expect("enabled marker");
+        std::fs::write(
+            &systemctl,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$TRACEDECAY_SYSTEMCTL_LOG"
+case "$2" in
+  is-active) test -f "$TRACEDECAY_SYSTEMCTL_RUNNING" ;;
+  is-enabled)
+    test -f "$TRACEDECAY_SYSTEMCTL_ENABLED" && printf 'enabled\n' || printf 'disabled\n'
+    ;;
+  stop) /usr/bin/rm -f "$TRACEDECAY_SYSTEMCTL_RUNNING" ;;
+  disable) /usr/bin/rm -f "$TRACEDECAY_SYSTEMCTL_RUNNING" "$TRACEDECAY_SYSTEMCTL_ENABLED" ;;
+  enable) /usr/bin/touch "$TRACEDECAY_SYSTEMCTL_ENABLED" ;;
+  restart)
+    /usr/bin/touch "$TRACEDECAY_SYSTEMCTL_RUNNING"
+    exit 42
+    ;;
+esac
+"#,
+        )
+        .expect("fake systemctl");
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+            .expect("systemctl permissions");
+        let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _data_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, &profile);
+        let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+        let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+        let _running_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_RUNNING", &running);
+        let _enabled_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_ENABLED", &enabled);
+        let old_spec = DaemonServiceSpec {
+            tracedecay_bin: PathBuf::from("/old absolute/tracedecay"),
+            socket_path: dir.path().join("daemon.sock"),
+            data_dir_override: None,
+        };
+        super::write_service_unit(&old_spec).expect("old service unit");
+        let new_spec = DaemonServiceSpec {
+            tracedecay_bin: dir.path().join("new install/tracedecay"),
+            socket_path: old_spec.socket_path,
+            data_dir_override: None,
+        };
+        let guard =
+            super::QuiescedDaemonLifecycle::acquire_forward_only("forward start test", &new_spec)
+                .expect("forward-only acquisition");
+        let previous_state = guard.previous_state();
+
+        let start_error =
+            super::refresh_installed_service_under_lease_with_state(&new_spec, previous_state)
+                .expect_err("restart must fail");
+        guard.finish_without_restore();
+        super::enforce_forward_only_service_recovery(&new_spec).expect("start failure recovery");
+
+        assert!(start_error.to_string().contains("restart"));
+        assert!(!running.exists(), "failed start must be stopped");
+        assert!(!enabled.exists(), "failed start must be disabled");
+        let commands = std::fs::read_to_string(log).expect("systemctl log");
+        assert!(commands.contains("--user restart tracedecay.service"));
+        assert!(
+            commands
+                .rfind("--user daemon-reload")
+                .expect("recovery reload")
+                < commands
+                    .rfind("--user disable --now tracedecay.service")
+                    .expect("recovery deactivation"),
+            "recovery must reload the durable unit before deactivation"
+        );
+        assert_eq!(
+            commands
+                .rmatch_indices("--user disable --now tracedecay.service")
+                .count(),
+            1
         );
     }
 

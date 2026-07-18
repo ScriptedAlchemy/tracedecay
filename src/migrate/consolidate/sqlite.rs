@@ -12,6 +12,7 @@ mod inspect;
 mod memory_v2;
 mod observation;
 pub(super) mod projection;
+mod temporal;
 mod verify;
 
 use memory_v2::merge_memory_v2_authority;
@@ -72,6 +73,41 @@ pub(super) async fn merge_memory_v2_for_test(target_path: &Path, source: &Path) 
         .await
         .map_err(|error| db_error("merge_memory_v2_for_test", error))?;
     target.checkpoint().await?;
+    target.close();
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn set_forward_migrate_fault_after_import(enabled: bool) {
+    temporal::set_forward_migrate_fault_after_import(enabled);
+}
+
+#[cfg(test)]
+pub(super) async fn merge_temporal_for_test(target_path: &Path, source: &Path) -> Result<()> {
+    normalize_sessions(target_path).await?;
+    normalize_sessions(source).await?;
+    let target = GlobalDb::try_open_at(target_path).await?.ok_or_else(|| {
+        db_message(
+            "merge_temporal_for_test",
+            "could not open target sessions DB",
+        )
+    })?;
+    let transaction = target
+        .begin_write_transaction()
+        .await
+        .map_err(|error| db_error("merge_temporal_for_test", error))?;
+    attach_as(&transaction, source, "source").await?;
+    transaction
+        .execute("PRAGMA defer_foreign_keys = ON", ())
+        .await
+        .map_err(|error| db_error("merge_temporal_for_test", error))?;
+    temporal::preflight(&transaction).await?;
+    temporal::merge(&transaction).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| db_error("merge_temporal_for_test", error))?;
+    target.checkpoint().await;
     target.close();
     Ok(())
 }
@@ -427,6 +463,7 @@ pub(super) async fn merge_sessions(
     build_consolidation_message_map(&transaction, "source", "target_input", source_project_id)
         .await?;
     projection::materialize(&transaction, "target_input", "source").await?;
+    temporal::preflight(&transaction).await?;
     preflight_observation_merge(&transaction).await?;
     merge_sessions_tx(&transaction, offsets).await?;
     verify_observation_merge(&transaction).await?;
@@ -1079,6 +1116,7 @@ async fn merge_sessions_tx(conn: &Connection, offsets: &SessionMergeOffsets) -> 
     .await
     .map_err(|error| db_error("merge_sessions", error))?;
     merge_observation_authority(conn).await?;
+    temporal::merge(conn).await?;
     Ok(())
 }
 

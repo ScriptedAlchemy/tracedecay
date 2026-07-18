@@ -437,6 +437,30 @@ fn queries_enforce_bounds() {
 }
 
 #[test]
+fn positive_contradictions_are_bounded_in_the_public_constructor() {
+    let mut contradicted_by = (0..=MAX_FACT_QUERY_CONTRADICTIONS)
+        .map(|index| {
+            fact_id(
+                FactOwnerV1::Profile,
+                &format!("operation.contradiction-{index}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    contradicted_by.push(contradicted_by[0].clone());
+    contradicted_by.reverse();
+
+    let state = FactContradictionStateV1::from_positive(contradicted_by);
+
+    assert_eq!(state.contradicted_by().len(), MAX_FACT_QUERY_CONTRADICTIONS);
+    assert!(
+        state
+            .contradicted_by()
+            .windows(2)
+            .all(|ids| ids[0] < ids[1])
+    );
+}
+
+#[test]
 fn projections_queries_and_receipts_reject_cross_owner_fact_ids() {
     let profile_fact_id = fact_id(FactOwnerV1::Profile, "operation.cross-owner");
     let project_owner = FactOwnerV1::Project {

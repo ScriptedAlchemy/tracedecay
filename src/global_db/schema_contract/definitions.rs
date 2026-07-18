@@ -721,6 +721,840 @@ pub(super) const TABLES: &[Table] = &[
             ),
         ]
     ),
+    table!(
+        "session_temporal_schema_migrations",
+        [
+            column("name", "TEXT", false, None, 1),
+            column("version", "INTEGER", true, None, 0),
+            column("applied_at", "INTEGER", true, None, 0),
+        ],
+        []
+    ),
+    table!(
+        "session_summary_nodes",
+        [
+            column("summary_id", "TEXT", false, None, 1),
+            column("session_id", "TEXT", true, None, 0),
+            column("summary_anchor_id", "TEXT", true, None, 0),
+            column("summary_text", "TEXT", true, None, 0),
+            column("index_text", "TEXT", true, None, 0),
+            column("source_horizon_json", "TEXT", true, None, 0),
+            column("publication_json", "TEXT", false, None, 0),
+            column("created_at", "INTEGER", true, None, 0),
+        ],
+        [foreign_key(
+            "summary_anchor_id",
+            "retrieval_anchors",
+            "anchor_id",
+            "NO ACTION"
+        )]
+    ),
+    table!(
+        "session_summary_sources",
+        [
+            column("summary_id", "TEXT", true, None, 1),
+            column("source_ordinal", "INTEGER", true, None, 2),
+            column("source_kind", "TEXT", true, None, 0),
+            column("source_anchor_id", "TEXT", false, None, 0),
+            column("source_summary_id", "TEXT", false, None, 0),
+        ],
+        [
+            foreign_key(
+                "summary_id",
+                "session_summary_nodes",
+                "summary_id",
+                "CASCADE"
+            ),
+            foreign_key(
+                "source_anchor_id",
+                "retrieval_anchors",
+                "anchor_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "source_summary_id",
+                "session_summary_nodes",
+                "summary_id",
+                "NO ACTION"
+            ),
+        ]
+    ),
+    table!(
+        "session_summary_successors",
+        [
+            column("predecessor_summary_id", "TEXT", true, None, 1),
+            column("successor_summary_id", "TEXT", true, None, 2),
+            column("created_at", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "predecessor_summary_id",
+                "session_summary_nodes",
+                "summary_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "successor_summary_id",
+                "session_summary_nodes",
+                "summary_id",
+                "NO ACTION"
+            ),
+        ]
+    ),
+    table!(
+        "session_external_payload_manifests",
+        [
+            column("payload_ref", "TEXT", false, None, 1),
+            column("session_id", "TEXT", true, None, 0),
+            column("payload_digest", "TEXT", true, None, 0),
+            column("manifest_json", "TEXT", true, None, 0),
+            column("receipt_id", "TEXT", true, None, 0),
+            column("created_at", "INTEGER", true, None, 0),
+        ],
+        [foreign_key(
+            "receipt_id",
+            "sanitization_receipts",
+            "receipt_id",
+            "NO ACTION"
+        ),]
+    ),
+    table!(
+        "session_refresh_operations",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("operation_id", "TEXT", true, None, 2),
+            column("request_digest", "TEXT", true, None, 0),
+            column("target_frontier_json", "TEXT", true, None, 0),
+            column("state", "TEXT", true, None, 0),
+            column("created_at", "INTEGER", true, None, 0),
+            column("updated_at", "INTEGER", true, None, 0),
+            column("terminal_at", "INTEGER", false, None, 0),
+            column("failure_code", "TEXT", false, None, 0),
+        ],
+        []
+    ),
+    table!(
+        "session_refresh_bindings",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("operation_id", "TEXT", true, None, 2),
+            column("scope_kind", "TEXT", true, None, 0),
+            column("source_frontier", "INTEGER", true, None, 0),
+            column("target_frontier", "INTEGER", true, None, 0),
+            column("projector_version", "TEXT", true, None, 0),
+            column("config_digest", "TEXT", true, None, 0),
+            column("generation", "INTEGER", true, None, 0),
+            column("frozen_watermarks_json", "TEXT", true, None, 0),
+            column("binding_digest", "TEXT", true, None, 0),
+            column("created_at", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "session_id",
+                "session_refresh_operations",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "operation_id",
+                "session_refresh_operations",
+                "operation_id",
+                "CASCADE",
+                1
+            ),
+            foreign_key(
+                "session_id",
+                "session_temporal_generations",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_temporal_generations",
+                "generation",
+                "CASCADE",
+                1
+            ),
+        ]
+    ),
+    table!(
+        "session_refresh_progress",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("operation_id", "TEXT", true, None, 2),
+            column("progress_ordinal", "INTEGER", true, None, 3),
+            column("frontier_json", "TEXT", true, None, 0),
+            column("coverage_json", "TEXT", true, None, 0),
+            column("committed_batches", "INTEGER", true, None, 0),
+            column("committed_records", "INTEGER", true, None, 0),
+            column("recorded_at", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "session_id",
+                "session_refresh_operations",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "operation_id",
+                "session_refresh_operations",
+                "operation_id",
+                "CASCADE",
+                1
+            ),
+        ]
+    ),
+    table!(
+        "session_refresh_batch_bindings",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("operation_id", "TEXT", true, None, 2),
+            column("progress_ordinal", "INTEGER", true, None, 3),
+            column("generation", "INTEGER", true, None, 0),
+            column("batch_ordinal", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "session_id",
+                "session_refresh_progress",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "operation_id",
+                "session_refresh_progress",
+                "operation_id",
+                "CASCADE",
+                1
+            ),
+            foreign_key_sequence(
+                "progress_ordinal",
+                "session_refresh_progress",
+                "progress_ordinal",
+                "CASCADE",
+                2
+            ),
+            foreign_key(
+                "session_id",
+                "session_temporal_projection_receipts",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_temporal_projection_receipts",
+                "generation",
+                "CASCADE",
+                1
+            ),
+            foreign_key_sequence(
+                "batch_ordinal",
+                "session_temporal_projection_receipts",
+                "batch_ordinal",
+                "CASCADE",
+                2
+            ),
+        ]
+    ),
+    table!(
+        "session_refresh_receipts",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("operation_id", "TEXT", true, None, 2),
+            column("terminal_state", "TEXT", true, None, 0),
+            column("frontier_json", "TEXT", true, None, 0),
+            column("coverage_json", "TEXT", true, None, 0),
+            column("failure_code", "TEXT", false, None, 0),
+            column("terminal_at", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "session_id",
+                "session_refresh_operations",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "operation_id",
+                "session_refresh_operations",
+                "operation_id",
+                "CASCADE",
+                1
+            ),
+        ]
+    ),
+    table!(
+        "session_query_cursor_keys",
+        [
+            column("key_id", "TEXT", false, None, 1),
+            column("key_version", "INTEGER", true, None, 0),
+            column("key_material", "BLOB", true, None, 0),
+            column("created_at", "INTEGER", true, None, 0),
+            column("retired_at", "INTEGER", false, None, 0),
+        ],
+        []
+    ),
+    table!(
+        "session_temporal_generations",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("state", "TEXT", true, None, 0),
+            column("frozen_watermarks_json", "TEXT", true, None, 0),
+            column("created_at", "INTEGER", true, None, 0),
+            column("ready_at", "INTEGER", false, None, 0),
+            column("activated_at", "INTEGER", false, None, 0),
+            column("completed_at", "INTEGER", false, None, 0),
+        ],
+        []
+    ),
+    table!(
+        "session_temporal_projection_receipts",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("batch_ordinal", "INTEGER", true, None, 3),
+            column("batch_digest", "TEXT", true, None, 0),
+            column("frozen_watermarks_json", "TEXT", true, None, 0),
+            column("source_through", "INTEGER", true, None, 0),
+            column("projection_through", "INTEGER", true, None, 0),
+            column("occurrence_count", "INTEGER", true, None, 0),
+            column("occurrence_digest", "TEXT", true, None, 0),
+            column("dimension_count", "INTEGER", true, None, 0),
+            column("dimension_digest", "TEXT", true, None, 0),
+            column("copy_count", "INTEGER", true, None, 0),
+            column("copy_digest", "TEXT", true, None, 0),
+            column("assertion_count", "INTEGER", true, None, 0),
+            column("assertion_digest", "TEXT", true, None, 0),
+            column("supersession_count", "INTEGER", true, None, 0),
+            column("supersession_digest", "TEXT", true, None, 0),
+            column("current_count", "INTEGER", true, None, 0),
+            column("current_digest", "TEXT", true, None, 0),
+            column("fts_count", "INTEGER", true, None, 0),
+            column("fts_digest", "TEXT", true, None, 0),
+            column("committed_at", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "session_id",
+                "session_temporal_generations",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_temporal_generations",
+                "generation",
+                "CASCADE",
+                1
+            ),
+        ]
+    ),
+    table!(
+        "session_temporal_observation_effects",
+        [
+            column("observation_id", "TEXT", false, None, 1),
+            column("observation_sequence", "INTEGER", true, None, 0),
+            column("session_id", "TEXT", true, None, 0),
+            column("receipt_id", "TEXT", true, None, 0),
+            column("effect_digest", "TEXT", true, None, 0),
+            column("output_count", "INTEGER", true, None, 0),
+            column("recorded_at", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "observation_id",
+                "observations",
+                "observation_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "receipt_id",
+                "sanitization_receipts",
+                "receipt_id",
+                "NO ACTION"
+            ),
+        ]
+    ),
+    table!(
+        "session_turns",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("turn_id", "TEXT", true, None, 3),
+            column("ordinal", "INTEGER", true, None, 0),
+            column("grouping_provenance", "TEXT", true, None, 0),
+            column("created_at", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "session_id",
+                "session_temporal_generations",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_temporal_generations",
+                "generation",
+                "CASCADE",
+                1
+            ),
+        ]
+    ),
+    table!(
+        "session_threads",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("thread_id", "TEXT", true, None, 3),
+            column("grouping_provenance", "TEXT", true, None, 0),
+            column("created_at", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "session_id",
+                "session_temporal_generations",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_temporal_generations",
+                "generation",
+                "CASCADE",
+                1
+            ),
+        ]
+    ),
+    table!(
+        "session_agents",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("agent_id", "TEXT", true, None, 3),
+            column("agent_json", "TEXT", true, None, 0),
+            column("created_at", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "session_id",
+                "session_temporal_generations",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_temporal_generations",
+                "generation",
+                "CASCADE",
+                1
+            ),
+        ]
+    ),
+    table!(
+        "session_occurrences",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("occurrence_id", "TEXT", true, None, 3),
+            column("source_observation_id", "TEXT", true, None, 0),
+            column("projection_output_ordinal", "INTEGER", true, None, 0),
+            column("retrieval_anchor_id", "TEXT", true, None, 0),
+            column("thread_id", "TEXT", false, None, 0),
+            column("thread_grouping_json", "TEXT", false, None, 0),
+            column("turn_id", "TEXT", false, None, 0),
+            column("turn_grouping_json", "TEXT", false, None, 0),
+            column("message_id", "TEXT", false, None, 0),
+            column("agent_id", "TEXT", false, None, 0),
+            column("role", "TEXT", true, None, 0),
+            column("knowledge_at", "INTEGER", true, None, 0),
+            column("valid_time_json", "TEXT", true, None, 0),
+            column("evidence_json", "TEXT", true, None, 0),
+            column("snippet_text", "TEXT", true, None, 0),
+            column("index_text", "TEXT", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "session_id",
+                "session_temporal_generations",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_temporal_generations",
+                "generation",
+                "CASCADE",
+                1
+            ),
+            foreign_key(
+                "source_observation_id",
+                "observations",
+                "observation_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "retrieval_anchor_id",
+                "retrieval_anchors",
+                "anchor_id",
+                "NO ACTION"
+            ),
+            foreign_key("session_id", "session_threads", "session_id", "NO ACTION"),
+            foreign_key_sequence(
+                "generation",
+                "session_threads",
+                "generation",
+                "NO ACTION",
+                1
+            ),
+            foreign_key_sequence("thread_id", "session_threads", "thread_id", "NO ACTION", 2),
+            foreign_key("session_id", "session_turns", "session_id", "NO ACTION"),
+            foreign_key_sequence("generation", "session_turns", "generation", "NO ACTION", 1),
+            foreign_key_sequence("turn_id", "session_turns", "turn_id", "NO ACTION", 2),
+            foreign_key("session_id", "session_agents", "session_id", "NO ACTION"),
+            foreign_key_sequence("generation", "session_agents", "generation", "NO ACTION", 1),
+            foreign_key_sequence("agent_id", "session_agents", "agent_id", "NO ACTION", 2),
+        ]
+    ),
+    table!(
+        "session_logical_copy_edges",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("occurrence_id", "TEXT", true, None, 3),
+            column("copied_from_occurrence_id", "TEXT", true, None, 4),
+            column("proof_json", "TEXT", true, None, 0),
+            column("created_at", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key("session_id", "session_occurrences", "session_id", "CASCADE"),
+            foreign_key_sequence(
+                "generation",
+                "session_occurrences",
+                "generation",
+                "CASCADE",
+                1
+            ),
+            foreign_key_sequence(
+                "occurrence_id",
+                "session_occurrences",
+                "occurrence_id",
+                "CASCADE",
+                2
+            ),
+            foreign_key("session_id", "session_occurrences", "session_id", "CASCADE"),
+            foreign_key_sequence(
+                "generation",
+                "session_occurrences",
+                "generation",
+                "CASCADE",
+                1
+            ),
+            foreign_key_sequence(
+                "copied_from_occurrence_id",
+                "session_occurrences",
+                "occurrence_id",
+                "CASCADE",
+                2
+            ),
+        ]
+    ),
+    table!(
+        "session_turn_members",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("turn_id", "TEXT", true, None, 3),
+            column("occurrence_id", "TEXT", true, None, 4),
+            column("ordinal", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key("session_id", "session_turns", "session_id", "CASCADE"),
+            foreign_key_sequence("generation", "session_turns", "generation", "CASCADE", 1),
+            foreign_key_sequence("turn_id", "session_turns", "turn_id", "CASCADE", 2),
+            foreign_key("session_id", "session_occurrences", "session_id", "CASCADE"),
+            foreign_key_sequence(
+                "generation",
+                "session_occurrences",
+                "generation",
+                "CASCADE",
+                1
+            ),
+            foreign_key_sequence(
+                "occurrence_id",
+                "session_occurrences",
+                "occurrence_id",
+                "CASCADE",
+                2
+            ),
+        ]
+    ),
+    table!(
+        "session_thread_hierarchy_edges",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("parent_thread_id", "TEXT", true, None, 3),
+            column("child_thread_id", "TEXT", true, None, 4),
+            column("ordinal", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key("session_id", "session_threads", "session_id", "CASCADE"),
+            foreign_key_sequence("generation", "session_threads", "generation", "CASCADE", 1),
+            foreign_key_sequence(
+                "parent_thread_id",
+                "session_threads",
+                "thread_id",
+                "CASCADE",
+                2
+            ),
+            foreign_key("session_id", "session_threads", "session_id", "CASCADE"),
+            foreign_key_sequence("generation", "session_threads", "generation", "CASCADE", 1),
+            foreign_key_sequence(
+                "child_thread_id",
+                "session_threads",
+                "thread_id",
+                "CASCADE",
+                2
+            ),
+        ]
+    ),
+    table!(
+        "session_agent_hierarchy_edges",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("parent_agent_id", "TEXT", true, None, 3),
+            column("child_agent_id", "TEXT", true, None, 4),
+            column("ordinal", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key("session_id", "session_agents", "session_id", "CASCADE"),
+            foreign_key_sequence("generation", "session_agents", "generation", "CASCADE", 1),
+            foreign_key_sequence(
+                "parent_agent_id",
+                "session_agents",
+                "agent_id",
+                "CASCADE",
+                2
+            ),
+            foreign_key("session_id", "session_agents", "session_id", "CASCADE"),
+            foreign_key_sequence("generation", "session_agents", "generation", "CASCADE", 1),
+            foreign_key_sequence("child_agent_id", "session_agents", "agent_id", "CASCADE", 2),
+        ]
+    ),
+    table!(
+        "session_assertions",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("assertion_id", "TEXT", true, None, 3),
+            column("assertion_kind", "TEXT", true, None, 0),
+            column("subject_anchor_id", "TEXT", true, None, 0),
+            column("object_anchor_id", "TEXT", true, None, 0),
+            column("knowledge_at", "INTEGER", true, None, 0),
+            column("valid_time_json", "TEXT", true, None, 0),
+            column("evidence_json", "TEXT", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "session_id",
+                "session_temporal_generations",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_temporal_generations",
+                "generation",
+                "CASCADE",
+                1
+            ),
+            foreign_key(
+                "subject_anchor_id",
+                "retrieval_anchors",
+                "anchor_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "object_anchor_id",
+                "retrieval_anchors",
+                "anchor_id",
+                "NO ACTION"
+            ),
+        ]
+    ),
+    table!(
+        "session_assertion_supersession",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("superseded_assertion_id", "TEXT", true, None, 3),
+            column("superseding_assertion_id", "TEXT", true, None, 4),
+            column("created_at", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key("session_id", "session_assertions", "session_id", "CASCADE"),
+            foreign_key_sequence(
+                "generation",
+                "session_assertions",
+                "generation",
+                "CASCADE",
+                1
+            ),
+            foreign_key_sequence(
+                "superseded_assertion_id",
+                "session_assertions",
+                "assertion_id",
+                "CASCADE",
+                2
+            ),
+            foreign_key("session_id", "session_assertions", "session_id", "CASCADE"),
+            foreign_key_sequence(
+                "generation",
+                "session_assertions",
+                "generation",
+                "CASCADE",
+                1
+            ),
+            foreign_key_sequence(
+                "superseding_assertion_id",
+                "session_assertions",
+                "assertion_id",
+                "CASCADE",
+                2
+            ),
+        ]
+    ),
+    table!(
+        "session_current_entities",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("entity_kind", "TEXT", true, None, 3),
+            column("entity_id", "TEXT", true, None, 4),
+            column("current_assertion_id", "TEXT", false, None, 0),
+            column("current_occurrence_id", "TEXT", false, None, 0),
+            column("coverage_json", "TEXT", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "session_id",
+                "session_temporal_generations",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_temporal_generations",
+                "generation",
+                "CASCADE",
+                1
+            ),
+            foreign_key(
+                "session_id",
+                "session_assertions",
+                "session_id",
+                "NO ACTION"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_assertions",
+                "generation",
+                "NO ACTION",
+                1
+            ),
+            foreign_key_sequence(
+                "current_assertion_id",
+                "session_assertions",
+                "assertion_id",
+                "NO ACTION",
+                2
+            ),
+            foreign_key(
+                "session_id",
+                "session_occurrences",
+                "session_id",
+                "NO ACTION"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_occurrences",
+                "generation",
+                "NO ACTION",
+                1
+            ),
+            foreign_key_sequence(
+                "current_occurrence_id",
+                "session_occurrences",
+                "occurrence_id",
+                "NO ACTION",
+                2
+            ),
+        ]
+    ),
+    table!(
+        "session_summary_availability",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("summary_id", "TEXT", true, None, 3),
+            column("availability", "TEXT", true, None, 0),
+            column("source_horizon_json", "TEXT", true, None, 0),
+            column("reason", "TEXT", false, None, 0),
+            column("checked_at", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "session_id",
+                "session_temporal_generations",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_temporal_generations",
+                "generation",
+                "CASCADE",
+                1
+            ),
+            foreign_key(
+                "summary_id",
+                "session_summary_nodes",
+                "summary_id",
+                "NO ACTION"
+            ),
+        ]
+    ),
+    table!(
+        "session_temporal_migration_receipts",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("batch_ordinal", "INTEGER", true, None, 3),
+            column("source_digest", "TEXT", true, None, 0),
+            column("frozen_watermarks_json", "TEXT", true, None, 0),
+            column("imported_items", "INTEGER", true, None, 0),
+            column("committed_at", "INTEGER", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "session_id",
+                "session_temporal_generations",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_temporal_generations",
+                "generation",
+                "CASCADE",
+                1
+            ),
+        ]
+    ),
 ];
 
 pub(super) const REGISTRY_TABLE_NAMES: &[&str] = &[
@@ -876,6 +1710,332 @@ pub(super) const INDEXES: &[Index] = &[
             "provider_reference",
             "observation_sequence",
         ],
+    },
+    Index {
+        table: "session_summary_nodes",
+        name: Some("idx_session_summary_nodes_session_created"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "created_at"],
+    },
+    Index {
+        table: "session_summary_nodes",
+        name: Some("idx_session_summary_nodes_root_created_order"),
+        unique: false,
+        origin: "c",
+        columns: &["created_at", "session_id", "summary_id"],
+    },
+    Index {
+        table: "session_summary_sources",
+        name: Some("idx_session_summary_sources_anchor"),
+        unique: false,
+        origin: "c",
+        columns: &["source_anchor_id"],
+    },
+    Index {
+        table: "session_summary_sources",
+        name: Some("idx_session_summary_sources_summary"),
+        unique: false,
+        origin: "c",
+        columns: &["source_summary_id", "summary_id"],
+    },
+    Index {
+        table: "session_summary_successors",
+        name: Some("idx_session_summary_successors_successor"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "successor_summary_id",
+            "created_at",
+            "predecessor_summary_id",
+        ],
+    },
+    Index {
+        table: "session_external_payload_manifests",
+        name: Some("idx_session_external_payload_manifests_session"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id"],
+    },
+    Index {
+        table: "session_refresh_operations",
+        name: Some("idx_session_refresh_operations_join"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "request_digest", "state"],
+    },
+    Index {
+        table: "session_refresh_operations",
+        name: Some("idx_session_refresh_operations_state"),
+        unique: false,
+        origin: "c",
+        columns: &["state", "updated_at"],
+    },
+    Index {
+        table: "session_refresh_operations",
+        name: Some("idx_session_refresh_operations_one_running"),
+        unique: true,
+        origin: "c",
+        columns: &["session_id"],
+    },
+    Index {
+        table: "session_refresh_bindings",
+        name: None,
+        unique: true,
+        origin: "u",
+        columns: &["session_id", "generation"],
+    },
+    Index {
+        table: "session_refresh_batch_bindings",
+        name: None,
+        unique: true,
+        origin: "u",
+        columns: &["session_id", "generation", "batch_ordinal"],
+    },
+    Index {
+        table: "session_refresh_receipts",
+        name: Some("idx_session_refresh_receipts_session"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "terminal_at"],
+    },
+    Index {
+        table: "session_query_cursor_keys",
+        name: Some("idx_session_query_cursor_keys_active"),
+        unique: false,
+        origin: "c",
+        columns: &["retired_at", "key_version"],
+    },
+    Index {
+        table: "session_query_cursor_keys",
+        name: None,
+        unique: true,
+        origin: "u",
+        columns: &["key_version"],
+    },
+    Index {
+        table: "session_temporal_generations",
+        name: Some("idx_session_temporal_generations_session_state"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "state"],
+    },
+    Index {
+        table: "session_temporal_generations",
+        name: Some("idx_session_temporal_generations_one_active"),
+        unique: true,
+        origin: "c",
+        columns: &["session_id"],
+    },
+    Index {
+        table: "session_temporal_projection_receipts",
+        name: None,
+        unique: true,
+        origin: "u",
+        columns: &["session_id", "generation", "batch_digest"],
+    },
+    Index {
+        table: "session_temporal_observation_effects",
+        name: None,
+        unique: true,
+        origin: "u",
+        columns: &["observation_sequence"],
+    },
+    Index {
+        table: "session_temporal_observation_effects",
+        name: Some("idx_session_temporal_observation_effects_session"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "observation_sequence"],
+    },
+    Index {
+        table: "session_occurrences",
+        name: Some("idx_session_occurrences_generation_order"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation", "knowledge_at", "occurrence_id"],
+    },
+    Index {
+        table: "session_occurrences",
+        name: Some("idx_session_occurrences_root_generation_order"),
+        unique: false,
+        origin: "c",
+        columns: &["knowledge_at", "session_id", "occurrence_id", "generation"],
+    },
+    Index {
+        table: "session_occurrences",
+        name: Some("idx_session_occurrences_session_time"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "knowledge_at"],
+    },
+    Index {
+        table: "session_occurrences",
+        name: Some("idx_session_occurrences_anchor_order"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "session_id",
+            "generation",
+            "retrieval_anchor_id",
+            "knowledge_at",
+            "occurrence_id",
+        ],
+    },
+    Index {
+        table: "session_occurrences",
+        name: Some("idx_session_occurrences_message"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "session_id",
+            "generation",
+            "message_id",
+            "knowledge_at",
+            "occurrence_id",
+        ],
+    },
+    Index {
+        table: "session_occurrences",
+        name: Some("idx_session_occurrences_thread"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "session_id",
+            "generation",
+            "thread_id",
+            "knowledge_at",
+            "occurrence_id",
+        ],
+    },
+    Index {
+        table: "session_occurrences",
+        name: Some("idx_session_occurrences_turn"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "session_id",
+            "generation",
+            "turn_id",
+            "knowledge_at",
+            "occurrence_id",
+        ],
+    },
+    Index {
+        table: "session_occurrences",
+        name: Some("idx_session_occurrences_agent"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "session_id",
+            "generation",
+            "agent_id",
+            "knowledge_at",
+            "occurrence_id",
+        ],
+    },
+    Index {
+        table: "session_logical_copy_edges",
+        name: Some("idx_session_logical_copy_edges_target"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation", "copied_from_occurrence_id"],
+    },
+    Index {
+        table: "session_turn_members",
+        name: Some("idx_session_turn_members_occurrence"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation", "occurrence_id"],
+    },
+    Index {
+        table: "session_thread_hierarchy_edges",
+        name: Some("idx_session_thread_hierarchy_edges_child"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation", "child_thread_id"],
+    },
+    Index {
+        table: "session_agent_hierarchy_edges",
+        name: Some("idx_session_agent_hierarchy_edges_child"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation", "child_agent_id"],
+    },
+    Index {
+        table: "session_assertions",
+        name: Some("idx_session_assertions_subject"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation", "subject_anchor_id"],
+    },
+    Index {
+        table: "session_assertions",
+        name: Some("idx_session_assertions_object_order"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "session_id",
+            "generation",
+            "object_anchor_id",
+            "knowledge_at",
+            "assertion_id",
+        ],
+    },
+    Index {
+        table: "session_assertions",
+        name: Some("idx_session_assertions_kind_order"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "session_id",
+            "generation",
+            "assertion_kind",
+            "knowledge_at",
+            "assertion_id",
+        ],
+    },
+    Index {
+        table: "session_assertions",
+        name: Some("idx_session_assertions_generation_order"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation", "knowledge_at", "assertion_id"],
+    },
+    Index {
+        table: "session_assertion_supersession",
+        name: Some("idx_session_assertion_supersession_successor"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation", "superseding_assertion_id"],
+    },
+    Index {
+        table: "session_current_entities",
+        name: Some("idx_session_current_entities_assertion"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation", "current_assertion_id"],
+    },
+    Index {
+        table: "session_current_entities",
+        name: Some("idx_session_current_entities_occurrence"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation", "current_occurrence_id"],
+    },
+    Index {
+        table: "session_summary_availability",
+        name: Some("idx_session_summary_availability_generation"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "generation", "availability"],
+    },
+    Index {
+        table: "session_temporal_migration_receipts",
+        name: Some("idx_session_temporal_migration_receipts_source"),
+        unique: false,
+        origin: "c",
+        columns: &["session_id", "source_digest", "generation"],
     },
 ];
 

@@ -14,6 +14,7 @@ const PENDING_PAYLOAD_DELETE_ERROR_COUNT_KEY: &str = "pending_payload_delete_err
 struct PendingPayloadDelete {
     content_hash: Option<String>,
     byte_count: u64,
+    char_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -78,11 +79,13 @@ pub(crate) async fn stage_payload_delete(
     payload_ref: &str,
     content_hash: Option<&str>,
     byte_count: u64,
+    char_count: u64,
 ) -> Result<(), LcmError> {
     payload::validate_payload_ref(payload_ref)?;
     let pending = PendingPayloadDelete {
         content_hash: content_hash.map(str::to_string),
         byte_count,
+        char_count: Some(char_count),
     };
     let value = serde_json::to_string(&pending).map_err(|err| LcmError::Db(err.to_string()))?;
     schema::set_gc_meta(conn, &pending_payload_delete_key(payload_ref), &value).await
@@ -245,6 +248,7 @@ async fn drain_pending_payload_deletes_matching(
             &payload_ref,
             pending.content_hash.as_deref(),
             pending.byte_count,
+            pending.char_count,
         ) {
             Ok(removal) => removal,
             Err(err) => {
@@ -347,5 +351,23 @@ mod tests {
         assert_eq!(first.outcomes.failed.refs, ["payload_b.payload"]);
         assert_eq!(first.errors.len(), 1);
         assert_eq!(first.errors[0].payload_ref, "payload_b.payload");
+    }
+
+    #[test]
+    fn pending_delete_serializes_only_digest_and_sizes() {
+        let pending = PendingPayloadDelete {
+            content_hash: Some("digest".to_string()),
+            byte_count: 11,
+            char_count: Some(7),
+        };
+        let serialized = serde_json::to_value(pending).unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::json!({
+                "content_hash": "digest",
+                "byte_count": 11,
+                "char_count": 7,
+            })
+        );
     }
 }

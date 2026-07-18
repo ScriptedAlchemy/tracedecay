@@ -7,6 +7,7 @@
 pub mod memory;
 pub mod observation;
 pub mod projection;
+pub mod session;
 pub mod transcript;
 
 pub use memory::{
@@ -50,12 +51,13 @@ pub use memory::{
     CompatibilityLegacyMemoryCutoverProgressV1, CompatibilityMemoryAlgebraV1,
     CompatibilityMemoryFeedbackFunnelV1, CompatibilityMemoryRepairCommandV1,
     CompatibilityMemoryRepairStatsV1, CompatibilityMemoryStatusV1, CompatibilityProjectionStateV1,
-    CurrentFactsQuery, FactAsOfQuery, FactCommitConflict, FactCommitOutcome, FactCommitReceipt,
-    FactCompatibilityResult, FactCompatibilityStore, FactCompatibilityStoreError, FactCurrentQuery,
-    FactLineageCursor, FactLineageQuery, FactProposalPromotionStateV1, FactProposalStore,
-    FactProposalStoreError, FactStore, FactStoreError, FactStoreResult, FactWriteBatch,
-    LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery,
-    StoredFactV1,
+    CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitConflict, FactCommitOutcome,
+    FactCommitReceipt, FactCompatibilityResult, FactCompatibilityStore,
+    FactCompatibilityStoreError, FactContradictionStateV1, FactCurrentQuery, FactCurrentResponseV1,
+    FactLineageCursor, FactLineageQuery, FactLineageResponseV1, FactProposalPromotionStateV1,
+    FactProposalStore, FactProposalStoreError, FactQueryCoverageV1, FactStore, FactStoreError,
+    FactStoreResult, FactWriteBatch, LegacyFactQuery, MAX_FACT_QUERY_CONTRADICTIONS,
+    PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
 };
 pub use observation::{
     AnchoredObservationWrite, ObservationCommitReceipt, ObservationPersistOutcome,
@@ -74,6 +76,44 @@ pub use projection::{
     SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V3,
     SESSION_MESSAGE_PROJECTOR_VERSION_V4, SessionMessageProjection, WorkflowFactProjection,
     WorkflowFactRecord,
+};
+pub use session::{
+    MAX_SESSION_SUMMARY_SOURCE_ANCHORS, MAX_SESSION_TEMPORAL_MIGRATION_BATCH_ITEMS,
+    MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS, MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE,
+    SessionFrozenWatermarksV1, SessionGenerationActivateOperation, SessionGenerationActivatePermit,
+    SessionGenerationActivationReceiptV1, SessionGenerationActivationRequestV1,
+    SessionGenerationRebuildBeginOperation, SessionGenerationRebuildBeginPermit,
+    SessionGenerationRebuildDispositionV1, SessionGenerationRebuildReceiptV1,
+    SessionGenerationRebuildRequestV1, SessionProjectionBatchPersistOperation,
+    SessionProjectionBatchPersistPermit, SessionRefreshBeginOrJoinOperation,
+    SessionRefreshBeginOrJoinPermit, SessionRefreshBeginOrJoinReceiptV1,
+    SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancelOperation, SessionRefreshCancelPermit,
+    SessionRefreshCancellationRequestV1, SessionRefreshCompleteOperation,
+    SessionRefreshCompletePermit, SessionRefreshCompletionRequestV1, SessionRefreshDispositionV1,
+    SessionRefreshFailOperation, SessionRefreshFailPermit,
+    SessionRefreshFailureCodeInvalidReasonV1, SessionRefreshFailureCodeV1,
+    SessionRefreshFailureRequestV1, SessionRefreshFrontierV1,
+    SessionRefreshProgressPersistOperation, SessionRefreshProgressPersistPermit,
+    SessionRefreshProgressReadOperation, SessionRefreshProgressReadPermit,
+    SessionRefreshProgressRequestV1, SessionRefreshProgressV1, SessionRefreshReceiptReadOperation,
+    SessionRefreshReceiptReadPermit, SessionRefreshReceiptRequestV1, SessionRefreshReceiptV1,
+    SessionRefreshStateV1, SessionRefreshStore, SessionRefreshTerminalStateV1,
+    SessionRetrievalPageV1, SessionRetrievalStore, SessionSnapshotFreezeOperation,
+    SessionSnapshotFreezePermit, SessionStoreError, SessionStoreResult,
+    SessionSummaryPublicationDispositionV1, SessionSummaryPublicationReceiptV1,
+    SessionSummaryPublicationRequestV1, SessionSummaryPublishOrReplayOperation,
+    SessionSummaryPublishOrReplayPermit, SessionSummaryStore, SessionTemporalCapabilitiesV1,
+    SessionTemporalCapabilityProvider, SessionTemporalCapabilityV1,
+    SessionTemporalDigestInvalidReasonV1, SessionTemporalDigestV1,
+    SessionTemporalMigrationBatchApplyOperation, SessionTemporalMigrationBatchApplyPermit,
+    SessionTemporalMigrationBatchV1, SessionTemporalMigrationDispositionV1,
+    SessionTemporalMigrationReceiptReadOperation, SessionTemporalMigrationReceiptReadPermit,
+    SessionTemporalMigrationReceiptRequestV1, SessionTemporalMigrationReceiptV1,
+    SessionTemporalMigrationStore, SessionTemporalOperationPermit,
+    SessionTemporalPageRetrieveOperation, SessionTemporalPageRetrievePermit,
+    SessionTemporalProjectionBatchDispositionV1, SessionTemporalProjectionBatchReceiptV1,
+    SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore,
+    SessionTemporalRetrievalRequestV1, SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
 };
 pub use transcript::{
     ParseOffset, SessionMessageRecord, SessionRecord, TranscriptStore, TranscriptStoreError,

@@ -35,7 +35,10 @@ include = [
     "/benches/**",
     "/examples/**",
     "/tests/fixtures/redundancy_eval_labeled.json",
+    "/tests/fixtures/transcript_golden/cline_like/**",
     "/benchmarks/queries/default.toml",
+    "/benchmarks/pr8-temporal/**",
+    "/scripts/run-pr8-temporal-benchmark.sh",
     "/plugin/**",
     "/vendor/**",
     "/dashboard/shell/dist/**",
@@ -168,6 +171,8 @@ tiktoken-rs = { version = "0.12", optional = true }
 # We deliberately use the raw watcher (not notify-debouncer-full) and debounce
 # ourselves so a monorepo's git-ref churn coalesces into a single sync.
 notify = "6"
+hmac = { version = "0.13.0", features = ["zeroize"] }
+zeroize = "1.9.0"
 
 [target.'cfg(not(windows))'.dependencies]
 flate2 = "1"
@@ -198,6 +203,18 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fau
 [[bench]]
 name = "large_repos"
 harness = false
+
+[[bench]]
+name = "session_temporal"
+harness = false
+test = true
+
+[profile.bench]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+incremental = false
 
 # Workspace crates retain line tables and incremental state; dependencies omit
 # debuginfo to reduce compile, cache, and link costs. CI explicitly disables

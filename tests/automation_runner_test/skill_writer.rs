@@ -13,6 +13,27 @@ fn skill_writer_options_have_no_storage_selector() {
     );
 }
 
+#[test]
+fn skill_writer_evidence_uses_fresh_authorized_forensic_retrieval() {
+    let source = include_str!("../../src/automation/runner.rs");
+    let start = source
+        .find("async fn build_skill_writer_evidence")
+        .expect("skill writer evidence builder");
+    let end = source[start..]
+        .find("async fn skipped_session_reflector_run")
+        .map(|offset| start + offset)
+        .expect("session reflector skip helper");
+    let builder = &source[start..end];
+
+    assert!(!builder.contains(".lcm_grep("));
+    assert!(!builder.contains(".lcm_recent_sessions("));
+    assert!(!builder.contains(".lcm_session_replay_slice("));
+    assert!(!builder.contains(".session_tool_usage_rows("));
+    assert!(builder.contains("retrieve_automation_session_evidence("));
+    assert!(source.contains("SessionFreshnessPolicy::RequireFresh"));
+    assert!(source.contains("TemporalModeV1::Forensic"));
+}
+
 #[tokio::test]
 async fn skill_writer_runner_skips_when_task_is_disabled() {
     let temp = tempdir().unwrap();
@@ -43,6 +64,53 @@ async fn skill_writer_runner_skips_when_task_is_disabled() {
     assert_eq!(
         run.ledger_record.error.as_deref(),
         Some("skill_writer_disabled")
+    );
+}
+
+#[tokio::test]
+async fn skill_writer_fails_closed_on_denied_temporal_evidence() {
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let retrieval = RejectedAutomationSessionRetrieval::new("session_evidence_denied");
+
+    let run = tracedecay::automation::runner::run_skill_writer_with_backend_and_retrieval(
+        &cg,
+        &enabled_skill_writer_config(),
+        &backend,
+        &retrieval,
+        SkillWriterAutomationOptions {
+            profile_root: Some(profile_root.clone()),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        run.ledger_record.error.as_deref(),
+        Some("session_evidence_denied")
+    );
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "denied evidence must not write a ledger record"
+    );
+    assert!(
+        !profile_root.exists(),
+        "denied evidence must not create the managed-skill profile"
+    );
+    assert!(
+        !cg.store_layout()
+            .dashboard_root
+            .join("automation_outcomes.json")
+            .exists(),
+        "denied evidence must not refresh skill outcomes"
     );
 }
 
@@ -120,11 +188,17 @@ async fn skill_writer_replays_recent_sessions_without_keyword_matches() {
     let _global_db = isolate_global_db(&cg);
     let backend = SkillWriterReplayEvidenceBackend::new("skill-writer-replay-1");
     let config = enabled_skill_writer_config();
+    let retrieval = StaticAutomationSessionRetrieval::message(
+        "skill-writer-replay-1",
+        "skill-writer-replay-1-message-001",
+        "Ran the dashboard build twice before every release cut.",
+    );
 
-    let run = run_skill_writer_with_backend(
+    let run = tracedecay::automation::runner::run_skill_writer_with_backend_and_retrieval(
         &cg,
         &config,
         &backend,
+        &retrieval,
         SkillWriterAutomationOptions {
             profile_root: Some(profile_root),
             ..SkillWriterAutomationOptions::default()

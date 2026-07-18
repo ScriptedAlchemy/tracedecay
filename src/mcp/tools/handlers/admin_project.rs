@@ -57,6 +57,9 @@ enum AdminProjectAction {
         task: AutomationRunTask,
         options: Value,
     },
+    AutomationReconcile {
+        scope: crate::dashboard::AutomationReconcileScope,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,6 +207,7 @@ pub(super) async fn handle_admin_project(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&GlobalDb>,
+    automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
 ) -> Result<ToolResult> {
     let action: AdminProjectAction =
         serde_json::from_value(args).map_err(|error| TraceDecayError::Config {
@@ -214,6 +218,20 @@ pub(super) async fn handle_admin_project(
         AdminProjectAction::CounterReset => {
             cg.reset_local_counter().await?;
             json!({ "reset": true })
+        }
+        AdminProjectAction::AutomationReconcile { scope } => {
+            if scope != crate::dashboard::AutomationReconcileScope::Project {
+                return Err(TraceDecayError::Config {
+                    message:
+                        "profile automation reconciliation requires a projectless daemon request"
+                            .to_string(),
+                });
+            }
+            let outcome = match automation_scheduler_reconciler {
+                Some(reconcile) => reconcile().await,
+                None => crate::dashboard::AutomationSchedulerReconcileOutcome::OwnerUnavailable,
+            };
+            json!({ "scope": "project", "outcome": outcome })
         }
         AdminProjectAction::StatusAccounting => {
             let global_db = global_db.ok_or_else(|| TraceDecayError::Config {
@@ -609,6 +627,7 @@ mod tests {
                     "limit": 50,
                 }),
                 None,
+                None,
             )
             .await
             .unwrap(),
@@ -623,9 +642,14 @@ mod tests {
         );
 
         let viewed = tool_json(
-            &handle_admin_project(&cg, json!({ "action": "fact_view", "id": apply_id }), None)
-                .await
-                .unwrap(),
+            &handle_admin_project(
+                &cg,
+                json!({ "action": "fact_view", "id": apply_id }),
+                None,
+                None,
+            )
+            .await
+            .unwrap(),
         );
         assert_eq!(viewed["proposal"]["proposal_id"], apply_id);
         assert_eq!(viewed["proposal"]["state"], "pending_approval");
@@ -648,9 +672,14 @@ mod tests {
         assert!(!viewed_proposal.contains_key("applied_fact_id"));
 
         let fact = tool_json(
-            &handle_admin_project(&cg, json!({ "action": "fact_apply", "id": apply_id }), None)
-                .await
-                .unwrap(),
+            &handle_admin_project(
+                &cg,
+                json!({ "action": "fact_apply", "id": apply_id }),
+                None,
+                None,
+            )
+            .await
+            .unwrap(),
         );
         assert_eq!(fact["proposal"]["proposal_id"], apply_id);
         assert_eq!(fact["proposal"]["state"], "applied");
@@ -671,6 +700,7 @@ mod tests {
                     "reason": "not durable",
                 }),
                 None,
+                None,
             )
             .await
             .unwrap(),
@@ -688,6 +718,7 @@ mod tests {
                     "task": "memory_curation",
                     "options": { "max_clusters": 9, "min_confidence": 0.7 }
                 }),
+                None,
                 None,
             )
             .await
@@ -777,6 +808,16 @@ mod tests {
         let options = decode_options::<MemoryCurationOptions>(options).unwrap();
         assert_eq!(options.max_clusters, 12);
         assert!((options.min_confidence - 0.75).abs() < f64::EPSILON);
+        assert!(matches!(
+            serde_json::from_value::<AdminProjectAction>(json!({
+                "action": "automation_reconcile",
+                "scope": "project"
+            }))
+            .unwrap(),
+            AdminProjectAction::AutomationReconcile {
+                scope: crate::dashboard::AutomationReconcileScope::Project
+            }
+        ));
 
         let typed_run = serde_json::from_value::<MemoryCuratorAutomationRun>(json!({
             "run_id": "run-5",

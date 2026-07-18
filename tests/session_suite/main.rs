@@ -21,12 +21,18 @@ mod lcm_payload;
 mod lcm_query;
 mod lcm_raw;
 mod lcm_schema;
+mod lcm_summary_lineage_review;
 mod message_search_eval_test;
 mod observation_application;
 mod observation_projection;
 mod observation_store;
 mod observation_workflow_projection;
 mod structured_backfill;
+mod temporal_application;
+mod temporal_privacy;
+mod temporal_projection;
+mod temporal_refresh;
+mod temporal_refresh_application;
 mod transcript_backfill;
 mod transcript_store;
 

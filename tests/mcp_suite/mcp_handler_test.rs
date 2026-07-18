@@ -33,9 +33,9 @@ use tracedecay::automation::skill_usage::{
 };
 use tracedecay::errors::TraceDecayError;
 use tracedecay::global_db::GlobalDb;
-use tracedecay::mcp::{ToolResult, get_tool_definitions};
+use tracedecay::mcp::{McpServer, McpTransport, ToolResult, get_tool_definitions};
 use tracedecay::memory::store::MemoryStore;
-use tracedecay::sessions::cursor::{cursor_project_slug, open_project_session_db};
+use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::lcm::{
     LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
 };
@@ -47,6 +47,61 @@ use tracedecay::tracedecay::TraceDecay;
 
 pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 const MCP_TEST_RESPONSE_CHAR_LIMIT: usize = 15_000;
+
+#[derive(Default)]
+struct CaptureTransport {
+    output: String,
+}
+
+impl McpTransport for CaptureTransport {
+    async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+        Ok(None)
+    }
+
+    async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+        self.output.push_str(line);
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+async fn handle_real_server_tool_call(
+    server: &McpServer,
+    tool_name: &str,
+    mut arguments: Value,
+) -> Value {
+    if let Some(arguments) = arguments.as_object_mut() {
+        arguments
+            .entry("format".to_string())
+            .or_insert_with(|| json!("json"));
+    }
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments,
+        }
+    });
+    let mut transport = CaptureTransport::default();
+    server
+        .handle_and_write(&request.to_string(), &mut transport)
+        .await
+        .expect("real MCP server tool call");
+    let response: Value = serde_json::from_str(transport.output.trim()).expect("JSON-RPC response");
+    assert!(response["error"].is_null(), "{response}");
+    response["result"].clone()
+}
+
+fn extract_real_server_text(result: &Value) -> &str {
+    result["content"][0]["text"]
+        .as_str()
+        .expect("MCP text result")
+}
 
 struct TestDbConnection {
     _db: libsql::Database,
@@ -87,6 +142,47 @@ async fn open_test_db_connection(db_path: &Path) -> TestDbConnection {
     .await
     .unwrap();
     TestDbConnection { _db: db, conn }
+}
+
+async fn activate_test_temporal_generation(conn: &libsql::Connection, session_id: &str) -> i64 {
+    let mut rows = conn
+        .query(
+            "SELECT MAX(generation) FROM session_temporal_generations WHERE session_id = ?1",
+            [session_id],
+        )
+        .await
+        .unwrap();
+    let generation = rows
+        .next()
+        .await
+        .unwrap()
+        .and_then(|row| row.get::<Option<i64>>(0).ok().flatten())
+        .unwrap_or(1);
+    drop(rows);
+    let watermarks = json!({
+        "active_generation": generation,
+        "cursor_key": {"key_id": "cursor.test", "version": 1},
+        "projection_frontier": 1,
+        "source_frontier": 1,
+        "summary_frontier": 1,
+    })
+    .to_string();
+    conn.execute(
+        "INSERT INTO session_temporal_generations (
+             session_id, generation, state, frozen_watermarks_json,
+             created_at, ready_at, activated_at, completed_at
+         ) VALUES (?1, ?2, 'active', ?3, 1, 1, 1, NULL)
+         ON CONFLICT(session_id, generation) DO UPDATE SET
+             state = 'active',
+             frozen_watermarks_json = excluded.frozen_watermarks_json,
+             ready_at = 1,
+             activated_at = 1,
+             completed_at = NULL",
+        libsql::params![session_id, generation, watermarks],
+    )
+    .await
+    .unwrap();
+    generation
 }
 
 pub(crate) async fn handle_tool_call(
@@ -350,6 +446,22 @@ impl Drop for TestTraceDecay {
     }
 }
 
+async fn real_mcp_server(cg: TestTraceDecay) -> Arc<McpServer> {
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("test project id");
+    let project_root = cg.project_root().to_path_buf();
+    let registry = Arc::new(GlobalDb::open().await.expect("test registry"));
+    registry
+        .upsert_code_project(&project_id, &project_root, None, None, None)
+        .await
+        .expect("register test project");
+    McpServer::new_with_dbs(cg.into_inner(), None, None, Some(registry), false).await
+}
+
 /// Creates a temporary Rust project with cross-file calls, structs, impls,
 /// test files, and doc comments, then initialises and indexes a `TraceDecay`.
 pub(crate) async fn setup_project() -> (TestTraceDecay, TestProject) {
@@ -489,33 +601,6 @@ async fn open_active_project_session_db(cg: &TraceDecay) -> GlobalDb {
     GlobalDb::open_at(&project_session_db_path(cg))
         .await
         .expect("active project-local session db should open")
-}
-
-async fn message_search_with_project_session_authority(
-    cg: &TraceDecay,
-    mut args: Value,
-    session_db: &Arc<GlobalDb>,
-) -> tracedecay::errors::Result<ToolResult> {
-    if let Some(object) = args.as_object_mut() {
-        object
-            .entry("format".to_owned())
-            .or_insert_with(|| json!("json"));
-    }
-    tracedecay::mcp::tools::handle_tool_call_with_registry_and_implicit_project(
-        cg,
-        "tracedecay_message_search",
-        args,
-        None,
-        None,
-        tracedecay::mcp::tools::ToolCallRegistryOptions {
-            session_authorities: tracedecay::mcp::tools::SessionAuthorities::new(
-                Some(session_db),
-                None,
-            ),
-            ..Default::default()
-        },
-    )
-    .await
 }
 
 /// Creates a small Rust library with an integration-style test that calls a
@@ -772,15 +857,6 @@ fn extract_first_json_content(value: &Value) -> Value {
         .unwrap_or_else(|| panic!("missing JSON content item in {value}"))
 }
 
-fn metadata_value_at(value: &Value) -> Value {
-    serde_json::from_str(
-        value
-            .as_str()
-            .expect("metadata_json should be returned as a JSON string"),
-    )
-    .expect("metadata_json should parse")
-}
-
 fn assert_fact_results(payload: &Value, included: &str, excluded: &str, context: &str) {
     assert_eq!(payload["count"].as_u64(), Some(1), "{context}: {payload}");
     let results = payload["results"].to_string();
@@ -837,6 +913,9 @@ async fn seed_project_registry(db_path: &Path, project_root: &Path) {
             Some("https://token:secret@example.test/alpha.git"),
             Some("main"),
         )
+        .await
+        .unwrap();
+    db.upsert_project_alias(Path::new("registered-alias"), &project.project_id)
         .await
         .unwrap();
     let store = db
@@ -1032,6 +1111,36 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         context_payload["stores"][0]["artifacts"][0]["artifact_kind"],
         "graph_db"
     );
+
+    let alias_context = handle_tool_call(
+        &cg,
+        "tracedecay_project_context",
+        json!({"path": "registered-alias", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let alias_payload: Value = serde_json::from_str(extract_text(&alias_context.value)).unwrap();
+    assert_eq!(alias_payload["status"], "ok");
+    assert_eq!(alias_payload["project"]["project_id"], "proj_alpha");
+    assert_eq!(
+        alias_payload["project"]["display_root"],
+        cg.project_root().to_string_lossy().as_ref()
+    );
+
+    let unknown_alias = handle_tool_call(
+        &cg,
+        "tracedecay_project_context",
+        json!({"path": "unknown-alias", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let unknown_payload: Value = serde_json::from_str(extract_text(&unknown_alias.value)).unwrap();
+    assert_eq!(unknown_payload["status"], "not_found");
+    assert!(unknown_payload["project"].is_null());
 }
 
 /// When no project registry is present for the profile, `tracedecay_project_list`
@@ -1259,20 +1368,6 @@ fn assert_schema_requires(
     assert_eq!(
         actual, expected,
         "{tool_name} schema required arguments drifted from handler parser expectations"
-    );
-}
-
-fn assert_nested_schema_requires(
-    tools: &[tracedecay::mcp::ToolDefinition],
-    tool_name: &str,
-    path: &[&str],
-    expected: &[&str],
-) {
-    let schema = tool_schema(tools, tool_name);
-    let actual = required_args_at(schema, path);
-    assert_eq!(
-        actual, expected,
-        "{tool_name} schema required arguments at {path:?} drifted from handler parser expectations"
     );
 }
 
@@ -1596,7 +1691,17 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         "tracedecay_lcm_expand",
         &["provider", "session_id", "target"],
     );
-    assert_nested_schema_requires(&tools, "tracedecay_lcm_expand", &["target"], &["kind"]);
+    let expand = tool_schema(&tools, "tracedecay_lcm_expand");
+    let target_branches = expand["properties"]["target"]["oneOf"]
+        .as_array()
+        .expect("closed target branches");
+    assert_eq!(target_branches.len(), 3);
+    assert_eq!(target_branches[0]["required"], json!(["kind", "store_id"]));
+    assert_eq!(target_branches[1]["required"], json!(["kind", "node_id"]));
+    assert_eq!(
+        target_branches[2]["required"],
+        json!(["kind", "payload_ref"])
+    );
     expect_missing_argument_error(
         &cg,
         "tracedecay_lcm_expand",
@@ -1643,6 +1748,17 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
             .unwrap_or_else(|| panic!("{read_only} definition"));
         assert_eq!(tool.input_schema["type"], "object");
         assert_eq!(tool.annotations.as_ref().unwrap()["readOnlyHint"], true);
+    }
+
+    for name in ["tracedecay_lcm_describe", "tracedecay_lcm_expand"] {
+        let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+        assert_eq!(tool.input_schema["additionalProperties"], false);
+        for branch in tool.input_schema["properties"]["target"]["oneOf"]
+            .as_array()
+            .unwrap()
+        {
+            assert_eq!(branch["additionalProperties"], false);
+        }
     }
 
     for mutating in [
@@ -3541,6 +3657,30 @@ async fn test_status() {
     assert!(
         text.contains("branch_diagnostics"),
         "status should include branch diagnostics"
+    );
+}
+
+#[tokio::test]
+async fn status_can_omit_verbose_branch_diagnostics() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_status",
+        json!({"include_branch_diagnostics": false}),
+        Some(json!({"uptime": 100})),
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+
+    assert!(
+        text.contains("node_count"),
+        "status must retain graph stats"
+    );
+    assert!(
+        !text.contains("branch_diagnostics"),
+        "compact status must omit the unbounded branch payload"
     );
 }
 
@@ -8210,71 +8350,6 @@ async fn user_memory_scope_is_profile_level_and_isolated_from_project_memory() {
 }
 
 #[tokio::test]
-async fn hermes_live_preflight_projects_stable_turns_into_the_active_project() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    handle_tool_call(
-        &cg,
-        "tracedecay_lcm_preflight",
-        json!({
-            "provider": "hermes",
-            "session_id": "hermes-live-session",
-            "transcript_projection": true,
-            "messages": [
-                {
-                    "id": "hermes-live-user-1",
-                    "role": "user",
-                    "content": "Correlate this Hermes turn with orchard routing",
-                    "timestamp": 1_783_700_000.0
-                },
-                {
-                    "id": "hermes-live-assistant-1",
-                    "role": "assistant",
-                    "content": "The turn is routed to the active project.",
-                    "timestamp": 1_783_700_001.0
-                }
-            ]
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let search = handle_tool_call(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "query": "orchard routing",
-            "provider": "hermes",
-            "catch_up": false,
-            "format": "json"
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let search = extract_json(&search.value);
-    assert_eq!(search["count"].as_u64(), Some(1));
-    assert_eq!(
-        search["results"][0]["session"]["session_id"],
-        "hermes-live-session"
-    );
-    assert_eq!(
-        search["results"][0]["session"]["project_path"],
-        cg.project_root().to_string_lossy().as_ref()
-    );
-    assert_eq!(
-        search["results"][0]["message"]["metadata_json"]
-            .as_str()
-            .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
-            .and_then(|metadata| metadata["location_provenance"].as_str().map(str::to_string))
-            .as_deref(),
-        Some("host_live_route")
-    );
-}
-
-#[tokio::test]
 async fn memory_fact_store_update_rejects_secret_like_content_with_diff_report() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let added = handle_tool_call(
@@ -8677,622 +8752,6 @@ async fn memory_tools_validate_malformed_inputs() {
     assert!(expect_tool_error(missing_feedback_action).contains("helpful"));
 }
 
-#[tokio::test]
-async fn message_search_reads_project_local_session_db() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let db = open_active_project_session_db(&cg).await;
-    let session = SessionRecord {
-        provider: "cursor".to_string(),
-        session_id: "cursor-session".to_string(),
-        project_key: cg.project_root().to_string_lossy().to_string(),
-        project_path: cg.project_root().to_string_lossy().to_string(),
-        title: Some("Cursor transcript".to_string()),
-        started_at: Some(1),
-        ended_at: None,
-        transcript_path: Some("cursor-session.jsonl".to_string()),
-        metadata_json: None,
-        parent_session_id: None,
-        is_subagent: false,
-        agent_id: None,
-        parent_tool_use_id: None,
-    };
-    assert!(db.upsert_session(&session).await);
-    let child_session = SessionRecord {
-        provider: "cursor".to_string(),
-        session_id: "worker-1".to_string(),
-        project_key: cg.project_root().to_string_lossy().to_string(),
-        project_path: cg.project_root().to_string_lossy().to_string(),
-        title: Some("Cursor subagent".to_string()),
-        started_at: Some(3),
-        ended_at: None,
-        transcript_path: Some("worker-1.jsonl".to_string()),
-        metadata_json: None,
-        parent_session_id: Some("cursor-session".to_string()),
-        is_subagent: true,
-        agent_id: Some("worker-1".to_string()),
-        parent_tool_use_id: None,
-    };
-    assert!(db.upsert_session(&child_session).await);
-    let codex_session = SessionRecord {
-        provider: "codex".to_string(),
-        session_id: "codex-session".to_string(),
-        project_key: cg.project_root().to_string_lossy().to_string(),
-        project_path: cg.project_root().to_string_lossy().to_string(),
-        title: Some("Codex transcript".to_string()),
-        started_at: Some(5),
-        ended_at: None,
-        transcript_path: Some("codex-session.jsonl".to_string()),
-        metadata_json: None,
-        parent_session_id: None,
-        is_subagent: false,
-        agent_id: None,
-        parent_tool_use_id: None,
-    };
-    assert!(db.upsert_session(&codex_session).await);
-    assert!(
-        db.upsert_session_message(&SessionMessageRecord {
-            provider: "cursor".to_string(),
-            message_id: "cursor-message".to_string(),
-            session_id: "cursor-session".to_string(),
-            role: "user".to_string(),
-            timestamp: Some(2),
-            ordinal: 1,
-            text: "Project-local transcript search is working.".to_string(),
-            kind: Some("message".to_string()),
-            model: Some("test-model".to_string()),
-            tool_names: None,
-            source_path: Some("cursor-session.jsonl".to_string()),
-            source_offset: Some(0),
-            metadata_json: None,
-        })
-        .await
-    );
-    assert!(
-        db.upsert_session_message(&SessionMessageRecord {
-            provider: "codex".to_string(),
-            message_id: "codex-message".to_string(),
-            session_id: "codex-session".to_string(),
-            role: "assistant".to_string(),
-            timestamp: Some(6),
-            ordinal: 1,
-            text: "Project-local transcript search is also working for Codex.".to_string(),
-            kind: Some("message".to_string()),
-            model: Some("test-model".to_string()),
-            tool_names: None,
-            source_path: Some("codex-session.jsonl".to_string()),
-            source_offset: Some(0),
-            metadata_json: None,
-        })
-        .await
-    );
-    assert!(
-        db.upsert_session_message(&SessionMessageRecord {
-            provider: "cursor".to_string(),
-            message_id: "worker-message".to_string(),
-            session_id: "worker-1".to_string(),
-            role: "assistant".to_string(),
-            timestamp: Some(4),
-            ordinal: 1,
-            text: "Subagent citrus evidence is linked to its parent.".to_string(),
-            kind: Some("message".to_string()),
-            model: Some("test-model".to_string()),
-            tool_names: None,
-            source_path: Some("worker-1.jsonl".to_string()),
-            source_offset: Some(0),
-            metadata_json: None,
-        })
-        .await
-    );
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "query": "transcript search",
-            "provider": "cursor",
-            "limit": 5,
-            "catch_up": false
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let parsed = extract_json(&result.value);
-    assert_eq!(parsed["status"], "ok");
-    assert_eq!(parsed["provider"], "cursor");
-    assert_eq!(parsed["requested_provider"], "cursor");
-    assert_eq!(parsed["count"], 1);
-    assert_eq!(
-        parsed["results"][0]["message"]["message_id"],
-        "cursor-message"
-    );
-    assert_eq!(
-        parsed["results"][0]["session"]["project_key"],
-        cg.project_root().to_string_lossy().to_string()
-    );
-
-    let all_provider_result = handle_tool_call(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "query": "transcript search",
-            "limit": 5,
-            "catch_up": false
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let all_provider_parsed = extract_json(&all_provider_result.value);
-    assert_eq!(all_provider_parsed["status"], "ok");
-    assert_eq!(all_provider_parsed["provider"], "all");
-    assert_eq!(all_provider_parsed["count"], 2);
-    let providers = all_provider_parsed["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|result| result["message"]["provider"].as_str().unwrap())
-        .collect::<std::collections::HashSet<_>>();
-    assert!(providers.contains("cursor"));
-    assert!(providers.contains("codex"));
-
-    let subagent_result = handle_tool_call(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "query": "citrus evidence",
-            "provider": "cursor",
-            "parent_session_id": "cursor-session",
-            "scope": "subagents_only",
-            "catch_up": false
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let subagent_parsed = extract_json(&subagent_result.value);
-    assert_eq!(subagent_parsed["status"], "ok");
-    assert_eq!(subagent_parsed["scope"], "subagents_only");
-    assert_eq!(subagent_parsed["parent_session_id"], "cursor-session");
-    assert_eq!(subagent_parsed["count"], 1);
-    assert_eq!(
-        subagent_parsed["results"][0]["session"]["parent_session_id"],
-        "cursor-session"
-    );
-    assert_eq!(
-        subagent_parsed["results"][0]["session"]["is_subagent"],
-        true
-    );
-}
-
-#[tokio::test]
-async fn mcp_session_retrieval_preserves_observed_location_metadata() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let metadata = json!({
-        "metadata_provenance": "transcript_record",
-        "codex_turn_cwd": "/repo/.worktrees/feature-a",
-        "codex_turn_worktree": "/repo/.worktrees/feature-a",
-        "codex_git_branch": "codex/feature-a",
-        "codex_git_repository": "/repo"
-    });
-    let metadata_json = metadata.to_string();
-
-    seed_lcm_session_message_with_metadata_for_provider(
-        &cg,
-        "codex",
-        "location-session",
-        "location-message",
-        "observed location metadata token",
-        1,
-        &metadata_json,
-    )
-    .await;
-
-    let search = handle_tool_call(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "query": "observed location metadata",
-            "provider": "codex",
-            "limit": 5,
-            "catch_up": false
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let search_payload = extract_json(&search.value);
-    assert_eq!(search_payload["status"], "ok");
-    assert_eq!(search_payload["count"], 1);
-    assert_eq!(
-        metadata_value_at(&search_payload["results"][0]["message"]["metadata_json"]),
-        metadata
-    );
-
-    let loaded = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_load_session",
-        json!({
-            "provider": "codex",
-            "session_id": "location-session",
-            "limit": 5
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let loaded_payload = extract_json(&loaded.value);
-    assert_eq!(loaded_payload["status"], "ok");
-    assert_eq!(
-        metadata_value_at(&loaded_payload["messages"][0]["metadata_json"]),
-        metadata
-    );
-
-    let store_id = lcm_raw_store_id_for_provider(&cg, "codex", "location-message").await;
-    let expanded = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_expand",
-        json!({
-            "provider": "codex",
-            "session_id": "location-session",
-            "target": {"kind": "raw_message", "store_id": store_id}
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let expanded_payload = extract_json(&expanded.value);
-    assert_eq!(expanded_payload["status"], "ok");
-    assert_eq!(
-        metadata_value_at(&expanded_payload["expansion"]["raw_message"]["metadata_json"]),
-        metadata
-    );
-}
-
-#[tokio::test]
-async fn message_search_catches_up_provider_transcripts_before_querying() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let session_db = Arc::new(open_active_project_session_db(&cg).await);
-    let home = cg.project_root().join("home");
-    let project = cg.project_root().to_path_buf();
-    let project_text = project.to_string_lossy();
-
-    let codex_dir = home.join(".codex/sessions/2026/01/01");
-    fs::create_dir_all(&codex_dir).unwrap();
-    let codex_transcript = codex_dir.join("rollout-2026-01-01T00-00-00-codex-catchup.jsonl");
-    fs::write(
-        &codex_transcript,
-        format!(
-            "{}\n{}\n",
-            json!({
-                "timestamp": "2026-01-01T00:00:00.000Z",
-                "type": "session_meta",
-                "payload": {"id": "codex-catchup", "cwd": project_text}
-            }),
-            json!({
-                "timestamp": "2026-01-01T00:00:01.000Z",
-                "type": "event_msg",
-                "payload": {
-                    "type": "user_message",
-                    "message": "Codex provider catchup sees rsbuild recall evidence."
-                }
-            })
-        ),
-    )
-    .unwrap();
-
-    let cursor_slug = cursor_project_slug(&project).expect("test project should have cursor slug");
-    let cursor_dir = home
-        .join(".cursor/projects")
-        .join(cursor_slug)
-        .join("agent-transcripts");
-    fs::create_dir_all(&cursor_dir).unwrap();
-    fs::write(
-        cursor_dir.join("cursor-catchup.jsonl"),
-        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Cursor provider catchup sees rsbuild recall evidence."}]}}
-"#,
-    )
-    .unwrap();
-
-    let codex_result = message_search_with_project_session_authority(
-        &cg,
-        json!({
-            "query": "codex provider catchup",
-            "provider": "codex",
-            "limit": 5
-        }),
-        &session_db,
-    )
-    .await
-    .unwrap();
-    let codex = extract_json(&codex_result.value);
-    assert_eq!(codex["status"], "ok");
-    assert_eq!(codex["count"], 1);
-    assert_eq!(codex["results"][0]["message"]["provider"], "codex");
-
-    use std::io::Write;
-    let mut codex_append = fs::OpenOptions::new()
-        .append(true)
-        .open(&codex_transcript)
-        .unwrap();
-    writeln!(
-        codex_append,
-        "{}",
-        json!({
-            "timestamp": "2026-01-01T00:00:02.000Z",
-            "type": "event_msg",
-            "payload": {
-                "type": "user_message",
-                "message": "deterministic-provider-only-token appears in appended transcript evidence."
-            }
-        })
-    )
-    .unwrap();
-
-    let appended_codex_result = message_search_with_project_session_authority(
-        &cg,
-        json!({
-            "query": "deterministic-provider-only-token",
-            "provider": "codex",
-            "limit": 5
-        }),
-        &session_db,
-    )
-    .await
-    .unwrap();
-    let appended_codex = extract_json(&appended_codex_result.value);
-    assert_eq!(appended_codex["status"], "ok");
-    assert_eq!(appended_codex["catch_up"], true);
-    assert_eq!(appended_codex["catch_up_performed"], true);
-    assert_eq!(appended_codex["count"], 1);
-    assert_eq!(appended_codex["results"][0]["message"]["provider"], "codex");
-
-    let requested_codex_unified_result = message_search_with_project_session_authority(
-        &cg,
-        json!({
-            "query": "rsbuild recall evidence",
-            "provider": "codex",
-            "limit": 5
-        }),
-        &session_db,
-    )
-    .await
-    .unwrap();
-    let requested_codex_unified = extract_json(&requested_codex_unified_result.value);
-    assert_eq!(requested_codex_unified["status"], "ok");
-    assert_eq!(requested_codex_unified["provider"], "codex");
-    assert_eq!(requested_codex_unified["requested_provider"], "codex");
-    let requested_codex_providers = requested_codex_unified["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|result| result["message"]["provider"].as_str().unwrap())
-        .collect::<std::collections::HashSet<_>>();
-    assert!(requested_codex_providers.contains("codex"));
-    assert!(!requested_codex_providers.contains("cursor"));
-    let db = open_active_project_session_db(&cg).await;
-    let ingested_cursor = db
-        .search_session_messages("cursor", None, "cursor provider catchup", 10)
-        .await;
-    assert_eq!(
-        ingested_cursor.len(),
-        0,
-        "provider-scoped search should only ingest the requested provider"
-    );
-
-    let cursor_result = message_search_with_project_session_authority(
-        &cg,
-        json!({
-            "query": "cursor provider catchup",
-            "provider": "cursor",
-            "limit": 5
-        }),
-        &session_db,
-    )
-    .await
-    .unwrap();
-    let cursor = extract_json(&cursor_result.value);
-    assert_eq!(cursor["status"], "ok");
-    assert_eq!(cursor["count"], 1);
-    assert_eq!(cursor["results"][0]["message"]["provider"], "cursor");
-
-    let all_result = message_search_with_project_session_authority(
-        &cg,
-        json!({"query": "rsbuild recall evidence", "limit": 5}),
-        &session_db,
-    )
-    .await
-    .unwrap();
-    let all = extract_json(&all_result.value);
-    assert_eq!(all["status"], "ok");
-    assert_eq!(all["provider"], "all");
-    let providers = all["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|result| result["message"]["provider"].as_str().unwrap())
-        .collect::<std::collections::HashSet<_>>();
-    assert!(providers.contains("codex"));
-    assert!(providers.contains("cursor"));
-}
-
-#[tokio::test]
-async fn message_search_can_skip_catch_up_for_read_only_audits() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let session_db = Arc::new(open_active_project_session_db(&cg).await);
-    let home = cg.project_root().join("home");
-    let project = cg.project_root().to_path_buf();
-    let project_text = project.to_string_lossy();
-
-    let codex_dir = home.join(".codex/sessions/2026/01/01");
-    fs::create_dir_all(&codex_dir).unwrap();
-    fs::write(
-        codex_dir.join("rollout-2026-01-01T00-00-00-codex-readonly.jsonl"),
-        format!(
-            "{}\n{}\n",
-            json!({
-                "timestamp": "2026-01-01T00:00:00.000Z",
-                "type": "session_meta",
-                "payload": {"id": "codex-readonly", "cwd": project_text}
-            }),
-            json!({
-                "timestamp": "2026-01-01T00:00:01.000Z",
-                "type": "event_msg",
-                "payload": {
-                    "type": "user_message",
-                    "message": "Read only transcript catchup should not import this."
-                }
-            })
-        ),
-    )
-    .unwrap();
-
-    let read_only_result = message_search_with_project_session_authority(
-        &cg,
-        json!({
-            "query": "read only transcript catchup",
-            "provider": "codex",
-            "catch_up": false,
-            "limit": 5
-        }),
-        &session_db,
-    )
-    .await
-    .unwrap();
-    let read_only = extract_json(&read_only_result.value);
-    assert_eq!(read_only["status"], "ok");
-    assert_eq!(read_only["catch_up"], false);
-    assert_eq!(read_only["count"], 0);
-
-    let db = open_active_project_session_db(&cg).await;
-    let skipped = db
-        .search_session_messages("codex", None, "read only transcript catchup", 10)
-        .await;
-    assert!(
-        skipped.is_empty(),
-        "catch_up=false must not ingest provider transcripts"
-    );
-
-    let catch_up_result = message_search_with_project_session_authority(
-        &cg,
-        json!({
-            "query": "read only transcript catchup",
-            "provider": "codex",
-            "limit": 5
-        }),
-        &session_db,
-    )
-    .await
-    .unwrap();
-    let catch_up = extract_json(&catch_up_result.value);
-    assert_eq!(catch_up["status"], "ok");
-    assert_eq!(catch_up["catch_up"], true);
-    assert_eq!(catch_up["count"], 1);
-    assert_eq!(catch_up["results"][0]["message"]["provider"], "codex");
-}
-
-#[tokio::test]
-async fn message_search_reads_profile_sharded_session_db() {
-    let _guard = GLOBAL_DB_ENV_LOCK.lock().await;
-    let dir = test_temp_dir();
-    let project = dir.path().join("repo");
-    let home = dir.path().join("home");
-    let shard_root = home.join(".tracedecay/projects/proj_123");
-    fs::create_dir_all(project.join(".tracedecay")).unwrap();
-    fs::create_dir_all(&shard_root).unwrap();
-    fs::write(
-        project.join(".tracedecay/enrollment.json"),
-        r#"{"project_id":"proj_123","storage_mode":"profile_sharded"}"#,
-    )
-    .unwrap();
-    let _home_guard = HomeEnvGuard::set(&home);
-    let config = tracedecay::config::TraceDecayConfig {
-        root_dir: project.to_string_lossy().to_string(),
-        ..tracedecay::config::TraceDecayConfig::default()
-    };
-    fs::write(
-        shard_root.join("config.json"),
-        serde_json::to_string_pretty(&config).unwrap(),
-    )
-    .unwrap();
-    crate::common::initialize_test_database(&shard_root.join("tracedecay.db"))
-        .await
-        .unwrap();
-    let meta = tracedecay::branch_meta::BranchMeta::new_for_dir(&shard_root, "main");
-    tracedecay::branch_meta::save_branch_meta(&shard_root, &meta).unwrap();
-    let cg = TestTraceDecay::new(TraceDecay::open(&project).await.unwrap());
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("profile-sharded session db should open");
-    assert!(
-        db.upsert_session(&SessionRecord {
-            provider: "cursor".to_string(),
-            session_id: "profile-session".to_string(),
-            project_key: project.to_string_lossy().to_string(),
-            project_path: project.to_string_lossy().to_string(),
-            title: Some("Profile shard".to_string()),
-            started_at: Some(10),
-            ended_at: None,
-            transcript_path: Some("profile-session.jsonl".to_string()),
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await
-    );
-    assert!(
-        db.upsert_session_message(&SessionMessageRecord {
-            provider: "cursor".to_string(),
-            message_id: "profile-message".to_string(),
-            session_id: "profile-session".to_string(),
-            role: "user".to_string(),
-            timestamp: Some(11),
-            ordinal: 1,
-            text: "Profile shard transcript search is working.".to_string(),
-            kind: Some("message".to_string()),
-            model: Some("test-model".to_string()),
-            tool_names: None,
-            source_path: Some("profile-session.jsonl".to_string()),
-            source_offset: Some(0),
-            metadata_json: None,
-        })
-        .await
-    );
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "query": "profile shard transcript",
-            "provider": "cursor",
-            "limit": 5,
-            "catch_up": false
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let parsed = extract_json(&result.value);
-
-    assert_eq!(parsed["status"], "ok");
-    assert_eq!(parsed["count"], 1);
-    assert_eq!(
-        parsed["results"][0]["message"]["message_id"],
-        "profile-message"
-    );
-    assert!(shard_root.join("sessions.db").is_file());
-    assert!(!project.join(".tracedecay/sessions.db").exists());
-}
-
 async fn seed_lcm_session_message(
     cg: &TraceDecay,
     session_id: &str,
@@ -9346,54 +8805,6 @@ async fn seed_lcm_session_message_for_provider(
             source_path: Some(format!("{session_id}.jsonl")),
             source_offset: Some(0),
             metadata_json: None,
-        })
-        .await
-    );
-}
-
-async fn seed_lcm_session_message_with_metadata_for_provider(
-    cg: &TraceDecay,
-    provider: &str,
-    session_id: &str,
-    message_id: &str,
-    text: impl Into<String>,
-    ordinal: i64,
-    metadata_json: &str,
-) {
-    let db = open_active_project_session_db(cg).await;
-    assert!(
-        db.upsert_session(&SessionRecord {
-            provider: provider.to_string(),
-            session_id: session_id.to_string(),
-            project_key: cg.project_root().to_string_lossy().to_string(),
-            project_path: cg.project_root().to_string_lossy().to_string(),
-            title: Some(format!("LCM session {session_id}")),
-            started_at: Some(ordinal),
-            ended_at: None,
-            transcript_path: Some(format!("{session_id}.jsonl")),
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await
-    );
-    assert!(
-        db.upsert_session_message(&SessionMessageRecord {
-            provider: provider.to_string(),
-            message_id: message_id.to_string(),
-            session_id: session_id.to_string(),
-            role: "assistant".to_string(),
-            timestamp: Some(ordinal + 1),
-            ordinal,
-            text: text.into(),
-            kind: Some("message".to_string()),
-            model: Some("test-model".to_string()),
-            tool_names: None,
-            source_path: Some(format!("{session_id}.jsonl")),
-            source_offset: Some(0),
-            metadata_json: Some(metadata_json.to_string()),
         })
         .await
     );
@@ -10711,27 +10122,6 @@ async fn user_scoped_lcm_preflight_ingests_without_a_project() {
         .await
         .unwrap();
     assert_eq!(session.project_key, "user");
-
-    let search = tracedecay::mcp::tools::handle_user_lcm_tool(
-        "tracedecay_message_search",
-        json!({
-            "storage_scope": "user",
-            "provider": "hermes",
-            "query": "general preference",
-            "catch_up": false,
-            "format": "json"
-        }),
-        profile.path(),
-    )
-    .await
-    .unwrap();
-    let search_payload: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
-    assert_eq!(search_payload["status"], "ok");
-    assert_eq!(search_payload["count"], 1);
-    assert_eq!(
-        search_payload["results"][0]["session"]["project_key"],
-        "user"
-    );
 }
 
 #[tokio::test]
@@ -11706,21 +11096,35 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
         })
         .await
         .expect("summary should insert");
+    let temporal = open_test_db_connection(&project_session_db_path(&cg)).await;
+    let generation = activate_test_temporal_generation(&temporal, "lcm-describe-targets").await;
+    temporal
+        .execute(
+            "INSERT OR REPLACE INTO session_summary_availability (
+                 session_id, generation, summary_id, availability,
+                 source_horizon_json, reason, checked_at
+             )
+             SELECT session_id, ?1, summary_id, 'available',
+                    source_horizon_json, NULL, 1
+             FROM session_summary_nodes
+             WHERE summary_id = ?2",
+            libsql::params![generation, summary.node_id.as_str()],
+        )
+        .await
+        .unwrap();
+    let server = real_mcp_server(cg).await;
 
-    let node_result = handle_tool_call(
-        &cg,
+    let node_result = handle_real_server_tool_call(
+        &server,
         "tracedecay_lcm_describe",
         json!({
             "provider": "cursor",
             "session_id": "lcm-describe-targets",
             "target": {"kind": "summary_node", "node_id": summary.node_id.clone()}
         }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let node_payload: Value = serde_json::from_str(extract_text(&node_result.value)).unwrap();
+    .await;
+    let node_payload: Value = serde_json::from_str(extract_real_server_text(&node_result)).unwrap();
     assert_eq!(node_payload["status"], "ok");
     assert_eq!(node_payload["description"]["target"], "summary_node");
     assert_eq!(
@@ -11731,42 +11135,48 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
         node_payload["description"]["summary_node"]["source_count"],
         1
     );
+    assert_eq!(node_payload["grain"], "summary");
+    assert_eq!(node_payload["state"], "available");
+    assert_eq!(node_payload["anchors"].as_array().unwrap().len(), 1);
+    assert!(node_payload["watermarks"]["generation"].as_u64().unwrap() > 0);
+    assert_eq!(node_payload["coverage"]["visible"], 1);
+    assert_eq!(node_payload["lineage"].as_array().unwrap().len(), 1);
 
-    let payload_result = handle_tool_call(
-        &cg,
+    let payload_result = handle_real_server_tool_call(
+        &server,
         "tracedecay_lcm_describe",
         json!({
             "provider": "cursor",
             "session_id": "lcm-describe-targets",
             "target": {"kind": "external_payload", "payload_ref": payload_ref.clone()}
         }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let payload_payload: Value = serde_json::from_str(extract_text(&payload_result.value)).unwrap();
+    .await;
+    let payload_payload: Value =
+        serde_json::from_str(extract_real_server_text(&payload_result)).unwrap();
     assert_eq!(payload_payload["status"], "ok");
     assert_eq!(payload_payload["description"]["target"], "external_payload");
     assert_eq!(
         payload_payload["description"]["external_payload"]["payload_ref"],
         payload_ref
     );
-    assert!(
-        payload_payload["description"]["external_payload"]["content_preview"]
-            .as_str()
-            .unwrap()
-            .contains(payload_ref.as_str())
+    assert_eq!(
+        payload_payload["description"]["external_payload"]["content_preview"],
+        ""
     );
+    assert_eq!(payload_payload["grain"], "occurrence");
+    assert_eq!(payload_payload["state"], "available");
+    assert_eq!(payload_payload["anchors"].as_array().unwrap().len(), 1);
 
     let rendered = format!(
         "{}\n{}",
-        extract_text(&node_result.value),
-        extract_text(&payload_result.value)
+        extract_real_server_text(&node_result),
+        extract_real_server_text(&payload_result)
     );
     assert!(!rendered.contains("summary secret body"));
     assert!(!rendered.contains("describe source body"));
     assert!(!rendered.contains("describe external secret"));
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -12000,80 +11410,6 @@ async fn lcm_grep_accepts_relative_time_filters() {
     assert_eq!(
         payload["hits"][0]["message_id"],
         "lcm-relative-timestamps-new"
-    );
-}
-
-#[tokio::test]
-async fn message_search_filters_by_time_aliases() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let db = open_active_project_session_db(&cg).await;
-    let session = SessionRecord {
-        provider: "cursor".to_string(),
-        session_id: "search-time-session".to_string(),
-        project_key: "project-a".to_string(),
-        project_path: cg.project_root().to_string_lossy().to_string(),
-        title: Some("Search time session".to_string()),
-        started_at: Some(1),
-        ended_at: Some(90_000),
-        transcript_path: Some("search-time-session.jsonl".to_string()),
-        metadata_json: None,
-        parent_session_id: None,
-        is_subagent: false,
-        agent_id: None,
-        parent_tool_use_id: None,
-    };
-    db.upsert_session(&session).await;
-
-    for (message_id, timestamp, text) in [
-        ("search-time-old", 10, "orchard search clock marker old"),
-        (
-            "search-time-target",
-            20,
-            "orchard search clock marker target",
-        ),
-        ("search-time-new", 90_000, "orchard search clock marker new"),
-    ] {
-        db.upsert_session_message(&SessionMessageRecord {
-            provider: "cursor".to_string(),
-            message_id: message_id.to_string(),
-            session_id: "search-time-session".to_string(),
-            role: "assistant".to_string(),
-            timestamp: Some(timestamp),
-            ordinal: timestamp,
-            text: text.to_string(),
-            kind: Some("message".to_string()),
-            model: Some("test-model".to_string()),
-            tool_names: None,
-            source_path: Some("search-time-session.jsonl".to_string()),
-            source_offset: Some(timestamp),
-            metadata_json: None,
-        })
-        .await;
-    }
-
-    let search = handle_tool_call(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "provider": "cursor",
-            "query": "orchard search clock marker",
-            "project_key": "project-a",
-            "time_from": "15",
-            "until": "1970-01-01",
-            "catch_up": false,
-            "limit": 10
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
-    assert_eq!(payload["status"], "ok");
-    assert_eq!(payload["count"], 1);
-    assert_eq!(
-        payload["results"][0]["message"]["message_id"],
-        "search-time-target"
     );
 }
 
@@ -12367,218 +11703,6 @@ async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
     assert!(text.len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
 }
 
-#[tokio::test]
-async fn message_search_preserves_provider_project_parent_scope_shape_after_lcm() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let db = open_project_session_db(cg.project_root())
-        .await
-        .expect("project-local session db should open");
-    assert!(
-        db.upsert_session(&SessionRecord {
-            provider: "cursor".to_string(),
-            session_id: "parent".to_string(),
-            project_key: cg.project_root().to_string_lossy().to_string(),
-            project_path: cg.project_root().to_string_lossy().to_string(),
-            title: Some("Parent session".to_string()),
-            started_at: Some(1),
-            ended_at: None,
-            transcript_path: Some("parent.jsonl".to_string()),
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await
-    );
-    assert!(
-        db.upsert_session(&SessionRecord {
-            provider: "cursor".to_string(),
-            session_id: "child".to_string(),
-            project_key: cg.project_root().to_string_lossy().to_string(),
-            project_path: cg.project_root().to_string_lossy().to_string(),
-            title: Some("Child session".to_string()),
-            started_at: Some(2),
-            ended_at: None,
-            transcript_path: Some("child.jsonl".to_string()),
-            metadata_json: None,
-            parent_session_id: Some("parent".to_string()),
-            is_subagent: true,
-            agent_id: Some("child".to_string()),
-            parent_tool_use_id: None,
-        })
-        .await
-    );
-    assert!(
-        db.upsert_session_message(&SessionMessageRecord {
-            provider: "cursor".to_string(),
-            message_id: "child-message".to_string(),
-            session_id: "child".to_string(),
-            role: "assistant".to_string(),
-            timestamp: Some(3),
-            ordinal: 1,
-            text: "orchard dispatch compatibility result".to_string(),
-            kind: Some("message".to_string()),
-            model: Some("test-model".to_string()),
-            tool_names: None,
-            source_path: Some("child.jsonl".to_string()),
-            source_offset: Some(0),
-            metadata_json: None,
-        })
-        .await
-    );
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "query": "orchard dispatch",
-            "provider": "cursor",
-            "project_key": cg.project_root().to_string_lossy(),
-            "scope": "subagents_only",
-            "parent_session_id": "parent",
-            "limit": 10
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(payload["status"], "ok");
-    assert_eq!(payload["scope"], "subagents_only");
-    assert_eq!(payload["provider"], "cursor");
-    assert_eq!(payload["requested_provider"], "cursor");
-    assert_eq!(payload["parent_session_id"], "parent");
-    assert_eq!(payload["results"].as_array().unwrap().len(), 1);
-    assert!(payload["results"][0]["message"].get("text").is_some());
-    assert_eq!(payload["results"][0]["session"]["is_subagent"], true);
-
-    for (message_id, session_id, text, metadata_json) in [
-        (
-            "parent-direct",
-            "parent",
-            "persimmon retrieval parent",
-            None,
-        ),
-        ("child-direct", "child", "persimmon retrieval direct", None),
-        (
-            "child-tool-result",
-            "child",
-            "persimmon retrieval tool output",
-            Some(json!({"tool_events":[{"type":"tool_result","call_id":"call-1"}]}).to_string()),
-        ),
-    ] {
-        assert!(
-            db.upsert_session_message(&SessionMessageRecord {
-                provider: "cursor".to_string(),
-                message_id: message_id.to_string(),
-                session_id: session_id.to_string(),
-                role: "user".to_string(),
-                timestamp: Some(10),
-                ordinal: 10,
-                text: text.to_string(),
-                kind: Some("message".to_string()),
-                model: Some("test-model".to_string()),
-                tool_names: None,
-                source_path: Some(format!("{session_id}.jsonl")),
-                source_offset: Some(10),
-                metadata_json,
-            })
-            .await
-        );
-    }
-
-    let direct = handle_tool_call(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "query": "persimmon retrieval",
-            "provider": "cursor",
-            "scope": "subagents_only",
-            "message_type": "direct_user",
-            "catch_up": false,
-            "limit": 10
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let direct: Value = serde_json::from_str(extract_text(&direct.value)).unwrap();
-    assert_eq!(direct["count"], 1);
-    assert_eq!(
-        direct["results"][0]["message"]["message_id"],
-        "child-direct"
-    );
-
-    let tool_result = handle_tool_call(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "query": "persimmon retrieval",
-            "provider": "cursor",
-            "scope": "subagents_only",
-            "message_type": "tool_result",
-            "catch_up": false,
-            "limit": 10
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let tool_result: Value = serde_json::from_str(extract_text(&tool_result.value)).unwrap();
-    assert_eq!(tool_result["count"], 1);
-    assert_eq!(
-        tool_result["results"][0]["message"]["message_id"],
-        "child-tool-result"
-    );
-
-    let parent_lcm = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_grep",
-        json!({
-            "query": "persimmon retrieval",
-            "provider": "cursor",
-            "scope": "all",
-            "relationship_scope": "parents_only",
-            "message_type": "direct_user",
-            "include_summaries": false,
-            "limit": 10
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let parent_lcm: Value = serde_json::from_str(extract_text(&parent_lcm.value)).unwrap();
-    assert_eq!(parent_lcm["count"], 1);
-    assert_eq!(parent_lcm["hits"][0]["message_id"], "parent-direct");
-
-    let child_tool_lcm = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_grep",
-        json!({
-            "query": "persimmon retrieval",
-            "provider": "cursor",
-            "scope": "all",
-            "relationship_scope": "subagents_only",
-            "message_type": "tool_result",
-            "include_summaries": false,
-            "limit": 10
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let child_tool_lcm: Value = serde_json::from_str(extract_text(&child_tool_lcm.value)).unwrap();
-    assert_eq!(child_tool_lcm["count"], 1);
-    assert_eq!(child_tool_lcm["hits"][0]["message_id"], "child-tool-result");
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn lcm_status_cli_bridge_accepts_json_args() {
@@ -12635,82 +11759,6 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
         payload["status"] == "ok" || payload["status"] == "not_ingested",
         "unexpected lcm_status: {payload}"
     );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn user_message_search_cli_bridge_accepts_storage_scope() {
-    let home_dir = test_temp_dir();
-    let home = home_dir.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let outside_cwd = test_temp_dir();
-    std::fs::create_dir_all(outside_cwd.path().join("src")).unwrap();
-    std::fs::write(
-        outside_cwd.path().join("src/lib.rs"),
-        "pub fn user_scope_bridge_fixture() {}\n",
-    )
-    .unwrap();
-
-    let mut init = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
-    common::apply_tracedecay_home_env(&mut init, &home);
-    let init_output = init
-        .arg("init")
-        .current_dir(outside_cwd.path())
-        .output()
-        .unwrap();
-    assert!(
-        init_output.status.success(),
-        "fixture init failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&init_output.stdout),
-        String::from_utf8_lossy(&init_output.stderr)
-    );
-    let _daemon = common::spawn_tracedecay_daemon(&home);
-
-    let mut ingest = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
-    common::apply_tracedecay_home_env(&mut ingest, &home);
-    let ingest_output = ingest
-        .current_dir(outside_cwd.path())
-        .args([
-            "tool",
-            "tracedecay_lcm_preflight",
-            "--json",
-            "--args",
-            r#"{"storage_scope":"user","provider":"codex","session_id":"projectless-codex","messages":[{"id":"projectless-message","role":"user","content":"Projectless apricot preference"}],"transcript_projection":true,"format":"json"}"#,
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        ingest_output.status.success(),
-        "user ingest failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&ingest_output.stdout),
-        String::from_utf8_lossy(&ingest_output.stderr)
-    );
-
-    let mut search = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
-    common::apply_tracedecay_home_env(&mut search, &home);
-    let search_output = search
-        .current_dir(outside_cwd.path())
-        .args([
-            "tool",
-            "tracedecay_message_search",
-            "--json",
-            "--args",
-            r#"{"storage_scope":"user","provider":"codex","query":"apricot","format":"json"}"#,
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        search_output.status.success(),
-        "user search failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&search_output.stdout),
-        String::from_utf8_lossy(&search_output.stderr)
-    );
-    let envelope: Value = serde_json::from_slice(&search_output.stdout).unwrap();
-    let payload = extract_first_json_content(&envelope);
-    assert_eq!(payload["status"], "ok");
-    assert_eq!(payload["catch_up_performed"], true);
-    assert_eq!(payload["count"], 1);
-    assert_eq!(payload["results"][0]["session"]["project_key"], "user");
 }
 
 #[test]
@@ -15063,23 +14111,38 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
         })
         .await
         .expect("summary should insert");
+    let summary_id = summary.node_id.clone();
+    let temporal = open_test_db_connection(&project_session_db_path(&cg)).await;
+    let generation = activate_test_temporal_generation(&temporal, "lcm-page-session").await;
+    temporal
+        .execute(
+            "INSERT OR REPLACE INTO session_summary_availability (
+                 session_id, generation, summary_id, availability,
+                 source_horizon_json, reason, checked_at
+             )
+             SELECT session_id, ?1, summary_id, 'available',
+                    source_horizon_json, NULL, 1
+             FROM session_summary_nodes
+             WHERE summary_id = ?2",
+            libsql::params![generation, summary_id.as_str()],
+        )
+        .await
+        .unwrap();
+    let server = real_mcp_server(cg).await;
 
-    let result = handle_tool_call(
-        &cg,
+    let result = handle_real_server_tool_call(
+        &server,
         "tracedecay_lcm_expand",
         json!({
             "provider": "cursor",
             "session_id": "lcm-page-session",
-            "target": {"kind": "summary_node", "node_id": summary.node_id},
+            "target": {"kind": "summary_node", "node_id": summary_id},
             "source_offset": 1,
             "source_limit": 2
         }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    .await;
+    let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
 
     assert_eq!(payload["status"], "ok");
     let sources = payload["expansion"]["summary_sources"].as_array().unwrap();
@@ -15094,6 +14157,38 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     assert_eq!(pagination["next_source_offset"], 3);
     assert_eq!(pagination["has_more"], true);
     assert_eq!(pagination["remaining_sources"], 1);
+    assert_eq!(payload["grain"], "summary");
+    assert_eq!(payload["state"], "available");
+    assert!(!payload["anchors"].as_array().unwrap().is_empty());
+    assert!(payload["watermarks"]["generation"].as_u64().unwrap() > 0);
+    assert!(payload["coverage"]["visible"].as_u64().unwrap() > 0);
+    let cursor = payload["next_cursor"]
+        .as_str()
+        .expect("summary source page should return an opaque cursor");
+
+    let continued = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "target": {"kind": "summary_node", "node_id": summary_id},
+            "source_limit": 2,
+            "cursor": cursor
+        }),
+    )
+    .await;
+    let continued: Value = serde_json::from_str(extract_real_server_text(&continued)).unwrap();
+    assert_eq!(
+        continued["expansion"]["summary_sources"][0]["raw_message"]["store_id"],
+        json!(store_ids[3])
+    );
+    assert_eq!(
+        continued["expansion"]["source_pagination"]["source_offset"],
+        3
+    );
+    assert!(continued["next_cursor"].is_null());
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -15116,21 +14211,22 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
     )
     .await;
     let origin_store_id = lcm_raw_store_id(&cg, "origin-message").await;
+    let temporal = open_test_db_connection(&project_session_db_path(&cg)).await;
+    activate_test_temporal_generation(&temporal, "lcm-origin-session").await;
+    activate_test_temporal_generation(&temporal, "lcm-active-session").await;
+    let server = real_mcp_server(cg).await;
 
-    let result = handle_tool_call(
-        &cg,
+    let result = handle_real_server_tool_call(
+        &server,
         "tracedecay_lcm_expand",
         json!({
             "provider": "cursor",
             "session_id": "lcm-active-session",
             "target": {"kind": "raw_message", "store_id": origin_store_id}
         }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    .await;
+    let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
 
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["expansion"]["kind"], "raw_message");
@@ -15143,6 +14239,71 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
         payload["expansion"]["content"],
         "cross session grep target body"
     );
+    assert_eq!(payload["state"], "available");
+    assert_eq!(payload["grain"], "occurrence");
+    assert_eq!(payload["anchors"].as_array().unwrap().len(), 1);
+    assert!(payload["watermarks"]["generation"].as_u64().unwrap() > 0);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "lcm-state-session",
+        "state-message",
+        "stateful expansion body",
+        1,
+    )
+    .await;
+    let store_id = lcm_raw_store_id(&cg, "state-message").await;
+    let conn = open_test_db_connection(&project_session_db_path(&cg)).await;
+    activate_test_temporal_generation(&conn, "lcm-state-session").await;
+    let server = real_mcp_server(cg).await;
+    let initial = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-state-session",
+            "target": {"kind": "raw_message", "store_id": store_id}
+        }),
+    )
+    .await;
+    let initial: Value = serde_json::from_str(extract_real_server_text(&initial)).unwrap();
+    assert_eq!(initial["status"], "ok");
+    let anchor = initial["anchors"][0].as_str().unwrap().to_string();
+
+    for (payload_access, expected_status) in [
+        ("redacted", "redacted"),
+        ("quarantined", "locked"),
+        ("deleted", "deleted"),
+        ("unavailable", "unavailable"),
+    ] {
+        conn.execute(
+            "UPDATE retrieval_anchors
+             SET anchor_json = json_set(anchor_json, '$.payload_access', ?1)
+             WHERE anchor_id = ?2",
+            libsql::params![payload_access, anchor.as_str()],
+        )
+        .await
+        .unwrap();
+        let result = handle_real_server_tool_call(
+            &server,
+            "tracedecay_lcm_expand",
+            json!({
+                "provider": "cursor",
+                "session_id": "lcm-state-session",
+                "target": {"kind": "raw_message", "store_id": store_id}
+            }),
+        )
+        .await;
+        let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
+        assert_eq!(payload["status"], expected_status, "{payload}");
+        assert!(payload["expansion"].as_array().unwrap().is_empty());
+    }
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -15166,21 +14327,22 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     )
     .await;
     let origin_store_id = lcm_raw_store_id(&cg, "origin-external-message").await;
+    let temporal = open_test_db_connection(&project_session_db_path(&cg)).await;
+    activate_test_temporal_generation(&temporal, "lcm-origin-session").await;
+    activate_test_temporal_generation(&temporal, "lcm-active-session").await;
+    let server = real_mcp_server(cg).await;
 
-    let raw_result = handle_tool_call(
-        &cg,
+    let raw_result = handle_real_server_tool_call(
+        &server,
         "tracedecay_lcm_expand",
         json!({
             "provider": "cursor",
             "session_id": "lcm-active-session",
             "target": {"kind": "raw_message", "store_id": origin_store_id}
         }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let raw_payload: Value = serde_json::from_str(extract_text(&raw_result.value)).unwrap();
+    .await;
+    let raw_payload: Value = serde_json::from_str(extract_real_server_text(&raw_result)).unwrap();
     assert_eq!(raw_payload["status"], "ok");
     assert_eq!(raw_payload["expansion"]["from_current_session"], false);
     assert!(raw_payload["expansion"]["externalized_note"].is_null());
@@ -15193,8 +14355,23 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
         .expect("owner session id should be surfaced")
         .to_string();
 
-    let payload_result = handle_tool_call(
-        &cg,
+    let denied_payload = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-active-session",
+            "target": {"kind": "external_payload", "payload_ref": payload_ref.clone()},
+            "content_limit": 80
+        }),
+    )
+    .await;
+    let denied_payload: Value =
+        serde_json::from_str(extract_real_server_text(&denied_payload)).unwrap();
+    assert_eq!(denied_payload["status"], "deleted");
+
+    let payload_result = handle_real_server_tool_call(
+        &server,
         "tracedecay_lcm_expand",
         json!({
             "provider": "cursor",
@@ -15202,12 +14379,9 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
             "target": {"kind": "external_payload", "payload_ref": payload_ref},
             "content_limit": 80
         }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&payload_result.value)).unwrap();
+    .await;
+    let payload: Value = serde_json::from_str(extract_real_server_text(&payload_result)).unwrap();
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["expansion"]["kind"], "external_payload");
     assert!(
@@ -15216,6 +14390,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
             .expect("external payload content")
             .starts_with("data:image/png;base64,")
     );
+    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -15849,15 +15024,14 @@ async fn message_search_rejects_unsupported_project_scope() {
     }
 }
 
-/// `all_registered` sweeps every registered project, so pairing it with a
-/// single-project selector is contradictory and must be rejected.
+/// The PR15-deferred `all_registered` scope cannot be paired with a
+/// single-project selector.
 #[tokio::test]
 async fn message_search_rejects_all_registered_with_project_selector() {
     let (cg, _env, _dir) = setup_empty_project().await;
     for selector in [
         json!({"project_id": "proj_x"}),
         json!({"project_path": "/some/path"}),
-        json!({"project_root": "/some/path"}),
         json!({"project_selector": {"path": "/some/path"}}),
     ] {
         let mut args = json!({"query": "anything", "project_scope": "all_registered"});
@@ -15869,586 +15043,9 @@ async fn message_search_rejects_all_registered_with_project_selector() {
         );
         assert!(
             err.contains(
-                "project_scope cannot be combined with project_id, project_path, project_root, or project_selector"
+                "project_scope cannot be combined with project_id, project_path, or project_selector"
             ),
             "unexpected error for selector {selector}: {err}"
-        );
-    }
-}
-
-/// Regression (fault isolation): a single registered project whose store
-/// artifact carries a malformed (path-escaping) relpath must be skipped, not
-/// abort the whole cross-project sweep. The healthy project must still be
-/// searched and its hit returned.
-#[tokio::test]
-async fn message_search_all_registered_skips_project_with_malformed_relpath() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let profile_root = cg.project_root().join("home/.tracedecay");
-    let registry = GlobalDb::open().await.expect("global registry should open");
-
-    // Healthy registered project with a real, searchable session db.
-    let good_project = cg.project_root().join("registered-good");
-    fs::create_dir_all(&good_project).unwrap();
-    let good_store_relpath = "projects/proj_good";
-    let good_store_root = profile_root.join(good_store_relpath);
-    fs::create_dir_all(&good_store_root).unwrap();
-    let good_session_db = good_store_root.join("sessions.db");
-    let good = registry
-        .upsert_code_project("proj_good", &good_project, None, None, Some("main"))
-        .await
-        .expect("good project should upsert");
-    let good_store = registry
-        .upsert_store_instance(tracedecay::global_db::StoreInstanceUpsert {
-            store_id: "store_good".to_string(),
-            project_id: good.project_id,
-            store_kind: "code_project".to_string(),
-            storage_mode: "profile_sharded".to_string(),
-            store_relpath: good_store_relpath.to_string(),
-            manifest_relpath: None,
-            last_verified_at: Some(1),
-            last_write_at: Some(1),
-        })
-        .await
-        .expect("good store should upsert");
-    registry
-        .upsert_store_artifact(tracedecay::global_db::StoreArtifactUpsert {
-            store_id: good_store.store_id,
-            artifact_kind: "sessions_db".to_string(),
-            relpath: format!("{good_store_relpath}/sessions.db"),
-            size_bytes: None,
-            schema_version: Some("1".to_string()),
-            updated_at: Some(1),
-        })
-        .await
-        .expect("good session artifact should upsert");
-
-    // Malformed registered project: the sessions_db artifact relpath escapes
-    // the profile root, so `registry_session_db_candidates` errors on it.
-    let bad_project = cg.project_root().join("registered-bad");
-    fs::create_dir_all(&bad_project).unwrap();
-    let bad = registry
-        .upsert_code_project("proj_bad", &bad_project, None, None, Some("main"))
-        .await
-        .expect("bad project should upsert");
-    let bad_store = registry
-        .upsert_store_instance(tracedecay::global_db::StoreInstanceUpsert {
-            store_id: "store_bad".to_string(),
-            project_id: bad.project_id,
-            store_kind: "code_project".to_string(),
-            storage_mode: "profile_sharded".to_string(),
-            store_relpath: "projects/proj_bad".to_string(),
-            manifest_relpath: None,
-            last_verified_at: Some(1),
-            last_write_at: Some(1),
-        })
-        .await
-        .expect("bad store should upsert");
-    registry
-        .upsert_store_artifact(tracedecay::global_db::StoreArtifactUpsert {
-            store_id: bad_store.store_id,
-            artifact_kind: "sessions_db".to_string(),
-            relpath: "../escape/sessions.db".to_string(),
-            size_bytes: None,
-            schema_version: Some("1".to_string()),
-            updated_at: Some(1),
-        })
-        .await
-        .expect("bad session artifact should upsert");
-
-    let good_db = GlobalDb::open_at(&good_session_db)
-        .await
-        .expect("good session db should open");
-    let good_project_path = good_project.to_string_lossy().to_string();
-    assert!(
-        good_db
-            .upsert_session(&SessionRecord {
-                provider: "cursor".to_string(),
-                session_id: "good-session".to_string(),
-                project_key: good_project_path.clone(),
-                project_path: good_project_path.clone(),
-                title: Some("Good project".to_string()),
-                started_at: Some(1),
-                ended_at: None,
-                transcript_path: Some("good-session.jsonl".to_string()),
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            })
-            .await
-    );
-    assert!(
-        good_db
-            .upsert_session_message(&SessionMessageRecord {
-                provider: "cursor".to_string(),
-                message_id: "good-message".to_string(),
-                session_id: "good-session".to_string(),
-                role: "assistant".to_string(),
-                timestamp: Some(2),
-                ordinal: 1,
-                text: "isolationtokenzz stays searchable despite a broken neighbor.".to_string(),
-                kind: Some("message".to_string()),
-                model: Some("test-model".to_string()),
-                tool_names: None,
-                source_path: Some("good-session.jsonl".to_string()),
-                source_offset: Some(0),
-                metadata_json: None,
-            })
-            .await
-    );
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "query": "isolationtokenzz",
-            "provider": "cursor",
-            "project_scope": "all_registered",
-            "limit": 5,
-            "catch_up": false
-        }),
-        None,
-        None,
-    )
-    .await
-    .expect("a malformed neighbor must not abort the cross-project sweep");
-    let parsed = extract_json(&result.value);
-    assert_eq!(parsed["status"], "ok", "{parsed}");
-    assert_eq!(parsed["count"], 1, "{parsed}");
-    assert_eq!(
-        parsed["results"][0]["message"]["message_id"], "good-message",
-        "healthy project must still be searched: {parsed}"
-    );
-    assert!(
-        parsed["searched_project_count"]
-            .as_u64()
-            .unwrap_or_default()
-            >= 1,
-        "the healthy project must still be searched: {parsed}"
-    );
-    assert!(
-        parsed["skipped_project_count"].as_u64().unwrap_or_default() >= 1,
-        "the malformed project must be counted as skipped: {parsed}"
-    );
-}
-
-#[tokio::test]
-async fn message_search_selects_registered_project_session_db_by_project_id() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let profile_root = cg.project_root().join("home/.tracedecay");
-    let target_project = cg.project_root().join("registered-target");
-    let target_store_relpath = "projects/proj_cross_messages";
-    let target_store_root = profile_root.join(target_store_relpath);
-    let target_session_db = target_store_root.join("sessions.db");
-    fs::create_dir_all(&target_project).unwrap();
-    fs::create_dir_all(&target_store_root).unwrap();
-    let target_project = target_project.canonicalize().unwrap();
-    let target_project_path = target_project.to_string_lossy().to_string();
-
-    let active_db = open_project_session_db(cg.project_root())
-        .await
-        .expect("active project session db should open");
-    assert!(
-        active_db
-            .upsert_session(&SessionRecord {
-                provider: "cursor".to_string(),
-                session_id: "active-session".to_string(),
-                project_key: cg.project_root().to_string_lossy().to_string(),
-                project_path: cg.project_root().to_string_lossy().to_string(),
-                title: Some("Active project".to_string()),
-                started_at: Some(1),
-                ended_at: None,
-                transcript_path: Some("active-session.jsonl".to_string()),
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            })
-            .await
-    );
-    assert!(
-        active_db
-            .upsert_session_message(&SessionMessageRecord {
-                provider: "cursor".to_string(),
-                message_id: "active-message".to_string(),
-                session_id: "active-session".to_string(),
-                role: "user".to_string(),
-                timestamp: Some(2),
-                ordinal: 1,
-                text: "Cross project dragonfruit belongs to the active database.".to_string(),
-                kind: Some("message".to_string()),
-                model: Some("test-model".to_string()),
-                tool_names: None,
-                source_path: Some("active-session.jsonl".to_string()),
-                source_offset: Some(0),
-                metadata_json: None,
-            })
-            .await
-    );
-
-    let registry = GlobalDb::open().await.expect("global registry should open");
-    let project = registry
-        .upsert_code_project(
-            "proj_cross_messages",
-            &target_project,
-            None,
-            None,
-            Some("main"),
-        )
-        .await
-        .expect("registered project should upsert");
-    let store = registry
-        .upsert_store_instance(tracedecay::global_db::StoreInstanceUpsert {
-            store_id: "store_cross_messages".to_string(),
-            project_id: project.project_id,
-            store_kind: "code_project".to_string(),
-            storage_mode: "profile_sharded".to_string(),
-            store_relpath: target_store_relpath.to_string(),
-            manifest_relpath: Some(format!("{target_store_relpath}/store_manifest.json")),
-            last_verified_at: Some(1_800_000_010),
-            last_write_at: Some(1_800_000_011),
-        })
-        .await
-        .expect("registered store should upsert");
-    registry
-        .upsert_store_artifact(tracedecay::global_db::StoreArtifactUpsert {
-            store_id: store.store_id,
-            artifact_kind: "sessions_db".to_string(),
-            relpath: format!("{target_store_relpath}/sessions.db"),
-            size_bytes: None,
-            schema_version: Some("1".to_string()),
-            updated_at: Some(1_800_000_012),
-        })
-        .await
-        .expect("session artifact should upsert");
-
-    for index in 0..500 {
-        let dummy_project = cg.project_root().join(format!("registered-dummy-{index}"));
-        registry
-            .upsert_code_project(
-                &format!("proj_cross_messages_dummy_{index}"),
-                &dummy_project,
-                None,
-                None,
-                Some("main"),
-            )
-            .await
-            .expect("dummy registered project should upsert");
-    }
-
-    let target_db = GlobalDb::open_at(&target_session_db)
-        .await
-        .expect("registered project session db should open");
-    assert!(
-        target_db
-            .upsert_session(&SessionRecord {
-                provider: "cursor".to_string(),
-                session_id: "target-session".to_string(),
-                project_key: target_project_path.clone(),
-                project_path: target_project_path.clone(),
-                title: Some("Registered project".to_string()),
-                started_at: Some(10),
-                ended_at: None,
-                transcript_path: Some("target-session.jsonl".to_string()),
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            })
-            .await
-    );
-    assert!(
-        target_db
-            .upsert_session_message(&SessionMessageRecord {
-                provider: "cursor".to_string(),
-                message_id: "target-message".to_string(),
-                session_id: "target-session".to_string(),
-                role: "assistant".to_string(),
-                timestamp: Some(11),
-                ordinal: 1,
-                text: "Cross project dragonfruit belongs to the registered database.".to_string(),
-                kind: Some("message".to_string()),
-                model: Some("test-model".to_string()),
-                tool_names: None,
-                source_path: Some("target-session.jsonl".to_string()),
-                source_offset: Some(0),
-                metadata_json: None,
-            })
-            .await
-    );
-    fn message_search_args(selector: Value) -> Value {
-        let mut args = json!({
-            "query": "dragonfruit",
-            "provider": "cursor",
-            "limit": 5,
-            "catch_up": false
-        });
-        args.as_object_mut()
-            .unwrap()
-            .extend(selector.as_object().unwrap().clone());
-        args
-    }
-
-    for (label, selector) in [
-        ("project_id", json!({"project_id": "proj_cross_messages"})),
-        (
-            "project_path",
-            json!({"project_path": target_project_path.clone()}),
-        ),
-        (
-            "project_root",
-            json!({"project_root": target_project_path.clone()}),
-        ),
-        (
-            "nested path",
-            json!({"project_selector": {"path": target_project_path.clone()}}),
-        ),
-        (
-            "nested project_path",
-            json!({"project_selector": {"project_path": target_project_path.clone()}}),
-        ),
-    ] {
-        let result = handle_tool_call(
-            &cg,
-            "tracedecay_message_search",
-            message_search_args(selector),
-            None,
-            None,
-        )
-        .await
-        .unwrap_or_else(|err| panic!("{label} selector should resolve target project: {err}"));
-        let parsed = extract_json(&result.value);
-
-        assert_eq!(parsed["status"], "ok", "{label}: {parsed}");
-        assert_eq!(
-            parsed["selected_project_root"],
-            target_project_path.as_str(),
-            "{label}: {parsed}"
-        );
-        assert_eq!(parsed["count"], 1, "{label}: {parsed}");
-        assert_eq!(
-            parsed["results"][0]["message"]["message_id"], "target-message",
-            "{label}: {parsed}"
-        );
-        assert_eq!(
-            parsed["results"][0]["session"]["project_key"],
-            target_project_path.as_str(),
-            "{label}: {parsed}"
-        );
-    }
-
-    assert!(
-        target_db
-            .upsert_session_message(&SessionMessageRecord {
-                provider: "cursor".to_string(),
-                message_id: "target-old-message".to_string(),
-                session_id: "target-session".to_string(),
-                role: "assistant".to_string(),
-                timestamp: Some(5),
-                ordinal: 0,
-                text: "Cross project dragonfruit belongs to the registered database but is old."
-                    .to_string(),
-                kind: Some("message".to_string()),
-                model: Some("test-model".to_string()),
-                tool_names: None,
-                source_path: Some("target-session.jsonl".to_string()),
-                source_offset: Some(0),
-                metadata_json: None,
-            })
-            .await
-    );
-
-    let all_registered = handle_tool_call(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "query": "dragonfruit",
-            "provider": "cursor",
-            "project_scope": "all_registered",
-            "since": 10,
-            "limit": 5,
-            "catch_up": false
-        }),
-        None,
-        None,
-    )
-    .await
-    .expect("all_registered project scope should search registered session DBs");
-    let parsed = extract_json(&all_registered.value);
-    assert_eq!(parsed["status"], "ok", "{parsed}");
-    assert_eq!(parsed["project_scope"], "all_registered", "{parsed}");
-    assert!(
-        parsed["searched_project_count"]
-            .as_u64()
-            .unwrap_or_default()
-            >= 1,
-        "{parsed}"
-    );
-    assert!(
-        parsed["skipped_project_count"].as_u64().unwrap_or_default() >= 500,
-        "{parsed}"
-    );
-    assert_eq!(parsed["count"], 1, "{parsed}");
-    assert_eq!(
-        parsed["results"][0]["message"]["message_id"], "target-message",
-        "{parsed}"
-    );
-
-    let cursor_slug = cursor_project_slug(&target_project).expect("target project should slug");
-    let cursor_dir = cg
-        .project_root()
-        .join("home/.cursor/projects")
-        .join(cursor_slug)
-        .join("agent-transcripts");
-    fs::create_dir_all(&cursor_dir).unwrap();
-    fs::write(
-        cursor_dir.join("registered-catchup.jsonl"),
-        r#"{"role":"assistant","message":{"content":[{"type":"text","text":"regcatchuptokenzz appears only in transcript."}]}}
-"#,
-    )
-    .unwrap();
-
-    let selected_without_authority = tracedecay::mcp::tools::handle_tool_call_with_registry(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "query": "regcatchuptokenzz",
-            "provider": "cursor",
-            "project_id": "proj_cross_messages",
-            "limit": 5,
-            "catch_up": true,
-            "format": "json"
-        }),
-        None,
-        None,
-        Some(&registry),
-        false,
-    )
-    .await
-    .expect("selected-project read must remain available without write authority");
-    let parsed = extract_json(&selected_without_authority.value);
-    assert_eq!(parsed["status"], "ok", "{parsed}");
-    assert_eq!(parsed["catch_up"], true, "{parsed}");
-    assert_eq!(parsed["catch_up_performed"], false, "{parsed}");
-    assert_eq!(parsed["count"], 0, "{parsed}");
-
-    let all_registered_without_authority = tracedecay::mcp::tools::handle_tool_call_with_registry(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "query": "regcatchuptokenzz",
-            "provider": "cursor",
-            "project_scope": "all_registered",
-            "limit": 5,
-            "catch_up": true,
-            "format": "json"
-        }),
-        None,
-        None,
-        Some(&registry),
-        false,
-    )
-    .await
-    .expect("registered-project reads must remain available without write authority");
-    let parsed = extract_json(&all_registered_without_authority.value);
-    assert_eq!(parsed["status"], "ok", "{parsed}");
-    assert_eq!(parsed["catch_up"], true, "{parsed}");
-    assert_eq!(parsed["catch_up_performed"], false, "{parsed}");
-    assert_eq!(parsed["count"], 0, "{parsed}");
-    assert!(
-        parsed["catch_up_skipped_project_count"]
-            .as_u64()
-            .unwrap_or_default()
-            >= 1,
-        "registered stores without retained authority must be searched read-only: {parsed}"
-    );
-
-    let catch_up_registered = handle_tool_call(
-        &cg,
-        "tracedecay_message_search",
-        json!({
-            "query": "regcatchuptokenzz",
-            "provider": "cursor",
-            "project_scope": "all_registered",
-            "limit": 5
-        }),
-        None,
-        None,
-    )
-    .await
-    .expect("all_registered catch_up without retained authority should remain read-only");
-    let parsed = extract_json(&catch_up_registered.value);
-    assert_eq!(parsed["status"], "ok", "{parsed}");
-    assert_eq!(parsed["catch_up"], true, "{parsed}");
-    assert_eq!(parsed["catch_up_performed"], false, "{parsed}");
-    assert_eq!(parsed["count"], 0, "{parsed}");
-
-    for (label, selector) in [
-        (
-            "missing project_id",
-            json!({"project_id": "proj_missing_messages"}),
-        ),
-        (
-            "missing nested path",
-            json!({"project_selector": {"path": cg.project_root().join("missing-project").to_string_lossy().to_string()}}),
-        ),
-    ] {
-        let err = expect_tool_error(
-            handle_tool_call(
-                &cg,
-                "tracedecay_message_search",
-                message_search_args(selector),
-                None,
-                None,
-            )
-            .await,
-        );
-        assert!(
-            err.contains("registered project not found for selector"),
-            "{label} must fail closed instead of searching the active session DB: {err}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn user_message_search_without_daemon_authority_does_not_create_a_writer() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let registry = GlobalDb::open().await.expect("global registry should open");
-    let profile_root = registry
-        .db_path()
-        .parent()
-        .expect("registry must live below the profile root");
-    let user_sessions_db = tracedecay::sessions::user_sessions_db_path(profile_root);
-    assert!(
-        !user_sessions_db.exists(),
-        "fixture must begin without a user sessions database"
-    );
-
-    for allow_owned_session_db in [false, true] {
-        let result = tracedecay::mcp::tools::handle_tool_call_with_registry(
-            &cg,
-            "tracedecay_message_search",
-            json!({
-                "query": "nothing",
-                "storage_scope": "user",
-                "catch_up": true,
-                "format": "json"
-            }),
-            None,
-            None,
-            Some(&registry),
-            allow_owned_session_db,
-        )
-        .await
-        .expect("missing retained user authority must fail closed as a tool result");
-        let parsed = extract_json(&result.value);
-        assert_eq!(parsed["status"], "unavailable", "{parsed}");
-        assert!(
-            !user_sessions_db.exists(),
-            "message search must not create a user writer without retained authority"
         );
     }
 }

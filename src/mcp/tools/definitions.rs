@@ -12,7 +12,7 @@ use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 /// Tools registered on every host before optional external capabilities.
 /// Count-contract tests share this source of truth so branch rebases cannot
 /// leave independent stale literals on the unit and integration surfaces.
-pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 103;
+pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 104;
 
 mod git_scope;
 mod session;
@@ -317,6 +317,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_hermes_skill_bridge(),
         def_dashboard(),
         def_analytics(),
+        session::def_session_refresh(),
         session::def_message_search(),
         session::def_sessions_for(),
         session::def_workflows(),
@@ -500,6 +501,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_lcm_session_boundary",
     "tracedecay_lcm_preflight",
     "tracedecay_lcm_compress",
+    "tracedecay_session_refresh",
     // skills
     "tracedecay_skill_list",
     "tracedecay_skill_view",
@@ -884,7 +886,13 @@ fn def_status() -> ToolDefinition {
         "Return aggregate statistics about the code graph (node/edge/file counts, DB size, etc.).",
         json!({
             "type": "object",
-            "properties": {}
+            "additionalProperties": false,
+            "properties": {
+                "include_branch_diagnostics": {
+                    "type": "boolean",
+                    "description": "Include the full tracked-branch diagnostic list (default: true). Disable for compact status consumers."
+                }
+            }
         }),
     )
 }
@@ -2650,7 +2658,23 @@ fn def_lcm_load_session() -> ToolDefinition {
                 "after_store_id": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Return rows after this raw store id."
+                    "deprecated": true,
+                    "description": "Deprecated unpinned first-page compatibility input. It is never returned or reused as next_cursor; continue with the authenticated opaque cursor."
+                },
+                "cursor": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Authenticated opaque continuation cursor returned as next_cursor. Cannot be combined with after_store_id."
+                },
+                "temporal_mode": {
+                    "type": "string",
+                    "enum": ["current", "as_of", "evolution", "forensic"],
+                    "description": "Canonical temporal retrieval mode. Defaults to forensic for exact-session loading."
+                },
+                "as_of_micros": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Required cutoff in UTC microseconds when temporal_mode=as_of."
                 },
                 "limit": {
                     "type": "integer",
@@ -2731,12 +2755,14 @@ fn def_lcm_grep() -> ToolDefinition {
                 },
                 "include_summaries": {
                     "type": "boolean",
-                    "description": "Include summary node text after raw-message matches (default: true)."
+                    "default": false,
+                    "description": "Canonical compatibility retrieval currently supports raw occurrences only. true returns a typed unsupported_filter response."
                 },
                 "sort": {
                     "type": "string",
                     "enum": ["recency", "relevance", "hybrid"],
-                    "description": "How to order matches. Defaults to relevance (FTS rank primary, recency as tiebreak) so distinct queries do not collapse onto the same recent sessions; pass 'recency' for newest-first or 'hybrid' for a recency-decayed relevance blend. Transcript inventory/listing tool calls are downranked below substantive hits, and in scope 'all' no single session may contribute more than a few hits per page."
+                    "default": "relevance",
+                    "description": "Canonical temporal ranking supports relevance. recency and hybrid return a typed unsupported_filter response."
                 },
                 "source": {
                     "type": "string",
@@ -2781,6 +2807,21 @@ fn def_lcm_grep() -> ToolDefinition {
                     "maximum": 100,
                     "description": "Maximum hits."
                 },
+                "cursor": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Authenticated opaque continuation cursor returned as next_cursor."
+                },
+                "temporal_mode": {
+                    "type": "string",
+                    "enum": ["current", "as_of", "evolution", "forensic"],
+                    "description": "Canonical temporal retrieval mode. Defaults to current."
+                },
+                "as_of_micros": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Required cutoff in UTC microseconds when temporal_mode=as_of."
+                },
                 "branch": git_scope::branch_schema("Optional git branch filter: only LCM snippets from sessions active on this branch (via the session-git correlation index)."),
                 "worktree": git_scope::worktree_schema("Optional git worktree root path filter: only LCM snippets from sessions active in this worktree (via the session-git correlation index)."),
                 "commit": git_scope::commit_schema("Optional commit sha filter (full or >=6-char hex prefix): only LCM snippets from sessions attributed to this commit (via the session-git correlation index).")
@@ -2797,6 +2838,7 @@ fn def_lcm_describe() -> ToolDefinition {
         "Describe one session's LCM raw-message and summary-DAG shape from the active project store without exposing full payload bodies.",
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "provider": {
                     "type": "string",
@@ -2807,22 +2849,43 @@ fn def_lcm_describe() -> ToolDefinition {
                     "description": "Provider-local session id."
                 },
                 "target": {
-                    "type": "object",
                     "description": "Optional describe target. Omit for session overview.",
-                    "properties": {
-                        "kind": {
-                            "type": "string",
-                            "enum": ["session", "summary_node", "external_payload"]
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "kind": {"const": "session"}
+                            },
+                            "required": ["kind"]
                         },
-                        "node_id": {
-                            "type": "string",
-                            "description": "Summary node id when kind=summary_node."
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "kind": {"const": "summary_node"},
+                                "node_id": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "Summary node id."
+                                }
+                            },
+                            "required": ["kind", "node_id"]
                         },
-                        "payload_ref": {
-                            "type": "string",
-                            "description": "External payload ref when kind=external_payload."
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "kind": {"const": "external_payload"},
+                                "payload_ref": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "External payload ref."
+                                }
+                            },
+                            "required": ["kind", "payload_ref"]
                         }
-                    }
+                    ]
                 }
             },
             "required": ["provider", "session_id"]
@@ -2837,6 +2900,7 @@ fn def_lcm_expand() -> ToolDefinition {
         "Expand one raw message, summary node, or external payload through the bounded LCM query API from the active project store.",
         json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "provider": {
                     "type": "string",
@@ -2847,28 +2911,48 @@ fn def_lcm_expand() -> ToolDefinition {
                     "description": "Provider-local session id."
                 },
                 "target": {
-                    "type": "object",
                     "description": "Expansion target.",
-                    "properties": {
-                        "kind": {
-                            "type": "string",
-                            "enum": ["raw_message", "summary_node", "external_payload"]
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "kind": {"const": "raw_message"},
+                                "store_id": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "description": "Owner-bound legacy raw-message store alias."
+                                }
+                            },
+                            "required": ["kind", "store_id"]
                         },
-                        "store_id": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "description": "Raw-message store id when kind=raw_message."
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "kind": {"const": "summary_node"},
+                                "node_id": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "Summary node id."
+                                }
+                            },
+                            "required": ["kind", "node_id"]
                         },
-                        "node_id": {
-                            "type": "string",
-                            "description": "Summary node id when kind=summary_node."
-                        },
-                        "payload_ref": {
-                            "type": "string",
-                            "description": "Payload ref when kind=external_payload."
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "kind": {"const": "external_payload"},
+                                "payload_ref": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "Owner-bound external payload ref."
+                                }
+                            },
+                            "required": ["kind", "payload_ref"]
                         }
-                    },
-                    "required": ["kind"]
+                    ]
                 },
                 "content_offset": {
                     "type": "integer",
@@ -2889,7 +2973,14 @@ fn def_lcm_expand() -> ToolDefinition {
                 "source_limit": {
                     "type": "integer",
                     "minimum": 1,
+                    "maximum": 100,
+                    "default": 50,
                     "description": "Maximum immediate sources returned from source_offset (summary_node targets only); resume with the response's next_source_offset. If a returned source has content_truncated=true, continue via target.kind=raw_message for that source's store_id and content_offset."
+                },
+                "cursor": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Opaque continuation cursor returned by the same authorized root and target."
                 }
             },
             "required": ["provider", "session_id", "target"]
@@ -3924,5 +4015,42 @@ mod tests {
             .unwrap();
         assert!(context_tool.description.contains("4 calls maximum"));
         assert!(context_tool.description.contains("10000 nodes"));
+    }
+
+    #[test]
+    fn lcm_compatibility_definitions_expose_only_opaque_continuation_cursors() {
+        let load = def_lcm_load_session();
+        let grep = def_lcm_grep();
+
+        for definition in [&load, &grep] {
+            let properties = definition.input_schema["properties"]
+                .as_object()
+                .expect("LCM properties");
+            assert_eq!(properties["cursor"]["type"], "string");
+            assert_eq!(
+                properties["temporal_mode"]["enum"],
+                json!(["current", "as_of", "evolution", "forensic"])
+            );
+            assert_eq!(properties["as_of_micros"]["minimum"], 0);
+        }
+
+        assert_eq!(
+            load.input_schema["properties"]["after_store_id"]["deprecated"],
+            true
+        );
+        assert!(
+            load.input_schema["properties"]["after_store_id"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("never returned or reused as next_cursor")
+        );
+        assert_eq!(
+            grep.input_schema["properties"]["include_summaries"]["default"],
+            false
+        );
+        assert_eq!(
+            grep.input_schema["properties"]["sort"]["default"],
+            "relevance"
+        );
     }
 }

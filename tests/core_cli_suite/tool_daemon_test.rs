@@ -1,8 +1,8 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Output, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,181 @@ const CLI_ROUNDTRIP_TIMEOUT: Duration = Duration::from_secs(20);
 /// socket and sending on an mpsc channel). These do not spawn external
 /// processes, but the thread can still be scheduled slowly under load.
 const LOCAL_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Outer kill ceiling for CLI children under hang-regression tests. Product
+/// deadlines (for example `TRACEDECAY_STATUS_DEADLINE_MS`) must expire first.
+const CLI_CHILD_KILL_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// Spawn a CLI child with stdin closed and drain stdout/stderr on dedicated
+/// threads so a large or stalled response cannot deadlock the pipe buffers.
+fn run_command_with_timeout(mut command: Command, timeout: Duration) -> Output {
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn tracedecay: {e}"));
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut out) = stdout {
+            out.read_to_end(&mut buf)
+                .unwrap_or_else(|e| panic!("failed to read stdout: {e}"));
+        }
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut err) = stderr {
+            err.read_to_end(&mut buf)
+                .unwrap_or_else(|e| panic!("failed to read stderr: {e}"));
+        }
+        buf
+    });
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .unwrap_or_else(|e| panic!("failed to poll child: {e}"))
+        {
+            let stdout = stdout_handle.join().expect("stdout reader");
+            let stderr = stderr_handle.join().expect("stderr reader");
+            return Output {
+                status,
+                stdout,
+                stderr,
+            };
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child
+                .wait()
+                .unwrap_or_else(|e| panic!("failed to wait for timed out child: {e}"));
+            let stdout = stdout_handle.join().unwrap_or_default();
+            let stderr = stderr_handle.join().unwrap_or_default();
+            panic!(
+                "tracedecay hung after {:?}\nstdout:\n{}\nstderr:\n{}",
+                started.elapsed(),
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+enum FakeDaemonResponse {
+    Complete { text: String },
+    TruncatedJsonRpc,
+    HoldOpen,
+}
+
+fn spawn_scripted_daemon(
+    socket_path: PathBuf,
+    expected_tool_name: &'static str,
+    response: FakeDaemonResponse,
+) -> mpsc::Receiver<Value> {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (request_tx, request_rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        listener
+            .set_nonblocking(true)
+            .expect("set listener nonblocking");
+        ready_tx.send(()).expect("notify fake daemon readiness");
+
+        let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
+        let (stream, _) = common::poll_until(
+            deadline,
+            Duration::from_millis(10),
+            || match listener.accept() {
+                Ok(accepted) => Some(accepted),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
+                Err(e) => panic!("accept fake daemon client: {e}"),
+            },
+            || "timed out waiting for tool CLI to connect to fake daemon".to_string(),
+        );
+        stream
+            .set_nonblocking(false)
+            .expect("set accepted stream blocking");
+        stream
+            .set_write_timeout(Some(CLI_ROUNDTRIP_TIMEOUT))
+            .expect("write timeout");
+        let _ = stream.set_read_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
+
+        let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+        let mut handshake = String::new();
+        reader
+            .read_line(&mut handshake)
+            .expect("read daemon handshake");
+        let _handshake: Value = serde_json::from_str(handshake.trim()).expect("handshake JSON");
+
+        let mut request = String::new();
+        reader
+            .read_line(&mut request)
+            .expect("read JSON-RPC request");
+        let request: Value = serde_json::from_str(request.trim()).expect("request JSON");
+        assert_eq!(request["method"], "tools/call");
+        assert_eq!(request["params"]["name"], expected_tool_name);
+        request_tx
+            .send(request.clone())
+            .expect("send observed JSON-RPC request");
+
+        match response {
+            FakeDaemonResponse::Complete { text } => {
+                let response = json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"].clone(),
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": text
+                        }]
+                    }
+                });
+                let mut writer = stream;
+                writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
+                    .expect("write fake daemon response");
+            }
+            FakeDaemonResponse::TruncatedJsonRpc => {
+                let mut writer = stream;
+                write!(writer, "{{\"jsonrpc\":\"2.0\",\"id\":").expect("write truncated frame");
+                // Close without a terminating newline so the client sees EOF mid-frame.
+            }
+            FakeDaemonResponse::HoldOpen => {
+                // Keep the accepted socket open without writing a matching response.
+                std::thread::sleep(CLI_CHILD_KILL_TIMEOUT + Duration::from_secs(2));
+            }
+        }
+    });
+
+    ready_rx
+        .recv_timeout(LOCAL_READY_TIMEOUT)
+        .expect("fake daemon should become ready");
+    request_rx
+}
+
+fn minimal_status_payload() -> String {
+    serde_json::to_string(&json!({
+        "node_count": 1,
+        "edge_count": 0,
+        "file_count": 1,
+        "nodes_by_kind": {},
+        "edges_by_kind": {},
+        "db_size_bytes": 128,
+        "last_updated": 1,
+        "total_source_bytes": 32,
+        "files_by_language": { "Rust": 1 },
+        "last_sync_at": 1,
+        "last_full_sync_at": 1,
+        "last_sync_duration_ms": 1,
+        "serving_branch": "master",
+    }))
+    .expect("status payload")
+}
 
 fn init_project_with_cli(home: &Path, project: &Path) {
     std::fs::create_dir_all(project.join("src")).unwrap();
@@ -1193,5 +1368,191 @@ fn tool_cli_without_daemon_socket_reports_daemon_unavailable() {
     assert!(
         stderr.contains("TraceDecay daemon socket") && stderr.contains("is not available"),
         "expected explicit daemon-unavailable error, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn status_json_requests_compact_daemon_payload_noninteractively() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let observed = spawn_scripted_daemon(
+        socket_path.clone(),
+        "tracedecay_status",
+        FakeDaemonResponse::Complete {
+            text: minimal_status_payload(),
+        },
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let mut command = tracedecay_command_with_home(&home_path);
+    command
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .env("TERM", "dumb")
+        // Positional path avoids a preliminary registry admin_cli round-trip
+        // through --project-path / --project-id resolution.
+        .args(["status", "--json", project_arg.as_str()]);
+    let output = run_command_with_timeout(command, CLI_ROUNDTRIP_TIMEOUT);
+
+    assert!(
+        output.status.success(),
+        "status --json should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "noninteractive status --json must not emit ANSI, got:\n{stdout}"
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("one JSON status object");
+    assert_eq!(payload["node_count"], 1);
+    assert_ne!(payload.get("truncated"), Some(&json!(true)));
+
+    let request = observed
+        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
+        .expect("fake daemon should receive tools/call request");
+    assert_eq!(request["params"]["name"], "tracedecay_status");
+    let args = &request["params"]["arguments"];
+    assert_eq!(args["format"], "json");
+    assert_eq!(args["include_branch_diagnostics"], false);
+    assert_eq!(args["include_storage_health"], false);
+    assert_eq!(args["include_session_ingest"], false);
+    assert_eq!(args["include_staleness"], false);
+}
+
+#[test]
+fn status_json_rejects_truncated_tool_payload_without_partial_stdout() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let truncated = json!({
+        "truncated": true,
+        "original_chars": 20_000,
+        "preview_chars": 32,
+        "preview": "{\"node_count\":1}",
+        "handle": "rh_status_test",
+    })
+    .to_string();
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let _observed = spawn_scripted_daemon(
+        socket_path.clone(),
+        "tracedecay_status",
+        FakeDaemonResponse::Complete { text: truncated },
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let mut command = tracedecay_command_with_home(&home_path);
+    command
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args(["status", "--json", project_arg.as_str()]);
+    let output = run_command_with_timeout(command, CLI_ROUNDTRIP_TIMEOUT);
+
+    assert!(
+        !output.status.success(),
+        "truncated status envelope must fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "must not print a partial/wrong-schema status object, got:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("truncated JSON") && stderr.contains("tracedecay_status"),
+        "expected truncation diagnostic, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn tool_cli_rejects_truncated_json_rpc_response_without_hanging() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let _observed = spawn_scripted_daemon(
+        socket_path.clone(),
+        "tracedecay_status",
+        FakeDaemonResponse::TruncatedJsonRpc,
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let mut command = tracedecay_command_with_home(&home_path);
+    command
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .args(["tool", "--project", &project_arg, "status", "--json"]);
+    let output = run_command_with_timeout(command, CLI_CHILD_KILL_TIMEOUT);
+
+    assert!(
+        !output.status.success(),
+        "truncated JSON-RPC must fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    assert!(
+        (stderr.contains("json") || stderr.contains("eof") || stderr.contains("decode"))
+            && (stderr.contains("daemon") || stderr.contains("tool")),
+        "expected a decode/EOF protocol diagnostic, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn status_command_times_out_when_daemon_never_replies() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let _observed = spawn_scripted_daemon(
+        socket_path.clone(),
+        "tracedecay_status",
+        FakeDaemonResponse::HoldOpen,
+    );
+    let project_arg = project_path.to_string_lossy().to_string();
+    let mut command = tracedecay_command_with_home(&home_path);
+    command
+        .current_dir(&project_path)
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .env("TRACEDECAY_STATUS_DEADLINE_MS", "2000")
+        .args(["status", "--json", project_arg.as_str()]);
+    let started = Instant::now();
+    let output = run_command_with_timeout(command, CLI_CHILD_KILL_TIMEOUT);
+    let elapsed = started.elapsed();
+
+    assert!(
+        !output.status.success(),
+        "stalled daemon must not succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "status should fail under the absolute deadline, took {elapsed:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    assert!(
+        stderr.contains("timed out") || stderr.contains("deadline"),
+        "expected deadline diagnostic, got:\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }

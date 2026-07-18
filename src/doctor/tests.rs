@@ -265,6 +265,21 @@ fn database_recovery_guidance_names_the_preserved_recovery_set() {
     assert!(guidance.contains("automatic rebuild is intentionally blocked"));
 }
 
+#[test]
+fn nodes_fts_corruption_guidance_uses_derived_index_recovery() {
+    let db_path = PathBuf::from("/profile/projects/proj_test/tracedecay.db");
+    let guidance = database_recovery_guidance_for_problem(
+        &db_path,
+        "malformed inverted index for FTS5 table main.nodes_fts",
+    );
+
+    assert!(guidance.contains("derived `nodes_fts` index"));
+    assert!(guidance.contains("restart the TraceDecay daemon"));
+    assert!(guidance.contains("rebuild it from the authoritative `nodes` table"));
+    assert!(guidance.contains("Do not run `tracedecay init`"));
+    assert!(!guidance.contains("automatic rebuild is intentionally blocked"));
+}
+
 #[tokio::test]
 async fn database_check_preserves_corrupt_graph_and_adjacent_stores()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -910,7 +925,7 @@ fn daemon_runtime_parser_extracts_storage_health_and_owner() {
             {"type": "text", "text": "daemon notice"},
             {
                 "type": "text",
-                "text": r#"{"tracedecay_version":"0.0.66","process":{"pid":1234},"database":{"canonical_db_path":"/tmp/project.db","quick_check_ok":true,"authority_audit_ok":true,"authority_audit_error":null,"dirty_marker":{"exists":false}},"cursor_session_ingest":{"tracked_transcripts":1,"pending_transcripts":0,"pending_bytes":0,"max_transcript_pending_bytes":0},"cursor_session_placeholder_paths":["${workspaceFolder}/cursor.jsonl"]}"#
+                "text": r#"{"tracedecay_version":"0.0.66","process":{"pid":1234},"database":{"canonical_db_path":"/tmp/project.db","quick_check_ok":true,"authority_audit_ok":true,"authority_audit_error":null,"dirty_marker":{"exists":false}},"session_temporal_health":{"status":"complete","findings":[]},"cursor_session_ingest":{"tracked_transcripts":1,"pending_transcripts":0,"pending_bytes":0,"max_transcript_pending_bytes":0},"cursor_session_placeholder_paths":["${workspaceFolder}/cursor.jsonl"]}"#
             }
         ]
     }))
@@ -944,6 +959,10 @@ fn daemon_runtime_parser_extracts_storage_health_and_owner() {
         parsed.pointer("/cursor_session_placeholder_paths/0"),
         Some(&serde_json::json!("${workspaceFolder}/cursor.jsonl"))
     );
+    assert_eq!(
+        parsed.pointer("/session_temporal_health/status"),
+        Some(&serde_json::json!("complete"))
+    );
 }
 
 #[test]
@@ -955,6 +974,363 @@ fn daemon_runtime_request_enables_authority_audit() {
             "authority_audit": true,
             "session_ingest_health": true,
         })
+    );
+}
+
+#[test]
+fn temporal_health_diagnosis_is_exhaustive_and_canonical() {
+    let kinds = [
+        "trigger_audit_drift",
+        "occurrence_fts_corruption",
+        "summary_fts_corruption",
+        "summary_cycle",
+        "stale_closure",
+        "missing_anchor",
+        "missing_receipt",
+        "invalid_generation",
+        "multi_active_generation",
+        "cursor_chain_absent",
+        "cursor_key_absent",
+        "ownership_drift",
+        "stuck_refresh",
+        "stuck_binding",
+        "stuck_progress",
+        "stuck_receipt",
+        "migration_gap",
+        "compatibility_drift",
+    ];
+    let diagnosis = super::temporal_health::diagnose(Some(&serde_json::json!({
+        "status": "complete",
+        "findings": kinds
+            .iter()
+            .map(|kind| serde_json::json!({ "kind": kind, "count": 1 }))
+            .collect::<Vec<_>>(),
+    })));
+
+    assert_eq!(diagnosis.finding_codes(), kinds);
+    assert!(diagnosis.lines().iter().all(|line| {
+        line.level == super::temporal_health::TemporalHealthLineLevel::Fail
+            && line.text.contains("daemon-owned")
+            && line.text.contains("no repair")
+    }));
+    let rendered = diagnosis
+        .lines()
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+    assert!(rendered.contains("explicit derived-index repair"));
+    assert!(rendered.contains("preserve the database"));
+    assert!(rendered.contains("pause temporal refresh"));
+    assert!(!rendered.contains("Plan 14"));
+}
+
+#[test]
+fn temporal_health_diagnosis_distinguishes_non_clean_availability() {
+    for status in ["unavailable", "partial", "locked"] {
+        let diagnosis = super::temporal_health::diagnose(Some(&serde_json::json!({
+            "status": status,
+            "findings": [],
+        })));
+        assert!(!diagnosis.is_clean(), "{status}");
+        assert!(
+            diagnosis.lines().iter().any(|line| {
+                line.level == super::temporal_health::TemporalHealthLineLevel::Warn
+                    && line.text.contains(status)
+            }),
+            "{status}: {:?}",
+            diagnosis.lines()
+        );
+    }
+
+    let missing = super::temporal_health::diagnose(None);
+    assert!(!missing.is_clean());
+    assert!(
+        missing
+            .lines()
+            .iter()
+            .any(|line| line.text.contains("unavailable"))
+    );
+}
+
+#[test]
+fn temporal_health_diagnosis_is_bounded_and_redacts_payload_keys_and_text() {
+    let canary = "sk-live-temporal-doctor-secret";
+    let findings = (0..=super::temporal_health::MAX_DIAGNOSIS_FINDINGS)
+        .map(|_| {
+            serde_json::json!({
+                "kind": "missing_anchor",
+                "count": u64::MAX,
+                "summary_text": canary,
+                "key_material": canary,
+                "payload": { "token": canary },
+            })
+        })
+        .collect::<Vec<_>>();
+    let diagnosis = super::temporal_health::diagnose(Some(&serde_json::json!({
+        "status": "complete",
+        "findings": findings,
+        "message": canary,
+        "database_key": canary,
+    })));
+    let rendered = diagnosis
+        .lines()
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(!rendered.contains(canary));
+    assert!(!rendered.contains("summary_text"));
+    assert!(!rendered.contains("key_material"));
+    assert!(!rendered.contains("payload"));
+    assert!(rendered.contains("partial"));
+    assert_eq!(diagnosis.finding_codes(), ["missing_anchor"]);
+    assert!(rendered.contains("1000000"));
+}
+
+#[tokio::test]
+async fn temporal_health_adapter_is_read_only_and_clean_on_canonical_schema() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let before = std::fs::read(dir.path().join("global.db")).unwrap();
+
+    let report = db.session_temporal_doctor_health().await;
+
+    let encoded = serde_json::to_value(report).unwrap();
+    assert_eq!(encoded["status"], "complete");
+    assert_eq!(encoded["findings"], serde_json::json!([]));
+    assert_eq!(
+        std::fs::read(dir.path().join("global.db")).unwrap(),
+        before,
+        "temporal health diagnosis must not mutate the authoritative database"
+    );
+}
+
+async fn temporal_health_test_count(db: &crate::global_db::GlobalDb, sql: &str) -> i64 {
+    let read = db.read_snapshot().await.unwrap();
+    let mut rows = read.query(sql, ()).await.unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+#[tokio::test]
+async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = crate::global_db::GlobalDb::open_at(&db_path).await.unwrap();
+    let writer = db.writer_connection().await.unwrap();
+    writer
+        .execute(
+            "INSERT INTO session_occurrences_fts(rowid, index_text, snippet_text)
+             VALUES (9001, 'temporalorphan', 'temporalorphan')",
+            (),
+        )
+        .await
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO session_summary_nodes_fts(rowid, summary_text, index_text)
+             VALUES (9002, 'temporalorphan', 'temporalorphan')",
+            (),
+        )
+        .await
+        .unwrap();
+    drop(writer);
+
+    let before = std::fs::read(&db_path).unwrap();
+    let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();
+    assert_eq!(
+        report["findings"],
+        serde_json::json!([
+            {"kind": "occurrence_fts_corruption", "count": 1},
+            {"kind": "summary_fts_corruption", "count": 1},
+        ])
+    );
+    assert_eq!(std::fs::read(&db_path).unwrap(), before);
+    assert_eq!(
+        temporal_health_test_count(
+            &db,
+            "SELECT COUNT(*) FROM session_occurrences_fts
+             WHERE session_occurrences_fts MATCH 'temporalorphan'",
+        )
+        .await,
+        1
+    );
+
+    assert_eq!(db.repair_session_temporal_fts(false).await.unwrap(), (2, 0));
+    assert_eq!(std::fs::read(&db_path).unwrap(), before);
+    assert_eq!(
+        temporal_health_test_count(
+            &db,
+            "SELECT COUNT(*) FROM session_summary_nodes_fts
+             WHERE session_summary_nodes_fts MATCH 'temporalorphan'",
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        temporal_health_test_count(&db, "SELECT COUNT(*) FROM session_occurrences").await,
+        0
+    );
+    assert_eq!(
+        temporal_health_test_count(&db, "SELECT COUNT(*) FROM session_summary_nodes").await,
+        0
+    );
+    assert_eq!(db.repair_session_temporal_fts(true).await.unwrap(), (2, 2));
+    assert_eq!(
+        temporal_health_test_count(
+            &db,
+            "SELECT COUNT(*) FROM session_occurrences_fts
+             WHERE session_occurrences_fts MATCH 'temporalorphan'",
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        temporal_health_test_count(
+            &db,
+            "SELECT COUNT(*) FROM session_summary_nodes_fts
+             WHERE session_summary_nodes_fts MATCH 'temporalorphan'",
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        temporal_health_test_count(&db, "SELECT COUNT(*) FROM session_occurrences").await,
+        0
+    );
+    assert_eq!(
+        temporal_health_test_count(&db, "SELECT COUNT(*) FROM session_summary_nodes").await,
+        0
+    );
+    assert_eq!(db.repair_session_temporal_fts(true).await.unwrap(), (0, 0));
+}
+
+#[tokio::test]
+async fn temporal_fts_repair_accepts_only_exact_malformed_index_damage() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let writer = db.writer_connection().await.unwrap();
+    writer
+        .execute(
+            "INSERT INTO session_occurrences_fts(rowid, index_text, snippet_text)
+             VALUES (9003, 'malformedprobe', 'malformedprobe')",
+            (),
+        )
+        .await
+        .unwrap();
+    writer
+        .execute(
+            "UPDATE session_occurrences_fts_data
+             SET block = x'ff'
+             WHERE id = (
+                 SELECT MAX(id) FROM session_occurrences_fts_data WHERE id > 10
+             )",
+            (),
+        )
+        .await
+        .unwrap();
+    drop(writer);
+
+    let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();
+    assert_eq!(
+        report["findings"],
+        serde_json::json!([
+            {"kind": "occurrence_fts_corruption", "count": 1},
+        ])
+    );
+    assert_eq!(db.repair_session_temporal_fts(true).await.unwrap(), (1, 1));
+    assert_eq!(
+        serde_json::to_value(db.session_temporal_doctor_health().await).unwrap()["findings"],
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
+async fn temporal_health_detects_cross_session_ownership() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let writer = db.writer_connection().await.unwrap();
+    writer
+        .execute("PRAGMA foreign_keys = OFF", ())
+        .await
+        .unwrap();
+    writer
+        .execute("DROP TRIGGER session_summary_sources_owner_guard_v1", ())
+        .await
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO session_summary_nodes (
+                 summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                 source_horizon_json, publication_json, created_at
+             ) VALUES
+                 ('summary-a', 'session-a', 'anchor-a', 'a', 'a', '{}', NULL, 1),
+                 ('summary-b', 'session-b', 'anchor-b', 'b', 'b', '{}', NULL, 2)",
+            (),
+        )
+        .await
+        .unwrap();
+    writer
+        .execute(
+            "INSERT INTO session_summary_sources (
+                 summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
+             ) VALUES ('summary-b', 0, 'summary', NULL, 'summary-a')",
+            (),
+        )
+        .await
+        .unwrap();
+    drop(writer);
+
+    let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();
+    assert!(
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "ownership_drift")
+    );
+}
+
+#[test]
+fn temporal_fts_classifier_rejects_whole_database_corruption() {
+    assert!(
+        crate::global_db::SessionTemporalHealthReport::is_fts_virtual_table_error_code_for_test(
+            267
+        )
+    );
+    assert!(
+        !crate::global_db::SessionTemporalHealthReport::is_fts_virtual_table_error_code_for_test(
+            11
+        )
+    );
+    assert!(
+        crate::global_db::SessionTemporalHealthReport::is_allowed_fts_quick_check_for_test(
+            "malformed inverted index for FTS5 table main.session_occurrences_fts",
+            true,
+            false,
+        )
+    );
+    assert!(
+        !crate::global_db::SessionTemporalHealthReport::is_allowed_fts_quick_check_for_test(
+            "database disk image is malformed",
+            true,
+            false,
+        )
+    );
+    assert!(
+        !crate::global_db::SessionTemporalHealthReport::is_allowed_fts_quick_check_for_test(
+            "malformed inverted index for FTS5 table main.session_summary_nodes_fts",
+            true,
+            false,
+        )
     );
 }
 

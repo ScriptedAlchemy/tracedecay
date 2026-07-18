@@ -12,6 +12,29 @@ fn session_reflector_options_have_no_storage_selector() {
         .is_err()
     );
 }
+
+#[test]
+fn session_reflector_evidence_uses_fresh_authorized_forensic_retrieval() {
+    let source = include_str!("../../src/automation/runner.rs");
+    let start = source
+        .find("async fn build_session_reflector_evidence")
+        .expect("session reflector evidence builder");
+    let end = source[start..]
+        .find("async fn build_skill_writer_evidence")
+        .map(|offset| start + offset)
+        .expect("skill writer evidence builder");
+    let builder = &source[start..end];
+
+    assert!(!builder.contains(".lcm_grep("));
+    assert!(!builder.contains(".lcm_recent_sessions("));
+    assert!(!builder.contains(".lcm_session_replay_slice("));
+    assert!(builder.contains("retrieve_automation_session_evidence("));
+    assert!(source.contains("SessionFreshnessPolicy::RequireFresh"));
+    assert!(source.contains("TemporalModeV1::Forensic"));
+    assert!(source.contains("production_project_automation_retrieval(cg).await"));
+    assert!(source.contains("production_user_automation_retrieval(profile_root).await"));
+    assert!(!include_str!("support.rs").contains(".lcm_grep("));
+}
 use tracedecay::automation::fact_proposals::record_session_fact_proposals;
 
 #[tokio::test]
@@ -42,6 +65,195 @@ async fn session_reflector_runner_skips_when_task_is_disabled() {
         run.ledger_record.error.as_deref(),
         Some("session_reflector_disabled")
     );
+}
+
+#[tokio::test]
+async fn session_reflector_fails_closed_on_stale_temporal_evidence() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    let backend = SessionJsonBackend::new(json!({"facts": []}));
+    let retrieval = RejectedAutomationSessionRetrieval::new("session_evidence_stale");
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            session_reflector: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+
+    let run = tracedecay::automation::runner::run_session_reflector_with_backend_and_retrieval(
+        &cg,
+        &config,
+        &backend,
+        &retrieval,
+        SessionReflectorAutomationOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        run.ledger_record.error.as_deref(),
+        Some("session_evidence_stale")
+    );
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "rejected evidence must not write a ledger record"
+    );
+    assert!(
+        !cg.store_layout()
+            .dashboard_root
+            .join("automation_outcomes.json")
+            .exists(),
+        "rejected evidence must not refresh fact outcomes"
+    );
+}
+
+#[tokio::test]
+async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_writes() {
+    for reason in [
+        "session_evidence_denied",
+        "session_evidence_stale",
+        "session_evidence_partial",
+        "session_evidence_unavailable",
+        "session_evidence_budget_exhausted",
+        "session_evidence_cancelled",
+    ] {
+        let temp = tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        let cg = init_project(temp.path()).await;
+        let retrieval = RejectedAutomationSessionRetrieval::new(reason);
+        let reflector_backend = SessionJsonBackend::new(json!({"facts": []}));
+        let skill_backend = SkillJsonBackend::new(json!({"skills": []}));
+        let config = AutomationConfig {
+            enabled: true,
+            backend: AutomationBackend::CodexAppServer,
+            host_mode: AutomationHostMode::Standalone,
+            tasks: AutomationTaskSet {
+                session_reflector: AutomationTaskConfig {
+                    enabled: true,
+                    schedule: Some("manual".to_string()),
+                    ..AutomationTaskConfig::default()
+                },
+                skill_writer: AutomationTaskConfig {
+                    enabled: true,
+                    schedule: Some("manual".to_string()),
+                    ..AutomationTaskConfig::default()
+                },
+                ..AutomationTaskSet::default()
+            },
+            ..AutomationConfig::default()
+        };
+
+        let reflector =
+            tracedecay::automation::runner::run_session_reflector_with_backend_and_retrieval(
+                &cg,
+                &config,
+                &reflector_backend,
+                &retrieval,
+                SessionReflectorAutomationOptions::default(),
+            )
+            .await
+            .unwrap();
+        let skill = tracedecay::automation::runner::run_skill_writer_with_backend_and_retrieval(
+            &cg,
+            &config,
+            &skill_backend,
+            &retrieval,
+            SkillWriterAutomationOptions {
+                profile_root: Some(profile_root.clone()),
+                ..SkillWriterAutomationOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reflector.ledger_record.error.as_deref(), Some(reason));
+        assert_eq!(skill.ledger_record.error.as_deref(), Some(reason));
+        assert_eq!(reflector_backend.calls(), 0);
+        assert_eq!(skill_backend.calls(), 0);
+        assert!(
+            load_run_records(&cg.store_layout().dashboard_root, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!profile_root.exists());
+    }
+
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("empty-profile");
+    let cg = init_project(temp.path()).await;
+    let retrieval = EmptyAutomationSessionRetrieval::new();
+    let reflector_backend = SessionJsonBackend::new(json!({"facts": []}));
+    let skill_backend = SkillJsonBackend::new(json!({"skills": []}));
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            session_reflector: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            skill_writer: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+    let reflector =
+        tracedecay::automation::runner::run_session_reflector_with_backend_and_retrieval(
+            &cg,
+            &config,
+            &reflector_backend,
+            &retrieval,
+            SessionReflectorAutomationOptions::default(),
+        )
+        .await
+        .unwrap();
+    let skill = tracedecay::automation::runner::run_skill_writer_with_backend_and_retrieval(
+        &cg,
+        &config,
+        &skill_backend,
+        &retrieval,
+        SkillWriterAutomationOptions {
+            profile_root: Some(profile_root.clone()),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reflector.ledger_record.error.as_deref(),
+        Some("no_session_evidence")
+    );
+    assert_eq!(
+        skill.ledger_record.error.as_deref(),
+        Some("no_skill_writer_evidence")
+    );
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!profile_root.exists());
 }
 
 #[tokio::test]
@@ -694,7 +906,7 @@ async fn session_fact_proposals_replay_same_run_idempotently() {
 }
 
 #[tokio::test]
-async fn session_reflector_host_modes_do_not_select_alternate_lcm_storage() {
+async fn session_reflector_rejects_unsupported_source_role_and_time_filters_without_writes() {
     let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
@@ -775,18 +987,18 @@ async fn session_reflector_host_modes_do_not_select_alternate_lcm_storage() {
         .await
         .unwrap();
 
-        if host_mode == AutomationHostMode::Standalone {
-            assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
-            assert_eq!(run.ledger_record.accepted_count, 0);
-            assert_eq!(run.ledger_record.rejected_count, 0);
-        } else {
-            assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-            assert_eq!(
-                run.ledger_record.error.as_deref(),
-                Some("delegated_host_mode")
-            );
-        }
+        assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+        assert_eq!(
+            run.ledger_record.error.as_deref(),
+            Some("session_evidence_filter_unavailable")
+        );
     }
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -831,6 +1043,11 @@ async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
         "session-replay-1",
         "session-replay-1-message-001",
     );
+    let retrieval = StaticAutomationSessionRetrieval::message(
+        "session-replay-1",
+        "session-replay-1-message-001",
+        "Always pass the offline flag to cargo nextest on this machine.",
+    );
     let config = AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
@@ -846,10 +1063,11 @@ async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
         ..AutomationConfig::default()
     };
 
-    let run = run_session_reflector_with_backend(
+    let run = tracedecay::automation::runner::run_session_reflector_with_backend_and_retrieval(
         &cg,
         &config,
         &backend,
+        &retrieval,
         SessionReflectorAutomationOptions::default(),
     )
     .await
@@ -1048,11 +1266,17 @@ async fn session_reflector_replay_respects_include_summaries_false() {
         },
         ..AutomationConfig::default()
     };
+    let retrieval = StaticAutomationSessionRetrieval::message(
+        "session-reflect-1",
+        "session-reflect-1-message-001",
+        "Remember TraceDecay automation should manage durable session reflection facts directly.",
+    );
 
-    let run = run_session_reflector_with_backend(
+    let run = tracedecay::automation::runner::run_session_reflector_with_backend_and_retrieval(
         &cg,
         &config,
         &NoSummaryReplayBackend,
+        &retrieval,
         SessionReflectorAutomationOptions {
             query: "does-not-match-any-grep-hit".to_string(),
             include_summaries: false,

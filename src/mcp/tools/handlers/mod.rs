@@ -30,6 +30,19 @@ mod support;
 pub mod workflow;
 pub mod workflow_query;
 
+pub(crate) use session::message_search::{
+    LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
+    LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
+    SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
+    SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
+    SessionRetrievalStoreScope, SessionTemporalMetadataView, SessionTemporalWatermarksView,
+};
+pub(crate) use session::{
+    SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,
+    SessionRefreshFrontierView, SessionRefreshProgressView, SessionRefreshReceiptView,
+    SessionRefreshServiceOutcome, SessionRefreshServicePort, utc_micros_value,
+};
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -46,7 +59,7 @@ pub async fn handle_user_lcm_tool(
     args: Value,
     profile_root: &Path,
 ) -> Result<crate::mcp::tools::ToolResult> {
-    handle_user_lcm_tool_with_db(tool_name, args, profile_root, None, None, true).await
+    handle_user_lcm_tool_with_db(tool_name, args, profile_root, None, None, true, None).await
 }
 
 async fn handle_user_lcm_tool_with_db(
@@ -54,8 +67,9 @@ async fn handle_user_lcm_tool_with_db(
     args: Value,
     profile_root: &Path,
     retained_session_db: Option<&Arc<GlobalDb>>,
-    registry_db: Option<&GlobalDb>,
-    allow_owned_session_db: bool,
+    _registry_db: Option<&GlobalDb>,
+    _allow_owned_session_db: bool,
+    retrieval_service: Option<&dyn session::message_search::SessionRetrievalServicePort>,
 ) -> Result<crate::mcp::tools::ToolResult> {
     if args.get("storage_scope").and_then(Value::as_str) != Some("user") {
         return Err(TraceDecayError::Config {
@@ -79,17 +93,17 @@ async fn handle_user_lcm_tool_with_db(
         });
     }
     if tool_name == "tracedecay_message_search" {
-        return session::handle_user_message_search(
-            profile_root,
+        return session::message_search::handle_message_search_with_service(
+            None,
+            session::message_search::SessionRetrievalStoreScope::Profile,
             args,
-            retained_session_db,
-            registry_db,
-            allow_owned_session_db,
+            retrieval_service,
         )
         .await;
     }
     let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
-    let context = session::LcmHandlerContext::user(&sessions_db_path, retained_session_db);
+    let context =
+        session::LcmHandlerContext::user(&sessions_db_path, retained_session_db, retrieval_service);
     dispatch_lcm_tool(tool_name, args, context).await
 }
 
@@ -124,11 +138,46 @@ async fn dispatch_lcm_tool(
 pub struct SessionAuthorities<'a> {
     pub(crate) project: Option<&'a Arc<GlobalDb>>,
     pub(crate) user: Option<&'a Arc<GlobalDb>>,
+    project_refresh: Option<&'a dyn session::SessionRefreshServicePort>,
+    profile_refresh: Option<&'a dyn session::SessionRefreshServicePort>,
+    project_retrieval: Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
+    profile_retrieval: Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
 }
 
 impl<'a> SessionAuthorities<'a> {
     pub const fn new(project: Option<&'a Arc<GlobalDb>>, user: Option<&'a Arc<GlobalDb>>) -> Self {
-        Self { project, user }
+        Self {
+            project,
+            user,
+            project_refresh: None,
+            profile_refresh: None,
+            project_retrieval: None,
+            profile_retrieval: None,
+        }
+    }
+
+    pub(crate) const fn with_refresh_services(
+        mut self,
+        project: Option<&'a dyn session::SessionRefreshServicePort>,
+        profile: Option<&'a dyn session::SessionRefreshServicePort>,
+    ) -> Self {
+        self.project_refresh = project;
+        self.profile_refresh = profile;
+        self
+    }
+
+    pub(crate) const fn with_retrieval_services(
+        mut self,
+        project: Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
+        profile: Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
+    ) -> Self {
+        self.project_retrieval = project;
+        self.profile_retrieval = profile;
+        self
+    }
+
+    const fn refresh_services(self) -> session::SessionRefreshServices<'a> {
+        session::SessionRefreshServices::new(self.project_refresh, self.profile_refresh)
     }
 }
 
@@ -415,10 +464,13 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         }
         match storage_scope {
             "user" => {
-                let profile_root = support::profile_root_for_global_db(
-                    options.global_db,
-                    options.allow_default_registry_fallback,
-                )?;
+                let profile_root = match options.profile_root {
+                    Some(profile_root) => profile_root.to_path_buf(),
+                    None => support::profile_root_for_global_db(
+                        options.global_db,
+                        options.allow_default_registry_fallback,
+                    )?,
+                };
                 return handle_user_lcm_tool_with_db(
                     tool_name,
                     args,
@@ -426,6 +478,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
                     options.session_authorities.user,
                     options.global_db,
                     options.allow_default_registry_fallback,
+                    options.session_authorities.profile_retrieval,
                 )
                 .await;
             }
@@ -477,7 +530,11 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         .is_none()
         .then_some(options.session_authorities.project)
         .flatten();
-    let active_lcm_context = session::LcmHandlerContext::active(cg, active_project_session_db);
+    let active_lcm_context = session::LcmHandlerContext::active(
+        cg,
+        active_project_session_db,
+        options.session_authorities.project_retrieval,
+    );
     match tool_name {
         "tracedecay_search" => graph::handle_search(cg, args, selected_scope_prefix).await,
         "tracedecay_grep" => grep::handle_grep(cg, args, selected_scope_prefix).await,
@@ -522,7 +579,13 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
             .await
         }
         "tracedecay_admin_project" => {
-            admin_project::handle_admin_project(cg, args, options.global_db).await
+            admin_project::handle_admin_project(
+                cg,
+                args,
+                options.global_db,
+                options.automation_scheduler_reconciler.clone(),
+            )
+            .await
         }
         "tracedecay_active_project" => Ok(info::handle_active_project(
             cg,
@@ -707,14 +770,16 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
             )
             .await
         }
+        "tracedecay_session_refresh" => {
+            session::handle_session_refresh(args, options.session_authorities.refresh_services())
+                .await
+        }
         "tracedecay_message_search" => {
-            Box::pin(session::handle_message_search(
-                cg,
+            Box::pin(session::message_search::handle_message_search_with_service(
+                Some(cg.project_root()),
+                session::message_search::SessionRetrievalStoreScope::Project,
                 args,
-                options.global_db,
-                options.allow_default_registry_fallback,
-                active_project_session_db,
-                options.session_authorities.user,
+                options.session_authorities.project_retrieval,
             ))
             .await
         }
@@ -1233,6 +1298,7 @@ mod tests {
         assert!(tool_names.contains(&"tracedecay_fact_store"));
         assert!(tool_names.contains(&"tracedecay_fact_feedback"));
         assert!(tool_names.contains(&"tracedecay_memory_status"));
+        assert!(tool_names.contains(&"tracedecay_session_refresh"));
         assert!(tool_names.contains(&"tracedecay_message_search"));
         assert!(tool_names.contains(&"tracedecay_impact"));
         assert!(tool_names.contains(&"tracedecay_node"));
@@ -1415,6 +1481,7 @@ mod tests {
             "tracedecay_fact_store",
             "tracedecay_fact_feedback",
             "tracedecay_memory_status",
+            "tracedecay_session_refresh",
             "tracedecay_lcm_doctor",
             "tracedecay_lcm_preflight",
             "tracedecay_lcm_compress",

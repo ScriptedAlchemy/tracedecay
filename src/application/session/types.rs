@@ -1,0 +1,1076 @@
+use std::fmt;
+
+use tracedecay_domain::{ActorId, RetrievalGrainV1, SessionId, TemporalModeV1};
+
+use crate::application::context::{
+    CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline, PolicyDigest,
+    RequestBudgets, RequestContext, ResolvedSessionIdentity, SessionOwner,
+};
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AuthorizationGrantId(String);
+
+impl AuthorizationGrantId {
+    pub fn new(value: impl Into<String>) -> Result<Self, SessionAuthorizationError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.trim() != value
+            || value.len() > 512
+            || value.chars().any(char::is_control)
+        {
+            return Err(SessionAuthorizationError::InvalidGrantId);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for AuthorizationGrantId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionAccess {
+    Read,
+    Search,
+    Hydrate,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SessionRetrievalScope {
+    Session(SessionId),
+    AllSessionsInAuthorizedRoot,
+}
+
+impl SessionRetrievalScope {
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Session(_) => "session",
+            Self::AllSessionsInAuthorizedRoot => "all_sessions_in_authorized_root",
+        }
+    }
+
+    pub fn session_id(&self) -> Option<&SessionId> {
+        match self {
+            Self::Session(session_id) => Some(session_id),
+            Self::AllSessionsInAuthorizedRoot => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionScopeAuthorizationRequest {
+    actor_id: ActorId,
+    identity: ResolvedSessionIdentity,
+    session_id: SessionId,
+    retrieval_scope: SessionRetrievalScope,
+    provider_scope: Option<String>,
+    temporal_mode: TemporalModeV1,
+    grain: RetrievalGrainV1,
+    access: SessionAccess,
+}
+
+impl SessionScopeAuthorizationRequest {
+    pub fn new(
+        actor_id: ActorId,
+        identity: ResolvedSessionIdentity,
+        session_id: SessionId,
+        provider_scope: Option<String>,
+        temporal_mode: TemporalModeV1,
+        grain: RetrievalGrainV1,
+        access: SessionAccess,
+    ) -> Result<Self, SessionAuthorizationError> {
+        if provider_scope.as_deref().is_some_and(|provider| {
+            provider.is_empty()
+                || provider.trim() != provider
+                || provider.len() > 512
+                || provider.chars().any(char::is_control)
+        }) {
+            return Err(SessionAuthorizationError::InvalidProviderScope);
+        }
+        let retrieval_scope = SessionRetrievalScope::Session(session_id.clone());
+        Ok(Self {
+            actor_id,
+            identity,
+            session_id,
+            retrieval_scope,
+            provider_scope,
+            temporal_mode,
+            grain,
+            access,
+        })
+    }
+
+    #[must_use]
+    pub fn with_retrieval_scope(mut self, retrieval_scope: SessionRetrievalScope) -> Self {
+        if let SessionRetrievalScope::Session(session_id) = &retrieval_scope {
+            self.session_id = session_id.clone();
+        }
+        self.retrieval_scope = retrieval_scope;
+        self
+    }
+
+    pub fn actor_id(&self) -> &ActorId {
+        &self.actor_id
+    }
+
+    pub fn identity(&self) -> &ResolvedSessionIdentity {
+        &self.identity
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    pub fn retrieval_scope(&self) -> &SessionRetrievalScope {
+        &self.retrieval_scope
+    }
+
+    pub fn provider_scope(&self) -> Option<&str> {
+        self.provider_scope.as_deref()
+    }
+
+    pub const fn temporal_mode(&self) -> TemporalModeV1 {
+        self.temporal_mode
+    }
+
+    pub const fn grain(&self) -> RetrievalGrainV1 {
+        self.grain
+    }
+
+    pub const fn access(&self) -> SessionAccess {
+        self.access
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizedSessionScope {
+    actor_id: ActorId,
+    identity: ResolvedSessionIdentity,
+    session_id: SessionId,
+    retrieval_scope: SessionRetrievalScope,
+    provider_scope: Option<String>,
+    temporal_mode: TemporalModeV1,
+    grain: RetrievalGrainV1,
+    access: SessionAccess,
+}
+
+impl AuthorizedSessionScope {
+    fn from_request(request: &SessionScopeAuthorizationRequest) -> Self {
+        Self {
+            actor_id: request.actor_id.clone(),
+            identity: request.identity.clone(),
+            session_id: request.session_id.clone(),
+            retrieval_scope: request.retrieval_scope.clone(),
+            provider_scope: request.provider_scope.clone(),
+            temporal_mode: request.temporal_mode,
+            grain: request.grain,
+            access: request.access,
+        }
+    }
+
+    pub fn actor_id(&self) -> &ActorId {
+        &self.actor_id
+    }
+
+    pub fn identity(&self) -> &ResolvedSessionIdentity {
+        &self.identity
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    pub fn retrieval_scope(&self) -> &SessionRetrievalScope {
+        &self.retrieval_scope
+    }
+
+    pub fn provider_scope(&self) -> Option<&str> {
+        self.provider_scope.as_deref()
+    }
+
+    pub const fn temporal_mode(&self) -> TemporalModeV1 {
+        self.temporal_mode
+    }
+
+    pub const fn grain(&self) -> RetrievalGrainV1 {
+        self.grain
+    }
+
+    pub const fn access(&self) -> SessionAccess {
+        self.access
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionAuthorizationGrant {
+    id: AuthorizationGrantId,
+    revision: u64,
+    scope: AuthorizedSessionScope,
+    capability_digest: CapabilityDigest,
+    policy_digest: PolicyDigest,
+    configuration_digest: ConfigurationDigest,
+    deadline: MonotonicDeadline,
+    cancellation: CancellationToken,
+    budgets: RequestBudgets,
+}
+
+impl SessionAuthorizationGrant {
+    /// Issues a grant after an authorizer accepts the exact resolved scope.
+    pub fn issue(
+        id: AuthorizationGrantId,
+        revision: u64,
+        context: &RequestContext,
+        request: &SessionScopeAuthorizationRequest,
+    ) -> Result<Self, SessionAuthorizationError> {
+        if revision == 0 {
+            return Err(SessionAuthorizationError::ZeroRevision);
+        }
+        if request.actor_id() != context.actor_id() {
+            return Err(SessionAuthorizationError::WrongContext);
+        }
+        if request.identity() != context.identity() {
+            return Err(SessionAuthorizationError::WrongScope);
+        }
+        if matches!(request.identity().owner(), SessionOwner::Project { .. })
+            && request.identity().git_route().is_none()
+        {
+            return Err(SessionAuthorizationError::UnresolvedGitRoute);
+        }
+
+        Ok(Self {
+            id,
+            revision,
+            scope: AuthorizedSessionScope::from_request(request),
+            capability_digest: context.capability_digest(),
+            policy_digest: context.policy_digest(),
+            configuration_digest: context.configuration_digest(),
+            deadline: context.deadline(),
+            cancellation: context.cancellation().clone(),
+            budgets: context.budgets(),
+        })
+    }
+
+    pub fn validate(
+        &self,
+        context: &RequestContext,
+        request: &SessionScopeAuthorizationRequest,
+    ) -> Result<(), SessionAuthorizationError> {
+        if self.scope.actor_id() != context.actor_id() || request.actor_id() != context.actor_id() {
+            return Err(SessionAuthorizationError::WrongContext);
+        }
+        if self.scope.identity() != context.identity() || request.identity() != context.identity() {
+            return Err(SessionAuthorizationError::WrongScope);
+        }
+        if self.capability_digest != context.capability_digest()
+            || self.policy_digest != context.policy_digest()
+            || self.configuration_digest != context.configuration_digest()
+            || self.deadline != context.deadline()
+            || !self.cancellation.is_same_token(context.cancellation())
+            || self.budgets != context.budgets()
+        {
+            return Err(SessionAuthorizationError::WrongContext);
+        }
+        if self.scope.access() != request.access() {
+            return Err(SessionAuthorizationError::WrongAccess);
+        }
+        if self.scope.retrieval_scope() != request.retrieval_scope()
+            || self.scope.provider_scope() != request.provider_scope()
+            || self.scope.temporal_mode() != request.temporal_mode()
+            || self.scope.grain() != request.grain()
+        {
+            return Err(SessionAuthorizationError::WrongTarget);
+        }
+        Ok(())
+    }
+
+    pub fn id(&self) -> &AuthorizationGrantId {
+        &self.id
+    }
+
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn scope(&self) -> &AuthorizedSessionScope {
+        &self.scope
+    }
+
+    pub const fn capability_digest(&self) -> CapabilityDigest {
+        self.capability_digest
+    }
+
+    pub const fn policy_digest(&self) -> PolicyDigest {
+        self.policy_digest
+    }
+
+    pub const fn configuration_digest(&self) -> ConfigurationDigest {
+        self.configuration_digest
+    }
+
+    pub const fn deadline(&self) -> MonotonicDeadline {
+        self.deadline
+    }
+
+    pub fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+
+    pub const fn budgets(&self) -> RequestBudgets {
+        self.budgets
+    }
+}
+
+pub trait SessionScopeAuthorizer {
+    fn authorize(
+        &self,
+        context: &RequestContext,
+        request: &SessionScopeAuthorizationRequest,
+    ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionAuthorizationError {
+    InvalidGrantId,
+    InvalidProviderScope,
+    ZeroRevision,
+    WrongScope,
+    WrongContext,
+    WrongTarget,
+    WrongAccess,
+    UnresolvedGitRoute,
+    Denied,
+    Unavailable,
+}
+
+impl fmt::Display for SessionAuthorizationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::InvalidGrantId => "authorization grant ID is not canonical",
+            Self::InvalidProviderScope => "authorization provider scope is not canonical",
+            Self::ZeroRevision => "authorization grant revision must be greater than zero",
+            Self::WrongScope => "requested session scope differs from resolved request scope",
+            Self::WrongContext => {
+                "authorization grant context digests differ from the current request"
+            }
+            Self::WrongTarget => "authorization grant target differs from the requested target",
+            Self::WrongAccess => "authorization grant access differs from the requested access",
+            Self::UnresolvedGitRoute => {
+                "project session scope requires resolved repository, worktree, and branch routing"
+            }
+            Self::Denied => "session scope authorization was denied",
+            Self::Unavailable => "session scope authorization is unavailable",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for SessionAuthorizationError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionFreshnessPolicy {
+    AllowStored,
+    RequireFresh,
+}
+
+impl SessionFreshnessPolicy {
+    pub const fn accepts(self, freshness: SessionDataFreshness) -> bool {
+        matches!(
+            (self, freshness),
+            (Self::AllowStored, _) | (_, SessionDataFreshness::Fresh)
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionDataFreshness {
+    Fresh,
+    Stored { generation_lag: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionRetrievalTarget {
+    Scope,
+    Session(SessionId),
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionRetrievalRequest {
+    grant: SessionAuthorizationGrant,
+    target: SessionRetrievalTarget,
+    freshness_policy: SessionFreshnessPolicy,
+    limit: u64,
+}
+
+impl SessionRetrievalRequest {
+    pub fn new(
+        grant: SessionAuthorizationGrant,
+        target: SessionRetrievalTarget,
+        freshness_policy: SessionFreshnessPolicy,
+        limit: u64,
+    ) -> Result<Self, SessionRetrievalError> {
+        if limit == 0 {
+            return Err(SessionRetrievalError::ZeroLimit);
+        }
+        if limit > grant.budgets().max_results() {
+            return Err(SessionRetrievalError::LimitExceedsGrant);
+        }
+        let target_is_authorized = match (grant.scope().retrieval_scope(), &target) {
+            (
+                SessionRetrievalScope::Session(authorized),
+                SessionRetrievalTarget::Session(requested),
+            ) => authorized == requested,
+            (SessionRetrievalScope::AllSessionsInAuthorizedRoot, SessionRetrievalTarget::Scope) => {
+                true
+            }
+            _ => false,
+        };
+        if !target_is_authorized {
+            return Err(SessionRetrievalError::TargetOutsideGrant);
+        }
+        Ok(Self {
+            grant,
+            target,
+            freshness_policy,
+            limit,
+        })
+    }
+
+    pub fn grant(&self) -> &SessionAuthorizationGrant {
+        &self.grant
+    }
+
+    pub fn target(&self) -> &SessionRetrievalTarget {
+        &self.target
+    }
+
+    pub const fn freshness_policy(&self) -> SessionFreshnessPolicy {
+        self.freshness_policy
+    }
+
+    pub const fn limit(&self) -> u64 {
+        self.limit
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionRetrievalOutcome<T> {
+    Complete {
+        items: Vec<T>,
+        freshness: SessionDataFreshness,
+    },
+    CompleteZero {
+        freshness: SessionDataFreshness,
+    },
+    Stale {
+        freshness: SessionDataFreshness,
+    },
+    Partial {
+        items: Vec<T>,
+        freshness: SessionDataFreshness,
+        omitted: u64,
+    },
+    WrongScope,
+    Locked,
+    Redacted,
+    Deleted,
+    Denied,
+    Unavailable,
+    BudgetExhausted,
+    Cancelled,
+}
+
+impl<T> SessionRetrievalOutcome<T> {
+    pub fn complete(
+        items: Vec<T>,
+        freshness: SessionDataFreshness,
+    ) -> Result<Self, SessionRetrievalError> {
+        if items.is_empty() {
+            return Err(SessionRetrievalError::EmptyComplete);
+        }
+        Ok(Self::Complete { items, freshness })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionRetrievalError {
+    ZeroLimit,
+    LimitExceedsGrant,
+    TargetOutsideGrant,
+    EmptyComplete,
+}
+
+impl fmt::Display for SessionRetrievalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::ZeroLimit => "session retrieval limit must be greater than zero",
+            Self::LimitExceedsGrant => "session retrieval limit exceeds the authorized budget",
+            Self::TargetOutsideGrant => {
+                "session retrieval target is outside the authorized grant scope"
+            }
+            Self::EmptyComplete => "complete session retrieval must contain at least one item",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for SessionRetrievalError {}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use tracedecay_domain::{
+        ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalModeV1, UtcMicros,
+        WorktreeId,
+    };
+
+    use super::*;
+    use crate::application::context::{
+        BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
+        PolicyDigest, ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedGitRoute,
+        ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    };
+
+    const DIGEST: [u8; 32] = [0xa5; 32];
+
+    struct AllowAuthorizer;
+
+    impl SessionScopeAuthorizer for AllowAuthorizer {
+        fn authorize(
+            &self,
+            context: &RequestContext,
+            request: &SessionScopeAuthorizationRequest,
+        ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
+            SessionAuthorizationGrant::issue(
+                AuthorizationGrantId::new("grant.session.read").unwrap(),
+                7,
+                context,
+                request,
+            )
+        }
+    }
+
+    fn context() -> RequestContext {
+        context_with_digests(DIGEST, DIGEST, DIGEST)
+    }
+
+    fn context_with_digests(
+        capability_digest: [u8; 32],
+        policy_digest: [u8; 32],
+        configuration_digest: [u8; 32],
+    ) -> RequestContext {
+        context_for_actor(
+            "actor.cursor",
+            capability_digest,
+            policy_digest,
+            configuration_digest,
+        )
+    }
+
+    fn context_for_actor(
+        actor_id: &str,
+        capability_digest: [u8; 32],
+        policy_digest: [u8; 32],
+        configuration_digest: [u8; 32],
+    ) -> RequestContext {
+        RequestContext::new(
+            ActorId::new(actor_id).unwrap(),
+            RequestId::new("request.session.read").unwrap(),
+            ResolvedSessionIdentity::for_project(
+                ProfileId::new("profile.primary").unwrap(),
+                ProjectId::new("project.tracedecay").unwrap(),
+                SessionStoreId::new("store.project.tracedecay").unwrap(),
+                SessionRootId::new("root.project.tracedecay").unwrap(),
+                ResolvedGitRoute::new(
+                    RepositoryId::new("repository.tracedecay").unwrap(),
+                    WorktreeId::new("worktree.main").unwrap(),
+                    BranchId::new("branch.application-slice-1").unwrap(),
+                ),
+            ),
+            CapabilityDigest::new(capability_digest),
+            PolicyDigest::new(policy_digest),
+            ConfigurationDigest::new(configuration_digest),
+            MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
+            CancellationToken::new(),
+            RequestBudgets::new(64, 4096, 16).unwrap(),
+        )
+    }
+
+    fn exact_authorization_request(
+        identity: ResolvedSessionIdentity,
+    ) -> SessionScopeAuthorizationRequest {
+        SessionScopeAuthorizationRequest::new(
+            ActorId::new("actor.cursor").unwrap(),
+            identity,
+            SessionId::new("session.application-slice-1").unwrap(),
+            Some("cursor".to_owned()),
+            TemporalModeV1::AsOf {
+                cutoff: UtcMicros(1_234_567),
+            },
+            RetrievalGrainV1::LogicalMessage,
+            SessionAccess::Hydrate,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn grant_binds_the_exact_typed_retrieval_target_without_serialization() {
+        let context = context();
+        let request = exact_authorization_request(context.identity().clone());
+        let grant = AllowAuthorizer.authorize(&context, &request).unwrap();
+
+        assert_eq!(grant.id().as_str(), "grant.session.read");
+        assert_eq!(grant.revision(), 7);
+        assert_eq!(grant.scope().actor_id(), context.actor_id());
+        assert_eq!(grant.scope().identity(), context.identity());
+        assert_eq!(
+            grant.scope().session_id().as_str(),
+            "session.application-slice-1"
+        );
+        assert_eq!(grant.scope().provider_scope(), Some("cursor"));
+        assert_eq!(
+            grant.scope().temporal_mode(),
+            TemporalModeV1::AsOf {
+                cutoff: UtcMicros(1_234_567)
+            }
+        );
+        assert_eq!(grant.scope().grain(), RetrievalGrainV1::LogicalMessage);
+        assert_eq!(grant.scope().access(), SessionAccess::Hydrate);
+        assert_eq!(grant.capability_digest(), context.capability_digest());
+        assert_eq!(grant.policy_digest(), context.policy_digest());
+        assert_eq!(grant.configuration_digest(), context.configuration_digest());
+        assert_eq!(grant.validate(&context, &request), Ok(()));
+    }
+
+    #[test]
+    fn root_wide_grant_binds_the_authorized_root_without_binding_anchor_session() {
+        let context = context();
+        let request = exact_authorization_request(context.identity().clone())
+            .with_retrieval_scope(SessionRetrievalScope::AllSessionsInAuthorizedRoot);
+        let grant = AllowAuthorizer.authorize(&context, &request).unwrap();
+
+        assert_eq!(
+            grant.scope().retrieval_scope(),
+            &SessionRetrievalScope::AllSessionsInAuthorizedRoot
+        );
+        assert_eq!(grant.validate(&context, &request), Ok(()));
+
+        let other_anchor = SessionScopeAuthorizationRequest::new(
+            context.actor_id().clone(),
+            context.identity().clone(),
+            SessionId::new("session.other-anchor").unwrap(),
+            request.provider_scope().map(str::to_owned),
+            request.temporal_mode(),
+            request.grain(),
+            request.access(),
+        )
+        .unwrap()
+        .with_retrieval_scope(SessionRetrievalScope::AllSessionsInAuthorizedRoot);
+        assert_eq!(grant.validate(&context, &other_anchor), Ok(()));
+
+        let exact = exact_authorization_request(context.identity().clone());
+        assert_eq!(
+            grant.validate(&context, &exact),
+            Err(SessionAuthorizationError::WrongTarget)
+        );
+    }
+
+    #[test]
+    fn grant_validation_rejects_every_target_access_and_root_mutation() {
+        let context = context();
+        let request = exact_authorization_request(context.identity().clone());
+        let grant = AllowAuthorizer.authorize(&context, &request).unwrap();
+        let target_mutations = [
+            SessionScopeAuthorizationRequest::new(
+                context.actor_id().clone(),
+                context.identity().clone(),
+                SessionId::new("session.other").unwrap(),
+                Some("cursor".to_owned()),
+                request.temporal_mode(),
+                request.grain(),
+                request.access(),
+            )
+            .unwrap(),
+            SessionScopeAuthorizationRequest::new(
+                context.actor_id().clone(),
+                context.identity().clone(),
+                request.session_id().clone(),
+                None,
+                request.temporal_mode(),
+                request.grain(),
+                request.access(),
+            )
+            .unwrap(),
+            SessionScopeAuthorizationRequest::new(
+                context.actor_id().clone(),
+                context.identity().clone(),
+                request.session_id().clone(),
+                Some("claude".to_owned()),
+                request.temporal_mode(),
+                request.grain(),
+                request.access(),
+            )
+            .unwrap(),
+            SessionScopeAuthorizationRequest::new(
+                context.actor_id().clone(),
+                context.identity().clone(),
+                request.session_id().clone(),
+                Some("cursor".to_owned()),
+                TemporalModeV1::Current,
+                request.grain(),
+                request.access(),
+            )
+            .unwrap(),
+            SessionScopeAuthorizationRequest::new(
+                context.actor_id().clone(),
+                context.identity().clone(),
+                request.session_id().clone(),
+                Some("cursor".to_owned()),
+                TemporalModeV1::AsOf {
+                    cutoff: UtcMicros(1_234_568),
+                },
+                request.grain(),
+                request.access(),
+            )
+            .unwrap(),
+            SessionScopeAuthorizationRequest::new(
+                context.actor_id().clone(),
+                context.identity().clone(),
+                request.session_id().clone(),
+                Some("cursor".to_owned()),
+                request.temporal_mode(),
+                RetrievalGrainV1::Turn,
+                request.access(),
+            )
+            .unwrap(),
+        ];
+        for mutation in &target_mutations {
+            assert_eq!(
+                grant.validate(&context, mutation),
+                Err(SessionAuthorizationError::WrongTarget)
+            );
+        }
+
+        for access in [SessionAccess::Read, SessionAccess::Search] {
+            let mutation = SessionScopeAuthorizationRequest::new(
+                context.actor_id().clone(),
+                context.identity().clone(),
+                request.session_id().clone(),
+                Some("cursor".to_owned()),
+                request.temporal_mode(),
+                request.grain(),
+                access,
+            )
+            .unwrap();
+            assert_eq!(
+                grant.validate(&context, &mutation),
+                Err(SessionAuthorizationError::WrongAccess)
+            );
+        }
+
+        let identity_mutations = [
+            ResolvedSessionIdentity::for_project(
+                ProfileId::new("profile.primary").unwrap(),
+                ProjectId::new("project.other").unwrap(),
+                SessionStoreId::new("store.project.tracedecay").unwrap(),
+                SessionRootId::new("root.project.tracedecay").unwrap(),
+                context.identity().git_route().unwrap().clone(),
+            ),
+            ResolvedSessionIdentity::for_project(
+                ProfileId::new("profile.primary").unwrap(),
+                ProjectId::new("project.tracedecay").unwrap(),
+                SessionStoreId::new("store.project.other").unwrap(),
+                SessionRootId::new("root.project.tracedecay").unwrap(),
+                context.identity().git_route().unwrap().clone(),
+            ),
+            ResolvedSessionIdentity::for_project(
+                ProfileId::new("profile.primary").unwrap(),
+                ProjectId::new("project.tracedecay").unwrap(),
+                SessionStoreId::new("store.project.tracedecay").unwrap(),
+                SessionRootId::new("root.project.other").unwrap(),
+                context.identity().git_route().unwrap().clone(),
+            ),
+            ResolvedSessionIdentity::for_project(
+                ProfileId::new("profile.primary").unwrap(),
+                ProjectId::new("project.tracedecay").unwrap(),
+                SessionStoreId::new("store.project.tracedecay").unwrap(),
+                SessionRootId::new("root.project.tracedecay").unwrap(),
+                ResolvedGitRoute::new(
+                    RepositoryId::new("repository.other").unwrap(),
+                    WorktreeId::new("worktree.main").unwrap(),
+                    BranchId::new("branch.application-slice-1").unwrap(),
+                ),
+            ),
+        ];
+        for identity in identity_mutations {
+            let mutation = SessionScopeAuthorizationRequest::new(
+                context.actor_id().clone(),
+                identity,
+                request.session_id().clone(),
+                Some("cursor".to_owned()),
+                request.temporal_mode(),
+                request.grain(),
+                request.access(),
+            )
+            .unwrap();
+            assert_eq!(
+                grant.validate(&context, &mutation),
+                Err(SessionAuthorizationError::WrongScope)
+            );
+        }
+    }
+
+    #[test]
+    fn grant_validation_rejects_each_context_digest_mutation() {
+        let context = context();
+        let request = exact_authorization_request(context.identity().clone());
+        let grant = AllowAuthorizer.authorize(&context, &request).unwrap();
+
+        for mutation in [
+            context_with_digests([0x11; 32], DIGEST, DIGEST),
+            context_with_digests(DIGEST, [0x22; 32], DIGEST),
+            context_with_digests(DIGEST, DIGEST, [0x33; 32]),
+        ] {
+            assert_eq!(
+                grant.validate(&mutation, &request),
+                Err(SessionAuthorizationError::WrongContext)
+            );
+        }
+    }
+
+    #[test]
+    fn grant_validation_rejects_actor_substitution_with_identical_context_digests() {
+        let context = context();
+        let request = exact_authorization_request(context.identity().clone());
+        let grant = AllowAuthorizer.authorize(&context, &request).unwrap();
+        let other_actor = context_for_actor("actor.other", DIGEST, DIGEST, DIGEST);
+        let other_actor_request = SessionScopeAuthorizationRequest::new(
+            other_actor.actor_id().clone(),
+            context.identity().clone(),
+            request.session_id().clone(),
+            request.provider_scope().map(str::to_owned),
+            request.temporal_mode(),
+            request.grain(),
+            request.access(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            grant.validate(&other_actor, &request),
+            Err(SessionAuthorizationError::WrongContext)
+        );
+        assert_eq!(
+            grant.validate(&context, &other_actor_request),
+            Err(SessionAuthorizationError::WrongContext)
+        );
+        assert!(matches!(
+            AllowAuthorizer.authorize(&context, &other_actor_request),
+            Err(SessionAuthorizationError::WrongContext)
+        ));
+    }
+
+    #[test]
+    fn authorization_request_rejects_noncanonical_provider_scope() {
+        let context = context();
+
+        for provider in ["", " cursor", "cursor ", "cursor\nagent"] {
+            assert_eq!(
+                SessionScopeAuthorizationRequest::new(
+                    context.actor_id().clone(),
+                    context.identity().clone(),
+                    SessionId::new("session.application-slice-1").unwrap(),
+                    Some(provider.to_owned()),
+                    TemporalModeV1::Current,
+                    RetrievalGrainV1::LogicalMessage,
+                    SessionAccess::Hydrate,
+                ),
+                Err(SessionAuthorizationError::InvalidProviderScope)
+            );
+        }
+    }
+
+    #[test]
+    fn authorizer_issues_an_opaque_grant_for_the_exact_resolved_route() {
+        let context = context();
+        let request = exact_authorization_request(context.identity().clone());
+        let grant = AllowAuthorizer.authorize(&context, &request).unwrap();
+
+        assert_eq!(grant.id().as_str(), "grant.session.read");
+        assert_eq!(grant.revision(), 7);
+        assert_eq!(grant.scope().identity(), context.identity());
+        assert_eq!(grant.scope().access(), SessionAccess::Hydrate);
+        assert_eq!(
+            grant
+                .scope()
+                .identity()
+                .git_route()
+                .unwrap()
+                .branch_id()
+                .as_str(),
+            "branch.application-slice-1"
+        );
+    }
+
+    #[test]
+    fn grant_rejects_scope_or_route_substitution() {
+        let context = context();
+        let profile_request = SessionScopeAuthorizationRequest::new(
+            context.actor_id().clone(),
+            ResolvedSessionIdentity::for_profile(
+                ProfileId::new("profile.primary").unwrap(),
+                SessionStoreId::new("store.profile.primary").unwrap(),
+                SessionRootId::new("root.profile.primary").unwrap(),
+            ),
+            SessionId::new("session.application-slice-1").unwrap(),
+            Some("cursor".to_owned()),
+            TemporalModeV1::AsOf {
+                cutoff: UtcMicros(1_234_567),
+            },
+            RetrievalGrainV1::LogicalMessage,
+            SessionAccess::Read,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            AllowAuthorizer.authorize(&context, &profile_request),
+            Err(SessionAuthorizationError::WrongScope)
+        ));
+    }
+
+    #[test]
+    fn retrieval_request_carries_grant_target_freshness_and_limit() {
+        let context = context();
+        let authorization = exact_authorization_request(context.identity().clone());
+        let grant = AllowAuthorizer.authorize(&context, &authorization).unwrap();
+        let request = SessionRetrievalRequest::new(
+            grant,
+            SessionRetrievalTarget::Session(SessionId::new("session.application-slice-1").unwrap()),
+            SessionFreshnessPolicy::RequireFresh,
+            25,
+        )
+        .unwrap();
+
+        assert_eq!(request.limit(), 25);
+        assert_eq!(
+            request.freshness_policy(),
+            SessionFreshnessPolicy::RequireFresh
+        );
+        assert!(matches!(
+            request.target(),
+            SessionRetrievalTarget::Session(session_id)
+                if session_id.as_str() == "session.application-slice-1"
+        ));
+    }
+
+    #[test]
+    fn retrieval_request_rejects_targets_outside_the_grant_scope() {
+        let context = context();
+        let exact_authorization = exact_authorization_request(context.identity().clone());
+        let exact_grant = AllowAuthorizer
+            .authorize(&context, &exact_authorization)
+            .unwrap();
+        for target in [
+            SessionRetrievalTarget::Scope,
+            SessionRetrievalTarget::Session(SessionId::new("session.other").unwrap()),
+        ] {
+            assert!(matches!(
+                SessionRetrievalRequest::new(
+                    exact_grant.clone(),
+                    target,
+                    SessionFreshnessPolicy::AllowStored,
+                    1,
+                ),
+                Err(SessionRetrievalError::TargetOutsideGrant)
+            ));
+        }
+
+        let root_authorization = exact_authorization
+            .with_retrieval_scope(SessionRetrievalScope::AllSessionsInAuthorizedRoot);
+        let root_grant = AllowAuthorizer
+            .authorize(&context, &root_authorization)
+            .unwrap();
+        assert!(
+            SessionRetrievalRequest::new(
+                root_grant.clone(),
+                SessionRetrievalTarget::Scope,
+                SessionFreshnessPolicy::AllowStored,
+                1,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            SessionRetrievalRequest::new(
+                root_grant,
+                SessionRetrievalTarget::Session(
+                    SessionId::new("session.application-slice-1").unwrap()
+                ),
+                SessionFreshnessPolicy::AllowStored,
+                1,
+            ),
+            Err(SessionRetrievalError::TargetOutsideGrant)
+        ));
+    }
+
+    #[test]
+    fn freshness_policy_distinguishes_stored_from_fresh_data() {
+        let stored = SessionDataFreshness::Stored { generation_lag: 2 };
+
+        assert!(SessionFreshnessPolicy::AllowStored.accepts(stored));
+        assert!(!SessionFreshnessPolicy::RequireFresh.accepts(stored));
+        assert!(SessionFreshnessPolicy::RequireFresh.accepts(SessionDataFreshness::Fresh));
+    }
+
+    #[test]
+    fn retrieval_terminal_states_never_collapse_to_complete_zero() {
+        let states: [SessionRetrievalOutcome<()>; 11] = [
+            SessionRetrievalOutcome::CompleteZero {
+                freshness: SessionDataFreshness::Fresh,
+            },
+            SessionRetrievalOutcome::Stale {
+                freshness: SessionDataFreshness::Stored { generation_lag: 1 },
+            },
+            SessionRetrievalOutcome::Partial {
+                items: vec![],
+                freshness: SessionDataFreshness::Fresh,
+                omitted: 1,
+            },
+            SessionRetrievalOutcome::WrongScope,
+            SessionRetrievalOutcome::Locked,
+            SessionRetrievalOutcome::Redacted,
+            SessionRetrievalOutcome::Deleted,
+            SessionRetrievalOutcome::Denied,
+            SessionRetrievalOutcome::Unavailable,
+            SessionRetrievalOutcome::BudgetExhausted,
+            SessionRetrievalOutcome::Cancelled,
+        ];
+
+        assert!(matches!(
+            states[0],
+            SessionRetrievalOutcome::CompleteZero { .. }
+        ));
+        for state in &states[1..] {
+            assert!(!matches!(
+                state,
+                SessionRetrievalOutcome::CompleteZero { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn complete_requires_at_least_one_item() {
+        assert_eq!(
+            SessionRetrievalOutcome::<()>::complete(Vec::new(), SessionDataFreshness::Fresh),
+            Err(SessionRetrievalError::EmptyComplete)
+        );
+        assert!(matches!(
+            SessionRetrievalOutcome::complete(vec![1], SessionDataFreshness::Fresh).unwrap(),
+            SessionRetrievalOutcome::Complete { items, .. } if items == vec![1]
+        ));
+    }
+}

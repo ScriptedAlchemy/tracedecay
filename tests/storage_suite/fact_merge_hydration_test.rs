@@ -28,8 +28,9 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitConflict, FactCommitOutcome, FactCommitReceipt,
-    FactCurrentQuery, FactLineageQuery, FactStore, FactStoreError, FactWriteBatch, LegacyFactQuery,
-    RetrievalAnchorQuery, StoredFactV1,
+    FactContradictionStateV1, FactCurrentQuery, FactLineageQuery, FactStore, FactStoreError,
+    FactWriteBatch, LegacyFactQuery, MAX_FACT_QUERY_CONTRADICTIONS, RetrievalAnchorQuery,
+    StoredFactV1,
 };
 
 struct TestDb {
@@ -138,6 +139,16 @@ fn anchor(
         durability: AnchorDurabilityClass::DurableEvidence,
     })
     .unwrap()
+}
+
+fn known_coverage(dispositions: BTreeMap<ShardId, ShardDispositionV1>) -> CoverageReportV1 {
+    CoverageReportV1 {
+        dispositions,
+        freshness: BTreeMap::new(),
+        retention_watermark: None,
+        universe: CoverageUniverseKnowledgeV1::Known,
+        remote: None,
+    }
 }
 
 fn evidence(
@@ -768,6 +779,26 @@ async fn contradictions_are_recorded_explicitly_in_lineage() {
             ..
         } if fact_id == &second.fact_id
     )));
+    let current_response = store
+        .query_fact_current_response(
+            FactCurrentQuery::new(owner.clone(), first.fact_id.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        current_response.contradiction().contradicted_by(),
+        &[second.fact_id.clone()]
+    );
+    let lineage_response = store
+        .query_fact_lineage_response(
+            FactLineageQuery::new(owner.clone(), first.fact_id.clone(), None, 100).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        lineage_response.contradiction().contradicted_by(),
+        &[second.fact_id.clone()]
+    );
 
     // A contradiction against a fact the authority does not retain is rejected
     // atomically: no partial lineage survives the failed batch.
@@ -965,6 +996,16 @@ async fn denied_payloads_never_hydrate() {
 
     // The denied fact leaves the current projections entirely.
     assert!(current(&store, &owner, &fixture.fact_id).await.is_none());
+    let current_response = store
+        .query_fact_current_response(
+            FactCurrentQuery::new(owner.clone(), fixture.fact_id.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(current_response.fact().is_none());
+    assert_eq!(current_response.coverage().hidden(), 1);
+    assert_eq!(current_response.coverage().unknown(), 0);
+    assert_eq!(current_response.coverage().redacted(), 0);
     assert!(
         current_page(&store, &owner)
             .await
@@ -990,6 +1031,14 @@ async fn denied_payloads_never_hydrate() {
         before.active_assertion_id(),
         fixture.assertion.assertion_id()
     );
+    let before_response = store
+        .query_fact_as_of_response(
+            FactAsOfQuery::new(owner.clone(), fixture.fact_id.clone(), UtcMicros(1_000)).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(before_response.coverage().hidden(), 1);
+    assert_eq!(before_response.coverage().unknown(), 0);
 
     // The full lineage, including the denial, is retained.
     let events = lineage(&store, &owner, &fixture.fact_id).await;
@@ -1053,11 +1102,27 @@ async fn redacted_frontiers_stay_redacted() {
         .expect("redacted fact should retain its projection");
     assert_eq!(hydrated.payload_access(), PayloadAccessState::Redacted);
     assert!(hydrated.payload().is_none());
+    let current_response = store
+        .query_fact_current_response(
+            FactCurrentQuery::new(owner.clone(), fixture.fact_id.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(current_response.coverage().redacted(), 1);
+    assert_eq!(current_response.coverage().hidden(), 0);
+    assert_eq!(current_response.coverage().unknown(), 1);
     let after = as_of(&store, &owner, &fixture.fact_id, 2_000)
         .await
         .expect("as-of projection at the redaction");
     assert_eq!(after.payload_access(), PayloadAccessState::Redacted);
     assert!(after.payload().is_none());
+    let after_response = store
+        .query_fact_as_of_response(
+            FactAsOfQuery::new(owner.clone(), fixture.fact_id.clone(), UtcMicros(2_000)).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(after_response.coverage().redacted(), 1);
 
     // Access state is projected rather than blanket-denied: before the
     // redaction the fact was eligible and its retained bytes still hydrate.
@@ -1186,6 +1251,16 @@ async fn unknown_denominators_report_unknown_not_fabricated() {
         !hydrated_anchor.coverage().is_complete(),
         "an unknown shard universe must not hydrate as complete coverage"
     );
+    let current_response = store
+        .query_fact_current_response(
+            FactCurrentQuery::new(owner.clone(), fixture.fact_id.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(current_response.coverage().visible(), 0);
+    assert_eq!(current_response.coverage().hidden(), 0);
+    assert_eq!(current_response.coverage().unknown(), 1);
+    assert_eq!(current_response.coverage().redacted(), 0);
 
     // A legacy import with unknown history coverage hydrates as unknown
     // through the compatibility mapping instead of inventing history.
@@ -1276,5 +1351,458 @@ async fn unknown_denominators_report_unknown_not_fabricated() {
             .expect("mapping should be visible at its migration time")
             .history_coverage(),
         LegacyHistoryCoverageV1::Unknown
+    );
+    let migrated_response = store
+        .query_fact_as_of_response(FactAsOfQuery::new(owner, fact_id, UtcMicros(2_002)).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(migrated_response.coverage().unknown(), 1);
+}
+
+#[tokio::test]
+async fn known_multishard_coverage_counts_each_searched_frontier() {
+    let test = setup_db().await;
+    let store = DatabaseFactStore::new(&test.db);
+    let owner = FactOwnerV1::Profile;
+    let fixture = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.coverage.multishard",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.coverage.multishard",
+            "privacy.fmh.coverage.multishard",
+            PayloadAccessState::Eligible,
+            known_coverage(BTreeMap::from([
+                (
+                    ShardId::new("shard.fmh.coverage.multishard.a").unwrap(),
+                    ShardDispositionV1::Searched,
+                ),
+                (
+                    ShardId::new("shard.fmh.coverage.multishard.b").unwrap(),
+                    ShardDispositionV1::Searched,
+                ),
+            ])),
+        ),
+        "multishard coverage",
+        1_000,
+    )
+    .await;
+
+    let response = store
+        .query_fact_current_response(FactCurrentQuery::new(owner, fixture.fact_id).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.coverage().visible(), 2);
+    assert_eq!(response.coverage().hidden(), 0);
+    assert_eq!(response.coverage().unknown(), 0);
+    assert_eq!(response.coverage().redacted(), 0);
+}
+
+#[tokio::test]
+async fn mixed_shard_coverage_counts_each_frontier_bucket() {
+    let test = setup_db().await;
+    let store = DatabaseFactStore::new(&test.db);
+    let owner = FactOwnerV1::Profile;
+    let fixture = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.coverage.mixed",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.coverage.mixed",
+            "privacy.fmh.coverage.mixed",
+            PayloadAccessState::Eligible,
+            known_coverage(BTreeMap::from([
+                (
+                    ShardId::new("shard.fmh.coverage.mixed.searched").unwrap(),
+                    ShardDispositionV1::Searched,
+                ),
+                (
+                    ShardId::new("shard.fmh.coverage.mixed.skipped").unwrap(),
+                    ShardDispositionV1::Skipped,
+                ),
+                (
+                    ShardId::new("shard.fmh.coverage.mixed.stale").unwrap(),
+                    ShardDispositionV1::Stale,
+                ),
+                (
+                    ShardId::new("shard.fmh.coverage.mixed.redacted").unwrap(),
+                    ShardDispositionV1::Redacted,
+                ),
+            ])),
+        ),
+        "mixed coverage",
+        1_000,
+    )
+    .await;
+
+    let response = store
+        .query_fact_current_response(FactCurrentQuery::new(owner, fixture.fact_id).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.coverage().visible(), 1);
+    assert_eq!(response.coverage().hidden(), 2);
+    assert_eq!(response.coverage().unknown(), 0);
+    assert_eq!(response.coverage().redacted(), 1);
+}
+
+#[tokio::test]
+async fn known_empty_coverage_reports_zero_denominators() {
+    let test = setup_db().await;
+    let store = DatabaseFactStore::new(&test.db);
+    let owner = FactOwnerV1::Profile;
+    let fixture = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.coverage.empty",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.coverage.empty",
+            "privacy.fmh.coverage.empty",
+            PayloadAccessState::Eligible,
+            known_coverage(BTreeMap::new()),
+        ),
+        "empty coverage",
+        1_000,
+    )
+    .await;
+
+    let response = store
+        .query_fact_current_response(FactCurrentQuery::new(owner, fixture.fact_id).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.coverage().visible(), 0);
+    assert_eq!(response.coverage().hidden(), 0);
+    assert_eq!(response.coverage().unknown(), 0);
+    assert_eq!(response.coverage().redacted(), 0);
+}
+
+#[tokio::test]
+async fn anchor_redaction_preserves_frontier_denominators() {
+    let test = setup_db().await;
+    let store = DatabaseFactStore::new(&test.db);
+    let owner = FactOwnerV1::Profile;
+    let fixture = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.coverage.anchor-redaction",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.coverage.anchor-redaction",
+            "privacy.fmh.coverage.anchor-redaction",
+            PayloadAccessState::Redacted,
+            known_coverage(BTreeMap::from([
+                (
+                    ShardId::new("shard.fmh.coverage.anchor-redaction.searched").unwrap(),
+                    ShardDispositionV1::Searched,
+                ),
+                (
+                    ShardId::new("shard.fmh.coverage.anchor-redaction.skipped").unwrap(),
+                    ShardDispositionV1::Skipped,
+                ),
+            ])),
+        ),
+        "anchor-redacted coverage",
+        1_000,
+    )
+    .await;
+
+    let response = store
+        .query_fact_current_response(FactCurrentQuery::new(owner, fixture.fact_id).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.coverage().visible(), 1);
+    assert_eq!(response.coverage().hidden(), 1);
+    assert_eq!(response.coverage().unknown(), 0);
+    assert_eq!(response.coverage().redacted(), 2);
+}
+
+#[tokio::test]
+async fn payload_redaction_preserves_frontier_denominators() {
+    let test = setup_db().await;
+    let store = DatabaseFactStore::new(&test.db);
+    let owner = FactOwnerV1::Profile;
+    let fixture = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.coverage.payload-redaction",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.coverage.payload-redaction",
+            "privacy.fmh.coverage.payload-redaction",
+            PayloadAccessState::Eligible,
+            known_coverage(BTreeMap::from([
+                (
+                    ShardId::new("shard.fmh.coverage.payload-redaction.searched").unwrap(),
+                    ShardDispositionV1::Searched,
+                ),
+                (
+                    ShardId::new("shard.fmh.coverage.payload-redaction.skipped").unwrap(),
+                    ShardDispositionV1::Skipped,
+                ),
+            ])),
+        ),
+        "payload-redacted coverage",
+        1_000,
+    )
+    .await;
+    let redacted = FactLineageEventV1::new(
+        fixture.fact_id.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::PayloadAccessChanged {
+            previous: PayloadAccessState::Eligible,
+            current: PayloadAccessState::Redacted,
+        },
+        UtcMicros(2_000),
+        None,
+    )
+    .unwrap();
+    commit(
+        &store,
+        FactWriteBatch::new(
+            fixture.fact_id.clone(),
+            owner.clone(),
+            None,
+            vec![redacted],
+            Vec::new(),
+            Vec::new(),
+            None,
+            Some(fixture.receipt.last_event_id().clone()),
+        )
+        .unwrap(),
+    )
+    .await;
+
+    let response = store
+        .query_fact_current_response(FactCurrentQuery::new(owner, fixture.fact_id).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.coverage().visible(), 1);
+    assert_eq!(response.coverage().hidden(), 1);
+    assert_eq!(response.coverage().unknown(), 0);
+    assert_eq!(response.coverage().redacted(), 2);
+}
+
+#[tokio::test]
+async fn contradiction_metadata_transitions_at_the_as_of_cutoff() {
+    let test = setup_db().await;
+    let store = DatabaseFactStore::new(&test.db);
+    let owner = FactOwnerV1::Profile;
+    let source = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.contradiction.temporal.source",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.contradiction.temporal.source",
+            "privacy.fmh.contradiction.temporal.source",
+            PayloadAccessState::Eligible,
+            known_coverage(BTreeMap::from([(
+                ShardId::new("shard.fmh.contradiction.temporal").unwrap(),
+                ShardDispositionV1::Searched,
+            )])),
+        ),
+        "temporal source",
+        1_000,
+    )
+    .await;
+    let first_target = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.contradiction.temporal.first",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.contradiction.temporal.first",
+            "privacy.fmh.contradiction.temporal.first",
+            PayloadAccessState::Eligible,
+            CoverageReportV1::default(),
+        ),
+        "temporal first target",
+        1_100,
+    )
+    .await;
+    let second_target = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.contradiction.temporal.second",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.contradiction.temporal.second",
+            "privacy.fmh.contradiction.temporal.second",
+            PayloadAccessState::Eligible,
+            CoverageReportV1::default(),
+        ),
+        "temporal second target",
+        1_200,
+    )
+    .await;
+    let first_contradiction = FactLineageEventV1::new(
+        source.fact_id.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::ContradictedBy {
+                fact_id: first_target.fact_id.clone(),
+            },
+            evidence_ids: Vec::new(),
+        },
+        UtcMicros(2_000),
+        None,
+    )
+    .unwrap();
+    let first_receipt = commit(
+        &store,
+        FactWriteBatch::new(
+            source.fact_id.clone(),
+            owner.clone(),
+            None,
+            vec![first_contradiction],
+            Vec::new(),
+            Vec::new(),
+            None,
+            Some(source.receipt.last_event_id().clone()),
+        )
+        .unwrap(),
+    )
+    .await;
+
+    let before = store
+        .query_fact_as_of_response(
+            FactAsOfQuery::new(owner.clone(), source.fact_id.clone(), UtcMicros(1_999)).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        before.contradiction(),
+        &FactContradictionStateV1::NotObserved
+    );
+    let at_first = store
+        .query_fact_as_of_response(
+            FactAsOfQuery::new(owner.clone(), source.fact_id.clone(), UtcMicros(2_000)).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        at_first.contradiction().contradicted_by(),
+        &[first_target.fact_id.clone()]
+    );
+
+    let second_contradiction = FactLineageEventV1::new(
+        source.fact_id.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::ContradictedBy {
+                fact_id: second_target.fact_id.clone(),
+            },
+            evidence_ids: Vec::new(),
+        },
+        UtcMicros(3_000),
+        None,
+    )
+    .unwrap();
+    commit(
+        &store,
+        FactWriteBatch::new(
+            source.fact_id.clone(),
+            owner.clone(),
+            None,
+            vec![second_contradiction],
+            Vec::new(),
+            Vec::new(),
+            None,
+            Some(first_receipt.last_event_id().clone()),
+        )
+        .unwrap(),
+    )
+    .await;
+
+    let after_second = store
+        .query_fact_as_of_response(
+            FactAsOfQuery::new(owner, source.fact_id, UtcMicros(3_000)).unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut expected = vec![first_target.fact_id, second_target.fact_id];
+    expected.sort_unstable();
+    assert_eq!(after_second.contradiction().contradicted_by(), expected);
+}
+
+#[tokio::test]
+async fn contradiction_metadata_is_bounded_and_sorted() {
+    const HISTORY_SIZE: usize = 1_001;
+
+    let test = setup_db().await;
+    let store = DatabaseFactStore::new(&test.db);
+    let owner = FactOwnerV1::Profile;
+    let source = commit_initial(
+        &store,
+        &owner,
+        "operation.fmh.contradiction.history.source",
+        anchor(
+            ObservationScopeV1::Profile,
+            "entity.fmh.contradiction.history.source",
+            "privacy.fmh.contradiction.history.source",
+            PayloadAccessState::Eligible,
+            known_coverage(BTreeMap::from([(
+                ShardId::new("shard.fmh.contradiction.history").unwrap(),
+                ShardDispositionV1::Searched,
+            )])),
+        ),
+        "history source",
+        1_000,
+    )
+    .await;
+    let mut expected = Vec::with_capacity(HISTORY_SIZE);
+    for index in 0..HISTORY_SIZE {
+        let target = FactId::derive(&application_identity(
+            &owner,
+            &format!("operation.fmh.contradiction.history.target.{index}"),
+        ))
+        .unwrap();
+        let event = FactLineageEventV1::new(
+            source.fact_id.clone(),
+            owner.clone(),
+            FactLineageEventKindV1::Curated {
+                action: FactCurationActionV1::ContradictedBy {
+                    fact_id: target.clone(),
+                },
+                evidence_ids: Vec::new(),
+            },
+            UtcMicros(2_000 + index as i64),
+            None,
+        )
+        .unwrap();
+        let event_json = serde_json::to_string(&event).unwrap();
+        test.db
+            .execute_write(
+                "seed bounded contradiction metadata history",
+                "INSERT INTO memory_v2_lineage_events(
+                    event_id, fact_id, owner_kind, project_id,
+                    event_json, occurred_at, recorded_at
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                libsql::params![
+                    event.event_id().as_str(),
+                    source.fact_id.as_str(),
+                    "profile",
+                    "",
+                    event_json,
+                    event.occurred_at().0,
+                    event.occurred_at().0,
+                ],
+            )
+            .await
+            .unwrap();
+        expected.push(target);
+    }
+    expected.sort_unstable();
+
+    let response = store
+        .query_fact_current_response(FactCurrentQuery::new(owner, source.fact_id).unwrap())
+        .await
+        .unwrap();
+    assert!(response.contradiction().is_positive());
+    assert_eq!(
+        response.contradiction().contradicted_by(),
+        &expected[..MAX_FACT_QUERY_CONTRADICTIONS]
     );
 }

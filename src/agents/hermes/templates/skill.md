@@ -32,6 +32,53 @@ budget is expressed with `max_nodes` / `max_code_blocks`, not guessed flags such
 as `--max-tokens` or `--paths`. When uncertain, run
 `tracedecay tool <name> --help` before invoking the fallback.
 
+## Session context retrieval
+
+When prior transcript evidence is relevant, climb this read-only ladder and
+stop when it answers the question. A recall tool never ingests, refreshes, or
+compresses a session.
+
+1. Start with `tracedecay_message_search`. Its defaults are `provider=all`,
+   `include_subagents=true`, `scope=all`, `message_type=all`, `limit=10`, and
+   `catch_up=false`. It finds stored message evidence and session ids; an
+   explicit freshness request can return `refresh_required`, but never catches
+   data up itself.
+2. Hermes exposes native aliases `lcm_grep`, `lcm_load_session`,
+   `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, and
+   `lcm_doctor`. They dispatch to their matching `tracedecay_lcm_*` commands;
+   use the Hermes alias and its schema when the context engine offers it, or the
+   canonical command and its schema elsewhere. Do not invent fields by mixing
+   the two surfaces.
+3. Narrow temporal evidence with `lcm_grep` / `tracedecay_lcm_grep` (default
+   `temporal_mode=current`; Hermes starts its native alias at the current
+   session), replay one session with `lcm_load_session` /
+   `tracedecay_lcm_load_session` (default `temporal_mode=forensic`), then use
+   `lcm_describe` / `tracedecay_lcm_describe` and `lcm_expand` /
+   `tracedecay_lcm_expand` to open only the needed DAG node or payload.
+   Summary node IDs are opaque strings, not integers. `source_offset`,
+   `source_limit`, and the opaque continuation cursor apply only to summary
+   source pages; raw and external payload expansion use content pagination.
+   Continue a summary page only by returning its opaque `next_cursor`
+   unchanged.
+4. `lcm_expand_query` / `tracedecay_lcm_expand_query` can assemble bounded
+   context. When it returns `needs_synthesis=true`, the host must synthesize
+   from that context; only use the direct answer when synthesis is not needed.
+5. Treat `coverage`, `anchors`, watermarks, and explanations as evidence
+   bounds. Partial or redacted coverage is not proof that a message never
+   existed; preserve anchors when citing or drilling into the result.
+6. For git-scoped recall, use `tracedecay_sessions_for` with its default
+   `relation=produced` and `limit=20`; feed its session ids back into the
+   temporal rungs. Use `tracedecay_workflows` (also default `limit=20`) to list
+   a parent thread or git-scoped run, inspect one `wf_*` run, or select one
+   agent before searching its messages.
+
+Freshness and lifecycle are explicit host decisions. When a read says refresh
+is required, invoke `tracedecay_session_refresh` only with clear host or user
+intent: its actions are `begin`, `status`, and `cancel`; `begin` returns the
+opaque handle used by `status` and `cancel`. Leave host context-window
+preflight, compression, and boundaries to the Hermes context engine rather
+than triggering them during recall.
+
 ## Storage and project identity
 
 Hermes may keep its own host files under its Hermes home, but that path never

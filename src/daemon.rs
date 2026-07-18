@@ -95,9 +95,9 @@ impl DaemonClientAdmission {
 }
 
 impl DaemonClientSaturationResponse {
-    fn into_json_rpc(self) -> JsonRpcResponse {
+    fn into_json_rpc_with_id(self, id: serde_json::Value) -> JsonRpcResponse {
         JsonRpcResponse::error_with_data(
-            serde_json::Value::Null,
+            id,
             ErrorCode::InternalError,
             "daemon client capacity reached".to_string(),
             serde_json::to_value(self).ok(),
@@ -105,14 +105,43 @@ impl DaemonClientSaturationResponse {
     }
 }
 
+async fn saturated_request_id(
+    transport: &mut BrokerStreamTransport,
+) -> Result<Option<serde_json::Value>> {
+    // A broker client sends a handshake before its JSON-RPC request, optionally
+    // preceded by an auth preface. Consume those frames so the rejection uses
+    // the request ID instead of being discarded as a notification.
+    let Some(first_line) = read_line_handling_wire_oversized(transport).await? else {
+        return Ok(None);
+    };
+    let handshake_line = if DaemonAuthPreface::from_line(&first_line).is_ok() {
+        let Some(handshake_line) = read_line_handling_wire_oversized(transport).await? else {
+            return Ok(None);
+        };
+        handshake_line
+    } else {
+        first_line
+    };
+    DaemonHandshake::from_line(&handshake_line)?;
+    let Some(request_line) = read_line_handling_wire_oversized(transport).await? else {
+        return Ok(None);
+    };
+    let request: JsonRpcRequest = serde_json::from_str(&request_line)?;
+    Ok(request.id)
+}
+
 async fn reject_saturated_daemon_client(
     stream: BrokerStream,
     response: DaemonClientSaturationResponse,
 ) {
     let mut transport = BrokerStreamTransport::new(stream);
-    let response = response.into_json_rpc();
-    let write = write_json_rpc_response(&mut transport, &response);
-    match timeout(DAEMON_SATURATION_RESPONSE_DEADLINE, write).await {
+    let response = async {
+        let request_id = saturated_request_id(&mut transport)
+            .await?
+            .unwrap_or(serde_json::Value::Null);
+        write_json_rpc_response(&mut transport, &response.into_json_rpc_with_id(request_id)).await
+    };
+    match timeout(DAEMON_SATURATION_RESPONSE_DEADLINE, response).await {
         Ok(Ok(())) => log_daemon_event(
             "daemon_client",
             &[("outcome", "client_capacity_reached".to_string())],
@@ -254,14 +283,16 @@ mod profile_host_admission_replay;
 #[cfg(unix)]
 mod scheduler;
 mod service;
+pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) mod transport;
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
-    default_socket_path, install_service, installed_service_socket_path,
-    quiesce_installed_service_before_lease, refresh_installed_service,
-    refresh_installed_service_under_lease, refresh_installed_service_under_lease_with_state,
-    refresh_service, restore_installed_service_after_update, service_spec, service_status,
-    socket_path_or_default, uninstall_service, verify_installed_service_quiesced_under_lease,
+    default_socket_path, enforce_forward_only_service_recovery, install_service,
+    installed_service_socket_path, quiesce_installed_service_before_lease,
+    refresh_installed_service, refresh_installed_service_under_lease,
+    refresh_installed_service_under_lease_with_state, refresh_service,
+    restore_installed_service_after_update, service_spec, service_status, socket_path_or_default,
+    uninstall_service, verify_installed_service_quiesced_under_lease,
     wait_for_installed_service_state, with_exclusive_maintenance_window,
     with_quiesced_installed_service,
 };
@@ -1622,6 +1653,21 @@ pub async fn call_default_tool(
     call_tool(&socket_path, handshake, tool_name, arguments).await
 }
 
+pub async fn call_default_doctor_runtime(
+    handshake: &DaemonHandshake,
+    arguments: serde_json::Value,
+) -> Result<serde_json::Value> {
+    if let Ok(socket_path) = default_available_socket_path()
+        && let Ok(result) =
+            call_tool(&socket_path, handshake, "tracedecay_runtime", arguments).await
+    {
+        return Ok(result);
+    }
+    Ok(doctor_runtime_tool_result(
+        cold_doctor_runtime_value(handshake).await,
+    ))
+}
+
 /// Extracts the single JSON payload from an MCP tool result while ignoring
 /// human-facing notice blocks.
 #[doc(hidden)]
@@ -1915,8 +1961,21 @@ struct DaemonEngine {
     /// Per-canonical-route singleflight gates. Weak entries disappear after
     /// the last waiter, so failed opens are never cached.
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    /// Per-logical-owner transition guards. Task-map locks are released before
+    /// stale owners are awaited; this guard alone spans retirement so a
+    /// concurrent activation or rekey cannot publish a replacement early.
+    maintenance_transition_gates: Arc<tokio::sync::Mutex<MaintenanceTransitionGates>>,
     #[cfg(test)]
     project_open_attempts: Arc<AtomicUsize>,
+    #[cfg(test)]
+    memory_repair_start_attempts: Arc<AtomicUsize>,
+    #[cfg(test)]
+    automation_config_probe_attempts: Arc<AtomicUsize>,
+    #[cfg(test)]
+    automation_scheduler_exit_barrier:
+        Arc<tokio::sync::Mutex<Option<Arc<scheduler::AutomationSchedulerExitBarrier>>>>,
+    #[cfg(test)]
+    automation_scheduler_state_changed: Arc<tokio::sync::Notify>,
     /// Client versions whose skew was already logged. Proxy clients reconnect
     /// per request, so without this the mismatch would flood the daemon log.
     logged_client_version_skews: Arc<tokio::sync::Mutex<HashSet<String>>>,
@@ -1962,6 +2021,22 @@ struct ProjectRouteKey {
 
 type ProjectOpenGate = tokio::sync::Mutex<()>;
 type ProjectOpenGates = HashMap<ProjectRouteKey, std::sync::Weak<ProjectOpenGate>>;
+type MaintenanceTransitionGate = tokio::sync::Mutex<()>;
+type MaintenanceTransitionGates =
+    HashMap<MaintenanceTransitionKey, std::sync::Weak<MaintenanceTransitionGate>>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct MaintenanceTransitionKey {
+    profile_root: PathBuf,
+    project_id: Option<String>,
+    scope_prefix: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MaintenanceRekeyOutcome {
+    Completed,
+    Retiring,
+}
 
 /// Scope-specific MCP servers routed through one canonical physical DB owner.
 /// `Database` performs the actual same-process handle sharing; this registry
@@ -2092,6 +2167,27 @@ async fn project_open_gate(
     gate
 }
 
+async fn maintenance_transition_gate(
+    gates: &tokio::sync::Mutex<MaintenanceTransitionGates>,
+    key: &ProjectServerKey,
+) -> Arc<MaintenanceTransitionGate> {
+    let transition_key = MaintenanceTransitionKey {
+        profile_root: key.owner.profile_root.clone(),
+        project_id: key.owner.project_id.clone(),
+        scope_prefix: key.scope_prefix.clone(),
+    };
+    let mut gates = gates.lock().await;
+    if let Some(gate) = gates
+        .get(&transition_key)
+        .and_then(std::sync::Weak::upgrade)
+    {
+        return gate;
+    }
+    let gate = Arc::new(MaintenanceTransitionGate::new(()));
+    gates.insert(transition_key, Arc::downgrade(&gate));
+    gate
+}
+
 #[cfg(any(not(unix), test))]
 fn portable_database_owner_reconciler(
     store_administration: StoreAdministration,
@@ -2105,10 +2201,10 @@ fn portable_database_owner_reconciler(
         let route_registered = Arc::clone(&route_registered);
         let handshake = handshake.clone();
         Box::pin(async move {
-            store_administration
+            let transition = store_administration
                 .with_writer(|| async {
                     if !route_registered.load(Ordering::Acquire) {
-                        return;
+                        return None;
                     }
                     let new_key = match ProjectServerKey::from_open_project(&fresh, &handshake) {
                         Ok(key) => key,
@@ -2116,25 +2212,44 @@ fn portable_database_owner_reconciler(
                             eprintln!(
                                 "[tracedecay] failed to rekey daemon database owner: {error}"
                             );
-                            return;
+                            return None;
                         }
                     };
                     let mut current = current_key.lock().await;
                     if *current == new_key {
-                        return;
+                        return None;
                     }
                     let old_key = current.clone();
-                    if !store_administration
+                    let rekeyed = store_administration
                         .project_servers()
                         .lock()
                         .await
-                        .rekey(&old_key, &new_key)
-                    {
+                        .rekey(&old_key, &new_key);
+                    if !rekeyed {
                         route_registered.store(false, Ordering::Release);
                     }
-                    *current = new_key;
+                    *current = new_key.clone();
+                    Some((old_key.owner, new_key.owner, rekeyed))
                 })
                 .await;
+            let Some((old_owner, new_owner, rekeyed)) = transition else {
+                return;
+            };
+            if rekeyed
+                && let Ok(database) = store_administration
+                    .global_database(&fresh.store_layout().sessions_db_path)
+                    .await
+            {
+                store_administration
+                    .session_temporal_refresh_schedulers()
+                    .rekey_project(&old_owner, new_owner, database)
+                    .await;
+            } else {
+                store_administration
+                    .session_temporal_refresh_schedulers()
+                    .retire_project(&old_owner)
+                    .await;
+            }
         })
     })
 }
@@ -2199,6 +2314,13 @@ impl DaemonEngine {
     async fn with_pr_autotrack_task(self, task: JoinHandle<()>) -> Self {
         *self.pr_autotrack_task.lock().await = Some(task);
         self
+    }
+
+    async fn maintenance_transition_gate(
+        &self,
+        key: &ProjectServerKey,
+    ) -> Arc<MaintenanceTransitionGate> {
+        maintenance_transition_gate(&self.maintenance_transition_gates, key).await
     }
 
     /// Runs destructive branch administration before any project server is
@@ -2305,13 +2427,11 @@ impl DaemonEngine {
         &self,
         handshake: &DaemonHandshake,
     ) -> Result<Arc<crate::mcp::McpServer>> {
-        let (key, project_path, server) = self
+        let (_key, project_path, server, _inserted) = self
             .store_administration
             .with_writer(|| self.open_project_server(handshake))
             .await?;
-        Ok(self
-            .activate_project_server(key, project_path, handshake, server)
-            .await)
+        Ok(self.activate_project_server(project_path, server).await)
     }
 
     /// Opens or resolves a project server while writer administration is held.
@@ -2320,7 +2440,7 @@ impl DaemonEngine {
     async fn open_project_server(
         &self,
         handshake: &DaemonHandshake,
-    ) -> Result<(ProjectServerKey, PathBuf, Arc<crate::mcp::McpServer>)> {
+    ) -> Result<(ProjectServerKey, PathBuf, Arc<crate::mcp::McpServer>, bool)> {
         let Some(project_path) = handshake.project_path.as_ref() else {
             return Err(TraceDecayError::Config {
                 message: "project server requested without project_path".to_string(),
@@ -2337,7 +2457,7 @@ impl DaemonEngine {
                 .map(|(key, server)| (key.clone(), Arc::clone(server)))
         };
         if let Some((key, server)) = cached {
-            return Ok((key, canonical_project_path, server));
+            return Ok((key, canonical_project_path, server, false));
         }
 
         let gate = project_open_gate(&self.project_open_gates, &route).await;
@@ -2349,7 +2469,7 @@ impl DaemonEngine {
                 .map(|(key, server)| (key.clone(), Arc::clone(server)))
         };
         if let Some((key, server)) = cached {
-            return Ok((key, canonical_project_path, server));
+            return Ok((key, canonical_project_path, server, false));
         }
 
         #[cfg(test)]
@@ -2371,7 +2491,7 @@ impl DaemonEngine {
             server
         };
         if let Some(server) = existing {
-            return Ok((key, canonical_project_path, server));
+            return Ok((key, canonical_project_path, server, false));
         }
 
         let registry_db = self
@@ -2392,17 +2512,33 @@ impl DaemonEngine {
             .store_administration
             .user_session_database(&handshake.client_identity.global_db_path)
             .await?;
+        let project_session_refresh_wake = self
+            .store_administration
+            .session_temporal_refresh_schedulers()
+            .ensure_project(key.owner.clone(), Arc::clone(&session_db))
+            .await;
+        let user_session_refresh_wake = self
+            .store_administration
+            .session_temporal_refresh_schedulers()
+            .ensure_profile(
+                user_session_db.db_path().to_path_buf(),
+                Arc::clone(&user_session_db),
+            )
+            .await;
         let accounting_db =
             crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registry_db));
         let current_key = Arc::new(tokio::sync::Mutex::new(key.clone()));
+        let current_project_path =
+            Arc::new(tokio::sync::Mutex::new(canonical_project_path.clone()));
         let route_registered = Arc::new(AtomicBool::new(true));
         let reconciler = self.automation_scheduler_reconciler(
             Arc::clone(&current_key),
-            canonical_project_path.clone(),
+            Arc::clone(&current_project_path),
             handshake.clone(),
         );
         let database_owner_reconciler = self.database_owner_reconciler(
             current_key,
+            current_project_path,
             Arc::clone(&route_registered),
             handshake.clone(),
         );
@@ -2418,6 +2554,8 @@ impl DaemonEngine {
                     user_sessions: user_session_db,
                 },
                 host_admission_broker,
+                project_session_refresh_wake,
+                user_session_refresh_wake,
                 database_owner_reconciler,
                 writers: crate::mcp::server::McpServerWriters::daemon_owned(
                     coordinated_dashboard_automation_writer(self.store_administration.clone()),
@@ -2436,33 +2574,135 @@ impl DaemonEngine {
             .bind_or_insert_route(route, key.clone(), candidate);
         if !inserted {
             route_registered.store(false, Ordering::Release);
+        } else {
+            self.spawn_project_maintenance_activation(
+                key.clone(),
+                canonical_project_path.clone(),
+                handshake.clone(),
+            );
         }
-        Ok((key, canonical_project_path, server))
+        Ok((key, canonical_project_path, server, inserted))
     }
 
     async fn activate_project_server(
         &self,
-        key: ProjectServerKey,
         project_path: PathBuf,
-        handshake: &DaemonHandshake,
         server: Arc<crate::mcp::McpServer>,
     ) -> Arc<crate::mcp::McpServer> {
         // A freshly-handshaken project should be watched even on a cache hit
         // (the watcher may have started after this server was cached).
         self.git_watcher.ensure_watching(&project_path).await;
-        Box::pin(self.ensure_memory_repair_scheduler(
-            key.clone(),
-            project_path.clone(),
-            handshake.clone(),
-        ))
-        .await;
-        Box::pin(self.ensure_automation_scheduler(key, project_path, handshake.clone())).await;
         server
+    }
+
+    fn spawn_project_maintenance_activation(
+        &self,
+        key: ProjectServerKey,
+        project_path: PathBuf,
+        handshake: DaemonHandshake,
+    ) {
+        let engine = self.clone();
+        tokio::spawn(async move {
+            engine
+                .activate_project_maintenance(key, project_path, handshake)
+                .await;
+        });
+    }
+
+    async fn activate_project_maintenance(
+        &self,
+        key: ProjectServerKey,
+        project_path: PathBuf,
+        handshake: DaemonHandshake,
+    ) {
+        let transition = self.maintenance_transition_gate(&key).await;
+        let _transition = transition.lock().await;
+        self.store_administration
+            .with_writer(|| async move {
+                if self
+                    .store_administration
+                    .project_servers()
+                    .lock()
+                    .await
+                    .get(&key)
+                    .is_none()
+                {
+                    return;
+                }
+                self.start_memory_repair_scheduler(
+                    key.clone(),
+                    project_path.clone(),
+                    handshake.clone(),
+                )
+                .await;
+                self.reconcile_automation_scheduler_locked(key, project_path, handshake)
+                    .await;
+            })
+            .await;
+    }
+
+    async fn rekey_project_maintenance(
+        &self,
+        old_key: &ProjectServerKey,
+        new_key: ProjectServerKey,
+        project_path: PathBuf,
+        handshake: DaemonHandshake,
+        acquire_new: bool,
+    ) -> MaintenanceRekeyOutcome {
+        let transition = self.maintenance_transition_gate(old_key).await;
+        let _transition = transition.lock().await;
+        let repair_retirement = self.retire_memory_repair_scheduler_locked(old_key).await;
+        let automation_retirement = self.retire_automation_scheduler_locked(old_key).await;
+        let retired = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
+            if let Some(retirement) = repair_retirement {
+                retirement.wait().await;
+            }
+            if let Some(retirement) = automation_retirement {
+                retirement.wait().await;
+            }
+        })
+        .await
+        .is_ok();
+        if !retired {
+            log_daemon_event(
+                "maintenance_rekey",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "retirement_timeout".to_string()),
+                ],
+            );
+            return MaintenanceRekeyOutcome::Retiring;
+        }
+        if !acquire_new || !self.lifecycle.accepting() {
+            return MaintenanceRekeyOutcome::Completed;
+        }
+        let repair_outcome = self
+            .reconcile_memory_repair_scheduler_locked(
+                new_key.clone(),
+                project_path.clone(),
+                handshake.clone(),
+            )
+            .await;
+        let automation_outcome = self
+            .reconcile_automation_scheduler_locked(new_key, project_path, handshake)
+            .await;
+        if matches!(
+            repair_outcome,
+            memory_repair_scheduler::MemoryRepairSchedulerReconcileOutcome::Retiring
+        ) || matches!(
+            automation_outcome,
+            crate::dashboard::AutomationSchedulerReconcileOutcome::Retiring
+        ) {
+            MaintenanceRekeyOutcome::Retiring
+        } else {
+            MaintenanceRekeyOutcome::Completed
+        }
     }
 
     fn database_owner_reconciler(
         &self,
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
+        current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
         route_registered: Arc<AtomicBool>,
         handshake: DaemonHandshake,
     ) -> crate::mcp::DatabaseOwnerReconciler {
@@ -2470,14 +2710,15 @@ impl DaemonEngine {
         Arc::new(move |fresh| {
             let engine = engine.clone();
             let current_key = Arc::clone(&current_key);
+            let current_project_path = Arc::clone(&current_project_path);
             let route_registered = Arc::clone(&route_registered);
             let handshake = handshake.clone();
             Box::pin(async move {
-                engine
+                let transition = engine
                     .store_administration
                     .with_writer(|| async {
                         if !route_registered.load(Ordering::Acquire) {
-                            return;
+                            return None;
                         }
                         let new_key = match ProjectServerKey::from_open_project(&fresh, &handshake)
                         {
@@ -2486,12 +2727,12 @@ impl DaemonEngine {
                                 eprintln!(
                                     "[tracedecay] failed to rekey daemon database owner: {error}"
                                 );
-                                return;
+                                return None;
                             }
                         };
                         let mut current = current_key.lock().await;
                         if *current == new_key {
-                            return;
+                            return None;
                         }
                         let old_key = current.clone();
                         let rekeyed = engine
@@ -2503,58 +2744,70 @@ impl DaemonEngine {
                         if !rekeyed {
                             route_registered.store(false, Ordering::Release);
                         }
-                        let removed_scheduler = {
-                            let mut schedulers = engine
-                                .store_administration
-                                .automation_schedulers()
-                                .lock()
-                                .await;
-                            let removed = schedulers.remove(&old_key);
-                            if let Some(handle) = removed {
-                                if schedulers.contains_key(&new_key) {
-                                    Some(handle)
-                                } else {
-                                    schedulers.insert(new_key.clone(), handle);
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        };
-                        if let Some(handle) = removed_scheduler {
-                            handle.task.abort();
-                        }
-                        let removed_memory_repair_scheduler = {
-                            let mut schedulers = engine
-                                .store_administration
-                                .memory_repair_schedulers()
-                                .lock()
-                                .await;
-                            let removed = schedulers.remove(&old_key);
-                            if let Some(handle) = removed {
-                                if schedulers.contains_key(&new_key) {
-                                    Some(handle)
-                                } else {
-                                    schedulers.insert(new_key.clone(), handle);
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        };
-                        if let Some(handle) = removed_memory_repair_scheduler {
-                            handle.task.abort();
-                        }
-                        *current = new_key;
+                        let project_path = fresh.project_root().to_path_buf();
+                        let new_session_db = engine
+                            .store_administration
+                            .global_database(&fresh.store_layout().sessions_db_path)
+                            .await
+                            .ok();
+                        *current_project_path.lock().await = project_path;
+                        *current = new_key.clone();
+                        Some((
+                            old_key,
+                            new_key,
+                            new_session_db,
+                            fresh.project_root().to_path_buf(),
+                            rekeyed,
+                        ))
                     })
                     .await;
+                if let Some((old_key, new_key, new_session_db, project_path, acquire_new)) =
+                    transition
+                {
+                    let old_owner = old_key.owner.clone();
+                    let new_owner = new_key.owner.clone();
+                    let outcome = engine
+                        .rekey_project_maintenance(
+                            &old_key,
+                            new_key,
+                            project_path,
+                            handshake,
+                            acquire_new,
+                        )
+                        .await;
+                    if outcome == MaintenanceRekeyOutcome::Completed {
+                        if acquire_new
+                            && engine.lifecycle.accepting()
+                            && let Some(new_session_db) = new_session_db
+                        {
+                            engine
+                                .store_administration
+                                .session_temporal_refresh_schedulers()
+                                .rekey_project(&old_owner, new_owner, new_session_db)
+                                .await;
+                        } else {
+                            engine
+                                .store_administration
+                                .session_temporal_refresh_schedulers()
+                                .retire_project(&old_owner)
+                                .await;
+                        }
+                    }
+                }
             })
         })
     }
 
     async fn shutdown_background_tasks(&self) {
+        self.store_administration
+            .session_temporal_refresh_schedulers()
+            .shutdown()
+            .await;
         self.shutdown_automation_schedulers().await;
         self.shutdown_memory_repair_schedulers().await;
+        self.store_administration
+            .shutdown_retirement_reapers()
+            .await;
         self.store_administration
             .shutdown_host_admission_replay()
             .await;
@@ -2724,6 +2977,328 @@ async fn write_routed_initialize_response(
     Ok(true)
 }
 
+#[derive(Debug)]
+struct DoctorRuntimeRequest {
+    id: serde_json::Value,
+}
+
+fn doctor_runtime_request(request_line: &str) -> Option<DoctorRuntimeRequest> {
+    let request = serde_json::from_str::<JsonRpcRequest>(request_line.trim()).ok()?;
+    if request.method != "tools/call" {
+        return None;
+    }
+    let (tool_name, arguments) = projectless_tool_call(request.params.as_ref()).ok()?;
+    if tool_name != "tracedecay_runtime"
+        || arguments
+            .get("authority_audit")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || arguments
+            .get("session_ingest_health")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || arguments.get("format").and_then(serde_json::Value::as_str) != Some("json")
+    {
+        return None;
+    }
+    Some(DoctorRuntimeRequest {
+        id: request.id.unwrap_or(serde_json::Value::Null),
+    })
+}
+
+fn doctor_runtime_temporal_unavailable(reason: &str) -> serde_json::Value {
+    let finding = match reason {
+        "project_store_missing" | "session_store_missing" => "migration_gap",
+        _ => "compatibility_drift",
+    };
+    json!({
+        "status": if reason.ends_with("_locked") { "locked" } else { "unavailable" },
+        "findings": [{
+            "kind": finding,
+            "count": 1,
+        }],
+    })
+}
+
+fn doctor_runtime_temporal_report(
+    report: crate::global_db::SessionTemporalHealthReport,
+) -> serde_json::Value {
+    let mut value = serde_json::to_value(report).unwrap_or_else(|_| {
+        doctor_runtime_temporal_unavailable("session_health_serialization_failed")
+    });
+    let unavailable_without_findings = value.get("status").and_then(serde_json::Value::as_str)
+        == Some("unavailable")
+        && value
+            .get("findings")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty);
+    if unavailable_without_findings {
+        value["findings"] = json!([{
+            "kind": "compatibility_drift",
+            "count": 1,
+        }]);
+    }
+    value
+}
+
+fn doctor_runtime_unavailable(
+    project_path: Option<&Path>,
+    reason: &'static str,
+) -> serde_json::Value {
+    json!({
+        "tracedecay_version": env!("CARGO_PKG_VERSION"),
+        "database": {
+            "project_root": project_path,
+            "quick_check_ok": null,
+            "quick_check_error": reason,
+            "authority_audit_ok": null,
+            "authority_audit_reason": "authority_audit_not_run",
+            "authority_audit_error": "authority_audit_not_run",
+        },
+        "doctor_runtime": {
+            "status": if reason.ends_with("_locked") { "locked" } else { "unavailable" },
+            "reason": reason,
+            "read_only": true,
+        },
+        "session_temporal_health": doctor_runtime_temporal_unavailable(reason),
+        "cursor_session_ingest": {
+            "status": "unavailable",
+            "reason": "session_store_unavailable",
+        },
+    })
+}
+
+fn doctor_runtime_tool_result(value: serde_json::Value) -> serde_json::Value {
+    let text = serde_json::to_string(&value).unwrap_or_else(|_| {
+        r#"{"doctor_runtime":{"status":"unavailable","reason":"serialization_failed","read_only":true}}"#
+            .to_string()
+    });
+    json!({
+        "content": [{
+            "type": "text",
+            "text": text,
+        }],
+    })
+}
+
+const DOCTOR_GRAPH_SCHEMA_VERSION: i64 = 23;
+
+fn doctor_runtime_store_paths(
+    project_path: &Path,
+    profile_root: &Path,
+) -> std::result::Result<(PathBuf, PathBuf), &'static str> {
+    match crate::storage::read_enrollment_marker(project_path) {
+        Ok(Some(marker)) => {
+            let layout =
+                crate::storage::profile_sharded_layout(project_path, profile_root, &marker)
+                    .map_err(|_| "project_store_schema_unsupported")?;
+            Ok((layout.graph_db_path, layout.sessions_db_path))
+        }
+        Ok(None) => {
+            let data_root = crate::config::get_tracedecay_dir(project_path);
+            Ok((
+                data_root.join(crate::config::db_filename(&data_root)),
+                data_root.join("sessions.db"),
+            ))
+        }
+        Err(_) => Err("project_store_schema_unsupported"),
+    }
+}
+
+async fn doctor_read_only_database(
+    db_path: &Path,
+    intent: &str,
+) -> std::result::Result<crate::db::Database, &'static str> {
+    if !db_path.is_file() {
+        return Err("store_missing");
+    }
+    let authority = crate::db::DatabaseAuthority::for_runtime(db_path, intent)
+        .map_err(|_| "store_unavailable")?;
+    crate::db::Database::open_read_only(db_path, &authority)
+        .await
+        .map(|(database, _)| database)
+        .map_err(|error| {
+            let message = error.to_string().to_ascii_lowercase();
+            if message.contains("database is locked")
+                || message.contains("database table is locked")
+                || message.contains("sqlite_busy")
+            {
+                "store_locked"
+            } else {
+                "store_unavailable"
+            }
+        })
+}
+
+async fn doctor_database_i64(database: &crate::db::Database, query: &str) -> Option<i64> {
+    let mut rows = database.conn().query(query, ()).await.ok()?;
+    rows.next().await.ok().flatten()?.get::<i64>(0).ok()
+}
+
+async fn doctor_database_text(database: &crate::db::Database, query: &str) -> Option<String> {
+    let mut rows = database.conn().query(query, ()).await.ok()?;
+    rows.next().await.ok().flatten()?.get::<String>(0).ok()
+}
+
+fn doctor_sidecar_size(db_path: &Path, suffix: &str) -> u64 {
+    let mut path = db_path.as_os_str().to_os_string();
+    path.push(suffix);
+    std::fs::metadata(PathBuf::from(path)).map_or(0, |metadata| metadata.len())
+}
+
+async fn doctor_global_db_read_only(
+    db_path: &Path,
+    intent: &str,
+) -> Option<crate::global_db::GlobalDb> {
+    let preflight = doctor_read_only_database(db_path, intent).await.ok()?;
+    let database = crate::global_db::GlobalDb::open_read_only_at(db_path).await;
+    drop(preflight);
+    database
+}
+
+async fn doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
+    let Some(project_path) = handshake.project_path.as_deref() else {
+        return doctor_runtime_unavailable(None, "project_path_missing");
+    };
+    let (graph_path, session_path) =
+        match doctor_runtime_store_paths(project_path, &handshake.client_identity.profile_root) {
+            Ok(paths) => paths,
+            Err(reason) => return doctor_runtime_unavailable(Some(project_path), reason),
+        };
+    let graph = match doctor_read_only_database(&graph_path, "doctor graph read-only").await {
+        Ok(graph) => graph,
+        Err("store_missing") => {
+            return doctor_runtime_unavailable(Some(project_path), "project_store_missing");
+        }
+        Err("store_locked") => {
+            return doctor_runtime_unavailable(Some(project_path), "project_store_locked");
+        }
+        Err(_) => {
+            return doctor_runtime_unavailable(Some(project_path), "project_store_unavailable");
+        }
+    };
+    let schema_version = match doctor_database_i64(&graph, "PRAGMA user_version").await {
+        Some(version) => version,
+        None => {
+            return doctor_runtime_unavailable(Some(project_path), "project_store_unavailable");
+        }
+    };
+    if schema_version != DOCTOR_GRAPH_SCHEMA_VERSION {
+        return doctor_runtime_unavailable(Some(project_path), "project_store_schema_unsupported");
+    }
+    let canonical_graph_path = graph_path
+        .canonicalize()
+        .unwrap_or_else(|_| graph_path.clone());
+    let mut value = json!({
+        "tracedecay_version": env!("CARGO_PKG_VERSION"),
+        "process": {
+            "pid": std::process::id(),
+        },
+        "database": {
+            "project_root": project_path,
+            "db_path": graph_path,
+            "canonical_db_path": canonical_graph_path,
+            "db_size_bytes": std::fs::metadata(&graph_path).map_or(0, |metadata| metadata.len()),
+            "wal_size_bytes": doctor_sidecar_size(&graph_path, "-wal"),
+            "shm_size_bytes": doctor_sidecar_size(&graph_path, "-shm"),
+            "journal_mode": doctor_database_text(&graph, "PRAGMA journal_mode").await,
+            "synchronous": doctor_database_i64(&graph, "PRAGMA synchronous").await,
+            "page_size": doctor_database_i64(&graph, "PRAGMA page_size").await,
+            "quick_check_ok": true,
+            "quick_check_error": null,
+            "schema_version": schema_version,
+        },
+        "doctor_runtime": {
+            "status": "complete",
+            "reason": null,
+            "read_only": true,
+        },
+    });
+
+    let registry = doctor_global_db_read_only(
+        &handshake.client_identity.global_db_path,
+        "doctor authority read-only",
+    )
+    .await;
+    let (authority_ok, authority_reason) = match registry.as_ref() {
+        Some(registry) => match registry.audit_observation_authority().await {
+            Ok(()) => (Some(true), None),
+            Err(_) => (Some(false), Some("authority_invariant_failed")),
+        },
+        None if handshake.client_identity.global_db_path.is_file() => {
+            (None, Some("authority_store_unavailable"))
+        }
+        None => (None, Some("authority_store_missing")),
+    };
+    value["database"]["authority_audit_ok"] = json!(authority_ok);
+    value["database"]["authority_audit_reason"] = json!(authority_reason);
+    value["database"]["authority_audit_error"] = json!(authority_reason);
+
+    let session_db =
+        doctor_global_db_read_only(&session_path, "doctor session temporal read-only").await;
+    value["session_temporal_health"] = match session_db.as_ref() {
+        Some(db) => {
+            match timeout(Duration::from_secs(8), db.session_temporal_doctor_health()).await {
+                Ok(report) => doctor_runtime_temporal_report(report),
+                Err(_) => doctor_runtime_temporal_unavailable("session_health_timed_out"),
+            }
+        }
+        None if session_path.is_file() => {
+            doctor_runtime_temporal_unavailable("session_store_unavailable")
+        }
+        None => doctor_runtime_temporal_unavailable("session_store_missing"),
+    };
+    value["cursor_session_ingest"] = match session_db.as_ref() {
+        Some(db) => {
+            serde_json::to_value(db.session_ingest_health_for_provider(Some("cursor")).await)
+                .unwrap_or_else(|_| {
+                    json!({
+                        "status": "unavailable",
+                        "reason": "session_ingest_serialization_failed",
+                    })
+                })
+        }
+        None => json!({
+            "status": "unavailable",
+            "reason": "session_store_unavailable",
+        }),
+    };
+    value["cursor_session_placeholder_paths"] = match session_db.as_ref() {
+        Some(db) => json!(db.literal_workspace_placeholder_transcript_paths(10).await),
+        None => json!([]),
+    };
+    value
+}
+
+async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
+    // Database access scopes are process-local capabilities. A cold Doctor has
+    // no daemon process from which to inherit one, so install a bounded scope
+    // only while the explicitly read-only handles below are alive.
+    let _read_only_scope = match crate::db::enter_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        0,
+        "doctor-read-only",
+    ) {
+        Ok(scope) => scope,
+        Err(_) => {
+            return doctor_runtime_unavailable(
+                handshake.project_path.as_deref(),
+                "doctor_read_scope_unavailable",
+            );
+        }
+    };
+    doctor_runtime_value(handshake).await
+}
+
+async fn write_doctor_runtime_response(
+    transport: &mut impl McpTransport,
+    handshake: &DaemonHandshake,
+    request: DoctorRuntimeRequest,
+) -> Result<()> {
+    let result = doctor_runtime_tool_result(doctor_runtime_value(handshake).await);
+    write_json_rpc_response(transport, &JsonRpcResponse::success(request.id, result)).await
+}
+
 #[cfg(unix)]
 async fn serve_broker_socket_client(
     stream: BrokerStream,
@@ -2760,6 +3335,18 @@ async fn serve_broker_socket_client(
         return Ok(());
     };
     let mut handshake = DaemonHandshake::from_line(&line)?;
+    let first_request_line = tokio::select! {
+        result = read_line_handling_wire_oversized(&mut transport) => result?,
+        () = engine.lifecycle.wait_for_draining() => return Ok(()),
+    };
+    let Some(first_request_line) = first_request_line else {
+        return Ok(());
+    };
+    if let Some(request) = doctor_runtime_request(&first_request_line) {
+        drop(setup_activity);
+        write_doctor_runtime_response(&mut transport, &handshake, request).await?;
+        return Ok(());
+    }
     engine.log_client_version_skew(&handshake).await;
     ensure_user_profile_host_admission_replay_for_identity(
         &engine.store_administration,
@@ -2768,13 +3355,6 @@ async fn serve_broker_socket_client(
     .await?;
     // Resolve initialize roots only after authentication and inside daemon
     // authority. The proxy process never opens the registry database.
-    let first_request_line = tokio::select! {
-        result = read_line_handling_wire_oversized(&mut transport) => result?,
-        () = engine.lifecycle.wait_for_draining() => return Ok(()),
-    };
-    let Some(first_request_line) = first_request_line else {
-        return Ok(());
-    };
     let initialize_route = apply_daemon_initialize_route(
         &mut handshake,
         &first_request_line,
@@ -2889,14 +3469,19 @@ async fn serve_windows_broker_client(
         return Ok(());
     };
     let mut handshake = DaemonHandshake::from_line(&handshake_line)?;
+    let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
+        return Ok(());
+    };
+    if let Some(request) = doctor_runtime_request(&first_request_line) {
+        drop(setup_activity);
+        write_doctor_runtime_response(&mut transport, &handshake, request).await?;
+        return Ok(());
+    }
     ensure_user_profile_host_admission_replay_for_identity(
         &store_administration,
         &handshake.client_identity,
     )
     .await?;
-    let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
-        return Ok(());
-    };
     let initialize_route =
         apply_daemon_initialize_route(&mut handshake, &first_request_line, &store_administration)
             .await?;
@@ -3051,6 +3636,17 @@ async fn portable_project_server(
     let user_session_db = store_administration
         .user_session_database(&handshake.client_identity.global_db_path)
         .await?;
+    let project_session_refresh_wake = store_administration
+        .session_temporal_refresh_schedulers()
+        .ensure_project(key.owner.clone(), Arc::clone(&session_db))
+        .await;
+    let user_session_refresh_wake = store_administration
+        .session_temporal_refresh_schedulers()
+        .ensure_profile(
+            user_session_db.db_path().to_path_buf(),
+            Arc::clone(&user_session_db),
+        )
+        .await;
     let accounting_db =
         crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registry_db));
     let context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
@@ -3065,6 +3661,8 @@ async fn portable_project_server(
                 user_sessions: user_session_db,
             },
             host_admission_broker,
+            project_session_refresh_wake,
+            user_session_refresh_wake,
             database_owner_reconciler,
             writers: crate::mcp::server::McpServerWriters::daemon_owned(
                 coordinated_dashboard_automation_writer(store_administration.clone()),
@@ -3317,6 +3915,59 @@ async fn projectless_tools_call_response(
             return JsonRpcResponse::error(id, ErrorCode::InvalidParams, message.to_string());
         }
     };
+    if tool_name == "tracedecay_admin_project" {
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+        enum ProjectlessAdminProjectAction {
+            AutomationReconcile {
+                scope: crate::dashboard::AutomationReconcileScope,
+            },
+        }
+
+        let request = match serde_json::from_value::<ProjectlessAdminProjectAction>(arguments) {
+            Ok(request) => request,
+            Err(error) => {
+                return JsonRpcResponse::error(
+                    id,
+                    ErrorCode::InvalidParams,
+                    format!("invalid projectless tracedecay_admin_project arguments: {error}"),
+                );
+            }
+        };
+        let ProjectlessAdminProjectAction::AutomationReconcile { scope } = request;
+        if scope != crate::dashboard::AutomationReconcileScope::Profile {
+            return JsonRpcResponse::error(
+                id,
+                ErrorCode::InvalidParams,
+                "project-scoped automation reconciliation requires a project path".to_string(),
+            );
+        }
+        let outcomes = match store_administration
+            .reconcile_cached_automation_for_profile(&client_identity.profile_root)
+            .await
+        {
+            Ok(outcomes) => outcomes,
+            Err(error) => {
+                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+            }
+        };
+        let report = crate::dashboard::ProfileAutomationReconcileReport {
+            scope,
+            cached_owners: outcomes.len(),
+            outcomes,
+            uncached_projects:
+                crate::dashboard::UncachedProjectReconcileOutcome::DeferredUntilProjectStartup,
+        };
+        return JsonRpcResponse::success(
+            id,
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
+                }]
+            }),
+        );
+    }
     if tool_name == "tracedecay_hook_runtime" {
         let global_db = match store_administration
             .global_database(&client_identity.global_db_path)
@@ -3349,6 +4000,13 @@ async fn projectless_tools_call_response(
             branch_admin::HostAdmissionBrokerState::Available(broker) => Ok(broker),
             branch_admin::HostAdmissionBrokerState::Unavailable(outcome) => Err(*outcome),
         };
+        let refresh_wake = store_administration
+            .session_temporal_refresh_schedulers()
+            .ensure_profile(
+                user_session_db.db_path().to_path_buf(),
+                Arc::clone(&user_session_db),
+            )
+            .await;
         return match crate::mcp::tools::handle_projectless_hook_runtime(
             arguments,
             &client_identity.profile_root,
@@ -3358,7 +4016,10 @@ async fn projectless_tools_call_response(
         )
         .await
         {
-            Ok(result) => JsonRpcResponse::success(id, result.value),
+            Ok(result) => {
+                refresh_wake.wake();
+                JsonRpcResponse::success(id, result.value)
+            }
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         };
     }
@@ -3438,6 +4099,271 @@ impl crate::mcp::McpTransport for BrokerStreamTransport {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod doctor_runtime_route_tests {
+    use std::path::{Path, PathBuf};
+
+    use super::{
+        DaemonClientIdentity, DaemonHandshake, cold_doctor_runtime_value, doctor_runtime_request,
+    };
+    use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+
+    fn handshake(
+        project_path: PathBuf,
+        profile_root: PathBuf,
+        global_db_path: PathBuf,
+    ) -> DaemonHandshake {
+        DaemonHandshake {
+            project_path: Some(project_path),
+            scope_prefix: None,
+            timings: false,
+            allow_init: false,
+            allow_initialize_root_routing: false,
+            client_identity: DaemonClientIdentity {
+                profile_root,
+                global_db_path,
+            },
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            client_instance_id: "doctor-runtime-test".to_string(),
+            tool_list_changed_capable: false,
+            catalog_version: String::new(),
+        }
+    }
+
+    fn filesystem_manifest(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn visit(root: &Path, current: &Path, entries: &mut Vec<(PathBuf, Vec<u8>)>) {
+            let mut children = std::fs::read_dir(current)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            children.sort();
+            for path in children {
+                let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                if path.is_dir() {
+                    entries.push((relative, Vec::new()));
+                    visit(root, &path, entries);
+                } else {
+                    entries.push((relative, std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+
+        let mut entries = Vec::new();
+        visit(root, root, &mut entries);
+        entries
+    }
+
+    #[test]
+    fn only_explicit_doctor_runtime_requests_take_the_safe_route() {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedecay_runtime",
+                "arguments": {
+                    "format": "json",
+                    "authority_audit": true,
+                    "session_ingest_health": true,
+                },
+            },
+        })
+        .to_string();
+        let parsed = doctor_runtime_request(&request).expect("doctor runtime request");
+        assert_eq!(parsed.id, serde_json::json!(7));
+
+        let ordinary = request.replace("\"authority_audit\":true", "\"authority_audit\":false");
+        assert!(doctor_runtime_request(&ordinary).is_none());
+    }
+
+    #[tokio::test]
+    async fn cold_missing_store_returns_typed_findings_without_creating_files() {
+        let root = tempfile::TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
+        let before = filesystem_manifest(root.path());
+
+        let value = cold_doctor_runtime_value(&handshake).await;
+
+        assert_eq!(filesystem_manifest(root.path()), before);
+        assert_eq!(
+            value.pointer("/doctor_runtime/reason"),
+            Some(&serde_json::json!("project_store_missing"))
+        );
+        assert_eq!(
+            value.pointer("/session_temporal_health/status"),
+            Some(&serde_json::json!("unavailable"))
+        );
+        assert_eq!(
+            value.pointer("/session_temporal_health/findings/0/kind"),
+            Some(&serde_json::json!("migration_gap"))
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_store_returns_fixed_safe_error_without_sidecars() {
+        let root = tempfile::TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile.clone()),
+            global_db_path: Some(profile.join("registry.db")),
+        };
+        let initialized = TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize test project");
+        let db_path = initialized.db_path().clone();
+        drop(initialized);
+        std::fs::write(&db_path, b"malformed doctor fixture").unwrap();
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = db_path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(sidecar));
+        }
+        let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
+        let before = filesystem_manifest(root.path());
+
+        let value = cold_doctor_runtime_value(&handshake).await;
+
+        assert_eq!(filesystem_manifest(root.path()), before);
+        assert_eq!(
+            value.pointer("/doctor_runtime/reason"),
+            Some(&serde_json::json!("project_store_unavailable"))
+        );
+        assert_eq!(
+            value.pointer("/database/quick_check_error"),
+            Some(&serde_json::json!("project_store_unavailable"))
+        );
+        assert!(!value.to_string().contains("malformed doctor fixture"));
+    }
+
+    #[tokio::test]
+    async fn old_graph_schema_returns_fixed_compatibility_finding_without_migrating() {
+        let root = tempfile::TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        let data_root = crate::config::get_tracedecay_dir(&project);
+        std::fs::create_dir_all(&data_root).unwrap();
+        let db_path = data_root.join(crate::config::db_filename(&data_root));
+        let legacy = libsql::Builder::new_local(&db_path).build().await.unwrap();
+        let connection = legacy.connect().unwrap();
+        connection
+            .execute_batch("PRAGMA user_version=1; CREATE TABLE legacy_graph(id INTEGER);")
+            .await
+            .unwrap();
+        drop(connection);
+        drop(legacy);
+        let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
+        let before = filesystem_manifest(root.path());
+
+        let value = cold_doctor_runtime_value(&handshake).await;
+
+        assert_eq!(filesystem_manifest(root.path()), before);
+        assert_eq!(
+            value.pointer("/doctor_runtime/reason"),
+            Some(&serde_json::json!("project_store_schema_unsupported"))
+        );
+        assert_eq!(
+            value.pointer("/session_temporal_health/findings/0/kind"),
+            Some(&serde_json::json!("compatibility_drift"))
+        );
+    }
+
+    #[tokio::test]
+    async fn old_session_schema_returns_typed_findings_without_migrating() {
+        let root = tempfile::TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile.clone()),
+            global_db_path: Some(profile.join("registry.db")),
+        };
+        let initialized = TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize test project");
+        let session_path = initialized.store_layout().sessions_db_path.clone();
+        drop(initialized);
+        std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+        let legacy = libsql::Builder::new_local(&session_path)
+            .build()
+            .await
+            .unwrap();
+        let connection = legacy.connect().unwrap();
+        connection
+            .execute("CREATE TABLE legacy_sessions(id INTEGER PRIMARY KEY)", ())
+            .await
+            .unwrap();
+        drop(connection);
+        drop(legacy);
+        let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
+        let before = filesystem_manifest(root.path());
+
+        let value = cold_doctor_runtime_value(&handshake).await;
+
+        assert_eq!(filesystem_manifest(root.path()), before);
+        assert_ne!(
+            value.pointer("/session_temporal_health/status"),
+            Some(&serde_json::json!("complete"))
+        );
+        assert!(
+            value
+                .pointer("/session_temporal_health/findings")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|findings| !findings.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn locked_store_returns_fixed_reason_without_filesystem_changes() {
+        let root = tempfile::TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile.clone()),
+            global_db_path: Some(profile.join("registry.db")),
+        };
+        let initialized = TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize test project");
+        let db_path = initialized.db_path().clone();
+        drop(initialized);
+        let locked = libsql::Builder::new_local(&db_path).build().await.unwrap();
+        let connection = locked.connect().unwrap();
+        connection
+            .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
+            .await
+            .unwrap();
+        let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
+        let before = filesystem_manifest(root.path());
+
+        let value = cold_doctor_runtime_value(&handshake).await;
+
+        assert_eq!(filesystem_manifest(root.path()), before);
+        assert_eq!(
+            value.pointer("/doctor_runtime/reason"),
+            Some(&serde_json::json!("project_store_locked"))
+        );
+        assert_eq!(
+            value.pointer("/doctor_runtime/status"),
+            Some(&serde_json::json!("locked"))
+        );
+        assert!(!value.to_string().contains(&db_path.display().to_string()));
+        connection.execute("ROLLBACK", ()).await.unwrap();
+    }
+}
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]

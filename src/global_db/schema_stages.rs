@@ -6,6 +6,7 @@ use super::schema_contract::{
 use super::{
     GlobalDb, ensure_code_project_native_root_columns, ensure_parse_offset_columns,
     ensure_session_parent_columns, global_db_operation_error, observation, observation_projection,
+    session_temporal,
 };
 
 pub(super) async fn ensure_registry(db: &GlobalDb) -> crate::errors::Result<()> {
@@ -249,12 +250,15 @@ pub(super) async fn ensure_observation_authority(db: &GlobalDb) -> crate::errors
         .begin_write_transaction()
         .await
         .map_err(|error| global_db_operation_error("begin observation authority schema", error))?;
+    session_temporal::ensure_session_temporal_schema(&transaction).await?;
     observation::ensure_observation_schema(&transaction).await?;
     observation_projection::ensure_observation_projection_schema(&transaction)
         .await
         .map_err(|error| {
             global_db_operation_error("initialize observation projection schema", error)
         })?;
+    ensure_authority_invariants(&transaction).await?;
+    validate_authority_schema_contract(&transaction).await?;
     transaction.commit().await.map_err(|error| {
         global_db_operation_error("commit observation authority schema initialization", error)
     })?;
