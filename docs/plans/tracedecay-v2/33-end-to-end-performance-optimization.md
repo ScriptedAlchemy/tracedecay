@@ -81,6 +81,14 @@ regression discovered by an earlier slice.
 - Bound queues, workers, concurrency, retry state, and memory. Backpressure and
   overload are explicit typed outcomes; one project or client cannot starve the
   daemon.
+- Daemon admission is class-aware and measured. Reserve capacity for
+  health/doctor/diagnostics traffic so bulk load cannot make the daemon
+  unobservable; report connection counts, admission latency, and per-class
+  shed/reject rates under multi-fleet concurrency. PR7 dogfooding measured
+  hundreds of capacity-shed events in minutes with diagnostics among the shed
+  traffic; that transport-level shedding shape is a regression, not a bound.
+- Bound per-host daemon connection counts through client-side multiplexing;
+  many short-lived tool processes must not each cost a daemon socket.
 
 ### Projection, indexing, and caches
 
@@ -91,6 +99,12 @@ regression discovered by an earlier slice.
 - Bound cache memory and disk, define admission/eviction and idle lifecycle,
   delete superseded generations only after authority and recovery checks, and
   prevent rebuild storms or mixed-generation reads.
+- One-shot backfills and repairs are marker-gated: ensure/open paths perform
+  bounded no-op work on every start, never a repeated full-table scan (a PR7
+  open-path backfill re-scanned two tables on every startup until gated).
+- Resolve store handles and application state once per authority scope and
+  reuse them; per-request database open or schema-ensure on hot routes is a
+  regression class, not an implementation choice.
 - Cancellation, disk-full, stale input, and concurrent rebuilds publish one
   complete verified generation or leave the prior generation authoritative.
 

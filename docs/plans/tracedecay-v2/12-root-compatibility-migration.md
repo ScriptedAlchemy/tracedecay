@@ -43,7 +43,22 @@ the defined recovery window, and then deleted under explicit policy.
 - After cutover, clients reconnect to the V2 daemon without opening stores directly.
 - Archive the V1 store with version, checksum, timestamp, migration ID, and restore instructions for one defined recovery window.
 - Doctor can diagnose preflight, incomplete migration, archive, daemon-version, lock, corruption, and recovery states without unsafe automatic deletion.
+- Doctor classifies corruption by data family before prescribing recovery.
+  Derived, deterministically rebuildable structures — external-content
+  full-text shadow tables, projection generations, caches — get an explicit,
+  safe, in-place rebuild action under quiesced maintenance authority.
+  Authoritative families (facts, observations, sessions, receipts) keep
+  preserve-and-escalate. A corrupt derived index must not escalate the whole
+  store to offline recovery: PR7 dogfooding hit a malformed external-content
+  FTS index whose generic "unrecoverable" prescription concealed a
+  one-statement, loss-free rebuild.
 - Upgrades quiesce writes, preserve client reconnection, validate the replacement daemon, and recover to the last verified state on failure.
+- Upgrade handoff is fenced roll-forward: once a newer binary has migrated a
+  shared store, an older daemon must refuse to reopen it as writer (schema
+  epoch fence) rather than wedging or contending. Recovery from a failed
+  upgrade replaces the binary and rolls forward; it never re-admits the old
+  authority over migrated state (a PR7 upgrade wedged exactly this way when an
+  old daemon rejected a newer schema it still claimed to own).
 - Delete archives and migration-only code when the recovery policy permits and verification remains valid; report exactly what was removed.
 - Delete migration-only dependencies, feature edges, build-script inputs, and
   test harnesses with the code they served. The final root package is

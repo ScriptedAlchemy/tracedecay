@@ -59,6 +59,20 @@ policy, lifecycle, or transport logic.
    - Extensions use typed capabilities and cannot reach around policy or daemon authority.
    - A compatibility alias may translate wire shape only. Availability, errors,
      authorization, effects, health, and cancellation come from its canonical operation.
+   - Reads never repair. Status and read projections report stored state;
+     convergence and repair loops have exactly one owner below all callers,
+     and callers are one-shot. PR7 accumulated three divergent copies of one
+     derived-memory convergence policy — scheduler, curation, and a startup
+     loop — plus status reads that performed repair writes; that shape is the
+     anti-pattern this rule forbids.
+   - Durable dispositions are consulted at the canonical derivation, not
+     patched around it. When an input has a recorded disposition (skip,
+     collision, refusal), the one derivation path returns the typed outcome;
+     drain, audit, and rebuild consumers must not each implement coordinated
+     pre-checks or substitutions over a disposition-blind core. PR7's
+     output-collision handling began as three coordinated special cases and
+     converged to one disposition-aware derivation; new dispositions start in
+     that shape.
 
 5. Typed workflows
    - PR17 represents dynamic workflows as typed, stored definitions.

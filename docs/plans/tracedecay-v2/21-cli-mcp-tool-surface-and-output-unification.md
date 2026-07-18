@@ -70,6 +70,28 @@ MCP tools and resources call the same explicit application methods as CLI. MCP t
 
 Multiple MCP clients may connect concurrently, but all business reads and writes are brokered through the owning daemon authority established locally by PR4 and generalized per shard by PR16.
 
+## Daemon connection capacity and saturation
+
+Brokering every client through the daemon makes daemon admission a product
+surface, not an implementation detail. PR7 dogfooding demonstrated the failure
+shape this section forbids: concurrent agent fleets exhausted the daemon's
+client capacity, connections were shed at the transport (broken pipe /
+connection reset), and Doctor's own diagnostics were among the shed traffic —
+so a healthy store was indistinguishable from a corrupt one exactly when an
+operator was trying to tell them apart.
+
+- Each client process holds one multiplexed daemon connection; per-request
+  connections and per-tool-call CLI one-shots share it through the daemon
+  client rather than multiplying sockets.
+- Admission is class-aware. Health, doctor, and diagnostics traffic occupies a
+  small reserved class that bulk context/query/ingest traffic cannot starve;
+  saturation of the bulk class never makes the daemon unobservable.
+- Capacity exhaustion is a typed, rendered saturation problem with retry
+  guidance — never a raw transport error. Clients render it distinctly from
+  daemon-missing and daemon-incompatible.
+- Shed and rejected admissions are counted and visible through the Plan 26
+  observability surface so saturation is diagnosable after the fact.
+
 ## LSP adapter
 
 LSP is stateful and protocol-native; it does not use canonical CLI/MCP
@@ -203,6 +225,7 @@ Parity is verified from public behavior, not from a generated inventory:
 4. test missing daemon, stale client, denied scope, empty, partial, redacted, paged, oversized, cancelled, and failed states;
 5. run concurrent-client tests proving clients never open writable databases;
 6. test stdout, stderr, exit codes, MCP lifecycle, framing, cancellation, and reconnect behavior directly;
+6a. drive the daemon to bulk-class saturation under concurrent clients and prove diagnostics/health requests still answer, saturated requests receive the typed saturation problem rather than a transport-level disconnect, and shed counts surface in observability;
 7. submit equivalent unknown, removed, misplaced, duplicate, and invalid-shape arguments through CLI, MCP, and HTTP and assert one schema-identical rejection event per attempt;
 8. prove values, payloads, paths, hostnames, identifiers, prompts, secrets, and unsafe names never enter events, logs, or typed problems, while redacted and dropped-event coverage remains visible;
 9. verify replay/retry idempotency, unavailable provider/model/host metadata, bounded name/cardinality limits, and daemon-unavailable client rejection behavior;
