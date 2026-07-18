@@ -30,8 +30,10 @@ fn skill_writer_evidence_uses_fresh_authorized_forensic_retrieval() {
     assert!(!builder.contains(".lcm_session_replay_slice("));
     assert!(!builder.contains(".session_tool_usage_rows("));
     assert!(builder.contains("retrieve_automation_session_evidence("));
+    assert!(builder.contains("validate_complete_evidence("));
     assert!(source.contains("SessionFreshnessPolicy::RequireFresh"));
     assert!(source.contains("TemporalModeV1::Forensic"));
+    assert!(source.contains("RequireFresh.accepts(freshness)"));
 }
 
 #[tokio::test]
