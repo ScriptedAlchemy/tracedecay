@@ -39,12 +39,26 @@ tracedecay daemon status
 tracedecay doctor
 ```
 
+Confirm the upgrade actually took effect on the live profile: exactly one
+managed daemon process is running (`systemctl --user show tracedecay.service
+-p MainPID`), doctor's current-project integrity check passes under the new
+daemon owner, and a daemon-brokered call answers (for example
+`tracedecay tool memory_status --args '{}'`). Schema migrations run when the
+new daemon first opens each store — roll forward only; never let an older
+daemon reopen a store a newer binary has migrated.
+
 Then reproduce the changed host scenario with the ordinary global
 `tracedecay` command. Inspect relevant service/host logs. Restart a host only
 when its integration is in-process or its plugin module cannot hot-reload.
 
 ## Guardrails
 
+- Machine-local Cargo wrappers that redirect `CARGO_TARGET_DIR` or set
+  `TRACEDECAY_DATA_DIR` (for example concurrent-build slot shims) must not
+  apply to `cargo dogfood`: a redirected target dir breaks the staged-binary
+  path, and an injected data dir deploys against an isolated test profile
+  instead of the real one. Configure such wrappers to pass `dogfood` through
+  untouched, or invoke the real `cargo` directly with those variables unset.
 - Do not run `tracedecay upgrade` for checkout dogfood; it installs a published
   release.
 - Do not kill host-owned MCP shim processes indiscriminately.
