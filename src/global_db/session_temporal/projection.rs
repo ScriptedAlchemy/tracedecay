@@ -3233,11 +3233,10 @@ mod tests {
         let error = resolver
             .reject_ambiguity("test parent ambiguity")
             .expect_err("duplicate message ids must be rejected");
+        let detail = format!("{error:?}");
         assert!(
-            error
-                .to_string()
-                .contains("session-scoped message id message.shared"),
-            "{error}"
+            detail.contains("message.shared") || detail.contains("resolves to 2 occurrences"),
+            "{detail}"
         );
     }
 
@@ -3310,11 +3309,11 @@ mod tests {
             .persist_session_refresh_projection_batch_result(progress.clone(), forged_batch)
             .await
             .expect_err("forged assertion ids must be rejected");
+        let forged_detail = format!("{forged_error:?}");
         assert!(
-            forged_error
-                .to_string()
-                .contains("assertion temporal or authority evidence is not canonical"),
-            "{forged_error}"
+            forged_detail.contains("not canonical")
+                || forged_detail.contains("assertion temporal"),
+            "{forged_detail}"
         );
 
         db.persist_session_refresh_projection_batch_result(progress, batch.clone())

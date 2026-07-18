@@ -1226,6 +1226,8 @@ pub(super) const TABLES: &[Table] = &[
             column("occurrence_id", "TEXT", true, None, 3),
             column("copied_from_occurrence_id", "TEXT", true, None, 4),
             column("proof_json", "TEXT", true, None, 0),
+            column("knowledge_at", "INTEGER", true, None, 0),
+            column("valid_time_json", "TEXT", true, None, 0),
             column("created_at", "INTEGER", true, None, 0),
         ],
         [
