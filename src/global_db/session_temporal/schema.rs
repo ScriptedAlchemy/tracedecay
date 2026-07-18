@@ -4,7 +4,7 @@ use crate::global_db::{global_db_operation_error, global_db_operation_message};
 
 const OPERATION: &str = "initialize session temporal schema";
 const MIGRATION_NAME: &str = "session-temporal";
-const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 2;
+const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 3;
 
 const TEMPORAL_FTS_CONTRACTS: &[(&str, &str)] = &[
     (
@@ -366,6 +366,21 @@ const TEMPORAL_SCHEMA_DDL: &str = r#"
         occurrence_id TEXT NOT NULL,
         copied_from_occurrence_id TEXT NOT NULL,
         proof_json TEXT NOT NULL CHECK(json_valid(proof_json)),
+        knowledge_at INTEGER NOT NULL,
+        valid_time_json TEXT NOT NULL CHECK(
+            json_valid(valid_time_json)
+            AND json_type(valid_time_json, '$.kind') IS 'text'
+            AND (
+                (
+                    json_extract(valid_time_json, '$.kind') = 'unknown'
+                    AND json_type(valid_time_json, '$.valid_at') IS NULL
+                )
+                OR (
+                    json_extract(valid_time_json, '$.kind') = 'known'
+                    AND json_type(valid_time_json, '$.valid_at') IS 'integer'
+                )
+            )
+        ),
         created_at INTEGER NOT NULL,
         PRIMARY KEY(session_id, generation, occurrence_id, copied_from_occurrence_id),
         CHECK(occurrence_id <> copied_from_occurrence_id),
@@ -793,6 +808,8 @@ const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "occurrence_id",
             "copied_from_occurrence_id",
             "proof_json",
+            "knowledge_at",
+            "valid_time_json",
             "created_at",
         ],
     ),
@@ -909,6 +926,7 @@ pub(in crate::global_db) async fn ensure_session_temporal_schema(
     conn.execute_batch(TEMPORAL_SCHEMA_DDL)
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    migrate_logical_copy_bitemporality(conn, version).await?;
     validate_temporal_table_shapes(conn).await?;
     validate_temporal_fts_contracts(conn).await?;
     if rebuild_fts {
@@ -923,6 +941,127 @@ pub(in crate::global_db) async fn ensure_session_temporal_schema(
             applied_at = excluded.applied_at
          WHERE session_temporal_schema_migrations.version < excluded.version",
         params![MIGRATION_NAME, SESSION_TEMPORAL_SCHEMA_VERSION],
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    Ok(())
+}
+
+/// Upgrade pre-v3 copy edges to carry bitemporal columns while preserving
+/// legacy unknown validity and the prior created_at knowledge watermark.
+async fn migrate_logical_copy_bitemporality(
+    conn: &Connection,
+    version: Option<i64>,
+) -> crate::errors::Result<()> {
+    let mut rows = conn
+        .query(
+            "SELECT name FROM pragma_table_info('session_logical_copy_edges') ORDER BY cid",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut columns = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        columns.push(
+            row.get::<String>(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        );
+    }
+    if columns.is_empty() {
+        return Ok(());
+    }
+    let expected = [
+        "session_id",
+        "generation",
+        "occurrence_id",
+        "copied_from_occurrence_id",
+        "proof_json",
+        "knowledge_at",
+        "valid_time_json",
+        "created_at",
+    ];
+    if columns == expected {
+        return Ok(());
+    }
+    let legacy = [
+        "session_id",
+        "generation",
+        "occurrence_id",
+        "copied_from_occurrence_id",
+        "proof_json",
+        "created_at",
+    ];
+    if columns != legacy {
+        return Err(global_db_operation_message(
+            OPERATION,
+            format!(
+                "table 'session_logical_copy_edges' has an incompatible temporal schema for migration from version {version:?}"
+            ),
+        ));
+    }
+    conn.execute_batch(
+        r#"
+        CREATE TABLE session_logical_copy_edges_v3 (
+            session_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            occurrence_id TEXT NOT NULL,
+            copied_from_occurrence_id TEXT NOT NULL,
+            proof_json TEXT NOT NULL CHECK(json_valid(proof_json)),
+            knowledge_at INTEGER NOT NULL,
+            valid_time_json TEXT NOT NULL CHECK(
+                json_valid(valid_time_json)
+                AND json_type(valid_time_json, '$.kind') IS 'text'
+                AND (
+                    (
+                        json_extract(valid_time_json, '$.kind') = 'unknown'
+                        AND json_type(valid_time_json, '$.valid_at') IS NULL
+                    )
+                    OR (
+                        json_extract(valid_time_json, '$.kind') = 'known'
+                        AND json_type(valid_time_json, '$.valid_at') IS 'integer'
+                    )
+                )
+            ),
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(session_id, generation, occurrence_id, copied_from_occurrence_id),
+            CHECK(occurrence_id <> copied_from_occurrence_id),
+            FOREIGN KEY(session_id, generation, occurrence_id)
+                REFERENCES session_occurrences(session_id, generation, occurrence_id) ON DELETE CASCADE,
+            FOREIGN KEY(session_id, generation, copied_from_occurrence_id)
+                REFERENCES session_occurrences(session_id, generation, occurrence_id) ON DELETE CASCADE
+        );
+        INSERT INTO session_logical_copy_edges_v3 (
+            session_id, generation, occurrence_id, copied_from_occurrence_id,
+            proof_json, knowledge_at, valid_time_json, created_at
+        )
+        SELECT
+            session_id,
+            generation,
+            occurrence_id,
+            copied_from_occurrence_id,
+            proof_json,
+            COALESCE(
+                (
+                    SELECT occurrence.knowledge_at
+                    FROM session_occurrences AS occurrence
+                    WHERE occurrence.session_id = session_logical_copy_edges.session_id
+                      AND occurrence.generation = session_logical_copy_edges.generation
+                      AND occurrence.occurrence_id = session_logical_copy_edges.occurrence_id
+                ),
+                created_at
+            ),
+            '{"kind":"unknown"}',
+            created_at
+        FROM session_logical_copy_edges;
+        DROP TABLE session_logical_copy_edges;
+        ALTER TABLE session_logical_copy_edges_v3 RENAME TO session_logical_copy_edges;
+        CREATE INDEX IF NOT EXISTS idx_session_logical_copy_edges_target
+            ON session_logical_copy_edges(session_id, generation, copied_from_occurrence_id);
+        "#,
     )
     .await
     .map_err(|error| global_db_operation_error(OPERATION, error))?;
