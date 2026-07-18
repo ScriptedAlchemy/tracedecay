@@ -2,10 +2,10 @@ use tracedecay_domain::{ActorId, DomainError, FactOwnerV1, ProvenanceId};
 
 use super::super::super::{FactStoreError, FactStoreResult};
 use super::super::{
-    validate_compatibility_text, CompatibilityFactMappingV1, CompatibilityFactTargetV1,
+    CompatibilityFactMappingV1, CompatibilityFactTargetV1, validate_compatibility_text,
 };
-use super::validate::validate_curation_fact_target;
 use super::MAX_COMPATIBILITY_CURATION_TARGETS;
+use super::validate::validate_curation_fact_target;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompatibilityFactMergeCommandV1 {

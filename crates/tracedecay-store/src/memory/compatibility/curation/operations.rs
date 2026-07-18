@@ -4,8 +4,8 @@ use tracedecay_domain::{ActorId, Confidence, DomainError, FactOwnerV1, Provenanc
 use super::super::super::queries::validate_limit;
 use super::super::super::{CompatibilityMemoryRepairStatsV1, FactStoreError, FactStoreResult};
 use super::super::{
-    validate_compatibility_metadata, validate_compatibility_text, CompatibilityFactMappingV1,
-    CompatibilityFactTargetV1,
+    CompatibilityFactMappingV1, CompatibilityFactTargetV1, validate_compatibility_metadata,
+    validate_compatibility_text,
 };
 use super::validate::{
     validate_curation_confidence, validate_curation_entity_target, validate_curation_evidence,
