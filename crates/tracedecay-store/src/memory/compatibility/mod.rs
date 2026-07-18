@@ -337,7 +337,11 @@ impl CompatibilityFactPageV1 {
         }
         if let Some(cursor) = &next_after_fact_id {
             validate_owned_fact_id(cursor, &owner)?;
-            if previous.is_some_and(|last| cursor <= last) {
+            // Resume semantics are exclusive-start (`fact_id > cursor`), so
+            // the canonical cursor for a full page is exactly its last fact
+            // id — the same convention the search-page cursor uses. Anything
+            // else either re-serves returned rows or silently skips rows.
+            if previous != Some(cursor) {
                 return Err(FactStoreError::Contract(DomainError::NonCanonical {
                     field: "compatibility fact page cursor",
                 }));

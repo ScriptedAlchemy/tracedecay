@@ -743,7 +743,12 @@ impl Database {
              DROP TRIGGER IF EXISTS nodes_fts_insert;
              DROP TRIGGER IF EXISTS nodes_fts_delete;
              DROP TRIGGER IF EXISTS nodes_fts_update;
-             DELETE FROM nodes_fts;",
+             -- nodes_fts is an external-content FTS5 table: a plain DELETE
+             -- computes the terms to remove from the CURRENT content rows, so
+             -- any index/content divergence survives it and the end-of-load
+             -- reinsert then duplicates entries (malformed inverted index).
+             -- 'delete-all' wipes the index structures unconditionally.
+             INSERT INTO nodes_fts(nodes_fts) VALUES('delete-all');",
             )
             .await
             .map_err(|e| TraceDecayError::Database {
@@ -792,8 +797,10 @@ impl Database {
                  INSERT INTO nodes_fts(rowid, name, qualified_name, docstring, signature)
                  VALUES (NEW.rowid, NEW.name, NEW.qualified_name, NEW.docstring, NEW.signature);
              END;
-             INSERT INTO nodes_fts(rowid, name, qualified_name, docstring, signature)
-                 SELECT rowid, name, qualified_name, docstring, signature FROM nodes;",
+             -- Canonical external-content resync: 'rebuild' derives the whole
+             -- index from the content table, correct even if the index was
+             -- not perfectly empty when the bulk load began.
+             INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild');",
         ).await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to end bulk load: {e}"),
             operation: "end_bulk_load".to_string(),

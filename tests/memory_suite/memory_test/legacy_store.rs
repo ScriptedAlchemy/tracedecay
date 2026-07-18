@@ -1368,6 +1368,34 @@ async fn memory_status_handles_empty_fact_store() {
 }
 
 #[tokio::test]
+async fn list_facts_paginates_past_the_page_limit() {
+    let (_tmp, cg) = make_project().await;
+    for n in 0..3 {
+        cg.add_fact(AddFactRequest {
+            content: format!("Pagination fixture fact number {n} with distinct content"),
+            category: MemoryCategory::Project,
+            source: Some("test".to_string()),
+            tags: Vec::new(),
+            entities: Vec::new(),
+            trust: Some(0.8),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    }
+
+    // A page smaller than the fact count carries a resume cursor equal to its
+    // last fact id (resume is exclusive-start). This exact shape previously
+    // failed page-contract validation with "compatibility fact page cursor is
+    // not canonical" on any store larger than one page.
+    let page = cg.list_facts(None, None, 2).await.unwrap();
+    assert_eq!(page.len(), 2);
+
+    let all = cg.list_facts(None, None, 10).await.unwrap();
+    assert_eq!(all.len(), 3);
+}
+
+#[tokio::test]
 async fn memory_status_reports_backlog_and_explicit_repair_converges_it() {
     let (_tmp, cg) = make_project().await;
     let fact = cg

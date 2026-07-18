@@ -59,6 +59,12 @@ the defined recovery window, and then deleted under explicit policy.
   upgrade replaces the binary and rolls forward; it never re-admits the old
   authority over migrated state (a PR7 upgrade wedged exactly this way when an
   old daemon rejected a newer schema it still claimed to own).
+- Sensitive store operations hold a maintenance fence that pauses scheduled
+  sync and ingest for the affected store until the operation commits and
+  verifies: integrity repair, index rebuild, migration, cutover, and offline
+  recovery never race a sync cycle. PR7 dogfooding demonstrated the failure
+  this forbids — a sync cycle ran immediately after an index repair and
+  re-amplified latent divergence before the repair could be verified.
 - Delete archives and migration-only code when the recovery policy permits and verification remains valid; report exactly what was removed.
 - Delete migration-only dependencies, feature edges, build-script inputs, and
   test harnesses with the code they served. The final root package is

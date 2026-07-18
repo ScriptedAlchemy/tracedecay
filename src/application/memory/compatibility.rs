@@ -844,10 +844,13 @@ fn validate_compatibility_page(
     page: &CompatibilityFactPageV1,
 ) -> Result<(), MemoryApplicationError> {
     let facts = page.facts();
+    // Resume is exclusive-start, so the canonical cursor for a full page is
+    // exactly its last fact id — mirroring the search-page cursor convention
+    // below, and matching what the authority's list producer emits.
     let cursor_is_invalid = page.next_after_fact_id().is_some_and(|cursor| {
         cursor.validate_owner(owner).is_err()
             || after_fact_id.is_some_and(|after| cursor <= after)
-            || facts.last().is_none_or(|last| cursor <= last.fact_id())
+            || facts.last().is_none_or(|last| cursor != last.fact_id())
     });
     if page.owner() != owner
         || facts.len() > limit
