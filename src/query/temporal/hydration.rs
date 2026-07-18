@@ -7,7 +7,7 @@ use thiserror::Error;
 use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId};
 use zeroize::Zeroizing;
 
-use super::ports::{await_controlled, TemporalExecutionSnapshot, TemporalPortError};
+use super::ports::{TemporalExecutionSnapshot, TemporalPortError, await_controlled};
 
 /// Fallible pre-allocation ceiling for a single authorized payload buffer.
 const MAX_HYDRATION_PREALLOC_BYTES: usize = 1024 * 1024;
@@ -284,8 +284,8 @@ pub(super) async fn hydrate_selected(
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Mutex,
+        atomic::{AtomicUsize, Ordering},
     };
 
     use tracedecay_domain::{
