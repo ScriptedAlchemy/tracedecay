@@ -1,201 +1,150 @@
-# PR7: memory, facts, and provenance
+# PR8: Session/LCM temporal retrieval
 
-PR6 completed provider coverage and event normalization. PR7 builds the durable
-memory slice on top of those sanitized observations: project and profile facts,
-their evidence and corrections, curated trust, legacy migration, deletion
-lineage, and generation-bound repository provenance anchors that lead any
-authorized result back to the exact retained evidence that supports it.
+**Status:** active execution slice.
 
-## Current branch status
+This file points contributors at the current implementation slice. It is
+documentation only: TraceDecay never parses, imports, schedules, or executes
+`NEXT.md`, and product task/work graphs never infer state from it.
 
-PR7 is complete and dogfood-verified. The branch delivers the PR7 slice end
-to end: the domain fact and anchor contracts, the
-`retrieval_anchors`/`retrieval_anchor_aliases`/binding schema with owner-bound
-identity and immutability triggers, the `AnchoredObservationWrite` persist
-path, the `memory_v2` fact store with assertions, supersession, trust, and
-proposals, the `v19`-`v23` migrations, the repository-provenance evidence
-path, and the compatibility fact authority that carries legacy V1 memory-tool
-facts forward through the same owner-bound contract. The legacy cutover is
-daemon-scheduled (decision-driven ticks on the shared bounded backoff curve),
-preserves legacy usage counters into the canonical projection, and memory
-replay identities are scoped per client connection so persistent operation
-receipts never collide across hosts.
-
-The post-review hardening wave closed every finding from four independent
-structural reviews (projection convergence, memory/daemon/application,
-operations/tests, and the decomposition commits): output-collision handling is
-one disposition-aware derivation mechanism; session-path canonicalization is
-confined to ingest so audits are pure over stored evidence; derived-memory
-convergence has exactly one application-layer owner
-(`converge_derived_memory`) with the dashboard, curation, and scheduler as
-one-shot callers; status reads are pure (live backlog, no repair side
-effects) with `repair_project_memory_once` as the public explicit entry;
-fact removal resolves its idempotent no-op disposition inside a single
-authority transaction; the project-memory DB handle and its routing predicate
-exist once (`ProjectMemoryDbHandle`); anchor alias collisions are reported as
-data with fail-closed mapping at the live-write caller; registry listings use
-typed per-row verdicts instead of swallowing storage errors; the store owns
-repair-batch saturation (`CompatibilityMemoryRepairStatsV1::saturated()`);
-error chains render without doubled text; the daemon service wait is
-wall-clock bounded; ingest futures are boxed at chokepoints rather than per
-frame; and the oversized modules from the size audit are decomposed
-(`crud`, `curation`, `proposals`, `memory_v2` schema/writers, store-crate
-compatibility curation). Suite health work made the tests hermetic to
-checkout path, collapsed hand-rolled deadline polls onto one `poll_until`
-helper, shrank fsync- and fixture-bound outliers, and moved test scratch to
-tmpfs via the machine-local build shim (which now passes `cargo dogfood`
-through untouched). A live FTS5 shard corruption recovered loss-free via
-external-content rebuild; that incident and the daemon client-saturation
-episode are now normative requirements in plans 12, 19, 21, and 33.
-
-Acceptance evidence: the plan 13/36/05 PR7 matrix passes (anchor atomicity,
-idempotent replay, retargeting immunity, typed tombstones with deletion
-lineage, authorization recheck, compatibility migration parity including the
-behavioral memory-hygiene evals); the deletion path redacts feedback
-free text; Linux `cargo check`/`clippy --all-features --all-targets` are
-error-free, formatting is clean, and the full workspace nextest suite passes
-(6,071 tests). Dogfood verification on the live profile: single managed
-daemon under the new binary, doctor fully green including current-project DB
-integrity checked by the daemon owner, and daemon-brokered status and
-memory-status calls answering through the new read-only path. Structural debt
-and deferred alignments are cataloged in
-`docs/PR7-STRUCTURAL-QUALITY-REPORT.md` (P2 decomposition wave — since
-executed, P3 planned-PR items). Release-profile memory/anchor/migration
-baselines are recorded as provisional evidence under
-`benchmarks/pr7-memory/` (dirty-worktree runs carry no commit attestation by
-design), and developer build feedback is captured via
-`scripts/dev/pr7-build-feedback.sh`.
-
-Forward note for PR11: `build_resolution_authorization_v1` snapshots are
-namespace-derived placeholders. The resolution-side recheck contract is
-correct and tested, but the snapshots are not policy-engine-issued grants;
-PR11's policy surface replaces their derivation without changing the recheck
-boundary (report item P3.1).
+PR6 is complete with clean benchmark acceptance at `05da230e`. PR7 is complete
+with memory, facts, provenance, migration, hardening, and dogfood evidence.
+PR8 now implements the temporally correct Session/LCM retrieval path defined by
+[Plan 23](23-session-lcm-temporal-retrieval-and-evaluation.md) under the shared
+execution boundary in [Plan 05](05-query-crate.md).
 
 ## Product slice
 
-Establish project-wide facts, profile-wide user facts, and stable evidence
-anchors for the observations already captured by PR5 and PR6. Facts carry their
-supporting evidence, corrections arrive through supersession rather than
-mutation, trust and curation are explicit, legacy V1 facts migrate through the
-compatibility fact authority, deletion preserves lineage, and every anchor and
-fact resolves back to exact retained evidence.
+Replace fragmented message search and LCM lookup with one bounded temporal
+retrieval kernel for messages, Turns, sessions, threads, agents, occurrences,
+logical copies, and summary-DAG nodes. Preserve exact retained evidence,
+history, provenance, privacy, stable anchors, and truthful coverage while
+returning the smallest useful context.
 
-The shared path is:
+PR8 operates on explicitly resolved current-project/single-root scope. Plan 15
+and Plan 16 add canonical multi-root/cross-project execution later; PR8 must not
+guess another root or fall back to CWD.
+
+The active path is:
 
 ```text
-sanitized retained observation or fact assertion
-  -> owner-bound fact/anchor identity in the retaining transaction
-  -> immutable evidence, provenance, and repository coordinates
-  -> supersession, contradiction, trust, and curation state
-  -> daemon-owned atomic commit with idempotent replay
-  -> authorization-rechecked resolution to exact evidence or a typed tombstone
+sanitized PR5/PR6 observations plus PR7 anchors
+  -> occurrence/copy/Turn/session/thread/agent and summary-lineage projections
+  -> one typed temporal request and read-only store/projector ports
+  -> current | as_of | evolution | forensic evaluation
+  -> deterministic candidate merge, hydration, coverage, and pagination
+  -> compact anchored context or a typed partial/unavailable result
 ```
+
+## Ownership and implementation boundary
+
+- Plan 23 owns temporal truth, occurrence/copy semantics, summary lineage,
+  context assembly, freshness, and PR8 acceptance.
+- Plan 05 owns shared query-execution primitives only: typed port boundaries,
+  scope inputs, budgets, cancellation, cursors, watermarks, deterministic
+  merge, coverage, and explanations.
+- PR8 keeps the temporal kernel in root-package modules while it has only one
+  consumer. It must satisfy the Plan 05 dependency boundary in place. PR9
+  re-evaluates physical query-crate extraction using measured reuse and compile
+  evidence; PR8 does not extract a crate speculatively.
+- Plan 09 owns typed application orchestration and authorization. CLI/MCP
+  compatibility bindings translate and delegate; they do not keep private
+  search, freshness, hydration, pagination, or repair behavior.
+- The daemon/store path remains the sole mutable authority. Reads are
+  side-effect free; explicit refresh is a separate durable operation.
 
 ## Required behavior
 
-- Create every anchor in the same authoritative transaction as the retained
-  sanitized evidence and its source identity for that target kind. Exact replay
-  returns the existing anchor; a conflicting identity fails without overwriting
-  evidence or advancing progress.
-- Keep anchor and fact identity opaque. IDs never embed payload bytes and are
-  never a search query, transport response handle, collection cursor, rank, file
-  path, branch name, timestamp, or content hash.
-- Recheck current authorization and privacy policy on every resolution. Possessing
-  an ID never grants access and never leaks an unauthorized target's existence.
-- Report resolution as `current`, `drifted`, `redacted`, `expired`, `deleted`,
-  `unavailable`, or `ambiguous` with coverage. Resolution never silently switches
-  owner, provider, project, session variant, or source generation.
-- Record typed fact, assertion, evidence, contradiction, supersession, trust,
-  curation, and as-of state. A correction supersedes; it does not edit prior
-  evidence. Source and privacy-domain identity survive merge and hydration.
-- Keep project facts and project sessions project-wide and user facts
-  profile-wide. Resolve linked worktrees through canonical project identity;
-  missing or ambiguous authority fails closed without a fallback store.
-- Carry legacy V1 memory-tool facts forward only through the compatibility fact
-  authority, preserving V1 tool behavior and mapping without a second fact model.
-- Record generation-bound repository provenance as evidence only: canonical
-  repository identity, checkout/worktree identity, canonical root, current ref
-  when attached, HEAD object ID, index tree identity when available, path
-  identity, dirty-state classification, and capture time. Missing, unborn,
-  detached, conflicted, or partially readable state is explicit, never guessed.
-- Treat refs, tags, symbolic refs, checkout paths, and ambient `HEAD` as routing
-  inputs only. Resolve them to exact retained commit, tree, and blob objects or a
-  receipt-bound index/worktree capture in the anchor transaction; ref movement
-  never changes what an existing anchor means. PR7 copies no Git objects and adds
-  no status, diff, staging, or commit tool.
-- Retain source-anchor lineage on derived summaries, search documents, graph
-  nodes, and reports. A derived object cannot become its own unsupported evidence
-  source, and path or line similarity never upgrades mismatched evidence.
-- Treat copied parent prompts, provider protocol records, and repeated
-  coordination messages as related evidence only. They cannot establish direct
-  human authorship or child-task ownership without provider linkage or an
-  explicit attribution assertion.
-- Remove payload access on deletion, redaction, or expiry according to policy
-  while preserving the minimum safe tombstone and deletion lineage needed to
-  explain the target state and prevent ID reuse.
-- Commit every fact, assertion, anchor, provenance, and lineage write atomically
-  through the already-open daemon authority. No client, hook, curation surface,
-  or recovery path opens another writer.
-- Record bounded fact-write, anchor-create, resolution, replay, and migration
-  baselines for later PR20 comparison. A severe regression or unbounded path
-  found here is fixed here, not deferred.
+- Model every retained provider message as an immutable occurrence with source
+  identity, order, ingest time, valid time when known, scope, and sanitization
+  receipt.
+- Represent logical copies through evidence-backed relations. Hashes,
+  timestamps, titles, or embeddings alone never collapse messages.
+- Make Turns and threads first-class retrieval grains; preserve provider-native
+  Session and agent identity without inferring missing IDs.
+- Support explicit `current`, `as_of`, `evolution`, and `forensic` modes.
+  Corrections and supersession append assertions and never rewrite history.
+- Publish summary-DAG nodes with exact source anchors, source horizon,
+  model/config route, watermark, sanitizer receipt, and successor/stale
+  lineage. A summary never replaces or hides exact evidence.
+- Use one temporal kernel behind `message_search`, `lcm_grep`, load, describe,
+  expand, and expand-query compatibility bindings.
+- Pin request scope, temporal mode, store/projection/configuration watermarks,
+  ordering, cursor identity, privacy decision, and coverage.
+- Preserve exact identifiers, quoted phrases, errors, paths, symbols, and
+  commands before approximate or configured semantic candidates.
+- Hydrate only selected authorized evidence. Empty, stale, partial, wrong
+  scope, redacted, retained, locked, and unavailable remain distinct.
+- Return bounded context with exact supporting Turns/evidence, summary lineage,
+  conflicts, omissions, and continuation anchors rather than transcript dumps.
+- Keep LCM payloads and summary nodes authoritative only for session-linked
+  narrative/tool-output context. GitHub, CI, diagnostics, Git snapshots, and
+  workflow/effect receipts resolve through Plan 13 anchors and their owning
+  stores.
+- Keep transport `rh_` handles and collection cursors out of durable evidence
+  identity.
+- Make refresh explicit, daemon-owned, joinable by source frontier/target
+  watermark, restart-safe, idempotent, cancellable, and receipt-backed.
 
-## Direct tests
+## Active implementation order
 
-- atomic observation-and-anchor creation, idempotent replay, rollback, native
-  alias collisions, copied-prompt attribution, and unauthorized resolution;
-- provenance preservation, contradiction, supersession, as-of knowledge, denied
-  payloads, redacted frontiers, and unknown denominators through fact merge and
-  hydration;
-- rebuilding projections preserves anchor IDs and source lineage, and a search
-  result resolves to its exact source observation after ranking or index versions
-  change with drift and coverage reported;
-- moving refs, rewriting a branch, or removing a checkout does not retarget
-  retained commit/tree/blob or captured-state anchors; unavailable objects return
-  a safe typed state rather than resolving against ambient `HEAD`;
-- repository provenance records clean, dirty, detached, unborn, conflicted, and
-  partially readable state explicitly and copies no Git objects;
-- moving a project or deleting a worktree does not break a retained
-  project/session or fact anchor;
-- redaction, expiry, deletion, unavailable, and ambiguous targets return safe
-  typed tombstones with deletion lineage and no payload bytes;
-- legacy V1 fact migration through the compatibility fact authority preserves
-  tool behavior, mapping, and history coverage without a second fact model;
-- transport response handles and collection cursors cannot substitute for anchor
-  resolution in fixtures or product contracts;
-- daemon-only writer, missing daemon, stale authority, ambiguous scope, linked
-  worktree, and concurrent-client cases without another database writer;
-- repository search finds no research-ledger, research-manifest, plan-parser,
-  compatibility-inventory, or plan-execution requirement in this slice;
-- stock Linux and Windows format, compile, Clippy, focused, and workspace tests.
+1. Complete the domain contracts for occurrences, logical copies, temporal
+   assertions, Turns/threads/agents, summary nodes, lineage, modes, requests,
+   results, coverage, and cursors.
+2. Complete store migrations/repositories and rebuildable projections without
+   introducing a second writer or repairing during reads.
+3. Implement the root-package temporal kernel behind typed read-only ports,
+   with deterministic ordering, pagination, hydration, abstention, and
+   cancellation.
+4. Route existing message/LCM application and compatibility surfaces through
+   that kernel and make freshness an explicit operation.
+5. Close migration, restart, concurrency, privacy, deletion, performance, and
+   compatibility acceptance with direct product tests.
+
+## Direct verification
+
+- copied prompts collapse only with origin evidence; independent repetition
+  remains distinct;
+- current/as-of/evolution/forensic fixtures preserve corrections, conflicts,
+  supersession, and exact historical occurrences;
+- summary publication and successor lineage are atomic, restart-stable, and
+  drill down to exact retained anchors;
+- punctuation, CJK, emoji, provider filters, quoted technical strings, and
+  exact identifiers retain deterministic inclusion and ordering;
+- reads create no rows, files, cursors, repairs, or writable connections;
+- concurrent equivalent refreshes share one operation and terminal receipt;
+- pagination rejects changed-watermark or wrong-scope cursors;
+- authorization, prompt-injection, secret-canary, redaction, retention,
+  deletion, unavailable-source, and partial-coverage cases fail closed;
+- single-root scope never switches through CWD, linked worktree, or another
+  active project;
+- migration/replay is idempotent and projector rebuild preserves anchors,
+  history, ordering, and coverage;
+- focused PR8 benchmarks record corpus/watermarks, p50/p95, candidate counts,
+  allocations, peak RSS, store opens, and exact no-op behavior; and
+- stock format, focused tests, all-feature checks/tests, and relevant
+  cross-platform gates pass before PR8 completion.
 
 ## Prohibited scope
 
-- no research-management system, research manifest, research ledger, private
-  corpus registry, or subagent roster;
-- no new observation schema, sanitizer, database authority, or writable store
-  beyond the owner-bound fact/anchor and compatibility fact contract; no
-  client-side, hook-side, or recovery writer;
-- no Git object database, status, diff, history, blame, staging, or commit tool,
-  and no autonomous branch, worktree, ref, or published-history mutation;
-- no transport response handle, collection cursor, rank, or path treated as
-  durable evidence identity;
-- no PR8 temporal/LCM retrieval, PR9 code indexing or read-only Git intelligence,
-  PR10 semantic ranking, PR11 policy/application/index-mutation surface, PR12
-  CLI/MCP/HTTP/LSP surface rewrite, or PR13 hook cutover;
-- no GitHub API ingress, review-thread or comment ingestion, comment writes, or
-  CI execution authority; those evidence classes belong to PR13.
+- no parsing or execution of this file or any V2 roadmap document;
+- no task/work graph filtering, Kanban behavior, plan execution, or workflow
+  runtime;
+- no PR9 lexical code index, PR10 semantic index, PR11 policy/catalog rewrite,
+  PR12 transport convergence, or PR15 multi-root federation;
+- no universal query AST, task/board query language, Search Quality Lab, or
+  benchmark bureaucracy;
+- no writable read path, implicit ingest/repair, fallback store, or direct
+  client database access; and
+- no GitHub write, autonomous Git mutation, or authority inferred from CWD,
+  branch names, response handles, or summary prose.
 
 ## Done
 
-PR7 is complete when every plan 13, 36, and 05 PR7 acceptance passes: anchors and
-facts are created atomically with the retained evidence they support; idempotent
-replay, supersession, trust, contradiction, and as-of knowledge are gap-free;
-authorization is rechecked on every resolution; ref movement, project moves, and
-worktree removal never retarget an anchor; deletion, redaction, and expiry return
-safe tombstones with lineage; legacy V1 facts migrate through the compatibility
-authority; repository provenance is generation-bound evidence only; no fact,
-anchor, or curation path retains another durable writer; the workspace, Clippy,
-and formatting gates pass; developer-feedback evidence is recorded for the changed
-compilation scope; and clean attested memory and anchor baselines are indexed.
+PR8 is complete when one root-package temporal kernel serves all message,
+Turn, session, thread, agent, and LCM context; raw evidence and summary lineage
+remain recoverable and temporally correct; every read is side-effect free;
+refresh is explicit and daemon-owned; results are anchored, scoped,
+coverage-aware, stable across restart, and compact; compatibility bindings
+delegate without private behavior; focused performance evidence is recorded;
+and the direct correctness, privacy, concurrency, migration, cross-platform,
+and aggregate gates pass.

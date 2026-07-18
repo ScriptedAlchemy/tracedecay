@@ -61,6 +61,12 @@ Every user-visible operation has one direct typed application entry point. CLI, 
   `unstage_hunks`, and `commit_index` execution against a real locked Git
   index. It owns immutable previews, CAS revalidation, idempotency, receipts,
   and explicit effect classes without exposing arbitrary Git execution.
+- PR17 typed [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md)
+  initiative/work-plan/work-item commands and queries: versioned graph
+  transactions, dependency/readiness and acceptance evaluation, evidence
+  relations, saved projection inputs, assignment and route-review decisions,
+  context assembly, transport-neutral auxiliary-attempt submission/inspection,
+  and the exact admission/revalidation bridge to Plan 32.
 
 ## Does not own
 
@@ -81,8 +87,15 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - A second diagnostic or finding store, transport bindings, LSP field
   projection, or host delivery adapters; those remain owned by Plans
   05/13/21/27/35/37 respectively.
-- Developer plan parsing, Markdown execution, task scheduling, agent orchestration, edit bundles, generated inventories, or compatibility ledgers.
+- Developer plan parsing, Markdown execution, rewrite completion tracking,
+  generated inventories, or compatibility ledgers. Product task/work graph
+  operations are explicit PR17 typed use cases, never inferred from roadmap
+  files.
 - JavaScript workflow execution. PR17 workflows are real typed product operations, not developer-plan machinery.
+- Runtime clocks/timers, scheduling, queues, leases, attempts, effects, retries,
+  artifacts, or cancellation execution; Plan 32 owns that one shared kernel.
+  This layer authorizes and maps Plan 24 task steps to it without duplicating
+  runtime state.
 - Merge, rebase, cherry-pick, branch/tag/ref mutation, history rewriting, or an
   autonomous Git workflow engine.
 
@@ -138,6 +151,38 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - Map domain and port failures into a small stable application error taxonomy without erasing actionable detail.
 - Keep streaming events bounded, ordered, resumable where the product contract requires it, and independent of SSE framing.
 - Expose workflow create, validate, run, inspect, cancel, and history operations in PR17 as typed domain/application contracts only.
+- Expose Plan 24 initiative, work-plan/version, work-item/dependency,
+  evidence/history, projection, assignment/review, runtime-admission, and
+  routing-review operations in PR17. The same transport-neutral family covers
+  task-shape assessment, decomposition proposal/review/decision,
+  routing recommendation/fallback explanation, live split/merge/resize/re-route
+  proposal review, independent review-grade recording, outcome attachment, and
+  calibration reports. These are application concepts, not frozen PR18 SDK
+  names.
+- Proposal commands pin expected work-plan/work-item/proposal versions,
+  evidence watermarks, code/Git generation, scope, and
+  policy/config/catalog/privacy revisions. The application revalidates
+  authorization, freshness, graph legality, acceptance, and Plan 32 runtime
+  state immediately before an explicit accept/reject/supersede action. Reading
+  or generating a proposal has no graph or runtime effect.
+- Every executable admission pins the exact
+  graph/readiness/scope/acceptance/route/grant/budget revisions and returns the
+  mapped Plan 32 run/node identity; stale evidence fails before dispatch.
+- PR17 auxiliary-attempt submission accepts only the Plan 24-owned typed
+  request identity plus expected graph/evidence/policy/config/catalog/privacy
+  revisions. The application resolves and authorizes exact
+  project/repository/worktree/branch and parent task/attempt/Session identity,
+  bounded retrieval anchors, requested provider/model/reasoning, sandbox and
+  approval class, capabilities, budgets, deadline/cancellation, and opaque
+  secret references before asking Plan 32 to admit. It never accepts a shell
+  string, raw environment, arbitrary executable, unbounded prompt/context, or
+  adapter-local fallback flag.
+- Plan 32 returns the negotiated provider descriptor, lease/attempt identity,
+  progress/event frontier, artifacts, and typed terminal receipt through this
+  application contract. `Unsupported`, `Absent`, `Stale`, `Cancelled`,
+  `TimedOut`, `Failed`, and `Partial` remain distinct. A requested-versus-actual
+  provider/backend/model mismatch without the pinned explicit fallback
+  decision fails closed.
 - Add each use case in the same product PR as its domain/store/query behavior; do not create speculative APIs ahead of executable behavior.
 - PR11 ships the transport-neutral semantic-evidence/provider contract with
   the completed application core and explicit current-project/single-root
@@ -148,6 +193,10 @@ Every user-visible operation has one direct typed application entry point. CLI, 
   identity. Plan 16 is not a PR11 prerequisite.
 - PR11 removes remaining root-level business orchestration by routing adapters
   through the completed application core.
+- PR17 keeps graph semantics in Plan 24 application use cases and runtime
+  semantics in Plan 32; no handler, projector, board, or host adapter decides
+  readiness, route quality, proposal acceptance, scheduling, or completion
+  locally. Policy recommendations never lower directly to runtime effects.
 - PR11 feedback-cycle requests bind project/repository/worktree/branch/ref/HEAD
   SHA, clean source-generation identity or an explicitly tagged ephemeral
   overlay, file digest and document version, agent/session/turn identity,
@@ -187,8 +236,26 @@ Every user-visible operation has one direct typed application entry point. CLI, 
   provider states have direct tests; none collapse to a clean empty result.
   Empty output is valid only for supported, successfully completed requests with
   complete coverage and zero matches.
-- No generic bus/framework, plan parser/executor, generated inventory, or JavaScript workflow runtime exists in this layer.
+- No generic bus/framework, developer-plan parser/executor, generated inventory,
+  or JavaScript workflow runtime exists in this layer.
 - PR11 leaves no product orchestration in transport handlers or the legacy root crate.
+- PR17 tests prove graph-version/readiness CAS, cycle and acceptance failures,
+  exact scope/worktree binding, one-to-one task-step/runtime mapping, stale
+  lease/attempt projection, cancellation/recovery, and no second
+  runtime-clock/scheduler/lease/attempt/effect authority.
+- PR17 proposal tests prove read-only assessment, recommendation, and
+  calibration calls cannot mutate; proposal decisions reject stale graph,
+  evidence, scope, policy/config, or runtime state; executor grants cannot
+  self-grade or accept their own route/resize proposal; and every accepted
+  decomposition or resize names the resulting immutable graph version and any
+  separate Plan 32 control decision.
+- PR17 auxiliary-attempt tests prove exact lineage/scope/context
+  revalidation, rejection of shell strings/raw environment and preservation of
+  typed execution fields for Plan 32 lowering, deterministic provider
+  selection, no Hermes Anthropic substitution for Claude Code, explicit Codex
+  app-server-to-CLI fallback policy, secret/environment filtering,
+  cancellation/deadline propagation, exhaustive result mapping, and no
+  recursive dispatch or provider-originated graph/runtime mutation.
 - A focused application check or test does not compile transport, dashboard,
   provider, or concrete-storage targets, and the legacy root crate's dependency
   fan-in is measurably reduced.

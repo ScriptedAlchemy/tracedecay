@@ -8,6 +8,8 @@
   PR14 first ships dashboard binding, dashboard actions, and dashboard parity
   over the same CapabilityIds and application handlers. PR18 adds SDK bindings
   only when the official SDK methods ship.
+- PR17 adds Plan 24 task/work graph and Plan 32 runtime capabilities through
+  the same catalog; it creates no task-specific registry.
 - tracedecay-tool-catalog describes callable product capabilities. It does not discover them by parsing source code.
 
 ## Outcome
@@ -18,6 +20,11 @@ Every public surface resolves stable capability IDs to the same application use 
 
 - Stable CapabilityId, UseCaseId, and BindingId values.
 - Small immutable definitions for capability identity, user-facing description, input/output schema references, effect class, scope requirements, privacy class, availability, deprecation, and surface binding.
+- PR17 auxiliary-provider descriptors for backend/executable/protocol identity
+  and version, model/reasoning selectors, typed argv/stdin and structured-event
+  support, sandbox/approval/environment/egress classes, tool and artifact
+  capabilities, deadline/cancellation/kill behavior, progress/heartbeat,
+  resume/reconnect, and explicit fallback eligibility.
 - Explicit surface profiles, including bounded MCP profiles and their capability ceilings.
 - Typed standard-LSP bindings from navigation and diagnostic methods to the
   existing code and diagnostic capabilities and application handlers defined
@@ -35,7 +42,9 @@ Every public surface resolves stable capability IDs to the same application use 
   connection state, or other protocol mechanics.
 - A generic invoke-anything tool or compatibility aliases for retired names.
 - An arbitrary JSON-RPC proxy capability.
-- Task graph, plan editor, workflow executor, or generated agent orchestration operations.
+- Task/work graph semantics, readiness, model scoring, workflow execution, or
+  generated agent orchestration logic. The catalog does declare the shipped
+  Plan 24/32 application capabilities and their effect/scope/privacy metadata.
 
 ## Required behavior
 
@@ -95,6 +104,27 @@ Every public surface resolves stable capability IDs to the same application use 
 - **PR12 — output:** all surfaces consume the same typed application result before rendering. Markdown is the human/agent default where appropriate; structured JSON remains explicit.
 - **PR12 — drift:** direct tests enumerate compiled bindings and assert each references a valid catalog entry and handler. This is runtime contract validation, not source extraction.
 - **PR13 — hooks:** hook adapters use cataloged host capabilities only through application/daemon responses; hooks do not resolve or execute catalog entries locally.
+- **PR17 — work graph:** catalog explicit initiative/work-item/version,
+  dependency, evidence/history, saved-projection, assignment/review, runtime
+  admission/control, task-shape assessment, decomposition review,
+  routing-recommendation, resize/re-route proposal, independent-review grade,
+  outcome-record, and calibration-report operations backed by Plan 24/32
+  application handlers. Proposal reads, proposal acceptance/rejection, human
+  graph mutations, runtime controls, and executor-lifecycle calls use distinct
+  capabilities, effects, and grants. These are semantic capability families;
+  PR17 catalog IDs do not prematurely freeze PR18 public SDK method names.
+  There is no generic status setter, invoke-anything task tool, board-local
+  command, local model scorer, or route that bypasses Plan 32 effect authority.
+- **PR17 — auxiliary providers:** catalog native Claude Code CLI, Codex
+  app-server, and policy-eligible Codex CLI fallback as distinct provider
+  adapter capabilities backed by Plan 32. Descriptors name executable and
+  protocol version constraints, supported models/reasoning/capabilities,
+  structured stream and lifecycle behavior, sandbox/approval/environment
+  requirements, and supported terminal outcomes. Hermes Anthropic is not a
+  Claude Code execution capability. An app-server descriptor never aliases the
+  CLI descriptor, and fallback eligibility never means automatic fallback.
+  Catalog IDs are internal PR17 capability identity and do not freeze PR18
+  public SDK operation names.
 - **PR18 — SDK bindings:** add Rust, TypeScript, and Python SDK BindingIds only
   with the shipped typed methods and conformance fixtures. PR12 may describe
   future SDK availability as unavailable protocol metadata but cannot advertise
@@ -110,6 +140,18 @@ Every public surface resolves stable capability IDs to the same application use 
   results before rendering, including Markdown/JSON equivalence, stale CAS,
   conflicting index state, idempotent replay, and receipt identity.
 - PR14 contract tests add dashboard binding, dashboard actions, and dashboard parity on the same typed requests and CapabilityIds.
+- PR17 catalog tests prove every Plan 24/32 binding resolves to one application
+  handler, Kanban and other lenses expose no mutation-only shortcut, and no
+  catalog entry parses developer-roadmap Markdown or creates a second
+  scheduler/effect path. Tests also prove assessment/recommendation/report
+  capabilities are read-only, proposal decisions are explicit versioned
+  commands, and active-executor profiles cannot grade themselves or accept a
+  split/merge/resize/re-route proposal.
+- PR17 provider-descriptor fixtures cover missing executables, version drift,
+  unsupported model/reasoning/sandbox/event/resume capabilities, explicit
+  app-server-versus-CLI fallback eligibility, native Claude Code selection,
+  deterministic lookup, and rejection of shell-string, recursive-dispatch, or
+  graph/runtime-mutation capabilities.
 - PR18 SDK parity tests require every advertised SDK binding to resolve to the
   shipped typed method and canonical application handler.
 - Discovery tests prove compact profiles stay bounded and administrative/private capabilities are filtered correctly.

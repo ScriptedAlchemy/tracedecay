@@ -4,7 +4,14 @@
 
 - Required V2 control plane.
 - PR11 delivers the typed configuration core and daemon operations.
-- PR14 fully delivers UI, Doctor integration, and observed activation state.
+- PR14 fully delivers the canonical Doctor/UI integration and observed
+  activation state; PR17 extends it with auxiliary-provider configuration
+  evidence through the same kernel.
+- PR17 registers Plan 24 task/model-routing, exploration, budget, privacy, and
+  deterministic-fallback settings through the same control plane.
+- PR17 also registers every auxiliary-provider setting here; no catalog, host
+  bundle, application handler, runtime adapter, or dashboard keeps a parallel
+  executable/provider configuration source.
 - Configuration changes activate directly after validation; there is no preview/apply workflow.
 
 ## Outcome
@@ -29,13 +36,38 @@ opaque and operators can see which revision the running system actually uses.
   [35](35-daemon-lsp-gateway-and-universal-diagnostics.md) runtime snapshot
   composition.
 - CLI, API, MCP, and UI configuration surfaces.
-- Doctor read-only detection and explanation for configuration state.
+- Typed configuration validation, provenance, desired/observed activation, and
+  drift evidence consumed by the one Plan 14 Doctor kernel.
+- Typed PR17 bounds for task/model route allowlists, cohort/sample/coverage
+  floors, exploration share, latency/token/cost limits, rollback thresholds,
+  circuit breakers, privacy/egress ceilings, and deterministic fallback;
+  task-shape scales and unknown thresholds; calibrated size bands and
+  interval/confidence floors; decomposition/parallelism and integration-gate
+  limits; independent-review requirements; estimator/cohort/horizon and
+  model-version drift rules; censoring ceilings; live proposal triggers and
+  cooldown/dedupe; and human-override/approval requirements.
+- The sole typed PR17 auxiliary-provider configuration definitions and
+  resolution rules for executable references; allowed executable/protocol/
+  model version ranges; provider/backend enablement and preference; sandbox,
+  approval, filesystem/network/egress and environment-disclosure policy;
+  opaque secret-reference policy; model/reasoning defaults and allowlists;
+  context/output/artifact/token/cost budgets; deadline, cancellation,
+  interrupt/terminate/kill escalation and grace periods; progress/heartbeat
+  bounds; reconnect/resume/restart policy; capacity/fairness limits; and the
+  explicit Codex app-server-to-CLI fallback policy.
 
 ## Does not own
 
 - Feature business logic beyond the settings contract each feature registers.
 - Secret detection and sink enforcement; Plan 18 consumes opaque references and protects outputs.
-- Task assignment, agent steering, plan execution, or workflow scheduling.
+- Task assignment, agent steering, work-graph mutation, model-route decisions,
+  plan execution, or workflow scheduling. Plan 06/24/32 consume the typed
+  settings and pinned revision; configuration never applies those decisions.
+- Executable discovery, installation, repair, host capability probes, stock-host
+  conformance, provider invocation/supervision, process/session adoption,
+  leases, attempts, receipts, or remediation execution. Plan 27 discovers and
+  remediates against this plan's effective snapshot; Plan 32 executes against
+  one pinned snapshot.
 - Preview/apply/rollback ceremonies for normal configuration changes.
 - Dynamic workflow definitions; PR17 stores those as typed product data using daemon operations.
 - Generated inventories, Markdown parsers, trackers, executors, or workflow JavaScript.
@@ -46,9 +78,10 @@ opaque and operators can see which revision the running system actually uses.
   [35](35-daemon-lsp-gateway-and-universal-diagnostics.md), which consumes only
   the canonical configuration source and digest this plan publishes.
 - Doctor repair, remediation, or implicit mutation of configuration state; PR14
-  owns explicit confirmed remediation operations with authorization,
-  dry-run/preview where applicable, idempotency/CAS, receipts,
-  rollback/recovery, and audit.
+  owns the canonical Doctor kernel, diagnosis, finding identity, and
+  remediation orchestration. Explicit configuration mutation still invokes
+  this plan's typed operation with authorization, dry-run/preview where
+  applicable, idempotency/CAS, receipts, rollback/recovery, and audit.
 
 ## Required behavior
 
@@ -104,11 +137,34 @@ opaque and operators can see which revision the running system actually uses.
    - UI groups settings by product capability and makes overrides and restart requirements visible.
 
 7. Doctor integration
-   - Doctor detects invalid persisted values, unknown keys, deprecated keys, unresolved credential
-     references, precedence mistakes, and desired/observed revision drift.
-   - Doctor detection and explanation is read-only. Automatic or implicit repair is forbidden.
-   - PR14 remediation uses separate explicit confirmed operations with authorization,
-     dry-run/preview where applicable, idempotency/CAS, receipts, rollback/recovery, and audit.
+   - Plan 20 emits typed evidence for invalid persisted values, unknown keys,
+     deprecated keys, unresolved credential references, precedence mistakes,
+     and desired/observed revision drift.
+   - Plan 14 Doctor alone detects, identifies, aggregates, explains, and
+     presents those findings. Detection is read-only; automatic or implicit
+     repair is forbidden.
+   - Doctor remediation invokes separate Plan 20 explicit confirmed operations
+     with authorization, dry-run/preview where applicable, idempotency/CAS,
+     receipts, rollback/recovery, and audit.
+
+8. PR17 auxiliary providers
+   - One effective provider snapshot contains every setting named above plus
+     its scope, provenance, revision, digest, sensitivity, and desired/observed
+     activation state. Partial snapshots are invalid.
+   - Plan 27 discovery and conformance receive the resolved non-secret
+     executable/version/capability expectations and return observed evidence;
+     they cannot choose precedence, defaults, fallback, environment disclosure,
+     model/reasoning, timeout, cancellation, kill, or resume behavior.
+   - Plan 32 pins exactly one snapshot at admission and includes its revision
+     and digest in negotiation, lease/attempt identity, event history, and
+     terminal receipt. An adapter cannot read mutable configuration again to
+     change an admitted attempt.
+   - A discovered executable or capability outside the configured reference or
+     allowed range is `stale`/`unsupported`, never an implicit setting update.
+     Missing or invalid fallback policy fails closed.
+   - Auxiliary configuration changes publish a new revision and invalidate only
+     affected future admissions and observed activation state. They never
+     rewrite or silently re-route an admitted attempt.
 
 ## Acceptance
 
@@ -120,4 +176,17 @@ opaque and operators can see which revision the running system actually uses.
 - PR14 ships complete configuration UI, Doctor read-only checks, explicit configuration
   remediation operations, and desired-versus-observed state.
 - Restart-required and failed-activation scenarios preserve the last working runtime configuration.
-- No task steering, preview/apply pipeline, plan machinery, or workflow JavaScript is present.
+- PR17 tests prove task/model-routing limits resolve identically across
+  surfaces, activation is versioned/audited, unsafe widening is rejected, and
+  missing or invalid settings select the declared deterministic fallback.
+  Estimator, cohort, horizon, drift, censoring, decomposition, review, and live
+  proposal settings are pinned into recommendations and never activate an
+  accepted graph/runtime change by themselves.
+- PR17 auxiliary-provider configuration fixtures prove one definition and
+  precedence path across CLI/API/MCP/UI; complete snapshot/digest stability;
+  unknown/deprecated/invalid executable, protocol/model range, sandbox,
+  environment, fallback, deadline/kill, and resume settings; secret opacity;
+  desired-versus-observed drift; Plan 27 read-only consumption; Plan 32
+  admission pinning; and no adapter-local defaults or mid-attempt reread.
+- No task steering, developer-plan machinery, preview/apply pipeline, or
+  workflow JavaScript is present.

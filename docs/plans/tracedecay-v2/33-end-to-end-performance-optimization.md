@@ -7,7 +7,9 @@
 [12 migration/cutover](12-root-compatibility-migration.md),
 [19 convergence](19-system-defragmentation-convergence-and-extensibility.md),
 [26 observability](26-observability-accounting-and-usage.md), and
-[35 daemon LSP gateway](35-daemon-lsp-gateway-and-universal-diagnostics.md).
+[35 daemon LSP gateway](35-daemon-lsp-gateway-and-universal-diagnostics.md),
+[24 task/work graph](24-canonical-task-plan-graph-and-multi-agent-executor.md),
+and [32 workflow runtime](32-dynamic-workflow-runtime-and-sdk.md).
 
 ## Outcome
 
@@ -51,6 +53,22 @@ regression discovered by an earlier slice.
   behavior, edit-to-durable-feedback latency per delivery adapter (LSP, hook,
   explicit diagnostics call), GitHub ingest/remap/surface latency, CI
   localization latency, and concurrent-agent proximity computation cost.
+- Measure PR17 work-graph event commit and projector lag, dependency/readiness
+  recomputation, cross-project relation hydration, Kanban/DAG/timeline/causal/
+  workload query and render latency, Plan 24-to-Plan 32 admission and
+  cancellation/recovery latency, lease/attempt churn, model-routing evidence
+  aggregation and recommendation latency, task-shape/impact feature
+  extraction, decomposition comparison, independent-review/outcome
+  attribution, calibration rebuild, live split/merge/resize/re-route proposal,
+  abstention, policy fallback cost, auxiliary provider discovery/negotiation,
+  lease-to-process/session start, context assembly, structured event ingestion,
+  first heartbeat/progress, stdout/stderr/artifact throughput, cancellation and
+  kill escalation, terminal receipt, reconnect/resume, and restart recovery.
+  Measure native Claude Code CLI, Codex app-server, and explicit Codex CLI
+  fallback separately. Report graph size/edge density/history horizon, selected
+  scope, feature/evidence/cohort/censoring coverage, exact executable/protocol/
+  model-version cardinality, concurrent executors, candidate/proposal count,
+  stream/artifact volume and coverage, and view/result cardinality.
 - Report peak and steady memory, CPU time/utilization, database and generation
   bytes, temporary space, bytes read/written, and write amplification.
 - Separate queue, lock, I/O, parse, projection, model, merge, hydration, and
@@ -144,6 +162,26 @@ General discipline for every SQL surface, not only the search path:
   their owning contracts require it.
 - Bound cross-project fan-out, graph traversal, reranking, result buffering,
   and per-client concurrency with explicit partial or unavailable coverage.
+- Incremental task-readiness, critical-path, history, and workload projections
+  must avoid full-graph rebuilds on one event while preserving deterministic
+  results. Kanban is not a separate cache or query engine, and route
+  recalibration cannot block lease heartbeats, cancellation, or deterministic
+  fallback.
+- Task-shape, model-capability, outcome, and calibration projections update
+  only affected work/cohort/version horizons. Live proposal generation is
+  coalesced, bounded, cancellable, deduplicated by pinned input digest, and
+  lower priority than lease heartbeats, explicit runtime controls, and
+  deterministic fallback. Optimization cannot coarsen model-version identity,
+  omit censored/negative outcomes, hide coverage, or change a reviewed
+  estimator's result.
+- Provider-adapter optimization preserves typed argv/stdin, capability
+  negotiation, exact executable/protocol/model identity, sandbox/approval/
+  environment boundaries, ordered structured events, cancellation escalation,
+  lease fencing, and resume proof. Process pooling or app-server reuse requires
+  exact scope/privacy/configuration identity and cannot retain another
+  attempt's context or secrets. Lower startup latency never permits hidden
+  CLI fallback, shell execution, PID-only adoption, dropped terminal outcomes,
+  or recursive auxiliary dispatch.
 
 ### Git intelligence and index transactions
 
@@ -207,6 +245,16 @@ General discipline for every SQL surface, not only the search path:
 - Include crash/restart, daemon reconnect, WAL/checkpoint interruption,
   projector replay, generation publication, cache loss, cancellation, and
   overload while load is active.
+- Include large multi-repository task DAGs, deep/fan-out/fan-in dependencies,
+  long attempt history, overlapping saved projections, stale lease receipts,
+  route-policy version changes, sparse/shifted model cohorts, bounded
+  exploration, human overrides, and deterministic fallback under load.
+- Include missing/stale provider executables, executable/protocol/model
+  upgrades, native Claude Code and Codex fake/native streams, app-server
+  saturation and reconnect, explicitly allowed CLI fallback, malformed and
+  oversized output, missing heartbeats, cancellation/kill escalation, daemon
+  restart/resume, secret canaries, and concurrent auxiliary attempts across
+  isolated worktrees.
 - Include concurrent conflicting overlays, bridge reconnect, upstream analyzer
   crash/restart, clean diagnostic cache hits, and no-op LSP sessions.
 - Publish concise aggregate benchmark artifacts through the existing

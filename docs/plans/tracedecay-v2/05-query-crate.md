@@ -24,6 +24,10 @@
 - PR11 composes query use cases in application and policy. PR12 exposes them
   through CLI, MCP, HTTP, LSP, export, and live non-dashboard adapters.
   PR14 first ships dashboard binding and dashboard parity.
+- PR17 may reuse these shared scope, budget, cancellation, cursor, watermark,
+  merge, and coverage primitives to execute Plan 24 task/work requests. Plan 24
+  owns those typed requests, graph traversal/projection semantics, lenses,
+  readiness meaning, and legal pivots.
 - Each retrieval slice records representative latency, throughput, resource,
   and no-op baselines for [PR20](33-end-to-end-performance-optimization.md).
 - If extracted, `tracedecay-query` is a transport-neutral execution library. It
@@ -63,7 +67,11 @@ Every product surface can run the same bounded query use case and receive determ
 - A universal TraceQueryV1 god AST. Activity, facts, LCM, lexical code, semantic code, graph, and export use typed domain requests.
 - Scope discovery, authorization, saved-view mutation, annotations, usage accounting, or policy effects.
 - SQLite/libSQL connections, SQL, migrations, projector writes, model downloads, HTTP, SSE framing, MCP, CLI, or dashboard code.
-- Task plans, work items, boards, leases, attempts, workflow execution, or agent orchestration.
+- Task/work domain identity, request schemas, graph traversal/projection
+  semantics, saved lenses, Kanban/board meaning, readiness, leases, attempts,
+  workflow execution, or agent orchestration. Plan 05 may execute a Plan
+  24-owned typed request through shared primitives; it never defines a task
+  query language or universal query AST.
 - Source parsing, generated inventories, generated architecture views, or plan-document enforcement.
 - A Git object database, revision walker, blame implementation, patch parser,
   or independent diff engine. Native Git supplies repository facts and diff
@@ -156,6 +164,11 @@ Every product surface can run the same bounded query use case and receive determ
   every other adapter. Dashboard binding and dashboard parity remain owned by
   PR14; PR12 does not ship dashboard adapters.
 - **PR12 — export/live:** stream bounded frozen exports with manifests and ordered snapshot/delta/gap contracts. Filesystem publication and SSE framing remain adapter responsibilities.
+- **PR17 — task/work reuse:** accept Plan 24-owned typed request and projection
+  descriptors through narrow consumer-owned ports, then provide only shared
+  scope resolution inputs, budgets, cancellation, pagination, watermarks,
+  deterministic merge, coverage, and explanations. Do not add `TaskQuery`,
+  board filter DSL, task entity semantics, or a universal cross-domain AST.
 
 ## Acceptance
 
@@ -178,5 +191,9 @@ Every product surface can run the same bounded query use case and receive determ
   CLI JSON, MCP JSON, HTTP JSON, LSP, export, and live adapters and compare
   semantic results before rendering. PR14 contract tests add dashboard binding
   and dashboard parity on the same typed requests.
+- PR17 contract tests prove Plan 24 requests retain identical selected entity
+  IDs, versions, scope, watermarks, coverage, and ordering when run through
+  shared execution primitives, while no task/board/request semantics enter
+  Plan 05.
 - Benchmarks record corpus and watermark with p50/p95, candidate counts, allocations, peak RSS, shard opens, and quality deltas. No ranking change ships without direct held-out evidence and worst-stratum checks.
 - Architecture tests reject storage, transport, UI, policy, task-executor, and model-runtime dependencies from tracedecay-query, plus any LSP-private query engine or fallback.

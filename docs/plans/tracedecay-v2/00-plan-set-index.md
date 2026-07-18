@@ -1,8 +1,7 @@
 # TraceDecay V2 roadmap
 
-Status: active product rewrite. PR5 is complete. PR6 implementation is active;
-final correctness closure, aggregate gates, and clean benchmark acceptance
-remain.
+Status: active product rewrite. PR7 is complete and PR8 implementation is
+active.
 
 This file owns delivery order. The master and numbered plans define product
 requirements and component boundaries; they are not independent queues and do
@@ -41,7 +40,7 @@ PR5 delivered:
 - a clean-commit production benchmark with 30 measured repetitions and a
   verified exact no-op replay that performs no writes or durable work.
 
-PR6 implementation now present on the rewrite branch includes:
+PR6 delivered:
 
 - one complete host-neutral catalog and provider observation path for the
   supported Claude, Codex, Cursor, Hermes, Kiro, and Cline-family sources;
@@ -50,11 +49,13 @@ PR6 implementation now present on the rewrite branch includes:
 - atomic projection with staged bounded rebuild, provider-native identity and
   relation preservation, typed hook telemetry, and executable native host
   fixtures;
-- an executable multi-provider benchmark harness whose current acceptance stays
-  unset until a clean attested run after the implementation commit.
+- an executable multi-provider benchmark harness and clean attested acceptance
+  evidence recorded by commit `05da230e`.
 
-PR6 remains active until its remaining correctness findings and aggregate
-Linux, Windows, all-feature, Clippy, workspace, and benchmark gates pass.
+PR7 delivered the canonical project/profile memory and fact path, evidence and
+provenance, corrections and trust, curation, migration, deletion lineage,
+dogfood hardening, and accepted aggregate evidence. PR8 now owns the active
+Session/LCM temporal-retrieval slice.
 
 The removed planning/evidence machinery is not unfinished product work and must
 not be rebuilt.
@@ -104,9 +105,9 @@ not be rebuilt.
 | PR | Product delivery |
 |---|---|
 | PR5 (complete) | Sanitized observation vertical: one real provider from parse through sanitizer, daemon-owned persistence, replay, and restart. |
-| PR6 (active) | Provider coverage and event normalization: remaining hosts/sources, daemon host-admission spool for non-replayable events, identities, dedupe, partial input, backpressure, and canonical event relations. |
-| PR7 | Memory, facts, and provenance: project/profile ownership, evidence, corrections, trust, curation, migration, deletion lineage, and generation-bound repository provenance anchors. |
-| PR8 | Session/LCM temporal retrieval: occurrences, copies, summaries, supersession, current/as-of/evolution retrieval, and stable context assembly. |
+| PR6 (complete) | Provider coverage and event normalization: remaining hosts/sources, daemon host-admission spool for non-replayable events, identities, dedupe, partial input, backpressure, and canonical event relations. |
+| PR7 (complete) | Memory, facts, and provenance: project/profile ownership, evidence, corrections, trust, curation, migration, deletion lineage, and generation-bound repository provenance anchors. |
+| PR8 (active) | Session/LCM temporal retrieval: occurrences, copies, summaries, supersession, current/as-of/evolution retrieval, and stable context assembly. |
 | PR9 | Code intelligence and lexical retrieval: deterministic extraction, generations, lineage, generation-bound managed diagnostics/tests, exact/phrase/BM25 search, V1 parity, and typed read-only Git status/diff/history/blame/hunk intelligence enriched by graph impact. |
 | PR10 | Native semantic retrieval and ranking: gated FastEmbed artifacts, immutable vector generations, hybrid ranking, redundancy augmentation, evaluation, and lexical fallback. |
 | PR11 | Policy, application, catalog, and configuration core: typed use cases, grants, routing, replay, operations, capabilities, analyzer policy/settings, one runtime configuration authority, daemon-serialized `stage_hunks`/`unstage_hunks`/`commit_index` transactions with `HunkRef` compare-and-swap and receipts, and the typed branch-aware feedback-cycle request/result and orchestration ([Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)) — first pillar of the PR11–PR13 read-only/advisory milestone (post-edit diagnostics and impact). |
@@ -115,10 +116,10 @@ not be rebuilt.
 | PR14 | Dashboard, Doctor, observability, and configuration operations: Brain/Explorer/Loom foundations, one truthful health/recovery kernel, metrics/SLOs, Settings, direct remediation, and [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md) dashboard/Doctor consumption of the typed feedback-cycle, GitHub-ingested review-thread, CI-localization, and proximity state shipped at PR13. |
 | PR15 | Cross-project, repository, and worktree behavior: canonical scope resolution, federation, globally routable evidence, graph/query/LSP workspace coverage, and multi-repository workflows. |
 | PR16 | Remote shared Brain: enrolled nodes, one fenced authority per shard, remote offline-capture spool, verified caches/replicas, node-local LSP overlays/analyzers, Git correlation, backup, restore, and failover. |
-| PR17 | Real typed dynamic workflows and automations ([Plan 32](32-dynamic-workflow-runtime-and-sdk.md)): daemon-owned definitions, deterministic replay, one shared scheduler/history/lease/effect/artifact kernel, and typed workflow steps that compose [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s already-shipped read-only advisory operations (feedback-cycle findings, GitHub-ingested review-thread surfacing, CI localization, proximity) — not first availability of those capabilities and no GitHub writes. Workflow effects remain workflow authority only; [Plan 36](36-git-aware-change-context-and-index-transactions.md) Git/PR snapshot identity and Plan 32 effect/audit/receipt contracts apply to workflow-owned effects, not outbound GitHub comment actions. |
-| PR18 | Official API stabilization and SDKs: frozen public contract, OpenAPI/schema publication, first-party Rust/TypeScript/Python SDKs, docs, and conformance. |
+| PR17 | Canonical product task/work graph, adaptive task intelligence, and typed workflows ([Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md), [Plan 32](32-dynamic-workflow-runtime-and-sdk.md)): versioned user task/ticket DAG state, evidence/history relations, Kanban/DAG/timeline/causal/workload projections, task-shape and calibrated-size assessment, reviewed parent/child decomposition, model-capability profiles and explained routing, independent grades/outcomes/calibration, live split/merge/resize/re-route proposals that never auto-apply, and graph-native typed auxiliary-attempt requests; plus daemon-owned definitions, deterministic replay, and one shared runtime-clock/scheduler/history/lease/attempt/effect/artifact kernel that executes explicitly admitted task steps through negotiated provider adapters. Claude-designated work uses native Claude Code CLI, never Hermes Anthropic. Codex app-server is preferred; a distinct Codex CLI fallback is explicit, policy/configuration-bounded, and never hidden. Typed workflow steps may compose [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s already-shipped read-only advisory operations (feedback-cycle findings, GitHub-ingested review-thread surfacing, CI localization, proximity) — not first availability of those capabilities and no GitHub writes. Plan 24 owns work-graph/proposal/auxiliary-request plus task-domain ready-node/decomposition/sizing/model-backend recommendation semantics; Plan 06 owns pure evaluator/policy-decision mechanics; Plan 26 owns observations/metrics; Plan 32 alone owns runtime clocks, provider-adapter execution, scheduling, leases, attempts, effects, retries, cancellation, and runtime receipts. [Plan 36](36-git-aware-change-context-and-index-transactions.md) Git/PR snapshot identity and Plan 32 effect/audit/receipt contracts apply to workflow-owned effects, not outbound GitHub comment actions. |
+| PR18 | Official API stabilization and SDKs: freeze names/schemas for the accepted PR17 graph, task-intelligence, and workflow semantics; publish OpenAPI/schema and first-party Rust/TypeScript/Python SDKs, docs, and conformance without moving scoring or runtime logic into clients. |
 | PR19 | Compatibility migration, defragmentation, cutover, and deletion: resumable backfill, shadow parity, bounded cutovers, rollback window, V2 default, and removal of every superseded V1 path. |
-| PR20 | End-to-end performance optimization: measured database, synchronization, projection, indexing, cache/generation, query, and repository-controlled developer-build improvements with Linux/Windows and crash/restart regression gates. |
+| PR20 | End-to-end performance optimization: measured database, synchronization, projection, indexing, cache/generation, query, task-intelligence evidence/calibration/proposal paths, and repository-controlled developer-build improvements with Linux/Windows and crash/restart regression gates. |
 
 PR #421 stays open through PR20. It merges only after PR20 and the aggregate
 Linux, Windows, migration, recovery, privacy, performance, and deletion gates
@@ -130,13 +131,21 @@ are stable.
   recovery, and migration boundaries.
 - Plans 05, 15, 23, 25, and 31: PR8–PR10 temporal, lexical, code, semantic,
   ranking, and evaluation behavior.
+- Plan 24's PR17 vertical extends Plans 01–04 domain, owner-shard store, and
+  generic projector infrastructure for product work entities and relations.
+  Plan 24 owns typed work requests and projection semantics; Plan 05 supplies
+  only shared execution primitives. PR17 creates no task-specific crate,
+  database, projector runtime, board query DSL, or universal query AST.
 - Plans 06, 08–10, 17, 20, 21, and
   [34](34-workspace-refactoring-and-api-migration.md): PR11–PR12 application,
   policy, configuration, catalog, transport, presentation, public contracts, and
-  safe workspace refactoring.
+  safe workspace refactoring. Plans 06, 08–10, 20, and 21 receive their Plan
+  24/32 task-routing, configuration, or task/work extensions in PR17; Plan 17's SDK
+  stabilization remains PR18.
 - Plans 07 and 27: PR6 host/hook baseline and canonical integration model, then
-  PR13 daemon cutover, host bundles, lifecycle, and conformance. Plan 22 owns
-  PR13 Context Scout behavior.
+  PR13 daemon cutover, host bundles, lifecycle, and conformance, then PR17
+  addressed task-step execution bindings. Plan 22 owns PR13 Context Scout
+  behavior.
 - Plan [35](35-daemon-lsp-gateway-and-universal-diagnostics.md): PR9,
   PR11–PR13, PR14, PR15, and PR16 generation-bound diagnostics, analyzer
   policy, daemon LSP gateway, gateway-specific finding/state schema consumed by
@@ -155,11 +164,15 @@ are stable.
   GitHub writes. Composes Plans 05/09/13/16/21/22/23/26/27/32/35/36 without
   owning their contracts.
 - Plans 11, 14, and 26: PR14 product UI, Doctor, observability, regression, and
-  operational quality.
-- Plan 16: PR15 canonical scope. Plan 24 is a permanent tombstone for the
-  removed task-plan parser, tracker, and multi-agent executor product.
+  operational quality, plus PR17 Work UI, task/model observations, and direct
+  task-graph/runtime regressions.
+- Plan 16: PR15 canonical scope. Plan 24: PR17 canonical product task/work
+  graph, model-routing review, and Kanban/DAG/timeline/causal/workload
+  projections; it is not a parser or executor for this developer roadmap.
 - Plan 28: PR16 remote topology and authority.
-- Plan 32: PR17 typed dynamic-workflow product.
+- Plan 32: PR17 typed dynamic-workflow product and the sole runtime clock,
+  scheduler, history, lease, attempt, effect, and artifact authority for
+  executable Plan 24 task steps.
 - Plans 08, 12, 13, 17, 19, and every component migration section: PR18–PR19
   SDK binding, publication, provenance, compatibility, cutover, and deletion.
 - Plan 33: PR20 end-to-end database, synchronization, indexing, query, and
@@ -181,9 +194,9 @@ Do not restore:
 - a second metadata model that generates product declarations from YAML,
   JSON, Markdown, or checked-in snapshots.
 
-PR17 workflows are product data executed through typed daemon operations. They
-cannot parse this roadmap, dispatch its PRs, track rewrite completion, or act as
-a developer-plan executor.
+Plan 24 work graphs and PR17 workflows are explicit product data handled
+through typed daemon operations. They cannot parse this roadmap, dispatch its
+PRs, track rewrite completion, or act as a developer-plan executor.
 
 ## Delivery gate
 

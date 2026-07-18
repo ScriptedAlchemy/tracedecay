@@ -25,7 +25,9 @@ Neither path is deferred. Both are implemented and tested before PR 13 is comple
 - The daemon owns event admission, coalescing, retrieval, model calls, policy, persistence, retries, and cancellation.
 - At an eligible host boundary, a hook may perform one bounded daemon lookup for a ready envelope, revalidate it, render it, and record delivery.
 - Capture succeeds independently of Scout. Scout failure never blocks session ingestion or normal hook behavior.
-- There is no task graph, plan executor, workflow runner, recursive MCP client, or second scheduler.
+- Scout owns no task graph, developer-plan executor, workflow runner,
+  recursive MCP client, or scheduler. It may reference Plan 24 work evidence,
+  but a suggestion never creates work or admits a Plan 32 runtime step.
 
 ## Address and evidence
 
@@ -111,4 +113,5 @@ PR 13 direct tests must satisfy every requirement below. These are acceptance ga
 - Hooks only signal the daemon and read a ready envelope.
 - Suggestions are exact-addressed, evidence-backed, compact, bounded, and duplicate-safe.
 - Silence is a normal successful outcome.
-- No task graph, plan tracker, executor, lab, or model-specific default exists.
+- No Scout-local task graph, developer-plan tracker/executor, lab, or
+  model-specific default exists.

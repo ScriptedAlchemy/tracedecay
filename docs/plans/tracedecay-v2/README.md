@@ -1,11 +1,11 @@
 # TraceDecay V2 rewrite
 
-Status: active product rewrite. PR5 is complete. PR6 implementation is active in
-the current branch; final correctness closure, aggregate gates, and a clean
-attested provider-observation benchmark remain. PR #421 remains open.
+Status: active product rewrite. PR7 is complete, PR8 implementation is active,
+and PR #421 remains open.
 
 The authoritative delivery order is [00-plan-set-index.md](00-plan-set-index.md).
-The next executable slice is [NEXT.md](NEXT.md). Numbered plans define component
+The active PR8 execution slice is [NEXT.md](NEXT.md). These are contributor
+documents only and never product runtime input. Numbered plans define component
 requirements and boundaries, not separate crate-first work queues.
 
 ## Current product foundation
@@ -36,8 +36,8 @@ requirements and boundaries, not separate crate-first work queues.
   sources use bounded fair scheduling, atomic cursor/projection commits, and a
   staged bounded projection rebuild rather than provider-local durable state.
 - Executable native host fixtures and typed hook-telemetry readiness now replace
-  prose-only provider claims. Current benchmark acceptance remains unset until
-  the clean attested PR6 run and aggregate gates pass.
+  prose-only provider claims. The clean attested PR6 benchmark acceptance is
+  recorded by commit `05da230e`; PR6 is complete.
 
 ## Storage and authority
 
@@ -68,6 +68,15 @@ requirements and boundaries, not separate crate-first work queues.
   PR11 daemon-serialized index/commit transactions, and PR12 shared surface
   bindings. They never autonomously mutate branches, worktrees, refs, or
   published history.
+- PR17 delivers the [canonical product task/work graph and Kanban/DAG/timeline/
+  causal/workload projections](24-canonical-task-plan-graph-and-multi-agent-executor.md)
+  plus advisory task-shape/decomposition/sizing/model-routing intelligence,
+  independent outcomes/calibration, and human-reviewed live resize/re-route
+  proposals. [Plan 32](32-dynamic-workflow-runtime-and-sdk.md) remains the sole
+  runtime clock, scheduler, history, lease, attempt, and effect authority.
+  Recommendations never auto-mutate the graph or silently choose a model.
+  These are typed product data, never an execution model for this developer
+  roadmap.
 - [The branch-aware feedback cycle, read-only GitHub review-comment
   ingestion/surfacing, CI-failure localization, and tiered concurrent-agent
   proximity](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
@@ -95,16 +104,17 @@ requirements and boundaries, not separate crate-first work queues.
 ## Removed permanently
 
 - compatibility and architecture inventory implementations;
-- plan Markdown parsers, PR-ID normalizers, slice DAGs, completion ledgers,
-  progress trackers, next-ready controllers, and rewrite executors;
+- plan Markdown parsers, PR-ID normalizers, developer-roadmap slice DAGs,
+  completion ledgers, progress trackers, next-ready controllers, and rewrite
+  executors;
 - generated plan views, owner maps, baseline packets, and planning-artifact CI;
 - large agent checklists or Claude workflow JavaScript for executing the rewrite;
 - parallel YAML/JSON/Markdown models that generate product declarations.
 
 Real product generation remains legal only when it removes duplicate product
 authorities and follows [RUST-METAPROGRAMMING.md](RUST-METAPROGRAMMING.md).
-Real dynamic workflows are daemon-owned typed product operations. They never
-parse or execute this roadmap.
+Real task/work graphs and dynamic workflows are daemon-owned typed product
+operations. They never parse or execute this roadmap.
 
 ## Release
 

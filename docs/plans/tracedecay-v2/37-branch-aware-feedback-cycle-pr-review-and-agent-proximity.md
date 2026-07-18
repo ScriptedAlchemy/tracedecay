@@ -62,9 +62,10 @@ workflow-step composition of this plan's already-shipped operations and is
 not a prerequisite for any PR9–PR16 capability defined here;
 [Plan 34](34-workspace-refactoring-and-api-migration.md) remains the only
 apply path for accepted refactor candidates; and
-[Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md) remains a
-permanent tombstone for any universal executor, orchestrator, or scheduler
-this plan must not resurrect.
+[Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md) owns the
+product task/work graph while Plan 32 owns its runtime; this advisory cycle
+creates neither canonical work nor executable runtime state unless a separate
+explicit authorized PR17 operation admits it.
 
 ## Outcome
 
@@ -152,10 +153,12 @@ GitHub, applies a fix, or continues an agent automatically.
 - Scheduling, leasing, or executing agents, and any autonomous agent
   continuation or follow-up. No trigger, cycle result, or proximity warning
   creates a file lock, task assignment, agent step, or `followup_message`.
-  [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md)'s
-  tombstone stands; the optional [PR17 workflow composition](32-dynamic-workflow-runtime-and-sdk.md)
-  remains workflow-authority effect safety, not generic editor or agent
-  ownership, and performs no GitHub write.
+  [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md) may store
+  an explicit user-authorized work relation and the optional
+  [PR17 workflow composition](32-dynamic-workflow-runtime-and-sdk.md) may
+  execute an explicitly admitted task step, but this cycle supplies advisory
+  evidence only, never generic editor or agent ownership, and performs no
+  GitHub write.
 - Host packaging, install/repair/uninstall mechanics, or the canonical
   host-integration catalog — [Plan 27](27-cross-host-agent-plugin-bundles.md)
   owns those; this plan only defines which delivery adapter a host receives
@@ -261,8 +264,8 @@ GitHub, applies a fix, or continues an agent automatically.
   `EditTransaction` remains the only apply path for supported
   rename/refactor candidates surfaced as an inert suggested next action.
 - No scheduling, leasing, or locking of any kind rides on this cycle or its
-  proximity warnings. [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md)'s
-  tombstone stands unconditionally.
+  proximity warnings. Plan 24/32 work or runtime state requires a separate,
+  explicit, authorized product command.
 - Unsaved overlays may produce immediate session-only feedback for the
   authorized client that owns the overlay. That feedback is never durable:
   it cannot enter a capsule, envelope, checkpoint, receipt, feedback-history
@@ -302,11 +305,9 @@ GitHub, applies a fix, or continues an agent automatically.
 - `textDocument/documentSymbol` may resolve ranges/symbols for a proximity
   warning; LSP never transports leases, presence, or the warning payload
   itself as a side channel outside the one typed cycle result (§1, §6).
-- This plan preserves
-  [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md)'s
-  tombstone exactly: no resurrected universal executor/orchestrator, no
-  autonomous file locks, and no agent scheduling. Every proximity warning is
-  advisory only.
+- This plan preserves the Plan 24/32 authority boundary: no proximity-triggered
+  work creation or runtime admission, no autonomous file locks, and no agent
+  scheduling. Every proximity warning is advisory only.
 - Delivery is through the same five surfaces as every other pillar (§6);
   optional IDE `relatedInformation` presentation ships only after that
   presentation method passes its own separate conformance gate per §9.
@@ -698,9 +699,9 @@ PR6 boundary.
   rejected; this cycle is one-shot per trigger (§2), suggested next actions
   are inert, and no `followup_message` or scheduling exists.
 - **A generic multi-agent scheduler or file-lock service riding on
-  proximity data:** rejected;
-  [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md)'s
-  tombstone stands, and proximity stays advisory at every tier.
+  proximity data:** rejected; Plan 24 owns explicit product work and Plan 32
+  owns its sole runtime, while proximity stays advisory at every tier and
+  cannot admit either.
 - **A GitHub-specific suggestion channel parallel to Scout:** rejected; PR
   review reuses the one capsule and suggestion channel owned by
   [Plan 22](22-incremental-context-scout-and-suggestion-envelopes.md).

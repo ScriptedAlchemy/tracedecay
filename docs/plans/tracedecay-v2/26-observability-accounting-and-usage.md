@@ -18,12 +18,28 @@ Every operational and product metric states what was measured, over which popula
 - Metric descriptors, units, populations, horizons, coverage, and aggregation semantics.
 - Denominator-safe projections and Observatory/Costs read models.
 - Product-wide lag, SLO, adoption, hint-outcome, and automation-outcome definitions.
+- Plan 24 task/model outcome observations, comparable evaluation cohorts, and
+  denominator-safe routing-review metrics consumed by typed policy, including
+  task-shape feature/estimate revisions, proposal lifecycle, model-capability
+  profiles, independent-review grades, first-pass and parent-normalized
+  outcomes, calibration error, censoring, selection/override/exploration
+  exposure, and drift/change-point evidence.
+- The canonical versioned independent-review and task-outcome label vocabulary,
+  evidence requirements, transition-validity inputs, and measurement schema
+  consumed by Plan 24 graph state, Plan 06 policy, Plan 11 UI, and public
+  application/surface contracts.
 - Trace and retrieval anchors needed to explain aggregate results without exposing private content.
 
 ## Does not own
 
 - A separate telemetry database, scheduler log, workflow event stream, or per-surface counter system.
 - Product execution, retries, admission, policy, or side effects.
+- Model assignment, task decomposition, route activation, or opaque
+  self-modifying policy. This plan supplies evidence; Plan 06 policy recommends
+  and Plan 32 executes under Plan 24 semantics.
+- Work-plan/item proposal or graph-transition authority. Plan 24 consumes
+  canonical labels and decides legal graph transitions; this plan never accepts
+  a proposal, changes readiness, or marks graph work complete.
 - Raw provider payloads or unsanitized content.
 - A source parser, Markdown parser, compatibility inventory, plan ledger, generated execution graph, or meta compiler.
 - UI-local metric formulas or transport-specific metric meanings.
@@ -67,6 +83,59 @@ Every operational and product metric states what was measured, over which popula
 - Use stable idempotency keys so retries and replay cannot double count.
 - Record terminal outcomes separately from attempts and preserve cancellation, rejection, timeout, partial success, and unknown outcomes.
 - Keep instrumentation bounded and non-blocking while making dropped or delayed telemetry measurable.
+- PR17 emits privacy-safe Plan 24/32 observations for task-shape and
+  decomposition grade and estimate ranges; proposal/decision identity;
+  requested/actual model route and exact model/version/effort/tool/host
+  capability; first-pass scope completion and accepted correctness;
+  tests/review independence and finding severity; escaped defects;
+  rework/remediation and parent/integration overhead; retries and typed causes;
+  queue/execution latency; tokens/cost/resources; autonomy; human
+  intervention/override; cancellation; censoring/unknown horizon; and audit
+  coverage. Records pin work/acceptance/decomposition, estimator, cohort,
+  policy/config/catalog/privacy, evidence horizon, and valid/observation-time
+  revisions. Self-reported completion is a separate evidence class and never
+  substitutes for independent acceptance, tests, review, or outcome.
+- PR17 auxiliary-provider observations include requested and actual
+  provider/backend/executable/protocol/model/reasoning identity; capability
+  negotiation and explicit fallback decision; exact task/attempt/Session and
+  scope identity; queue/admission/start/progress/heartbeat/event/artifact/
+  terminal timing; stdout/stderr/structured-event byte and drop coverage;
+  sandbox/approval/capability class; cancellation/deadline/interrupt/terminate/
+  kill stages; restart/reconnect/resume state; and one terminal
+  `Completed`, `Unsupported`, `Absent`, `Stale`, `Cancelled`, `TimedOut`,
+  `Failed`, or `Partial` outcome. Events never contain argv/stdin values, raw
+  output, environment values, secrets, prompts, paths, or private context.
+
+### Canonical review and outcome labels
+
+PR17 uses one Plan 26-owned label schema. Every label records schema revision,
+work/acceptance/decomposition identity, attempt and evidence horizon,
+valid/observation time, source class, retrieval anchors, coverage/confidence,
+actor/reviewer identity where permitted, and conflict/override provenance.
+
+The exhaustive task-outcome lifecycle labels are `Pending`,
+`ObservedPartial`, `Reviewable`, `Accepted`, `Rejected`, `Censored`, and
+`Unknown`. Review independence is `Independent`, `NonIndependent`,
+`Conflicted`, `Missing`, or `Unknown`; review judgment is `Accepted`,
+`Rejected`, `Partial`, or `Unknown`. First-pass scope completion, correctness,
+test evidence, escaped defects, rework/remediation, autonomy/intervention, and
+residual risk are separate measured dimensions with explicit unknown/coverage,
+not aliases for the outcome label.
+
+`Accepted` and `Rejected` describe independently evidenced outcome judgment,
+not Plan 24 proposal acceptance and not Plan 32 terminal runtime status.
+`Censored` names a known observation cutoff such as cancellation,
+supersession, lost authority, or unfinished horizon; `Unknown` means the
+available evidence cannot classify the outcome. `Partial` review judgment does
+not imply `ObservedPartial` task outcome. Plan 32 `Completed`, `Failed`,
+`Cancelled`, `TimedOut`, and provider outcomes remain runtime evidence that may
+support—but never substitute for—these labels.
+
+Plan 24 owns the graph transition table that consumes the exact label revision
+plus acceptance/dependency evidence. Plan 24 may display or branch on these
+labels but cannot redefine, coerce, or mint a second review/outcome vocabulary.
+Late or corrected evidence appends a new label revision and leaves prior labels
+queryable.
 
 ### Truthful aggregation
 
@@ -75,6 +144,17 @@ Every operational and product metric states what was measured, over which popula
 - Refuse percentages, savings, success rates, or SLO claims when their denominator or coverage is insufficient.
 - Separate zero observed events from absent, delayed, excluded, or unreadable data.
 - Preserve methodology and descriptor revision so changed definitions do not rewrite history silently.
+- Publish eligible, observed, completed, censored, unknown, excluded,
+  overridden, and exploration counts separately. A model/version or route
+  ranking is unavailable when missing outcomes, selection bias, version drift,
+  or cohort shift could reverse it.
+- Keep child-task throughput and quality attributable to the pinned parent and
+  initiative, including decomposition, coordination, integration, and review
+  overhead. Splitting work cannot improve the denominator by itself.
+- Report calibration by estimate dimension and cohort: predicted band or
+  interval, observed value, error/coverage, horizon, sample/censoring counts,
+  and estimator revision. Never collapse correctness, safety, latency, tokens,
+  cost, and autonomy into one reward score.
 
 ### Required product views
 
@@ -83,6 +163,23 @@ Every operational and product metric states what was measured, over which popula
 - Capability and surface adoption with active-user, active-project, and invocation denominators.
 - Hint emission, delivery, action, usefulness, dismissal, and unknown-outcome funnels.
 - Automation admission, execution, useful work, effect, recovery, and terminal outcome funnels.
+- Task/work graph throughput and quality by eligible task-shape cohort,
+  decomposition policy, executor/provider/model/effort, while preserving
+  first-pass completion, correctness, tests/review, rework, latency,
+  tokens/cost, autonomy, overrides, cancellations, unknown outcomes, and
+  evidence coverage as separate dimensions.
+- Task-intelligence calibration and drift views: estimate versus outcome
+  intervals, decomposition and live resize/re-route proposal disposition,
+  independent-review coverage, exact model-version boundaries, current versus
+  historical cohorts, censoring/selection exposure, abstention/fallback
+  reasons, and insufficient-evidence state.
+- Auxiliary-provider reliability and cost views by eligible backend,
+  executable/protocol/model version, capability and task-shape cohort:
+  negotiation availability, explicit fallback, queue/start latency,
+  heartbeat/progress and stream coverage, cancellation escalation,
+  restart/resume, artifacts, terminal outcomes, tokens/cost, and unknown
+  effect. Native Claude Code, Codex app-server, and Codex CLI remain separate
+  dimensions; absence or failure of one never counts as success of another.
 - Usage, cost, and measured savings with declared pricing inputs, exclusions, and confidence.
 - Store, index, daemon, hook, and remote-coverage health derived from canonical facts rather than incidental row presence.
 - Diagnostic and analyzer/provider coverage carry the complete canonical state
@@ -151,6 +248,35 @@ decision with collision, ambiguity, maintenance, and privacy review.
   in PR14; PR18 SDK conformance adds the same parity fixtures for each shipped
   SDK.
 - Privacy fixtures prove events and drill-down anchors contain no prohibited raw content.
+- Plan 24 routing-review fixtures prove cohort eligibility, minimum sample and
+  coverage, policy/evidence revisions, requested-versus-actual route,
+  independent outcome evidence, exploration/fallback state, and override
+  attribution rebuild deterministically. Small/private cohorts are suppressed;
+  prompts, source, symbols, paths, review bodies, private session content, and
+  hidden reasoning never enter route metrics. Missing or shifted evidence
+  cannot produce a confident recommendation or hide a deterministic fallback.
+- Task-intelligence fixtures preserve calibrated size bands, first-pass
+  identity, parent-normalized decomposition/integration overhead, independent
+  versus self review, exact model-version cohorts, valid/observation time,
+  censored/unknown outcomes, selection/override/exploration exposure, and
+  proposal disposition through replay and late evidence. Cold-start, sparse,
+  shifted, or high-censoring populations produce bounded fallback/abstention
+  rather than a success rank; task splitting and cheap self-reports cannot
+  improve quality denominators.
+- Review/outcome schema fixtures exhaust every label, legal evidence
+  requirement, independence/judgment combination, runtime-versus-outcome
+  distinction, censored-versus-unknown case, late correction, schema-version
+  replay, and missing/conflicting coverage. Cross-plan fixtures prove Plan 24
+  consumes the same revision for graph transitions and cannot create a local
+  label, while Plan 32 process completion or worker self-report alone never
+  yields `Accepted`.
+- Auxiliary-provider fixtures reconcile fake/native negotiation, attempt,
+  stream, cancellation, resume, artifact, and terminal events without
+  double-counting retries or fallback. Version drift, malformed/truncated
+  streams, secret/shell-injection canaries, daemon restart, missing
+  heartbeats, and explicit app-server-to-CLI fallback preserve truthful
+  coverage and requested-versus-actual identity; raw argv/stdin/output/env and
+  secrets never enter observations or drill-down anchors.
 - Git fixtures prove patch, path, commit-message, author, and conflict content
   never enters telemetry while attempts, typed outcomes, latency, and dropped
   coverage remain truthful.

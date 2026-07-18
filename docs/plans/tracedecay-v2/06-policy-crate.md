@@ -4,19 +4,29 @@
 
 - Status: pending for PR11.
 - PR5 and PR7–PR10 provide typed, immutable query candidates and evidence.
-- PR11 implements tracedecay-policy and application effect handling together so no policy result is left without a production consumer.
+- PR11 implements tracedecay-policy and application authorization/orchestration
+  together so no policy result is left without a production consumer.
+- PR17 adds pure Plan 24 task-shape, decomposition, assignment/model-route, and
+  live-recalibration evaluators over Plan 26 evidence.
 - tracedecay-policy is a pure Rust decision library. It evaluates facts; it does not perform effects.
 
 ## Outcome
 
-Hints, retrieval choices, routing, correlation, diagnostics, curation, scheduling, and memory decisions use deterministic, explainable evaluators with one application-owned path for validation and effects.
+Hints, retrieval choices, routing, correlation, diagnostics, curation,
+admission recommendations, and memory decisions use deterministic, explainable
+evaluators. Plan 09 authorizes and orchestrates typed operations; each owning
+runtime performs its effects.
 
 ## Owns
 
 - Versioned evaluator IDs, typed input snapshots, typed decisions, reason codes, score components, and canonical policy decision/revision/digest semantics consumed by [09](09-application-crate.md) provider-result identity.
-- Ordinary pure Rust evaluators for hint eligibility and delivery, retrieval selection, tool/Git routing, correlation, diagnostics/curation, scheduler decisions, and memory proposals.
+- Ordinary pure Rust evaluators for hint eligibility and delivery, retrieval
+  selection, tool/Git routing, correlation, diagnostics/curation, admission
+  recommendations, and memory proposals.
 - Pure analyzer eligibility and routing decisions for the daemon-hosted LSP
   gateway in [35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
+- Pure Plan 24 task sizing/decomposition and executor/provider/model/effort
+  recommendations, including bounded exploration and deterministic fallback.
 - Replay comparison over immutable recorded inputs and outputs.
 - One delivery arbiter that resolves eligible guidance by priority, relevance, repetition, cooldown, token budget, and host capability.
 - Deterministic conflict handling when several rules propose incompatible effects.
@@ -28,7 +38,11 @@ Hints, retrieval choices, routing, correlation, diagnostics, curation, schedulin
 - Saving facts, sending hints, mutating config, scheduling runs, editing task plans, or applying any ProposedEffect.
 - Starting or supervising analyzers, handling LSP JSON-RPC, or fabricating an
   analyzer or code-intelligence fallback.
-- Task decomposition, board state, work-item readiness, leases, attempts, fairness, packets, or executor lifecycle.
+- Task/work graph identity or mutation, board state, readiness authority,
+  leases, attempts, packets, runtime fairness enforcement, or executor
+  lifecycle. Policy may propose typed task decomposition and route decisions;
+  Plan 24 defines graph semantics, application revalidates, and Plan 32
+  executes.
 - UI, API, CLI, MCP, hook rendering, experiment persistence, or generated inventories.
 
 ## Required behavior
@@ -58,11 +72,43 @@ Hints, retrieval choices, routing, correlation, diagnostics, curation, schedulin
   not duplicate policy fields or digest semantics.
 - **PR11 — correlation:** reconcile local code/session evidence with live Git delivery evidence while preserving separate watermarks and disagreements.
 - **PR11 — diagnostics/curation:** propose bounded remediation or fact changes with evidence and confidence; application revalidates authority and preconditions before applying.
-- **PR11 — scheduler:** decide eligibility from explicit config, activity, lock, retry, budget, and prior-run state; application owns clocks, leases, and execution.
+- **PR11 — admission policy:** recommend eligibility from explicit
+  configuration, activity, prior-run evidence, budget, and declared runtime
+  state. Plan 09 revalidates and authorizes the typed operation. Plan 32 alone
+  owns workflow/task runtime clocks, queues, fairness enforcement, leases,
+  attempts, retries, cancellation, effects, and execution.
 - **PR11 — memory:** propose retain, supersede, contradict, merge, forget, or no-op against explicit fact/version evidence. Equal text across scopes does not imply identity.
-- **PR11 — application:** implement every ProposedEffect handler in the same PR, with authorization, idempotency, stale-input rejection, persistence receipts, and explicit failure.
+- **PR11 — application:** implement every `ProposedEffect` authorization and
+  orchestration handler in the same PR, with idempotency, stale-input
+  rejection, persistence receipts, and explicit failure. The owning subsystem
+  performs the effect; Plan 32 exclusively performs workflow/task runtime
+  clock, lease, attempt, retry, cancellation, and effect transitions.
 - **PR11 — experiments:** expose pure evaluator adapters to the application experiment service; no evaluator writes experiment state.
 - **PR13 — hooks:** hooks receive only application-approved guidance. They never invoke policy directly against partial host state.
+- **PR17 — task/model routing:** grade task shape and decomposition fit, then
+  recommend task sizing, executor/provider/model/effort, reviewer, and
+  fallback from eligible versioned Plan 26 evidence. Inputs carry cohort,
+  coverage, horizon, graph/scope, policy/config/catalog/privacy revisions,
+  human overrides, and independent outcome evidence. Sparse, shifted, denied,
+  or incomplete evidence selects the deterministic baseline. Exploration has
+  explicit allowlists, sample/coverage floors, budget and privacy ceilings,
+  maximum share, rollback thresholds, and circuit breakers. Workers cannot
+  choose their grade, denominator, or policy; self-reported completion is
+  distinct from tests, review, accepted outcomes, rework, and escaped defects.
+  Results are an explained `Recommendation`, `FallbackRecommendation`, or
+  typed `Abstention`; they include ranked eligible routes, exclusions,
+  confidence/coverage, evidence horizon, calibrated ranges, and legal next
+  actions. Exact model/version, tool/context capability, host adapter,
+  decomposition role, risk band, censoring, override/selection exposure, and
+  estimator revision are comparison dimensions. A decision never rewrites
+  admitted work or changes policy code/config.
+- **PR17 — estimator governance:** use reviewed versioned formulas, cohort
+  filters, priors, thresholds, intervals, and change-point rules over immutable
+  inputs. Cold start, sparse/private cohorts, model/version drift,
+  nonstationarity, censored outcomes, or incomparable evidence widen
+  uncertainty, coarsen only to an eligible declared parent cohort, select the
+  baseline, or abstain. There is no opaque online weight mutation, hidden
+  self-training, self-authored reward, or single-proxy optimization.
 
 ## Acceptance
 
@@ -74,6 +120,19 @@ Hints, retrieval choices, routing, correlation, diagnostics, curation, schedulin
   stale preview rejection, index conflicts, denied authority, and the absence
   of generic or history-mutating Git effects.
 - Correlation tests preserve local/live disagreement and both watermarks.
-- Diagnostics, scheduler, and memory tests prove evaluators cannot mutate and application handlers revalidate stale decisions.
+- Diagnostics, admission-policy, and memory tests prove evaluators cannot
+  mutate, application handlers revalidate stale decisions, and no policy
+  evaluator advances a clock, queue, lease, attempt, retry, cancellation, or
+  effect.
 - Concurrent evaluation tests use immutable snapshots and remain deterministic while application state changes.
 - Architecture tests reject storage, transport, hook, model, process, task-executor, compiler, and generated-inventory dependencies.
+- PR17 fixtures replay task/model decisions byte-for-byte, exercise
+  first-pass completion, correctness, tests/review, rework, latency,
+  tokens/cost, autonomy, overrides, cancellation and unknown outcomes, and
+  prove privacy suppression, anti-gaming, bounded exploration, and
+  deterministic fallback.
+- PR17 estimator fixtures cover cold start, sparse and private cohorts, exact
+  model-version boundaries, shifted horizons, censored failures,
+  selection/override bias, task inflation, self-grading, non-causal
+  correlation, confidence/calibration error, and explicit abstention without
+  mutating policy or graph/runtime state.

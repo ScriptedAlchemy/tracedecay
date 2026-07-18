@@ -4,6 +4,9 @@
 
 - Required V2 product surface.
 - PR12 delivers the official daemon API.
+- PR17 extends that API with Plan 24 task/work graph and Plan 32 runtime
+  operations through internal typed contracts and then-supported adapters; it
+  does not publish generated clients or SDKs.
 - PR18 stabilizes that API and fully delivers supported Rust, TypeScript, and Python SDKs.
 - The end state is complete across all three SDKs; no language binding is deferred or skipped.
 
@@ -32,7 +35,9 @@ The daemon remains the only process that reads or writes product storage.
 - LSP JSON-RPC framing, document lifecycle, analyzer supervision, or an
   SDK-visible arbitrary LSP payload tunnel.
 - A generated compatibility inventory or a second model of the product.
-- Markdown parsers, plan trackers, task executors, or workflow JavaScript.
+- Markdown/developer-roadmap parsers, rewrite trackers, independent task
+  executors, or workflow JavaScript. Typed Plan 24/32 product operations are
+  part of the supported API.
 - Dynamic workflow execution. PR17 stores typed workflow definitions and invokes existing daemon
   operations; it does not introduce a JavaScript SDK or runtime.
 
@@ -66,6 +71,18 @@ The daemon remains the only process that reads or writes product storage.
    - Rust, TypeScript, and Python expose typed sync or async APIs idiomatic to each ecosystem.
    - Pagination, streaming, cancellation, timeouts, and structured errors are first-class.
    - SDKs provide connection setup and operation calls, not independent business logic.
+   - PR18 SDKs expose Plan 24 initiative/work-item/version, dependency,
+     history/projection, assignment/review, task-shape assessment,
+     decomposition proposal/review, routing recommendation, live
+     resize/re-route proposal, independent-review grade, outcome/calibration,
+     Plan 24 auxiliary-attempt request, Plan 32 provider capability,
+     admission/progress/cancel/receipt, and other runtime operations with
+     distinct IDs and typed legal actions.
+     PR18 chooses and stabilizes idiomatic public names over PR17 application
+     semantics; planning prose does not freeze generated method spellings. No
+     SDK computes readiness, scoring, proposal acceptance, provider selection,
+     scheduling, or completion; accepts shell strings/raw environment; or
+     executes Claude Code/Codex locally.
 
 6. Safe output
    - Privacy enforcement runs before every public response, stream item, log, and diagnostic payload.
@@ -76,6 +93,17 @@ The daemon remains the only process that reads or writes product storage.
 - PR12 ships a versioned daemon API backed by the real application contracts.
 - CLI, MCP, and HTTP parity tests cover every public operation and stable error code.
 - PR18 ships usable, documented, tested Rust, TypeScript, and Python SDKs.
+- PR17 API fixtures cover task/work graph versioning, paged projections,
+  assessment/proposal/recommendation/outcome/calibration semantics, abstention
+  and deterministic fallback, auxiliary request/provider negotiation,
+  requested-versus-actual backend/model identity, typed progress/events/
+  artifacts/terminal outcomes, runtime mapping, cancellation, resume/reconnect,
+  and SSE history; PR18 runs the same fixtures through all three SDKs.
+- Plan 32 PR17 completion never depends on SDK generation or parity. PR18 owns
+  public schema/OpenAPI stabilization, client generation/publication,
+  documentation, and Rust/TypeScript/Python conformance for workflow and
+  task/work and auxiliary-provider operations. PR17 semantic concepts and
+  internal IDs do not freeze public method/tool/route names before this gate.
 - The three SDK suites pass the same contract fixtures against one daemon build.
 - Cancellation, reconnect, idempotent retry, pagination, and streaming tests pass.
 - LSP bridge contract tests cover negotiation, ordered bidirectional delivery,

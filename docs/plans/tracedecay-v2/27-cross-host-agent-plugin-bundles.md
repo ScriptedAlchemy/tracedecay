@@ -2,18 +2,20 @@
 
 ## Status / role
 
-PR6's current branch implementation establishes the host-neutral integration
+PR6 established the host-neutral integration
 catalog model, working Claude Code, Codex, Cursor, Hermes, and Kiro observation
 adapters, canonical event semantics, daemon host admission, and executable host
-fixtures. PR6 remains active until final correctness review, aggregate gates,
-and clean attested benchmark acceptance complete. PR13 completes packaging,
-registration, conflict handling, install/repair/uninstall, one
+fixtures with accepted correctness, aggregate, and clean benchmark evidence.
+The clean PR6 benchmark acceptance is commit `05da230e`. PR13 completes
+packaging, registration, conflict handling, install/repair/uninstall, one
 configured-language TraceDecay LSP plugin for Claude Code, the Cursor desktop
 native-diagnostics adapter, Cursor cloud/Codex/Hermes/Kiro hook/MCP/CLI or typed
 unavailable paths, host install/registration/protocol conformance findings and
 fixtures, and cutover for every supported host. PR14 owns canonical Doctor
 presentation, diagnosis, and remediation orchestration that invokes PR13
 lifecycle operations without redefining repair mechanics.
+PR17 extends the same catalog/bundles with Plan 24 task context and Plan 32
+runtime execution adapters; it does not create a host-local board or scheduler.
 
 ## Outcome
 
@@ -44,6 +46,10 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
 ## Does not own
 
 - Product use-case definitions already owned by domain, catalog, application, policy, memory, or workflow components.
+- Task/work graph identity, readiness, model-routing policy, scheduling,
+  leases, attempts, effects, or completion semantics. Plan 24 owns graph
+  semantics, Plan 06 owns pure routing decisions, and Plan 32 owns runtime
+  authority; bundles only transport addressed context, commands, and receipts.
 - Database access, daemon authority, or host-specific copies of durable TraceDecay state.
 - A requirement that MCP be installed; the CLI and daemon API are the baseline.
 - Workflow JavaScript, incremental PR-series scripts, Markdown task parsers, rewrite-plan executors, progress ledgers, or generated plan state.
@@ -106,7 +112,9 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
   All other supported hosts receive the same explicit capability reporting or a
   tested unavailable path.
 - Never infer unsupported events, lifecycle controls, permissions, or task semantics.
-- Preserve provider-native workflows as observations unless the user explicitly imports them into a TraceDecay product workflow.
+- Preserve provider-native workflows and task/goal systems as observations
+  unless the user explicitly imports or relates them through typed TraceDecay
+  product operations; no host-native board becomes canonical task authority.
 - Host adapters are the delivery mechanics for [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s
   advisory feedback-cycle result on every host as part of the PR11–PR13
   milestone. PR13 hook, MCP, and CLI contexts deliver the same typed result;
@@ -120,6 +128,48 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
   adapter/application path at PR13 and surfaced as advisory findings. This
   plan does not post, update, or resolve GitHub comments and does not claim
   GitHub API identity, finding ownership, or durable finding storage.
+- PR17 host projections for Plan 32 executor adapters receive only the exact
+  addressed Plan 24 work-item version, sanitized context packet, resolved
+  workspace/scope, Plan 32 run/node/lease proof, capability grants, budgets,
+  and cancellation contract. Plan 32 owns adapter invocation, supervision, and
+  lifecycle/effect/artifact receipts; this plan owns only host packaging,
+  discovery, registration, and conformance. A host may expose richer native UI
+  or subagents, but it cannot schedule another canonical task, widen grants, or
+  advance graph state locally.
+- PR17 host bundles and skills present the same application-backed task-shape,
+  decomposition-review, routing-recommendation, resize/re-route proposal,
+  outcome, and calibration concepts where the host supports them. They may
+  collect explicit user review/override input and attach addressed receipts;
+  they never keep model-performance memory, compute a private score, choose a
+  hidden fallback, mutate the graph, or accept a proposal locally. Requested
+  and actual provider/model/version/effort/tool capability remain distinct.
+- Pinned Hermes evidence (`agent/prompt_builder.py` and
+  `hermes_cli/kanban_db.py` at `c48d53413aa2c`) shows that workers benefit when
+  task guidance, required terminal behavior, workspace discipline, heartbeat,
+  artifacts, and selected skills are visible before execution. TraceDecay host
+  projections therefore expose a bounded, ordered list of applicable
+  skill/hint/capability identities, provenance, availability, and delivery
+  status in both human help and the typed auxiliary request. Each native
+  Claude Code/Codex conformance test proves the list is delivered without
+  loss/duplication where supported. It does not copy Hermes prompt text,
+  repeated `--skills` flags, environment variable names, or profile routing.
+- PR17 extends host lifecycle/conformance with provider-adapter discovery and
+  registration evidence for the native Claude Code CLI, Codex app-server, and
+  separately policy-eligible Codex CLI fallback. Plan 27 receives one resolved
+  Plan 20 configuration snapshot and owns discovery of the configured
+  executable references, observed version/capability probes,
+  ownership/conflict-safe install or repair guidance, and native conformance
+  fixtures; it does not define, default, layer, persist, or resolve any
+  provider setting. Plan 32 owns invocation and supervision against the same
+  pinned Plan 20 snapshot. TraceDecay never silently installs, upgrades,
+  replaces, or adopts a third-party executable, and ambient `PATH`, PID, CWD,
+  or host profile does not become execution authority.
+- Claude-designated execution resolves only the native Claude Code CLI
+  capability. Hermes Anthropic is a distinct observed/host capability and
+  cannot satisfy or silently emulate it. Codex app-server and Codex CLI are
+  distinct capabilities; a healthy supported app-server is preferred, while
+  CLI fallback remains unavailable unless the pinned Plan 20 fallback policy,
+  Plan 06 decision, and negotiated host capability explicitly permit it.
 
 ### Lifecycle safety (PR13)
 
@@ -132,7 +182,7 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
 - Make install and update idempotent; make repair explicit and receipt-backed; remove only TraceDecay-owned state during uninstall.
 - Keep service-manager ownership and daemon lifecycle separate from host registration files.
 
-### Host conformance findings (PR13) and Doctor remediation (PR14)
+### Host/provider findings (PR13/PR17) and Doctor remediation (PR14)
 
 - PR13 emits read-only host install, registration, version skew, endpoint
   reachability, hook delivery, capability availability, and protocol-conformance
@@ -151,6 +201,19 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
   adapter has separate conformance coverage. Cursor cloud, Codex, Hermes, and
   Kiro prove hook/MCP/CLI or typed unavailable paths instead of LSP session
   conformance.
+- PR17 provider discovery/conformance supplies typed evidence and remediation
+  operations for unsupported/absent/stale executables, executable/protocol
+  version drift, invalid configured fallback, sandbox/environment/capability
+  mismatch, provider availability, and reconnect/resume failure. Plan 27 owns
+  those probes and confirmed install/update/repair/rollback mechanics only.
+  Plan 14's canonical Doctor kernel owns finding identity, diagnosis,
+  aggregation, severity, legal remediation presentation, and health state;
+  Plan 27 creates no provider-specific Doctor or health formula.
+- Stuck lease/attempt detection remains Plan 32 runtime evidence consumed by
+  Plan 14 Doctor. Plan 27 may collect typed external executable/host diagnostic
+  evidence and offer a confirmed repair operation, but only Plan 14 turns that
+  evidence into a diagnosis/finding; Plan 27 cannot declare, reclaim, cancel,
+  or repair runtime authority.
 
 ## Acceptance
 
@@ -166,6 +229,34 @@ TraceDecay ships one host-neutral integration catalog and thin host-native adapt
 - MCP-present and CLI-only paths produce equivalent authorized product behavior.
 - Version-skew, missing binary, dead daemon, stale registration, ownership conflict, and partial-install host-conformance fixtures return stable causes without mutation; PR14 Doctor consumes the same finding identities for kernel/UI presentation and remediation orchestration that invokes PR13 lifecycle operations.
 - Cross-host handoff preserves repository/worktree, session, parent/subagent, privacy, and provenance identity.
+- PR17 cross-host task execution fixtures preserve exact Plan 24/32 identity,
+  reject stale lease/graph versions and wrong worktrees, report requested versus
+  actual model/provider/effort, and prove each host bundle has no durable task
+  store, scheduler, model scorer, proposal authority, or direct database
+  access. Equivalent hosts preserve proposal/abstention/fallback and
+  independent-review semantics; unsupported host interactions return a typed
+  unavailable path rather than silently narrowing the contract.
+- PR17 provider conformance runs bounded fake and supported native Claude Code
+  and Codex protocol fixtures for executable absence, version/capability drift,
+  model/reasoning negotiation, structured and malformed streams, typed
+  argv/stdin and shell-injection canaries, sandbox/approval/environment/secret
+  canaries, cancellation and kill escalation, progress/heartbeats, artifacts,
+  restart/reconnect/resume, and every terminal outcome. Fixtures prove
+  deterministic backend selection, no hidden app-server/CLI or
+  Claude/Hermes substitution, and no host-local recursive dispatch,
+  graph/runtime mutation, or durable provider state.
+- PR17 configuration-boundary fixtures prove discovery and remediation consume
+  the exact Plan 20 snapshot/revision, report observed drift without writing
+  settings, cannot invent executable paths/defaults/fallback, and return typed
+  evidence to the one Plan 14 Doctor kernel. Doctor invocation of a Plan 27
+  remediation operation preserves confirmation, CAS/idempotency, receipts,
+  backup/rollback, and never mutates Plan 32 lease/attempt state.
+- Pinned-Hermes-derived host fixtures verify task guidance and
+  skill/hint/capability discoverability, bounded terminal-protocol help,
+  workspace and artifact instructions, and delegation visibility across
+  supported native hosts. They assert TraceDecay identities and typed grants,
+  not Hermes profile names, prompt constants, CLI flags, environment keys, or
+  board-local state.
 - PR13 Plan 37 delivery fixtures prove hook/MCP/CLI, Claude LSP, and Cursor
   native-diagnostics paths publish semantically equivalent advisory results
   where capabilities overlap; read-only GitHub ingestion fixtures prove ingested

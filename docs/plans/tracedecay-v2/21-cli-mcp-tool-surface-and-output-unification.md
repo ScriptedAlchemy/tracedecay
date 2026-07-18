@@ -1,6 +1,6 @@
 # TraceDecay V2 CLI, MCP, LSP, and Output Unification
 
-**Delivery:** PR 12
+**Delivery:** PR12 core; PR17 Plan 24/32 task/work extensions
 
 **Status:** planned product work
 **Depends on:** [08 tool catalog](08-tool-catalog-crate.md), [09 application](09-application-crate.md), [18 privacy](18-secret-detection-redaction-and-private-data-safety.md), and [20 configuration](20-configuration-control-plane.md). PR12 ships Plan 35's explicitly resolved single-project LSP admission; [16 scope](16-cross-project-repository-worktree-scope.md) extends it to canonical multi-root admission in PR15 and is not a PR12 prerequisite.
@@ -12,7 +12,10 @@ LSP is a stateful sibling adapter over the same typed code and diagnostic
 contracts. CLI and MCP render typed results as compact human output or canonical
 JSON; LSP uses protocol-native JSON-RPC responses and diagnostics.
 
-This plan does not create a generated surface inventory, plan parser, command generator, parity matrix, task editor, or workflow executor.
+This plan does not create a generated surface inventory, developer-plan parser,
+command generator, parity matrix, independent task editor, or workflow
+executor. PR17 binds typed Plan 24 task/work and Plan 32 runtime application
+operations without moving their semantics into adapters.
 
 ## Boundaries
 
@@ -176,6 +179,66 @@ Response handles are never durable finding IDs. Ingested GitHub review threads
 first surface through PR13 host adapters; PR17 optional workflow composition
 does not gate these bindings.
 
+## PR17 task/work graph bindings
+
+CLI and MCP expose a compact, audience-filtered surface for Plan 24
+initiative/work-item/version, dependency, context/history, saved projection,
+assignment/review, task-shape assessment, decomposition review,
+routing recommendation, split/merge/resize/re-route proposal, outcome record,
+calibration report, Plan 24 auxiliary-attempt request, provider-capability
+inspection, and Plan 32 auxiliary admission/progress/inspect/cancel operations.
+PR17 binds these semantic operation families without claiming their command or
+tool spellings are the frozen PR18 SDK vocabulary. Human/operator,
+orchestrator, reviewer, and active-executor profiles are distinct; an active
+executor receives only its addressed work, context, lifecycle, and handoff
+capabilities and cannot grade itself or accept its own proposal.
+
+Kanban, DAG, timeline, causal, workload, executor/model, and
+repository/delivery reads render the same sealed application selection with
+canonical IDs, versions, scope, watermarks, coverage, evidence anchors, and
+Plan 32 runtime refs. There is no adapter-local board filter language, status
+setter, readiness calculation, model score, scheduler command bus, or generic
+task invocation. Mutations require the exact typed application capability,
+expected versions, authorization, and idempotency identity. No operation
+accepts this roadmap or another Markdown file as executable work input.
+Assessment, recommendation, and calibration output always preserves feature
+coverage, confidence/intervals, evidence horizon, estimator/policy/config
+revisions, exclusions, abstention/fallback reason, and requested-versus-actual
+route. Human output cannot shorten an abstention, stale proposal, unknown
+outcome, censored failure, or model-version boundary into a score or success.
+
+Auxiliary surfaces submit or inspect typed application requests only. CLI, MCP,
+and HTTP clients never execute Claude Code or Codex locally, construct a shell
+command, pass raw environment/secrets, choose an unapproved fallback, mint a
+lease, or parse provider output into graph state. Results preserve requested
+and actual provider/backend/executable/protocol/model/reasoning identity,
+negotiated capabilities, sandbox/approval class, parent lineage,
+progress/heartbeat and stream coverage, cancellation stage, artifacts, and the
+explicit `Unsupported`, `Absent`, `Stale`, `Cancelled`, `TimedOut`, `Failed`,
+or `Partial` outcome. These are PR17 semantic surface families, not frozen
+PR18 command, MCP-tool, route, or SDK method names.
+
+Pinned Hermes CLI/dashboard evidence at `c48d53413aa2c`
+(`hermes_cli/kanban.py`, `plugins/kanban/dashboard/plugin_api.py`) establishes
+the minimum practical Work UX, not names to copy. CLI/MCP/HTTP must offer
+compact, composable outcomes for:
+
+- initiative/work selection, task list/detail, derived lane/readiness,
+  dependencies/blockers, assignment/recommendation, comments and artifacts;
+- decomposition/proposal review and explicit legal actions;
+- attempt/run history, bounded event/output tail, delegation/parent lineage,
+  progress/heartbeat, diagnostics, capacity/defer reasons, and terminal
+  receipts;
+- dispatch watch/status, workload/provider statistics, cancellation/recovery,
+  and restart/resume explanation; and
+- applicable skill/hint/capability discovery with provenance and availability.
+
+The derived UI may use familiar triage/todo/scheduled/ready/running/blocked/
+review/done/archived vocabulary where semantically valid, but no adapter writes
+a card status, selects an ambient board/profile, or treats a list rendering as
+readiness authority. Plain-text process exit, a terminal-protocol reminder, or
+a dragged card is never a successful application result.
+
 ## Rejected-argument telemetry
 
 The versioned schema registry and dispatcher own one
@@ -247,8 +310,27 @@ Parity is verified from public behavior, not from a generated inventory:
     handles with original/preview counts and expiry while response handles
     remain distinct from durable finding IDs; security fixtures prove handles
     cannot bypass authorization or substitute for anchors.
+15. in PR17, compare task/work graph, projection, history, task-shape,
+    decomposition review, routing recommendation, live resize/re-route
+    proposal, outcome/calibration, and runtime-control results across CLI, MCP,
+    and HTTP; preserve confidence/coverage/abstention/censoring and prove lane
+    or proposal decisions lower only to legal typed commands and cannot bypass
+    dependencies or Plan 32 runtime/effect authority.
+16. compare Plan 24 auxiliary-request and Plan 32 provider-adapter
+    admission/progress/cancel/receipt results across CLI, MCP, and HTTP using
+    fake and supported native streams; prove typed argv/stdin, deterministic
+    native Claude Code and Codex app-server/allowed-CLI selection, exhaustive
+    outcomes, malformed-output and version-drift handling, secret redaction,
+    cancellation/kill escalation, restart/resume, and no client-side execution
+    or recursive dispatch.
+17. translate the pinned Hermes CLI/dashboard scenarios into surface parity:
+    list/detail/dependency and derived-lane reads; proposal review; run/event
+    tail; delegation visibility; blocker/capacity explanation; diagnostics,
+    watch/statistics, skills/hints, artifacts, terminal receipt, cancellation,
+    and restart recovery. Fixtures compare semantic results rather than copying
+    Hermes command names, status writes, profile routing, or free-form fields.
 
-## PR 12 deliverables
+## PR12 core and PR17 extension deliverables
 
 - one daemon client shared by CLI and MCP adapters;
 - one daemon-owned stateful LSP gateway and transport-only stdio bridge;
@@ -265,6 +347,12 @@ Parity is verified from public behavior, not from a generated inventory:
 - read-only feedback diagnostics bindings (`feedback_diagnostics`,
   `feedback_get`, `feedback_expand`, `feedback_list`) with Plan 05 cursors,
   Plan 13 anchor expansion, and `tracedecay_retrieve` truncation handles.
+- PR17 compact task/work graph and Plan 32 runtime bindings over the same typed
+  application results, including reversible paging/expansion and explicit
+  audience profiles.
+- PR17 auxiliary request/provider capability and attempt lifecycle bindings
+  with bounded streams/resources; no generic process-execution or raw
+  provider-protocol proxy.
 
 ## Done
 
@@ -281,4 +369,5 @@ Parity is verified from public behavior, not from a generated inventory:
 - Feedback diagnostics CLI/MCP/HTTP bindings agree semantically with host
   adapter projections at PR13, preserve truncation/cursor/anchor semantics,
   and never treat response handles as durable finding IDs.
-- No generated surface inventory, plan parser, task editor, or executor is introduced.
+- No generated surface inventory, developer-plan parser, independent task
+  editor, or second executor is introduced.
