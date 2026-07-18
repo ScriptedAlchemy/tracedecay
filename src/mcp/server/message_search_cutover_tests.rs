@@ -525,6 +525,18 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
     .await;
     assert_eq!(first["outcome"], "partial", "{first}");
     assert_eq!(first["count"], 1);
+    assert!(
+        first["results"][0]["message"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("orchard evidence")),
+        "search must emit canonical hydrated text: {first}"
+    );
+    assert!(
+        !first["results"][0]["message"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("legacy projection poison")),
+        "legacy compatibility text must never override hydration: {first}"
+    );
     assert_eq!(first["temporal"]["freshness"]["state"], "fresh");
     assert_eq!(first["refresh_required"], false);
     assert_eq!(

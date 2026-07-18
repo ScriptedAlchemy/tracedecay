@@ -50,6 +50,7 @@ use crate::mcp::tool_analytics::{
 use crate::path_tree::format_compact_annotated_path_list;
 use crate::query::temporal::TemporalKernelResult;
 use crate::query::temporal::context::VersionedTokenEstimator;
+use crate::query::temporal::ports::TemporalExecutionSnapshot;
 use crate::sessions::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
@@ -1631,7 +1632,7 @@ impl DaemonSessionRetrievalService {
                 cursor = item.next_cursor.clone();
             }
             for ranked in item.ranked {
-                let result = self.hydrate_result(&ranked).await?;
+                let result = self.hydrate_result(&item.snapshot, &ranked).await?;
                 anchors.push(ranked.anchor_id.clone());
                 explanations.push(SessionRetrievalExplanationView {
                     anchor: ranked.anchor_id,
@@ -1660,37 +1661,16 @@ impl DaemonSessionRetrievalService {
 
     async fn hydrate_result(
         &self,
+        snapshot: &TemporalExecutionSnapshot,
         ranked: &crate::query::temporal::ranking::RankedCandidate,
     ) -> Option<SessionMessageSearchResult> {
-        let session_id = ranked.session.as_deref()?;
-        let message_id = ranked.logical_message.as_deref()?;
-        let snapshot = self.database.read_snapshot().await.ok()?;
-        let mut rows = snapshot
-            .query(
-                "SELECT json_extract(
-                        observation.observation_json,
-                        '$.identity.source.provider'
-                     )
-                 FROM session_occurrences AS occurrence
-                 JOIN observations AS observation
-                   ON observation.observation_id = occurrence.source_observation_id
-                 WHERE occurrence.session_id = ?1
-                   AND occurrence.retrieval_anchor_id = ?2
-                 LIMIT 2",
-                libsql::params![session_id, ranked.anchor_id.as_str()],
-            )
+        let message = GlobalDbSessionTemporalExecution::new(self.database.as_ref())
+            .hydrate_authorized_occurrence(snapshot, &ranked.anchor_id)
             .await
             .ok()?;
-        let provider = rows.next().await.ok()??.get::<String>(0).ok()?;
-        if rows.next().await.ok()?.is_some() {
-            return None;
-        }
-        drop(rows);
-        drop(snapshot);
-        let session = self.database.get_session(&provider, session_id).await?;
-        let message = self
+        let session = self
             .database
-            .get_session_message(&provider, message_id)
+            .get_session(&message.provider, &message.session_id)
             .await?;
         if message.session_id != session.session_id {
             return None;

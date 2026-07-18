@@ -10,7 +10,7 @@ mod retrieval;
 mod schema;
 
 use serde::Deserialize;
-use tracedecay_domain::SignedCursorKeyRefV1;
+use tracedecay_domain::{RetrievalAnchorId, SignedCursorKeyRefV1};
 
 use crate::application::session::{
     AuthorizedTemporalExecutionRequest, SessionDataFreshness, SessionTemporalExecutionError,
@@ -23,6 +23,7 @@ use crate::query::temporal::ports::{
     BindingDigest, KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
 };
 use crate::query::temporal::resolution::ValidatedAuthorization;
+use crate::sessions::SessionMessageRecord;
 
 use self::cursor_keys::GlobalDbCursorKeyProvider;
 use self::hydration::GlobalDbTemporalHydrationPort;
@@ -43,6 +44,21 @@ pub struct GlobalDbSessionTemporalExecution<'db> {
 impl<'db> GlobalDbSessionTemporalExecution<'db> {
     pub const fn new(db: &'db GlobalDb) -> Self {
         Self { db }
+    }
+
+    pub(crate) async fn hydrate_authorized_occurrence(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        anchor_id: &RetrievalAnchorId,
+    ) -> Result<SessionMessageRecord, SessionTemporalExecutionError> {
+        let read = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        hydration::hydrate_authorized_occurrence(&read, &self.db.storage_root, snapshot, anchor_id)
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)
     }
 
     async fn freeze(

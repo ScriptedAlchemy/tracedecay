@@ -22,6 +22,7 @@ use crate::query::temporal::hydration::{
 use crate::query::temporal::ports::{
     ExecutionControl, TemporalExecutionSnapshot, TemporalRetrievalScope,
 };
+use crate::sessions::SessionMessageRecord;
 use crate::sessions::lcm::payload::{expand_payload, validate_payload_ref};
 
 use super::operations::CanonicalPublicationManifest;
@@ -214,6 +215,135 @@ impl<'snapshot> SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapsh
     ) -> Self {
         Self::new(GlobalDbHydrationBackend::new(read, storage_root))
     }
+}
+
+pub(super) async fn hydrate_authorized_occurrence(
+    read: &GlobalDbReadSnapshot,
+    storage_root: &Path,
+    snapshot: &TemporalExecutionSnapshot,
+    anchor_id: &RetrievalAnchorId,
+) -> Result<SessionMessageRecord, HydrationError> {
+    let adapter = GlobalDbTemporalHydrationPort::for_snapshot(read, storage_root);
+    let limits = snapshot.request().limits();
+    let mut bytes = Zeroizing::new(Vec::new());
+    adapter
+        .read_after_recheck(
+            snapshot,
+            anchor_id,
+            limits.hydration_payload_bytes,
+            limits.hydration_chunk_bytes,
+            &mut |chunk| {
+                bytes.extend_from_slice(chunk);
+                Ok(())
+            },
+        )
+        .await?;
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| HydrationError::Unavailable)?;
+
+    let generation =
+        i64::try_from(snapshot.watermarks().generation).map_err(|_| HydrationError::Unavailable)?;
+    let mut rows = match snapshot.retrieval_scope() {
+        TemporalRetrievalScope::Session(session_id) => {
+            read.query(
+                "SELECT occurrence.message_id, occurrence.role,
+                        occurrence.projection_output_ordinal,
+                        observation.observation_json
+                 FROM session_occurrences occurrence
+                 JOIN observations observation
+                   ON observation.observation_id = occurrence.source_observation_id
+                 WHERE occurrence.session_id = ?1
+                   AND occurrence.generation = ?2
+                   AND occurrence.retrieval_anchor_id = ?3
+                 ORDER BY occurrence.occurrence_id
+                 LIMIT 2",
+                params![session_id.as_str(), generation, anchor_id.as_str()],
+            )
+            .await
+        }
+        TemporalRetrievalScope::AllSessionsInAuthorizedRoot => {
+            read.query(
+                "SELECT occurrence.message_id, occurrence.role,
+                        occurrence.projection_output_ordinal,
+                        observation.observation_json
+                 FROM session_occurrences occurrence
+                 JOIN session_temporal_generations generation
+                   ON generation.session_id = occurrence.session_id
+                  AND generation.generation = occurrence.generation
+                  AND generation.state = 'active'
+                 JOIN observations observation
+                   ON observation.observation_id = occurrence.source_observation_id
+                 WHERE occurrence.retrieval_anchor_id = ?1
+                 ORDER BY occurrence.session_id, occurrence.occurrence_id
+                 LIMIT 2",
+                [anchor_id.as_str()],
+            )
+            .await
+        }
+    }
+    .map_err(|_| HydrationError::Unavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|_| HydrationError::Unavailable)?
+        .ok_or(HydrationError::Unavailable)?;
+    let message_id: String = row.get(0).map_err(|_| HydrationError::Unavailable)?;
+    let role: String = row.get(1).map_err(|_| HydrationError::Unavailable)?;
+    let ordinal: i64 = row.get(2).map_err(|_| HydrationError::Unavailable)?;
+    let observation_json: String = row.get(3).map_err(|_| HydrationError::Unavailable)?;
+    if rows
+        .next()
+        .await
+        .map_err(|_| HydrationError::Unavailable)?
+        .is_some()
+    {
+        return Err(HydrationError::Unavailable);
+    }
+    let observation: DurableObservationV1 =
+        serde_json::from_str(&observation_json).map_err(|_| HydrationError::Unavailable)?;
+    let envelope: CanonicalObservationEnvelopeV1 =
+        serde_json::from_value(observation.payload().clone())
+            .map_err(|_| HydrationError::Unavailable)?;
+    if envelope
+        .relations()
+        .message_id()
+        .is_none_or(|candidate| candidate.as_str() != message_id)
+    {
+        return Err(HydrationError::Unavailable);
+    }
+    let (model, timestamp) = envelope
+        .facts()
+        .iter()
+        .find_map(|fact| match fact {
+            CanonicalObservationFactV1::Message {
+                model, timestamp, ..
+            } => Some((model.clone(), *timestamp)),
+            _ => None,
+        })
+        .ok_or(HydrationError::Unavailable)?;
+    let tool_names = envelope
+        .facts()
+        .iter()
+        .filter_map(|fact| match fact {
+            CanonicalObservationFactV1::ToolInvocation { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(SessionMessageRecord {
+        provider: observation.source().provider().as_str().to_string(),
+        message_id,
+        session_id: observation.source().session_id().as_str().to_string(),
+        role,
+        timestamp,
+        ordinal,
+        text,
+        kind: Some("message".to_string()),
+        model,
+        tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
+        source_path: None,
+        source_offset: None,
+        metadata_json: None,
+    })
 }
 
 impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
