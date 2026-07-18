@@ -336,6 +336,8 @@ fn copy(
             ))
             .unwrap(),
         },
+        knowledge_at: target.knowledge_at,
+        valid_time: target.valid_time,
     }
 }
 
@@ -350,6 +352,8 @@ fn parent_message_copy(
             source_occurrence_id: source.occurrence_id.clone(),
             parent_message_id: source.message_id.clone().expect("source message id"),
         },
+        knowledge_at: target.knowledge_at,
+        valid_time: target.valid_time,
     }
 }
 
@@ -364,6 +368,8 @@ fn explicit_anchor_copy(
             source_occurrence_id: source.occurrence_id.clone(),
             assertion_anchor_id: source.retrieval_anchor_id.clone(),
         },
+        knowledge_at: target.knowledge_at,
+        valid_time: target.valid_time,
     }
 }
 

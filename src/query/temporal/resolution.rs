@@ -1200,6 +1200,8 @@ mod tests {
                 source_occurrence_id: first.occurrence_id.clone(),
                 provider_record_id,
             },
+            knowledge_at: copied.knowledge_at,
+            valid_time: copied.valid_time,
         };
 
         let resolved = resolve_temporal(
@@ -2190,8 +2192,7 @@ mod tests {
         ];
 
         for source_anchors in [forward.as_slice(), reverse.as_slice()] {
-            let summary =
-                summary_with_sources("mixed", "summary-mixed", source_anchors, 7, 7);
+            let summary = summary_with_sources("mixed", "summary-mixed", source_anchors, 7, 7);
             let eligibility = evaluate_summary_lineage_eligibility(
                 std::slice::from_ref(&summary),
                 &source_states,
@@ -2261,12 +2262,9 @@ mod tests {
             for source_anchors in [["left", "right"], ["right", "left"]] {
                 let summary =
                     summary_with_sources("precedence", "summary-precedence", &source_anchors, 7, 7);
-                let source_states = [
-                    (anchor("left"), left),
-                    (anchor("right"), right),
-                ]
-                .into_iter()
-                .collect();
+                let source_states = [(anchor("left"), left), (anchor("right"), right)]
+                    .into_iter()
+                    .collect();
                 let eligibility = evaluate_summary_lineage_eligibility(
                     std::slice::from_ref(&summary),
                     &source_states,
@@ -2333,6 +2331,8 @@ mod tests {
                 source_occurrence_id: source.occurrence_id.clone(),
                 provider_record_id,
             },
+            knowledge_at: occurrence.knowledge_at,
+            valid_time: occurrence.valid_time,
         }
     }
 
