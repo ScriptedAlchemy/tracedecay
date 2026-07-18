@@ -6,6 +6,7 @@
 [05 query](05-query-crate.md), [25 code indexing](25-code-intelligence-indexing-crate.md),
 [12 migration/cutover](12-root-compatibility-migration.md),
 [19 convergence](19-system-defragmentation-convergence-and-extensibility.md),
+[15 search quality](15-search-quality-evaluation-and-retrieval-research.md),
 [26 observability](26-observability-accounting-and-usage.md), and
 [35 daemon LSP gateway](35-daemon-lsp-gateway-and-universal-diagnostics.md),
 [24 task/work graph](24-canonical-task-plan-graph-and-multi-agent-executor.md),
@@ -99,6 +100,219 @@ regression discovered by an earlier slice.
   allocation, and Rust Analyzer processes are environmental context, not
   roadmap mechanisms or portable regression thresholds.
 
+### Concrete measurement types and instrumentation
+
+[Plan 26](26-observability-accounting-and-usage.md) owns
+`PerformanceMeasurementDescriptorV1`, `BenchmarkRunAggregateV1`,
+`PairedEffectEstimateV1`, `OperationResourceObservedV1`,
+`NoProgressObservedV1`, `BenchmarkAttestationV1`, `EvidenceGradeV1`, and
+`PerformanceDispositionV1`. This plan sets and evaluates path-specific budgets
+through those types; it does not fork their schema. Plan 15 remains authority
+for relevance labels and search-quality promotion, Plan 24 for work/outcome
+identity and legal transitions, and Plan 32 for actual scheduling, leases,
+effects, cancellation, and runtime receipts.
+
+`PerformanceMeasurementDescriptorV1` freezes the operation and stratum,
+supported decision, estimand, population/unit, `BaselineCapture |
+CandidateComparison` kind, subject tree identity, optional accepted-baseline
+attestation reference required only for a candidate comparison, workload/
+corpus/environment/oracle/configuration/harness/clock digests, platform and
+hardware class, every cache-layer preparation, open- or closed-loop arrival
+process, bursts/concurrency, timeout/retry/think-time policy, sample and
+independent-block floors, quantile algorithm, randomized AB/BA order for
+candidate comparisons, A/A noise method, interval estimator, stopping/
+exclusion rule, protected strata, coverage and expected-tail-support floors,
+practical margin, and correctness/resource guardrails before candidate
+results are visible. Neither a missing numeric baseline nor a not-yet-measured
+path is filled with a sentinel. A baseline capture can be admitted without a
+prior baseline; a candidate comparison cannot.
+
+The root span is `tracedecay.operation`. Required closed child
+`SpanStageV1` values are `AdmissionQueue`, `StoreLock`, `IndexLock`, `Io`,
+`Parse`, `Projection`, `Model`, `Rank`, `Merge`, `Hydration`, `Synthesis`,
+`Render`, `Persist`, `ProviderDiscovery`, `ProviderNegotiation`,
+`ProviderLeaseToStart`, `ProviderContextAssembly`, `ProviderEventIngestion`,
+`ProviderFirstProgress`, `ProviderCancellation`, `ProviderTerminal`,
+`ProviderReconnect`, and `ProviderResume`. Repeated spans are accumulated with
+count and min/max/sum into at most 32 rows. Attributes are closed operation,
+scope, queue/lock, requested/actual cataloged provider/backend/model/protocol,
+outcome, revision, and coverage values. Paths, prompts, source, symbols,
+argv/stdin, provider output, environment, errors, and secrets are forbidden.
+
+`OperationResourceObservedV1` reports scheduled-arrival-to-terminal and service
+latency; offered/admitted/started/completed/cancelled/timed-out/shed/retried
+counts and rates; p50/p95/p99 and throughput; queue age and saturation;
+baseline, peak, and steady process-tree RSS/PSS, anonymous/file-backed RSS,
+and separately named container high-water evidence; live heap, allocation
+churn, retained/fragmented, SQLite-cache, queue/result/generation bytes;
+user/system CPU and core-seconds; database/generation/temporary space, bytes
+read/written, and write amplification; input/output/reasoning/cache-read/
+cache-write tokens; cost/currency/pricing revision; and attempted, committed,
+reconciled, unknown, prevented-duplicate, and retried effects. Tokens and costs
+state `ProviderReported | LocallyMeasured | Estimated | NotApplicable |
+Unknown`. Estimated required resource evidence makes an attestation
+provisional; unknown is never zero.
+
+Linux process-isolated runs report process-tree RSS and PSS, plus cgroup v2
+`memory.peak` separately under that exact name; cgroup peak is never labeled
+RSS. The cgroup is recreated per phase and the manifest freezes page-cache and
+swap policy. Windows uses the manifest's equivalent process-tree RSS/PSS and
+job/container high-water methods; other platforms declare equivalent
+boundaries or mark the dimension partial. The 100 ms samples describe baseline
+and steady-state RSS/PSS shape, with steady state the median after the warm-up
+frontier and before drain. Profiler-on/off A/A pairs quantify overhead.
+Missing child-process coverage prevents a memory promotion claim.
+
+Instrumentation enters through
+`src/application/observability/{record,performance}.rs` and
+`src/runtime_telemetry.rs`; the canonical store/projector and query boundaries
+are `crates/tracedecay-store/src/observation/telemetry.rs`,
+`crates/tracedecay-store/src/observation/telemetry_projection.rs`, and
+`src/application/observability/query.rs`. Owning paths add spans at
+`src/application/retrieval/pipeline.rs`,
+`src/query/retrieval/{exact,lexical,semantic,graph,temporal,task_session,diagnostic,fusion,dedupe,diversity,rerank,hydrate}.rs`,
+`src/daemon/transport.rs`, `src/daemon/scheduler.rs`,
+`src/automation/runner.rs`, and the Plan 32 workflow/provider modules. The
+instrumentation path is bounded and non-blocking. Each producer maintains a
+saturating in-memory atomic drop count plus one reserved control-lane slot;
+the next accepted envelope and shutdown flush carry the count, and a
+`TelemetryDropObservedV1` uses the reserved slot. The drop signal never depends
+on capacity in the full data lane and is not another durable counter store.
+
+### Retrieval, planner, and outcome performance
+
+Each Plan 15 query comparison reports per canonical `RetrieverKind`
+requested/consumed
+candidate budget, raw/eligible/deduplicated/returned count, fixed rank buckets,
+unique and final-top-k contribution, source freshness/coverage/denial,
+retrieval/rank/model duration, and labeled marginal Recall@K/nDCG@10 where an
+oracle exists. Every metric and promotion guardrail is also stratified by
+Plan 26 `RetrievalQueryFamilyV1`, with `Unknown` shown separately and never
+pooled into a passing family. Planner selection/queue, requested/admitted/deferred fan-out,
+fan-out wait, merge/dedupe/rerank/hydration/render/synthesis, critical-path,
+and total latency are separate spans. Exact, lexical, graph, temporal,
+task/session, diagnostic, and semantic lane ablations receive the same frozen
+total candidate budget; unused budget is not silently reassigned. Reranker
+off/on is a separate composition-stage ablation over byte-identical saved
+pre-rerank candidates. Candidate oracle Recall@N is reported before reranker
+quality, and exact flat-vector scan remains the ANN oracle. Denied candidates
+produce no count, rank, trace, cache, or aggregate influence; denial telemetry
+is operation-level only.
+
+Context comparisons pin the same work/acceptance identity and report required,
+included, independently verified relevant, irrelevant, stale, truncated, and
+unknown authorized anchors plus operation-level denial without candidate or
+anchor cardinality; Precision@1/3/5 and required-anchor coverage;
+context bytes/tokens; assembly latency; time to first valid action; rediscovery
+reads/searches/tests/tokens; independently accepted correctness; rework; and
+unknown/censored outcomes. Plan 24 packet count and token/byte distributions
+use Plan 26's fixed buckets by closed work class and fixture-size stratum. The
+required ablations are no-context/no-auxiliary,
+bounded retrieval manifest, handoff/recall enabled, and the production
+profile. They preserve Plan 24 first-pass and parent-normalized identity and
+never infer quality from Plan 32 `Completed`, low latency, token reduction, or
+worker self-report.
+
+Plan 24 planner and Plan 32 runtime measurements record requested and actual
+topology, route, fan-out, concurrency, provider/backend/model, queue, effect,
+and terminal state separately. A scheduler speedup that increases rejected,
+unknown, censored, duplicate-effect, review, integration, or rework outcomes
+is a regression even if completed-attempt throughput rises.
+
+### Quantile, threshold, and no-progress methodology
+
+One paired baseline/candidate block is the experimental unit. Run order is
+randomized or interleaved AB/BA on the same host and prepared state. The
+empirical quantile algorithm and paired cluster-bootstrap 95% interval freeze
+in the descriptor; requests remain clustered within their run. Report
+eligible, observed, completed, each terminal outcome, independent block count,
+and `expected_tail_support = terminal_observations * (1 - quantile)`.
+
+A quantile may gate only with at least 20 independent paired blocks and 100
+expected observations in its tail: p50 therefore needs at least 200 terminal
+observations, p95 2,000, and p99 10,000 per protected stratum. Lower support
+may be reported with `insufficient_evidence` but cannot pass or fail a
+quantile gate. The descriptor also freezes a maximum interval half-width and
+requires the last two predeclared checkpoints to change that half-width by no
+more than 10%; otherwise evidence is provisional. Tail observations must span
+all 20 blocks and no block may contribute more than 10% of tail support.
+Every offered request enters
+the scheduled-arrival-to-terminal distribution at its actual completion,
+cancellation, timeout, shed, or failure timestamp. Retries are separate linked
+attempts. Cancellation, timeout, shed, retry, failure, unknown, and censoring
+rates each have frozen non-inferiority guardrails, so a candidate cannot win by
+discarding its slowest work. Predeclared exclusions retain reason and count.
+
+Each descriptor runs A/A before A/B. The frozen regression margin is
+the owner-predeclared practical margin; measurement never enlarges it. A/A is
+eligible only when `2 * p95_absolute_AA_paired_effect` is no greater than that
+margin. Otherwise the run is provisional and `insufficient_evidence`. A
+claimed improvement requires its paired 95% interval to clear the frozen
+improvement margin. Every guardrail passes only when its one-sided harm bound
+stays within the frozen regression margin. A p-value, point estimate,
+aggregate mean, or transferred external threshold never gates.
+
+Plan 32's `MonotonicRunDeadline`,
+`ConcurrencyPolicyV1.no_progress_timeout`, and `ProgressFrontier` are the only
+workflow deadline and stall authority. PR20 measures queue wait, remaining
+monotonic budget, configured no-progress timeout, last committed frontier,
+stall duration, timeout, and cancel/interrupt/terminate/kill results without
+changing them. A heartbeat alone cannot reset the timeout; unproved provider
+termination remains `Partial` or `EffectUnknown`. Tests prove bulk work cannot
+starve heartbeat, cancellation, Doctor, or diagnostics classes.
+
+### Implementation, dashboard, and test map
+
+The PR20 harness and checked-in protocol are:
+
+- `benches/pr20_e2e_performance.rs` and
+  `benches/pr20/{workloads,runner,metrics,attestation}.rs`;
+- `scripts/run-pr20-performance-benchmark.sh`;
+- `benchmarks/pr20-performance/README.md`,
+  `benchmarks/pr20-performance/workload-v1.json`, and
+  `benchmarks/pr20-performance/measurement-v1.json`;
+- sanitized PR20 comparison output resolved by
+  `BenchmarkArtifactLayoutV1::comparison_dir(comparison_id)` under
+  `benchmarks/pr20-performance/results/`, containing exactly `README.md`,
+  `workload-v1.json`, `attestation-v1.json`, `aggregate-v1.json`, and
+  `evidence-index.json`; and
+- authorized raw `manifest.json`, `runs.jsonl`, profiles, and private-oracle
+  references resolved by
+  `ProjectStoreLayout::benchmark_run_dir(BenchmarkSuiteId::EndToEndPerformance,
+  attestation_id)`.
+
+The Observatory and Costs backend views are
+`src/dashboard/{observatory_api,costs_api}.rs`. The rendered views are
+`dashboard/observatory/src/{Performance,Retrieval,Attestation}Panel.tsx` and
+`dashboard/costs/src/CostsPage.tsx`. They show descriptor revision, baseline/
+candidate and attestation identity, scope/stratum, p50/p95/p99 and support,
+paired interval and frozen margin, queue/lock/provider spans, RSS/CPU/I/O,
+tokens/cost source, effects, no-progress outcomes, coverage, and disposition;
+they contain no client-side formula.
+
+Direct suites are:
+
+- `tests/performance_suite/measurement_contract.rs` for descriptor freeze,
+  baseline lineage, quantile support, A/A, paired intervals, stopping, and
+  exclusions;
+- `tests/performance_suite/retrieval.rs` for per-retriever candidate/rank/
+  contribution, source state, equal-budget ablations, and context outcomes;
+- `tests/performance_suite/overload.rs` for scheduled arrivals, all terminal
+  counts, coordinated omission, fairness, queue age, saturation, and recovery;
+- `tests/performance_suite/resources.rs` for process-tree RSS/PSS, separately
+  named cgroup `memory.peak` and platform container high-water evidence,
+  CPU/I/O, tokens/cost provenance, profiler overhead, and effect accounting;
+- `tests/performance_suite/provider_deadlines.rs` for progress frontiers and
+  every cancel/interrupt/terminate/kill outcome;
+- `tests/performance_suite/attestation.rs` for clean/provisional/rejected
+  grading, digest mutation, raw lineage, threshold freeze, privacy, and
+  supersession;
+- `tests/performance_suite/runtime_rollback.rs` for rollout hold, fallback,
+  effect reconciliation, and exact pinned
+  `prior_accepted_profile_id`/revision restoration; and
+- `tests/dashboard_api_test/{observatory,costs}.rs` plus
+  `dashboard/test/{observatory,costs}.vitest.tsx` for value/coverage parity.
+
 ## Optimization requirements
 
 ### Database and synchronization
@@ -181,6 +395,11 @@ General discipline for every SQL surface, not only the search path:
 - Use measured selectivity and costs to prune shards/candidates, avoid repeated
   hydration/parsing, reuse compatible prepared or derived state, and stop work
   at declared budgets and cancellation boundaries.
+- An optimization may reduce candidate work only when the frozen Plan 15
+  oracle proves protected quality parity. Per-retriever candidate, rank,
+  unique/final contribution, source freshness/coverage/denial, and equal-budget
+  ablation evidence remains present after pruning; an uninstrumented retriever
+  or planner phase is not an optimization candidate.
 - Preserve deterministic order, exact-match tiers, temporal truth, stable
   cursors, coverage, explanations, and lexical fallback byte-for-byte where
   their owning contracts require it.
@@ -298,6 +517,28 @@ General discipline for every SQL surface, not only the search path:
 - Publish concise aggregate benchmark artifacts through the existing
   observability contracts. No private corpus, prompt, source payload, separate
   telemetry database, benchmark service, or performance-only product path.
+- Every published baseline or comparison carries one
+  `BenchmarkAttestationV1`. `BenchmarkBaselineAttestationV1` can accept an
+  independently measured clean subject without a prior baseline.
+  `BenchmarkComparisonAttestationV1` must reference that accepted compatible
+  baseline. `EvidenceGradeV1::Clean` requires immutable clean subject trees,
+  verified workload/corpus/environment/oracle/harness/schema/configuration/
+  threshold digests, raw aggregate lineage, required platforms/strata/support/
+  coverage, acceptable A/A noise, frozen thresholds, and intervals. Clean
+  evidence may still disposition `reject` when a candidate correctness,
+  privacy, recovery, or performance gate fails.
+- `EvidenceGradeV1::Provisional` is structurally valid and privacy-safe but has
+  a dirty tree, missing required platform or confirmation cohort, insufficient
+  tail support, excessive censoring/noise, estimated required resource
+  evidence, or partial coverage. Its only disposition is
+  `insufficient_evidence`; it cannot promote, reject, or establish a baseline.
+- `EvidenceGradeV1::Rejected` identifies invalid evidence: placeholder or
+  invalid digest, missing or fabricated baseline required by a candidate
+  comparison, comparison-identity mismatch, absent raw lineage, post-result
+  threshold change, coordinated omission/survivor bias, hidden protected
+  stratum, or leakage from the measurement artifact itself. Rejected evidence
+  never decides candidate quality, while an independently observed product
+  safety violation still triggers the immediate rollback below.
 - Gate material regressions in p95/p99 latency, throughput, memory, CPU, disk,
   write amplification, no-op work, and startup/recovery time using reviewed
   workload-specific practical margins and intervals rather than one universal
@@ -307,6 +548,52 @@ General discipline for every SQL surface, not only the search path:
   baseline where one exists and establish a PR20 baseline before optimization
   otherwise. Publish the command and workload identity with the result; do not
   turn one developer machine's absolute duration into a cross-platform limit.
+
+### Acceptance and rollback
+
+Promotion requires one clean comparison attestation whose primary improvement interval
+clears its frozen margin; every protected exact/no-answer/wrong-scope/stale/
+privacy/language/repository/low-coverage and correctness/recovery stratum has
+required support and coverage; every latency, throughput, RSS, CPU, disk,
+PSS, separately named cgroup/container high-water, write-amplification, no-op,
+startup/recovery, token/cost, and effect guardrail
+stays within its one-sided harm margin; cancellation, timeout, shed, retry,
+failure, unknown, and censoring rates stay within their frozen guardrails; and
+Linux/Windows exclusions are explicit. If no compatible baseline exists, PR20
+first records an accepted clean `BenchmarkBaselineAttestationV1` and starts a
+separate candidate comparison; it never invents historical values.
+
+`insufficient_evidence` holds the current implementation/profile and schedules
+no automatic retry or rollout. A clean `reject` leaves an unpromoted candidate
+disabled. For an activated optimization, rollback is immediate on semantic
+divergence, privacy or authority violation, exact-tier demotion, wrong-scope
+evidence, hidden provider fallback, duplicate observable effect, unreconciled
+unsafe effect, secret canary, or deterministic-order/recovery failure.
+
+`RuntimeRollbackPolicyV1` freezes non-overlapping 15-minute windows, resets
+only on a profile activation epoch, and pins exact `candidate_profile_id`,
+`control_profile_id`, `prior_accepted_profile_id`, profile revisions, baseline
+attestation revision, and compatibility digest. The prior accepted profile is
+the only rollback target; there is no "latest" ordering lookup. Side-effect-free
+paths may use concurrent shadow control; other paths use policy-approved
+deterministic canary/control assignment with the same workload strata and no
+user, project, or payload label. A live performance
+rollback requires three consecutive eligible matched windows, each meeting
+the descriptor's support, independent-block, terminal-rate, and coverage
+floors, whose one-sided harm interval exceeds the frozen margin. Without an
+eligible control, rollout cannot continue: the canary reverts to the exact
+pinned `prior_accepted_profile_id` and revision and records
+`insufficient_evidence`. One breach of a separately configured hard resource/
+deadline bound rolls back immediately.
+
+Rollback activates only the exact pinned `prior_accepted_profile_id` and
+revision after verifying the policy's compatibility digest,
+preserves durable evidence, pins in-flight work until Plan 32 explicitly
+fences or reconciles it, and never retries through `EffectUnknown`. Missing
+telemetry, a full control lane, capped coverage, or excessive noise reverts an
+active canary after one complete window; it is not proof of health. Threshold,
+workload, or configuration changes create a new comparison and cannot
+retroactively rescue a failed gate.
 
 ## Done
 
@@ -318,3 +605,8 @@ optimization weakens product semantics, privacy, scope, durability, coverage,
 ordering, or daemon authority.
 No LSP process-sharing or cache optimization may trade correctness or privacy
 for lower process count or resource use.
+Completion additionally requires the concrete measurement, retrieval,
+overload, resource, deadline, attestation, dashboard-parity, and rollback
+suites above; clean Linux and Windows attestations for every promoted path;
+and no provisional or rejected evidence presented as a baseline, improvement,
+or release gate.

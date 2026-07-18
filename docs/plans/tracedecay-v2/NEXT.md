@@ -124,6 +124,29 @@ sanitized PR5/PR6 observations plus PR7 anchors
 - stock format, focused tests, all-feature checks/tests, and relevant
   cross-platform gates pass before PR8 completion.
 
+## Later roadmap contracts (not PR8 scope)
+
+PR8 priority above is unchanged. Later slices already have owners; do not pull
+them into this executable path:
+
+- **Source contracts:** [Plan 01](01-domain-crate.md) definition/binding
+  identity; [Plan 20](20-configuration-control-plane.md) policy metadata
+  including mandatory local privacy; [Plan 06](06-policy-crate.md) authorization;
+  [Plan 03](03-capture-crate.md) / [Plan 27](27-cross-host-agent-plugin-bundles.md)
+  capture and connectors; [Plan 09](09-application-crate.md) sink recheck.
+- **Evidence spans:** Plan 23 session-derived spans/bursts ship in PR8; Plan 13
+  cross-domain `EvidenceSpanRecordV1` and Plan 24 TaskId references follow their
+  PR sequence.
+- **Federated retrieval / query collections:** [Plan 16](16-cross-project-repository-worktree-scope.md)
+  owns collections and scope-set digests; Plan 05 executes federation at PR15.
+- **Task investigation / evidence / synthesis:** [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md)
+  / [Plan 32](32-dynamic-workflow-runtime-and-sdk.md) at PR17. Canonical retrieval
+  rejects expertise context; expertise is interactive-only and never durable
+  evidence, completion, or routing authority.
+- **LSP handoff / dashboard / observability / performance:** Plan 35/09 handoff,
+  Plan 11 dashboard, Plan 26 observations, Plan 33 PR20 optimization — each in
+  its indexed PR, never as PR8 work.
+
 ## Prohibited scope
 
 - no parsing or execution of this file or any V2 roadmap document;

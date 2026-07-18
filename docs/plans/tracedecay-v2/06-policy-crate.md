@@ -134,6 +134,215 @@ runtime performs its effects.
   privacy, latency, cost, and autonomy remain separate outcomes rather than a
   scalar reward, and no live autonomous contextual bandit ships in PR17.
 
+## External-source authorization kernel
+
+PR11 adds
+`crates/tracedecay-policy/src/authorization/{mod,input,grant,intersection,decision,recheck,state}.rs`,
+`crates/tracedecay-policy/tests/{source_authorization,sink_recheck}.rs`, and
+`crates/tracedecay-application/src/authorization/{mod,ports,service,non_disclosure}.rs`.
+The policy crate receives immutable snapshots and performs no lookup, fetch,
+refresh, persistence, lifecycle, or UI effect.
+
+`SourceDefinitionSnapshotV1` wraps one exact `SourceDefinitionV1` revision and
+digest only. `SourceBindingSnapshotV1` separately wraps one
+`ProjectSourceBindingV1` or `ProfileSourceBindingV1` and its revision/digest;
+it does not contain a grant. Plan 20 alone owns and supplies a separate
+`SourcePolicyMetadataSnapshotV1` with sensitivity, disclosure ceiling, eligible
+sinks, mandatory local-privacy constraints, and revision/digest. Definitions
+remain reusable capture/storage contracts with no owner, sink, disclosure, or
+local-privacy authority; bindings attach a definition to exactly one typed
+owner; mutable Plan 20 policy metadata cannot become definition identity.
+Policy creates, mutates, and persists none of these snapshots.
+
+```rust
+pub struct SourceDefinitionSnapshotV1 {
+    pub definition: SourceDefinitionV1,
+}
+
+pub struct SourcePolicyMetadataSnapshotV1 {
+    pub source_id: SourceId,
+    pub policy_revision: u64,
+    pub policy_digest: Digest,
+    pub sensitivity: SensitivityV1,
+    pub disclosure_ceiling: DisclosureClassV1,
+    pub eligible_sinks: SinkSetV1,
+    pub mandatory_privacy: PrivacyConstraintSetV1,
+}
+
+pub struct SourceAuthorizationInputV1 {
+    pub definition: SourceDefinitionSnapshotV1,
+    pub binding: SourceBindingSnapshotV1,
+    pub source_grant: CapabilityGrantV1,
+    pub requester_grant: CapabilityGrantV1,
+    pub resolved_owner_scope: ResolvedOwnerScopeV1,
+    pub requested_operation: TypedOperationV1,
+    pub source_policy: SourcePolicyMetadataSnapshotV1,
+    pub sink_policy: SinkPolicySnapshotV1,
+    pub content_status: ExternalContentStatusV1,
+    pub evaluated_at: ExplicitTimeV1,
+}
+
+pub struct EffectiveSourceGrantV1 {
+    pub owner: SourceOwnerV1,
+    pub resources: ResourceScopeSetV1,
+    pub operations: OperationSetV1,
+    pub sinks: SinkSetV1,
+    pub disclosures: DisclosureSetV1,
+    pub constraints: PrivacyConstraintSetV1,
+    pub budgets: BudgetSetV1,
+}
+```
+
+The effective grant is exactly:
+
+```text
+source grant
+∩ requester grant
+∩ resolved owner scope
+∩ sink policy
+∩ the explicitly requested operation/resource subset
+```
+
+Authorization begins with the required source grant ∩ requester grant ∩
+resolved owner scope ∩ sink policy, then narrows to the explicitly requested
+operation/resource. Permission sets intersect, owner identity must match
+exactly, temporal windows overlap, and budgets take pointwise minima. Privacy
+obligations from Plan 20 `SourcePolicyMetadataSnapshotV1` and all four operands
+accumulate conjunctively; the most restrictive disclosure and retention rules
+win, and any inconsistency denies. Plan 20 policy-metadata mandatory local
+privacy is non-waivable even when every grant otherwise permits egress.
+Narrowing any input must never widen a decision. A project binding matches only
+its typed `ProjectId`; a Profile binding matches only its typed
+`UserProfileId`. CWD, path, display label, collection membership, provider
+account, current branch, or native object ID cannot grant scope.
+
+```rust
+pub trait SourceAuthorizationEvaluator {
+    fn evaluate(
+        &self,
+        input: &SourceAuthorizationInputV1,
+    ) -> SourceAuthorizationDecisionV1;
+}
+
+pub enum SourceAuthorizationDispositionV1 {
+    Allow,
+    Deny,
+    Abstain,
+    NotApplicable,
+    Indeterminate,
+}
+
+pub enum SourceAccessDecisionV1 {
+    Authorized,
+    PolicyExcluded,
+    Unauthorized,
+}
+pub enum AuthorizationCoverageV1 { Complete, Partial }
+
+pub struct SourceAuthorizationDecisionV1 {
+    pub content_status: ExternalContentStatusV1,
+    pub access: SourceAccessDecisionV1,
+    pub authorization_coverage: AuthorizationCoverageV1,
+    pub disposition: SourceAuthorizationDispositionV1,
+    pub effective_grant: Option<EffectiveSourceGrantV1>,
+    pub ordered_reason_codes: Vec<PolicyReasonCodeV1>,
+    pub input_digest: Digest,
+    pub policy_revision: u64,
+}
+```
+
+The decision keeps content and access axes separate. `Live`, `Partial`,
+`TemporarilyUnavailable`, and `AuthoritativeDeleted` are content facts.
+`AuthoritativeDeleted` neither allows nor denies by itself; historical evidence
+is visible only when the full effective grant and fresh sink proof authorize
+the operation, sink, and disclosure. Policy may return `PolicyExcluded`
+(`NotApplicable`) or `Unauthorized` (`Deny`) without rewriting content status.
+A mixed visible authorized subset sets `AuthorizationCoverageV1::Partial`;
+unavailable required snapshots retain content
+`TemporarilyUnavailable` and use `Indeterminate`. Policy never infers
+`AuthoritativeDeleted`; access loss, exclusion, stale grants, incomplete
+coverage, or source unavailability are not deletion. Hidden members do not
+affect public counts or omission details.
+Plan 09 composes `ExternalSourceResultStatusV1` exhaustively: access
+`PolicyExcluded` or `Unauthorized` takes non-disclosing precedence; authorized
+partial request coverage or partial content yields `Partial`; otherwise
+`Live`, `AuthoritativeDeleted`, or `TemporarilyUnavailable` passes through.
+Composition never mutates the stored content frontier.
+
+Authorization is a state machine with private constructors:
+
+```text
+SourceAuthorizationInputV1
+→ SourceAuthorizationDecisionV1
+→ SourceAuthorizationProofV1
+→ SinkRecheckDecisionV1
+→ SinkAdmissionProofV1
+→ application effect
+```
+
+Every provider fetch, source-page continuation, canonical admission, shard
+selection, statistics read, graph expansion, hydration, query-page
+continuation, anchor resolution, summary/projection publication, model-context
+delivery, host delivery, UI rendering, export, telemetry write, and other sink
+requires a fresh `SinkAdmissionProofV1`. The recheck pins current grant,
+binding, resolved-owner, source-policy, privacy, configuration, and sink revisions.
+Any drift invalidates the old proof and forces reevaluation; an earlier allow
+cannot be reused. Local-only privacy is non-waivable, sanitization permits local
+durability but not egress, and derived observations/summaries inherit the most
+restrictive contributing source constraint.
+
+Resource-addressed absent, hidden, wrong-owner, and unauthorized results map to
+the same `NotFoundOrNotAuthorized` application shape with no source state,
+count, cursor, anchor detail, timing distinction, or denial trace.
+`PolicyExcluded` and `TemporarilyUnavailable` render only for sources already
+visible under the effective grant. Internal decision traces retain ordered
+stable reason codes without becoming authority.
+
+## Fixtures, TDD, and ownership
+
+Truth tables live in
+`crates/tracedecay-policy/tests/fixtures/source_authorization/*.json`. Each row
+contains canonical definition and binding snapshots, all four grant/scope/policy
+operands, requested operation, source status, policy/grant/config revisions,
+expected effective grant, disposition, ordered reason codes, and public shape.
+Rows that depend on provider facts reference the exact checked-in Plan 27 bytes
+and SHA-256 under `tests/fixtures/source_connectors/<source>/`, then traverse the
+real Plan 03 capture/sanitization path; invented provider protocol fields do
+not qualify.
+
+The minimum matrix independently fails every intersection dimension; covers
+project/Profile mismatch, Plan 20 policy-metadata mandatory local-only privacy
+with all grants otherwise allowing external egress, revoked/expired/stale inputs,
+mixed-source partial output, policy or grant drift between initial evaluation
+and sink recheck, temporary unavailability, and deletion history both with and
+without historical-read authority. TDD order is failing canonical truth tables
+and non-disclosure tests, minimal intersection logic, monotonic narrowing
+property tests, private proof transitions, sink-revocation tests, application
+integration, then native-fixture parity.
+
+Run:
+
+```bash
+cargo test -p tracedecay-policy --test source_authorization --all-features
+cargo test -p tracedecay-policy --test sink_recheck --all-features
+cargo test -p tracedecay-application --test authorization_non_disclosure --all-features
+cargo test -p tracedecay-application --test authorization_recheck --all-features
+cargo test --test architecture_boundaries policy
+cargo check --all-features
+```
+
+Plan [09](09-application-crate.md) loads snapshots, authorizes/orchestrates typed
+operations, and returns receipts. Plan
+[13](13-research-provenance-and-context-anchors.md) owns anchor states, Plan
+[16](16-cross-project-repository-worktree-scope.md) resolves owner scope, Plan
+[20](20-configuration-control-plane.md) owns `SourcePolicyMetadataSnapshotV1`
+and mutates bindings, configuration, secret references, and other policy
+metadata, Plan
+[23](23-session-lcm-temporal-retrieval-and-evaluation.md) owns temporal query
+semantics, and Plan [27](27-cross-host-agent-plugin-bundles.md) owns connector
+packaging, lifecycle, and host UI. Policy consumes their pinned typed inputs
+without duplicating their authorities.
+
 ## Acceptance
 
 - Direct unit tests freeze canonical inputs and assert byte-stable decisions, reasons, evidence, versions, and config digests.
@@ -164,3 +373,11 @@ runtime performs its effects.
   replayable stable reason IDs, heuristic-versus-calibrated rendering, and
   route-propensity logging without policy-owned scheduling, Doctor logic,
   graph mutation, provider invocation, or hidden online learning.
+- External-source truth tables prove the four-way authority intersection,
+  monotonic narrowing, exact typed owner separation, no hidden counts, and
+  non-waivable Plan 20 policy-metadata local privacy.
+- Sink tests revoke or narrow every operand between decision and effect and
+  prove no stale proof reaches hydration, publication, model/host/UI delivery,
+  export, or telemetry.
+- State tests prove policy exclusion, unauthorized access, partial coverage,
+  and temporary unavailability never masquerade as authoritative deletion.

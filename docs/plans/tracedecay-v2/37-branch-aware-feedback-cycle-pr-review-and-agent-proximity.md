@@ -69,7 +69,12 @@ apply path for accepted refactor candidates; and
 [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md) owns the
 product task/work graph while Plan 32 owns its runtime; this advisory cycle
 creates neither canonical work nor executable runtime state unless a separate
-explicit authorized PR17 operation admits it.
+explicit authorized PR17 operation admits it. Plan 37 owns the reference-only
+feedback evidence packet and the proximity/expertise producer contracts;
+Plan 24 alone owns `TaskId`-rooted retrieval, task-to-evidence link revisions,
+retriever fusion, and any accepted work relation; Plan 32 alone owns optional
+workflow execution after a separate explicit admission. None of those
+boundaries weakens the read-only GitHub rule.
 
 ## Outcome
 
@@ -116,6 +121,13 @@ GitHub, applies a fix, or continues an agent automatically.
   contract, warning classes, thresholds, freshness/expiry, and privacy
   controls, built from existing agent/session/worktree/branch observations and
   graph neighborhoods rather than a new coordination or scheduling authority.
+- The producer-side contracts for `FeedbackEvidencePacketV1`,
+  `ProximityContributionV1`, and opt-in
+  `DemonstratedExpertiseSignalRevisionV1`, including consent, authorization,
+  temporal decay, explanation, revocation, source deletion, and the absolute
+  prohibition on employee scoring. Plan 24 consumes these reference-only
+  records through its own `TaskId` retrieval and evidence-relation contracts;
+  this plan does not own task fusion or graph mutation.
 - The lossless-evidence/bounded-projection contract for this cycle's findings:
   which fields are canonical-anchored, which are safe bounded snippets, and
   how truncation, expansion, and expiry compose across every delivery surface
@@ -175,6 +187,11 @@ GitHub, applies a fix, or continues an agent automatically.
 - Session/LCM narrative summarization or its summary-DAG — Plan 23 owns
   those; this plan only forbids narrative from replacing canonical evidence
   (§8).
+- Employee scoring, productivity ranking, people leaderboards, performance
+  management, hiring, compensation, promotion, discipline, or any other
+  employment decision. Demonstrated-expertise evidence is opt-in retrieval
+  context for an authorized task and topic, never a composite person score,
+  trust level, or basis for comparing people.
 
 ## Required architecture
 
@@ -198,9 +215,9 @@ GitHub, applies a fix, or continues an agent automatically.
 - Trigger sources are exhaustive and typed: saved-file/post-edit hook,
   IDE/LSP document-save lifecycle, an explicit TraceDecay diagnostics
   MCP/CLI/API call, an agent stop/pre-stop gate, a request to surface a PR's
-  existing review threads, and a request to localize a CI failure. Every
-  trigger maps to the same one-shot cycle; none defines a private evidence
-  shape.
+  existing review threads, a request to localize a CI failure, and an explicit
+  request for concurrent-agent proximity. Every trigger maps to the same
+  one-shot cycle; none defines a private evidence shape.
 - The cycle composes: [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)
   semantic-provider results for the active document/session; [Plan 05](05-query-crate.md)
   graph/query impact, affected-test, and revision-range diff/hunk evidence;
@@ -329,6 +346,495 @@ GitHub, applies a fix, or continues an agent automatically.
   optional IDE `relatedInformation` presentation ships only after that
   presentation method passes its own separate conformance gate per §9.
 
+### 3A. TaskId-rooted retrieval, typed evidence packets, and contribution provenance
+
+This section is a cross-plan contract, not a transfer of authority. Within this
+plan, `TaskId` means Plan 24's stable opaque public retrieval-root identifier
+for the canonical `WorkItemId`; every request that could affect a current work
+projection also pins the exact immutable `WorkItemVersionId`. Plan 37 never
+mints a parallel task identity, resolves readiness, or writes a task edge.
+
+The Plan 37 producer emits one reference-only `FeedbackEvidencePacketV1`:
+
+```text
+FeedbackEvidencePacketV1 {
+  packet_id, schema_version = 1, cycle_result_id,
+  scope: {
+    project_id, repository_id, worktree_id, branch_id,
+    base_sha, head_sha, merge_base_sha, code_generation
+  },
+  producer: { operation_id, revision, node_id },
+  findings: [{
+    finding_id,
+    kind: PostEditDiagnostic | GithubReview | CiLocalization | Proximity,
+    retrieval_anchor_id,
+    source_record_id,
+    source_state: DiagnosticProviderState
+      | GithubLifecycleAndIngressOutcome
+      | CiLocalizationState
+      | ProximityObservationState,
+    coverage, observed_at, valid_at, expires_at,
+    safe_bounded_preview
+  }],
+  evidence_watermark,
+  policy_revision, config_revision, privacy_revision,
+  total, returned, omitted, omission_reasons,
+  budget, truncation, next_cursor,
+  advisory_only = true
+}
+```
+
+`packet_id` is immutable content-addressed identity over the schema version,
+cycle result, scope/generation, finding ID/anchor pairs, producer revision, and
+watermark. The packet copies no source, review body, log, private session
+content, or diagnostic payload. `safe_bounded_preview` follows §8 and is never
+durable evidence authority. Dirty-overlay findings cannot enter this packet.
+
+Every proximity finding additionally carries:
+
+```text
+ProximityContributionV1 {
+  contribution_id,
+  retriever_kind = Proximity,
+  warning_id, warning_class,
+  source_observation_ids[],
+  retrieval_anchor_ids[],
+  address: { project_id, repository_id, worktree_id, branch_id,
+             file_id, range, symbol_id },
+  relation_paths[],
+  risk_inputs: {
+    overlap_size, blast_radius_size, relation_strength,
+    branch_worktree_incompatibility, freshness_decay
+  },
+  threshold_tier: Immediate | Configured,
+  threshold_value, threshold_revision, raw_risk,
+  observed_at, expires_at, coverage,
+  inclusion: Included | BelowThreshold | SuppressedDuplicate
+             | Stale | Denied | Private
+}
+```
+
+The producer preserves all qualifying observation and relation-path
+provenance. `BelowThreshold` is a successful zero-candidate proximity outcome;
+`Denied` or `Private` exposes no hidden actor, session, root, address, count,
+or content.
+
+An actionable “link to task” affordance carries only a signed
+`TaskFeedbackLinkIntentV1 { TaskId, WorkItemVersionId, packet_id, finding_id,
+retrieval_anchor_id, relation_kind, expected_graph_version, scope_digest,
+authorization_grant_id, idempotency_key }`. It is inert until a user invokes
+Plan 24's separately authorized version-checked relation command. Plan 24 then
+owns the immutable `TaskFeedbackLinkRevisionV1`:
+
+```text
+TaskFeedbackLinkRevisionV1 {
+  link_id, revision, TaskId, WorkItemId, WorkItemVersionId,
+  packet_id, cycle_result_id, finding_id, retrieval_anchor_id,
+  relation_kind: Supports | Contradicts | Risk | Overlap | ReviewInput,
+  scope_digest, head_sha, code_generation, evidence_watermark,
+  producer, actor, authorization_grant_id,
+  observed_at, valid_from, valid_until,
+  state: Active | Stale | Superseded | Revoked,
+  supersedes_revision, reason
+}
+```
+
+Head/generation drift, task-version drift, authorization loss, retention
+expiry, source deletion, anchor invalidation, or consent revocation appends a
+`Stale`, `Superseded`, or `Revoked` revision. It never silently reactivates,
+rewrites history, advances readiness, or changes runtime state. Ambiguous
+many-task mapping returns `AmbiguousTaskRoot`; it never chooses a task.
+
+Plan 24's existing canonical types remain the only task-retrieval contract:
+`TaskEvidenceRequest`, `TaskEvidenceRoot`, `TaskRetrievalPlan`,
+`TaskEvidencePacket`, `TaskEvidenceRecord`, `RetrieverContribution`,
+`SourceCoverage`, `EvidenceOmission`, `TaskPlanningFailure`, and
+`TaskRetrievalFailure`. Plan 37 does not define a parallel request/result,
+state machine, or packet. A Plan 37 consumer expresses feedback/proximity
+through Plan 24's `FeedbackCycleEvidence` primitive and exact Plan 13 anchors.
+
+To make contribution provenance and source diversity representable without a
+second contract, the PR17 Plan 24 integration adds these fields to Plan 24's
+canonical types before enabling the retriever:
+
+```text
+TaskEvidenceRequest.controls.feedback_profile: {
+  eligible_source_families,
+  minimum_represented_families,
+  maximum_family_share,
+  relevance_slack,
+  proximity_maximum_rank_contribution,
+  policy_revision, privacy_revision
+}
+
+RetrieverContribution += {
+  retriever_id,
+  retriever_kind,
+  source_family,
+  source_record_ids[],
+  candidate_evidence_ids[],
+  selected_evidence_ids[],
+  producer_revision,
+  valid_at, observed_at, expires_at,
+  coverage, freshness,
+  score_kind, raw_score, normalized_rank_contribution,
+  inclusion_or_suppression_reasons[]
+}
+
+TaskEvidencePacket.source_diversity: {
+  eligible_families,
+  represented_families,
+  minimum_represented_families,
+  maximum_family_share,
+  observed_maximum_family_share,
+  source_entropy,
+  diversity_unmet,
+  policy_revision
+}
+```
+
+Each `selected_evidence_id` resolves one canonical `TaskEvidenceRecord` and
+its anchor; each candidate omitted by budget, dedupe, authorization,
+freshness, threshold, or diversity has an explicit reason and count.
+Plan 24 remains the owner of these additive fields and their public evolution.
+Plan 37 owns only the source-side `ProximityContributionV1` mapped into them.
+
+Plan 24 registers **exactly one** `proximity` retriever. Multiple proximity
+warnings are candidates from that retriever, not multiple retrievers.
+Authorization and source eligibility execute before scoring. Candidate union
+uses canonical result ID plus anchor; dedupe merges contribution records and
+never drops provenance. Proximity may annotate a result or provide a bounded,
+policy-versioned rank contribution. It cannot remove canonical evidence,
+lower severity, upgrade confidence/coverage/trust, change GitHub lifecycle or
+ingress outcome, satisfy a diversity minimum by itself, or alter task
+identity, graph state, readiness, assignment, leases, attempts, effects, or
+runtime receipts. No retriever can override an owning source's authority.
+
+Source diversity is enforced after authorization and before final projection.
+The pinned policy declares the eligible source families, minimum represented
+families, maximum family share, and relevance slack. If the eligible evidence
+cannot meet those constraints, the result reports `diversity_unmet`; it does
+not invent, duplicate, or promote evidence. Frame-neutral code, Git,
+diagnostic, test, and CI evidence remains independently attributed even when
+GitHub narrative or proximity is highly ranked.
+
+Execution uses Plan 24's sole state machine:
+`Received -> RootAuthorized -> GraphSnapshotPinned -> Planned ->
+FanoutRunning -> Merging -> PacketAssembling -> Complete | Partial |
+NoRelevantEvidence | Abstained`, with its canonical cancellation, timeout,
+failure, planning-failure, retrieval-failure, coverage, omission, and
+per-primitive terminal states. The one proximity primitive moves
+`Planned -> Running | SkippedIneligible -> Evidence | NoRelevantEvidence |
+Omitted | Cancelled | TimedOut | BudgetExhausted | Failed`; it cannot recurse,
+invoke another retriever, or reopen.
+
+`NoRelevantEvidence` is legal only under Plan 24's complete required-source
+coverage rules. Below-threshold proximity maps to primitive
+`NoRelevantEvidence`, not unsupported, absent, failure, or permission to label
+the whole task query clean. Unknown/unauthorized task remains Plan 24's
+enumeration-safe `DeniedOrNotFound`; stale task version, scope/head/generation
+mismatch, readiness/cursor/watermark/authorization change, missing/redacted/
+expired/corrupt anchor, partial required source, budget exhaustion, unsupported
+capability, and diversity shortfall map to Plan 24's existing typed failure,
+coverage, omission, `Partial`, or `Abstained` outcomes. An ambiguous proposed
+link fails before retrieval and never chooses a task.
+
+The exact ownership boundary is:
+
+- **Plan 37 / Plan 09:** Plan 37 specifies packet, proximity contribution, and
+  expertise producer semantics; Plan 09 owns their concrete transport-neutral
+  request/result orchestration and authorization checks.
+- **Plan 24:** owns `TaskId`/`WorkItemId` identity, link revisions, retrieval
+  request/result, retriever registry, fusion, source-diversity policy
+  application, feedback observations, and any explicit graph relation or
+  accepted proposal. A packet or warning alone cannot create work.
+- **Plan 32:** owns only optional workflow definition/admission/run/step/
+  attempt/effect/receipt state. A PR17 read-only step may consume an already
+  authorized packet or Plan 24 `TaskEvidenceRequest` and emits Plan 32's
+  existing `NormalizedEvidenceEnvelopeV1`; it cannot create a task link, infer
+  consent, change ranking policy, admit product work, or reactivate stale/
+  revoked evidence. No feedback-specific workflow binding type exists.
+  Plan 32's canonical `WorkflowStepV1` references the cataloged read operation
+  ID and schema-validates an input that pins optional exact
+  `TaskEvidenceRoot`, packet/request schema versions, scope/grant/policy/
+  privacy revisions, and idempotency identity. Plan 32 owns run/node/attempt/
+  receipt identity and wraps the returned packet in its existing
+  `EvidencePacketSetV1`; Plan 37 owns none of those runtime types.
+- **GitHub:** remains read-only ingress under every path. Creating a local
+  Plan 24 evidence relation or executing a Plan 32 read-only step performs no
+  GitHub post, update, resolve, dismiss, reaction, or reply.
+
+### 3B. Opt-in demonstrated expertise, never employee scoring
+
+Demonstrated expertise is evidence-backed retrieval context, not reputation,
+trust, productivity, seniority, or a person score. It is disabled by default.
+An actor must grant affirmative, revocable consent scoped to exact project,
+repository, signal kinds, purpose `task_context_retrieval`, retention class,
+and validity interval. Authorization and consent are rechecked at ingestion,
+projection, query, expansion, export, and workflow use; possessing an actor,
+signal, packet, or anchor ID grants nothing.
+
+The only eligible signal kinds and their qualification rules are:
+
+- `AuthoredCommit`: an authorized exact commit/patch attribution. It proves
+  observed authorship or co-authorship, not correctness, ownership, or quality.
+- `ReviewedCommit`: an authorized exact review-to-commit relation. Review
+  activity, approval, author role, or comment count does not prove correctness.
+- `ResolvedDiagnostic`: exact prior finding ID and before/after clean
+  generations, complete supported provider coverage, and an anchored causal
+  relation. Disappearance, suppression, stale indexing, or changed scope is
+  not resolution.
+- `AcceptedTaskOutcome`: exact `TaskId`, `WorkItemVersionId`, and independently
+  accepted Plan 24/26 outcome revision. Plan 32 completion, self-report, a
+  commit, or elapsed time is insufficient.
+- `AnchoredDiscussionContribution`: an authorized exact Plan 13 anchor and
+  topic relation. Participation, narrative framing, approval, resolution, or
+  maintainer/bot class does not establish correctness or trust.
+
+Qualification is a tagged union; empty or kind-incompatible evidence cannot
+construct a signal:
+
+```text
+DemonstratedExpertiseEvidenceV1 =
+  AuthoredCommit {
+    commit_id, patch_anchor, attribution_receipt
+  }
+  | ReviewedCommit {
+    review_id, commit_id, review_anchor, observed_review_role
+  }
+  | ResolvedDiagnostic {
+    finding_id, before_generation, after_generation,
+    before_anchor, after_anchor, causal_relation_anchor,
+    provider_coverage
+  }
+  | AcceptedTaskOutcome {
+    TaskId, WorkItemVersionId, accepted_outcome_revision,
+    independent_review_anchor
+  }
+  | AnchoredDiscussionContribution {
+    discussion_anchor, topic_relation_anchor
+  }
+
+DemonstratedExpertiseSignalRevisionV1 {
+  signal_id, revision, subject_actor_id,
+  evidence: DemonstratedExpertiseEvidenceV1,
+  topic_scope, project_id, repository_id,
+  occurred_at, observed_at, valid_from, valid_until,
+  source_watermark,
+  attribution: {
+    observed_role, attribution_kind, confidence_kind,
+    confidence, coverage, ambiguity
+  },
+  consent_grant_id, authorization_scope,
+  policy_revision, privacy_revision, retention_class,
+  decay: {
+    policy_revision, basis_time, half_life,
+    computed_at, internal_eligibility_weight, stale_after,
+    state: Fresh | Decaying | Stale
+  },
+  explanation: {
+    qualifying_evidence[], counterevidence[], exclusions[],
+    unknowns[], decay_effect, coverage
+  },
+  lifecycle: Active | Expired | Revoked | SourceDeleted
+           | Superseded | Quarantined
+}
+```
+
+`internal_eligibility_weight` is never serialized through an API, projection,
+export, workflow envelope, metric, or UI and is never summed across signals or
+people. The pinned decay policy uses event-time `basis_time`, a signal-kind and
+topic-specific half-life, and deterministic recomputation time. Crossing
+`stale_after` expires the signal unless newer independently qualifying evidence
+creates a new revision. Absence or decay is unknown, never negative evidence.
+Every surfaced signal explains the qualifying anchors, exclusions, unknowns,
+coverage, policy revision, age, half-life, and `Fresh | Decaying | Stale`
+effect without exposing a numeric person-comparable weight.
+
+Pre-persistence evaluation returns
+`ExpertiseQualificationOutcomeV1 = Qualified | ConsentDenied |
+AuthorizationDenied | AmbiguousAttribution | InsufficientEvidence |
+IncompleteCoverage | ProhibitedPurpose | SourceUnavailable`. Only `Qualified`
+creates an `Active` signal revision; the other outcomes create a privacy-safe
+attempt audit with no signal, source payload, actor-listing index, or retriever
+candidate. A persisted revision transitions only `Active -> Expired | Revoked
+| SourceDeleted | Superseded | Quarantined`; terminal revisions never reopen.
+
+Revocation, source deletion, and retention expiry immediately exclude the
+signal from retrieval, invalidate result caches and handles, rebuild
+projections, and physically erase the stored signal revision—including actor,
+topic, repository, evidence, anchor, timestamp-history, attribution,
+explanation, and decay metadata—and every retained payload within five
+minutes. The terminal deletion event replaces that privacy-bearing revision
+with the tombstone below; immutable history means the tombstone cannot be
+rewritten, not that deleted personal metadata may survive. The only
+permitted `ExpertiseSignalTombstoneV1` fields are `signal_id`, terminal
+lifecycle, terminal timestamp, policy/privacy revisions, and a non-reversible
+subject digest scoped to the deletion ledger; it carries no actor ID, topic,
+repository, evidence reference, anchor, timestamp history, or weight.
+Re-consent never reactivates a terminal revision: newly observed, currently
+authorized evidence must qualify as a new revision.
+
+Raw `DemonstratedExpertiseSignalRevisionV1` records are not listable,
+searchable, sortable, or exportable by actor. The only non-self-service read is
+an exact authorized `TaskEvidenceRequest` whose task/topic need returns a
+bounded `ExpertiseContextProjectionV1 { TaskEvidenceRoot, topic_scope,
+signal_id, evidence_kind, authorized_evidence_anchors, decay_state,
+explanation }`; it contains no actor ID or numeric weight. Subject identity may
+appear only as a separately authorized, consented display label in the
+interactive task context, never in a cursor, batch response, export, sort key,
+group key, filter, or metric. A subject may list and revoke their own signals
+through a dedicated self-service path that cannot query any other subject.
+
+The following invariant is normative:
+
+> Demonstrated-expertise evidence MUST NOT be used for employee scoring,
+> productivity rankings, people leaderboards, performance management, hiring,
+> compensation, promotion, discipline, or any employment decision. No API,
+> projection, export, metric, workflow, or UI may expose a composite person
+> score, order people by expertise, infer identity-wide expertise, or enable
+> those prohibited purposes.
+
+Expertise may only explain why a bounded piece of evidence or an authorized
+context suggestion is relevant to the current task/topic. It never overrides
+task assignment, source authority, independent review, policy, consent,
+proximity risk, or a human decision, and it never broadens access to another
+session, repository, discussion, or actor.
+
+### 3C. Exact implementation allocation, feedback metrics, and rollout gates
+
+The owning PRs use these exact files; no adapter-local duplicate schema is
+permitted:
+
+- `crates/tracedecay-domain/src/feedback/mod.rs`,
+  `crates/tracedecay-domain/src/feedback/evidence_packet.rs`,
+  `crates/tracedecay-domain/src/feedback/proximity.rs`, and
+  `crates/tracedecay-domain/src/feedback/expertise.rs` own the pure V1 values,
+  enums, validation, decay calculation, and prohibited-purpose invariants.
+- `crates/tracedecay-application/src/feedback/mod.rs`,
+  `crates/tracedecay-application/src/feedback/cycle.rs`,
+  `crates/tracedecay-application/src/feedback/task_retrieval.rs`, and
+  `crates/tracedecay-application/src/feedback/expertise.rs` own Plan 09
+  orchestration, authorization/consent rechecks, operation IDs, and typed
+  application errors. PR11's application-crate migration places the canonical
+  implementation there; the legacy root may re-export during migration but
+  contains no implementation.
+- `src/query/task_retrieval/mod.rs` and
+  `src/query/task_retrieval/fusion.rs` implement the Plan 24 retriever registry,
+  candidate union, provenance-preserving dedupe, diversity policy, and
+  deterministic fusion. A later Plan 05 measured query-crate extraction may
+  move this module as one unit, but this plan creates no second implementation.
+- `crates/tracedecay-store/src/feedback/mod.rs`,
+  `crates/tracedecay-store/src/feedback/packet.rs`,
+  `crates/tracedecay-store/src/feedback/task_link.rs`, and
+  `crates/tracedecay-store/src/feedback/expertise.rs` own persistence ports,
+  immutable revisions, tombstones, and projector rebuild.
+- `src/daemon/feedback/mod.rs`, `src/daemon/feedback/github_ingest.rs`,
+  `src/daemon/feedback/ci_localization.rs`, and
+  `src/daemon/feedback/proximity.rs` own daemon composition over the application
+  ports; GitHub transport, CI parsing, and proximity observation never enter
+  task retrieval or adapters.
+- `src/mcp/tools/definitions/feedback.rs`,
+  `src/mcp/tools/handlers/feedback.rs`, `src/cli/feedback.rs`,
+  `src/lsp/feedback_projection.rs`, `src/agents/feedback_delivery.rs`,
+  `src/dashboard/feedback.rs`, and `src/doctor/feedback.rs` are thin
+  Plan 21/27/35/11 surfaces over the same application operations; they contain
+  no fusion, consent, decay, or task authority.
+- `src/observability/feedback_metrics.rs` owns the Plan 26 metric projection
+  and gate-evidence artifact; `src/application/workflow/runtime.rs` and
+  `crates/tracedecay-domain/src/workflow/evidence.rs` consume Plan 32's
+  existing `WorkflowStepV1`, `NormalizedEvidenceEnvelopeV1`, and
+  `EvidencePacketSetV1` contracts without adding a feedback-specific workflow
+  type.
+- `tests/feedback_suite/main.rs`,
+  `tests/feedback_suite/task_retrieval.rs`,
+  `tests/feedback_suite/proximity_provenance.rs`,
+  `tests/feedback_suite/expertise_privacy.rs`,
+  `tests/feedback_suite/github_read_only.rs`,
+  `tests/feedback_suite/metrics_rollout.rs`,
+  `tests/feedback_suite/workflow_boundary.rs`, and
+  `tests/architecture_boundaries.rs` own integration, privacy, authority, and
+  dependency-boundary conformance.
+
+Plan 26 records system-quality metrics, never worker-performance metrics:
+retrieval precision/relevance at `k`, fixture recall, distinct source
+families at `k`, source entropy, maximum family share, proximity marginal
+gain/overlap/top-k displacement/stale rate, complete/partial/degraded query
+rate, latency by retriever, omissions, authorization denials, consented-event
+eligibility and abstention, attribution false-positive rate, anchor and
+explanation completeness, decayed/expired-signal rate, revocation/deletion
+propagation latency, small-cohort suppression, privacy-canary leakage, and
+attempted GitHub writes (required to remain zero).
+
+Explicit feedback is stored as
+`RetrievalFeedbackObservationV1 { query_id, canonical_result_id,
+contribution_id, disposition: Helpful | Stale | Irrelevant | Contradictory |
+Unknown, actor, authorization_grant_id, observed_at, policy_revision }`.
+Display, click, acknowledgement, expansion, deferral, acceptance, override,
+task completion, or comment resolution is reliance/interaction evidence only,
+never a correctness label. Metrics preserve denominator, eligibility,
+coverage, horizon, and policy/privacy revision and suppress private or small
+cohorts.
+
+Rollout is gated and reversible:
+
+1. **PR13 packet gate:** packet schemas, reference-only storage, one proximity
+   producer, typed failures, privacy canaries, and zero-GitHub-write
+   conformance pass while TaskId linking and expertise remain disabled.
+   Required evidence is 100% round-trip identity across every durable surface,
+   100% legal transition coverage, zero privacy-canary leaks, zero forbidden
+   adapter operations, and zero outbound GitHub writes over the full §4
+   lifecycle × provider-outcome matrix.
+2. **PR17 shadow retrieval gate:** Plan 24 link/retrieval/fusion contracts run
+   in shadow mode with no rank influence. Provenance completeness, source
+   diversity, state-machine, restart/cursor, authorization, and
+   authority-canary tests must pass. The pinned corpus contains at least 200
+   adjudicated TaskEvidenceRequests, at least 40 proximity-positive cases, and
+   at least three eligible source families. Every selected record has complete
+   contribution provenance; deterministic replay/digest equality is 100%;
+   privacy/authority violations are zero.
+3. **Project-local expertise gate:** default-off, single-user project/repository
+   opt-in only. Deterministic decay, explanation completeness, ambiguous
+   attribution, revocation/deletion purge, prohibited-purpose schema scans,
+   and privacy canaries must pass before any signal is surfaced. The corpus has
+   at least 20 positive and 20 negative fixtures for each of the five evidence
+   variants; malformed or empty evidence rejection, explanation completeness,
+   and deterministic decay replay are 100%; attribution false-positive and
+   privacy-canary counts are zero; revocation, source deletion, and retention
+   expiry exclude immediately and complete cache/handle/payload purge within
+   five minutes.
+4. **Bounded influence gate:** proximity may receive a capped rank
+   contribution of at most `0.10` of the normalized rank score only when the
+   held-out corpus's paired-bootstrap 95% confidence interval for nDCG@10
+   change has a lower bound of at least zero and proximity-positive recall@10
+   improves by at least five percentage points. When at least two families are
+   eligible, at least two are represented and no family exceeds 60% of top-10
+   results; stale selected records stay below 1%; p95 latency regression is at
+   most 10% and 25 milliseconds; privacy/authority violations remain zero.
+   Expertise remains evidence eligibility/explanation only and never ranks
+   people.
+5. **Cross-session/cross-project gate:** requires Plan 15/16/28 scope and
+   remote-fencing acceptance, authorized privacy-safe cohorts, minimum-cell
+   suppression of every cohort smaller than 20, retention enforcement, zero
+   cross-scope privacy canaries, and revocation propagation plus remote-cache
+   purge within five minutes.
+
+Each gate produces an immutable Plan 26
+`FeedbackRolloutGateEvidenceV1 { gate, corpus_digest, evaluation_window,
+sample_counts, metric_definitions, confidence_method, thresholds,
+policy_revision, privacy_revision, result, decided_at, decision_actor }`.
+Changing a schema, retriever, source-family mapping, score scale, decay policy,
+privacy policy, or authorization policy invalidates the affected gate and
+returns that feature to shadow/default-off state until a new evidence record
+passes.
+
+Rollback disables the proximity rank contribution and expertise projection
+independently. Base TaskId retrieval, Plan 37 delivery, canonical evidence,
+and read-only GitHub ingestion remain available. A gate failure, privacy
+canary, attempted authority override, prohibited-purpose request, stale-rate
+breach, unexplained result, or any attempted GitHub write trips the relevant
+circuit breaker and cannot degrade to silent success.
+
 ### 4. Read-only GitHub PR review ingestion (never an LSP transport, never a write path)
 
 - PR titles/descriptions, commit messages, review bodies/replies, claimed
@@ -346,6 +852,17 @@ GitHub, applies a fix, or continues an agent automatically.
   [Plan 32](32-dynamic-workflow-runtime-and-sdk.md) prerequisite anywhere in
   this ingestion path — none of that exists because there is no write path to
   gate.
+- The adapter is structurally read-only: its REST operation allowlist contains
+  only HTTP `GET` for the exact ingress resources in this section. GraphQL may
+  use HTTP `POST` only to transport a parsed operation whose kind is `query`
+  and whose normalized-document digest is on the read-ingress allowlist;
+  `mutation`, REST `POST`/`PUT`/`PATCH`/`DELETE`, and write-capable generated
+  client methods are rejected at configuration/schema validation before
+  credentials or network access. Admission accepts only
+  credentials whose observed scopes are read-only for the requested
+  repository resources; write-capable or indeterminate scopes fail closed.
+  The GitHub ingress crate does not link a mutation client, and architecture
+  tests scan its operation descriptors and compiled dependency boundary.
 - The typed ingest contract binds, per ingested item:
   - repository, provider, and PR identity; base and head SHA; and merge base;
   - review, thread, comment, and reply IDs;
@@ -630,11 +1147,11 @@ PR6 boundary.
 | PR9 | No new authority here. [Plan 36](36-git-aware-change-context-and-index-transactions.md) ships repository/commit-snapshot identity (base/head SHA, merge base, HEAD/ref) and read-only diff/hunk intelligence, and [Plan 05](05-query-crate.md) ships the composed revision-range diff/hunk query primitives, that this cycle's GitHub remap and CI localization later consume. Plan 32's workflow kernel is not required here or anywhere else in this milestone. |
 | PR11 | [Plan 09](09-application-crate.md) ships the concrete typed feedback-cycle request/result, orchestration, and the one-shot termination taxonomy (§2). First pillar (post-edit diagnostics+impact) begins shipping. |
 | PR12 | [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) gateway triggers and the explicit MCP/CLI/API diagnostics-call trigger bound once by [Plan 21](21-cli-mcp-tool-surface-and-output-unification.md) (§6). Completes the post-edit diagnostics-and-impact pillar for LSP/MCP/CLI. |
-| PR13 | **First coherent milestone (§7).** Hook and agent stop/pre-stop-gate triggers, host delivery-adapter parity through [Plan 27](27-cross-host-agent-plugin-bundles.md); first availability of CI-failure localization (§5), read-only GitHub review-comment/thread ingestion and surfacing (§4), and tiered concurrent-agent proximity (§3). All four pillars are simultaneously available across hook/MCP/CLI/LSP surfaces. No GitHub write exists at PR13 or at any later PR. |
+| PR13 | **First coherent milestone (§7).** Hook and agent stop/pre-stop-gate triggers, host delivery-adapter parity through [Plan 27](27-cross-host-agent-plugin-bundles.md); first availability of CI-failure localization (§5), read-only GitHub review-comment/thread ingestion and surfacing (§4), and tiered concurrent-agent proximity (§3). All four pillars are simultaneously available across hook/MCP/CLI/LSP surfaces. `FeedbackEvidencePacketV1` and `ProximityContributionV1` ship reference-only behind the PR13 packet gate (§3C); TaskId linking, fusion rank influence, and expertise remain disabled. No GitHub write exists at PR13 or at any later PR. |
 | PR14 | Dashboard/Doctor/observability consumption of the same typed cycle, GitHub-ingested, CI-localization, and proximity state already shipped at PR13, through [Plan 11](11-dashboard-frontend.md) and [Plan 26](26-observability-accounting-and-usage.md). Not first availability. |
 | PR15 | Multi-root/cross-project cycle, GitHub-remap, CI-localization, and proximity scope through [Plan 16](16-cross-project-repository-worktree-scope.md); no pillar's first availability depends on PR15. |
 | PR16 | Node-local overlay and remote-authority rules through [Plan 28](28-remote-multi-machine-shared-brain.md): unsaved overlays and proximity computation stay node-local; durable cycle state, GitHub-ingested evidence, and CI-localization evidence are fenced through shard authority. No pillar's first availability depends on PR16. |
-| PR17 | Optional composition of this plan's already-shipped read-only advisory operations (feedback-cycle findings, GitHub-ingested review-thread surfacing, CI localization, proximity) as typed workflow steps through [Plan 32](32-dynamic-workflow-runtime-and-sdk.md)'s shared scheduler/history/lease/effect/artifact kernel. Not first availability of any capability; no GitHub write; no new authority. |
+| PR17 | Plan 24 adds explicit `TaskFeedbackLinkRevisionV1`, TaskId-rooted retrieval through its canonical `TaskEvidenceRequest`/`TaskEvidencePacket`, exactly one proximity primitive, and provenance/diversity/feedback observations. Plan 37/09 add the default-off demonstrated-expertise producer and consent/decay/projection gates in §§3B–3C. Plan 32 may optionally compose the already-shipped read-only advisory operations through its existing `WorkflowStepV1`/`NormalizedEvidenceEnvelopeV1`/`EvidencePacketSetV1` runtime contracts; it does not own linking, retrieval, consent, decay, or rank policy. Not first availability of the four pillars; no GitHub write; no new authority. |
 
 ## Acceptance
 
@@ -694,6 +1211,11 @@ PR6 boundary.
     call, producing separate `policy=denied` and `effect=suppressed` outcomes,
     never an item/thread lifecycle value or ingress provider outcome and never
     any partial write.
+  - REST descriptor scans reject every method except `GET`; GraphQL parser and
+    normalized-document allowlist reject every operation kind except `query`;
+    write-capable or indeterminate credential scopes fail admission; the
+    ingress dependency graph contains no mutation client; and rejected
+    operations produce zero network calls.
 - **CI-localization fixtures** map a structured failure to symbol/branch
   generation/callers and a targeted rerun hint using the typed input contract
   (§5), including stale, partial, unavailable, and denied log/artifact states
@@ -710,6 +1232,62 @@ PR6 boundary.
   advisory-only semantics, `observed_at`/`expires_at` freshness, suppression/
   dedupe, and privacy scoping across sessions/agents without creating a lock
   or schedule.
+- **TaskId retrieval/fusion fixtures** prove `TaskId` resolves the canonical
+  Plan 24 `WorkItemId` and pins `WorkItemVersionId`; current/as-of/evolution/
+  forensic modes expand exact anchors; the registry contains exactly one
+  proximity retriever; duplicate candidates merge while preserving every
+  canonical `RetrieverContribution`; source ablation and deterministic ranking retain
+  frame-neutral evidence; minimum-family/maximum-share shortfalls report
+  `diversity_unmet`; and proximity cannot alter severity, coverage, lifecycle,
+  graph readiness, assignment, lease, attempt, effect, or receipt state.
+- **Retrieval transition and failure-matrix fixtures** cover every legal edge
+  in Plan 24's canonical §3A-referenced state machine and reject illegal
+  transitions. They distinguish `NoRelevantEvidence` from `Partial`,
+  `Abstained`, cancelled, timed-out, failed, and per-source complete/partial/
+  stale/denied/unavailable/retained/locked/redacted/deleted coverage; cover
+  `DeniedOrNotFound`, stale task version, ambiguous link mapping, scope/head/
+  generation drift, readiness/cursor/watermark/authorization change,
+  duplicate link, budget exhaustion, unsupported capability, and corrupt
+  anchors; and prove no degraded state becomes clean or silently selects a
+  task.
+- **Task-link lifecycle fixtures** prove an explicit authorized Plan 24
+  command is required to turn an inert link intent into `Active`; head,
+  generation, work-item-version, authorization, retention, source-deletion,
+  anchor, and consent changes append `Stale`, `Superseded`, or `Revoked`
+  revisions without rewriting history or mutating runtime. Dirty overlays
+  cannot produce a packet, link, workflow input, cache entry, or export.
+- **Demonstrated-expertise fixtures** cover co-authored, rebased, merge, bot,
+  maintainer, and ambiguous-identity commits; review activity without invented
+  trust; diagnostic disappearance versus causally proved resolution; Plan 32
+  runtime completion versus independently accepted Plan 24/26 outcome;
+  discussion participation without correctness inference; deterministic
+  half-life decay and stale abstention; and full explanation lineage.
+  Every tagged evidence variant rejects empty anchors, missing required IDs,
+  kind-incompatible fields, incomplete coverage, and malformed attribution.
+  Consent denial, scope narrowing, revocation, source deletion, retention
+  expiry, cache/handle/export purge, re-consent, and authorization loss produce
+  the exact qualification outcome, signal lifecycle, and tombstone shape in
+  §3B and never leak private evidence. A purpose/scope/grant-loss matrix
+  rechecks ingestion, projection, query, expansion, export, and workflow use
+  independently.
+- **Prohibited-purpose fixtures** schema-scan every API, projection, export,
+  metric, workflow, and dashboard payload for composite person-score,
+  person-ordering, leaderboard, employee filter, or employment-purpose fields;
+  attempts to request employee scoring, productivity ranking, performance
+  management, hiring, compensation, promotion, or discipline fail closed and
+  trip the policy circuit breaker. Metrics remain system-quality observations
+  with privacy-safe denominators, never worker-performance measurements.
+  Non-self-service actor listing/search/filter/sort/group/export and cross-
+  subject batch retrieval are absent from schemas and rejected at operation
+  admission; raw signal and numeric internal weight never enter a packet,
+  cursor, handle, workflow envelope, metric, or UI.
+- **Plan 24/32 boundary fixtures** prove a packet or warning cannot create
+  work; a Plan 24 link cannot admit runtime; a Plan 32 `WorkflowStepV1` pins
+  the exact packet/request schema, `TaskEvidenceRoot` when present, grant,
+  scope, and policy/privacy revisions and returns a
+  `NormalizedEvidenceEnvelopeV1`; retry preserves packet/finding/anchor
+  identities without duplicate evidence; and no workflow step can infer
+  consent, reactivate revoked data, change rank policy, or emit a GitHub write.
 - **Lossless evidence fixtures** prove: a finding's ID + `RetrievalAnchorId`
   survive envelope, checkpoint, delivery, telemetry, and every durable
   spool/cache/replica/export representation unchanged; a 24-hour response

@@ -15,13 +15,18 @@
 - PR17 also registers every auxiliary-provider setting here; no catalog, host
   bundle, application handler, runtime adapter, or dashboard keeps a parallel
   executable/provider configuration source.
-- Configuration changes activate directly after validation; there is no preview/apply workflow.
+- Ordinary scalar and provider configuration changes activate directly after validation.
+  Source-binding mutations, restrictive allow/deny policy mutations, and rollback operations
+  containing either are protected scope-control changes and use one bounded dry-run/apply
+  protocol. This is not a general configuration preview pipeline.
 
 ## Outcome
 
 Every supported TraceDecay setting has one typed definition and one daemon-owned resolution path.
 CLI, API, MCP, and UI read and mutate the same effective configuration, while credentials remain
-opaque and operators can see which revision the running system actually uses.
+opaque and operators can see which revision the running system actually uses. Self-service source
+bindings and restrictive allow/deny rules use the same revision, audit, dry-run/apply, and forward
+rollback kernel without becoming project identity or authorization authority.
 
 ## Owns
 
@@ -33,6 +38,12 @@ opaque and operators can see which revision the running system actually uses.
   alone defines their resolution and identity semantics.
 - Direct activation and observed daemon/component revision state.
 - Opaque credential references and write-only credential mutation surfaces.
+- Typed `scope.source_bindings.v1`, `scope.access_rules.v1`, and optional
+  `query.default_collection.v1` definitions; protected-change plans, apply receipts,
+  append-only audit, and forward rollback for those definitions.
+- Self-service binding of a source to an existing `ProjectId`, or to `UserProfileId` only
+  for a resolver-verified projectless Hermes source. The binding stores a reference and
+  never copies or creates the authority.
 - One typed analyzer configuration source for enablement, executable reference,
   arguments, initialization options, settings, environment allowlist, privacy
   class, resource limits, restart policy, and per-language selection for
@@ -84,7 +95,12 @@ opaque and operators can see which revision the running system actually uses.
   leases, attempts, receipts, or remediation execution. Plan 27 discovers and
   remediates against this plan's effective snapshot; Plan 32 executes against
   one pinned snapshot.
-- Preview/apply/rollback ceremonies for normal configuration changes.
+- A preview/apply/rollback ceremony for normal configuration changes. Plan 20 does own the
+  mandatory two-phase protocol and forward rollback for protected scope-control changes.
+- `QueryCollection` or `WorkspaceCollection` identity, membership, canonical ordering,
+  scope resolution, authorization decisions, project registration, source discovery, or
+  storage routing. Plan 16 owns those contracts; this plan stores only source-binding and
+  restrictive-policy configuration plus an optional default collection selector.
 - Dynamic workflow definitions; PR17 stores those as typed product data using daemon operations.
 - Generated inventories, Markdown parsers, trackers, executors, or workflow JavaScript.
 - Static extension, language-ID, root-marker, and parser facts owned by
@@ -104,6 +120,20 @@ opaque and operators can see which revision the running system actually uses.
 1. One typed source
    - Each setting declares its key, type, default, validation, sensitivity, scope, and documentation.
    - CLI, API, MCP, UI, Doctor, and persisted encoding use that definition directly.
+   - `scope.source_bindings.v1` is a typed collection of `ScopeSourceBinding`; each entry
+     contains `SourceBindingId`, `SourceKind`, a redacted `SourceLocatorDigest`, and
+     exactly one `AuthorityRef::Project(ProjectId)` or
+     `AuthorityRef::ProjectlessHermes(UserProfileId)`. The latter is accepted only after
+     Plan 16 verifies the source is projectless Hermes.
+   - `scope.access_rules.v1` is a typed collection of `ScopeAccessRule`; each entry
+     contains `AccessRuleId`, typed subject scope, typed `AuthorityRef`, capability set,
+     `Allow` or `Deny`, and an optional expiry. It is a restrictive policy input, not an
+     authorization grant.
+   - `query.default_collection.v1` is
+     `Option<CollectionSelector<QueryCollectionId, WorkspaceCollectionId>>`, is scoped to
+     `UserProfileId`, and defaults to `None`. It selects convenience input only; Plan 16
+     reauthorizes every referenced source. A stale, missing, or denied default does not
+     fall back to all projects, CWD, first project, or newest collection.
    - Analyzer settings cover enablement, executable reference, arguments,
      initialization options, settings, environment allowlist, privacy class,
      limits, restart policy, and per-language selection without duplicating
@@ -146,12 +176,34 @@ opaque and operators can see which revision the running system actually uses.
      unchanged value between layers may change provenance without changing
      behavior; changing the effective winner changes both.
    - Resolution is pure and testable; adapters do not implement precedence independently.
+   - Applicable deny rules are unioned. Applicable allowlists are intersected with each
+     other and with independently authorized capabilities. Deny wins at every layer; a
+     lower layer cannot override an inherited deny. Removing a deny or broadening an
+     allowlist is authority-sensitive and still cannot exceed Plan 16 authority.
+   - Projectless Hermes resolves through `default < UserProfileId`; project and collection
+     layers are absent. No CWD, workspace, source binding, or default collection creates a
+     synthetic `ProjectId` or moves projectless data out of user-profile authority.
 
-3. Atomic direct activation
-   - A valid mutation commits one new revision and becomes desired active configuration immediately.
-   - Invalid input commits nothing and leaves the previous revision active.
-   - Compare-and-set rejects stale concurrent writes with the current revision.
-   - Multi-setting updates validate and commit atomically.
+3. Mutation classes
+   - A valid ordinary mutation commits one new revision and becomes desired active
+     configuration immediately. Invalid input commits nothing; compare-and-set rejects a
+     stale writer; a multi-setting update validates and commits atomically.
+   - Protected mutations are source bind/rebind/unbind, allow/deny
+     add/change/remove, default-collection change bundled with either, and rollback
+     containing any protected entry. They require dry-run followed by apply.
+   - Dry-run changes no desired or effective configuration. It returns a redacted diff,
+     safe affected-source coverage, required authorization, base revision, operation
+     digest, Plan 16 `ResolvedScopeSet` digest, collection membership digest when
+     applicable, authorization-policy digest, policy epoch, expiry, and `ChangePlanId`.
+     It may append only a redacted `dry_run_created` audit event.
+   - Apply requires the unexpired `ChangePlanId`, actor-bound confirmation,
+     expected base revision, operation digest, and idempotency key. The daemon re-resolves
+     and reauthorizes every source, rechecks every frozen digest and policy epoch, and
+     commits the complete configuration revision plus receipt atomically. Drift,
+     revocation, ambiguity, expiry, widening beyond independently authorized capabilities,
+     or CAS conflict commits nothing.
+   - A protected operation cannot convert a path, remote, provider key, label, host
+     profile, store name, collection membership, or mutable locator into authority.
 
 4. Observed state
    - The daemon records which configuration revision each long-lived component has loaded.
@@ -169,6 +221,16 @@ opaque and operators can see which revision the running system actually uses.
    - CLI, API, MCP, and UI support list, explain, get, set, unset, and atomic batch mutation.
    - All surfaces return the same validation errors, revisions, provenance, and observed state.
    - UI groups settings by product capability and makes overrides and restart requirements visible.
+   - All surfaces also expose the same protected dry-run, apply, rollback-dry-run,
+     rollback-apply, and audit operations. Target pickers list only targets the caller may
+     discover. `target_unavailable` intentionally conflates missing, unregistered,
+     revoked, and denied targets; only fully authorized ambiguity returns candidates.
+   - Coverage for a caller-supplied or previously visible denied binding uses
+     `restricted_or_unavailable` without canonical ID, label, path, stable token, hidden
+     count, or a cause split. An unauthorized audit view omits target fields and exposes
+     only an event-scoped integrity commitment keyed by `(event_id, target)`; it cannot be
+     joined to another event. Canonical target identity is rendered only after the audit
+     reader is independently authorized for that target at read time.
 
 7. Doctor integration
    - Plan 20 emits typed evidence for invalid persisted values, unknown keys,
@@ -211,6 +273,263 @@ opaque and operators can see which revision the running system actually uses.
      task-recall quarantine/retirement, role-isolation, and bounded-exploration
      controls. These settings constrain Plan 24 proposals and Plan 32
      execution; they never create either authority.
+10. Source-binding authority
+    - A project-associated source always targets canonical `ProjectId`; all checkouts and
+      worktrees retain that project authority while code roots remain separately typed.
+    - `AuthorityRef::ProjectlessHermes(UserProfileId)` is valid only when Plan 16 resolves
+      the source as projectless Hermes. Attaching that source to a project requires a new
+      binding targeting `ProjectId`; configuration never infers the transition.
+    - Binding publication stores only source kind, redacted locator digest, authoritative
+      typed reference, revision, and provenance. It never duplicates project/profile
+      records, source content, repository metadata, credentials, capabilities, ownership,
+      authorization, paths, or storage locators.
+11. Restrictive allow/deny policy
+    - An allow rule can only reduce the independently authorized capability set; absence of
+      a rule grants nothing. A deny rule removes matching capabilities before collection
+      selection, source statistics, telemetry, retrieval, or coverage rendering.
+    - Rule applicability is deterministic over typed actor, operation, authority, source
+      kind, and capability fields. Free-form text, path substring, display name, CWD,
+      branch name, or collection name is not a policy selector.
+    - Rule evaluation emits an `AuthorizationPolicyDigest` consumed by Plan 16 membership
+      snapshots and query cursors. Every request and continuation reauthorizes every source;
+      a digest change invalidates the continuation before retrieval.
+12. Forward rollback
+    - Rollback never rewinds tables, deletes audit history, restores plaintext secrets, or
+      reactivates stale authority. It dry-runs selected historical typed values against the
+      current schema, current Plan 16 resolution, current authorization, and current base
+      revision, then applies them as a new child revision.
+    - A historical binding whose target is now missing, denied, ambiguous, or no longer
+      projectless Hermes is omitted with safe coverage or causes the atomic rollback to
+      fail according to the caller-selected all-or-nothing mode. The default mode is
+      all-or-nothing. Partial mode names only independently visible sources.
+    - Rollback receipts bind old revision, new revision, change-plan digest, actor,
+      idempotency key, redacted diff, authorization-policy digest, and activation result.
+13. Audit
+    - Dry-run, apply, rejection, expiry, activation, rollback, and recovery are append-only
+      events with actor, operation class, request/correlation IDs, base/result revisions,
+      digests, idempotency key, safe reason code, and timestamp.
+    - Audit rendering reauthorizes target identity at read time. Unauthorized readers see
+      only an event-scoped non-correlatable integrity commitment and
+      `restricted_or_unavailable`; logs, diagnostics, metrics, Doctor evidence, and UI
+      payloads use the same safe view and never receive the internal target reference.
+
+## Implementation contract
+
+### Domain, configuration, and application files
+
+- `crates/tracedecay-domain/src/configuration.rs` defines `AuthorityRef`,
+  `SourceBindingId`, `ScopeSourceBinding`, `AccessRuleId`, `ScopeAccessRule`,
+  `RuleEffect`, `ProtectedChange`, `ProtectedChangePlan`, `ProtectedApplyRequest`,
+  `ConfigurationAuditEvent`, and safe error/coverage enums;
+  `crates/tracedecay-domain/src/lib.rs` exports them.
+- `crates/tracedecay-domain/tests/configuration_contract.rs` proves strict typed IDs,
+  projectless-Hermes constraints, deny precedence, allow intersection, redacted error
+  equivalence, digest stability, and rollback receipt encoding.
+- `src/config.rs` remains the module root. `src/config/registry.rs`,
+  `src/config/resolver.rs`, and `src/config/scope_control.rs` register the three typed
+  definitions and implement pure precedence/policy resolution without adapter defaults.
+- `src/application/configuration/mod.rs`, `src/application/configuration/types.rs`,
+  `src/application/configuration/ports.rs`, and
+  `src/application/configuration/operations.rs` implement ordinary direct mutations and
+  protected dry-run/apply/rollback/audit use cases. They depend on Plan 16's resolver
+  through `ScopeResolutionPort`; no adapter resolves or authorizes a source.
+
+The application signatures are:
+
+```rust
+pub trait ConfigurationControlPlane {
+    fn list(&self, actor: AuthorizedActor) -> Result<Vec<SettingSummary>, ConfigurationError>;
+    fn explain(
+        &self,
+        actor: AuthorizedActor,
+        key: SettingKey,
+    ) -> Result<ResolvedSetting, ConfigurationError>;
+    fn get(
+        &self,
+        actor: AuthorizedActor,
+        key: SettingKey,
+    ) -> Result<ResolvedSetting, ConfigurationError>;
+    fn mutate_direct(
+        &self,
+        actor: AuthorizedActor,
+        mutation: DirectConfigurationMutation,
+        expected_revision: ConfigurationRevisionId,
+    ) -> Result<ConfigurationMutationReceipt, ConfigurationError>;
+    fn write_credential(
+        &self,
+        actor: AuthorizedActor,
+        write: WriteOnlyCredentialMutation,
+        expected_revision: ConfigurationRevisionId,
+    ) -> Result<CredentialReferenceMetadata, ConfigurationError>;
+    fn observed_state(
+        &self,
+        actor: AuthorizedActor,
+    ) -> Result<Vec<ComponentConfigurationState>, ConfigurationError>;
+    fn dry_run_protected_change(
+        &self,
+        actor: AuthorizedActor,
+        change: ProtectedChange,
+        expected_revision: ConfigurationRevisionId,
+    ) -> Result<ProtectedChangePlan, ConfigurationError>;
+
+    fn apply_protected_change(
+        &self,
+        actor: AuthorizedActor,
+        request: ProtectedApplyRequest,
+    ) -> Result<ConfigurationMutationReceipt, ConfigurationError>;
+
+    fn dry_run_rollback(
+        &self,
+        actor: AuthorizedActor,
+        target: ConfigurationRevisionId,
+        mode: RollbackMode,
+    ) -> Result<ProtectedChangePlan, ConfigurationError>;
+    fn apply_rollback(
+        &self,
+        actor: AuthorizedActor,
+        request: ProtectedApplyRequest,
+    ) -> Result<ConfigurationMutationReceipt, ConfigurationError>;
+    fn audit(
+        &self,
+        actor: AuthorizedActor,
+        query: ConfigurationAuditQuery,
+    ) -> Result<ConfigurationAuditPage, ConfigurationError>;
+}
+```
+
+### Store schema and migration
+
+- `crates/tracedecay-store/src/configuration.rs` defines revision, plan, audit, and
+  transaction ports; `crates/tracedecay-store/src/lib.rs` exports them.
+- `crates/tracedecay-store/tests/configuration_contract.rs` runs CAS, idempotency,
+  append-only audit, expiry, crash-recovery, and forward-rollback tests against each store.
+- `src/global_db/configuration/schema.rs`, `src/global_db/configuration/store.rs`, and
+  `src/global_db/configuration/migration.rs` own the SQLite implementation.
+- `configuration_revisions(revision_id, parent_revision_id, snapshot_id,
+  effective_behavior_digest, resolution_provenance_digest, actor_id, operation_kind,
+  created_at)` is append-only.
+- `configuration_entries(revision_id, key, layer_kind, layer_id, schema_revision,
+  typed_value)` stores ordinary typed settings.
+- `configuration_source_bindings(revision_id, binding_id, source_kind, locator_digest,
+  authority_kind, project_id, user_profile_id, provenance_digest)` checks that exactly the
+  authoritative ID required by `authority_kind` is non-null and has unique
+  `(revision_id, binding_id)` and `(revision_id, source_kind, locator_digest)`.
+- `configuration_access_rules(revision_id, rule_id, subject_kind, subject_id,
+  actor_kind, actor_id, operation_kind, source_kind, authority_kind, project_id,
+  user_profile_id, capability_encoding, effect, expires_at)` constrains `effect` to
+  `allow|deny`, requires every selector kind to use its matching typed ID/value, and
+  rejects free-form selectors.
+- `configuration_change_plans(plan_id, actor_id, base_revision_id, operation_digest,
+  resolved_scope_digest, membership_digest, authorization_policy_digest, policy_epoch,
+  expires_at)` is immutable. Current plan state is derived exclusively from its ordered
+  events; the apply-time idempotency key is not part of dry-run plan identity.
+- `configuration_change_plan_operations(plan_id, sequence, payload_schema_revision,
+  sealed_typed_operation, operation_digest)` stores the complete typed proposed mutation
+  in daemon-sealed form so post-restart apply, reauthorization, expiry, recovery, and
+  rollback replay the exact dry-run input without exposing locators or credentials.
+- `configuration_change_plan_events(plan_id, sequence, event_kind, safe_reason_code,
+  occurred_at)`, `configuration_mutation_receipts(receipt_id, plan_id, actor_id,
+  idempotency_key, base_revision_id, result_revision_id, operation_digest,
+  authorization_policy_digest, activation_status, receipt_digest, created_at)`, and
+  `configuration_audit_events(event_id, actor_id, idempotency_key, operation_kind,
+  base_revision_id, result_revision_id, sealed_target_reference,
+  event_scoped_target_commitment, receipt_digest, correlation_id, safe_reason_code,
+  occurred_at)` are append-only.
+- `event_scoped_target_commitment` is
+  `HMAC(audit_redaction_key, event_id || canonical_target_reference)`; the event ID prevents
+  cross-event correlation. `sealed_target_reference` is never returned until read-time
+  authorization independently permits canonical identity.
+- Foreign keys and triggers reject revision mutation/deletion, plan reuse, authority-kind
+  mismatch, audit/receipt deletion, operation replacement, and a second terminal plan
+  event. Unique indexes on `(actor_id, idempotency_key)` and
+  `(plan_id, idempotency_key)` return the original receipt for an exact replay and
+  `idempotency_conflict` for a digest mismatch. One transaction writes the new revision,
+  entries, protected collections, receipt, plan terminal event, and audit event.
+
+`src/global_db/configuration/migration.rs` first adds empty tables without changing
+effective behavior and creates
+`configuration_migration_quarantine(source_kind, source_key_digest, reason_code,
+redacted_value_digest, quarantined_at)` with primary key
+`(source_kind, source_key_digest, redacted_value_digest)`. It asks the existing
+`src/config.rs` decoder for the same ordered persisted layers used before migration,
+validates every decoded key through the typed registry, and writes one initial revision
+whose effective and provenance digests must equal the pre-migration resolver output.
+Unknown, deprecated-invalid, undecodable, path-derived authority, ambiguous binding, and
+unauthorized binding values enter quarantine and do not affect the initial revision.
+Because no legacy collection policy is authoritative, the migration registers empty
+`scope.source_bindings.v1` and `scope.access_rules.v1` values and
+`query.default_collection.v1=None`; it never guesses bindings from project paths, CWD,
+host configuration, or project registry adjacency. The daemon then enables the
+application port as the sole writer while retaining existing files as read-only input
+layers. Re-execution matches `(source_kind, source_key_digest, redacted_value_digest)` and
+the initial snapshot digest, creates no duplicate revision, and never truncates revision,
+receipt, plan-event, audit, or quarantine history.
+
+### Surfaces and exact operations
+
+- `src/cli/configuration.rs` exposes
+  `tracedecay config list|explain|get|set|unset|batch`,
+  `tracedecay config credential set` as a write-only operation, and
+  `tracedecay config observed`,
+  `tracedecay config source bind|rebind|unbind --dry-run`,
+  `tracedecay config policy add|change|remove --dry-run`,
+  `tracedecay config apply --plan-id --expected-revision --idempotency-key`,
+  `tracedecay config rollback --dry-run --to-revision [--partial]`, and
+  `tracedecay config audit --revision`.
+- `src/mcp/tools/definitions/configuration.rs` and
+  `src/mcp/tools/handlers/configuration.rs` expose
+  `configuration_change_dry_run`, `configuration_change_apply`,
+  `configuration_rollback_dry_run`, `configuration_rollback_apply`, and
+  `configuration_audit` plus list/explain/get/set/unset/batch,
+  write-only-credential, and observed-state definitions with the same application DTOs.
+- `src/dashboard/configuration_api.rs` exposes
+  `POST /v2/configuration/change-plans`,
+  `POST /v2/configuration/change-plans/{plan_id}/apply`,
+  `POST /v2/configuration/rollback-plans`, and
+  `GET /v2/configuration/audit`, plus `GET /v2/configuration/settings`,
+  `POST /v2/configuration/direct-mutations`,
+  `POST /v2/configuration/credential-references`, and
+  `GET /v2/configuration/observed-state`; the UI displays the redacted diff, effective
+  restriction, deny precedence, base revision, frozen digests, expiry, and rollback mode.
+- Public errors are exactly `target_unavailable`, `authorized_target_ambiguous`,
+  `revision_conflict`, `plan_expired`, `plan_stale`, `policy_widening_forbidden`,
+  `projectless_profile_required`, and `idempotency_conflict`. CLI, MCP, HTTP, UI, Doctor,
+  audit, and logs render the same safe reason and never attach hidden target identity.
+
+### Tests and executable acceptance
+
+- `tests/configuration_control_plane_suite/protected_changes.rs` covers dry-run purity,
+  plan expiry, CAS, idempotency, source drift, authorization revocation between phases,
+  same-name projects, moved worktrees, atomic batch failure, and crash recovery.
+- `tests/configuration_control_plane_suite/access_policy.rs` covers deny precedence, allow
+  intersection, inherited deny, forbidden widening, expiry, policy-digest query
+  invalidation, and projectless-Hermes user-profile authority.
+- `tests/configuration_control_plane_suite/audit_rollback.rs` covers append-only audit,
+  read-time reauthorization, missing-versus-denied byte equivalence, no-existence leakage,
+  all-or-nothing and partial forward rollback, activation failure, and receipt replay.
+- `tests/configuration_control_plane_suite/surface_parity.rs` runs the same DTO/error
+  fixtures through CLI, MCP, HTTP, and dashboard handlers.
+- `tests/configuration_control_plane_suite/migration.rs` proves idempotency, quarantine,
+  empty-policy behavior preservation, default-unset behavior, and no copied source data.
+- `tests/configuration_control_plane_suite/direct_operations.rs` covers
+  list/explain/get/set/unset/batch, invalid atomic batches, CAS races, direct activation,
+  and adapter parity.
+- `tests/configuration_control_plane_suite/credentials_observed.rs` covers write-only
+  credential references, plaintext non-disclosure, desired/observed drift, restart
+  requirements, failed activation, and last-working-state preservation.
+
+```sh
+cargo test -p tracedecay-domain --test configuration_contract --all-features
+cargo test -p tracedecay-store --test configuration_contract --all-features
+cargo test --all-features --test configuration_control_plane_suite protected_changes
+cargo test --all-features --test configuration_control_plane_suite access_policy
+cargo test --all-features --test configuration_control_plane_suite audit_rollback
+cargo test --all-features --test configuration_control_plane_suite surface_parity
+cargo test --all-features --test configuration_control_plane_suite migration
+cargo test --all-features --test configuration_control_plane_suite direct_operations
+cargo test --all-features --test configuration_control_plane_suite credentials_observed
+cargo check --all-features
+```
 
 ## Acceptance
 
@@ -249,5 +568,11 @@ opaque and operators can see which revision the running system actually uses.
   environment, fallback, deadline/kill, and resume settings; secret opacity;
   desired-versus-observed drift; Plan 27 read-only consumption; Plan 32
   admission pinning; and no adapter-local defaults or mid-attempt reread.
-- No task steering, developer-plan machinery, preview/apply pipeline, or
-  workflow JavaScript is present.
+- Protected scope-control fixtures prove self-service source bind/rebind/unbind,
+  deny precedence, allow intersection, no authority widening, dry-run/apply drift
+  rejection, append-only redacted audit, and forward rollback across CLI/API/MCP/UI.
+- Projectless Hermes fixtures prove `UserProfileId` remains authoritative and no source
+  binding, collection default, CWD, or workspace manufactures `ProjectId`.
+- No task steering, developer-plan machinery, general preview/apply pipeline, or workflow
+  JavaScript is present. Only protected scope-control changes use the bounded two-phase
+  protocol.

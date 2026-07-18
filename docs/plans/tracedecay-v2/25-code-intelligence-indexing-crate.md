@@ -7,6 +7,11 @@ PR9/PR10 record incremental, no-op, generation, and resource baselines for
 [PR20](33-end-to-end-performance-optimization.md).
 Generation-bound diagnostics compose with the daemon gateway defined by
 [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
+[Plan 15](15-search-quality-evaluation-and-retrieval-research.md) exclusively
+owns retrieval-research design, corpus/label policy, quality metrics, candidate
+profile comparison, thresholds, and promotion decisions. PR9 implements the
+frozen lexical/chunk contracts and emits measurements; it does not tune or
+promote retrieval policy.
 
 ## Outcome
 
@@ -19,6 +24,18 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
   structural search, outline, rewrite, analyzer routing, and host LSP
   projection.
 - Canonical symbol, occurrence, relationship, diagnostic, and test-attribution records.
+- Storage-neutral `CodeSearchDocumentV1`, `CodeSearchChunkV1`,
+  `CodeSearchChunkId`, `CodeSearchChunkGrainV1`,
+  `ChangedCodeChunkSetV1`, `CodeChunkProjectionReceiptV1`, and
+  `CodeIndexCapabilityManifestV1` values. They are immutable logical records,
+  not rows coupled to a lexical table, vector table, or vendor index.
+- Deterministic symbol-signature, symbol-body, symbol-member, file-preamble,
+  and bounded file-window chunks tied to one code generation. These chunks are
+  the replayable source for lexical and later model/version-specific
+  projections; embeddings never become source or symbol authority.
+- Ordered changed/reused/deleted chunk manifests and projection receipts that
+  let downstream projectors prove exactly which generation-bound chunks they
+  consumed, skipped, replaced, or removed.
 - Canonical raw quantifier inputs: decision/control-flow facts, typed
   dependency/test/change relations, extraction coverage, ambiguity, and
   language-validation revision. Preserve raw evidence sufficient to recompute
@@ -42,6 +59,12 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 - Database connections, generation files, transactions, manifests, pointers, or publication; store owns those.
 - Projector scheduling, retries, or checkpoints.
 - Query ranking, semantic embedding inference, UI, or public transport bindings.
+- Retrieval-research policy, fusion weights, diversity limits, candidate
+  budgets, corpus labels, metric interpretation, or profile promotion; Plan 15
+  owns those decisions and Plan 05 owns retrieval/fusion implementation.
+- A required physical table layout. Canonical chunks, lexical postings, graph
+  evidence, vectors, and receipts may use separate store-owned representations
+  and join only through stable typed identities and generation manifests.
 - Analyzer executable commands or settings, which remain configuration-owned
   by Plan 20.
 - A host-facing analyzer broker; the Plan 35 daemon gateway is the sole broker
@@ -91,6 +114,164 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
   unsupported regions, and bounded errors. Pagination cursors bind query,
   descriptor, generation, and ordering; cancellation cannot publish partial
   extraction or mutation state.
+
+### Code-search chunk and projection contract
+
+PR9 lands the stable values in
+`crates/tracedecay-domain/src/code_intelligence/search.rs` and the initial
+implementation in `src/code_index/`. If the Plan 19 extraction gate approves a
+separate crate, move that module tree to
+`crates/tracedecay-code-index/src/` without changing these values or ports.
+
+The domain contract is:
+
+```rust
+pub struct CodeSearchDocumentV1 {
+    pub generation_id: CodeGenerationId,
+    pub file_occurrence_id: FileOccurrenceId,
+    pub content_digest: ContentDigest,
+    pub eligibility: CodeSearchEligibilityV1,
+    pub chunk_ids: Vec<CodeSearchChunkId>,
+}
+
+pub enum CodeSearchChunkGrainV1 {
+    SymbolSignature,
+    SymbolBody,
+    SymbolMember,
+    FilePreamble,
+    FileWindow,
+}
+
+pub struct CodeSearchChunkAnchorV1 {
+    pub generation_id: CodeGenerationId,
+    pub file_occurrence_id: FileOccurrenceId,
+    pub symbol_occurrence_id: Option<SymbolOccurrenceId>,
+    pub parent_chunk_id: Option<CodeSearchChunkId>,
+    pub source_span: SourceSpan,
+    pub grain: CodeSearchChunkGrainV1,
+    pub ordinal: u32,
+}
+
+pub struct CodeSearchChunkV1 {
+    pub id: CodeSearchChunkId,
+    pub anchor: CodeSearchChunkAnchorV1,
+    pub content_digest: ContentDigest,
+    pub language_descriptor_revision: LanguageDescriptorRevision,
+    pub chunker_revision: ChunkerRevision,
+    pub sanitizer_revision: SanitizerRevision,
+    pub sensitivity: SensitivityDecision,
+    pub exact_terms: Vec<ExactTechnicalTermV1>,
+    pub sanitized_text: BoundedSanitizedText,
+}
+
+pub struct ChangedCodeChunkSetV1 {
+    pub from_generation: Option<CodeGenerationId>,
+    pub to_generation: CodeGenerationId,
+    pub manifest_digest: ManifestDigest,
+    pub added_or_changed: Vec<ChangedCodeChunkV1>,
+    pub deleted: Vec<ChangedCodeChunkV1>,
+    pub reused: Vec<ChangedCodeChunkV1>,
+}
+
+pub struct ChangedCodeChunkV1 {
+    pub chunk_id: CodeSearchChunkId,
+    pub prior_digest: Option<ContentDigest>,
+    pub current_digest: Option<ContentDigest>,
+}
+
+pub struct ProjectionBatchRequestV1 {
+    pub request_digest: ManifestDigest,
+    pub changes: ChangedCodeChunkSetV1,
+    pub previous_projection_key: Option<ProjectionKeyV1>,
+    pub target_projection_key: ProjectionKeyV1,
+    pub replay_reason: ProjectionReplayReasonV1,
+}
+
+pub struct CodeChunkProjectionReceiptV1 {
+    pub projection_key: ProjectionKeyV1,
+    pub request_digest: ManifestDigest,
+    pub prior_generation: Option<CodeGenerationId>,
+    pub source_generation: CodeGenerationId,
+    pub source_manifest_digest: ManifestDigest,
+    pub chunk_id: CodeSearchChunkId,
+    pub prior_chunk_digest: Option<ContentDigest>,
+    pub current_chunk_digest: Option<ContentDigest>,
+    pub operation: ProjectionOperationV1,
+    pub outcome: ProjectionOutcomeV1,
+    pub output_digest: Option<ContentDigest>,
+}
+
+pub struct ProjectionBatchReceiptV1 {
+    pub target_projection_key: ProjectionKeyV1,
+    pub request_digest: ManifestDigest,
+    pub source_generation: CodeGenerationId,
+    pub source_manifest_digest: ManifestDigest,
+    pub receipts: Vec<CodeChunkProjectionReceiptV1>,
+    pub reused_count: u64,
+    pub publication_digest: ManifestDigest,
+}
+```
+
+- `CodeSearchDocumentV1` is one generation-bound file manifest and the
+  scheduling/checkpoint unit; chunks are the projection and receipt unit.
+  Document eligibility changes expand into explicit chunk changes before a
+  projector runs.
+- `CodeSearchChunkId` is the digest of repository identity, file logical
+  identity, optional symbol logical identity, grain, structural split path (or
+  fallback window start/size), and chunker revision. Generation and content
+  digest are excluded: `(CodeGenerationId, CodeSearchChunkId)` is the exact
+  occurrence key, while a digest change classifies an upsert and a move/rename
+  or structural-boundary change classifies delete-plus-add. Extractor
+  enumeration order and mutable line numbers cannot affect identity.
+- `ProjectionKeyV1` contains projection kind, projection schema revision, and a
+  canonical profile digest. Plan 31's `EmbeddingProjectionKeyV1` is the typed
+  semantic profile whose canonical digest occupies that field; adapters cannot
+  define a second projection-key identity.
+- Symbol signatures and bodies are separate grains. Members become child
+  chunks only when the language descriptor identifies stable member spans.
+  Oversized bodies split on deterministic structural boundaries; if none are
+  available, fixed byte windows with pinned size/overlap are used. File
+  preambles cover imports/module documentation. File windows cover otherwise
+  unowned sanitized ranges. Every eligible sanitized byte is covered by a
+  declared chunk or an explicit unsupported/excluded range.
+- `exact_terms` classifies whole symbols, qualified names, paths, compiler and
+  runtime error codes/text, CLI flags, tool names, and configuration keys.
+  Whole exact terms and language-profiled subtokens are distinct fields. This
+  is extraction evidence only; Plan 05 applies Plan 15's protected lexical
+  policy.
+- `src/code_index/chunks.rs` builds chunks and their parent/child hierarchy.
+  `src/code_index/incremental.rs` compares ordered manifests by typed ID and
+  digest. `src/code_index/projection.rs` exposes
+  `CodeChunkProjectionSink::project_changed_chunks(ProjectionBatchRequestV1)
+  -> ProjectionBatchReceiptV1` and validates returned receipts.
+  `src/code_index/capabilities.rs` emits
+  `CodeIndexCapabilityManifestV1`.
+- The mandatory base capability manifest pins code generation, chunk schema/chunker and
+  language-descriptor revisions, available grains and exact-term fields,
+  supported languages, graph edge-authority classes, privacy domain/key epoch,
+  source coverage, exclusions, partial states, and manifest digest. Consumers
+  must reject a missing, incompatible, mixed-generation, or unauthorized
+  base manifest before candidate production. Plan 31's optional semantic
+  manifest augments this base; its absence cannot block authorized
+  lexical/graph retrieval.
+- A no-op generation emits empty `added_or_changed` and `deleted` sets plus
+  explicit `reused` counts and causes zero projection calls. An edit reprojects
+  only changed symbol chunks, affected ancestors/file windows, and explicit
+  deletions. Grammar, chunker, sanitizer, identity, or privacy incompatibility
+  emits a full-rebuild reason rather than disguising all chunks as ordinary
+  edits.
+- Projection receipts are deterministic apart from store-owned operational
+  timestamps, which are excluded from receipt identity and digest. Publication
+  rejects duplicate, missing, extra, cross-generation, wrong-digest, or
+  wrong-projection-key receipts. Failed or partial receipt sets remain
+  inspectable but cannot activate a projection generation.
+- Invalidation is field-specific: source content, language descriptor,
+  extractor, sanitizer, sensitivity, or chunker changes rebuild canonical
+  documents/chunks; projection-profile changes replay retained eligible chunks
+  without parsing; query/fusion/diversity/rerank/hydration profile changes
+  invalidate only query/session caches. Privacy-domain or key-epoch changes
+  rebuild canonical eligibility when policy output changes and always create a
+  new projection plus zero cross-epoch cache reuse.
 
 ### Generations and incremental reuse
 
@@ -162,9 +343,97 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 - Preserve source generation and migration provenance, rebuild deterministic V2 identities, and verify counts and digests before publication.
 - Never open a V1 database from the indexer.
 
+## PR9 implementation phases and verification
+
+`tests/code_index_suite/main.rs` is the Cargo integration-test entrypoint and
+declares every `tests/code_index_suite/*.rs` module named below.
+
+1. **Contracts and intake:** add
+   `crates/tracedecay-domain/src/code_intelligence/{mod.rs,search.rs,index.rs}`
+   with the search values above plus `SanitizedCodeSnapshotV1`,
+   `CodeGenerationManifestV1`, `ExtractionBatchV1`, `SymbolLineageCandidateV1`,
+   `GenerationDiagnosticV1`, and `GenerationTestAttributionV1`. Add
+   `src/code_index/intake.rs` with
+   `CodeIndexIntake::validate(SanitizedCodeSnapshotV1)
+   -> ValidatedCodeSnapshotV1`. Tests:
+   `crates/tracedecay-domain/tests/code_search_contract.rs` and
+   `tests/code_index_suite/sanitized_intake.rs`.
+2. **Language registry, extraction, and chunks:** add
+   `src/code_index/{languages.rs,extract.rs,chunks.rs,capabilities.rs}`.
+   `languages.rs` owns `LanguageDescriptorV1` and the complete extractor port
+   `LanguageExtractor::extract(&ValidatedCodeFileV1,
+   &LanguageDescriptorV1, &CancellationToken)
+   -> Result<ExtractionBatchV1, ExtractionFailureV1>`; descriptors, not
+   extractors, select grammars and capabilities. Tests:
+   `tests/code_index_suite/language_registry.rs`,
+   `deterministic_extraction.rs`, and `search_chunks.rs`, covering descriptor
+   aliases, parse errors, cancellation, caps, every chunk grain, exact terms,
+   structural fallback, unsupported ranges, ordering, and capability digests.
+3. **Generations, incrementality, and lineage:** add
+   `src/code_index/{generation.rs,incremental.rs,lineage.rs}` with
+   `GenerationPlannerV1`, `GenerationSealV1`, and `LineageEvidenceV1`. Tests:
+   `tests/code_index_suite/generations.rs`,
+   `chunk_incremental.rs`, and `lineage.rs`, covering no-op, one-symbol and
+   preamble edits, rename, move, deletion, split/merge, ambiguity/abstention,
+   chunker/grammar/privacy invalidation, sealing, and mixed-snapshot rejection.
+4. **Git, diagnostics, and test joins:** add
+   `src/code_index/{git_join.rs,diagnostics.rs,test_attribution.rs}` with
+   `GenerationGitJoinV1`, `GenerationDiagnosticJoinV1`, and
+   `GenerationTestJoinV1`. Tests:
+   `tests/code_index_suite/git_joins.rs`,
+   `diagnostic_generation.rs`, and `test_attribution.rs`, covering
+   working/staged/range hunks, mismatch/binary/rename/deletion cases, current/
+   stale/cleared diagnostics, and every declared attribution evidence class.
+5. **Projection boundary:** add `src/code_index/projection.rs`; implement
+   in-memory conformance fixtures that return reordered, duplicate, missing,
+   extra, wrong-generation, and wrong-digest receipts in
+   `tests/code_index_suite/projection_receipts.rs`. These tests must pass
+   without importing `fastembed` or a concrete store adapter.
+6. **V1 migration:** add `src/code_index/v1_import.rs` with
+   `V1CodeBatchConsumer::rebuild(V1SanitizedCodeBatchV1)
+   -> Result<CodeGenerationManifestV1, V1CodeImportErrorV1>`. Test counts,
+   digests, duplicates, unsupported rows, cancellation, and the no-database-
+   open boundary in `tests/code_index_suite/v1_migration.rs`.
+7. **Measurement:** add `benches/code_index_chunks.rs` and
+   `benchmarks/pr9-code-index/{workload-v1.json,expected-v1.json,README.md}`.
+   Record clean, warm one-file, deletion, no-op, chunker/model-key replay, and
+   incompatible full-rebuild cases at current and 10x corpus sizes. Report
+   files parsed, chunks added/changed/deleted/reused, projection calls, bytes,
+   wall time, CPU, and peak RSS separately; PR20 owns later end-to-end resource
+   budgets and Plan 15 owns quality interpretation. The workload manifest pins
+   exact file/byte/chunk counts, content and descriptor digests, language
+   strata, seed, runtime/hardware manifest, and cache state. Each case runs 5
+   untimed warmups plus 30 measured repetitions and retains all samples.
+
 ## Acceptance
 
 - Identical sanitized fixtures produce byte-identical logical rows and generation digests across repeated and supported-host runs.
+- Repeated runs and shuffled extractor output produce byte-identical chunk
+  manifests, capability manifests, chunk IDs, parent/child links, and receipt
+  identity digests.
+- Fixtures prove line-number and extractor-order changes do not alter
+  `CodeSearchChunkId`, a content-only edit keeps the logical chunk ID and
+  changes its digest, and move/rename or structural split-boundary changes emit
+  explicit delete-plus-add entries.
+- Every eligible chunk names exactly one code generation and file occurrence;
+  symbol grains also name the generation-local symbol occurrence. Mixed-
+  generation manifests or receipts are rejected before publication.
+- Golden fixtures cover all five grains, deterministic oversized-symbol
+  splitting, file-range coverage, unsupported/excluded ranges, and exact-term
+  classification for a qualified symbol, compiler error, runtime error, CLI
+  flag, tool name, and configuration key.
+- No-op fixtures make zero projection calls. A one-symbol edit reports only
+  that symbol's changed signature/body/member chunks, affected parent/file
+  chunks, and deletions; every unrelated chunk remains in `reused` with the
+  same ID and digest. A model-only projection-key change replays all eligible
+  chunks without invoking parser or extractor fixtures.
+- Receipt conformance rejects missing, duplicate, extra, reordered-without-
+  canonicalization, wrong-request, wrong-prior/current-generation,
+  wrong-digest, and wrong-key receipts; cancellation or failure activates no
+  projection generation.
+- Split-adapter tests keep canonical chunks, lexical postings, graph evidence,
+  and projection receipts in separate in-memory stores and return the same
+  identities and manifests, proving no table or embedding runtime is authority.
 - One-file edits reparse only changed sanitized content/descriptor inputs and
   recompute only evidence-invalidated relation/attribution closures; reports
   separate parse work, resolution work, invalidation fan-out, reuse, and any
@@ -180,17 +449,25 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
   rename, deletion, ambiguous lineage, and missing-generation cases remain
   explicit. Caller, hazard, and affected-test results retain their own graph and
   test-evidence provenance rather than inheriting certainty from the Git hunk.
-- TaskId-linked fixtures resolve exact generation/occurrence evidence through
-  Plan 13 anchors, remain losslessly expandable, and introduce no task-owned
-  rows or task authority into the code index.
+- At the PR17 extension gate, TaskId-linked fixtures resolve exact generation/
+  occurrence evidence through Plan 13 anchors, remain losslessly expandable,
+  and introduce no task-owned rows or task authority into the code index; they
+  are not a PR9 completion gate.
 - Canonical descriptor fixtures prove analyzer routing and host LSP projection
   use the same extension, language-ID, root-marker, and capability facts without
   copying executable commands or settings into this boundary.
-- Dirty-overlay fixtures create no durable generation rows, while matching
-  saved content preserves producer provenance through capture and publication.
+- Unsaved per-client LSP overlay fixtures create no durable generation rows.
+  Sanitized dirty-worktree snapshots remain eligible for their own bounded
+  durable generation, and matching saved content preserves producer provenance
+  through capture and publication.
 - Crash, cancellation, disk-full, stale-snapshot, and concurrent-build tests publish either one complete generation or none.
 - V1 fixtures migrate through logical batches with no indexer database open and no lost or duplicate supported records.
-- Direct behavior tests prove capture is the only intake and store/projector composition is the only publication path.
+- `tests/code_index_suite/architecture_boundaries.rs` constructs the indexer
+  only through `CodeIndexIntake` and `CodeChunkProjectionSink`, while
+  `tests/architecture_boundaries.rs` rejects filesystem, database, model-
+  runtime, and transport imports from the module; together they enforce capture
+  as the only intake and store/projector composition as the only publication
+  path.
 - Focused non-indexing package checks do not compile Tree-sitter grammars or
   structural-search implementation, and PR9 publishes the compilation baselines
   required for PR20 comparison.

@@ -132,6 +132,350 @@ Every operational and product metric states what was measured, over which popula
   precision, verifier exploit success, false accept/reject, legitimate-solver
   retention, and reviewer independence/conflict.
 
+### Concrete event and type contract
+
+The canonical domain contract lives in
+`crates/tracedecay-domain/src/observability/mod.rs`,
+`crates/tracedecay-domain/src/observability/retrieval.rs`,
+`crates/tracedecay-domain/src/observability/adoption.rs`,
+`crates/tracedecay-domain/src/observability/performance.rs`, and
+`crates/tracedecay-domain/src/observability/attestation.rs`.
+`crates/tracedecay-store/src/observation/telemetry.rs` persists the common
+envelope, `crates/tracedecay-store/src/observation/telemetry_projection.rs`
+builds denominator-safe read models, and
+`crates/tracedecay-store/src/observation/telemetry_retention.rs` applies the
+retention policy. `src/application/observability/{mod,record,query,privacy}.rs`
+is the only application write/query boundary. Product owners instrument their
+own paths and emit these types; they do not add another counter store.
+
+`ObservabilityEnvelopeV1` contains `event_id`, `event_kind`,
+`schema_revision`, `idempotency_key`, opaque local `trace_id`, authorized
+`scope_ref`, capability and operation enums, event and observation time,
+duration or quantity and unit, terminal result, producer/configuration/policy/
+privacy revisions, watermark, `CoverageStateV1`, sampling probability,
+retention class, and emitted/delayed/dropped counts. `CoverageStateV1` is
+exactly `Known | Partial | Stale | Unknown | Sampled | Capped`. Attempts and
+terminal events have different idempotency identities.
+
+`PerformanceMeasurementDescriptorV1`, `BenchmarkRunAggregateV1`,
+`PairedEffectEstimateV1`, and `PerformanceDispositionV1` are defined in
+`performance.rs`; `BenchmarkBaselineAttestationV1`,
+`BenchmarkComparisonAttestationV1`, and their
+`BenchmarkAttestationV1` enum are defined in `attestation.rs`.
+
+The minimum cross-cutting V1 event payloads added by this plan are:
+
+- `RetrievalQueryObservedV1` (`retrieval.query.completed.v1`);
+- `RetrievalPlannerObservedV1` (`retrieval.planner.decided.v1`);
+- `RetrieverObservedV1` (`retrieval.retriever.completed.v1`);
+- `RetrievalSynthesisObservedV1` (`retrieval.synthesis.completed.v1`);
+- `RetrievalSourceObservedV1` (`retrieval.source.observed.v1`);
+- `ContextOutcomeObservedV1` (`retrieval.context.outcome_linked.v1`);
+- `RetrievalAblationObservedV1` (`retrieval.ablation.measured.v1`);
+- `AdoptionEligibilityObservedV1` (`adoption.eligibility_observed.v1`);
+- `AdoptionOutcomeLinkedV1` (`adoption.outcome_linked.v1`);
+- `AnalyticsConsentChangedV1` (`analytics.consent.changed.v1`);
+- `OperationResourceObservedV1` (`operation.resource.completed.v1`);
+- `NoProgressObservedV1` (`operation.no_progress.terminal.v1`);
+- `WorkflowRunSourceEventV1`, `WorkflowStageSourceEventV1`,
+  `WorkflowEffectSourceEventV1`, `WorkflowRouteSourceEventV1`, and
+  `WorkflowRecoverySourceEventV1`, emitted by Plan 32 for run terminal,
+  budget exhaustion, queue/backpressure, progress timeout, cancellation,
+  effect, retry/recovery, requested/actual route, recursive-dispatch
+  rejection, and fan-out observations;
+- `BenchmarkRunAttemptedV1`, `BenchmarkRunTerminalV1`,
+  `BenchmarkAttestationRecordedV1`, `BenchmarkBaselineAcceptedV1`,
+  `BenchmarkBaselineRevokedV1`, and `BenchmarkAttestationSupersededV1`; and
+- `TelemetryDropObservedV1` (`telemetry.drop.observed.v1`).
+
+Plans 35–37 and every other owning slice define their additional exhaustive
+source-event enum in that slice while using `ObservabilityEnvelopeV1`; omission
+from this minimum list is not permission to emit an untyped counter.
+Every listed event has canonical serialization and digest fixtures in
+`crates/tracedecay-domain/tests/observability_contract.rs`; persistence,
+replay, late arrival, and retention fixtures live in
+`crates/tracedecay-store/tests/observability_projection.rs`.
+Each producer has a saturating in-memory atomic drop count and one reserved
+control-lane slot outside the fixed data queue. The next accepted envelope and
+shutdown flush carry the accumulated count; `TelemetryDropObservedV1` uses the
+reserved slot. A full telemetry queue therefore cannot hide its own drops, and
+the counter is not another durable event store. Envelopes also carry a process
+boot identity and producer sequence. A boot without a clean terminal envelope
+marks coverage from its last persisted sequence through restart `Unknown` and
+reports only the proved drop lower bound; abrupt process loss never renders as
+zero drops.
+
+### Retrieval, planner, and context measurement
+
+[Plan 15](15-search-quality-evaluation-and-retrieval-research.md) owns search
+labels and quality promotion. This plan owns their event schema and read model.
+[Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md) owns task
+planning and outcome identity, while
+[Plan 32](32-dynamic-workflow-runtime-and-sdk.md) owns actual scheduling and
+runtime receipts. Requested and actual selection, fan-out, route, and outcome
+therefore remain separate observations.
+
+`RetrieverObservedV1` references Plan 15's canonical `RetrieverKind` exactly:
+`ExactLiteral | Lexical | Semantic | Graph | Temporal | TaskSession |
+Diagnostic`. Phrase, BM25, typo recovery, exact flat scan, and ANN are
+versioned implementation/profile dimensions inside those lanes; reranking is
+a composition stage, not another retriever.
+`RetrievalQueryObservedV1` records the pinned query snapshot and profile
+revisions, `RetrievalQueryFamilyV1`, authorized scope class, enabled lane set,
+scheduled/start/terminal times, total candidate/context/token budgets,
+answered/abstained/partial/denied/terminal result, source and lane coverage,
+planner/synthesis trace references, emitted/delayed/dropped coverage, and no
+query bytes or reversible query digest.
+`RetrievalQueryFamilyV1` is `ExactTechnical | Phrase | NaturalLanguage | Typo |
+Temporal | Graph | TaskSession | Diagnostic | NoAnswer | Unknown`; adding or
+reinterpreting a family increments the schema revision, and an unrecognized
+value decodes only as `Unknown`, never into another cohort.
+`RetrieverObservedV1` records retriever/profile revision, requested and
+consumed candidate budget, raw/eligible/deduplicated/returned candidate
+counts, budget/cutoff reason, queue/I/O/parse/model/rank duration, final-top-k
+and unique contribution counts, and fixed rank buckets `1`, `2..3`, `4..5`,
+`6..10`, `11..25`, `26..50`, and `over_50`. Labeled evaluation additionally
+records oracle Recall@N, first-useful rank, relevant selected count, and
+marginal Recall@K/nDCG@10. Online traffic without a pinned oracle records those
+fields as unavailable, never zero.
+
+At most ten `CandidateRankContributionV1` entries are retained per query.
+Only candidates already authorized for the requester may enter this list.
+Each contains only an authorization-bound anchor reference, retriever,
+pre-rerank and final rank, exact-tier flag, and one
+`ContributionKindV1`: `Selected | DuplicateSuppressed | StaleRejected |
+BudgetTruncated | RerankedOut`. A denied or forbidden candidate leaves no
+anchor, count, rank, cache, event, aggregate influence, or explanation.
+Wrong-scope and authorization-leakage rates are computed only inside Plan
+15's sanitized authorized evaluation harness and exported as run-level
+metrics without candidate references. Raw query or source text, snippets,
+scores, logits, margins, embeddings, paths, symbols, or provider payloads are
+forbidden. An admitted anchor is a local join key and never an export or
+dashboard grouping key.
+
+`RetrievalPlannerObservedV1` records eligible, selected, and excluded
+retriever enums with typed reasons; requested/admitted/deferred fan-out;
+source and shard counts; candidate/token/time budgets; and selection plus
+queue duration. `RetrievalSynthesisObservedV1` records actual fan-out, union,
+deduplicated, stale, and final authorized counts; operation-level denied lane
+outcomes without candidate counts; per-retriever final contribution; fan-out
+wait, merge, dedupe, rerank, hydration, render,
+synthesis, critical-path, and total duration; cancellation; and partial/budget
+state. Instrumentation is implemented in
+`src/application/retrieval/pipeline.rs`,
+`src/query/retrieval/{exact,lexical,semantic,graph,temporal,task_session,diagnostic,fusion,dedupe,diversity,rerank,hydrate}.rs`,
+and the existing `src/query/temporal/` kernel through its temporal adapter.
+
+Source availability, authorization, and coverage are orthogonal.
+`RetrievalSourceAvailabilityV1` is `Unsupported | Absent | Indexing |
+Available | Cancelled | TimedOut | Failed`;
+`RetrievalFreshnessV1` is `Current | Stale | Unknown`;
+`AuthorizationOutcomeV1` is `Allowed | Denied`; and coverage uses
+`CoverageStateV1`. `RetrievalSourceObservedV1` records only cataloged source
+kind, authority class, generation digest, watermark, fixed freshness bucket,
+eligible/searched/returned counts for allowed access, the four states, typed
+operation-level denial reason, and drop count. For `Denied`, all source and
+candidate counts, generation, watermark, and freshness are unavailable so the
+event cannot reveal source or candidate existence. Denial never becomes
+absence, stale evidence never becomes an empty result, and complete zero-match requires
+`Available + Current + Allowed + Known`.
+
+`ContextOutcomeObservedV1` binds the retrieval profile, context packet,
+authorized work/attempt and outcome-label revisions. It records required,
+available, included, cited, independently verified relevant, labeled
+irrelevant, stale, truncated, and unknown authorized anchor counts plus one
+operation-level denial outcome with no candidate/anchor cardinality; presented and
+used tokens/bytes; Precision@1/3/5 and required-anchor coverage where labels
+exist; time to first valid action; rediscovery reads/searches/tests/tokens;
+first-pass status; review independence; accepted correctness; rework; and
+outcome coverage. `ContextSupplied | EvidenceCited |
+IndependentlyVerifiedUse | NoUseObserved` describes linkage, not causality.
+Plan 32 `Completed` and worker self-report cannot produce Plan 26 `Accepted`.
+Plan 24 context packets additionally report count and token/byte distributions
+by its closed work class and fixture-size stratum, using fixed packet buckets
+`0`, `1..1024`, `1025..4096`, `4097..16384`, `16385..65536`, and
+`over_65536`; no work title, payload, path, or task identity becomes a metric
+label.
+
+`RetrievalAblationObservedV1` pins evaluation run, partition, query stratum,
+baseline/candidate profile, oracle/label revisions, enabled retrievers, and
+equal total and per-retriever candidate budgets. Allocation and redistribution
+rules freeze before the run; unused budget is not silently moved. It reports
+Plan 15 Precision@1/3/5, Recall@5/10, MRR, nDCG@10, first-useful rank,
+no-answer precision, duplicate/wrong-scope rates, risk/coverage, AURC,
+candidate oracle Recall@N before reranking, p50/p95/p99 latency, process-tree
+RSS/PSS and separately named cgroup/container high-water evidence, support,
+interval, coverage, and disposition. Exact flat-vector scan remains the ANN
+oracle. Fixtures live in
+`tests/observability_suite/{retrieval,context_outcomes,ablation}.rs`.
+
+### Privacy-safe adoption and retention
+
+`AnalyticsModeV1` is `Off | LocalOnly | AggregateShare`; `LocalOnly` is the
+default and `AggregateShare` requires explicit opt-in. `Off` prevents optional
+adoption event serialization, projection, and egress. Mandatory operational
+and audit receipts, Plan 24 outcome evidence, and Plan 32 run/effect history
+remain under their owning entity lifetime and deletion contracts; they cannot
+be disabled without breaking product authority, are excluded from adoption
+read models in `Off`, and are never exported by adoption analytics.
+`LocalOnly` permits authorized local drill-down and has no network exporter.
+`AggregateShare` emits weekly aggregate contribution
+packets without anchors or stable installation, actor, user, project,
+repository, session, trace, task, or operation identity.
+
+The adoption funnel is `Eligible -> Enabled -> Available -> Invoked ->
+Terminal -> IndependentlyUseful -> RepeatUseful`. Every stage reports both its
+previous-stage and original-eligible denominator, exclusions, unknown and
+censored counts, watermark, horizon, coverage, and interval. Repeat useful use
+means another independently useful outcome in a later seven-day window;
+28-day retained useful use is a separate projection. Display, click, raw
+invocation, process completion, self-report, cards closed, tests run, token
+volume, and subjective trust are never product-success outcomes. Search uses
+Plan 15 relevance/correct-abstention labels; task adoption uses Plan 24 work
+identity and the canonical outcome labels below.
+
+Retention classes are `OptionalLocalDetail30d`, `PrivateBenchmarkRaw30d`,
+`LocalRollup395d`, `ShareStaging24h`, `OwningEntityLifetime`, and
+`PromotedBenchmarkAggregate`. Opt-out stops egress synchronously before its
+configuration receipt returns and purges share staging in the same daemon
+transaction; local deletion tombstones or crypto-shreds optional adoption
+observations and rollups within 24 hours. Backup copies expire within 30 days.
+Sanitized benchmark aggregates survive only when the user explicitly promotes
+them; private raw benchmark evidence expires after 30 days unless a shorter
+project retention applies. Already unlinkable shared
+aggregates cannot be retracted, and that limitation is disclosed before
+opt-in.
+
+`crates/tracedecay-store/src/observation/telemetry_retention.rs` owns one
+hourly daemon sweep with a persisted per-authority watermark, idempotent
+tombstone/crypto-shred receipt, bounded batch and retry, and restart resume.
+Opt-out destroys the optional-detail and share-staging encryption keys in its
+configuration transaction, so daemon downtime cannot restore access; the
+sweep physically removes unreadable rows within 24 hours of cumulative daemon
+availability. A missed physical deadline or failed backup-expiry receipt is a
+Plan 14 Doctor finding and keeps aggregate sharing disabled.
+
+Local views collapse cells below five eligible units. A rate requires at least
+20 eligible units and 90% observed coverage. Exact route/model comparisons
+require at least 30 eligible outcomes, 90% outcome coverage, no more than 10%
+censoring, and no unresolved cohort/version shift. Shared cells require at
+least 100 contribution-windows, permit at most four dimensions, and cap each
+installation at one contribution per capability/outcome/day. Shared
+dimensions are only cataloged capability (maximum 64), surface, host family,
+major/minor product version, OS family, outcome class, coverage class, and
+eight fixed latency buckets. Unknown remains `unknown`; overflow becomes
+`other`. Active-user and active-project denominators are local-only because
+shared packets contain no stable identity.
+
+No event, local aggregate, export, or drill-down contains query text, prompts,
+source, snippets, symbols, paths, diagnostic or error messages, review bodies,
+private session content, hidden reasoning, patches, commit messages, authors,
+conflicts, argv/stdin values, stdout/stderr, environment values, secrets,
+hostnames, CI logs, raw provider payloads, free-form labels, or reversible
+digests of them. Events permit at most 16 retriever/source rows and 32
+`SpanStageV1` rows; overflow aggregates into an `other` cell and sets coverage
+to `Capped`. A descriptor/horizon retains at most eight local grouping
+dimensions, 4,096 local cells per daily bucket, and 1,024 catalog identities
+per projection epoch; overflow aggregates into `other` while exact details
+remain only in authorized owning history. Queries return at most 256 cells.
+Exact provider/model/executable versions are catalog IDs and remain authorized
+local dimensions.
+
+Privacy/configuration and retention operations are implemented in
+`src/application/observability/privacy.rs`. The shared aggregate serializer is
+`src/application/observability/adoption_share.rs`. Secret-canary, mode,
+suppression, purge, backup-expiry, and no-egress fixtures live in
+`tests/observability_suite/{privacy,adoption,retention,aggregate_share}.rs`.
+
+### Resource accounting and benchmark evidence
+
+`OperationResourceObservedV1` records p50/p95/p99-eligible scheduled-arrival
+and service latency; closed `SpanStageV1` queue, store-lock, index-lock, I/O,
+parse, projection, model, rank, merge, hydration, synthesis, render, persist,
+provider-discovery, provider-negotiation, lease-to-start, context-assembly,
+event-ingestion, first-progress, cancellation, terminal, reconnect, and resume
+spans; baseline/peak/steady process-tree RSS and PSS plus separately named
+container/cgroup high-water evidence; live heap, allocation churn, retained/
+fragmented, SQLite-cache, queue/result/generation bytes; user/system CPU;
+temporary/database bytes and read/write amplification; input/output/reasoning/
+cache tokens; cost amount/currency/pricing revision; and attempted, committed,
+reconciled, unknown, prevented-duplicate, and retried effects. Token and cost
+values carry `ProviderReported | LocallyMeasured | Estimated | NotApplicable |
+Unknown`.
+Correctness, safety, latency, resources, tokens, cost, autonomy, and effects
+remain separate dimensions.
+
+Plan 32 owns `MonotonicRunDeadline`,
+`ConcurrencyPolicyV1.no_progress_timeout`, `ProgressFrontier`, and cancellation
+escalation. `NoProgressObservedV1` records the pinned run-deadline identity,
+concurrency-policy digest, workflow stage, configured timeout, last committed
+frontier and elapsed stall, remaining monotonic run budget, escalation action,
+and terminal/effect-reconciliation outcome. A heartbeat never advances the
+frontier. Plans 26 and 33 may evaluate timeout precision and resource impact
+but cannot create another deadline, reset rule, timer, or escalation policy.
+
+`BenchmarkAttestationV1` is an enum. `BenchmarkBaselineAttestationV1` contains
+one subject commit/tree/content identity, suite, supported baseline decision,
+population/unit/horizon, workload/corpus/environment/oracle/harness/clock/
+schema/configuration/threshold digests, protocol, raw lineage, coverage,
+correctness gates, and evidence grade. Baseline acceptance is not an embedded
+boolean; it is the separate CAS transition event below.
+`BenchmarkComparisonAttestationV1` adds an independently accepted baseline
+attestation reference, candidate identity, paired outcomes and ablations, and
+`promote | reject | insufficient_evidence`.
+Baseline lifecycle is `Recorded -> Accepted -> Superseded | Revoked`.
+Acceptance, supersession, and revocation require expected attestation revision,
+actor, reason, and compare-and-swap receipt. A comparison pins the exact
+accepted baseline revision and prior accepted rollback profile. Revocation
+before a comparison decision invalidates that comparison; later revocation
+preserves the historical decision but blocks new promotion and rollout.
+`BenchmarkAttestationSupersededV1` names the replacement baseline and every
+comparison made ineligible.
+`EvidenceGradeV1` is:
+
+- `Clean`: immutable clean subject trees, verified digests and raw aggregate
+  lineage, required platforms/strata/support/coverage, acceptable A/A noise,
+  frozen thresholds and intervals, and a valid measurement protocol;
+- `Provisional`: structurally valid and privacy-safe, but dirty tree, missing
+  required platform or confirmation cohort, insufficient tail support,
+  excessive censoring/noise, estimated required resource evidence, or partial
+  coverage; its disposition is always `insufficient_evidence`; or
+- `Rejected`: placeholder or invalid digest, missing/fabricated baseline,
+  mismatched comparison identity, absent lineage, post-result threshold
+  change, coordinated-omission/survivor-bias defect, protected-stratum hiding,
+  or leakage from the evidence collection/artifact itself.
+
+A clean attestation may still disposition `reject`; clean describes evidence
+integrity, not candidate quality. A measured candidate correctness, privacy,
+authorization, or recovery failure is clean evidence with `reject` and also
+triggers the hard rollback gate. Plan 15 outcomes map without loss:
+`invalid_run -> Rejected/insufficient_evidence`; `blocked`, `inconclusive`, and
+`runtime_fallback_observed -> Provisional/insufficient_evidence`;
+`rejected -> Clean/reject`; and `accepted -> Clean/promote`.
+
+`ProjectStoreLayout::benchmark_run_dir(suite_id, attestation_id)` owns local
+`manifest.json`, `runs.jsonl`, profiler artifacts, and private oracle
+references under the resolved project store. The search suite uses Plan 15's
+exact checked-in contract:
+`fixture-manifest-v1.json`, `queries-v1.jsonl`, `snapshots-v1.jsonl`,
+`judgments-development-v1.jsonl`, `locked-judgments-v1.json`,
+`temporal-events-v1.jsonl`, `context-spans-v1.jsonl`, `tasks-v1.jsonl`,
+`evidence-index.json`, `run-v1.json`, and `promotion-v1.json`, all under
+`benchmarks/search-quality/`. Sanitization replaces repository, branch,
+worktree, commit/tree/ref, snapshot, allowed-scope, query, anchor,
+contamination, prompt, and task identities with fixture-local random aliases;
+source/store/projection generations and watermarks, temporal event IDs,
+labeler/adjudicator provenance, authorized-store locators, profile/model/tool
+IDs, approval actors, and activation receipts are also replaced or omitted;
+the alias map and HMAC keys for authorized private-query/prompt locators remain
+only in the private oracle store. Checked-in values cannot be joined back to a
+local project without that authorized map. PR20 uses its exact Plan 33
+artifact paths. Evidence indexes contain safe aliases, digests, and
+authorization-bound anchors, never local paths or payloads. Classification,
+digest-mutation, baseline lifecycle/CAS, placeholder, threshold-freeze,
+privacy, and supersession fixtures live in
+`tests/observability_suite/attestation.rs`.
+
 ### Canonical review and outcome labels
 
 PR17 uses one Plan 26-owned label schema. Every label records schema revision,
@@ -193,6 +537,18 @@ queryable.
 - Ingest and projection lag by source, project, provider, and store authority.
 - Latency and availability SLOs with explicit eligible populations and failure classes.
 - Capability and surface adoption with active-user, active-project, and invocation denominators.
+- `retrieval-quality` shows per-retriever budgets, candidate/rank/contribution,
+  source freshness/coverage/denial, planner/fan-out/synthesis spans, context
+  precision, task-outcome linkage, and equal-budget ablations.
+- `adoption-outcomes` shows the outcome funnel, correct abstention,
+  independently useful and retained use; `adoption-coverage` shows eligible
+  versus observed, late/dropped/capped, suppression, and denominator failures;
+  `analytics-privacy` shows local mode, share staging age, retention/deletion,
+  and egress failures.
+- `performance-budgets` shows p50/p95/p99 with support and intervals,
+  queue/lock/provider spans, RSS/CPU/I/O, no-progress outcomes, and accepted
+  budget revision; `benchmark-attestations` shows clean/provisional/rejected
+  evidence separately from promote/reject/insufficient-evidence disposition.
 - Hint emission, delivery, action, usefulness, dismissal, and unknown-outcome funnels.
 - Appropriate-reliance views keep accepted-correct, accepted-incorrect,
   rejected-correct, rejected-incorrect, independently verified, override with
@@ -270,6 +626,15 @@ decision with collision, ambiguity, maintenance, and privacy review.
 - PR14 exposes shared typed read models through application queries and the
   then-shipped CLI, MCP, HTTP, and dashboard adapters. PR18 adds SDK adapters
   and parity when the official SDKs ship.
+- Backend adapters are `src/dashboard/observatory_api.rs` and
+  `src/dashboard/costs_api.rs`. The UI implementations are
+  `dashboard/observatory/src/{entry,api,types,ObservatoryPage}.tsx`,
+  `dashboard/observatory/src/{Retrieval,Adoption,Performance,Attestation}Panel.tsx`,
+  and `dashboard/costs/src/{entry,api,types,CostsPage}.tsx`. Dashboard formulas
+  are prohibited; these files render application read models.
+- Dashboard/API parity fixtures are
+  `tests/dashboard_api_test/{observatory,costs}.rs` and
+  `dashboard/test/{observatory,costs}.vitest.tsx`.
 - Every card, chart, and export shows scope, horizon, freshness, coverage, unit, and denominator.
 - Users can drill from an aggregate to safe trace or retrieval anchors and see why data is partial or unknown.
 - UI and transports consume the same values; none recompute business metrics locally.
@@ -284,6 +649,27 @@ decision with collision, ambiguity, maintenance, and privacy review.
   in PR14; PR18 SDK conformance adds the same parity fixtures for each shipped
   SDK.
 - Privacy fixtures prove events and drill-down anchors contain no prohibited raw content.
+- Retrieval fixtures prove per-retriever counts reconcile to planner and
+  synthesis totals; ranks and contribution cap deterministically; equal-budget
+  ablations cannot transfer unused budget; source state, authorization, and
+  coverage remain orthogonal; and missing labels make precision/contribution
+  unavailable rather than zero.
+- Context fixtures prove precision and required-anchor coverage link to exact
+  Plan 15 label and Plan 24 work/outcome revisions without claiming causality
+  or treating Plan 32 completion as acceptance.
+- Adoption fixtures prove `Off` and `LocalOnly` make no network request,
+  shared cells meet suppression/contribution caps, all rates satisfy support
+  and coverage floors, opt-out blocks egress before its receipt and purges
+  staging transactionally, deletion and backup expiry meet their 24-hour and
+  30-day bounds, and activity-only vanity metrics cannot render as useful
+  outcomes.
+- Resource fixtures reconcile scheduled-arrival latency, every span, RSS,
+  tokens/cost evidence class, and effect state; no-progress fixtures prove a
+  heartbeat alone cannot extend the progress frontier or synthesize success.
+- Attestation fixtures prove clean/provisional/rejected classification,
+  immutable digests, independent baseline lineage, frozen thresholds, no
+  fabricated or sentinel baseline, no coordinated omission, protected-stratum
+  visibility, and aggregate-only Git artifacts.
 - Plan 24 routing-review fixtures prove cohort eligibility, minimum sample and
   coverage, policy/evidence revisions, requested-versus-actual route,
   independent outcome evidence, exploration/fallback state, and override

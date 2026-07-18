@@ -252,6 +252,366 @@ Every user-visible operation has one direct typed application entry point. CLI, 
   application-test compilation before and after root orchestration moves.
   Regressions require an identified cause and explicit disposition.
 
+## Common result and evidence contracts
+
+PR11 seals all transport-neutral outcomes behind these application-owned
+contracts. Payload types are concrete per use case; no field accepts arbitrary
+`serde_json::Value`.
+
+```rust
+pub type ApplicationResult<T> =
+    Result<ApplicationEnvelope<T>, ApplicationProblemEnvelope>;
+
+pub struct ApplicationEnvelope<T> {
+    pub contract: ResultContractRef,
+    pub request_id: RequestId,
+    pub scope: ResolvedScope,
+    pub outcome: ApplicationOutcome<T>,
+}
+
+pub enum ApplicationOutcome<T> {
+    Evidence(EvidencePacket<T>),
+    Preview(PreviewResult<T>),
+    Effect(EffectResult<T>),
+}
+
+pub struct ApplicationProblemEnvelope {
+    pub contract: ResultContractRef,
+    pub request_id: RequestId,
+    pub problem: ApplicationProblem,
+}
+
+pub struct EvidencePacket<T> {
+    pub temporal: TemporalState,
+    pub authority: AuthorityReceipt,
+    pub evidence_authorities: Vec<EvidenceAuthority>,
+    pub coverage: Coverage,
+    pub omissions: Vec<Omission>,
+    pub scores: Vec<EvidenceScore>,
+    pub contributions: Vec<RetrieverContribution>,
+    pub page: PageState,
+    pub execution: OperationReceipt,
+    pub payload: Option<T>,
+}
+```
+
+`ResultContractRef` carries stable `schema_id` and `schema_revision`; a field
+cannot be removed, repurposed, or change enum/number/null semantics without a
+revision change.
+
+`TemporalState` records the requested mode (`Current`, `AsOf`, `Evolution`, or
+`Forensic`), requested and resolved horizons, source snapshot/generation,
+watermark, observed-at time, and freshness classification. `AuthorityReceipt`
+exists only after successful authorization and records decision/grant identity,
+revision/digest, authorized scope digest, disclosure class, and revalidation
+time. It never carries credentials or policy inputs.
+
+`Coverage` records requested evidence domains, visited/eligible/returned counts,
+completeness (`Complete`, `Partial`, or `Unknown`), bounded search horizon, and
+per-domain state. `Omission` records only an authorized requested domain, count,
+and one reason (`Budget`, `Redacted`, `Unavailable`, `Unsupported`, `Stale`,
+`Failed`, `Cancelled`, or `TimedOut`); it cannot identify a hidden resource.
+`EvidenceScore` preserves `ScoreKind` (`OrdinalRank`, `HeuristicScore`,
+`CalibratedProbability`, or `CalibratedInterval`), value or interval,
+calibration revision/validity, and deterministic components. Scores are
+optional evidence metadata, never authority or truth.
+
+`AuthorityReceipt` proves the caller's request authorization.
+`EvidenceAuthority` is separate claim/source authority keyed by
+`EvidenceIdentity` (or an explicit identity group) and records source kind,
+owner/producer, scope, revision, and authority horizon. It cannot grant access
+or runtime authority. Every evidence-bearing payload identity has exactly one
+matching authority record or a typed unknown-authority omission.
+
+Each `RetrieverContribution` records `RetrieverId`, contract and producer
+revision, requested domain, terminal state, coverage delta, returned and
+omitted counts, score references, provenance/anchor references, and elapsed
+budget class, plus claim-specific evidence-authority references. A contribution
+cannot claim broader coverage or authority than its source port reported. The
+packet-level coverage is a deterministic fold over these contributions;
+adapters and planners cannot recompute it.
+
+`PageState` carries stable order revision, total when known, returned count, and
+an optional authenticated opaque cursor bound to capability and use-case IDs,
+request digest, scope/grant digest, temporal horizon, source snapshot/generation
+and watermark, result-schema and sort revisions, last sort key, and expiry.
+Every resume reauthorizes before decoding or hydrating the next page.
+Scope/grant mismatch returns `NotFoundOrNotAuthorized` before any cursor-state
+detail. Concatenated pages must equal the same-snapshot bounded full result.
+
+Every returned item has a stable `EvidenceIdentity` within the pinned source
+snapshot, and every score has a stable `ScoreId` referencing one or more
+evidence identities. Contribution folding sorts by `(domain, retriever_id,
+evidence_identity)`, deduplicates identical evidence identities, and retains
+all distinct provenance/anchor refs. `returned` counts unique authorized
+evidence. Every contribution carries `CoveragePartitionId` plus its exact
+visited/eligible membership as a bounded exact `EvidenceIdentity` set, an
+explicit `DisjointFrom(Vec<CoveragePartitionId>)` proof with cardinality, or a
+typed unknown-overlap/cardinality state. Identity-set digests authenticate
+membership but never prove overlap by themselves. Packet `visited` and
+`eligible` are union cardinalities only when exact membership or disjointness
+proofs establish the union: disjoint partitions add, exact overlapping sets
+deduplicate by evidence identity, and any unproved overlap makes packet
+completeness/counts `Unknown` rather than using sum or maximum. Omission counts
+sum only disjoint omission partitions keyed by `(domain, reason,
+partition_digest)`. Conflicting payloads for one identity produce `Partial`
+coverage plus a conflict omission; they are never silently selected. Packet
+scores preserve all referenced score records in stable `ScoreId` order and do
+not average unlike score kinds.
+
+`OperationReceipt` records start/end, effective deadline, cancellation
+observation and stage, budget consumed, and one termination state. Commands use
+the stronger contract:
+
+```rust
+pub struct PreviewResult<T> {
+    pub preview_id: PreviewId,
+    pub preview_digest: PreviewDigest,
+    pub effect_class: EffectClass,
+    pub authority: AuthorityReceipt,
+    pub expected_state: ExpectedStateDigest,
+    pub execution: OperationReceipt,
+    pub payload: Option<T>,
+}
+
+pub struct EffectResult<T> {
+    pub effect_id: EffectId,
+    pub effect_class: EffectClass,
+    pub idempotency_key: IdempotencyKey,
+    pub authority: AuthorityReceipt,
+    pub expected_state: ExpectedStateDigest,
+    pub execution: OperationReceipt,
+    pub reconciliation: ReconciliationState,
+    pub receipt: EffectReceipt,
+    pub payload: Option<T>,
+}
+```
+
+`EffectReceipt` binds operation identity, request/actor/scope, effect class,
+idempotency identity, input and expected-state digests, policy/config/catalog/
+privacy revisions, committed state or external proof, and exactly one outcome:
+`Completed`, `Cancelled`, `TimedOut`, `Failed`, `Partial`, or `EffectUnknown`.
+Only `Completed` can claim success. Cancellation and deadline expiry report the
+last proven stage (`BeforeAdmission`, `BeforeRead`, `DuringRead`,
+`BeforeEffect`, `EffectInFlight`, `Reconciling`, or `AfterCommit`) and never
+rewrite a committed effect.
+
+Phase determines where terminal state is represented. Syntax, admission,
+authentication/authorization, scope, and precondition failures before an
+operation is admitted return `ApplicationProblemEnvelope`. Once a read is
+admitted, `Cancelled`, `TimedOut`, `Failed`, and `Partial` return an
+`EvidencePacket` with the true operation receipt, coverage, omissions, and
+contributions. Once a preview or effect is admitted, every terminal state
+returns `PreviewResult` or `EffectResult` with its canonical receipt;
+`EffectUnknown` is never a pre-admission problem. This rule prevents adapters
+from replacing admitted execution evidence with a transport error.
+`Completed` evidence with zero matches carries `Some(empty_collection)` plus
+complete coverage and no omissions. An admitted non-completed operation may
+carry `None` when no payload was produced or `Some(partial_payload)` when the
+receipt and coverage describe exactly what was produced. `None` is never
+rendered as a clean empty result.
+
+Resource-addressed authorization failure returns
+`ApplicationProblem::NotFoundOrNotAuthorized` before an evidence packet,
+cursor, count, timing detail, provider state, anchor state, or legal action is
+disclosed. The same problem code, terminality, retry class, safe message, and
+CLI/MCP/HTTP mapping apply whether the resource is absent, outside scope, or
+hidden by policy. Internal audit records may retain the denied decision under
+Plan 18, but public results cannot distinguish those causes.
+
+## Retrieval primitive ports and planner boundary
+
+PR11 defines no universal `RetrievalPrimitive`, generic evidence retriever,
+query bus, or capability-by-name call. It defines concrete use-case types:
+`SymbolSearch`, `SymbolExactLookup`, `QualifiedNameLookup`, `SignatureLookup`,
+`ImplementationLookup`, `TypeHierarchyRead`, `SourceLinesRead`,
+`SourceBodyRead`, `SourceOutlineRead`, `ModuleApiRead`, `FileMetadataRead`,
+`CallersRead`, `CalleesRead`, `CallChainRead`, `FileDependentsRead`,
+`ImpactRead`, `DependencyDepthRead`, `TestMapRead`, `AffectedTestsRead`,
+`SessionLookup`, `MessageSearch`, `SessionNarrativeRead`, `AnchorExpand`,
+`CatalogRead`, `ConfigurationRead`, `ProjectRead`, `HealthRead`, and
+`StorageRuntimeRead`. Each exposes one ordinary `execute` method whose concrete
+request and result append `Request` and `Result` to the use-case type name; for
+example, `SymbolSearch::execute(&RequestContext, SymbolSearchRequest) ->
+ApplicationResult<SymbolSearchResult>`. No method accepts an untyped operation
+name or payload.
+
+Concrete ports are `SymbolRetrievalPort`, `SourceRetrievalPort`,
+`GraphRetrievalPort`, `TestRetrievalPort`, `TemporalRetrievalPort`,
+`AnchorHydrationPort`, and `OperationalRetrievalPort`. Each method accepts a
+typed request with explicit scope, bound, temporal mode, order, cursor, and
+projection and returns one typed provider contribution. The application service
+validates context, calls the named port, and produces the common packet. A
+primitive never accepts a prompt, planner state, workflow definition,
+capability name, or nested operation list.
+
+The immutable `EvidencePacket<T>` is the planner-facing consumer boundary; PR11
+defines no planner trait, request-proposal callback, or planning extension.
+Plan 24's PR17 `work/context.rs` consumes packets and owns task decomposition,
+retrieval-plan intent, and fan-out shape. Plan 32 alone admits and executes
+parallel branches, enforces concurrency/failure budgets, and returns branch
+receipts. This crate serves each admitted primitive request and may
+deterministically fold an explicitly supplied list of already-completed
+packets; it owns no hidden parallelism, model call, scheduler, lease, retry
+loop, recursive retrieval, or request proposal. Non-planner callers invoke the
+same primitives directly.
+
+Pre-admission application error mapping is exhaustive and transport-neutral:
+`InvalidRequest`, `NotFoundOrNotAuthorized`, `Conflict`, `Stale`,
+`Unsupported`, `Unavailable`, `Saturated`,
+`Cancelled { stage: BeforeAdmission }`, and
+`TimedOut { stage: BeforeAdmission }`. Admitted cancellation, deadline,
+failure, partial, and unknown-effect states use receipts as defined above.
+Port-specific detail is retained as bounded safe diagnostics and retriever
+state without changing the stable problem code. Empty payload is valid only for
+`Some(empty_collection)`, `Complete` coverage, no omissions, and a completed
+operation receipt.
+Every problem carries one `RetryDirective`: `Never`, `SameRequest`,
+`AfterDelay`, `AfterRevalidate`, or `AfterReconcile`. Adapters preserve it and
+cannot infer retry safety from the problem code.
+
+## Files and dependency order
+
+PR11 creates these Plan-09-owned files:
+
+- `Cargo.toml` — workspace registration for `tracedecay-application`;
+- `crates/tracedecay-application/Cargo.toml` — domain/port/catalog-contract
+  dependencies only;
+- `crates/tracedecay-application/src/lib.rs` — narrow module declarations and
+  public contract re-exports;
+- `crates/tracedecay-application/src/context.rs` — `RequestContext`,
+  deadline/cancellation references, and immutable grant inputs;
+- `crates/tracedecay-application/src/result/mod.rs` — sealed result exports;
+- `crates/tracedecay-application/src/result/envelope.rs` —
+  `ApplicationEnvelope`, `ApplicationProblemEnvelope`, `ApplicationOutcome`,
+  and contract revision;
+- `crates/tracedecay-application/src/result/evidence.rs` — `EvidencePacket`,
+  temporal, authority, coverage, omission, score, contribution, and page types;
+- `crates/tracedecay-application/src/result/receipt.rs` —
+  `OperationReceipt`, `PreviewResult`, `EffectResult`, `EffectReceipt`,
+  cancellation stages, and reconciliation states;
+- `crates/tracedecay-application/src/result/stream.rs` — bounded ordered
+  `StreamEvent`, `StreamFrontier`, `StreamGap`, `ResumeToken`,
+  `StreamTermination`, drop/truncation coverage, and terminal-event contract;
+- `crates/tracedecay-application/src/result/problem.rs` — stable problem
+  taxonomy, safe diagnostics, retry class, and legal actions;
+- `crates/tracedecay-application/src/handlers.rs` — closed validation-only
+  `ApplicationHandlerDescriptors`; it has no function pointers, invocation,
+  runtime registration, or dispatch;
+- `crates/tracedecay-application/src/retrieval/ports.rs` — the seven narrow
+  retrieval port traits;
+- `crates/tracedecay-application/src/retrieval/requests.rs` — bounded typed
+  primitive request/projection/order contracts;
+- `crates/tracedecay-application/src/retrieval/service.rs` — authorization,
+  deadline/cancellation checks, one-port execution, contribution folding, and
+  packet construction;
+- `crates/tracedecay-application/src/retrieval/catalog.rs` — Plan 08
+  contributions for shipped primitive handlers.
+
+Plan 24's PR17 contributions live in
+`crates/tracedecay-application/src/work/catalog.rs` and consume packets through
+`crates/tracedecay-application/src/work/context.rs`. Plan 32
+admission/control contributions live in
+`crates/tracedecay-application/src/workflow/catalog.rs`; their runtime
+implementation remains outside this crate. Plan 21 imports only the public
+application contracts. Plans 05/13/23 implement the query, anchor, and temporal
+ports without importing application or transport crates.
+
+Implementation order is mandatory:
+
+1. Plan 08 lands inert catalog IDs/record types without importing application;
+2. add workspace/crate manifests, `lib.rs`, result/context types, and
+   serialization fixtures;
+3. land port traits and fake-port tests without concrete stores;
+4. land the retrieval service, non-disclosure, cursor, deadline, cancellation,
+   score, contribution, and omission folds;
+5. register Plan 08 contributions only for executable handlers;
+6. root-owned `src/catalog_composition.rs` assembles contributions and validates
+   their UseCaseIds/schema refs against `ApplicationHandlerDescriptors`;
+7. migrate one primitive family at a time from root/handler orchestration and
+   run old-versus-new semantic fixtures;
+8. switch Plan 21 adapters only after each family passes CLI/MCP canonical
+   result parity; and
+9. delete the migrated handler-local query/auth/error path before admitting the
+   next family, so no shadow application layer survives.
+
+PR17 adds work/task consumers only after the PR11 packet contract is stable.
+Its CLI/MCP names follow Plan 21 compatibility policy and do not constrain or
+require approval from PR18. PR18 independently chooses SDK method names and
+adds SDK BindingIds only with SDK conformance fixtures.
+
+## Test matrix and migration gates
+
+Focused tests are fixed at:
+
+- `crates/tracedecay-application/tests/evidence_contract.rs` — stable
+  result/problem serialization, temporal modes, evidence-identity deduplication,
+  partition-union contribution/omission/count folding including unknown
+  overlap, request-versus-evidence authority, score identity and calibration,
+  preview identity, optional payload terminal invariants, and clean-empty rules;
+- `crates/tracedecay-application/tests/retrieval_primitives.rs` — every narrow
+  port, bound/order/projection enforcement, one-port execution, pagination,
+  resume equivalence, and no nested dispatch;
+- `crates/tracedecay-application/tests/authorization_non_disclosure.rs` —
+  absent/out-of-scope/policy-hidden equivalence for lookup, cursor, anchor,
+  and shipped operational requests, including equal public problem envelopes
+  and no count/timing/existence leakage; PR17 extends this file with task,
+  WorkItem, and provider requests when those handlers ship;
+- `crates/tracedecay-application/tests/deadline_cancellation.rs` — cancellation
+  pre-admission problem mapping, cancellation at every admitted stage, deadline
+  precedence, no new evidence/effect admission after cancellation, suppression
+  of late uncommitted data, after-commit reconciliation/receipt publication,
+  and `EffectUnknown` reconciliation;
+- `crates/tracedecay-application/tests/stream_contract.rs` — monotonic sequence
+  and frontier, gap/drop/truncation coverage, bounded resume, expiry,
+  cancellation/deadline ordering, exactly one terminal event, and no events
+  after terminal publication;
+- `crates/tracedecay-application/tests/effect_receipts.rs` — effect class,
+  expected-state digest, idempotent replay, mismatched-key rejection, partial
+  and unknown-effect outcomes;
+- `crates/tracedecay-application/tests/planner_boundary.rs` — dependency and
+  fake-port assertions proving no universal retrieval trait/query bus exists
+  and concrete primitives cannot import/invoke a planner, model, catalog
+  dispatcher, Plan 32 runtime, or parallel executor; and
+- `tests/architecture_boundaries.rs` — no transport, concrete store, provider,
+  dashboard, scheduler, or runtime dependency.
+- `tests/catalog_composition_contract.rs` — root snapshot validates every
+  contribution against the closed handler descriptors without creating an
+  invocation registry.
+
+The PR11 gate runs:
+
+```bash
+cargo test -p tracedecay-application --test evidence_contract
+cargo test -p tracedecay-application --test retrieval_primitives
+cargo test -p tracedecay-application --test authorization_non_disclosure
+cargo test -p tracedecay-application --test deadline_cancellation
+cargo test -p tracedecay-application --test stream_contract
+cargo test -p tracedecay-application --test effect_receipts
+cargo test -p tracedecay-application --test planner_boundary
+cargo check -p tracedecay-application --all-features
+cargo test --test catalog_composition_contract
+cargo test --test architecture_boundaries
+```
+
+Migration is blocked if canonical JSON changes without a result-contract
+revision, a primitive lacks exact bounds/ordering/temporal behavior, an
+unauthorized request differs publicly from an absent request, page
+concatenation differs from the pinned full result, cancellation admits new work
+or publishes late uncommitted data, an already-committed effect loses its
+reconciliation/receipt publication, an effect lacks a durable receipt, a
+planner/model/fan-out executor enters a primitive dependency, or a focused
+application check compiles transport or concrete storage.
+
+PR11 records `cargo tree -p tracedecay-application --edges normal` at
+`benchmarks/pr11-application-boundary/dependency-tree.txt` and same-host warm
+incremental medians at
+`benchmarks/pr11-application-boundary/compile-baseline.json`. The dependency
+gate requires zero transport/concrete-store/provider/runtime packages and a
+strict reduction in legacy root-crate normal-dependency fan-in. The compile gate
+blocks a median regression above 10 percent unless the PR11 owner records the
+measured cause and accepted disposition in that JSON artifact.
+
 ## Acceptance
 
 - Every shipped product operation has a typed application contract and focused unit tests.

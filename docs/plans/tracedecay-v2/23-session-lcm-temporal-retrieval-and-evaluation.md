@@ -39,41 +39,237 @@ sources. [Plan 05](05-query-crate.md) opaque cursors page typed collections only
 
 ## Source truth
 
-- Every provider observation is an immutable message occurrence with source identity, order, ingest time, valid time when known, scope, and sanitization receipt.
-- Logical copies are versioned evidence-backed relations. Content hashes, timestamps, titles, or embeddings alone never collapse messages.
-- Corrections and supersession append typed assertions. They do not overwrite prior occurrences.
-- Turns and threads are first-class retrieval grains rather than labels inferred at render time.
-- Raw occurrences remain addressable subject to authorization, retention, redaction, and deletion.
+- Every provider observation is an immutable `MessageOccurrenceRecordV1` with
+  canonical source identity, provider order, `knowledge_at: UtcMicros`,
+  `valid_time: TemporalValidityV1`, resolved scope, and sanitization receipt.
+- `knowledge_at` records when sanitized evidence became visible to the
+  authoritative store or projection. Provider timestamps never substitute for
+  it.
+- `valid_time` independently records when evidence applies in the represented
+  world as `Known { valid_at }` or `Unknown`; ingest order never fabricates it.
+- Logical copies are versioned `LogicalCopyRecordV1` relations backed by origin
+  evidence. Hashes, timestamps, titles, exact text, or embeddings alone never
+  collapse independent repetitions.
+- Corrections, supersession, and contradiction append immutable
+  `TemporalAssertionRecordV1` values. Reusing an assertion ID with different
+  canonical content is an idempotency conflict.
+- Turns and threads are persisted retrieval grains. Raw occurrences remain
+  addressable subject to authorization, retention, redaction, and deletion.
+- Ready and active generations reject UPDATE and DELETE of occurrences,
+  assertions, copy/supersession edges, derived evidence, summaries, and their
+  manifests. Rebuilds write and atomically activate a new generation.
+
+The normative domain contracts remain in
+`crates/tracedecay-domain/src/session.rs`: `TemporalModeV1`,
+`TemporalValidityV1`, `MessageOccurrenceRecordV1`,
+`TemporalAssertionRecordV1`, `TemporalAssertionKindV1`,
+`LogicalCopyRecordV1`, `SessionSummaryRecordV1`,
+`SummarySourceHorizonV1`, and `TemporalCoverageCountsV1`.
+
+## Immutable derived evidence spans and bursts
+
+PR8 adds actionable evidence spans and bursts as immutable, generation-scoped,
+rebuildable derived projections over consecutive message and tool-call
+occurrences:
+
+- a span is a bounded actionable interval selected by a versioned policy;
+- a burst is a maximal consecutive run selected by a versioned adjacency
+  policy;
+- membership follows canonical
+  `(observation_sequence, projection_output_ordinal)` order, never timestamps,
+  titles, similarity, or model output;
+- neither is source authority, a summary, a replacement occurrence, or an
+  external evidence store.
+
+`crates/tracedecay-domain/src/session.rs` adds
+`DerivedEvidenceKindV1::{Span, Burst}`, `DerivedEvidenceIdV1`,
+`EvidenceSpanIdV1`, `EvidenceBurstIdV1`,
+`SessionDerivedEvidenceRecordV1`, `DerivedEvidenceMemberV1`, and
+`RetrievalGrainV1::{EvidenceSpan, EvidenceBurst}`.
+`SessionDerivedEvidenceRecordV1` binds its typed ID, `RetrievalAnchorId`,
+session and optional thread IDs, first and last occurrence IDs, member count
+and digest, algorithm and configuration versions, source horizon, and
+`SessionAuthorityClassV1::DerivedProjection`. It stores no copied message, tool
+payload, concatenated span text, GitHub, CI, diagnostic, Git, receipt, task, or
+`rh_` payload.
+
+`crates/tracedecay-domain/src/research/subjects.rs` adds
+`EntityKind::{EvidenceSpan, EvidenceBurst}`.
+`crates/tracedecay-domain/src/research/anchor.rs` represents each derived item
+as `RetrievalAnchorTargetV2::Entity`; its manifest contains one
+`AnchorLineageRefV2 { relation: DerivedFrom, ... }` for every member occurrence
+anchor.
+
+The projection rejects cross-session or cross-generation members, duplicate or
+noncontiguous ordinals, and endpoint/manifest mismatches. The derived ID and
+member digest bind kind, algorithm/configuration version, and the complete
+ordered occurrence-ID list. Identical frozen input produces byte-identical
+derived records, manifests, anchors, indexes, and receipt digests.
+
+Authorized drill-down pages the complete ordered member manifest. Deleted,
+redacted, expired, locked, retained-but-unavailable, or unauthorized members
+occupy their original ordinal as typed omissions; they never disappear or
+promote replacement evidence. A summary citing a span or burst is eligible only
+while every leaf occurrence anchor remains authorized and available.
 
 ## Temporal modes
 
 The shared query accepts four explicit modes:
 
-- `current`: prefer supported current assertions and show material conflicts;
-- `as_of`: evaluate only evidence known and valid at the requested cutoff;
-- `evolution`: show the ordered correction and supersession chain;
-- `forensic`: preserve all authorized occurrences and uncertainty.
+- `current`: apply eligible `Corrects`, `Supersedes`, and `Contradicts`
+  assertions only when authority and supported evidence strength justify
+  suppression; otherwise retain both sides as a material conflict.
+- `as_of { cutoff }`: independently require `knowledge_at <= cutoff` and known
+  `valid_at <= cutoff` for every occurrence and assertion before applying
+  current-mode authority rules. Unknown valid time is excluded from
+  representative answers.
+- `evolution`: retain eligible versions in correction/supersession graph order,
+  not incidental timestamp order; cycle members remain visible and conflicted.
+- `forensic`: preserve every authorized occurrence, explicit logical copy,
+  assertion, unknown valid time, and uncertainty without current-answer
+  suppression.
 
 Recency is bounded evidence, not a truth rule. A newer weak mention does not erase an older authoritative decision, and an old exact match does not silently override a supported correction.
+
+Freshness is mode-specific. `current` compares each selected source frontier
+with the pinned current target. `as_of` reports historical coverage at the
+cutoff and cannot leak later ingest or correction. `evolution` reports covered
+and missing source intervals for the returned lineage. `forensic` reports all
+authorized source states and unknown validity without collapsing mixed
+coverage to empty-complete.
 
 ## Retrieval pipeline
 
 This is the sole temporal retrieval kernel. Legacy `message_search` and
 `lcm_grep`/load/describe/expand/query bindings translate into this request and
 delegate; they do not keep separate ranking, hydration, context, pagination, or
-freshness logic. Workflow recovery consumes session evidence through this
-kernel; the term workflow otherwise belongs to the PR17 product.
+freshness logic. `src/mcp/server.rs`,
+`src/mcp/tools/handlers/session/message_search.rs`, and
+`src/mcp/tools/handlers/session/lcm_handlers.rs` are translation/rendering
+adapters only: they do not query LCM tables, call `get_session_message`,
+hydrate payloads, apply semantic filters after ranking, or encode a second LCM
+cursor. Workflow recovery consumes session evidence through this kernel; the
+term workflow otherwise belongs to the PR17 product.
 
-1. Resolve the exact authorized profile/project/repository/worktree/ref/provider/session scope.
-2. Pin store, projection, graph, index, and configuration watermarks.
-3. Generate bounded lexical, phrase, fuzzy, entity, summary, graph, time, and configured semantic candidates.
-4. Fuse candidates without comparing uncalibrated shard-local scores directly.
-5. resolve copies, temporal assertions, authority, contradiction, and requested answer mode;
-6. diversify by logical message, Turn, session, source, and evidence role;
-7. hydrate only the selected anchors under current authorization;
-8. assemble a compact context bundle under an exact byte/token budget.
+PR8 accepts exactly one already-resolved `ResolvedSessionIdentity` and one
+`SessionRetrievalScope::{Session, AllSessionsInAuthorizedRoot}` per request.
+`AllSessionsInAuthorizedRoot` means authorized sessions in that identity's
+existing store/root. PR8 performs no registry enumeration, CWD-derived store
+selection, `all_registered` fan-out, cross-project composition, or store
+switching.
 
-Exact identifiers, errors, paths, symbols, commands, and quoted phrases remain first-class. Optional semantic or model-assisted stages cannot bypass lexical exactness, privacy, temporal safety, or abstention.
+The kernel executes in this order:
+
+1. `SessionRetrievalService::retrieve` resolves authorization and puts query
+   text, every semantic filter, provider/session selector, grain, temporal mode
+   and cutoff, budget, ranking/diversity versions, and policy digest into one
+   canonical request.
+2. `SessionTemporalExecutionPort` freezes a sorted manifest for every
+   participating session/source: store generation and source, projection,
+   graph, index, summary, configuration, and authorization watermarks.
+3. `TemporalReadPort` emits compact exact-literal, lexical, phrase, fuzzy,
+   entity, span, burst, summary, graph, time, and configured semantic candidates
+   without reading full payloads.
+4. `resolve_temporal_with_checkpoints` resolves copies, assertions, authority,
+   contradictions, and the requested temporal mode. Contradiction admission
+   occurs before duplicate rejection.
+5. `rank_candidates` fuses calibrated contributions under one stable evidence
+   identity, then deduplicates and diversifies.
+6. The kernel freezes the ordered page and continuation boundary before reading
+   payload bytes.
+7. `TemporalHydrationPort` authorizes and rechecks each selected anchor and
+   returns one positional available or typed-unavailable result per rank.
+8. Context assembly emits selected Turns/derived intervals, exact support,
+   summary lineage, conflicts, omissions, source coverage, and continuation
+   anchors under the exact byte/token budget.
+
+### Exact literals, fusion, deduplication, and diversity
+
+Exact-literal retrieval performs a byte/codepoint-exact predicate against
+sanitized occurrence text and records the matching occurrence plus exact byte
+ranges. It matches a literal embedded in a longer occurrence; whole-snippet
+equality and tokenizer output are not correctness gates. FTS may accelerate
+the predicate but cannot suppress a match. Exact identifiers,
+punctuation-heavy errors, paths, symbols, commands, quoted phrases, CJK, and
+emoji outrank generic semantic neighbors.
+
+`crates/tracedecay-domain/src/session.rs` defines `RetrieverIdV1`,
+`SourceDiversityKeyV1`, `ByteRangeV1`, and `RetrieverContributionV1`.
+`src/query/temporal/candidates.rs` owns exact-literal and span/burst candidate
+production; `src/query/temporal/ranking.rs` consumes the domain types and owns
+fusion. Every contribution records retriever, canonical provider/source
+partition, retriever ordinal, raw and calibrated score, matching occurrence
+ID, and exact ranges. Candidate identity is the evidence identity, independent
+of retriever/channel, so one item found by several retrievers becomes one
+candidate retaining every contribution. Uncalibrated shard-local scores are
+never compared directly.
+
+Dedupe and diversity run after temporal/conflict admission. Only explicit
+`LogicalCopyRecordV1` evidence collapses occurrences; independent repetitions
+remain addressable. Diversity uses canonical logical-message, Turn, thread,
+session, provider/source, and evidence-role keys. Source identity is never an
+occurrence or summary ID. Every deterministic exclusion remains in the score
+explanation as a typed diversity decision.
+
+### Rank-final authorized late hydration
+
+`src/query/temporal/hydration.rs` owns `TemporalHydrationPort`,
+`RankedHydrationResultV1`, and
+`RankedHydrationPayloadV1::{Available { payload },
+Unavailable { reason: HydrationStateV1 }}`; the unavailable reason reuses the
+existing domain `HydrationStateV1`.
+`TemporalHydrationPort` receives an immutable ordered ranked page and returns a
+`Vec<RankedHydrationResultV1>`. Every result repeats the selected `rank`,
+stable evidence ID, and anchor ID; ranks are unique, contiguous for the page,
+and in input order. The result contains no score or reorder operation.
+
+Hydration may reveal bytes or change an item from available to unavailable
+after authorization recheck. It cannot add, remove, reorder, promote, demote,
+backfill, replace, or change the cursor boundary. Authorization drift preserves
+the denied anchor's rank as an omission. `src/query/temporal/context.rs`
+consumes only these positional results for payload-derived snippets, support,
+and omissions; it cannot backfill from candidate metadata. No handler,
+renderer, or context assembler performs a second payload lookup.
+
+### Canonical pagination
+
+`src/query/temporal/cursor.rs` owns the only continuation cursor used by search,
+direct-anchor lookup, describe, expansion, expand-query, hydration, replay, and
+legacy LCM adapters. MAC verification precedes binding diagnostics.
+
+The cursor binds canonical query text and every semantic filter, resolved
+authorization/root/provider/session scope, grain, temporal mode/cutoff,
+ranking/diversity/projector/configuration/signing-key-route versions, stable
+evidence sort key/page boundary, and the sorted per-session/per-source manifest
+of store, source, projection, graph, index, summary, configuration, and
+authorization watermarks.
+
+Continuation rejects any binding or watermark drift, including a non-anchor
+session/source change during root-wide retrieval. Payload availability and
+bytes are not cursor inputs. The offset-only LCM cursor is removed, not
+strengthened as a parallel format.
+
+`crates/tracedecay-domain/src/session.rs` defines
+`SessionFrozenSourceWatermarkV1` as one canonical manifest entry and
+`SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS = 256`. Entries sort by
+`(session_id, source_id)` and duplicate keys are invalid. The uncompressed
+canonical cursor payload is capped at 65,536 bytes. A request exceeding either
+bound returns
+`SessionRetrievalOutcome::CursorManifestLimitExceeded {
+kind: CursorManifestLimitKindV1, observed, maximum }`, where
+`CursorManifestLimitKindV1::{Participants, CanonicalBytes}` distinguishes the
+256-participant and 65,536-byte limits. Rejection occurs before candidate
+generation and persists no cursor state.
+
+`src/global_db/session_temporal/cursor_keys.rs` owns cursor-key provisioning,
+rotation, and retention. A cursor expires 24 hours after issue; retired keys
+remain verification-only for 24 hours plus five minutes of clock skew. Reads
+never provision or rotate keys. The untrusted key-route ID may select a retained
+verification key, but no scope/binding detail is returned until MAC
+verification succeeds. Unknown or expired routes return only
+`CursorError::UnknownOrExpiredKey`; a valid MAC under a retained key may then
+return typed expiry, rotation, or binding diagnostics. Restart reloads active
+and retained verification keys from the read snapshot.
 
 ## Summary DAG
 
@@ -121,61 +317,500 @@ compact task-linked narrative second, and exact chronology only by authorized
 expansion. Summaries accelerate retrieval but cannot replace raw messages or
 external anchored evidence.
 
+No PR8 domain record, store port, SQL table, migration receipt, refresh key,
+cursor, query request, or application request contains `TaskId`. PR17
+translates an authorized `TaskId` into an ordinary PR8 request without changing
+PR8 storage, sequencing, authority, or scope.
+
 ## Side-effect-free reads and freshness
 
-Search, LCM expansion, hydration, and replay never ingest provider history, repair a store, open a writable fallback, or advance a cursor. They report the watermark and truthful fresh/stale/partial/unavailable coverage they observed.
+Search, direct-anchor lookup, LCM describe/expansion/expand-query, hydration,
+replay, and continuation use `GlobalDbReadSnapshot`. They never ingest provider
+history, create a database/file/key/cursor, repair a store, open a writable
+fallback, start refresh, advance source progress, or mutate access metadata.
 
-Freshness is an explicit daemon operation. Equivalent refresh requests join one durable operation keyed by source frontier and target watermark. The daemon scans each source once, commits sanitized observations and source progress atomically, resumes after restart, and returns a typed coverage receipt. Cancellation returns the last committed frontier.
+`crates/tracedecay-domain/src/session.rs` adds `SessionSourceIdV1`,
+`SessionSourceFrontierV1`,
+`ClosedUtcIntervalV1 { from_inclusive: Option<UtcMicros>,
+through_inclusive: Option<UtcMicros> }`,
+`ValidCoverageIntervalV1::{Known(ClosedUtcIntervalV1), Unknown}`,
+`SessionSourceCoverageIntervalV1 { knowledge: ClosedUtcIntervalV1,
+valid: ValidCoverageIntervalV1 }`,
+`SessionTemporalCoverageRequestV1 { mode: TemporalModeV1 }`,
+`SessionSourceCoverageStateV1::{Fresh, Stale, Partial, Locked, Redacted,
+RetentionWithheld, Unavailable}`,
+`SessionSourceCoverageV1 { source_id, observed_frontier, committed_frontier,
+target_watermark, request, covered_intervals, missing_intervals, state, reason }`,
+and
+`SessionSourceCoverageReceiptV1`.
+
+Each closed interval requires at least one bound and
+`from_inclusive <= through_inclusive` when both exist. Covered and missing
+lists sort canonically by knowledge bounds and then valid-time discriminant and
+bounds; duplicate, overlapping-on-both-axes, or mergeable-adjacent entries are
+invalid. `TemporalModeV1::AsOf { cutoff }` is the sole cutoff field, so wire
+values cannot disagree.
+
+The receipt is carried through `SessionRefreshProgressV1`,
+`SessionRefreshReceiptV1`, `SessionTemporalExecutionReport`, and
+`src/application/session/types.rs::SessionTemporalMetadataView`. The view binds
+the requested mode/cutoff and the complete sorted source receipts. Aggregate
+freshness is derived from source receipts and is never hard-coded to `Fresh`.
+Wrong scope is the request-level
+`SessionRetrievalOutcome::ScopeUnavailable`, not a source coverage state. Empty
+results distinguish no relevant evidence from scope-unavailable and from mixed
+stale, partial, retained, locked, redacted, or unavailable source coverage.
+
+Freshness is an explicit daemon operation.
+`crates/tracedecay-domain/src/session.rs` owns
+`SessionRefreshSourceTargetV1 { source_id, observed_frontier,
+target_watermark }` and
+`SessionRefreshKeyV1 { store_root_id, session_id, sources,
+projector_version, configuration_digest }`. `sources` is nonempty, sorted by
+source ID, unique, and included in the canonical key digest.
+`crates/tracedecay-store/src/session/refresh.rs` consumes these types in
+`SessionRefreshStore`. Fields that alter projection output participate in
+equality; query-only mode and grain do not.
+
+`SessionRefreshStore::begin_or_join` joins only identical keys. Different
+source sets/frontiers/targets cannot join. The daemon scans each source once,
+atomically commits sanitized observations and source progress, resumes the last
+committed frontier after restart, and gives every joiner the same terminal
+receipt. Cancellation returns that frontier and never rolls it back.
 
 ## Result and context contract
 
-Each result includes a stable retrieval anchor, logical occurrence/cluster identity, Turn/session/thread identity, timestamp and temporal state, safe snippet, evidence/authority class, score explanation, source coverage, and hydration availability.
+Each result includes a stable retrieval anchor, logical occurrence/cluster or
+derived identity, Turn/session/thread/source identity, independent knowledge
+and valid-time state, safe snippet, evidence/authority class, every
+`RetrieverContributionV1`, calibration/diversity decisions, source coverage
+receipt, and positional hydration availability.
 
-Pages use stable ordering and a cursor bound to query, scope, temporal mode, and watermarks. Empty results distinguish no relevant evidence from stale, partial, wrong-scope, retained, locked, redacted, or unavailable sources.
+Pages use stable evidence ordering and the canonical cursor contract above.
+Empty results retain per-source coverage and abstention reasons.
 
-Compact context contains only the selected Turns, exact supporting evidence, summary lineage when used, conflicts, omissions, and continuation anchors. It never dumps a transcript or unrelated agent activity.
+Compact context contains only selected Turns, spans/bursts, exact supporting
+occurrences, summary lineage when used, conflicts, typed omissions, source
+coverage, and continuation anchors. It never dumps a transcript or unrelated
+agent activity. Expansion from a span, burst, or summary is lossless to every
+authorized occurrence and preserves unavailable members by ordinal.
 
-## Direct verification
+## Exact file and port ownership
 
-- copied prompts collapse only with origin evidence; independent repetition remains distinct;
-- current, as-of, evolution, and forensic fixtures handle correction and conflict correctly;
-- summary lineage survives restart and exposes exact sources;
-- exact technical queries are not displaced by generic semantic neighbors;
-- within the PR8 single-root scope, results hydrate without CWD or store switching; PR15 extends this to canonical cross-project targets;
-- partial/conflicted shards remain visible and never fabricate an empty-complete answer;
-- reads create no files, rows, cursors, repairs, or writable connections;
-- concurrent refresh callers share one operation and one terminal receipt;
-- stable pagination rejects changed-watermark cursors;
-- deletion, redaction, retention, authorization, and prompt-injection fixtures fail closed;
-- compact output stays within its budget and preserves anchors and coverage;
-- authorization is equivalent across search, direct anchor lookup, expansion,
-  hydration, and cursor continuation;
-- contradiction admission occurs before near-duplicate rejection;
-- source discovery, successor rediscovery, correction/retirement, and harmful
-  replay remain distinct outcomes;
-- TaskId/handoff context stays bounded and losslessly expands to raw messages
-  and external Plan 13 anchors without copying task evidence into LCM;
-- GitHub, CI, diagnostic, and Git evidence referenced from session context resolve only
-  through Plan 13 anchors, never through LCM payloads, summary nodes, or `rh_` handles;
-- Plan 37 session-context reuse exercises this kernel without a second retrieval engine.
+### Domain
 
-## PR 8 deliverables
+- `crates/tracedecay-domain/src/session.rs` owns occurrence, bitemporal,
+  assertion, copy, Turn/thread, derived evidence, retriever contribution,
+  source coverage, summary lineage, refresh key, and wire-validation types.
+- `crates/tracedecay-domain/src/research/subjects.rs` and
+  `crates/tracedecay-domain/src/research/anchor.rs` own typed derived entities
+  and complete `DerivedFrom` anchor lineage.
+- `crates/tracedecay-domain/tests/session_contract.rs` owns serialization,
+  malformed-manifest, independent-time, and authority validation.
 
-- occurrence, logical-copy, Turn/thread, temporal-assertion, and summary-lineage contracts;
-- rebuildable projections and indexes;
-- unified temporal retrieval and context assembly;
-- stable anchors, pagination, coverage, explanations, and abstention;
-- daemon-owned durable refresh operation;
-- migration from existing message/LCM sources with idempotent receipts;
-- focused correctness, concurrency, privacy, restart, and resource tests.
+### Store
 
-## Done
+- `crates/tracedecay-store/src/session/common.rs` owns
+  `SessionFrozenWatermarksV1`, expanded to the sorted per-session/per-source
+  manifest.
+- `projection.rs::SessionTemporalProjectionStore` owns generation writes,
+  derived records/members, count/digest receipts, ready/active transitions, and
+  immutable replay.
+- `retrieval.rs::SessionRetrievalStore` owns frozen compact reads and
+  `expand_derived_members(snapshot, id, after_ordinal, limit)`.
+- `summary.rs::SessionSummaryStore` owns immutable summary publication and leaf
+  eligibility.
+- `migration.rs::SessionTemporalMigrationStore` owns idempotent batch/receipt
+  persistence and version-conflict rejection.
+- `refresh.rs::SessionRefreshStore` owns begin-or-join, progress, cancellation,
+  recovery, and terminal source-coverage receipts.
+- `crates/tracedecay-store/tests/session_contract/{projection,retrieval,summary,migration,refresh}.rs`
+  own the corresponding port contracts.
 
-- One retrieval engine serves message, Turn, session, thread, agent, and LCM context.
-- Raw evidence and summary lineage remain recoverable and temporally correct.
-- Reads are side-effect free; refresh is explicit and daemon-owned.
-- Every result and context bundle is compact, anchored, scoped, and coverage-aware.
-- LCM payloads and summaries remain session-narrative authority only; GitHub, CI,
-  diagnostic, Git, and receipt evidence stay on Plan 13 anchors and owning stores.
-- Plan 37 reuses this kernel for session expansion without a parallel retrieval path.
-- No task-plan filtering, executor dependency, evaluation bureaucracy, or parallel LCM engine remains.
+### Query and application
+
+- `src/query/temporal/ports.rs` owns `TemporalReadPort`, `TemporalRecord`, and
+  the frozen execution manifest.
+- `src/query/temporal/candidates.rs` owns bounded candidate planning and
+  exact-literal/span/burst channels.
+- `src/query/temporal/resolution.rs` owns bitemporal mode, copy, assertion,
+  conflict, summary-horizon, and leaf-eligibility resolution.
+- `src/query/temporal/ranking.rs` owns calibrated fusion, retained retriever
+  contributions, deterministic dedupe/diversity, and rank explanation.
+- `src/query/temporal/cursor.rs` owns the authenticated canonical cursor.
+- `src/query/temporal/hydration.rs` owns `TemporalHydrationPort`,
+  `RankedHydrationResultV1`, `RankedHydrationPayloadV1`, and rank-final
+  authorized hydration; unavailable payloads reuse domain `HydrationStateV1`.
+- `src/query/temporal/context.rs` owns exact-budget context assembly.
+- `src/query/temporal/mod.rs::execute_temporal_kernel` is the sole orchestration
+  entry point.
+- `src/application/session/retrieval.rs::SessionRetrievalService::retrieve`
+  owns authorization and canonical request construction.
+- `src/application/session/ports.rs::SessionTemporalExecutionPort` owns the
+  application/kernel boundary.
+- `src/application/session/refresh.rs::SessionRefreshService` owns explicit
+  refresh begin-or-join, status, and cancellation.
+- `src/application/session/types.rs` owns application request, result,
+  freshness, abstention, and coverage views.
+
+### Database, daemon, compatibility, and migration
+
+- `src/global_db/session_temporal/schema.rs::ensure_session_temporal_schema`
+  owns the schema-version-2 to schema-version-3 DDL migration, exact
+  column/index validation, append-only triggers, derived evidence/member
+  tables, source-manifest tables, and receipt columns.
+- `src/global_db/schema_contract/definitions.rs` registers every new table,
+  foreign key, trigger, and index; `src/global_db/schema_stages.rs` keeps their
+  installation atomic.
+- `src/global_db/session_temporal/{projection,rebuild,retrieval,hydration,refresh}.rs`
+  implement store/query ports without adding policy.
+- `src/global_db/session_temporal/cursor_keys.rs` owns explicit write-side key
+  provisioning/rotation, 24-hour cursor expiry, and retained verification-key
+  loading; read paths cannot create or rotate keys.
+- `src/global_db/session_temporal/operations/publication.rs::publish_immutable_summary`
+  owns canonical atomic summary publication.
+- `src/global_db/session_temporal/operations/compatibility.rs` writes dashboard
+  compatibility projections last in the same transaction.
+- `src/migrate/consolidate/sqlite/temporal.rs::forward_migrate_legacy_sources`
+  owns eligible sanitized legacy forward migration, derives spans/bursts from
+  migrated occurrences, and writes idempotent receipts. It skips quarantined or
+  unsanitized input and never imports a derived row as authority.
+- `src/daemon/session_temporal_refresh_scheduler.rs` owns durable restart
+  recovery and source scanning; it does not own query ranking or hydration.
+- `src/mcp/tools/handlers/session/message_search.rs` and
+  `src/mcp/tools/handlers/session/lcm_handlers.rs` translate legacy requests to
+  the application service. Missing service wiring returns typed unavailable or
+  deferred output and never probes legacy storage.
+
+Legacy field mapping is normative:
+
+- `knowledge_at` is the source row's recorded authoritative ingest time; when
+  absent, it is the migration operation's single frozen start watermark, never
+  the provider message timestamp;
+- `valid_time` is `Known` only for a parsed, source-supported provider event
+  time and is `Unknown` otherwise;
+- source identity binds legacy database identity, table kind, provider/session
+  identity, and stable row identity; provider order binds the legacy sequence
+  plus projection output ordinal;
+- every imported row carries a verified sanitization receipt;
+- missing identity/order, invalid time, absent sanitization evidence,
+  quarantine, and payload conflict produce typed skip receipts with row
+  identity and reason;
+- compatibility-projection rows carry a migration-origin marker and are
+  ineligible as migration input, preventing migrate/write-compatibility/rerun
+  self-import.
+
+The schema-v3 derived projection tables are:
+
+```sql
+session_derived_evidence(
+  session_id, generation, evidence_kind, evidence_id,
+  retrieval_anchor_id, thread_id,
+  first_occurrence_id, last_occurrence_id,
+  algorithm_version, configuration_digest,
+  member_count, member_digest, evidence_json,
+  PRIMARY KEY(session_id, generation, evidence_kind, evidence_id)
+);
+
+session_derived_evidence_members(
+  session_id, generation, evidence_kind, evidence_id,
+  ordinal, occurrence_id, member_role,
+  PRIMARY KEY(session_id, generation, evidence_kind, evidence_id, ordinal),
+  UNIQUE(session_id, generation, evidence_kind, evidence_id, occurrence_id)
+);
+```
+
+`schema.rs` creates `idx_session_derived_evidence_scope_order`,
+`idx_session_derived_evidence_anchor`,
+`idx_session_derived_evidence_thread_order`, and
+`idx_session_derived_evidence_members_occurrence`, then validates each exact
+column and index shape before recording schema version 3.
+
+Through PR14, physical `session_messages` and `lcm_*` tables remain explicitly
+non-authoritative dashboard compatibility projections because SQLite views
+cannot preserve the dashboard's direct FTS
+`MATCH`/rank/snippet/rowid behavior. PR14 migrates dashboard bindings. PR19
+removes or renames physical legacy tables only after zero production legacy
+reads/writes and validated parity. Compatibility tables never rank, hydrate,
+paginate, or report freshness.
+
+## Implementation order
+
+Each step finishes with its focused tests passing before the next starts.
+
+1. Add and validate domain bitemporal, derived evidence, contribution,
+   freshness, and refresh-key types.
+2. Extend store capabilities, projection batches/receipts, frozen manifests,
+   member expansion, summary, migration, and refresh ports.
+3. Upgrade temporal schema v2 to v3; add generation-scoped derived
+   evidence/member storage, source manifests, receipt digests, and append-only
+   triggers; prove repeated upgrade idempotent.
+4. Project spans/bursts and complete anchor manifests from frozen sanitized
+   occurrence order; prove one-shot, incremental, migrated, and restart rebuild
+   byte identity.
+5. Implement exact-literal/span/burst candidate channels, stable
+   evidence-identity fusion, retriever provenance, bitemporal resolution,
+   contradiction-first dedupe, and source/thread/session diversity.
+6. Finalize the canonical root-wide cursor, freeze every participating source,
+   enforce 256-participant/65,536-byte bounds and the 24-hour key lifecycle,
+   and reject each independent binding/watermark drift.
+7. Enforce immutable-page late hydration, positional omissions, authorization
+   recheck, and lossless derived/summary drill-down.
+8. Carry source-specific coverage through query/application results and make
+   durable refresh key, progress, cancellation, terminal receipt, and restart
+   recovery source-aware.
+9. Forward-migrate eligible legacy sources and write compatibility projections
+   without introducing a second authority.
+10. Cut `message_search`, LCM describe/expand/query, direct-anchor lookup, and
+    workflow recovery over to the one application request; remove second
+    hydration and offset-only LCM cursor paths.
+11. Run the complete correctness, privacy, cursor, restart, side-effect, and
+    all-feature gates below.
+
+## Verification matrix
+
+The listed test modules and named cases are required PR8 deliverables. A missing
+named case is a failed gate, not deferred work.
+
+### Temporal and derived evidence
+
+- `crates/tracedecay-domain/tests/session_contract.rs` round-trips every temporal
+  mode and derived ID, proves independent knowledge and valid time, rejects
+  unknown-valid representative `as_of`, and rejects malformed, duplicate,
+  noncontiguous, cross-session, or wrong-authority manifests. It also rejects
+  inverted/unbounded, duplicate, overlapping, unsorted, and mergeable-adjacent
+  source coverage intervals and proves `as_of` has exactly one cutoff field.
+- `src/query/temporal/resolution.rs` and `src/query/temporal/tests.rs` cover
+  current suppression/conflict, strict two-axis as-of, graph-ordered evolution,
+  forensic unknown validity/copies, unauthorized assertion exclusion, cycles,
+  source horizons, and summary leaf eligibility.
+- `tests/session_suite/temporal_derived_evidence.rs` proves one-shot,
+  incremental, migrated, and restart rebuilds produce identical IDs, order,
+  anchors, bytes, and receipt digests; paged drill-down reconstructs every
+  occurrence and preserves typed omission ordinals.
+- `tests/session_suite/main.rs` registers
+  `mod temporal_derived_evidence;`; the test-list gate below proves the module
+  is compiled before filtered execution.
+- `tests/session_suite/temporal_projection.rs` proves active occurrences,
+  assertions, copy edges, derived records/members, summary lineage, and receipts
+  reject direct UPDATE and DELETE.
+
+### Exact retrieval, ranking, and diversity
+
+- `src/query/temporal/tests.rs` proves one evidence item found by several
+  retrievers yields one candidate with every `RetrieverContributionV1`;
+  contribution input permutation does not change rank/explanation;
+  provider/source, thread, and session limits use canonical keys; contradiction
+  admission precedes dedupe.
+- `tests/session_suite/temporal_application.rs` proves punctuation-heavy errors,
+  paths, symbols, commands, embedded quoted text, CJK, and emoji return exact
+  ranges and outrank generic semantic neighbors; copied prompts collapse only
+  with origin evidence and independent repetitions remain distinct.
+- `benches/session_temporal.rs::PhaseSet` adds `CompactRank`, `LateHydrate`,
+  and `MemberExpand` beside `RebuildActivate` and `ExactReplay`.
+  `benchmarks/pr8-temporal/workload-v1.json` contains one nonempty case for
+  each phase. `result-provisional.json` records `sample_count`, p50, p95, and
+  maximum duration for each phase, and `evidence-index.json` binds every
+  result to workload/commit/toolchain hashes. These measurements are
+  informational resource evidence; correctness acceptance never depends on a
+  machine-local duration threshold.
+
+### Hydration and cursor
+
+- `src/query/temporal/hydration.rs` proves changing payload bytes or availability
+  cannot change rank, membership, or cursor; denied hydration keeps its rank as
+  a typed omission and no lower candidate is promoted.
+- `src/query/temporal/cursor.rs` independently rejects tampered MAC,
+  query/filter/scope/provider/session/grain/mode/cutoff,
+  ranking/diversity/projector/config/key-route, and every
+  store/source/projection/graph/index/summary/authorization watermark drift
+  with a precise typed mismatch.
+- `src/query/temporal/cursor.rs` also covers 256 accepted manifest entries, 257
+  rejected entries, 65,536 accepted canonical bytes, 65,537 rejected bytes,
+  issue/expiry boundaries, active-to-retired rotation, expired key removal, and
+  restart loading of active plus retained verification keys. Binding
+  diagnostics are absent before a valid MAC; participant and canonical-byte
+  overflow return their distinct `CursorManifestLimitKindV1` values.
+- `tests/session_suite/temporal_application.rs` proves root-wide continuation
+  rejects a non-anchor session/source change, resumes across service
+  reconstruction when the manifest is unchanged, and rejects CWD/store
+  switching.
+- `src/mcp/server/message_search_cutover_tests.rs` proves search, direct anchor,
+  describe, expand, expand-query, and continuation use the canonical cursor and
+  preserve identical ordering.
+
+### Privacy and authorization
+
+- `tests/session_suite/temporal_privacy.rs` applies the same authorization matrix
+  to search, direct anchor, describe, expansion, expand-query, hydration,
+  replay, and continuation.
+- Secret and prompt-injection canaries never enter FTS, snippets, derived
+  records, member indexes, summaries, receipts, explanations, logs, or dynamic
+  sinks.
+- Deletion, redaction, retention expiry, lock, and authorization revocation are
+  rechecked before candidate exposure and immediately before payload emission.
+  Stale indexes reveal no payload; expansion returns typed omissions; dependent
+  summaries become unavailable.
+- Quarantined or unsanitized legacy sources are never migrated. GitHub, CI,
+  diagnostic, Git, receipt, task, and `rh_` payloads never become LCM, summary,
+  or derived authority.
+
+### Refresh and restart
+
+- `tests/session_suite/temporal_refresh.rs` exercises
+  `current`, `as_of`, `evolution`, and `forensic` source receipts separately:
+  current frontier lag, historical cutoff isolation, evolution covered/missing
+  intervals, and forensic unknown-valid/unavailable intervals.
+- `tests/session_suite/temporal_refresh.rs` proves identical source-aware keys
+  join one durable operation and different source sets/frontiers/targets do not;
+  projection and source progress commit atomically.
+- `tests/session_suite/temporal_refresh_application.rs` proves concurrent
+  callers receive the same terminal receipt, cancellation preserves the last
+  committed frontier, restart resumes exactly that frontier, completed
+  receipts replay idempotently, and mixed source freshness remains visible.
+- `tests/session_suite/lcm_summary_lineage_review.rs` proves restart recovery
+  reopens summary and derived lineage and losslessly expands every authorized
+  leaf anchor.
+- `src/migrate/consolidate/tests.rs` uses nonempty fixtures to assert every
+  legacy field mapping, each typed skip reason, schema v2-to-v3 upgrade, and
+  migrate-to-compatibility-to-rerun exclusion. Imported rows, receipts, and
+  repeated output are byte-identical.
+
+### Side effects and boundaries
+
+- Every public read-surface test snapshots database bytes, row counts,
+  filesystem entries, cursor-key state, refresh rows/frontiers, and repair state
+  before and after the read; all snapshots remain identical.
+- Architecture-boundary tests prove PR8 modules contain no `TaskId`, project
+  registry fan-out, CWD store resolution, writable read fallback, second LCM
+  cursor, second payload lookup, or external evidence payload ownership.
+- PR8 proves a dependency-free typed application extension boundary for Plan
+  37. Plan 37 owns its PR11-PR13 integration gate and must add no second LCM
+  engine, summary store, ranking path, cursor, or hydration path.
+
+## Commands and expected outcomes
+
+Run ordinary Cargo commands from the repository root:
+
+```bash
+cargo test -p tracedecay-domain --test session_contract --all-features
+```
+
+Expected: all domain wire, bitemporal, derived-manifest, contribution, coverage,
+and malformed-input cases pass.
+
+```bash
+cargo test -p tracedecay-store --test session_contract --all-features
+```
+
+Expected: projection, retrieval/member expansion, summary, migration, refresh,
+snapshot, capability, and idempotent-receipt contracts pass.
+
+```bash
+cargo test --lib --all-features query::temporal::
+```
+
+Expected: candidate, exact-literal, temporal resolution, fusion/provenance,
+diversity, cursor, hydration, and context-budget cases pass with no rank change
+after hydration.
+
+```bash
+cargo test --test session_suite --all-features -- --list
+```
+
+Expected: the output contains at least one test name prefixed by each of
+`temporal_derived_evidence::`, `temporal_projection::`,
+`temporal_application::`, `temporal_privacy::`, `temporal_refresh::`, and
+`temporal_refresh_application::`; a missing prefix fails acceptance before
+filtered commands run.
+
+```bash
+cargo test --test session_suite --all-features temporal_derived_evidence::
+cargo test --test session_suite --all-features temporal_projection::
+cargo test --test session_suite --all-features temporal_application::
+```
+
+Expected: deterministic derived rebuild/drill-down, append-only active
+authority, exact literals, canonical diversity, root-wide pagination, and
+single-root/CWD isolation cases pass.
+
+```bash
+cargo test --test session_suite --all-features temporal_privacy::
+```
+
+Expected: every public surface fails closed, no canary appears in persisted or
+rendered output, stale derived indexes leak nothing, and typed omissions retain
+member/rank positions.
+
+```bash
+cargo test --test session_suite --all-features temporal_refresh::
+cargo test --test session_suite --all-features temporal_refresh_application::
+cargo test --test session_suite --all-features lcm_summary_lineage_review::
+```
+
+Expected: source-aware join/conflict, atomic progress, cancellation, terminal
+receipt replay, restart recovery, lossless lineage expansion, and distinct
+current/as-of/evolution/forensic source-coverage assertions pass.
+
+```bash
+cargo test --lib --all-features mcp::server::message_search_cutover_tests::
+cargo test --test mcp_suite --all-features
+cargo test --lib --all-features migrate::consolidate::tests::
+```
+
+Expected: all legacy session/LCM surfaces delegate to the kernel, use one
+cursor/hydration path, remain read-only across restart, and migration v2-to-v3
+plus legacy replay is idempotent.
+
+```bash
+scripts/run-pr8-temporal-benchmark.sh --dry-run
+cargo bench --bench session_temporal --all-features -- --run
+```
+
+Expected: dry-run lists `rebuild_activate`, `exact_replay`, `compact_rank`,
+`late_hydrate`, and `member_expand`; the benchmark emits at least one sample
+and p50/p95/maximum values for every phase, and the evidence index binds the
+result to the workload, commit, and toolchain. Duration values are reported,
+not used as a machine-independent pass/fail threshold.
+
+```bash
+cargo check --all-features
+cargo test --workspace --all-features
+```
+
+Expected: zero compiler errors and zero test failures across the all-feature
+workspace gate.
+
+## PR 8 deliverables and acceptance gates
+
+- Immutable occurrence, logical-copy, Turn/thread, temporal-assertion,
+  evidence-span/burst, ordered-member, and summary-lineage contracts exist with
+  complete Plan 13 anchors and independent knowledge/valid time.
+- Rebuildable projections and indexes include derived member manifests,
+  exact-literal support, source manifests, and receipt digests; deterministic
+  rebuild and schema v2-to-v3 migration tests pass.
+- One temporal kernel serves message, Turn, session, thread, agent, span/burst,
+  summary, direct-anchor, LCM, and workflow-recovery reads.
+- Compact candidates are temporally resolved, fused with full retriever
+  provenance, deduplicated/diversified by canonical source/thread/session keys,
+  and ranked before payload hydration.
+- Authorized late hydration preserves page rank, membership, and cursor under
+  payload, availability, and authorization changes.
+- The authenticated cursor binds all semantic inputs and every participating
+  session/source watermark; every drift test passes.
+- Source-specific freshness and explicit daemon refresh survive restart,
+  cancellation, concurrency, and mixed source state without fabricating
+  empty-complete output.
+- Search, direct anchor, describe, expansion, expand-query, hydration, replay,
+  and continuation pass the same privacy/authorization matrix and create no
+  files, rows, keys, repairs, refreshes, cursor state, or writable connections.
+- Raw occurrences, derived member lineage, and summary leaf lineage remain
+  losslessly recoverable subject to typed authorization/retention omissions.
+- LCM, summary, and derived payloads remain session-narrative projections only;
+  GitHub, CI, diagnostic, Git, receipt, task, and `rh_` evidence stays on Plan
+  13 anchors and in owning stores.
+- PR8 remains task-agnostic and single-root. PR15 owns cross-project scope,
+  PR17 owns TaskId composition, PR14 owns dashboard cutover, and PR19 owns
+  physical legacy-table removal.
+- All focused commands and the final `cargo test --workspace --all-features`
+  gate complete with the expected outcomes above.

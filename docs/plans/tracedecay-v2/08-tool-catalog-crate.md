@@ -77,7 +77,11 @@ Every public surface resolves stable capability IDs to the same application use 
 - **PR11 — policy:** expose read-only capability metadata to policy routing. Availability and effect metadata inform a decision but never execute it.
 - **PR11 — daemon:** bind each executable capability to the single tracedecayd/application authority. Catalog consumers never open a database or bypass application authorization.
 - **PR11 — profiles:** define explicit capability sets and hard ceilings for default, compact, administrative, and host-limited surfaces. Absence is explicit, not a hidden fallback.
-- **PR11 — compatibility:** retain a current public name only when a direct compatibility test requires it. Retired names are absent and return typed discovery guidance.
+- **PR11 — compatibility:** retain a supported deprecated name only as a
+  `SurfaceBinding` when a direct compatibility test requires it. Once removed,
+  it returns the same unknown-operation problem as any unknown name; authorized
+  callers may separately use ordinary discovery guidance. No retired-name
+  tombstone registry or compatibility ledger exists.
 - **PR12 — bindings:** map CLI commands, MCP tools, HTTP operations, and LSP
   methods to the same CapabilityId and typed application handler where the
   protocol exposes a callable product operation. Dashboard binding, dashboard
@@ -146,6 +150,234 @@ Every public surface resolves stable capability IDs to the same application use 
   with the shipped typed methods and conformance fixtures. PR12 may describe
   future SDK availability as unavailable protocol metadata but cannot advertise
   an unimplemented SDK method.
+
+## Capability and retrieval contracts
+
+PR11 adds the following catalog-owned records. The Rust names are internal
+contract names, not frozen PR18 command, MCP-tool, route, or SDK method names.
+
+```rust
+pub struct CapabilityManifestV1 {
+    pub capability_id: CapabilityId,
+    pub use_case_id: UseCaseId,
+    pub request_schema: SchemaRef,
+    pub result_schema: SchemaRef,
+    pub effect: EffectClass,
+    pub scope: ScopeRequirement,
+    pub authority: AuthorityRequirement,
+    pub denied_disclosure: DeniedDisclosurePolicy,
+    pub privacy: PrivacyClass,
+    pub lifecycle: LifecycleClass,
+    pub streaming: StreamingContract,
+    pub cancellation: CancellationContract,
+    pub deadline: DeadlineContract,
+    pub pagination: Option<PaginationContract>,
+    pub idempotency: IdempotencyContract,
+    pub authority_revalidation: RevalidationContract,
+    pub reconciliation: ReconciliationContract,
+    pub receipt: ReceiptContract,
+    pub terminal_states: TerminalStateContract,
+    pub availability: AvailabilityContract,
+    pub binding_ids: Vec<BindingId>,
+    pub profile_eligibility: Vec<ProfileId>,
+    pub required_features: Vec<FeatureId>,
+}
+
+pub struct RetrievalPrimitiveManifestV1 {
+    pub capability_id: CapabilityId,
+    pub family: RetrievalFamily,
+    pub retriever_id: RetrieverId,
+    pub request_schema: SchemaRef,
+    pub evidence_packet_schema: SchemaRef,
+    pub coverage_contract: CoverageContractRef,
+    pub omission_contract: OmissionContractRef,
+    pub scoring_contract: ScoringContractRef,
+    pub contribution_contract: ContributionContractRef,
+    pub deterministic_order: SortContract,
+    pub default_page_size: u32,
+    pub maximum_page_size: u32,
+    pub temporal_modes: Vec<TemporalMode>,
+    pub cancellation_points: Vec<CancellationPoint>,
+    pub deadline_behavior: DeadlineBehavior,
+}
+```
+
+A primitive executes one bounded retrieval contract and returns the Plan 09
+evidence packet; it cannot invoke a model, select another capability, synthesize
+a plan, recursively call the dispatcher, or create a Plan 32 run. Primitive
+manifests contain no planning field or extension point. Plan 24 consumes
+immutable packets and owns task decomposition and declared fan-out; Plan 32
+alone admits and executes parallel fan-out. Neither authority is hidden inside
+a catalog entry or retriever.
+
+The PR11/PR12 core mostly LLM-free primitive families are deliberately narrow:
+
+- symbol identity: name/pattern search, exact identity, qualified-name,
+  signature, implementation, and type-hierarchy reads;
+- source evidence: bounded lines, body, outline, module API, and file metadata;
+- graph evidence: callers, callees, call chain, file dependents, bounded
+  impact, and dependency depth;
+- test evidence: test mapping and affected-test attribution;
+- temporal evidence: authorized session lookup, message search, shipped
+  current/as-of session narrative, and exact Plan 13 anchor expansion; and
+- operational evidence: catalog, configuration, project, storage/runtime, and
+  health inspection where the owning application use case is already shipped.
+
+PR17 extends those families with TaskId/WorkItemId lookup and compact context,
+current/as-of/evolution/forensic task history, thread/attempt traversal, and
+auxiliary-provider capability inspection only after the Plan 24/32 application
+handlers ship. Those operations are absent from PR12 profiles and discovery.
+
+Literal grep, AST matching, semantic symbol lookup, source reads, graph
+traversal, test attribution, temporal retrieval, and context assembly remain
+separate manifests because their authority, temporal, coverage, scoring, and
+omission semantics differ. Context assembly is an explicit consumer capability
+over evidence packets, never an alias that adds a hidden model call. Each
+manifest declares whether results can score matches; `ScoreKind` and
+calibration semantics come from Plan 09 and cannot be inferred from a generic
+floating-point field.
+
+`DeniedDisclosurePolicy::Indistinguishable` is mandatory for resource-addressed
+lookup, cursor resume, anchor expansion, task history, and provider inspection.
+Discovery filters an unauthorized capability before rendering, while direct
+invocation maps absent, unauthorized, and scope-hidden resource identity to the
+same application problem contract. Catalog metadata cannot reveal whether a
+hidden resource, administrative binding, provider, page, or anchor exists.
+Direct invocation of an unauthorized or profile-hidden BindingId/name is
+indistinguishable from an unknown operation and cannot return alternative
+binding guidance.
+
+Read capabilities use `EffectClass::Read` and `ReceiptContract::Operation`;
+preview capabilities use `EffectClass::Preview` and
+`ReceiptContract::Operation`, validated against Plan 09 `PreviewResult`;
+commands name their exact effect class and `ReceiptContract::DurableEffect`. A
+command manifest without an idempotency field, authority revalidation point,
+deadline/cancellation contract, reconciliation state, and typed effect receipt
+fails snapshot validation. `Cancelled`, `TimedOut`, `Failed`, `EffectUnknown`,
+`Partial`, and `Completed` are distinct terminal contracts.
+
+## Files and ownership
+
+PR11 creates these Plan-08-owned files:
+
+- `Cargo.toml` — workspace membership and dependency declaration for the new
+  crate, without adapter/application dependencies;
+- `crates/tracedecay-tool-catalog/Cargo.toml` — feature-minimal crate manifest;
+- `crates/tracedecay-tool-catalog/src/lib.rs` — narrow public re-exports only;
+- `crates/tracedecay-tool-catalog/src/id.rs` — `CapabilityId`, `UseCaseId`,
+  `BindingId`, `RetrieverId`, `ProfileId`, and stable serialization;
+- `crates/tracedecay-tool-catalog/src/manifest.rs` — capability, effect,
+  authority, privacy, lifecycle, streaming, idempotency, revalidation,
+  cancellation, deadline, reconciliation, terminal-state, and receipt records;
+- `crates/tracedecay-tool-catalog/src/retrieval.rs` — retrieval-family and
+  primitive-manifest records with explicit packet-component references and no
+  planning hook;
+- `crates/tracedecay-tool-catalog/src/binding.rs` — CLI/MCP/HTTP/LSP/dashboard
+  binding references and protocol revision ranges;
+- `crates/tracedecay-tool-catalog/src/profile.rs` — explicit profile membership,
+  schema/routing budgets, and reviewed per-profile ceilings;
+- `crates/tracedecay-tool-catalog/src/snapshot.rs` — immutable contribution
+  assembly and deterministic lookup; and
+- `crates/tracedecay-tool-catalog/src/validation.rs` — duplicate, handler,
+  schema, authority/effect, pagination, receipt, dependency, and profile-budget
+  validation.
+
+The owning product PR places contributions beside their use cases in
+`crates/tracedecay-application/src/retrieval/catalog.rs`,
+`crates/tracedecay-application/src/edit/catalog.rs`,
+`crates/tracedecay-application/src/git/catalog.rs`,
+`crates/tracedecay-application/src/feedback/catalog.rs`,
+`crates/tracedecay-application/src/work/catalog.rs`, and
+`crates/tracedecay-application/src/workflow/catalog.rs`; Plan 09 and the owning
+vertical PR own those files and handler references. Plan 21 owns adapter
+bindings and renderers. Plans 05/13/23 own query, anchor, and temporal kernels.
+Plan 24 owns task graph, decomposition, and fan-out intent. Plan 32 owns
+workflow/auxiliary parallel execution, leases, attempts, runtime cancellation,
+runtime effects, and runtime receipts; Plan 09 retains operation-specific
+`EditTransaction` and `GitIndexTransaction` authority. Plan 08 imports only
+contract types needed to describe those owners and never imports their
+implementations.
+
+`src/catalog_composition.rs` is the root-composition-owned assembly point. The
+dependency direction is acyclic: `tracedecay-tool-catalog` defines inert record
+and builder types; `tracedecay-application` depends on those types and exports
+typed contributions plus the closed validation-only
+`ApplicationHandlerDescriptors` from
+`crates/tracedecay-application/src/handlers.rs`; the root crate depends on both,
+assembles the immutable snapshot, and validates every `UseCaseId` against those
+descriptors. Descriptors contain only UseCaseId and request/result schema refs,
+not function pointers, dynamic dispatch, invocation, policy, or runtime lookup;
+ordinary typed service methods remain the sole execution path. The catalog
+crate never imports application, and application never imports the root
+composition file.
+
+Tests are fixed at:
+
+- `crates/tracedecay-tool-catalog/tests/manifest_contract.rs`;
+- `crates/tracedecay-tool-catalog/tests/retrieval_contract.rs`;
+- `crates/tracedecay-tool-catalog/tests/snapshot_contract.rs`;
+- `crates/tracedecay-tool-catalog/tests/profile_budget.rs`; and
+- `tests/catalog_composition_contract.rs` for root contribution-to-handler
+  validation;
+- `tests/architecture_boundaries.rs` for forbidden dependencies and facade
+  growth.
+
+The facade budget remains explicit: `lib.rs` only re-exports reviewed records
+and lookup entry points; it contains no assembly, execution, rendering, policy,
+or compatibility logic. Host packaging keeps one semantic integration catalog
+and independently installable context, work, and operator MCP companions over
+the same daemon/catalog/types. Every workflow has one primary discovery
+surface; skills are not duplicated as MCP prompts. Deferred tool discovery is
+an optimization, never justification for exceeding an eager client's reviewed
+schema/routing budget or for inventing a universal tool-count limit.
+`ProfileDefinition` stores hard `maximum_bindings`, `maximum_schema_bytes`, and
+`maximum_routing_tokens` values per profile/companion. The checked-in values in
+`profile.rs` are the thresholds; any increase requires Plan 08 and Plan 21
+owner approval plus an eager-client routing fixture in `profile_budget.rs`.
+There is no aggregate or universal count shared by all profiles.
+
+## Implementation order and migration gates
+
+1. **Crate contract gate:** add workspace/manifests, then land `id.rs`,
+   `manifest.rs`, `retrieval.rs`, and serialization tests without application
+   or adapter imports. Run
+   `cargo test -p tracedecay-tool-catalog --test manifest_contract --test retrieval_contract`.
+2. **Application contribution gate:** Plan 09 lands executable handlers and
+   contribution functions against the inert Plan 08 record types. No snapshot
+   assembly occurs inside either crate.
+3. **Root composition gate:** land profiles, builder validation, and
+   `src/catalog_composition.rs`. Every shipped contribution must resolve one
+   real Plan 09 handler and one request/result schema; startup rejects an
+   incomplete snapshot. Run
+   `cargo test -p tracedecay-tool-catalog --test snapshot_contract --test profile_budget`
+   and `cargo test --test catalog_composition_contract`.
+4. **Primitive gate:** register the symbol, source, graph, test, temporal, and
+   operational primitive families only as their owning use cases ship. Contract
+   tests prove deterministic order, bounded pages, declared temporal modes,
+   explicit omissions/contributions, no planner/model/dispatcher dependency,
+   and indistinguishable authorization failures.
+5. **Binding gate:** PR12 may switch CLI/MCP/HTTP/LSP discovery to the immutable
+   snapshot only after Plan 21 parity fixtures map every enabled BindingId to
+   the same CapabilityId, schemas, effect, cursor, deadline/cancellation, and
+   receipt contract.
+6. **Deletion gate:** delete the legacy `admin_cli`/handler registries and
+   duplicate discovery metadata only after direct old-versus-new compatibility
+   fixtures pass for supported names. Do not retain a shadow registry or
+   generated inventory.
+7. **PR17 extension gate:** add Plan 24/32 contributions only after their typed
+   Plan 09 handlers exist. Profile tests prove active executors cannot
+   self-grade, decide proposals, create fan-out, or call runtime effects outside
+   Plan 32.
+8. **PR18 naming gate:** SDK BindingIds and public SDK methods remain absent
+   until PR18 ships official methods and conformance fixtures. Internal
+   capability families, existing CLI/MCP bindings, and this file map do not
+   freeze that public vocabulary.
+
+The final PR11 checks are
+`cargo test -p tracedecay-tool-catalog --all-features`,
+`cargo check -p tracedecay-tool-catalog --all-features`, and
+`cargo test --test architecture_boundaries`. The PR12/PR17 gate additionally
+runs `cargo test --test mcp_suite`.
 
 ## Acceptance
 

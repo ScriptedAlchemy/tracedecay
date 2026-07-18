@@ -13,7 +13,11 @@ bounded single-project admission with canonical multi-root project/worktree
 scope, and PR16 defines remote-node placement without exporting unsaved
 workspace authority accidentally. PR17 may add opaque TaskId join keys to
 advisory editor projection; it does not add task authority or make LSP a task
-retrieval transport.
+retrieval transport. PR18, through
+[Plan 17](17-official-public-api-and-sdks.md), freezes any public command,
+route, MCP-tool, or SDK spelling used to open an investigation or task. Internal
+Rust action/type identifiers in this plan are non-serialized implementation
+placeholders, not public names or `executeCommandProvider.commands` values.
 
 This plan extends, rather than replaces, the code-intelligence ownership in
 [25](25-code-intelligence-indexing-crate.md), the daemon and binding rules in
@@ -75,9 +79,15 @@ architecture.
   and Plan 13 anchor IDs only as authorized join keys; LSP never stores task
   evidence or becomes a task-retrieval transport.
 - Exact clean-snapshot diagnostic reuse and isolated unsaved-document overlays.
-- Typed gateway requirements, finding, and engine-state schema consumed by
+- Typed gateway requirements, projection-only `LspFindingProjectionV1`/`V2`,
+  and engine-state schema consumed by
   [27](27-cross-host-agent-plugin-bundles.md) host plugin projection, PR13
   conformance checks, and PR14 Doctor/dashboard surfaces.
+- Ephemeral delivery metadata needed to clear, deduplicate, authorize, and
+  hand off a cue. The gateway and bridge may retain session/document/revision
+  keys, finding/anchor join IDs, optional authorized `TaskId`, and opaque
+  short-lived handoff tokens; they never persist canonical findings, task
+  records, evidence, histories, payloads, pages, or expansion results.
 - Telemetry and direct protocol conformance for the daemon gateway and bridge.
 
 ## Does not own
@@ -103,16 +113,21 @@ architecture.
   [28](28-remote-multi-machine-shared-brain.md) own those contracts.
 - Completion, formatting, or arbitrary vendor-specific LSP methods until a
   separate product requirement and conformance gate justify them.
-- Applying `rename` or any other edit-shaped LSP result. This plan surfaces
-  `prepareRename`/`rename` results as read-only candidate evidence routed to
-  [Plan 34](34-workspace-refactoring-and-api-migration.md); Plan 34 owns
-  preview, precondition, formatting, verification, and apply authority for
-  every edit that originates from LSP candidate evidence. General
-  `textDocument/codeAction` remains deferred until a separate typed
-  candidate-consumption operation, policy, transactional apply owner, and
-  acceptance fixtures are planned.
+- Applying `rename` or any other edit-shaped LSP result. Both rename methods
+  remain unadvertised until [Plan 34](34-workspace-refactoring-and-api-migration.md)
+  owns a typed candidate/preview, preconditions, formatting, verification,
+  transactional apply, and host interception that prevents raw
+  `WorkspaceEdit` application. General `textDocument/codeAction` remains
+  unavailable except for the separately gated PR18 handoff-only action below.
 - Publishing historical, stale, inferred, or cross-snapshot findings as if they
   were current editor diagnostics.
+- Canonical finding/evidence storage, full evidence packets, chronology,
+  synthesis revisions, task navigation, task-to-evidence relations, planner
+  controls, leases, attempts, receipts, workflow control, or agent execution.
+  Plan 09 owns the transport-neutral result and handoff contract, Plan 13 owns
+  evidence anchors, Plan 24 owns task identity/navigation/planning, Plan 32 owns
+  runtime execution, Plan 37 owns feedback finding architecture/lifecycle, and
+  Plan 21 owns CLI/MCP/HTTP/LSP bindings and rendering.
 - Facts, memory, Git history, proof that a test executed or a change was
   delivered, authorization or privacy policy authority, workflow scheduling, or
   durable temporal truth. Those remain owned by their existing product plans
@@ -183,10 +198,21 @@ architecture.
   cannot select CWD, the first folder, or an active checkout as a substitute.
 - PR15 resolves every workspace folder through the canonical scope service.
   Each request pins one canonical workspace-set revision and per-folder
-  snapshot vector. Folder-set transitions are atomic or explicitly partial.
+  snapshot vector. The result names every admitted, denied, ambiguous, moved,
+  removed, and unavailable root without exposing the identity or count of roots
+  the caller cannot see. Folder-set transitions cancel work for removed roots,
+  clear their diagnostics, preserve unaffected roots, and return explicit
+  per-root coverage; they never report an atomic clean result when any admitted
+  root is partial.
   Plan 16 resolves one owner or ambiguity for each document; no longest-prefix,
   CWD, first-folder, or active-checkout fallback exists. Workspace-wide fan-out
   merges through Plan 05 with per-root coverage.
+- Every projected finding and handoff pins its canonical workspace-folder,
+  project, repository, worktree, ref, source-generation, document, and content
+  identities. A task spanning several roots does not erase the cue's source
+  root. PR15 resolves each related root independently; ambiguous, moved,
+  removed, denied, or partial roots return typed outcomes rather than being
+  rebound to another folder.
 - Open-document state is keyed by client session, canonical file identity,
   document version, content digest, language descriptor revision, and analyzer
   configuration revision.
@@ -238,29 +264,86 @@ architecture.
 
 ### Capability negotiation and routing
 
-- The gateway implements the standard LSP lifecycle and document synchronization
-  methods required by Claude Code and other supported hosts.
+- PR12's server-capability matrix is exact:
+  `positionEncoding = "utf-16"`; `textDocumentSync.openClose = true`,
+  `change = Incremental`, and `save = true`; document pull with
+  `diagnosticProvider.interFileDependencies = true`,
+  `workspaceDiagnostics = false`, full/unchanged reports, and
+  generation-bound `resultId`; the enumerated semantic provider keys below;
+  and no workspace-folder, rename, code-action, or execute-command capability.
+- The PR12 push client prerequisites are
+  `general.positionEncodings` containing UTF-16 or omitted (which LSP 3.17
+  defines as implicit UTF-16),
+  `textDocument.publishDiagnostics.versionSupport`,
+  `textDocument.publishDiagnostics.relatedInformation`,
+  `textDocument.publishDiagnostics.codeDescriptionSupport`, and
+  `textDocument.publishDiagnostics.dataSupport`. The PR12 pull prerequisites
+  are `textDocument.diagnostic` with `relatedInformation`,
+  `codeDescriptionSupport`, `dataSupport`, and optional
+  `relatedDocumentSupport`, plus
+  `workspace.diagnostics.refreshSupport` when refresh is used. A missing
+  optional diagnostic field capability removes that field. A client without
+  versioned publication and diagnostic `dataSupport` on the push path, or
+  without document-pull and diagnostic `dataSupport` on the pull path, does
+  not receive Plan 37 finding projection until its host-specific adapter passes
+  an equivalent stale-data and join-ID conformance gate.
+- Legal PR12 protocol messages are `initialize`, `initialized`, `shutdown`,
+  and `exit`; `textDocument/didOpen`, `didChange`, `didSave`, and `didClose`;
+  `$/cancelRequest`; `window/workDoneProgress/create` and `$/progress`;
+  `textDocument/publishDiagnostics`, `textDocument/diagnostic`, and
+  `workspace/diagnostic/refresh`. Initialize advertises the maximal safe static
+  subset. `client/registerCapability`/`client/unregisterCapability` is used
+  only for a method whose client capability declares
+  `dynamicRegistration = true`; otherwise an unsupported method remains absent
+  until the next initialize.
+- PR12 sets `workspaceFolders.supported = false` and
+  `diagnosticProvider.workspaceDiagnostics = false`. It does not advertise
+  `workspace/diagnostic`, `workspace/executeCommand`,
+  `textDocument/codeAction`, rename, custom task/evidence/history methods, or
+  arbitrary vendor methods. PR15 alone enables
+  `workspaceFolders.supported = true`, and an opaque revisioned
+  `changeNotifications` registration for
+  `workspace/didChangeWorkspaceFolders` after the multi-root fixtures pass;
+  `workspace.workspaceFolders = true` is the corresponding PR15 client
+  prerequisite, not a server capability.
 - Effective capability is the intersection of client support, gateway
   guarantee, upstream analyzer support, admitted project/language,
   policy/configuration, and active profile. Negotiation binds
   protocol/catalog/project/workspace/gateway/analyzer/config/policy/client
   revisions; incompatible drift renegotiates or fails typed-stale before work.
-- The supported semantic capability set is: `textDocument/declaration`,
-  `textDocument/definition`, `textDocument/typeDefinition`,
-  `textDocument/implementation`, `textDocument/references`,
-  `textDocument/hover`, `textDocument/signatureHelp`,
-  `textDocument/documentSymbol`, `workspace/symbol`, the standard prepare,
-  incoming, and outgoing call-hierarchy methods, the standard prepare,
-  supertypes, and subtypes type-hierarchy methods, `textDocument/diagnostic`
-  alongside `publishDiagnostics`, and `textDocument/prepareRename` and
-  `textDocument/rename`. General `textDocument/codeAction` remains deferred
-  until a separate typed candidate-consumption operation, policy,
-  transactional apply owner, and acceptance fixtures are planned.
-- `prepareRename` and `rename` results are read-only candidate evidence routed
-  to [Plan 34](34-workspace-refactoring-and-api-migration.md). The gateway
-  never calls `workspace/applyEdit`, executes an opaque server command, or
-  writes a file from these results; Plan 34 is the sole path that can convert
-  a candidate into a canonical preview/manifest and `EditTransaction`.
+- The core PR12 semantic provider keys are
+  `declarationProvider`, `definitionProvider`, `typeDefinitionProvider`,
+  `implementationProvider`, `referencesProvider`, `hoverProvider`,
+  `documentSymbolProvider`, `workspaceSymbolProvider` with
+  `resolveProvider = false`, and `callHierarchyProvider`. The later PR12
+  sub-slice adds `signatureHelpProvider` with only upstream-declared trigger/
+  retrigger characters and `typeHierarchyProvider`. Each key is true/options
+  only for the effective capability intersection and is absent otherwise;
+  language-scoped changes use method-specific dynamic registration only when
+  the client advertises it. `textDocument/diagnostic` and
+  `publishDiagnostics` follow the separate diagnostic matrix above.
+  Both `renameProvider.prepareProvider` and `renameProvider` are absent because
+  LSP exposes preparation only through the rename provider, which necessarily
+  advertises rename, and a standard rename response is a `WorkspaceEdit` that
+  a host may apply without Plan 34 interception. They can ship only after
+  [Plan 34](34-workspace-refactoring-and-api-migration.md) supplies a typed
+  candidate/preview operation and each host proves raw edits cannot bypass
+  `EditTransaction`.
+- PR18 may add one diagnostic-scoped `textDocument/codeAction` quick-fix and
+  `workspace/executeCommand` pair solely after Plans 21 and 17 add and freeze
+  the binding. Its exact client prerequisites are
+  `textDocument.codeAction.codeActionLiteralSupport` for `quickfix`,
+  diagnostic `dataSupport`, and `window.showDocument.support`; its server
+  capabilities are exactly
+  `codeActionProvider = { codeActionKinds: ["quickfix"],
+  resolveProvider: false }` and `executeCommandProvider.commands` containing
+  only the two Plan-21/Plan-17-frozen public names. Before that coordinated
+  gate neither capability is advertised. Plan-35-internal Rust variants
+  `OpenInvestigation` and `OpenTask` are placeholders and are never serialized
+  as command names. The action returns no edit, executes no analyzer/server
+  command, and accepts only an opaque, session-bound `HandoffToken`, never IDs,
+  paths, URLs, query text, or executable arguments. General code actions and
+  commands remain unavailable.
 - A method outside this set, or a request the active analyzer declares
   unsupported, returns an explicit typed capability-unavailable outcome. The
   gateway never guesses a fallback result or synthesizes a plausible-looking
@@ -373,11 +456,27 @@ not forced into fake editor positions.
 - Each published `Diagnostic` includes: exact UTF-16 range and current
   enclosing-function mapping when available; `source` naming the producer;
   stable `code`; `codeDescription.href` to the original review or CI URL only
-  when authorized; `data` carrying stable finding ID plus Plan 13
-  `RetrievalAnchorId`, optional authorized Plan 24 `TaskId`,
-  lifecycle/coverage state, and no full payload;
+  when it is credential-free HTTPS, matches the authorized repository/PR/check
+  scope, and passes the publication-time disclosure check; `data` carrying
+  only stable finding ID, Plan 13 `RetrievalAnchorId`, item/thread lifecycle,
+  ingress provider outcome, and coverage;
   `relatedInformation` with typed locations and bounded messages where the
   finding references additional sites.
+- `LspFindingProjectionV1` serializes exactly Plan 37's current allowlist.
+  Its concise message renders a bounded observed/valid/expired freshness cue
+  and complete/partial/unknown coverage summary from those owner-provided
+  fields; it adds no private `Diagnostic.data` key. PR17 may introduce
+  `LspFindingProjectionV2` with one optional, independently authorized opaque
+  Plan 24 `TaskId` and typed temporal summary only after Plan 37's schema,
+  allowlist, and fixtures are revised in the same coordinated change. Until
+  that owner-plan gate passes, V2 is not serialized or accepted. `TaskId` is
+  only a join key; it grants no task visibility, navigation, mutation,
+  planning, lease, or execution authority.
+- The allowlist excludes bodies, diffs, logs, source, task narrative, task
+  graphs, dependencies, attempts, leases, receipts, chronology, synthesis
+  revisions, cursors, response handles, command arguments, arbitrary JSON, and
+  any full `EvidencePacket`. The gateway and bridge do not cache expansion
+  responses after delivering or opening the owning surface.
 - Severity is conservative: preserve upstream/analyzer severity where scored;
   default to Information for unscored review comments and proximity warnings.
   TraceDecay does not raise severity because several producers agree.
@@ -397,6 +496,52 @@ not forced into fake editor positions.
   editor projection rather than query, task, or Doctor authority.
 - Dirty-overlay feedback findings remain session-only for the authorized
   overlay owner and are never published as durable LSP diagnostics.
+
+### Typed investigation cue and one-way handoff
+
+- Plan 09 owns `InvestigationHandoffRequest`,
+  `InvestigationHandoffResult`, `InvestigationAvailability`,
+  `InvestigationScopeSnapshot`, `TemporalCoverageSummary`, and
+  `AuthorizedInvestigationLink` through a coordinated addition to its existing
+  feedback-cycle contract. Plan 35 owns only the adapter DTO
+  `LspInvestigationCue`, its bounded LSP encoding, and `HandoffToken`; these
+  types cannot land first or become a gateway-private replacement.
+- `LspInvestigationCue` contains only a sanitized cue, finding ID,
+  `RetrievalAnchorId`, optional V2 `TaskId`, canonical source-root/snapshot
+  identity, lifecycle, observed/as-of/expiry/freshness values, complete/partial/
+  unknown coverage counts, and authorized links. The cue is a one-way pointer:
+  no callback mutates LSP state, and opening it cannot schedule, claim, lease,
+  execute, cancel, retry, or complete work.
+- Full evidence packets, GitHub thread/reply text, CI logs, chronology,
+  synthesis revisions, task neighborhood/history/navigation, planner controls,
+  and agent execution remain in typed application/dashboard/CLI-MCP surfaces.
+  Plan 21's concrete `feedback_get` and `feedback_expand` plus Plan 13 anchor
+  resolution are the full-evidence expansion path;
+  `feedback_diagnostics` and `feedback_list` remain bounded views. PR17 task
+  navigation and Plan 32 runtime controls remain separate typed operations;
+  this plan invents no public task or execution command.
+- PR12–PR17 actionable links are authorized credential-free HTTPS source URLs
+  in `codeDescription.href` and typed IDs copied into explicit Plan 21 reads.
+  Raw URLs receive publication-time authorization only because an LSP client
+  opens them without a daemon callback; sensitive or revocable destinations
+  therefore omit `codeDescription.href` and require the PR18 tokenized action.
+  Authorization-revision changes clear the next publication, but no claim is
+  made that a client cannot retain an already received public URL.
+  After PR18, the restricted code action may mint a single-use
+  `HandoffToken` with a 60-second TTL, bound to client session, actor,
+  workspace folder, project/worktree, finding/anchor/task IDs, source
+  generation, content digest, and authorization revision. Executing it
+  rechecks authorization and uses `window/showDocument` only when the client
+  advertised that capability; otherwise it returns the same typed handoff
+  result for the host adapter to render.
+- Authorization at publication is not transferable to expansion or tokenized
+  opening. Projection, code-action creation, token execution, tokenized
+  destination opening, every page/hydration/expansion, and every `TaskId`
+  pivot recheck `RequestContext`, current capability grants, exact root scope,
+  privacy/retention state, authorization revision, and URL safety. Revocation
+  invalidates tokens immediately and clears links at the next monotone
+  publication; expansion returns `DeniedOrMissing`, never cached content or
+  clean empty success.
 
 ## Host plugin projection and coexistence
 
@@ -462,12 +607,63 @@ not forced into fake editor positions.
 - Remote or networked analyzers require an explicit policy capability and
   privacy disclosure. Analyzer environment inheritance is allowlisted rather
   than copied wholesale from the daemon or bridge.
-- Per-session and per-engine limits bound document bytes, message bytes,
-  pending requests, workspace scans, analyzer processes, restart rate, memory,
-  CPU, queue depth, and diagnostic count.
-- Backpressure is explicit. The daemon may coalesce superseded document changes
-  and diagnostic updates, but it cannot reorder versions, silently discard a
-  current error state, or acknowledge work it did not accept.
+- Hard defaults are a 4 MiB JSON-RPC frame, 2 MiB document, 64 pending
+  requests per session, 128 queued requests per engine, four concurrent root
+  fan-outs, and eight admitted roots per request. A document publication is at
+  most 200 diagnostics and 256 KiB serialized; each diagnostic message is at
+  most 512 UTF-8 bytes, `data` at most 1 KiB, and
+  `relatedInformation` at most eight locations with 256 UTF-8 bytes per
+  message. Crossing a hard limit rejects or deterministically truncates before
+  bridge write and reports total/returned/omitted counts and reason through the
+  typed application/Doctor surface; LSP never hides a continuation page.
+- Dirty changes debounce for 75 ms with a 250 ms maximum wait; save flushes
+  immediately. Every accepted incremental edit is applied in order to a
+  materialized document snapshot; only downstream analysis jobs for superseded
+  snapshots may be coalesced. Publication coalesces for 50 ms with a 200 ms
+  maximum wait and preserves the newest accepted error state.
+- On the checked-in warm benchmark, bridge initialization is p95 <= 250 ms,
+  navigation is p95 <= 100 ms and p99 <= 250 ms, and diagnostics are p95 <=
+  500 ms and p99 <= 1.5 s, excluding separately reported cold upstream
+  indexing. Accepted cancellation suppresses queued, not-yet-bridge-acknowledged
+  publication within 50 ms; an already acknowledged notification is corrected
+  only by a later versioned publication. Plan 33 owns later holistic
+  optimization; these are Plan 35's
+  correctness/UX admission budgets and baseline gates.
+- Pull diagnostics and requests use protocol-valid outcomes:
+  cancellation returns `RequestCancelled`; superseded document identity
+  returns `ContentModified`; saturation or transient store lock returns
+  `ServerCancelled` with standard `{ retriggerRequest: true }`. Retry delay and
+  lock reason live only in bounded typed engine state, not JSON-RPC error data.
+  A partial pull with verified findings returns those findings with per-cue
+  coverage; a zero-finding partial pull returns `ServerCancelled` with
+  `retriggerRequest: true`, never a clean empty report or fake diagnostic.
+- Push synchronization and publication are notifications and return no LSP
+  error. Oversized frames close the bridge session before dispatch. If a
+  `didChange` sequence cannot be materialized in order within the 2 MiB
+  document limit or queue bound, the daemon terminates that LSP session with a
+  typed, content-free bridge close reason and never acknowledges preserved
+  synchronization. For partial push results, the gateway publishes the
+  verified subset with coverage in each real cue; when that subset is empty it
+  publishes an empty versioned clear and exposes partial/locked/unavailable
+  state only through the typed host-status/Doctor surface. Push-only clients
+  therefore cannot infer complete-zero from empty-partial and do not pass the
+  universal-diagnostics conformance gate without an equivalent native status
+  adapter.
+- `LspProjectionAvailability` maps application state separately for push and
+  pull: `Current` publishes/returns the matching complete set; `Partial`
+  follows the zero/nonzero rules above; `Stale` clears push state and returns
+  pull `ContentModified`; `Blocked(StoreLocked)` may reuse an exact
+  identity-matching current cache, otherwise clears push state and returns
+  pull `ServerCancelled`; `DeniedOrMissing` clears links, tokens, and findings
+  without revealing which case applies; `Unavailable` clears findings and
+  exposes engine state. A lock or partial provider never becomes a new finding,
+  fake source-range diagnostic, or clean result.
+- `InvestigationAvailability` separately distinguishes `Ready`, `Partial`,
+  `Stale`, `DisclosureLocked`, `DeniedOrMissing`, and `Unavailable`.
+  `DisclosureLocked` is returned only when relation existence is independently
+  visible under the current grant; otherwise it collapses to
+  `DeniedOrMissing`. It neither creates a Plan 24 assignment nor a Plan 32
+  lease. Proximity is advisory and never creates a file, task, or runtime lock.
 
 ## Observability and Doctor
 
@@ -534,10 +730,11 @@ not forced into fake editor positions.
   `textDocument/documentSymbol`, `workspace/symbol`, and the standard prepare,
   incoming, and outgoing call-hierarchy methods.
 - Later PR12 sub-slice gate: `textDocument/signatureHelp`, the standard prepare,
-  supertypes, and subtypes type-hierarchy methods, and
-  `textDocument/prepareRename` and `textDocument/rename` as read-only candidate
-  evidence routed to [Plan 34](34-workspace-refactoring-and-api-migration.md).
-  General `textDocument/codeAction` remains deferred.
+  supertypes, and subtypes type-hierarchy methods. Both prepare-rename and
+  rename remain unadvertised until Plan 34 interception and host conformance
+  prove the returned `WorkspaceEdit` cannot bypass `EditTransaction`. General
+  `textDocument/codeAction` remains unavailable before the coordinated PR18
+  handoff-only gate.
 - Install the canonical daemon gateway and disable or mark bypass paths by
   default after parity. Dashboard consumption and migration remain owned by
   PR14; any bounded compatibility path names its PR19 deletion condition and
@@ -562,6 +759,8 @@ not forced into fake editor positions.
 - Expose compatibility pinning and host install/registration/protocol conformance
   evidence through Plan 35's gateway finding/state schema for Plan 27 and PR13
   conformance checks. Add real Claude Code protocol fixtures.
+- Ship `LspFindingProjectionV1` for concise feedback cues and prove all full
+  evidence expands through Plan 21/Plan 13 operations rather than LSP.
 - Add conformant LSP capability projections for additional LSP-capable hosts
   only where their native LSP extension mechanism passes the same conformance
   contract.
@@ -590,6 +789,82 @@ not forced into fake editor positions.
   local database writer, silently move an overlay, or publish cached diagnostics
   as current.
 
+### PR17: optional task join projection
+
+- After Plans 24 and 32 ship, add `LspFindingProjectionV2` with an optional
+  authorized opaque `TaskId` join key and separate typed Plan 24 task
+  navigation. LSP cannot resolve task context, inspect task history, mutate a
+  plan, or invoke Plan 32 admission/control.
+
+### PR18: public handoff binding stabilization
+
+- Plan 17 freezes any public command/route/tool/SDK spellings. Only then may
+  conformant hosts advertise the Plan-21-bound handoff-only diagnostic code
+  action and execute-command binding. PR18 adds no task/evidence storage,
+  planner authority, general command channel, or bulk LSP retrieval.
+
+## Exact implementation and evidence map
+
+- Plan-09-owned application contract:
+  a coordinated addition to the existing
+  `crates/tracedecay-application/src/feedback/cycle.rs` defines
+  `InvestigationHandoffRequest`, `InvestigationHandoffResult`,
+  `InvestigationAvailability`, `InvestigationScopeSnapshot`,
+  `TemporalCoverageSummary`, `AuthorizedInvestigationLink`, and the internal
+  `OpenFeedbackInvestigation` use case.
+- PR9 diagnostic model/store ports:
+  `crates/tracedecay-domain/src/diagnostics.rs`,
+  `crates/tracedecay-store/src/diagnostics/mod.rs`,
+  `crates/tracedecay-store/src/diagnostics/ports.rs`,
+  `crates/tracedecay-application/src/diagnostics/mod.rs`, and
+  `src/migrate/consolidate/sqlite/diagnostics.rs` own generation-bound
+  identity, persistence ports, application translation, and migration. The
+  gateway consumes those APIs and defines no duplicate diagnostic record.
+- Plan-35-owned gateway:
+  `src/daemon/lsp_gateway/mod.rs`,
+  `src/daemon/lsp_gateway/capabilities.rs`,
+  `src/daemon/lsp_gateway/session.rs`,
+  `src/daemon/lsp_gateway/projection.rs`,
+  `src/daemon/lsp_gateway/handoff.rs`, and
+  `src/daemon/lsp_gateway/limits.rs` define `GatewayCapabilitySet`,
+  `LspFindingProjectionV1`, `LspFindingProjectionV2`,
+  `LspInvestigationCue`, `LspProjectionAvailability`, `LspDeliveryState`, and
+  `HandoffToken`.
+- Transport-only bridge: `src/lsp_bridge.rs`. It owns framing, authentication,
+  request correlation, and forwarding only.
+- Owning non-LSP surfaces:
+  `src/cli/feedback.rs` and `src/mcp/tools/handlers/feedback.rs` consume the
+  Plan 09 result under Plan 21. Plan 11's existing
+  `dashboard/code-diagnostics/src/CodeDiagnostics.tsx` and reusable
+  `dashboard/lib/evidence/EvidenceExpansionDialog.tsx` own dashboard opening
+  and expansion. These surfaces do not import gateway DTOs; exact public names
+  remain owned by Plan 21/Plan 17.
+- Broker/cache/storage:
+  `src/diagnostics/lsp/broker.rs` evolves into the upstream broker;
+  `src/daemon/lsp_gateway/provider_cache.rs` owns cache admission/eviction;
+  `src/global_db/lsp_provider_cache.rs` and
+  `src/migrate/consolidate/sqlite/lsp_provider_cache.rs` own the clean-result
+  schema and migration. `Cargo.toml` adds the direct `lsp-types` protocol
+  dependency and reuses existing `serde`, `serde_json`, `tokio`, and
+  `criterion`; it adds `[[bench]] name = "lsp_gateway", harness = false`.
+  `Cargo.lock` changes only for the resolved `lsp-types` graph. No second LSP
+  runtime framework is added, and no client process gains a store dependency.
+- Contract target: `tests/lsp_gateway_suite/main.rs` with
+  `protocol.rs`, `limits.rs`, `backpressure.rs`, `diagnostics.rs`,
+  `investigation_handoff.rs`, `authorization.rs`, `host_conformance.rs`,
+  `multi_root.rs`, `remote_authority.rs`, and `performance.rs`.
+  Protocol bytes live under `tests/lsp_gateway_suite/fixtures/claude-code/`;
+  deterministic Rust/Python/TypeScript workspaces live under
+  `tests/lsp_gateway_suite/fixtures/workspaces/`.
+  `benches/lsp_gateway.rs`, `benchmarks/pr12-lsp-gateway/workload-v1.json`, and
+  `scripts/check-lsp-gateway-benchmark.sh` own benchmark generation and
+  threshold enforcement; reviewed results live at
+  `benchmarks/pr12-lsp-gateway/baseline.json`, candidate output at
+  `benchmarks/pr12-lsp-gateway/result-candidate.json`, and their shared schema
+  at `benchmarks/pr12-lsp-gateway/schema-v1.json`.
+  `.github/workflows/lsp-gateway-benchmark.yml` runs the benchmark and threshold
+  script on the designated runner and uploads baseline/candidate metadata.
+
 ## Acceptance
 
 - A real Claude Code session registers only the TraceDecay LSP plugin for the
@@ -599,9 +874,8 @@ not forced into fake editor positions.
   hover, signature help, document/workspace symbols, call hierarchy, and type
   hierarchy match direct upstream results on representative projects, with
   deterministic exact TraceDecay graph augmentation where available.
-- `prepareRename` and `rename` return read-only candidate evidence routed to
-  Plan 34 that matches direct upstream results; no gateway path applies a
-  workspace edit or server command from that evidence.
+- `rename_and_prepare_are_not_advertised_without_plan34_interception` proves
+  neither rename method can bypass Plan 34.
 - Analyzer notifications cannot be mistaken for request responses; startup
   waits for readiness, and cross-file operations pass after workspace indexing.
 - Identical clean generations reuse diagnostics without analyzer work.
@@ -632,17 +906,59 @@ not forced into fake editor positions.
   never spool or cache unsaved source.
 - Plan 37 feedback-projection fixtures cover ingested PR comments, CI findings,
   and proximity warnings surfacing through Problems with conservative severity,
-  stable finding/anchor IDs and optional authorized `TaskId` in `data`, bounded
-  `relatedInformation`, authorized `codeDescription.href`, deterministic
+  V1 stable finding/anchor IDs, V2 optional independently authorized `TaskId`,
+  bounded temporal/coverage summaries and `relatedInformation`, authorized
+  `codeDescription.href`, deterministic
   clear/remap on head/content/generation change, lossless expansion through
   owning retrieval operations, truncation without hidden payload, and
   dirty-overlay non-durability.
+- Named tests include
+  `diagnostic_projection_never_embeds_full_evidence`,
+  `lsp_task_id_is_join_key_only`,
+  `lsp_handoff_never_executes_work`,
+  `feedback_investigation_authorization_recheck`,
+  `feedback_investigation_authorized_link_revocation`,
+  `feedback_investigation_stale_partial_disclosure_locked`,
+  `disclosure_locked_does_not_enumerate_hidden_relations`,
+  `did_change_coalesces_but_save_flushes`,
+  `incremental_changes_materialize_in_order_before_analysis_coalesces`,
+  `queue_saturation_rejects_without_acknowledging`,
+  `lock_after_version_change_clears_old_publication`,
+  `push_and_pull_zero_partial_have_distinct_truthful_outcomes`,
+  `oversized_notification_closes_without_desynchronizing`,
+  `pr18_handoff_token_tampering_fails_without_edit`,
+  `multi_root_denial_never_falls_back`, and
+  `task_id_visibility_is_independent_of_finding_visibility`.
+- Protocol fixtures assert the exact PR12/PR15/PR18 capability matrices,
+  every client-capability permutation, PR15 `changeNotifications`,
+  method-specific dynamic-registration permission and reconnect behavior,
+  strict `Diagnostic.data` key/version allowlists, unauthorized `TaskId`
+  omission, rejected bulk/task/custom methods, no gateway/bridge persistence
+  after disconnect or restart, and authorization recheck at every handoff.
 - Linux, macOS, and Windows fixtures cover URI normalization, UTF-16 positions,
   process lifecycle, command discovery, socket/stdio behavior, path safety, and
   shutdown.
-- Stock Cargo checks and focused protocol, daemon, diagnostics, Doctor, and host
-  conformance tests pass with all features. PR12 records gateway latency and
-  resource baselines for Plan 33's end-to-end optimization.
+- Required commands are
+  `cargo test --all-features --test lsp_gateway_suite`,
+  `cargo bench --bench lsp_gateway`,
+  `scripts/check-lsp-gateway-benchmark.sh
+  benchmarks/pr12-lsp-gateway/baseline.json`,
+  `cargo check --all-features`, and `cargo test --all-features`.
+  `workload-v1.json` fixes content hashes, operation mix, 5 warm-up rounds, 200
+  measured operations per method, 5 independent processes, concurrency 1 and
+  8, cache/analyzer warm-state boundaries, and bridge-receive through
+  bridge-write clock boundaries. The threshold script gates only on the
+  designated Linux x86_64 benchmark runner class recorded in the baseline;
+  other CI hosts report without comparing. Percentiles are computed per
+  independent process and the worst process must satisfy every absolute p95/
+  p99 budget above; cancellation's maximum observed pre-acknowledgement delay
+  must be <= 50 ms. The script also fails when the lower bound of a bootstrap
+  95% confidence interval over process-level p95 values shows greater than 10%
+  latency regression, or when median peak RSS regresses by both greater than
+  10% and greater than 16 MiB. It checks every hard payload/queue limit and
+  fails on either an absolute-budget violation or a regression-threshold
+  violation. PR12 records the baseline for Plan 33's later end-to-end
+  optimization.
 
 ## Rejected designs
 

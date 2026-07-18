@@ -81,16 +81,19 @@ The minimum typed model includes:
   `calibrated_interval` assessment carrying explicit producer/origin and
   scale/calibration revision.
 
-Every opaque `TaskId`/`WorkItemId` is also a stable authorized retrieval root.
-It resolves typed dependencies, versions, attempts, independent reviews,
-temporal outcomes, sessions/Threads/Turns/messages/agents/tool calls,
-artifacts, receipts, handoffs, and other-agent work, plus exact Plan 13
-anchored project/repository/worktree/branch, file/symbol, diagnostic,
-code-generation, Git/commit/PR/check, impact, and affected-test evidence.
-Task-linked session narrative reuses Plan 23's current/as-of/evolution/forensic
-kernel; GitHub, CI, diagnostic, Git, and code evidence stays in its owning
-store. Summaries accelerate bounded context but never replace exact evidence,
-and every page, hydration, or expansion rechecks authorization.
+`TaskId` is a public vocabulary alias for canonical `WorkItemId`; it is not a
+second identifier family. Every opaque `TaskId` is a stable **selection root**:
+after a non-enumerating authorization check, Plan 24 selects typed task
+relations to dependencies, versions, attempts, independent reviews, outcomes,
+sessions/Threads/Turns/messages/agents/tool calls, artifacts, receipts,
+handoffs, and explicitly task-linked sibling work. Plan 24 never hydrates those
+sources itself. Task-linked session narrative delegates to Plan 23's
+current/as-of/evolution/forensic kernel. Project/repository/worktree/branch,
+file/symbol, diagnostic, code-generation, Git/commit/PR/check, impact, and
+affected-test evidence resolves through Plan 13 anchors and each owning store.
+Summaries accelerate bounded context but never replace exact evidence. Every
+selection, page, hydration, continuation, and expansion rechecks authorization;
+possession of a `TaskId`, cursor, packet ID, or anchor never grants access.
 
 Gating edges form a DAG. Informational and evidence relations may contain
 cycles but never unlock work or enter critical-path calculations. Readiness is
@@ -141,6 +144,917 @@ auxiliary-attempt request is advisory: Plan 24 does not reserve capacity,
 acquire a lease, start a process, dispatch bytes, supervise a provider, or
 create an attempt. Plan 32 alone revalidates the request, acquires the fenced
 lease, creates the attempt, and executes it through a typed provider adapter.
+
+## Executable task retrieval and evidence contract
+
+This section fixes PR17's internal names and type boundaries. PR18 may map them
+into public SDK naming, but it cannot merge the states, omit fields, or move
+authority. Rust snippets are normative signatures; implementations may add
+private fields but not weaken required inputs or outcomes.
+
+### Domain identities and request types
+
+```rust
+pub type TaskId = WorkItemId;
+
+pub struct TaskEvidenceRequest {
+    pub root: TaskEvidenceRoot,
+    pub graph_snapshot: WorkGraphSnapshotSelector,
+    pub relation_selection: TaskRelationSelection,
+    pub session_query: Option<TaskSessionNarrativeQuery>,
+    pub needs: NonEmptyVec<EvidenceNeed>,
+    pub capability_manifest_revision: SourceCapabilityManifestRevision,
+    pub controls: RetrievalControls,
+    pub cursor: Option<TaskEvidenceCursor>,
+}
+
+/// Authorized interactive overlay only. Never part of canonical retrieval
+/// identity, request digests, packets, completion, or routing.
+pub struct InteractiveTaskContextRequest {
+    pub evidence: TaskEvidenceRequest,
+    pub expertise_context: TaskExpertiseContextNeed,
+}
+
+pub struct TaskEvidenceRoot {
+    pub work_plan_version_id: WorkPlanVersionId,
+    pub work_item_id: WorkItemId,
+    pub work_item_version_id: WorkItemVersionId,
+    pub readiness_digest: ReadinessDigest,
+    pub acceptance_contract_id: AcceptanceContractId,
+    pub authorized_scope_digest: AuthorizedScopeDigest,
+}
+
+pub enum WorkGraphSnapshotSelector {
+    CurrentHead,
+    ExactPlanVersion(WorkPlanVersionId),
+    ObservedAt(UtcMicros),
+}
+
+pub struct TaskRelationSelection {
+    pub pivots: NonEmptySet<TaskEvidencePivot>,
+    pub maximum_hops: NonZeroU8,
+    pub maximum_relations: NonZeroU32,
+}
+
+pub enum TaskEvidencePivot {
+    Dependency,
+    Attempt,
+    IndependentReview,
+    Outcome,
+    SessionNarrative,
+    Artifact,
+    Receipt,
+    Handoff,
+    ExplicitSiblingWork,
+    Code,
+    Git,
+    PullRequest,
+    Check,
+    Diagnostic,
+    Impact,
+    AffectedTest,
+}
+
+pub struct TaskSessionNarrativeQuery {
+    pub query: SessionTemporalQuery,
+}
+
+pub struct EvidenceNeed {
+    pub role: EvidenceRole,
+    pub required: bool,
+    pub exactness: EvidenceExactness,
+    pub minimum_authority: AuthorityClass,
+    pub maximum_age: Option<Duration>,
+    pub maximum_items: NonZeroU32,
+    pub maximum_bytes: NonZeroU64,
+}
+```
+
+`SessionTemporalQuery`, `TemporalModeV1`, and `RetrievalGrainV1` are imported
+unchanged from Plan 23. `SessionTemporalQuery` encodes the legal
+`current | as_of | evolution | forensic` mode and its cutoff, so Plan 24 cannot
+construct an invalid mode/cutoff pair. Plan 24 derives only the authorized
+exact-identity selector; it never sends a raw `TaskId` to Plan 23 or adds task
+semantics to the PR8 kernel.
+
+### Compact source-capability manifest
+
+The planner consumes capabilities, not payloads or ambient store handles:
+
+```rust
+pub struct SourceCapabilityManifest {
+    pub revision: SourceCapabilityManifestRevision,
+    pub generated_at: UtcMicros,
+    pub scope_digest: AuthorizedScopeDigest,
+    pub sources: NonEmptyVec<SourceCapability>,
+    pub fallback: DeterministicRetrievalFallback,
+}
+
+pub struct SourceCapability {
+    pub source: TaskEvidenceSource,
+    pub primitive: RetrievalPrimitiveKind,
+    pub owner: EvidenceOwner,
+    pub grains: NonEmptySet<EvidenceGrain>,
+    pub temporal_modes: NonEmptySet<TemporalModeV1>,
+    pub exact_evidence: CapabilitySupport,
+    pub summary_acceleration: CapabilitySupport,
+    pub hydration: CapabilitySupport,
+    pub authority: AuthorityClass,
+    pub freshness: SourceFreshness,
+    pub source_watermark: Option<SourceWatermark>,
+    pub maximum_parallel_reads: NonZeroU16,
+    pub maximum_page_items: NonZeroU32,
+}
+
+pub enum CapabilitySupport {
+    Supported,
+    Unsupported,
+    Absent,
+    Denied,
+    Unavailable,
+    Stale,
+}
+
+pub enum RetrievalPrimitiveKind {
+    TaskRelations,
+    SessionTemporal,
+    RetrievalAnchorResolution,
+    CodeGraphEvidence,
+    GitDeliveryEvidence,
+    RuntimeReceiptEvidence,
+    FeedbackCycleEvidence,
+}
+```
+
+The manifest contains no transcript text, evidence body, response handle,
+credential, executable setting, CWD-relative path, or provider prompt. Its
+revision, scope digest, source watermarks, and canonical fallback sequence
+enter the plan digest. A listed `Absent` or `Unavailable` source has no
+watermark. A source omitted from the manifest is ineligible; it is not
+discovered opportunistically during execution. The application creates the
+manifest and fallback from authorized Plan 08/20/27 capabilities; requesters
+cannot supply or reorder fallback.
+
+### Planner, retrieval executor, and owner ports
+
+`TaskEvidencePlanner` is a pure Plan 24 domain service. `TaskEvidenceExecutor`
+is the Plan 09 application composition over Plan 05's generic bounded-query
+mechanics. This retrieval executor is not the Plan 32 workflow runtime: it
+creates no run, node, lease, attempt, effect, artifact, or runtime receipt.
+
+```rust
+pub trait TaskEvidencePlanner {
+    fn plan(
+        &self,
+        preflight: &AuthorizedTaskRetrievalPreflight,
+    ) -> Result<TaskRetrievalPlan, TaskPlanningFailure>;
+}
+
+pub struct AuthorizedTaskRetrievalPreflight {
+    pub request: TaskEvidenceRequest,
+    pub request_digest: TaskEvidenceRequestDigest,
+    pub authorized_root: AuthorizedTaskRoot,
+    pub pinned_graph_snapshot: PinnedWorkGraphSnapshot,
+    pub manifest: SourceCapabilityManifest,
+    pub cursor_binding: Option<TaskEvidenceCursorBinding>,
+}
+
+pub struct TaskRetrievalPlan {
+    pub plan_id: TaskRetrievalPlanId,
+    pub plan_digest: TaskRetrievalPlanDigest,
+    pub request_digest: TaskEvidenceRequestDigest,
+    pub root: TaskEvidenceRoot,
+    pub authorized_root: AuthorizedTaskRoot,
+    pub pinned_graph_snapshot: PinnedWorkGraphSnapshot,
+    pub manifest_revision: SourceCapabilityManifestRevision,
+    pub pinned_source_watermarks: RetrievalWatermarks,
+    pub cursor_binding: Option<TaskEvidenceCursorBinding>,
+    pub primitives: NonEmptyVec<PlannedRetrievalPrimitive>,
+    pub required_sources: Set<TaskEvidenceSource>,
+    pub deterministic_merge: DeterministicMergeRevision,
+    pub fallback: DeterministicRetrievalFallback,
+    pub controls: RetrievalControls,
+}
+
+pub struct PlannedRetrievalPrimitive {
+    pub primitive_id: RetrievalPrimitiveId,
+    pub kind: RetrievalPrimitiveKind,
+    pub source: TaskEvidenceSource,
+    pub selector: PrimitiveSelector,
+    pub depends_on: Set<RetrievalPrimitiveId>,
+    pub required: bool,
+    pub reserved_budget: PrimitiveBudgetReservation,
+}
+
+pub struct RetrievalControls {
+    pub absolute_deadline: UtcMicros,
+    pub cancellation_id: CancellationId,
+    pub effect_budget: RetrievalEffectBudget,
+    pub feedback_profile: Option<FeedbackRetrievalProfile>,
+}
+
+pub struct FeedbackRetrievalProfile {
+    pub eligible_source_families: NonEmptySet<EvidenceSourceFamily>,
+    pub minimum_represented_families: NonZeroU16,
+    pub maximum_family_share: Probability,
+    pub relevance_slack: FiniteF64,
+    pub proximity_maximum_rank_contribution: FiniteF64,
+    pub policy_revision: PolicyRevision,
+    pub privacy_revision: PrivacyPolicyRevision,
+}
+
+pub struct RetrievalEffectBudget {
+    pub maximum_source_operations: NonZeroU32,
+    pub maximum_parallelism: NonZeroU16,
+    pub maximum_remote_reads: u16,
+    pub maximum_hydrated_bytes: NonZeroU64,
+    pub maximum_context_tokens: NonZeroU64,
+    pub maximum_cost_micros: u64,
+}
+
+pub trait TaskEvidenceExecutor {
+    async fn execute(
+        &self,
+        actor: AuthorizedActor,
+        plan: TaskRetrievalPlan,
+    ) -> Result<TaskEvidencePacket, TaskRetrievalFailure>;
+}
+
+pub struct RetrievalExecutionContext {
+    plan_digest: TaskRetrievalPlanDigest,
+    cancellation_id: CancellationId,
+    watermark_digest: RetrievalWatermarksDigest,
+    budget_ledger_id: RetrievalBudgetLedgerId,
+    authorization: CurrentTaskReadAuthorization,
+    absolute_deadline: UtcMicros,
+    cancellation: CancellationToken,
+    watermarks: RetrievalWatermarks,
+    budget_ledger: AtomicRetrievalBudgetLedger,
+}
+
+impl RetrievalExecutionContext {
+    pub fn plan_digest(&self) -> &TaskRetrievalPlanDigest;
+    pub fn cancellation_id(&self) -> &CancellationId;
+    pub fn watermark_digest(&self) -> &RetrievalWatermarksDigest;
+    pub fn budget_ledger_id(&self) -> &RetrievalBudgetLedgerId;
+    pub fn authorization(&self) -> &CurrentTaskReadAuthorization;
+    pub fn absolute_deadline(&self) -> UtcMicros;
+    pub fn cancellation(&self) -> &CancellationToken;
+    pub fn watermarks(&self) -> &RetrievalWatermarks;
+    pub fn budget_ledger(&self) -> &AtomicRetrievalBudgetLedger;
+}
+
+pub trait TaskGraphRetrievalStore {
+    async fn authorize_and_resolve_root(
+        &self,
+        actor: &AuthorizedActor,
+        root: &TaskEvidenceRoot,
+        snapshot: &WorkGraphSnapshotSelector,
+    ) -> Result<AuthorizedTaskRoot, TaskRootFailure>;
+
+    async fn select_relations(
+        &self,
+        root: &AuthorizedTaskRoot,
+        selection: &TaskRelationSelection,
+        page: PageRequest,
+        context: &RetrievalExecutionContext,
+    ) -> Result<TaskRelationPage, TaskRelationFailure>;
+}
+
+pub trait TaskGraphMutationStore {
+    async fn commit(
+        &self,
+        transaction: WorkGraphTransaction,
+    ) -> Result<WorkGraphCommitReceipt, WorkGraphStoreFailure>;
+}
+
+pub struct WorkGraphTransaction {
+    pub owner_shard: OwnerShardId,
+    pub expected_work_plan_version: WorkPlanVersionId,
+    pub expected_heads: NonEmptyMap<WorkItemId, WorkItemVersionId>,
+    pub events: NonEmptyVec<WorkGraphEvent>,
+    pub idempotency_key: IdempotencyKey,
+    pub actor: ActorId,
+    pub causation: CommandId,
+    pub evidence_refs: Vec<TaskEvidenceId>,
+    pub source_watermarks: RetrievalWatermarks,
+}
+
+pub enum WorkGraphStoreFailure {
+    Denied,
+    WrongOwnerShard,
+    ExpectedVersionMismatch,
+    CycleDetected,
+    IllegalTransition,
+    IdempotencyConflict,
+    ConstraintViolation,
+    StoreUnavailable,
+}
+
+pub trait TaskSessionRetrievalAdapter {
+    async fn retrieve(
+        &self,
+        query: TaskSessionNarrativeQuery,
+        context: &RetrievalExecutionContext,
+    ) -> SessionRetrievalOutcome<TemporalKernelResult>;
+}
+
+pub trait RetrievalAnchorResolverPort {
+    async fn resolve_many(
+        &self,
+        scope: &AuthorizedScope,
+        anchors: NonEmptySlice<RetrievalAnchorId>,
+        context: &RetrievalExecutionContext,
+    ) -> Vec<AnchorResolutionOutcome>;
+}
+
+pub trait RuntimeEvidenceReadPort {
+    async fn read_receipts(
+        &self,
+        scope: &AuthorizedScope,
+        ids: NonEmptySlice<RuntimeEvidenceId>,
+        context: &RetrievalExecutionContext,
+    ) -> RuntimeEvidencePage;
+}
+
+pub trait FeedbackEvidenceReadPort {
+    async fn retrieve_candidates(
+        &self,
+        request: FeedbackEvidenceCandidateRequest,
+        context: &RetrievalExecutionContext,
+    ) -> Result<FeedbackEvidenceCandidatePage, FeedbackEvidenceFailure>;
+
+    async fn expand_anchors(
+        &self,
+        anchors: NonEmptySlice<RetrievalAnchorId>,
+        context: &RetrievalExecutionContext,
+    ) -> Result<FeedbackEvidencePage, FeedbackEvidenceFailure>;
+}
+```
+
+`TaskSessionRetrievalAdapter` is a Plan 09 adapter that delegates to Plan 23's
+existing `SessionRetrievalService`; Plan 23 does not implement a Plan 24 trait.
+Plan 13 resolution and owning stores back `RetrievalAnchorResolverPort`; Plan
+32 exposes a read-only receipt projection through `RuntimeEvidenceReadPort`;
+Plan 37 supplies source-side packet/proximity operations consumed by the Plan
+24-owned `FeedbackEvidenceReadPort` for canonical retrieval. Demonstrated
+expertise is never a `FeedbackEvidenceReadPort` input, retrieval primitive, or
+packet contribution. Exactly one `FeedbackCycleEvidence` primitive is
+registered. None of those plans imports Plan 24 graph semantics.
+
+The executor starts every dependency-free primitive concurrently, bounded by
+`maximum_parallelism`. Every primitive receives the same absolute deadline,
+cancellation token, scope, pinned watermarks, and one atomic budget ledger.
+The executor constructs `RetrievalExecutionContext` from the plan and current
+actor authorization; its private constructor rejects any plan-digest,
+cancellation-ID, watermark-digest, or ledger-ID mismatch.
+Budget reservation happens before source work; unused reservations return to
+the ledger. Retrievers cannot extend the deadline, mint child budgets, refresh
+or repair a source, invoke another retriever, dispatch an agent, or mutate any
+store. Cancellation prevents late candidates from entering the packet.
+Every digest-bearing set and map uses canonical domain ordering; vectors are
+either semantically ordered by their type or sorted by the declared stable
+key before hashing.
+
+### Normalized evidence packet
+
+```rust
+pub struct TaskEvidencePacket {
+    pub packet_id: TaskEvidencePacketId,
+    pub packet_digest: TaskEvidencePacketDigest,
+    pub request_digest: TaskEvidenceRequestDigest,
+    pub plan_digest: TaskRetrievalPlanDigest,
+    pub root: TaskEvidenceRoot,
+    pub scope_digest: AuthorizedScopeDigest,
+    pub watermarks: RetrievalWatermarks,
+    pub status: EvidencePacketStatus,
+    pub records: Vec<TaskEvidenceRecord>,
+    pub coverage: NonEmptyVec<SourceCoverage>,
+    pub omissions: Vec<EvidenceOmission>,
+    pub conflicts: Vec<EvidenceConflict>,
+    pub retriever_contributions: NonEmptyVec<TaskRetrieverContribution>,
+    pub source_diversity: SourceDiversityReport,
+    pub fallback_decisions: Vec<FallbackDecision>,
+    pub continuation: Option<TaskEvidenceCursor>,
+}
+
+pub enum EvidencePacketStatus {
+    Complete,
+    Partial,
+    NoRelevantEvidence,
+    Abstained,
+}
+
+pub struct TaskEvidenceRecord {
+    pub evidence_id: TaskEvidenceId,
+    pub relation: TaskEvidenceRelation,
+    pub source: TaskEvidenceSource,
+    pub anchor: RetrievalAnchorId,
+    pub task_link: TaskEvidenceLinkRevision,
+    pub provenance: TaskEvidenceProvenance,
+    pub temporal_state: EvidenceTemporalState,
+    pub authority: AuthorityClass,
+    pub assessments: Vec<TypedEvidenceAssessment>,
+    pub representation: EvidenceRepresentation,
+    pub coverage: EvidenceCoverage,
+}
+
+pub struct TaskEvidenceLinkRevision {
+    pub link_revision_id: TaskEvidenceLinkRevisionId,
+    pub work_item_version_id: WorkItemVersionId,
+    pub evidence_anchor: RetrievalAnchorId,
+    pub relation: TaskEvidenceRelation,
+    pub valid_at: UtcMicros,
+    pub observed_at: UtcMicros,
+    pub producer: ProducerId,
+    pub coverage: EvidenceCoverage,
+}
+
+pub enum TaskEvidenceProvenance {
+    AnchorOnly {
+        anchor: RetrievalAnchorId,
+    },
+    ExactSpan {
+        evidence_span_id: EvidenceSpanIdV1,
+        span_anchor: RetrievalAnchorId,
+    },
+    RetrieverContribution {
+        contribution_id: RetrieverContributionIdV1,
+        contribution_anchor: RetrievalAnchorId,
+        evidence_span_id: EvidenceSpanIdV1,
+        span_anchor: RetrievalAnchorId,
+    },
+}
+
+pub struct TypedEvidenceAssessment {
+    pub score: TypedEvidenceScore,
+    pub producer: ProducerId,
+    pub origin: AssessmentOrigin,
+    pub evidence_anchors: NonEmptyVec<RetrievalAnchorId>,
+    pub coverage: EvidenceCoverage,
+    pub horizon: AssessmentHorizon,
+}
+
+pub enum TypedEvidenceScore {
+    ExactMatch { matched_fields: NonEmptySet<ExactField> },
+    OrdinalRank {
+        rank: NonZeroU32,
+        comparison_set: ComparisonSetId,
+    },
+    Heuristic {
+        value: FiniteF64,
+        scale_revision: ScoreScaleRevision,
+    },
+    CalibratedProbability {
+        value: Probability,
+        estimator: EstimatorRevision,
+        cohort: CohortRevision,
+        support: NonZeroU32,
+        held_out_error: FiniteF64,
+        drift_validity: DriftValidity,
+        calibration_revision: CalibrationRevision,
+    },
+    CalibratedInterval {
+        lower: FiniteF64,
+        upper: FiniteF64,
+        declared_level: Probability,
+        estimator: EstimatorRevision,
+        cohort: CohortRevision,
+        support: NonZeroU32,
+        held_out_error: FiniteF64,
+        drift_validity: DriftValidity,
+        calibration_revision: CalibrationRevision,
+    },
+}
+
+pub enum EvidenceRepresentation {
+    Exact,
+    SessionSummaryAcceleration(SessionSummaryRecordV1),
+}
+
+pub struct SourceCoverage {
+    pub source: TaskEvidenceSource,
+    pub state: CoverageState,
+    pub considered: u32,
+    pub returned: u32,
+    pub omitted: u32,
+    pub source_watermark: Option<SourceWatermark>,
+}
+
+pub enum CoverageState {
+    Complete,
+    Partial,
+    Absent,
+    Stale,
+    Denied,
+    Unavailable,
+    RateLimited,
+    Retained,
+    Locked,
+    Redacted,
+    Deleted,
+    Expired,
+    Corrupt,
+}
+
+pub struct EvidenceOmission {
+    pub source: TaskEvidenceSource,
+    pub reason: OmissionReason,
+    pub count: u32,
+    pub required: bool,
+}
+
+pub struct TaskRetrieverContribution {
+    pub primitive_id: RetrievalPrimitiveId,
+    pub retriever_id: RetrieverId,
+    pub retriever_kind: RetrieverKind,
+    pub source: TaskEvidenceSource,
+    pub source_family: EvidenceSourceFamily,
+    pub source_record_ids: Vec<SourceRecordId>,
+    pub candidate_evidence_ids: Vec<TaskEvidenceId>,
+    pub selected_evidence_ids: Vec<TaskEvidenceId>,
+    pub producer_revision: ProducerRevision,
+    pub valid_at: Option<UtcMicros>,
+    pub observed_at: UtcMicros,
+    pub expires_at: Option<UtcMicros>,
+    pub coverage: EvidenceCoverage,
+    pub freshness: SourceFreshness,
+    pub score_kind: Option<ScoreKind>,
+    pub raw_score: Option<FiniteF64>,
+    pub normalized_rank_contribution: Option<FiniteF64>,
+    pub reasons: Vec<InclusionOrSuppressionReason>,
+    pub terminal: RetrieverTerminalState,
+    pub candidates_considered: u32,
+    pub records_selected: u32,
+    pub bytes_spent: u64,
+    pub cost_micros: u64,
+    pub elapsed_micros: u64,
+}
+
+pub struct SourceDiversityReport {
+    pub eligible_families: Set<EvidenceSourceFamily>,
+    pub represented_families: Set<EvidenceSourceFamily>,
+    pub minimum_represented_families: NonZeroU16,
+    pub maximum_family_share: Probability,
+    pub observed_maximum_family_share: Probability,
+    pub source_entropy: FiniteF64,
+    pub diversity_unmet: bool,
+    pub policy_revision: PolicyRevision,
+}
+
+pub struct FallbackDecision {
+    pub sequence: u16,
+    pub candidate: FallbackCandidate,
+    pub trigger: FallbackTrigger,
+    pub outcome: FallbackOutcome,
+    pub reason: FallbackReason,
+}
+```
+
+`TaskEvidenceLinkRevision` is Plan 24's immutable task-to-evidence edge. Exact
+source coordinates, occurrence sets, source generation, content identity,
+horizon, catalog binding, and original-span immutability remain in Plan 13's
+`EvidenceSpanRecordV1`; Plan 24 references its `EvidenceSpanIdV1` and anchor
+without copying it. Plan 13 also owns `RetrieverContributionRecordV1`;
+`TaskRetrieverContribution` is only Plan 24 packet-local fan-out accounting
+and uses a distinct name. A branch remap creates another Plan 13-anchored derived
+projection with `current | outdated | ambiguous | unavailable`; it never
+rewrites the original span. Path, line, symbol, or text similarity alone
+cannot mark a remap current.
+
+Raw score kinds, scales, and revisions are never averaged or directly ordered.
+The deterministic merger first preserves exact identifiers and quoted
+technical evidence, then applies each producer's declared ordering, admits
+contradictions before duplicate suppression, and uses
+`(manifest fallback sequence, primitive_id, anchor_id)` as the final stable
+tie-break. Every ordering decision is explainable from packet fields.
+Authorization and source eligibility precede scoring. Source-diversity policy
+runs after candidate union and before final projection. Proximity may add no
+more than `proximity_maximum_rank_contribution`, cannot satisfy diversity by
+itself, and cannot lower source severity or upgrade authority, confidence, or
+coverage. A diversity shortfall sets `diversity_unmet` and forces `Partial` or
+`Abstained`; it never invents or promotes evidence.
+
+A summary is eligible only when its exact source anchors are authorized,
+lineage is acyclic and complete, and its verified horizon covers the selected
+evidence. Plan 24 carries Plan 23's complete immutable
+`SessionSummaryRecordV1`, including `SummarySourceHorizonV1`, summary identity,
+model/configuration route, creation watermark, sanitization receipt, and exact
+source lineage; it defines no second horizon type. A summary acceleration
+never satisfies an exact-evidence need, acceptance gate, or causal claim.
+Demonstrated expertise is rejected from canonical retrieval entirely and cannot
+satisfy any evidence need, acceptance gate, or causal claim. Exact retained
+sources remain expandable.
+Redacted, expired, deleted, denied, corrupt, or unavailable sources remain
+typed omissions or tombstones rather than clean absence.
+
+### Deterministic fallback and no recursion
+
+```rust
+pub struct DeterministicRetrievalFallback {
+    pub revision: RetrievalFallbackRevision,
+    pub ordered: Vec<FallbackCandidate>,
+}
+
+pub struct FallbackCandidate {
+    pub source: TaskEvidenceSource,
+    pub primitive: RetrievalPrimitiveKind,
+    pub allowed_when: NonEmptySet<FallbackTrigger>,
+}
+
+pub enum FallbackTrigger {
+    Unsupported,
+    Absent,
+    Stale,
+    UnavailableBeforeRead,
+}
+```
+
+The planner evaluates the captured order only. Denial, privacy failure,
+malformed evidence, changed authorization, changed watermark, cancellation,
+budget exhaustion, or a source failure after an effectful/remote read never
+changes source implicitly. Capacity exhaustion returns a typed omission; it
+does not select a different provider. Every considered fallback and rejection
+is recorded. Plan 32 independently applies its own pinned provider fallback
+rules at runtime and never reuses retrieval fallback as provider policy.
+
+Execution envelopes and retrieval contexts omit task-dispatch, graph-write,
+runtime-control, lease-minting, provider-selection, source-refresh, and
+child-budget capabilities. Provider output or retrieved content asking for
+another agent/retriever is inert evidence. Only a new human-authorized Plan 09
+command over a new Plan 24 decision may produce another auxiliary request.
+
+### Retrieval states and exhaustive failures
+
+```text
+Received
+  -> RootAuthorized
+  -> GraphSnapshotPinned
+  -> Planned
+  -> FanoutRunning
+  -> Merging
+  -> PacketAssembling
+  -> Complete | Partial | NoRelevantEvidence | Abstained
+
+Received | RootAuthorized | GraphSnapshotPinned | Planned | FanoutRunning
+  | Merging | PacketAssembling
+  -> Cancelled | TimedOut | Failed
+```
+
+Each primitive moves exactly once from `Planned` to
+`SkippedIneligible` (terminal) or `Running`, then from `Running` to
+`Evidence | NoRelevantEvidence | Omitted | Cancelled | TimedOut |
+BudgetExhausted | Failed`. Terminal states never reopen. Packet order and
+digest are independent of primitive completion order.
+
+```rust
+pub enum TaskPlanningFailure {
+    InvalidRequest,
+    IllegalPivot,
+    ManifestScopeMismatch,
+    ManifestRevisionUnavailable,
+    RequiredCapabilityUnsupported,
+    InvalidFallback,
+    BudgetImpossible,
+}
+
+pub enum TaskRetrievalFailure {
+    DeniedOrNotFound,
+    TaskVersionUnavailable,
+    ScopeMismatch,
+    ReadinessDigestChanged,
+    CursorMismatch,
+    WatermarkChanged,
+    AuthorizationChanged,
+    CancellationRequested,
+    DeadlineExceeded,
+    BudgetExhausted,
+    CorruptEvidence,
+    RequiredSourceFailed { source: TaskEvidenceSource },
+    InternalInvariantViolated,
+}
+
+pub enum TaskEvidenceFailure {
+    Planning(TaskPlanningFailure),
+    Retrieval(TaskRetrievalFailure),
+}
+
+pub enum TaskRootFailure {
+    DeniedOrNotFound,
+    ScopeMismatch,
+    VersionUnavailable,
+    SnapshotUnavailable,
+    StoreUnavailable,
+}
+
+pub enum TaskRelationFailure {
+    Denied,
+    IllegalPivot,
+    BoundExceeded,
+    CursorMismatch,
+    WatermarkChanged,
+    StoreUnavailable,
+}
+
+pub enum FeedbackEvidenceFailure {
+    Denied,
+    Unsupported,
+    Stale,
+    Unavailable,
+    RateLimited,
+    Corrupt,
+}
+```
+
+`DeniedOrNotFound` deliberately prevents TaskId enumeration. A required source
+that returns a truthful `Denied`, `Stale`, `Redacted`, `Deleted`, or
+`Unavailable` coverage outcome normally yields `Partial` or `Abstained`; the
+executor returns `RequiredSourceFailed` only when the source contract itself
+cannot produce a typed outcome. Cancellation may return a separately marked
+authorized partial packet only if policy permits partial delivery; it never
+returns `Complete`.
+
+Packet status is deterministic: all required sources `Complete` and no
+required omission yields `Complete`; all required sources complete with zero
+selected records yields `NoRelevantEvidence`; any required source
+`Partial | Absent | Stale | Denied | Unavailable | RateLimited | Retained |
+Locked | Redacted | Deleted | Expired | Corrupt` with usable authorized
+evidence yields `Partial`; the same condition without sufficient evidence
+yields `Abstained`. A required source contract
+failure uses `TaskRetrievalFailure`. An optional-source omission cannot lower
+`Complete` but remains visible in coverage and omissions.
+
+### Application commands and Plan 32 runtime bridge
+
+```rust
+pub trait TaskWorkApplication {
+    /// Canonical TaskId-rooted retrieval. Rejects any expertise context.
+    async fn retrieve_evidence(
+        &self,
+        actor: AuthorizedActor,
+        request: TaskEvidenceRequest,
+    ) -> Result<TaskEvidencePacket, TaskEvidenceFailure>;
+
+    /// Authorized ephemeral interactive overlay only. Expertise never enters
+    /// the canonical packet, request digest, durable evidence, completion, or
+    /// routing authority.
+    async fn retrieve_interactive_task_context(
+        &self,
+        actor: AuthorizedActor,
+        request: InteractiveTaskContextRequest,
+    ) -> Result<InteractiveTaskEvidenceView, TaskEvidenceFailure>;
+
+    async fn project(
+        &self,
+        actor: AuthorizedActor,
+        request: WorkProjectionRequest,
+    ) -> Result<WorkProjectionView, WorkProjectionFailure>;
+
+    async fn submit_proposal(
+        &self,
+        actor: AuthorizedActor,
+        command: SubmitTaskProposal,
+    ) -> Result<TaskProposalRevision, TaskMutationFailure>;
+
+    async fn review_proposal(
+        &self,
+        actor: AuthorizedActor,
+        command: ReviewTaskProposal,
+    ) -> Result<TaskProposalRevision, TaskMutationFailure>;
+
+    async fn apply_accepted_proposal(
+        &self,
+        actor: AuthorizedActor,
+        command: ApplyAcceptedTaskProposal,
+    ) -> Result<WorkPlanVersion, TaskMutationFailure>;
+
+    async fn request_runtime_admission(
+        &self,
+        actor: AuthorizedActor,
+        command: Plan24RuntimeAdmissionIntent,
+    ) -> Result<RunAdmissionReceiptV1, TaskRuntimeBridgeFailure>;
+}
+
+pub struct TaskMutationEnvelope {
+    pub scope_digest: AuthorizedScopeDigest,
+    pub expected_work_plan_version: WorkPlanVersionId,
+    pub expected_work_item_version: WorkItemVersionId,
+    pub idempotency_key: IdempotencyKey,
+    pub reason: SafeReason,
+    pub policy_revision: PolicyRevision,
+    pub configuration_revision: ConfigurationRevision,
+    pub catalog_revision: CatalogRevision,
+    pub privacy_revision: PrivacyPolicyRevision,
+    pub causation: CommandId,
+    pub evidence_refs: Vec<TaskEvidenceId>,
+    pub source_watermarks: RetrievalWatermarks,
+}
+
+pub struct SubmitTaskProposal {
+    pub envelope: TaskMutationEnvelope,
+    pub proposal: TaskProposalDraft,
+}
+
+pub struct ReviewTaskProposal {
+    pub envelope: TaskMutationEnvelope,
+    pub expected_proposal_revision: TaskProposalRevisionId,
+    pub decision: ProposalReviewDecision,
+}
+
+pub struct ApplyAcceptedTaskProposal {
+    pub envelope: TaskMutationEnvelope,
+    pub expected_proposal_revision: TaskProposalRevisionId,
+    pub expected_accepted_decision: TaskProposalDecisionId,
+}
+
+pub enum TaskMutationFailure {
+    Denied,
+    InvalidCommand,
+    StaleWorkPlan,
+    StaleWorkItem,
+    StaleProposal,
+    IllegalTransition,
+    IdempotencyConflict,
+    WatermarkChanged,
+    AuthorizationChanged,
+    PrivacyViolation,
+    StoreUnavailable,
+}
+
+pub enum WorkProjectionFailure {
+    DeniedOrNotFound,
+    InvalidSelection,
+    CursorMismatch,
+    WatermarkChanged,
+    BudgetExceeded,
+    Cancelled,
+    TimedOut,
+    StoreUnavailable,
+}
+
+pub enum TaskRuntimeBridgeFailure {
+    Denied,
+    StaleTaskRequest,
+    StaleReadiness,
+    StaleEvidencePacket,
+    ScopeMismatch,
+    WatermarkChanged,
+    RuntimeAdmission(AdmissionError),
+}
+
+pub struct FrozenTaskEvidencePacketRef {
+    pub packet_id: TaskEvidencePacketId,
+    pub packet_digest: TaskEvidencePacketDigest,
+    pub scope_digest: AuthorizedScopeDigest,
+    pub watermarks: RetrievalWatermarks,
+    pub coverage_digest: CoverageDigest,
+    pub authorized_payload_handles: Vec<AuthorizedPayloadHandle>,
+}
+
+pub struct Plan24RuntimeAdmissionIntent {
+    pub mutation: TaskMutationEnvelope,
+    pub plan24_request_id: Plan24RequestId,
+    pub request_version: Plan24RequestVersion,
+    pub work_plan_version_id: WorkPlanVersionId,
+    pub work_item_version_id: WorkItemVersionId,
+    pub readiness_digest: ReadinessDigest,
+    pub acceptance_contract_id: AcceptanceContractId,
+    pub proposal_decision: Plan24ProposalDecisionRef,
+    pub accepted_attempt_set: AcceptedAttemptSetRef,
+    pub capability_manifest_digest: Digest,
+    pub auxiliary_request_id: Option<AuxiliaryAttemptRequestId>,
+    pub route_decision_id: RouteDecisionId,
+    pub evidence: FrozenTaskEvidencePacketRef,
+    pub grants: AttemptGrantSet,
+    pub budgets: AttemptBudgets,
+}
+```
+
+Proposal review and proposal application are separate transactions. `Accepted`
+records a decision; only `apply_accepted_proposal` creates a graph version.
+Changing admitted work requires a second explicit
+Plan 32 `PauseWorkflowRunV1`, `ResumeWorkflowRunV1`, or
+`RequestRunCancellationV1` command, or a new `AdmitWorkflowRunV1` for
+re-admission, each with expected runtime and authority versions. No command
+combines accept-and-execute.
+
+Plan 24 validates and lowers `Plan24RuntimeAdmissionIntent` into Plan 32's
+canonical `AdmitWorkflowRunV1`; the Plan 09 bridge calls only
+`WorkflowRuntimeKernel::admit_run` and returns
+`Result<RunAdmissionReceiptV1, AdmissionError>`. Plan 24 defines no runtime
+port, admission outcome, provider fallback, run state, attempt state, effect
+state, retry disposition, or control transition. It imports Plan 32's
+`WorkflowRunState`, `WorkflowAttemptState`, `EffectState`, `ProviderOutcome`,
+and receipts for projection only.
+
+Plan 32 revalidates request/version, work/plan versions, readiness, accepted
+attempt set, packet digest/scope/watermarks, route, grants, budgets, and the
+pinned Plan 20 capability/configuration manifest before lease acquisition.
+Provider fallback remains Plan 32/Plan 20 authority. Capacity deferral never
+changes provider. Retry always creates a new `WorkflowAttemptId`; an
+`EffectState::Unknown` / `WorkflowAttemptState::EffectUnknown` blocks retry,
+replacement, synthesis success, and run success. Runtime completion is
+evidence only and cannot perform Plan 24 acceptance.
 
 ## Model-routing review and live recalibration
 
@@ -265,7 +1179,8 @@ Shared-state or cross-cutting work is not falsely labeled parallel merely
 because several agents are available.
 
 Committed graph/runtime evidence may produce a new split, merge, resize,
-reorder, re-scope, re-review, or re-route proposal when, for example:
+reorder, re-scope, re-review, or re-route proposal only for one or more of
+these exhaustive trigger classes:
 
 - code-symbol impact, dependency, scope, or acceptance evidence expands or
   contracts;
@@ -363,11 +1278,15 @@ sole independent reviewer.
 All task-intelligence artifacts are immutable revisions. Proposal lifecycle is:
 
 ```text
-Proposed -> UnderReview -> Accepted | Rejected | Superseded | Expired
+Proposed -> UnderReview
+UnderReview -> Accepted | Rejected
+Proposed | UnderReview -> Superseded | Expired
 ```
 
-`Accepted` records the explicit command/actor and resulting graph version or
-runtime-control reference; it is not itself a graph mutation. An evaluator may
+`Accepted` records only the explicit decision command, actor, and decision
+reference; it is not itself a graph mutation. A later version-checked apply
+transaction records the resulting graph version, and any separate Plan 32
+control records its own runtime receipt. An evaluator may
 instead terminate without a proposal as `Abstained`, with one typed reason:
 insufficient eligible evidence, incomplete coverage, ambiguity above policy,
 no eligible route, privacy/authorization denial, stale/invalidated inputs,
@@ -386,7 +1305,9 @@ Pending | ObservedPartial | Reviewable -> Censored | Unknown
 
 Cancellation, timeout, lost authority, supersession, or an unfinished
 observation horizon can censor an outcome without turning it into failure or
-success. Late evidence appends a new outcome revision. First-pass means the
+success. Late eligible evidence never reopens `Censored` or `Unknown`; it
+appends a successor outcome revision beginning at `Pending` or
+`ObservedPartial` and links the superseded assessment. First-pass means the
 first admitted attempt against the pinned work-item/acceptance version before
 remediation; changing scope or acceptance creates a new comparison identity
 rather than laundering rework into a first pass.
@@ -413,7 +1334,7 @@ authorized product work + anchored graph/code/Git/session evidence
   -> later Plan 06 recommendations from a pinned evidence horizon
 ```
 
-PR17 must provide typed product operation concepts for:
+PR17 catalogs these internal typed operations:
 
 - task-shape assessment and explanation;
 - decomposition proposal creation, comparison, review, acceptance, rejection,
@@ -427,10 +1348,16 @@ PR17 must provide typed product operation concepts for:
 - topology assessment, minimal-repair comparison, selective escalation,
   governed experience recall, and typed handoff inspection/review.
 
-These are semantic operation families, not frozen PR18 public method, command,
-or MCP-tool names. Plan 09 owns the transport-neutral use cases, Plan 08 the
-capability definitions, Plan 21 the compact CLI/MCP bindings, and Plan 17 the
-later stabilized public API/SDK names.
+The corresponding catalog IDs are
+`work.task_shape.assess.v1`, `work.topology.assess.v1`,
+`work.decomposition.propose.v1`, `work.proposal.review.v1`,
+`work.routing.recommend.v1`, `work.repair.propose.v1`,
+`work.escalation.propose.v1`, `work.experience.retrieve.v1`,
+`work.handoff.inspect.v1`, `work.outcome.attach.v1`, and
+`work.calibration.report.v1`. Plan 09 owns these transport-neutral use cases,
+Plan 08 their capability definitions, Plan 21 compact CLI/MCP bindings, and
+Plan 17 later public API/SDK names. PR18 may rename a public binding but cannot
+change the operation ID or semantics.
 
 Optional process checkpoints use only external typed receipts: evidence
 acquired, exact-generation diagnostic/test, artifact
@@ -542,6 +1469,109 @@ count, tokens, latency, or cost. Security/privacy violations, hidden route
 substitution, severe escaped defects, and duplicate effects are hard adverse
 outcomes rather than tradeable score components.
 
+## Task-scoped demonstrated expertise and who-knows context
+
+Plan 37 owns `DemonstratedExpertiseSignalRevisionV1`, qualification, consent,
+authorization, temporal decay, lifecycle, revocation, deletion, tombstones,
+retention, and the five-minute purge bound. Plan 24 creates no second
+expertise signal, consent grant, subject index, support vector, decay policy,
+person score, or people-search store.
+
+Canonical TaskId-rooted retrieval explicitly rejects expertise context.
+`TaskEvidenceRequest`, request digests, capability manifests, retrieval plans,
+`FeedbackEvidenceReadPort`, retriever contributions, `TaskEvidencePacket`,
+packet digests, frozen packet refs, acceptance contracts, task completion,
+outcome labels, and model/route recommendations never accept, hash, store, or
+rank demonstrated expertise. A canonical request that carries expertise fields,
+needs, or pivots fails closed with a typed rejection. Expertise may exist only
+in an authorized ephemeral interactive view assembled after a complete
+canonical packet, and never becomes durable evidence or routing authority.
+
+Plan 24 owns only that ephemeral task-root interactive composition. It persists
+no derivative task-to-signal edge containing actor, topic, signal, anchor,
+timestamp, or decay metadata:
+
+```rust
+pub struct TaskExpertiseContextNeed {
+    pub topic_scope: ExpertiseTopicScope,
+    pub purpose: TaskExpertisePurpose,
+    pub maximum_signals: NonZeroU16,
+}
+
+pub enum TaskExpertisePurpose {
+    InteractiveTaskContext,
+}
+
+pub struct EphemeralTaskExpertiseEvidenceRef {
+    pub root: TaskEvidenceRoot,
+    pub projection: ExpertiseContextProjectionV1,
+}
+
+pub struct InteractiveTaskEvidenceView {
+    pub packet: TaskEvidencePacket,
+    pub expertise_context: Vec<EphemeralTaskExpertiseEvidenceRef>,
+}
+```
+
+The only authorized expertise read is `retrieve_interactive_task_context` with
+an `InteractiveTaskContextRequest` that pairs a canonical
+`TaskEvidenceRequest` and a `TaskExpertiseContextNeed`. Canonical
+`retrieve_evidence` never accepts that need. The interactive path first obtains
+the canonical packet, then consumes Plan 37's bounded
+`ExpertiseContextProjectionV1 { TaskEvidenceRoot, topic_scope, signal_id,
+evidence_kind, authorized_evidence_anchors, decay_state, explanation }` into
+memory-only refs. `EphemeralTaskExpertiseEvidenceRef` may exist only inside the
+authorized in-memory interactive view lifetime; it is never part of the
+canonical packet or packet digest, a graph event, store row, cache key, cursor
+payload, export record, workflow envelope, acceptance receipt, completion
+proof, route recommendation, or metric dimension.
+There is no general who-knows request, actor lookup, candidate page, maintainer
+search, reviewer selection API, or actor-addressable cursor.
+
+The task-scoped who-knows experience explains why bounded, consented evidence
+is relevant to the current task/topic. The packet may show a subject display
+label only through Plan 37's separate current authorization and affirmative
+identity-disclosure consent in one interactive task context. Identity never
+enters a cursor, batch result, export, workflow envelope, sort/filter/group
+key, metric, saved view, task assignment, or provider input.
+
+Plan 37's event-time half-life and `Fresh | Decaying | Stale` state are reused
+unchanged. Plan 24 never serializes or sums
+`internal_eligibility_weight`. `as_of(cutoff)` requires evidence occurrence,
+observation, validity, and signal revision eligibility at the cutoff while
+still rechecking current consent, authorization, retention, and source
+disposition. Historical mode never resurrects revoked, deleted, redacted,
+expired, quarantined, or withdrawn evidence.
+
+The imported signal lifecycle is exactly
+`Active -> Expired | Revoked | SourceDeleted | Superseded | Quarantined`;
+terminal revisions never reopen. Plan 24 creates no additional expertise
+lifecycle or transition.
+
+Missing, denied, private, revoked, deleted, expired, quarantined, and unknown
+signals are externally indistinguishable and expose no actor identity, topic,
+count, omission, cursor, or existence distinction. Every anchor expansion
+rechecks current Plan 13 authorization/disposition and Plan 37 consent. Plan 23
+summaries may locate exact anchors but cannot qualify a signal. Plan 37
+proximity may not create, refresh, order, or disclose demonstrated expertise.
+
+Evidence order inside the interactive expertise overlay is deterministic by
+`(evidence_kind, signal_id, first_authorized_anchor)` and explicitly
+non-semantic; it never reorders the canonical packet. No API, projection,
+export, metric, workflow, completion gate, route recommendation, or UI may
+expose a composite person score, order people by expertise, infer
+identity-wide expertise, or support employee scoring, productivity ranking,
+people leaderboards, performance management, hiring, compensation, promotion,
+discipline, availability, ownership, or permission to contact.
+
+Revocation or current source disposition immediately excludes the signal and
+invalidates packets, projections, pages, cursors, handles, and exports.
+Payload/cache/replica purge follows Plan 37's five-minute bound; restore and
+rebuild apply dispositions before serving. Audit is Plan 37-owned,
+security-only, access-controlled, and shortest-retention. Product analytics,
+managers, Plan 24 projections, and exports cannot query or group audit records
+by subject, requester, task, disclosed identity, signal, or topic.
+
 ## Projections and Work experience
 
 Saved views store an authorized Plan 24 typed selection/projection request,
@@ -549,8 +1579,172 @@ scope, lens, grouping, and layout—not copied task rows, independent status, a
 board filter DSL, or a universal cross-domain query AST. Plan 05 may execute
 the request through shared scope, budget, cancellation, cursor, watermark,
 merge, coverage, and explanation primitives, but it cannot redefine the
-selected work entities, edges, readiness, lens, or legal pivots. Required
-projections are:
+selected work entities, edges, readiness, lens, or legal pivots.
+
+All surfaces render the same application view:
+
+```rust
+pub struct WorkProjectionView {
+    pub selection: WorkProjectionSelection,
+    pub watermark: WorkGraphWatermark,
+    pub coverage: ProjectionCoverage,
+    pub total_count: u64,
+    pub returned_count: u32,
+    pub omitted_count: u64,
+    pub next_cursor: Option<WorkProjectionCursor>,
+    pub payload: WorkProjectionPayload,
+}
+
+pub struct WorkProjectionRequest {
+    pub selection: WorkProjectionSelection,
+    pub lens: WorkProjectionLens,
+    pub page: PageRequest,
+    pub cursor: Option<WorkProjectionCursor>,
+}
+
+pub struct WorkProjectionSelection {
+    pub scope_digest: AuthorizedScopeDigest,
+    pub roots: NonEmptySet<WorkItemId>,
+    pub plan_version: WorkPlanVersionId,
+    pub observed_at: Option<UtcMicros>,
+    pub valid_at: Option<UtcMicros>,
+    pub maximum_hops: NonZeroU8,
+}
+
+pub enum WorkProjectionPayload {
+    Kanban(KanbanProjection),
+    Dag(DagProjection),
+    Timeline(TimelineProjection),
+    Causal(CausalProjection),
+    Workload(WorkloadProjection),
+    Repository(RepositoryProjection),
+}
+
+pub struct KanbanProjection {
+    pub lanes: Vec<KanbanLaneView>,
+    pub items: Vec<WorkItemView>,
+}
+
+pub struct DagProjection {
+    pub items: Vec<WorkItemView>,
+    pub edges: Vec<WorkGraphEdgeView>,
+    pub critical_paths: Vec<CriticalPathView>,
+    pub unknown_segments: Vec<UnknownPathSegment>,
+}
+
+pub struct TimelineProjection {
+    pub events: Vec<WorkEventView>,
+}
+
+pub struct CausalProjection {
+    pub nodes: Vec<CausalNodeView>,
+    pub edges: Vec<CausalEdgeView>,
+}
+
+pub struct WorkloadProjection {
+    pub groups: Vec<WorkloadGroupView>,
+    pub items: Vec<WorkItemView>,
+}
+
+pub struct RepositoryProjection {
+    pub groups: Vec<RepositoryDeliveryGroupView>,
+    pub items: Vec<WorkItemView>,
+}
+
+pub struct WorkItemView {
+    pub work_item_id: WorkItemId,
+    pub work_item_version_id: WorkItemVersionId,
+    pub work_plan_version_id: WorkPlanVersionId,
+    pub title: SafeDisplayText,
+    pub objective: SafeDisplayText,
+    pub resolution: WorkResolution,
+    pub retention: WorkRetentionState,
+    pub readiness: WorkReadiness,
+    pub evidence_health: EvidenceHealth,
+    pub derived_lane: DerivedKanbanLane,
+    pub dependency_summary: DependencySummary,
+    pub acceptance_summary: AcceptanceSummary,
+    pub assignment: Option<AssignmentView>,
+    pub advisory_claims: Vec<WorkClaimView>,
+    pub runtime: Option<RuntimeProjectionView>,
+    pub requested_route: Option<RouteView>,
+    pub actual_route: Option<RouteView>,
+    pub evidence_refs: Vec<TaskEvidenceId>,
+    pub reasons: NonEmptyVec<ReadinessReason>,
+    pub legal_actions: Vec<WorkAction>,
+}
+
+pub enum WorkReadiness {
+    Ready { readiness_digest: ReadinessDigest },
+    Blocked { reasons: NonEmptyVec<ReadinessReason> },
+    NotExecutable { reason: NotExecutableReason },
+}
+
+pub enum EvidenceHealth {
+    Healthy,
+    Degraded { reasons: NonEmptyVec<ReadinessReason> },
+    Unknown { reasons: NonEmptyVec<ReadinessReason> },
+}
+
+pub struct ReadinessReason {
+    pub code: ReadinessReasonCode,
+    pub owner: AuthorityOwner,
+    pub gate: GateKind,
+    pub status: ConditionStatus,
+    pub expected: TypedConditionValue,
+    pub observed: Option<TypedConditionValue>,
+    pub evidence_refs: Vec<TaskEvidenceId>,
+    pub remediation_actions: Vec<WorkAction>,
+}
+
+pub enum WorkAction {
+    Inspect,
+    ExpandEvidence,
+    CreateSuccessorVersion,
+    AddDependency,
+    RemoveDependency,
+    BeginProposalReview,
+    AcceptProposal,
+    RejectProposal,
+    ApplyAcceptedGraphProposal,
+    RequestRuntimeAdmission,
+    PauseRuntime,
+    CancelRuntime,
+    ResumeRuntime,
+    RequestNewAdmission,
+    RecordBlocker,
+    ResolveBlocker,
+    AcceptWork,
+    RejectWork,
+    WithdrawWork,
+}
+```
+
+`ProjectionCoverage` is exactly `Complete | Partial | Stale | Denied |
+Unavailable | Cancelled | TimedOut | Failed | Ambiguous`. `Ready` requires the
+active plan/item version, every gating dependency, acceptance prerequisite,
+schedule, budget, policy, scope generation, and runtime compatibility check to
+pass. Unknown gating evidence is `Blocked`; incomplete non-gating evidence is
+`Ready + Degraded`. Accepted, cancelled, superseded, withdrawn, or archived
+versions are `NotExecutable`. Every displayed status has at least one typed
+reason and every displayed action is returned by the application service;
+clients do not infer either.
+
+Work item lifecycle is independent of readiness and runtime:
+
+```text
+Version: Candidate -> Active -> Superseded | Withdrawn
+Resolution: Open -> AcceptanceReview -> Accepted | Rejected
+Resolution: Open | AcceptanceReview -> Cancelled
+```
+
+Accepted, rejected, cancelled, superseded, and withdrawn versions never reopen.
+Remediation creates a successor version. Runtime `Completed` may make a work
+item reviewable but cannot perform `AcceptanceReview -> Accepted`.
+Archival is orthogonal `WorkRetentionState::Live | Archived`; archiving does
+not change version or resolution history.
+
+Required projections are:
 
 - **Kanban:** derived readiness/resolution lanes with blockers and legal next
   actions. Dragging a card invokes an explicit authorized graph or Plan 32
@@ -567,6 +1761,55 @@ projections are:
   initiative/project/agent/executor/provider/model/effort.
 - **Repository/delivery:** exact repository/worktree generation, branch/ref,
   commit, PR/check/review/release, freshness, ownership, and retention state.
+
+Kanban derives lanes in this fixed precedence:
+
+```text
+Archived -> Done -> Review -> Blocked -> Running -> Queued
+         -> Ready -> Scheduled -> Triage -> Todo
+```
+
+The first matching rule wins: archived/cancelled/superseded; accepted; terminal
+runtime evidence awaiting acceptance; gating failure/`AwaitingDecision`/
+`EffectUnknown`; active fenced attempt; admitted node without active attempt;
+valid readiness digest; only a future schedule gate; missing scope/acceptance/
+decision data; other active non-ready work. A Plan 32 `Paused` run derives
+`Blocked` with reason `RuntimePaused`. `Degraded` is a badge, never a lane.
+
+A drag resolves to:
+
+```rust
+pub enum WorkDragPreview {
+    Ready {
+        command: WorkAction,
+        expected_work_item_version: WorkItemVersionId,
+        expected_runtime_version: Option<RuntimeVersion>,
+    },
+    Unsupported { reason: ReadinessReason },
+    StalePreview { refresh: WorkProjectionRequest },
+    RequiresSeparateCommands { ordered: NonEmptyVec<WorkAction> },
+}
+```
+
+`Ready -> Queued` previews `RequestRuntimeAdmission`. `Review -> Done`
+previews `AcceptWork`. Direct `Running -> Blocked` is disabled; the user first
+confirms Plan 32 `PauseRuntime` or `CancelRuntime`, then submits a separately
+version-checked `RecordBlocker`. Split, merge, re-route, and resize create
+proposals. `Done -> Todo` is illegal; the legal action is successor creation.
+If the first of multiple separately confirmed commands succeeds and a later
+one fails, the receipt is `Partial`, preserves every completed command
+receipt, and requires refresh before another action. Dropping never writes a
+lane string.
+
+Timeline items carry event ID, kind, entity/version, valid time, observation
+time, actor, authority epoch, expected versions, causation refs, evidence refs,
+stale-authority flag, and coverage. Late evidence appears at observation time
+while preserving original valid time. Causal edges use
+`Produced | Decided | Blocked | Satisfied | Invalidated | FailedBecause |
+Impacted | CausalCandidate | TemporalOnly`; only the first seven may satisfy a
+gate. `CausalCandidate` and `TemporalOnly` are visually and textually labeled
+as non-causal and always expose producer, score kind, calibration revision,
+coverage, and evidence anchors.
 
 One item may appear in several projections without copies. Selection, scope,
 time, and evidence anchors survive lens changes. Large views use bounded
@@ -699,6 +1942,296 @@ canonical tasks, scheduling, leases, policy, or storage.
 - Plan 14 owns the direct cross-cutting regression classes and Plan 33 owns
   end-to-end performance gates.
 
+## Implementation ownership and dependency order
+
+PR17 executes this plan in the following file ownership. A task may import an
+owned interface but may not implement a competing one in another plan's files.
+
+Plan 24 owns and creates:
+
+- `crates/tracedecay-domain/src/work/mod.rs`: module exports only;
+- `crates/tracedecay-domain/src/work/identity.rs`: task/work identities,
+  immutable version identities, aliases, and validation;
+- `crates/tracedecay-domain/src/work/graph.rs`: graph events, edges,
+  readiness inputs, legal transitions, and proposal revisions;
+- `crates/tracedecay-domain/src/work/retrieval.rs`: request, manifest, plan,
+  packet, task-link/span-reference, score, coverage, omission, task-retriever
+  contribution, cursor, and failure
+  types specified above;
+- `crates/tracedecay-domain/src/work/intelligence.rs`,
+  `crates/tracedecay-domain/src/work/routing.rs`,
+  `crates/tracedecay-domain/src/work/outcome.rs`, and
+  `crates/tracedecay-domain/src/work/handoff.rs`: task shape, topology,
+  decomposition/repair/escalation, route recommendation, Plan 26 outcome
+  references, and handoff revisions;
+- `crates/tracedecay-domain/src/work/projection.rs`: application view,
+  readiness reason, lane, action, timeline, and causal-edge types;
+- `crates/tracedecay-store/src/work/mod.rs` and
+  `crates/tracedecay-store/src/work/traits.rs`: task graph event/head,
+  task-evidence-link, relation-selection, and projection store ports;
+- `src/global_db/work/mod.rs`, `src/global_db/work/schema.rs`,
+  `src/global_db/work/projection.rs`, and `src/global_db/work/query.rs`:
+  owner-shard tables, transactional heads, deterministic projection, and
+  bounded relation reads;
+- `src/query/task_retrieval/mod.rs`,
+  `src/query/task_retrieval/planner.rs`,
+  `src/query/task_retrieval/executor.rs`, and
+  `src/query/task_retrieval/fusion.rs`: pure planning, bounded primitive
+  fan-out over Plan 05 mechanics, Plan 37 source adaptation, diversity, and
+  deterministic packet assembly;
+- `crates/tracedecay-application/src/work/mod.rs`,
+  `crates/tracedecay-application/src/work/ports.rs`,
+  `crates/tracedecay-application/src/work/retrieval.rs`,
+  `crates/tracedecay-application/src/work/intelligence.rs`,
+  `crates/tracedecay-application/src/work/routing.rs`,
+  `crates/tracedecay-application/src/work/outcome.rs`,
+  `crates/tracedecay-application/src/work/handoff.rs`,
+  `crates/tracedecay-application/src/work/projection.rs`, and
+  `crates/tracedecay-application/src/work/commands.rs`: Plan 09-owned
+  authorization, idempotency, use cases, graph transactions, and Plan 32
+  bridge. The legacy root `src/application/work/` may re-export during the
+  Plan 09 migration but contains no implementation;
+- `tests/work_suite/main.rs`, `tests/work_suite/graph.rs`,
+  `tests/work_suite/retrieval.rs`, `tests/work_suite/expertise.rs`,
+  `tests/work_suite/intelligence.rs`, `tests/work_suite/routing.rs`,
+  `tests/work_suite/outcomes.rs`, `tests/work_suite/handoff.rs`,
+  `tests/work_suite/projection.rs`, and
+  `tests/work_suite/runtime_bridge.rs`: PR17 cross-layer acceptance.
+
+Plan 13 retains exclusive ownership of
+`crates/tracedecay-domain/src/research/id.rs`,
+`crates/tracedecay-domain/src/research/anchor.rs`,
+`crates/tracedecay-domain/src/research/retrieval.rs`,
+`crates/tracedecay-domain/src/research/evidence_span.rs`,
+`crates/tracedecay-domain/src/research/retriever_contribution.rs`,
+`crates/tracedecay-domain/src/research/resolution.rs`, and
+`src/application/anchor_resolution.rs`. Plan 24 imports
+`RetrievalAnchorId`, resolution states, provenance, drift, and tombstones. It
+adds no task-specific anchor, resolver, external payload table, or alternate
+hydration path. Any older cross-plan prose using the name `TaskEvidenceSpan`
+means the Plan 24 binding view now represented by
+`TaskEvidenceProvenance::ExactSpan` or
+`TaskEvidenceProvenance::RetrieverContribution`; Plan 24 defines no
+`TaskEvidenceSpan` source-evidence type.
+
+Plan 23 retains exclusive ownership of
+`crates/tracedecay-domain/src/session.rs`,
+`src/query/temporal/ports.rs`, `src/query/temporal/candidates.rs`,
+`src/query/temporal/ranking.rs`, `src/query/temporal/resolution.rs`,
+`src/query/temporal/hydration.rs`, `src/query/temporal/context.rs`,
+`src/application/session/retrieval.rs`, and `src/application/context.rs`.
+Plan 24 supplies an authorized exact-identity selector and consumes the
+returned page; it adds no temporal mode, session ranker, summary store,
+hydrator, or pagination kernel.
+
+Plan 32 retains exclusive ownership of
+`crates/tracedecay-domain/src/workflow/{definition,control,budget,provider,evidence,state}.rs`,
+`crates/tracedecay-store/src/workflow/{events,leases,outbox,recovery}.rs`,
+`src/application/workflow/{ports,admission,runtime,recovery,queries}.rs`, and
+`src/workflow_runtime/{kernel,planner,fanout,synthesis}.rs` plus
+`src/workflow_runtime/providers/`. Its PR17 task imports
+`FrozenTaskEvidencePacketRef` from Plan 24, rechecks packet digest/scope/
+watermarks before lease acquisition, and publishes read-only receipt
+projections. Plan 24 creates none of those runtime files.
+
+Plan 37 retains exclusive ownership of
+`crates/tracedecay-domain/src/feedback/{mod,evidence_packet,proximity,expertise}.rs`,
+`crates/tracedecay-application/src/feedback/{mod,cycle,task_retrieval,expertise}.rs`,
+`crates/tracedecay-store/src/feedback/{mod,packet,task_link,expertise}.rs`, and
+`src/daemon/feedback/{mod,github_ingest,ci_localization,proximity}.rs`.
+Plan 24 consumes authorized packet, finding, and proximity records through
+`FeedbackEvidenceReadPort` for canonical retrieval only. It composes
+`ExpertiseContextProjectionV1` solely into an authorized ephemeral interactive
+view after the canonical packet is complete. It does not copy finding bodies,
+redefine finding/provider/expertise lifecycle, persist consent or expertise,
+infer expertise from proximity, admit expertise into retrieval identity or
+routing, or make advisory feedback executable.
+
+### Milestones
+
+1. **M24.0 — prerequisite conformance:** freeze import tests against Plan 13
+   anchor resolution, Plan 23 temporal retrieval, and Plan 37 advisory finding
+   contracts. Exit requires no Plan 24-owned duplicate type and byte-stable
+   owner-plan fixtures.
+2. **M24.1 — graph domain/store:** land Plan 24 identities, immutable graph
+   events, transition tables, transactional heads, relation store, projector,
+   and deterministic rebuild. Exit requires cycle rejection, expected-version
+   mutation rejection, and rebuild equality.
+3. **M24.2 — task-root retrieval:** land capability manifests, pure planner,
+   owner ports, bounded parallel executor, packet assembly, exact spans,
+   summary-lineage rules, failures, and deterministic fallback. Exit requires
+   authorization parity, completion-order-independent digest, truthful partial
+   coverage, and zero read-side writes.
+4. **M24.3 — expertise rejection and interactive-only composition:** prove
+   canonical `TaskEvidenceRequest` / `retrieve_evidence` reject expertise
+   context; compose Plan 37 `ExpertiseContextProjectionV1` only into an
+   authorized ephemeral `InteractiveTaskEvidenceView` for exact TaskId/topic
+   overlays without a person index, semantic people ordering, identity-bearing
+   cursor/export/metric, packet digest field, completion proof, route input, or
+   Plan 24 consent/decay store. Exit requires Plan 37's no-existence-leak,
+   revocation, source-deletion, and five-minute purge suites with default-off
+   configuration.
+5. **M24.4 — projections/actions:** land one projection view, readiness reasons,
+   fixed lane precedence, typed drag previews, timeline, causal, workload, and
+   repository lenses. Exit requires identical entity/version sets and legal
+   actions across every lens.
+6. **M24.5 — Plan 32 bridge:** freeze a packet reference, revalidate admission,
+   acquire lease before provider start, disclose requested/actual route, and
+   reject recursive dispatch. Exit requires stale packet/readiness rejection,
+   zero pre-lease starts, and runtime completion without graph acceptance.
+7. **M24.6 — task intelligence and outcomes:** land task shape, topology,
+   decomposition, repair, escalation, routing, experience, handoff, outcome,
+   and recalibration contracts. Exit requires deterministic replay, Plan
+   26-label-only outcomes, held-out calibration rules, abstention, stale
+   proposal rejection, no auto-apply, and no runtime mutation.
+8. **M24.7 — surfaces and shadow rollout:** bind the same Plan 09 application
+   views to HTTP, CLI/MCP, and dashboard, run shadow retrieval/expertise/
+   proposal evaluation, then enable human-apply and one-attempt canaries. Exit
+   requires the rollout gates below.
+
+M24.0 consumes PR8 Plan 23 and PR11–PR13 Plan 37 without reopening their
+scope. M24.1–M24.4 and M24.6 are Plan 24 work. M24.5 co-delivers with Plan 32
+in PR17. M24.7 binds existing Plan 09/10/11/21 surfaces. PR18 alone freezes public SDK
+names; Plan 33 alone sets production latency/service-level thresholds.
+
+## Verification matrix, metrics, and rollout gates
+
+The following tests are named deliverables, not examples:
+
+- `crates/tracedecay-domain/tests/work_contract.rs` validates exhaustive enums,
+  ID aliases, transition tables, invalid transitions, score-kind
+  incompatibility, and serialization round trips.
+- `crates/tracedecay-store/tests/work_contract.rs` validates atomic event/head
+  commits, expected-version rejection, owner-shard routing, immutable history,
+  relation bounds, task-evidence links, and deterministic rebuild.
+- `tests/work_suite/retrieval.rs` validates non-enumerating TaskId denial,
+  relation-pivot legality, authorization parity across page/hydration/
+  continuation/expansion, all Plan 23 modes, Plan 13 resolution-state parity,
+  one deadline/token/budget ledger, parallel fan-out bounds, cancellation,
+  deadline, budget exhaustion, completion-order-independent packet digests,
+  summary lineage, exact expansion, deterministic fallback, and read-only
+  behavior.
+- `tests/work_suite/expertise.rs` validates canonical rejection plus
+  interactive-only composition and imports Plan 37's
+  `tests/feedback_suite/expertise_privacy.rs` fixtures. Canonical requests that
+  carry expertise fields fail closed; packet digests, frozen refs, acceptance,
+  completion, and routing fixtures never include expertise. Paired missing,
+  denied, private, revoked, deleted, expired, and quarantined interactive cases
+  produce identical public status, shape, counts, omissions, and cursors.
+  Schema scans reject actor listing, people ordering, identity
+  sort/filter/group keys, composite scores, prohibited purposes, and
+  identity-bearing exports or metrics. Fixtures cover Plan 23-summary
+  rejection, proximity rejection, restore/rebuild disposition, immediate
+  exclusion, and five-minute cache/handle/export/replica purge.
+- `tests/work_suite/intelligence.rs` validates task-shape/topology/decomposition
+  replay, legal proposal transitions, cycle/unsafe-cut rejection, repair
+  boundaries, escalation expiry without approval, and no auto-apply.
+- `tests/work_suite/routing.rs` validates eligible-route filtering, typed score
+  semantics, deterministic fallback recommendation, held-out calibration
+  policy, sparse/drift abstention, override evidence, and no self-grading.
+- `tests/work_suite/outcomes.rs` validates Plan 26 label-only outcomes,
+  first-pass identity, censored/unknown successor revisions, independent-review
+  gates, parent-normalized rework, and runtime completion without acceptance.
+- `tests/work_suite/handoff.rs` validates exact pinned scope/evidence horizons,
+  negative evidence, acknowledgement versus correctness, supersession,
+  rediscovery, and authorization loss.
+- `tests/work_suite/projection.rs` validates fixed lane precedence, readiness
+  versus degradation, every legal/illegal drag, identical canonical entities
+  across lenses, immutable original span across remap, late evidence valid/
+  observation time, causal-candidate labeling, bounded pagination, and
+  browser-free action logic.
+- `tests/work_suite/runtime_bridge.rs` validates separate proposal acceptance
+  and apply, stale graph/packet/readiness rejection, lease-before-start,
+  Plan 32-owned deterministic provider fallback, capacity deferral without substitution,
+  effect-unknown retry blocking, new attempt on retry, no recursive dispatch,
+  requested/actual route evidence, and Plan 32 completion without Plan 24
+  acceptance.
+- `tests/session_suite/task_rooted_retrieval.rs` remains Plan 23-owned and proves
+  TaskId-derived exact selectors match direct Plan 23 queries without changing
+  the kernel.
+- `tests/feedback_suite/task_retrieval.rs` remains Plan 37-owned and
+  proves findings stay advisory, anchors stay immutable, and proximity creates
+  neither expertise nor executable work.
+
+Plan 26 records these metric series with scope/cohort suppression:
+
+- `work_retrieval_requests_total{status}`;
+- `work_retrieval_latency_micros{stage}` and deadline utilization;
+- `work_retrieval_budget_units{source,kind=reserved|spent|returned}`;
+- `work_retrieval_source_coverage_total{source,state}`;
+- `work_retrieval_omissions_total{source,reason,required}`;
+- `work_retrieval_contribution_total{source,terminal}`;
+- `work_retrieval_summary_total{result=used|lineage_rejected|exact_expanded}`;
+- `work_retrieval_fallback_total{source,trigger,result}`;
+- `work_retrieval_digest_mismatch_total`;
+- `work_retrieval_authorization_rejection_total{phase}`;
+- `work_expertise_projection_total{status}` as a small-cohort-suppressed
+  system-quality aggregate with no purpose, principal, subject, task, project,
+  repository, signal, edge, or topic dimension;
+- `work_expertise_privacy_canary_leak_total`;
+- `work_expertise_prohibited_surface_total`;
+- `work_expertise_purge_sla_breach_total`;
+- `work_projection_reason_coverage_ratio{lens}`;
+- `work_projection_entity_mismatch_total{lens}`;
+- `work_runtime_prelease_start_total`;
+- `work_runtime_hidden_fallback_total`;
+- `work_runtime_recursive_dispatch_total`; and
+- `work_evidence_original_span_mutation_total`.
+
+Metrics never contain principal identity, query text, task title, prompt,
+snippet, source body, private URL, raw path, individual ranking, or unsuppressed
+small-cohort dimensions.
+
+Rollout gates are exact:
+
+1. **Contract gate:** all named contract suites pass; every enum match is
+   exhaustive; JSON/domain round trips and Markdown golden renderings preserve
+   status, coverage, omission, authority, score, contribution, or span fields.
+2. **Authority gate:** zero unauthorized payload or candidate-existence
+   disclosures; zero read-side writes; zero duplicate anchor/session/runtime/
+   feedback authority; authorization parity passes every fixture.
+3. **Determinism gate:** identical pinned inputs produce identical plan,
+   packet, projection, lane, explanation, and fallback digests across 100
+   shuffled completion orders and a daemon restart.
+4. **Evidence gate:** 100% of selected records carry task/version, source,
+   anchor, immutable task link, temporal state, authority, coverage, and
+   producer; 100% of exact-span records reference a Plan 13
+   `EvidenceSpanIdV1` and span anchor; 100% of summaries carry authorized exact
+   lineage; every omitted record has a typed reason.
+5. **Privacy gate:** demonstrated expertise remains Plan 37-owned, default-off,
+   and excluded from canonical retrieval identity, durable evidence, task
+   completion, and routing authority. Every visible interactive overlay has
+   current Plan 37 consent and authorized anchors; paired hidden cases are
+   publicly indistinguishable; schema scans find no actor-listing/ordering/
+   export/metric surface; revocation/source disposition excludes immediately
+   and purge completes within five minutes.
+6. **Runtime gate:** zero provider starts before a fenced Plan 32 lease; zero
+   hidden route substitutions, recursive dispatches, automatic retries under
+   unknown effect, duplicate observable effects, or runtime-terminal graph
+   acceptance.
+7. **Shadow gate:** direct owner-plan queries and TaskId-rooted composition
+   return the same exact evidence identities and typed source states for the
+   fixture corpus; any mismatch blocks canary enablement.
+8. **Canary gate:** cancellation/deadline/budget fault injection produces only
+   declared terminal or partial outcomes, no post-cancellation packet
+   admission, and no leaked budget reservation. Human apply remains required.
+9. **Surface gate:** CLI/MCP/HTTP/dashboard return the same serialized
+   application view semantics; clients contain zero readiness, lane, ranking,
+   fallback, authorization, or legal-action computation.
+10. **Promotion gate:** default enablement requires gates 1–9 on the same build
+    and pinned configuration. Any non-zero
+    `work_retrieval_digest_mismatch_total`,
+    `work_expertise_privacy_canary_leak_total`,
+    `work_expertise_prohibited_surface_total`,
+    `work_expertise_purge_sla_breach_total`,
+    `work_projection_entity_mismatch_total`,
+    `work_runtime_prelease_start_total`,
+    `work_runtime_hidden_fallback_total`,
+    `work_runtime_recursive_dispatch_total`, or
+    `work_evidence_original_span_mutation_total` disables new admissions and
+    expertise projection while preserving read-only history and explicit
+    recovery.
+
 ## Safety and privacy invariants
 
 - TraceDecay never autonomously creates, stashes, cleans, resets, rebases,
@@ -713,7 +2246,7 @@ canonical tasks, scheduling, leases, policy, or storage.
 - Scope, privacy, authority, acceptance, effect reconciliation, and
   cancellation uncertainty fail closed. A process exit, card move, commit,
   PR, model self-report, or elapsed time alone never proves completion.
-- Plan 22 proximity remains advisory. Only an explicit authorized graph command
+- Plan 37 proximity remains advisory. Only an explicit authorized graph command
   and Plan 32 admission may create executable work.
 - Retention, redaction, deletion, backup, restore, remote fencing, and
   authorization follow the existing daemon/store authorities; this feature
@@ -728,9 +2261,12 @@ not a scoring-only backend or UI-only prototype:
    assessments;
 2. propose and review a parent/child decomposition with calibrated ranges,
    serial/no-decomposition alternatives, and collapse conditions;
-3. recommend an eligible executor/model/effort and independent reviewer with
-   explanation, typed score/uncertainty origin and scale semantics, coverage,
-   abstention, and deterministic fallback;
+3. recommend an eligible executor/model/effort and an independent-review
+   capability or registered non-human reviewer route with explanation, typed
+   score/uncertainty origin and scale semantics, coverage, abstention, and
+   deterministic fallback; human reviewer identity is never ranked or selected
+   from demonstrated-expertise evidence, and expertise never enters routing
+   authority;
 4. explicitly accept a graph version, emit one typed auxiliary-attempt request,
    and admit one mapped Plan 32 task step through a negotiated provider adapter;
 5. record requested/actual route, attempt/runtime evidence, independent review,
@@ -742,16 +2278,19 @@ not a scoring-only backend or UI-only prototype:
 The slice includes domain/store contracts, graph projections/query, typed
 application commands, runtime mapping, pure policy inputs/results, Plan 26
 observations/read models, CLI/MCP/HTTP bindings, dashboard Work views, and host
-execution adapters. It ships representative deterministic estimators and
-fixtures for bounded work classes; unsupported task shapes abstain rather than
-pretending universal intelligence.
+execution adapters. It ships deterministic ordinal baselines for
+`CodeChange | BugDiagnosis | TestRepair | Documentation | Migration | Review`
+work classes, each with a versioned comparison set and fixture corpus;
+unsupported task shapes abstain rather than pretending universal intelligence.
 
 PR18 freezes public API names/schemas and ships Rust/TypeScript/Python SDK
 parity for the accepted PR17 semantics. It may improve ergonomics but cannot
 redefine task shape, proposal states, routing evidence, or runtime authority.
 PR20 optimizes graph projection, evidence aggregation, recommendation,
-calibration, and live-proposal latency after representative PR17 baselines; it
-does not defer obvious PR17 bounds, cancellation, or fallback behavior.
+calibration, and live-proposal latency only after PR17 records stage-level
+latency, budget, coverage, and packet-size distributions for every named work
+class and fixture size under Plan 26. Plan 33 sets promotion thresholds; PR20
+does not defer PR17 bounds, cancellation, or fallback behavior.
 
 Acceptance requires direct tests proving:
 

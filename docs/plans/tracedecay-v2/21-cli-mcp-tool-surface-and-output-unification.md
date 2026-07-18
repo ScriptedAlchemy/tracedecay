@@ -122,12 +122,12 @@ augmentation.
 
 ## Canonical dispatch and tool families
 
-One typed schema registry and canonical binding taxonomy maps CLI, MCP, HTTP,
-and LSP names to cataloged application operations. The CLI/MCP dispatcher,
-Plan 10 HTTP router, and Plan 35 LSP gateway consume those references through
-their own protocol adapters. Bindings may validate transport syntax and render
-protocol-native results; aliases contain zero authorization, query, mutation,
-storage, availability, or fallback logic.
+The Plan 08 catalog snapshot's schema-reference index and canonical binding
+taxonomy map CLI, MCP, HTTP, and LSP names to cataloged application operations.
+The CLI/MCP dispatcher, Plan 10 HTTP router, and Plan 35 LSP gateway consume
+those references through their own protocol adapters. Bindings may validate
+transport syntax and render protocol-native results; aliases contain zero
+authorization, query, mutation, storage, availability, or fallback logic.
 
 - `search`, `find_exact`, qualified-name lookup, similar-symbol lookup, and
   signature search are views over one symbol kernel.
@@ -257,9 +257,314 @@ a card status, selects an ambient board/profile, or treats a list rendering as
 readiness authority. Plain-text process exit, a terminal-protocol reminder, or
 a dragged card is never a successful application result.
 
+## Exact CLI/MCP primitive parity contract
+
+PR12 uses one compiled binding record per callable application operation:
+
+```rust
+pub struct CliMcpBindingV1 {
+    pub binding_id: BindingId,
+    pub capability_id: CapabilityId,
+    pub exposure: BindingExposure,
+}
+
+pub enum BindingExposure {
+    PairedCliMcp { cli: CliBinding, mcp: McpBinding },
+    CliOnly { cli: CliBinding, reason: AsymmetryReason, approval: ReviewId },
+    McpOnly { mcp: McpBinding, reason: AsymmetryReason, approval: ReviewId },
+}
+```
+
+The BindingId resolves UseCaseId, schemas, effect, pagination, cancellation,
+deadline, receipt, authority, and privacy from the single Plan 08 capability
+snapshot; this record cannot override or copy semantic fields. Plan 21
+contributes CLI/MCP spellings and transport syntax, while Plan 08 owns the inert
+record type, assembly, and validation.
+
+For every capability selected into a declared paired CLI/MCP profile, a
+callable retrieval, preview, command, or control capability has both bindings
+or snapshot validation fails. The two bindings decode into the same Plan 09
+request and `RequestContext`, call the snapshot's UseCaseId, and receive the
+same `ApplicationResult<T>`. A larger CLI profile may omit a capability from an
+MCP companion to satisfy that companion's reviewed schema/routing ceilings; the
+omission is explicit profile membership, not missing parity. Context, work, and
+operator MCP companions are projections of the one catalog, never copied
+catalogs.
+Every `CliBinding` stores its exact command path and every `McpBinding` stores
+its exact tool name; aliases reference the same BindingId and carry an expiry
+revision. Compiled tests reject duplicate spellings, empty names, separate
+alias schemas/handlers, and unreviewed asymmetry. These CLI/MCP compatibility
+names do not determine PR18 SDK method names.
+
+Transport-local `--help`, `--version`, shell-completion generation, MCP stdio
+connection lifecycle, MCP resources, and LSP lifecycle/notifications are not
+callable application capabilities. No exception permits a business capability
+selected into a paired profile to have only one adapter.
+
+The exact PR12 core primitive families are:
+
+- symbol: search, exact/qualified-name, signature, implementations, and type
+  hierarchy;
+- source: bounded lines, body, outline, module API, and file metadata;
+- graph: callers, callees, call chain, file dependents, impact, and dependency
+  depth;
+- tests: test map and affected-test attribution;
+- temporal: authorized session lookup, message search, shipped current/as-of
+  session narrative, and Plan 13 anchor expansion; and
+- operational: catalog, configuration, project, health, and storage/runtime
+  state where the application operation is shipped.
+
+PR17 extends paired profiles with TaskId/WorkItemId lookup and compact context,
+current/as-of/evolution/forensic task history, thread/attempt traversal, Plan 24
+proposal/context reads, and Plan 32 provider-capability and runtime inspection
+only after their typed handlers ship. These bindings are absent from PR12
+profiles, help, and discovery.
+
+Each is a narrow mostly LLM-free application call. Context or planning
+operations consume returned evidence packets explicitly; no primitive invokes a
+model, chooses another binding, performs recursive dispatch, or creates
+parallel work. Plan 24 owns declared task/retrieval fan-out and Plan 32 alone
+admits and executes parallel branches. CLI and MCP only submit or inspect those
+typed operations and receipts.
+
+These family names and `BindingId`s are internal PR12/PR17 semantic identity.
+PR18 retains sole authority to choose and freeze official Rust, TypeScript, and
+Python SDK methods. PR12 does not derive SDK names from CLI commands or MCP
+tools. PR17 CLI/MCP names follow this plan's compatibility policy and neither
+constrain nor require approval from PR18; PR18 independently adds SDK
+BindingIds only with SDK conformance fixtures.
+
+## Canonical invocation, output, and controls
+
+Both adapters construct the same transport-neutral invocation:
+
+```rust
+pub struct CanonicalInvocation<T> {
+    pub request: T,
+    pub scope: ScopeSelector,
+    pub page: PageRequest,
+    pub deadline: Option<Deadline>,
+    pub cancellation: CancellationRef,
+    pub requested_format: OutputFormat,
+}
+```
+
+`requested_format` is removed before the application call and affects only
+presentation. CLI accepts the common scope/page/deadline fields and maps
+SIGINT/explicit cancellation to the invocation cancellation reference. MCP
+maps the protocol request ID, cancellation notification, and negotiated
+deadline to the same fields. The effective deadline is the earliest authorized
+client, daemon, policy, or operation bound. Disconnect does not imply effect
+rollback; the client reconnects with request/effect identity to inspect the
+canonical receipt.
+Cancellation or deadline expiry before daemon admission maps to Plan 09
+`Cancelled { stage: BeforeAdmission }` or
+`TimedOut { stage: BeforeAdmission }`: CLI uses the stable cancelled/timed-out
+exit class and stderr view, while MCP uses the same problem envelope in
+structured problem data and text content. After admission, both surfaces render
+the canonical operation/effect receipt instead of a pre-admission problem.
+
+`--json` and MCP structured content serialize the same schema-versioned Plan 09
+success or problem envelope with stable enum tags, field meanings, number
+representation, null rules, and deterministic collection order. Golden
+fixtures compare canonical JSON values, not object insertion order.
+CLI `--json` emits exactly one UTF-8 JSON object followed by one newline, with
+no ANSI, Markdown, progress, log, or diagnostic bytes on stdout.
+`HumanViewRevision` identifies one compact Markdown contract; CLI writes it as
+terminal-safe Markdown/plain text and MCP returns the same view in text
+content. Golden snapshots live under
+`tests/fixtures/interface_output/human-v1/`. Human output must preserve result
+contract revision, primary identity, temporal state, authorized scope class,
+coverage, omissions, score kind/calibration, retriever contributions,
+cursor/anchor, effect class, cancellation/deadline stage, receipt identity,
+problem code, and legal next action whenever present. It may omit safe
+zero/default decoration but cannot turn partial/unknown/denied/stale into empty
+or successful.
+
+Collections share Plan 09 `PageRequest` and `PageState`. The opaque
+authenticated cursor is bound to capability/use case, request digest,
+scope/grant digest and authorization epoch, temporal
+horizon/snapshot/generation/watermark, catalog, result-schema, sort/ranking,
+privacy, and redaction revisions, last sort key, profile, and expiry.
+`PageRequest` is exactly `{ limit, cursor }`; resume permits no query, scope,
+ordering, or profile change. CLI `--cursor` and MCP `cursor` carry the same
+bytes. Resume reauthorizes before cursor validation and hydration;
+authorization narrowing or scope/grant mismatch returns
+`NotFoundOrNotAuthorized` before cursor validity or state is disclosed. Invalid,
+expired, stale, and wrong-operation cursor codes are distinct only after the
+caller is authorized for the addressed resource and operation.
+
+Resource-addressed absent, out-of-scope, and policy-hidden requests are
+externally identical across CLI JSON, CLI human output, MCP structured content,
+MCP text content, exit class, protocol problem data, retry class, and legal
+actions. They expose no count, cursor, provider/anchor/task state, alternative
+binding, timing classification, or existence hint. Discovery omits
+unauthorized capabilities rather than returning disabled entries.
+Direct invocation of an unauthorized or profile-hidden command/tool is
+indistinguishable from an unknown operation and returns no alternative binding
+or profile hint.
+Random, expired-without-authority, and real-but-unauthorized response handles
+return the same non-disclosing handle-unavailable shape; only an authorized
+handle may expose a distinct expiry or truncation state.
+
+Previews use the cataloged `EffectClass::Preview` and Plan 09
+`PreviewResult`/`OperationReceipt`; mutating commands use their cataloged effect
+class and Plan 09 `EffectReceipt`. Adapter success is impossible without the
+receipt contract named by the manifest. CLI exit and MCP result mapping preserve
+`Completed`, `Cancelled`, `TimedOut`, `Failed`, `Partial`, and `EffectUnknown`
+plus cancellation stage and reconciliation state. A transport timeout,
+disconnect, or MCP cancellation acknowledgement cannot fabricate a terminal
+application outcome. When completion, cancellation, and deadline race, the
+daemon's committed terminal event wins; adapters never replace it with their
+locally observed timeout or cancellation.
+
+## Files, owners, and dependency order
+
+PR12 changes only adapter and shared-client files:
+
+- `Cargo.toml` — no new adapter-to-store dependency and no second
+  schema/catalog crate;
+- `src/daemon_client.rs` — one multiplexed client, request correlation,
+  reconnect/receipt inspection, class-aware admission, and no business logic;
+- `src/cli.rs` — command-tree composition and compatibility shims only;
+- `src/cli/dispatch.rs` — `BindingId` resolution and canonical invocation;
+- `src/cli/args/common.rs` — shared scope, page, cursor, deadline, cancellation,
+  and format syntax;
+- `src/cli/output/mod.rs` — presenter selection;
+- `src/cli/output/json.rs` — canonical Plan 09 JSON serialization;
+- `src/cli/output/markdown.rs` — deterministic compact human rendering;
+- `src/cli/output/problem.rs` — stable stderr/exit mapping;
+- `src/mcp/tools/dispatch.rs` — the same BindingId/request/result dispatch;
+- `src/mcp/tools/render.rs` — MCP structured-content and text-content mapping
+  from the canonical result;
+- `src/mcp/transport.rs` — request ID, cancellation, deadline, lifecycle, and
+  backpressure mechanics only;
+- `src/mcp/response_handles.rs` — reversible oversized-response handles with
+  authorization recheck and no anchor/task identity substitution;
+- `src/mcp/tools/handlers/admin_cli.rs` — deleted after the final family
+  migration; and
+- `tests/mcp_suite/main.rs` and
+  `tests/mcp_suite/mcp_cli_parity_test.rs` — registered public semantic parity,
+  paired-profile, cursor, and non-disclosure fixtures;
+- `tests/core_cli_suite/main.rs` and
+  `tests/core_cli_suite/output_contract.rs` — registered stdout/stderr/exit and
+  human/JSON golden fixtures; and
+- `tests/fixtures/interface_output/human-v1/` — reviewed human-view snapshots.
+
+Family cutovers remove local orchestration from
+`src/mcp/tools/handlers/analysis.rs`, `grep.rs`, `graph.rs`, `info.rs`,
+`health.rs`, `admin_project.rs`, `session/message_search.rs`,
+`session/sessions_for.rs`, `edit.rs`, `git.rs`, `workflow_query.rs`, and
+`workflow.rs`, plus corresponding command branches in `src/cli.rs`,
+`src/sessions_cmd.rs`, `src/status_cmd.rs`, `src/doctor.rs`,
+`src/agent_cmd.rs`, and `src/automation_cli/mod.rs`. A handler file may remain
+as transport decoding only; any migrated query, authorization, error, or
+rendering branch is deleted in the same slice.
+
+Plan 08 owns `CliMcpBindingV1`, profile/schema budgets, and snapshot validation.
+Plan 09 owns requests, evidence/effect envelopes, cursors, errors, deadlines,
+cancellation stages, stream events/frontiers/gaps/resume, and receipts. Plan 05
+owns deterministic query ordering;
+Plans 13/23 own anchors and temporal history. Plans 18/20 own privacy and
+configuration. Plan 24 owns task graph/planning/fan-out intent; Plan 32 owns
+workflow/auxiliary parallel runtime and effects; Plan 09 retains
+operation-specific edit/Git transaction authority. Plan 21 owns only transport
+decoding, daemon-client mechanics, and rendering. No adapter file may import a
+store, query provider, planner/model client, scheduler, or effect
+implementation. Plan 10 owns HTTP parity in
+`tests/api_application_parity.rs`; Plan 35 owns LSP parity in
+`tests/lsp_application_parity.rs`. Those dedicated test targets consume the same snapshot
+but are not implementations of or exceptions to paired CLI/MCP profiles.
+
+Dependency order is fixed:
+
+1. Plan 08 lands inert IDs, manifest/binding record types, and builder
+   validation without importing application.
+2. Plan 09 lands packet/problem/cursor/receipt contracts, executable handlers,
+   contributions, and fake-port tests against those record types.
+3. Root-owned `src/catalog_composition.rs` assembles and validates the snapshot
+   against Plan 09's closed validation-only
+   `ApplicationHandlerDescriptors`; runtime dispatch continues through
+   ordinary typed methods.
+4. `src/daemon_client.rs` lands multiplexing, cancellation/deadline
+   propagation, saturation mapping, and receipt reinspection.
+5. CLI and MCP dispatchers migrate the read-only primitive families in this
+   order: symbol, source, graph, tests, temporal, then operational. Each family
+   must pass JSON, human, paging, cancellation/deadline, and authorization
+   parity before its old handler-local path is deleted.
+6. Preview and command families migrate only after preview/effect-receipt,
+   idempotency, stale/CAS, cancellation-after-commit, and `EffectUnknown`
+   fixtures pass.
+7. Feedback diagnostics and PR17 task/work/runtime families bind last, after
+   their owning application handlers exist; no stub or advertised unavailable
+   method is counted as shipped.
+8. Delete `admin_cli` and duplicate render/query/error helpers, then enforce
+   architecture and facade budgets. PR18 SDK bindings remain a later,
+   independently reviewed gate.
+
+## Public test matrix and migration gates
+
+The following matrix is acceptance prose and executable fixtures, not a
+generated inventory, runtime parity registry, or frozen public-name list.
+
+- **Result states:** complete-empty, complete-nonempty, partial, unknown,
+  unavailable, unsupported, stale, redacted, ambiguous, saturated, cancelled,
+  timed out, failed, and effect-unknown.
+- **Temporal/authority:** current/as-of/evolution/forensic; authorized,
+  expired/narrowed grant, absent, out-of-scope, and policy-hidden with
+  indistinguishable public failures.
+- **Paging:** first/middle/final page, zero results, known/unknown total,
+  concatenation equivalence, cursor expiry, scope/grant/schema/sort mismatch,
+  authorization-epoch/catalog/ranking/privacy/redaction/profile mismatch,
+  snapshot drift, random versus unauthorized response handles, handle expiry,
+  and anchor expansion.
+- **Evidence:** complete/partial/unknown coverage, every omission reason, each
+  score kind and invalid calibration, multiple retriever contributions,
+  deterministic ordering, and contribution/aggregate count agreement.
+- **Control:** cancel before admission/read/effect, during read/effect,
+  after-commit cancellation, deadline at each stage, disconnect/reconnect,
+  resume suffix equivalence, suppression of late uncommitted data, and
+  continued reconciliation/receipt publication for already-committed effects.
+- **Streams:** monotonic event sequence/frontier, bounded resume, explicit
+  gap/drop/truncation coverage, token expiry, backpressure, cancellation and
+  deadline ordering, exactly one terminal event, and no post-terminal event.
+- **Effects:** read/preview/write/admin classes, idempotent replay, mismatched
+  idempotency input, stale CAS, conflict, durable receipt identity,
+  reconciliation, partial, and unknown effect.
+- **Presentation:** CLI JSON, CLI human/stdout/stderr/exit, MCP structured
+  content, MCP text content, protocol problem, terminal-control/path/Markdown
+  safety, no double encoding, and no irreversible truncation.
+
+PR12 runs:
+
+```bash
+cargo test --test mcp_suite
+cargo test --test core_cli_suite
+cargo test --test api_application_parity
+cargo test --test lsp_application_parity
+cargo test --test architecture_boundaries
+cargo check --all-features
+```
+
+Each family cutover is blocked unless every capability selected into a paired
+profile has one CLI and one MCP binding to the same CapabilityId/UseCaseId and
+schemas; canonical JSON values match; `HumanViewRevision` snapshots preserve
+all continuation and safety fields;
+concatenated pages and resumed suffixes match the pinned full execution;
+cancellation/deadline and effect receipts agree; unauthorized and absent
+resources, unknown versus hidden bindings, and stolen/wrong-scope cursors are
+indistinguishable; adapters open no store or planner/runtime path; and the
+replaced handler/query/renderer is deleted in the same migration slice. The
+final gate also rejects any value above the paired profile's checked-in
+`maximum_bindings`, `maximum_schema_bytes`, or `maximum_routing_tokens` unless
+Plan 08 and Plan 21 owners approve the updated profile record and eager-client
+fixture; a second discovery authority; duplicated workflow semantics; SDK
+names published before PR18; or any CLI/MCP facade that works only through
+deferred tool discovery.
+
 ## Rejected-argument telemetry
 
-The versioned schema registry and dispatcher own one
+The catalog snapshot's schema-reference index and dispatcher own one
 `interface_argument_rejected.v1` event for CLI, MCP, and HTTP. It is emitted
 at the authoritative schema/dispatch rejection boundary, after syntax has
 been separated into argument names and values and before the typed problem is

@@ -216,6 +216,63 @@ are stable.
 - The retired Plans 29–30 review artifacts are deleted. Any still-valid behavior belongs in
   the owning product plan and its direct regression tests.
 
+## Cross-cutting source, retrieval, and surface contracts
+
+These contracts are already owned by numbered plans. They do not change the
+active PR8 Session/LCM temporal-retrieval priority in [NEXT.md](NEXT.md).
+
+Dependency order (consume only after the predecessor publishes typed results):
+
+1. [Plan 01](01-domain-crate.md) generic external-source identities, definitions,
+   and owner bindings; [Plan 27](27-cross-host-agent-plugin-bundles.md) connector
+   contracts; [Plan 03](03-capture-crate.md) capture/sanitization.
+2. [Plan 20](20-configuration-control-plane.md) `SourcePolicyMetadataSnapshotV1`,
+   bindings, and other policy metadata — never definition-associated privacy.
+3. [Plan 06](06-policy-crate.md) pure source-authorization intersection over Plan
+   20 policy metadata plus grants/scope/sinks; [Plan 09](09-application-crate.md)
+   loads snapshots, rechecks sinks, and orchestrates effects.
+4. [Plan 13](13-research-provenance-and-context-anchors.md) retrieval anchors and
+   immutable `EvidenceSpanRecordV1` / retriever-contribution identity.
+5. [Plan 23](23-session-lcm-temporal-retrieval-and-evaluation.md) session/LCM
+   temporal truth and PR8 immutable derived evidence spans/bursts (active now).
+6. [Plan 16](16-cross-project-repository-worktree-scope.md) `QueryCollection` /
+   `WorkspaceCollection` and authorized scope-set resolution; [Plan 05](05-query-crate.md)
+   shared federated query execution primitives (PR15 multi-root federation).
+7. [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) LSP projection and
+   one-way investigation handoff tokens; Plan 09 owns transport-neutral
+   investigation handoff results.
+8. [Plan 11](11-dashboard-frontend.md) renderer-neutral Brain/Explorer/Loom
+   investigation journey and PR17 Work projections; no backend truth.
+9. [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md) TaskId-rooted
+   investigation/evidence packets; [Plan 32](32-dynamic-workflow-runtime-and-sdk.md)
+   optional synthesis and runtime execution (PR17). Canonical retrieval rejects
+   demonstrated expertise; expertise may exist only in an authorized ephemeral
+   interactive view.
+10. [Plan 26](26-observability-accounting-and-usage.md) measurement descriptors and
+    retrieval/synthesis observations (PR14 Observatory/Costs); [Plan 33](33-end-to-end-performance-optimization.md)
+    PR20 cross-path performance optimization after owning slices instrument baselines.
+
+Ownership summary:
+
+- **Source contracts:** Plan 01 definition/binding identity; Plan 20 policy
+  metadata including mandatory local privacy; Plan 06 evaluation; Plan 03/27
+  capture and connectors. Definitions never own privacy or sinks.
+- **Federated retrieval / query collections:** Plan 16 owns collection identity,
+  membership, and scope-set digests; Plan 05 executes federation without granting
+  ownership or authorization by membership.
+- **Evidence spans:** Plan 23 owns PR8 session-derived spans/bursts; Plan 13 owns
+  cross-domain `EvidenceSpanRecordV1`; Plan 24 references span IDs/anchors only.
+- **Task investigation / evidence / synthesis:** Plan 24 owns task-root evidence
+  packets and graph semantics; Plan 32 alone owns synthesis attempts, leases, and
+  runtime receipts; Plan 06 owns pure routing evaluators.
+- **LSP handoff:** Plan 35 encodes short-lived cues/tokens; Plan 09 authorizes
+  investigation availability and links; Plan 21 binds surfaces.
+- **Dashboard:** Plan 11 presents Plan 09/14/24/26/37 envelopes; Plan 14 alone
+  owns Doctor/health/remediation composition.
+- **Observability / performance:** Plan 26 owns labels, cohorts, and observation
+  schemas; Plan 33 owns PR20 measured optimization. Neither duplicates query,
+  policy, graph, or Doctor authority.
+
 ## Rejected rewrite machinery
 
 Do not restore:

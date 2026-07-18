@@ -65,11 +65,29 @@ requirements and boundaries, not separate crate-first work queues.
   workflow implementations.
 - Consumers compose owner results without duplicating authority: Plan 05 owns
   shared query execution, Plan 23 temporal session/LCM retrieval, Plan 14 the
-  Doctor/health/remediation kernel, Plan 20 configuration resolution and
-  snapshots, Plan 26 measurements and labels, and Plan 32 workflow clocks,
-  scheduling, attempts, effects, and runtime receipts. Plan 11 renders Plan 14
-  findings and legal actions without becoming another health or remediation
-  authority.
+  Doctor/health/remediation kernel, Plan 20 configuration resolution,
+  snapshots, and source policy metadata (including mandatory local privacy),
+  Plan 26 measurements and labels, and Plan 32 workflow clocks, scheduling,
+  attempts, effects, and runtime receipts. Plan 11 renders Plan 14 findings
+  and legal actions without becoming another health or remediation authority.
+- External-source contracts separate definition/binding identity
+  ([Plan 01](01-domain-crate.md)), Plan 20 policy metadata, Plan 06 pure
+  authorization, Plan 03/27 capture and connectors, and Plan 09 sink recheck.
+  Definitions never own local privacy or sinks.
+- Federated retrieval and `QueryCollection` / `WorkspaceCollection` are Plan 16
+  scope contracts executed through Plan 05; membership never grants ownership
+  or authorization. Evidence spans are Plan 23 session-derived for PR8 and Plan
+  13 `EvidenceSpanRecordV1` for cross-domain anchors; Plan 24 references them
+  from TaskId-rooted packets without copying span authority.
+- Task investigation/evidence is Plan 24; optional synthesis and runtime
+  execution are Plan 32. Canonical task retrieval rejects demonstrated
+  expertise; expertise may exist only in an authorized ephemeral interactive
+  view and never enters durable evidence, completion, or routing. LSP
+  investigation handoff is Plan 35 cue/token encoding over Plan 09
+  transport-neutral results. Dashboard investigation UX is Plan 11 over those
+  envelopes. Observability descriptors are Plan 26; PR20 performance
+  optimization is Plan 33. Active executable work remains PR8 temporal
+  retrieval in [NEXT.md](NEXT.md).
 - High-confidence architecture and explicit rejection findings are normative.
   Medium-confidence model, ranking, topology, renderer, calibration, and
   optimization mechanisms are versioned candidates that ship only after
