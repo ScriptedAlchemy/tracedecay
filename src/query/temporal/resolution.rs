@@ -2140,7 +2140,9 @@ mod tests {
             vec![SummaryOmission {
                 summary_id: summary.summary_id().clone(),
                 anchor_id: summary.summary_anchor_id().clone(),
-                rejection: SummaryLineageRejection::UnauthorizedSource,
+                rejection: SummaryLineageRejection::UnauthorizedSource {
+                    anchor_id: anchor("source-privacy-state"),
+                },
             }]
         );
         assert_eq!(
@@ -2190,8 +2192,7 @@ mod tests {
         ];
 
         for source_anchors in [forward.as_slice(), reverse.as_slice()] {
-            let summary =
-                summary_with_sources("mixed", "summary-mixed", source_anchors, 7, 7);
+            let summary = summary_with_sources("mixed", "summary-mixed", source_anchors, 7, 7);
             let eligibility = evaluate_summary_lineage_eligibility(
                 std::slice::from_ref(&summary),
                 &source_states,
@@ -2204,7 +2205,9 @@ mod tests {
                 eligibility
                     .rejections
                     .get(&SessionSummaryIdV1::new("mixed").expect("valid id")),
-                Some(&SummaryLineageRejection::UnauthorizedSource)
+                Some(&SummaryLineageRejection::UnauthorizedSource {
+                    anchor_id: anchor("unauthorized"),
+                })
             );
         }
     }
@@ -2261,12 +2264,9 @@ mod tests {
             for source_anchors in [["left", "right"], ["right", "left"]] {
                 let summary =
                     summary_with_sources("precedence", "summary-precedence", &source_anchors, 7, 7);
-                let source_states = [
-                    (anchor("left"), left),
-                    (anchor("right"), right),
-                ]
-                .into_iter()
-                .collect();
+                let source_states = [(anchor("left"), left), (anchor("right"), right)]
+                    .into_iter()
+                    .collect();
                 let eligibility = evaluate_summary_lineage_eligibility(
                     std::slice::from_ref(&summary),
                     &source_states,
@@ -2316,7 +2316,9 @@ mod tests {
             eligibility
                 .rejections
                 .get(&SessionSummaryIdV1::new("horizon-private").expect("valid id")),
-            Some(&SummaryLineageRejection::UnauthorizedSource)
+            Some(&SummaryLineageRejection::UnauthorizedSource {
+                anchor_id: anchor("source-horizon-private"),
+            })
         );
     }
 
