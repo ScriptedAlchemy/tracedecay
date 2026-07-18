@@ -1,3 +1,8 @@
+use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+use std::time::SystemTime;
+
 use super::*;
 use crate::global_db::StoreInstanceUpsert;
 use crate::storage::{
@@ -5,8 +10,6 @@ use crate::storage::{
     StoreKind, StoreManifest, profile_sharded_layout, write_enrollment_marker,
     write_repository_identity_marker, write_store_manifest,
 };
-#[cfg(unix)]
-use std::os::unix::fs::symlink;
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
@@ -1107,6 +1110,173 @@ async fn temporal_health_adapter_is_read_only_and_clean_on_canonical_schema() {
         std::fs::read(dir.path().join("global.db")).unwrap(),
         before,
         "temporal health diagnosis must not mutate the authoritative database"
+    );
+}
+
+fn temporal_family_manifest(db_path: &Path) -> BTreeMap<String, (u64, Option<SystemTime>)> {
+    let mut manifest = BTreeMap::new();
+    for path in [
+        db_path.to_path_buf(),
+        {
+            let mut wal = db_path.as_os_str().to_os_string();
+            wal.push("-wal");
+            PathBuf::from(wal)
+        },
+        {
+            let mut shm = db_path.as_os_str().to_os_string();
+            shm.push("-shm");
+            PathBuf::from(shm)
+        },
+    ] {
+        if let Ok(metadata) = std::fs::metadata(&path) {
+            manifest.insert(
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                (metadata.len(), metadata.modified().ok()),
+            );
+        }
+    }
+    let lock_root = db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".tracedecay-database-locks");
+    if let Ok(entries) = std::fs::read_dir(&lock_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if name.ends_with(".access.lock")
+                || name.ends_with(".writer.lock")
+                || name.ends_with(".writer.owner")
+                || name.ends_with(".bootstrap.lock")
+            {
+                if let Ok(metadata) = std::fs::metadata(&path) {
+                    manifest.insert(
+                        format!("lock:{name}"),
+                        (metadata.len(), metadata.modified().ok()),
+                    );
+                }
+            }
+        }
+    }
+    manifest
+}
+
+#[tokio::test]
+async fn temporal_health_path_api_creates_no_authority_wal_shm_or_schema_artifacts() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    {
+        let db = crate::global_db::GlobalDb::open_at(&db_path).await.unwrap();
+        let report = db.session_temporal_doctor_health().await;
+        assert_eq!(
+            report.status(),
+            crate::global_db::SessionTemporalHealthStatus::Complete
+        );
+        assert!(report.findings().is_empty());
+    }
+    // Drop the authority-held handle, then diagnose solely through the
+    // immutable path API — the cold Doctor/transport surface.
+    let before_bytes = std::fs::read(&db_path).unwrap();
+    let before_family = temporal_family_manifest(&db_path);
+    let lock_root = db_path.parent().unwrap().join(".tracedecay-database-locks");
+    let lock_names_before = if lock_root.is_dir() {
+        std::fs::read_dir(&lock_root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<BTreeSet<_>>()
+    } else {
+        BTreeSet::new()
+    };
+
+    let report =
+        crate::global_db::session_temporal::session_temporal_doctor_health_at(&db_path).await;
+    assert_eq!(
+        report.status(),
+        crate::global_db::SessionTemporalHealthStatus::Complete
+    );
+    assert!(report.findings().is_empty());
+    assert_eq!(std::fs::read(&db_path).unwrap(), before_bytes);
+    assert_eq!(temporal_family_manifest(&db_path), before_family);
+
+    let lock_names_after = if lock_root.is_dir() {
+        std::fs::read_dir(&lock_root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<BTreeSet<_>>()
+    } else {
+        BTreeSet::new()
+    };
+    assert_eq!(
+        lock_names_after, lock_names_before,
+        "immutable doctor health must not create authority/lock/owner files"
+    );
+    for suffix in ["-wal", "-shm"] {
+        let mut path = db_path.as_os_str().to_os_string();
+        path.push(suffix);
+        let path = PathBuf::from(path);
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            path.exists(),
+            before_family.contains_key(&name),
+            "immutable doctor health must not create {suffix} sidecars"
+        );
+    }
+}
+
+#[tokio::test]
+async fn temporal_health_missing_store_is_unavailable_without_artifacts() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let missing = dir.path().join("missing.db");
+    let before = temporal_family_manifest(&missing);
+
+    let report =
+        crate::global_db::session_temporal::session_temporal_doctor_health_at(&missing).await;
+
+    assert_eq!(
+        report.status(),
+        crate::global_db::SessionTemporalHealthStatus::Unavailable
+    );
+    assert!(report.findings().is_empty());
+    assert!(!missing.exists());
+    assert_eq!(temporal_family_manifest(&missing), before);
+    assert!(!dir.path().join(".tracedecay-database-locks").exists());
+}
+
+#[tokio::test]
+async fn temporal_health_detects_index_and_column_migration_gaps() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = crate::global_db::GlobalDb::open_at(&db_path).await.unwrap();
+    let writer = db.writer_connection().await.unwrap();
+    writer
+        .execute(
+            "DROP INDEX IF EXISTS idx_session_occurrences_generation_order",
+            (),
+        )
+        .await
+        .unwrap();
+    writer
+        .execute(
+            "ALTER TABLE session_occurrences ADD COLUMN doctor_probe_column TEXT",
+            (),
+        )
+        .await
+        .unwrap();
+    drop(writer);
+    drop(db);
+
+    let report = serde_json::to_value(
+        crate::global_db::session_temporal::session_temporal_doctor_health_at(&db_path).await,
+    )
+    .unwrap();
+    assert_eq!(report["status"], "partial");
+    let findings = report["findings"].as_array().unwrap();
+    assert!(
+        findings.iter().any(|finding| {
+            finding["kind"] == "migration_gap" && finding["count"].as_u64().unwrap_or(0) >= 2
+        }),
+        "{report}"
     );
 }
 
