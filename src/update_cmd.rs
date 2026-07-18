@@ -9,9 +9,12 @@
 //! `--no-reinstall` to skip that agent-integration refresh.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use tracedecay::upgrade::UpgradeOutcome;
 use tracedecay::user_config::UserConfig;
+
+const DAEMON_RESTART_LEASE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) async fn refresh_generated_plugins() -> tracedecay::errors::Result<()> {
     let home = tracedecay_home_dir()?;
@@ -147,7 +150,12 @@ where
 pub(crate) fn restart_daemon_service() -> tracedecay::errors::Result<()> {
     let restarted = restart_daemon_service_with(
         tracedecay::daemon::quiesce_installed_service_for_restart,
-        || tracedecay::lifecycle_lease::acquire_exclusive("daemon restart"),
+        || {
+            tracedecay::lifecycle_lease::acquire_exclusive_with_timeout(
+                "daemon restart",
+                DAEMON_RESTART_LEASE_TIMEOUT,
+            )
+        },
         refresh_daemon_service,
     )?;
     match restarted {
