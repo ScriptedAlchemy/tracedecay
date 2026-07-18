@@ -1713,6 +1713,11 @@ async fn test_logging_set_level_returns_success() {
 }
 
 /// Verify every log level accepted by RFC 5424 is handled without error.
+///
+/// One server session carries all eight requests: level changes are a
+/// mid-session operation, and building a fresh server per level only
+/// multiplied fixture cost (8x setup dominated this test's runtime) without
+/// adding coverage.
 #[tokio::test]
 async fn test_logging_set_level_all_levels() {
     let levels = [
@@ -1725,18 +1730,21 @@ async fn test_logging_set_level_all_levels() {
         "alert",
         "emergency",
     ];
-    for (idx, level) in levels.iter().enumerate() {
-        let id = json!(600 + idx as u64);
-        let (server, _dir) = setup_server().await;
-        let responses = run_server_with_messages(
-            server,
-            vec![jsonrpc_request(
-                id.clone(),
+    let (server, _dir) = setup_server().await;
+    let requests = levels
+        .iter()
+        .enumerate()
+        .map(|(idx, level)| {
+            jsonrpc_request(
+                json!(600 + idx as u64),
                 "logging/setLevel",
                 json!({"level": level}),
-            )],
-        )
-        .await;
+            )
+        })
+        .collect();
+    let responses = run_server_with_messages(server, requests).await;
+    for (idx, level) in levels.iter().enumerate() {
+        let id = json!(600 + idx as u64);
         let resp_str = responses
             .iter()
             .find(|r| parse_response(r)["id"] == id)

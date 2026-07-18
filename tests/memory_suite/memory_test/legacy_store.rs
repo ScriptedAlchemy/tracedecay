@@ -1368,7 +1368,7 @@ async fn memory_status_handles_empty_fact_store() {
 }
 
 #[tokio::test]
-async fn memory_status_repairs_missing_vectors_and_reports_stats() {
+async fn memory_status_reports_backlog_and_explicit_repair_converges_it() {
     let (_tmp, cg) = make_project().await;
     let fact = cg
         .add_fact(AddFactRequest {
@@ -1386,11 +1386,22 @@ async fn memory_status_repairs_missing_vectors_and_reports_stats() {
         .unwrap();
     clear_fact_vector(&cg, fact.fact_id).await;
 
+    // A status read is pure: it reports the live backlog, performs no repair,
+    // and its repair counters (repairs performed by this request) stay zero.
     let status = cg.memory_status().await.unwrap();
+    assert_eq!(status.missing_vector_count, 1);
+    assert_eq!(status.repair.missing_vectors_repaired, 0);
+    assert_eq!(status.repair.banks_rebuilt, 0);
 
+    // Repair is owned by the explicit entry point, which returns its own
+    // batch stats; the next status read reflects the converged backlog.
+    let repair = cg.repair_project_memory_once().await.unwrap();
+    assert_eq!(repair.missing_vectors_repaired(), 1);
+    assert!(repair.banks_rebuilt() >= 1);
+
+    let status = cg.memory_status().await.unwrap();
     assert_eq!(status.missing_vector_count, 0);
-    assert_eq!(status.repair.missing_vectors_repaired, 1);
-    assert!(status.repair.banks_rebuilt >= 1);
+    assert_eq!(status.repair.missing_vectors_repaired, 0);
 }
 
 #[tokio::test]
@@ -1413,14 +1424,16 @@ async fn memory_status_repair_preserves_fact_updated_at() {
     clear_fact_vector(&cg, fact.fact_id).await;
     set_fact_updated_at(&cg, fact.fact_id, 1000).await;
 
+    let repair = cg.repair_project_memory_once().await.unwrap();
+    assert_eq!(repair.missing_vectors_repaired(), 1);
+
     let status = cg.memory_status().await.unwrap();
     assert_eq!(status.missing_vector_count, 0);
-    assert_eq!(status.repair.missing_vectors_repaired, 1);
 
     assert_eq!(
         fact_updated_at(&cg, fact.fact_id).await,
         1000,
-        "status-triggered derived-vector repair must not change fact updated_at"
+        "derived-vector repair must not change fact updated_at"
     );
 }
 

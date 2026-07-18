@@ -517,14 +517,15 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     /// One authority status read projected both into legacy fields and the
     /// finite feedback-history repair state.
     ///
-    /// This is a pure read: it reports the backlog and last-repair counters
-    /// already carried on the status snapshot (`status.repair()`,
-    /// `status.feedback_history_repair()`) and never triggers a repair pass as
-    /// a side effect. Repair remains owned by the daemon's bounded memory-
+    /// This is a pure read: it reports the live backlog (missing vectors,
+    /// projection and feedback repair state) and never triggers a repair pass
+    /// as a side effect. Repair remains owned by the daemon's bounded memory-
     /// repair scheduler and the explicit [`Self::dashboard_repair_v1`] entry
     /// point; a status read must not race or duplicate that work. The legacy
-    /// `MemoryStatus`/`V1MemoryStatusWithRepairV1` field shapes are unchanged,
-    /// so existing consumers keep the same reporting contract.
+    /// `MemoryStatus`/`V1MemoryStatusWithRepairV1` field shapes are
+    /// unchanged, but `repair` counters are always zero here: they describe
+    /// repairs performed by the reporting request, and a pure read performs
+    /// none — explicit repair entry points return their own batch stats.
     pub async fn memory_status_with_repair_v1(
         &self,
     ) -> Result<V1MemoryStatusWithRepairV1, MemoryApplicationError> {
