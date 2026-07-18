@@ -14,7 +14,9 @@ use std::time::Duration;
 use tracedecay::upgrade::UpgradeOutcome;
 use tracedecay::user_config::UserConfig;
 
-const DAEMON_RESTART_LEASE_TIMEOUT: Duration = Duration::from_secs(60);
+// Exceeds the daemon's sequential 15s client drain, 2s task abort, and 45s
+// server-shutdown bounds with margin for service-manager/process-exit latency.
+const DAEMON_RESTART_LEASE_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub(crate) async fn refresh_generated_plugins() -> tracedecay::errors::Result<()> {
     let home = tracedecay_home_dir()?;
