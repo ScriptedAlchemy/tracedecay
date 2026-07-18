@@ -3311,8 +3311,7 @@ mod tests {
             .expect_err("forged assertion ids must be rejected");
         let forged_detail = format!("{forged_error:?}");
         assert!(
-            forged_detail.contains("not canonical")
-                || forged_detail.contains("assertion temporal"),
+            forged_detail.contains("not canonical") || forged_detail.contains("assertion temporal"),
             "{forged_detail}"
         );
 
