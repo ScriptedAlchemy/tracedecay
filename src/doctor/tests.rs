@@ -19,6 +19,28 @@ fn canonical_temp_path(path: &Path) -> PathBuf {
     }
 }
 
+/// A directory guaranteed to sit outside `std::env::temp_dir()`, for fixtures
+/// that must NOT be classified as "ephemeral" by
+/// `migrate::registry::classify_project_root` (which rejects project roots
+/// under the OS temp directory). `env!("CARGO_MANIFEST_DIR")).parent()` used
+/// to serve this purpose, but that only holds when the checkout itself lives
+/// outside the temp directory; a repo cloned under `/tmp` (as some sandboxed
+/// CI/dev environments do) breaks that assumption. Deriving the base from the
+/// running test binary's own on-disk location is robust regardless of where
+/// the checkout lives, because cargo (or any build-cache shim in front of it)
+/// never places build output inside the volatile system temp directory.
+fn ephemeral_safe_fixture_base() -> PathBuf {
+    let exe = std::env::current_exe().expect("test binary has a current_exe path");
+    let profile_dir = exe
+        .parent() // .../target/<profile>/deps
+        .and_then(Path::parent) // .../target/<profile>
+        .expect("test binary sits under a cargo target profile directory")
+        .to_path_buf();
+    let base = profile_dir.join("clone-path-hermetic-fixtures");
+    std::fs::create_dir_all(&base).unwrap();
+    base
+}
+
 #[test]
 fn format_bytes_boundaries() {
     assert_eq!(format_bytes(0), "0 B");
@@ -34,10 +56,10 @@ fn format_bytes_boundaries() {
 
 #[tokio::test]
 async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
-    let base = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let base = ephemeral_safe_fixture_base();
     let dir = tempfile::Builder::new()
         .prefix("doctor-orphans-")
-        .tempdir_in(base)
+        .tempdir_in(&base)
         .unwrap();
     let db_dir = tempfile::Builder::new()
         .prefix("doctor-orphans-db-")

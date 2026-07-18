@@ -28,6 +28,28 @@ fn canonical_temp_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// A directory guaranteed to sit outside `std::env::temp_dir()`, for fixtures
+/// that must NOT be classified as "ephemeral" by
+/// `migrate::registry::classify_project_root` (which rejects project roots
+/// under the OS temp directory). `env!("CARGO_MANIFEST_DIR")).parent()` used
+/// to serve this purpose, but that only holds when the checkout itself lives
+/// outside the temp directory; a repo cloned under `/tmp` (as some sandboxed
+/// CI/dev environments do) breaks that assumption. Deriving the base from the
+/// running test binary's own on-disk location is robust regardless of where
+/// the checkout lives, because cargo (or any build-cache shim in front of it)
+/// never places build output inside the volatile system temp directory.
+fn ephemeral_safe_fixture_base() -> PathBuf {
+    let exe = std::env::current_exe().expect("test binary has a current_exe path");
+    let profile_dir = exe
+        .parent() // .../target/<profile>/deps
+        .and_then(Path::parent) // .../target/<profile>
+        .expect("test binary sits under a cargo target profile directory")
+        .to_path_buf();
+    let base = profile_dir.join("clone-path-hermetic-fixtures");
+    std::fs::create_dir_all(&base).unwrap();
+    base
+}
+
 fn profile_root(home: &Path) -> PathBuf {
     canonical_temp_path(home).join(".tracedecay")
 }
@@ -1444,7 +1466,7 @@ fn list_all_reports_orphan_manifest_reconstructable_store() {
     let home = TempDir::new().unwrap();
     let project = tempfile::Builder::new()
         .prefix("list-orphan-project-")
-        .tempdir_in(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
+        .tempdir_in(ephemeral_safe_fixture_base())
         .unwrap();
     git(project.path(), &["init"]);
     write_profile_sharded_fixture(home.path(), project.path());

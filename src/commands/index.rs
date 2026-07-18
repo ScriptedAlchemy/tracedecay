@@ -234,10 +234,27 @@ mod init_bootstrap_tests {
         }
     }
 
+    /// A directory guaranteed to sit outside `std::env::temp_dir()`, so the
+    /// project/profile fixtures built inside it are never treated as
+    /// isolated-test paths by `db::access::is_isolated_test_path` (which
+    /// would let a direct open acquire the test-only authority escape hatch
+    /// instead of exercising the fail-closed production path this test
+    /// verifies). `env!("CARGO_MANIFEST_DIR")).join("target")` used to serve
+    /// this purpose, but that only holds when the checkout itself lives
+    /// outside the OS temp directory; a repo cloned under `/tmp` (as some
+    /// sandboxed CI/dev environments do) breaks that assumption. Deriving the
+    /// base from the running test binary's own on-disk location is robust
+    /// regardless of where the checkout lives, because cargo (or any
+    /// build-cache shim in front of it) never places build output inside the
+    /// volatile system temp directory.
     fn checkout_tempdir() -> tempfile::TempDir {
-        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("commands-init-tests");
+        let exe = std::env::current_exe().expect("test binary has a current_exe path");
+        let profile_dir = exe
+            .parent() // .../target/<profile>/deps
+            .and_then(Path::parent) // .../target/<profile>
+            .expect("test binary sits under a cargo target profile directory")
+            .to_path_buf();
+        let base = profile_dir.join("commands-init-tests");
         std::fs::create_dir_all(&base).unwrap();
         tempfile::Builder::new()
             .prefix("daemonless-init-")

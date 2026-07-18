@@ -367,14 +367,34 @@ async fn stale_fact_authority_cas_conflict_is_typed_and_leaves_lineage_untouched
     assert_eq!(current.payload().unwrap().content(), "base fact content");
 }
 
+/// A directory guaranteed to sit outside `std::env::temp_dir()`, for fixture
+/// paths that must NOT be classified as an isolated-test path by
+/// `db::access::is_isolated_test_path`. `std::env::current_dir()` (the
+/// package root under `cargo test`) plus a `target/...` suffix used to serve
+/// this purpose, but that only holds when the checkout itself lives outside
+/// the OS temp directory; a repo cloned under `/tmp` (as some sandboxed
+/// CI/dev environments do) breaks that assumption. Deriving the base from
+/// the running test binary's own on-disk location is robust regardless of
+/// where the checkout lives, because cargo (or any build-cache shim in front
+/// of it) never places build output inside the volatile system temp
+/// directory.
+fn ephemeral_safe_fixture_base() -> PathBuf {
+    let exe = std::env::current_exe().expect("test binary has a current_exe path");
+    let profile_dir = exe
+        .parent() // .../target/<profile>/deps
+        .and_then(Path::parent) // .../target/<profile>
+        .expect("test binary sits under a cargo target profile directory")
+        .to_path_buf();
+    let base = profile_dir.join("tracedecay-pr7-authority");
+    std::fs::create_dir_all(&base).expect("failed to create hermetic fixture base directory");
+    base
+}
+
 #[tokio::test]
 async fn missing_daemon_authority_fails_closed_without_a_fallback_store() {
     // A path outside every isolated-test root keeps `for_runtime` on the
     // production branch: no live daemon, no maintenance scope, no fallback.
-    let root = std::env::current_dir().unwrap().join(format!(
-        "target/tracedecay-pr7-authority/missing-daemon-{}",
-        std::process::id()
-    ));
+    let root = ephemeral_safe_fixture_base().join(format!("missing-daemon-{}", std::process::id()));
     let db_path = root.join("global.db");
 
     let error = match DatabaseAuthority::for_runtime(&db_path, "pr7 missing daemon fixture") {

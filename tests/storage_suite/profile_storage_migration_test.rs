@@ -30,7 +30,7 @@ use tracedecay::storage::{
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::common::EnvVarGuard;
-use crate::support::HOME_ENV_LOCK;
+use crate::support::{HOME_ENV_LOCK, ephemeral_safe_fixture_base};
 
 struct HomeEnvGuard {
     previous_home: Option<OsString>,
@@ -906,13 +906,9 @@ fn strict_scan_classifies_unmarked_temporary_project_root_stale() {
 
 #[test]
 fn strict_scan_requires_matching_repository_identity_or_enrollment() {
-    let target = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .to_path_buf();
     let dir = tempfile::Builder::new()
         .prefix("reconstruct-identity-")
-        .tempdir_in(target)
+        .tempdir_in(ephemeral_safe_fixture_base())
         .unwrap();
     let profile_root = dir.path().join("profile");
     let project_root = dir.path().join("repo");
