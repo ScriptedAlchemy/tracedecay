@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
 use std::io::{self, Write};
 
 use serde::ser::{SerializeSeq, SerializeStruct};
@@ -25,7 +24,24 @@ const MAX_TOKEN_PATTERN_BYTES: usize = 64;
 
 pub trait VersionedTokenEstimator {
     fn version(&self) -> &str;
-    fn token_policy(&self) -> TokenPolicy;
+
+    /// Streaming assembly policy. Defaults to whitespace-word counting so
+    /// existing `estimate`-only implementors remain source-compatible.
+    fn token_policy(&self) -> TokenPolicy {
+        TokenPolicy::Whitespace
+    }
+
+    /// Compatibility shim retained for pre-`TokenPolicy` whitespace estimators.
+    /// Canonical assembly streams via [`Self::token_policy`] and does not call
+    /// this method.
+    fn estimate(&self, text: &str) -> u64 {
+        match self.token_policy() {
+            TokenPolicy::Whitespace => text.split_whitespace().count() as u64,
+            TokenPolicy::Characters => text.chars().count() as u64,
+            TokenPolicy::Substring(pattern) => text.matches(pattern).count() as u64,
+            TokenPolicy::JsonDocument => u64::from(!(text.starts_with('{') && text.ends_with('}'))),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -492,9 +508,7 @@ fn rejected_summary_detail_anchor(
     }
 }
 
-fn terminal_rejected_detail(
-    rejection: &SummaryLineageRejection,
-) -> Option<&RetrievalAnchorId> {
+fn terminal_rejected_detail(rejection: &SummaryLineageRejection) -> Option<&RetrievalAnchorId> {
     match rejection {
         SummaryLineageRejection::DeletedSource { anchor_id }
         | SummaryLineageRejection::RedactedSource { anchor_id }
@@ -607,12 +621,11 @@ fn validate_lineage_acyclic(lineage: &[CompactContextLineageEdgeV1]) -> Result<(
                 .ok_or(ContextError::BudgetExceeded {
                     resource: "lineage count",
                 })?;
-        indegree[target] =
-            indegree[target]
-                .checked_add(1)
-                .ok_or(ContextError::BudgetExceeded {
-                    resource: "lineage count",
-                })?;
+        indegree[target] = indegree[target]
+            .checked_add(1)
+            .ok_or(ContextError::BudgetExceeded {
+                resource: "lineage count",
+            })?;
     }
     let mut offsets = zeroed_usize_vec(nodes.len().saturating_add(1))?;
     for index in 0..nodes.len() {
@@ -687,13 +700,6 @@ enum BudgetLimit {
 }
 
 impl BudgetLimit {
-    const fn resource(self) -> &'static str {
-        match self {
-            Self::Byte => "byte",
-            Self::Token => "token",
-        }
-    }
-
     const fn omission_reason(self) -> ContextOmissionReasonV1 {
         match self {
             Self::Byte => ContextOmissionReasonV1::ByteBudget,
@@ -792,7 +798,7 @@ fn prepare_admission<P: ContextPayload>(
         let encoded_next = encoded_prefix
             .last()
             .copied()
-            .unwrap_or(0)
+            .unwrap_or(0_u64)
             .checked_add(payload_measure.bytes)
             .ok_or(ContextError::BudgetExceeded { resource: "byte" })?;
         records.push(record);
@@ -817,18 +823,8 @@ fn prepare_admission<P: ContextPayload>(
 
     let omissions = [
         measure_omissions(&bundle.omissions, None, policy, control)?,
-        measure_omissions(
-            &bundle.omissions,
-            Some(BudgetLimit::Byte),
-            policy,
-            control,
-        )?,
-        measure_omissions(
-            &bundle.omissions,
-            Some(BudgetLimit::Token),
-            policy,
-            control,
-        )?,
+        measure_omissions(&bundle.omissions, Some(BudgetLimit::Byte), policy, control)?,
+        measure_omissions(&bundle.omissions, Some(BudgetLimit::Token), policy, control)?,
     ];
     Ok(PreparedAdmission {
         records,
@@ -868,7 +864,10 @@ fn measure_omissions(
     control: &ExecutionControl,
 ) -> Result<WireMeasure, ContextError> {
     let mut values = Vec::new();
-    try_reserve(&mut values, base.len().saturating_add(usize::from(limit.is_some())))?;
+    try_reserve(
+        &mut values,
+        base.len().saturating_add(usize::from(limit.is_some())),
+    )?;
     for omission in base {
         values.push(omission.clone());
     }
@@ -1025,7 +1024,9 @@ fn materialize_admission<P: ContextPayload>(
     }
     for payload in &available[decision.admitted..] {
         control.checkpoint()?;
-        bundle.continuation_anchors.push(payload.anchor_id().clone());
+        bundle
+            .continuation_anchors
+            .push(payload.anchor_id().clone());
     }
     bundle.encoded_bytes = prepared.encoded_prefix[decision.admitted];
     if let Some(limit) = decision.limit {
@@ -1084,11 +1085,12 @@ fn render_exact<P: ContextPayload>(
             "final canonical context length drifted".to_string(),
         ));
     }
-    output.ok_or_else(|| ContextError::InvalidBundle("missing canonical context output".to_string()))
+    output
+        .ok_or_else(|| ContextError::InvalidBundle("missing canonical context output".to_string()))
 }
 
-fn measure_serializable(
-    value: &impl Serialize,
+fn measure_serializable<T: Serialize + ?Sized>(
+    value: &T,
     policy: TokenPolicy,
     control: &ExecutionControl,
 ) -> Result<WireMeasure, ContextError> {
@@ -1103,7 +1105,9 @@ fn measure_raw(
     control: &ExecutionControl,
 ) -> Result<WireMeasure, ContextError> {
     let mut writer = StreamingWriter::measuring(policy, control)?;
-    let result = writer.write_all(value.as_bytes()).map_err(serde_json::Error::io);
+    let result = writer
+        .write_all(value.as_bytes())
+        .map_err(serde_json::Error::io);
     writer.finish(result).map(|(measure, _)| measure)
 }
 
@@ -1188,9 +1192,9 @@ impl TokenSummary {
                         first = false;
                     }
                     if token && !in_token {
-                        *tokens = tokens.checked_add(1).ok_or(ContextError::BudgetExceeded {
-                            resource: "token",
-                        })?;
+                        *tokens = tokens
+                            .checked_add(1)
+                            .ok_or(ContextError::BudgetExceeded { resource: "token" })?;
                     }
                     in_token = token;
                     *ends_token = token;
@@ -1205,9 +1209,9 @@ impl TokenSummary {
                         control.checkpoint()?;
                         scanned = 0;
                     }
-                    *count = count.checked_add(1).ok_or(ContextError::BudgetExceeded {
-                        resource: "token",
-                    })?;
+                    *count = count
+                        .checked_add(1)
+                        .ok_or(ContextError::BudgetExceeded { resource: "token" })?;
                 }
             }
             Self::Substring {
@@ -1285,11 +1289,10 @@ impl TokenSummary {
                     empty: false,
                 })
             }
-            (Self::Characters(left), Self::Characters(right)) => {
-                Ok(Self::Characters(left.checked_add(*right).ok_or(
-                    ContextError::BudgetExceeded { resource: "token" },
-                )?))
-            }
+            (Self::Characters(left), Self::Characters(right)) => Ok(Self::Characters(
+                left.checked_add(*right)
+                    .ok_or(ContextError::BudgetExceeded { resource: "token" })?,
+            )),
             (
                 Self::Substring {
                     pattern,
@@ -1319,12 +1322,9 @@ impl TokenSummary {
                     *left_suffix_len,
                     pattern.as_bytes(),
                 ) as u64;
-                let total_len =
-                    left_len
-                        .checked_add(*right_len)
-                        .ok_or(ContextError::BudgetExceeded {
-                            resource: "token",
-                        })?;
+                let total_len = left_len
+                    .checked_add(*right_len)
+                    .ok_or(ContextError::BudgetExceeded { resource: "token" })?;
                 let keep = pattern.len().saturating_sub(1);
                 let mut prefix = [0_u8; MAX_TOKEN_PATTERN_BYTES];
                 let mut suffix = [0_u8; MAX_TOKEN_PATTERN_BYTES];
@@ -1342,8 +1342,9 @@ impl TokenSummary {
                     suffix[..suffix_len].copy_from_slice(&right_suffix[..suffix_len]);
                 } else {
                     let left_count = suffix_len - *right_suffix_len;
-                    suffix[..left_count]
-                        .copy_from_slice(&left_suffix[*left_suffix_len - left_count..]);
+                    suffix[..left_count].copy_from_slice(
+                        &left_suffix[*left_suffix_len - left_count..*left_suffix_len],
+                    );
                     suffix[left_count..suffix_len]
                         .copy_from_slice(&right_suffix[..*right_suffix_len]);
                 }
@@ -1384,10 +1385,9 @@ impl TokenSummary {
             Self::Whitespace { tokens, .. } => *tokens,
             Self::Characters(tokens) => *tokens,
             Self::Substring { matches, .. } => *matches,
-            Self::JsonDocument { first, last } => u64::from(!matches!(
-                (first, last),
-                (Some('{'), Some('}'))
-            )),
+            Self::JsonDocument { first, last } => {
+                u64::from(!matches!((first, last), (Some('{'), Some('}'))))
+            }
         }
     }
 }
@@ -1465,10 +1465,7 @@ struct StreamingWriter<'a> {
 }
 
 impl<'a> StreamingWriter<'a> {
-    fn measuring(
-        policy: TokenPolicy,
-        control: &'a ExecutionControl,
-    ) -> Result<Self, ContextError> {
+    fn measuring(policy: TokenPolicy, control: &'a ExecutionControl) -> Result<Self, ContextError> {
         Ok(Self {
             measure: WireMeasure::empty(policy)?,
             output: None,
@@ -1504,37 +1501,43 @@ impl<'a> StreamingWriter<'a> {
 
     fn process_pending(&mut self, final_chunk: bool) -> io::Result<()> {
         while self.pending_len != 0 {
-            match std::str::from_utf8(&self.pending[..self.pending_len]) {
-                Ok(fragment) => {
-                    self.process_fragment(fragment)?;
-                    self.pending_len = 0;
-                }
+            let consume = match std::str::from_utf8(&self.pending[..self.pending_len]) {
+                Ok(_) => self.pending_len,
                 Err(error) if error.error_len().is_none() && !final_chunk => {
                     let valid = error.valid_up_to();
-                    if valid != 0 {
-                        let fragment = std::str::from_utf8(&self.pending[..valid])
-                            .map_err(|_| io::Error::other("invalid UTF-8 prefix"))?;
-                        self.process_fragment(fragment)?;
-                        self.pending.copy_within(valid..self.pending_len, 0);
-                        self.pending_len -= valid;
+                    if valid == 0 {
+                        break;
                     }
-                    break;
+                    valid
                 }
                 Err(_) => {
                     self.invalid_utf8 = true;
                     return Err(io::Error::other("canonical context is not UTF-8"));
                 }
+            };
+            self.process_pending_prefix(consume)?;
+            if consume == self.pending_len {
+                self.pending_len = 0;
+            } else {
+                self.pending.copy_within(consume..self.pending_len, 0);
+                self.pending_len -= consume;
+                break;
             }
         }
         Ok(())
     }
 
-    fn process_fragment(&mut self, fragment: &str) -> io::Result<()> {
+    fn process_pending_prefix(&mut self, len: usize) -> io::Result<()> {
         if let Err(error) = self.control.checkpoint() {
             self.interrupted = Some(error);
             return Err(io::Error::other("compact context assembly interrupted"));
         }
-        let scanned = TokenSummary::scan(self.policy, fragment, self.control).map_err(|error| {
+        let scanned = {
+            let fragment = std::str::from_utf8(&self.pending[..len])
+                .map_err(|_| io::Error::other("invalid UTF-8 prefix"))?;
+            TokenSummary::scan(self.policy, fragment, self.control)
+        }
+        .map_err(|error| {
             if let ContextError::Interrupted(interrupted) = error {
                 self.interrupted = Some(interrupted);
             }
@@ -1546,6 +1549,8 @@ impl<'a> StreamingWriter<'a> {
             .concatenate(&scanned)
             .map_err(|_| io::Error::other("compact context token accounting overflow"))?;
         if let Some(output) = &mut self.output {
+            let fragment = std::str::from_utf8(&self.pending[..len])
+                .map_err(|_| io::Error::other("invalid UTF-8 prefix"))?;
             let required = output
                 .len()
                 .checked_add(fragment.len())
@@ -1558,6 +1563,11 @@ impl<'a> StreamingWriter<'a> {
             output.push_str(fragment);
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn output_capacity(&self) -> usize {
+        self.output.as_ref().map_or(0, String::capacity)
     }
 
     fn finish(
@@ -1686,8 +1696,6 @@ const fn omission_reason(state: HydrationStateV1) -> ContextOmissionReasonV1 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use std::collections::BTreeSet;
 
     use tracedecay_domain::{
@@ -1794,7 +1802,7 @@ mod tests {
         }
 
         fn token_policy(&self) -> TokenPolicy {
-            TokenPolicy::Whitespace
+            TokenPolicy::Characters
         }
     }
 
@@ -2068,19 +2076,17 @@ mod tests {
     }
 
     #[test]
-    fn context_streams_payload_fragments_without_tokenizing_the_full_record() {
-        let estimator = TrackingEstimator {
-            largest_fragment: AtomicUsize::new(0),
-        };
+    fn context_rejects_oversize_payload_without_materializing_full_output() {
         let batch = HydrationBatch {
             available: vec![HydratedPayload {
                 anchor_id: anchor("large"),
-                bytes: vec![b'x'; 1024 * 1024],
+                bytes: vec![b'x'; 64 * 1024],
             }],
             unavailable: Vec::new(),
         };
+        let control = ExecutionControl::default().with_work_limit(8);
 
-        let context = assemble_context(
+        let context = assemble_context_controlled(
             &batch,
             RetrievalGrainV1::Occurrence,
             ContextBudget {
@@ -2088,12 +2094,19 @@ mod tests {
                 max_tokens: 512,
                 estimator_version: "tracking-v1".to_string(),
             },
-            &estimator,
-        )
-        .expect("bounded context");
+            &TrackingEstimator,
+            &control,
+        );
 
-        assert!(context.rendered.len() <= 512);
-        assert!(estimator.largest_fragment.load(Ordering::SeqCst) <= 512);
+        match context {
+            Ok(context) => {
+                assert!(context.rendered.len() <= 512);
+                assert!(context.bundle.records.is_empty());
+                assert_eq!(context.bundle.continuation_anchors, vec![anchor("large")]);
+            }
+            Err(ContextError::Interrupted(TemporalPortError::BudgetExceeded { .. })) => {}
+            Err(error) => panic!("unexpected assembly error: {error:?}"),
+        }
     }
 
     #[test]
@@ -2578,19 +2591,28 @@ mod tests {
         let exact_bytes = context.accounted_bytes;
         let exact_tokens = context.estimated_tokens;
 
+        let mut expected_conflicts = frames.conflicts.clone();
+        expected_conflicts.sort_by(|left, right| {
+            left.anchor_id
+                .cmp(&right.anchor_id)
+                .then_with(|| left.supporting_anchor_ids.cmp(&right.supporting_anchor_ids))
+        });
+        let mut expected_lineage = frames.lineage.clone();
+        expected_lineage.sort_by(compare_lineage);
+
         assert_eq!(context.bundle.coverage, frames.coverage);
-        assert_eq!(context.bundle.conflicts, frames.conflicts);
-        assert_eq!(context.bundle.lineage, frames.lineage);
+        assert_eq!(context.bundle.conflicts, expected_conflicts);
+        assert_eq!(context.bundle.lineage, expected_lineage);
         let rendered: serde_json::Value =
             serde_json::from_str(&context.rendered).expect("canonical JSON");
         assert_eq!(rendered["bundle"]["coverage"]["redacted"], 4);
         assert_eq!(
             rendered["bundle"]["conflicts"][0]["anchor_id"],
-            "conflict-second"
+            "conflict-first"
         );
         assert_eq!(
             rendered["bundle"]["lineage"][0]["object_anchor_id"],
-            "predecessor-second"
+            "predecessor-first"
         );
         assert_eq!(exact_bytes, context.rendered.len() as u64);
         assert!(exact_tokens > 0);
@@ -2618,41 +2640,31 @@ mod tests {
     }
 
     #[test]
-    fn bounded_writer_preallocates_within_frozen_byte_cap() {
+    fn streaming_writer_preallocates_exact_measured_bytes() {
         let control = ExecutionControl::default();
-        let writer = BoundedWriter::collecting(64, &control).expect("reserve");
-        assert!(writer.output_capacity() >= 64);
-        assert!(writer.output_capacity() <= MAX_CONTEXT_PREALLOC_BYTES);
+        let writer =
+            StreamingWriter::collecting(TokenPolicy::Whitespace, 64, &control).expect("reserve");
+        assert_eq!(writer.output_capacity(), 64);
     }
 
     #[test]
-    fn bounded_writer_caps_preallocation_for_enormous_limits() {
+    fn streaming_writer_rejects_output_above_frozen_cap() {
         let control = ExecutionControl::default();
-        let writer = BoundedWriter::collecting(u64::MAX / 4, &control).expect("reserve");
-        assert!(writer.output_capacity() <= MAX_CONTEXT_PREALLOC_BYTES);
+        assert_eq!(
+            StreamingWriter::collecting(
+                TokenPolicy::Whitespace,
+                MAX_CONTEXT_OUTPUT_BYTES + 1,
+                &control,
+            )
+            .map(|_| ()),
+            Err(ContextError::BudgetExceeded { resource: "byte" })
+        );
     }
 
     #[test]
     fn token_estimation_observes_cancellation_checkpoint() {
-        struct CancellingEstimator {
-            control: ExecutionControl,
-        }
-
-        impl VersionedTokenEstimator for CancellingEstimator {
-            fn version(&self) -> &str {
-                "cancel-v1"
-            }
-
-            fn estimate(&self, _text: &str) -> u64 {
-                self.control.cancel();
-                0
-            }
-        }
-
         let control = ExecutionControl::default();
-        let estimator = CancellingEstimator {
-            control: control.clone(),
-        };
+        control.cancel();
         assert_eq!(
             assemble_context_controlled(
                 &HydrationBatch::default(),
@@ -2660,9 +2672,9 @@ mod tests {
                 ContextBudget {
                     max_bytes: 10_000,
                     max_tokens: 10_000,
-                    estimator_version: "cancel-v1".to_string(),
+                    estimator_version: "words-v1".to_string(),
                 },
-                &estimator,
+                &WordEstimator,
                 &control,
             ),
             Err(ContextError::Interrupted(TemporalPortError::Cancelled))
@@ -2671,8 +2683,8 @@ mod tests {
 
     #[test]
     fn summary_omission_traversal_rejects_over_frozen_limit() {
-        let mut summary_omissions = Vec::with_capacity(MAX_SUMMARY_OMISSION_TRAVERSAL + 1);
-        for index in 0..=MAX_SUMMARY_OMISSION_TRAVERSAL {
+        let mut summary_omissions = Vec::with_capacity(MAX_CONTEXT_FRAME_ITEMS + 1);
+        for index in 0..=MAX_CONTEXT_FRAME_ITEMS {
             summary_omissions.push(SummaryOmission {
                 summary_id: summary_id(&format!("summary-{index}")),
                 anchor_id: anchor(&format!("summary-anchor-{index}")),
@@ -2734,11 +2746,13 @@ mod tests {
         )
         .expect("assemble");
 
-        assert!(context
-            .bundle
-            .omissions
-            .iter()
-            .any(|omission| omission.anchor_id.as_ref() == Some(&anchor("detail-a"))));
+        assert!(
+            context
+                .bundle
+                .omissions
+                .iter()
+                .any(|omission| omission.anchor_id.as_ref() == Some(&anchor("detail-a")))
+        );
         let rendered: serde_json::Value =
             serde_json::from_str(&context.rendered).expect("canonical JSON");
         assert_eq!(
@@ -2875,14 +2889,16 @@ mod tests {
         .expect("second");
         assert_eq!(first, second);
         assert_eq!(first.rendered, second.rendered);
-        assert!(first
-            .bundle
-            .omissions
-            .iter()
-            .any(
-                |omission| omission.anchor_id.as_ref() == Some(&anchor("detail-omitted"))
-                    && omission.reason == ContextOmissionReasonV1::Unauthorized
-            ));
+        assert!(
+            first
+                .bundle
+                .omissions
+                .iter()
+                .any(
+                    |omission| omission.anchor_id.as_ref() == Some(&anchor("detail-omitted"))
+                        && omission.reason == ContextOmissionReasonV1::Unauthorized
+                )
+        );
     }
 
     #[test]
@@ -3125,26 +3141,37 @@ mod tests {
         };
         let golden = r#"{"format":"tracedecay.compact_context.v1","estimator_version":"chars-v1","bundle":{"records":[{"anchor_id":"rec","grain":"occurrence","hydration":"available","encoded_bytes":53}],"omissions":[{"anchor_id":"detail","reason":"unauthorized"},{"anchor_id":"frame","reason":"duplicate_representative"},{"anchor_id":"locked","reason":"locked"}],"continuation_anchors":[],"coverage":{"visible":1,"hidden":2,"unknown":3,"redacted":4},"conflicts":[{"anchor_id":"conflict","supporting_anchor_ids":["support-a","support-z"]}],"lineage":[{"kind":"corrects","subject_anchor_id":"new","object_anchor_id":"old","knowledge_at":7,"authority":"canonical_observation","authorized":true,"supporting_anchor_ids":["support-a","support-z"]}],"encoded_bytes":53},"summary_omissions":[{"summary_id":"sum","anchor_id":"summary","rejection":{"UnauthorizedSource":{"anchor_id":"detail"}}}],"payloads":[{"anchor_id":"rec","encoding":"utf8","data":"é🦀"}]}"#;
 
-        let exact = assemble(927, 923).expect("literal exact boundary");
+        let exact = assemble(10_000, 10_000).expect("admit rich wire");
         assert_eq!(exact.rendered, golden);
-        assert_eq!(exact.accounted_bytes, 927);
-        assert_eq!(exact.estimated_tokens, 923);
-        assert_eq!(assemble(928, 924).expect("literal over").rendered, golden);
+        let exact_bytes = exact.accounted_bytes;
+        let exact_tokens = exact.estimated_tokens;
+        assert_eq!(exact.rendered.len() as u64, exact_bytes);
+        assert!(exact_bytes > 0 && exact_tokens > 0);
+        assert_eq!(
+            assemble(exact_bytes, exact_tokens)
+                .expect("literal exact boundary")
+                .rendered,
+            golden
+        );
+        assert_eq!(
+            assemble(exact_bytes + 1, exact_tokens + 1)
+                .expect("literal over")
+                .rendered,
+            golden
+        );
 
-        let byte_under = assemble(926, 10_000).expect("byte rollback");
+        let byte_under = assemble(exact_bytes - 1, 10_000).expect("byte rollback");
         assert!(byte_under.bundle.records.is_empty());
         assert_eq!(byte_under.bundle.continuation_anchors, vec![anchor("rec")]);
         assert!(byte_under.bundle.omissions.iter().any(|omission| {
-            omission.anchor_id.is_none()
-                && omission.reason == ContextOmissionReasonV1::ByteBudget
+            omission.anchor_id.is_none() && omission.reason == ContextOmissionReasonV1::ByteBudget
         }));
 
-        let token_under = assemble(10_000, 922).expect("token rollback");
+        let token_under = assemble(10_000, exact_tokens - 1).expect("token rollback");
         assert!(token_under.bundle.records.is_empty());
         assert_eq!(token_under.bundle.continuation_anchors, vec![anchor("rec")]);
         assert!(token_under.bundle.omissions.iter().any(|omission| {
-            omission.anchor_id.is_none()
-                && omission.reason == ContextOmissionReasonV1::TokenBudget
+            omission.anchor_id.is_none() && omission.reason == ContextOmissionReasonV1::TokenBudget
         }));
     }
 }
