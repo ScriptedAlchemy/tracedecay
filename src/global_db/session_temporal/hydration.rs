@@ -8,8 +8,9 @@ use libsql::{Connection, params};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    AnchorDurabilityClass, DurableObservationV1, HydrationStateV1, ObservationScopeV1,
-    PayloadAccessState, ProjectId, RetrievalAnchorId, RetrievalAnchorRecord,
+    AnchorDurabilityClass, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
+    DurableObservationV1, HydrationStateV1, ObservationScopeV1, PayloadAccessState, ProjectId,
+    RetrievalAnchorId, RetrievalAnchorRecord,
 };
 use zeroize::Zeroizing;
 
@@ -54,9 +55,7 @@ impl fmt::Debug for PayloadDescriptor {
 #[derive(Clone)]
 enum PayloadSource {
     Occurrence {
-        provider: String,
-        session_id: String,
-        message_id: String,
+        content: Zeroizing<Vec<u8>>,
     },
     Summary {
         session_id: String,
@@ -245,39 +244,8 @@ impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
         Box::pin(async move {
             control.checkpoint()?;
             match &descriptor.source {
-                PayloadSource::Occurrence {
-                    provider,
-                    session_id,
-                    message_id,
-                } => {
-                    let mut rows = self
-                        .read
-                        .query(
-                            "SELECT content
-                             FROM lcm_raw_messages
-                             WHERE provider = ?1 AND session_id = ?2 AND message_id = ?3
-                               AND storage_kind = 'inline'
-                               AND legacy_source = 0 AND legacy_truncated = 0
-                               AND length(CAST(content AS BLOB)) <= ?4",
-                            params![
-                                provider.as_str(),
-                                session_id.as_str(),
-                                message_id.as_str(),
-                                i64::try_from(max_bytes).unwrap_or(i64::MAX)
-                            ],
-                        )
-                        .await
-                        .map_err(|_| HydrationError::Unavailable)?;
-                    let row = rows
-                        .next()
-                        .await
-                        .map_err(|_| HydrationError::Unavailable)?
-                        .ok_or(HydrationError::Unavailable)?;
-                    let content = Zeroizing::new(
-                        row.get::<String>(0)
-                            .map_err(|_| HydrationError::Unavailable)?,
-                    );
-                    bounded_copy(content.as_bytes(), max_bytes, control)
+                PayloadSource::Occurrence { content } => {
+                    bounded_copy(content.as_slice(), max_bytes, control)
                 }
                 PayloadSource::Summary {
                     session_id,
@@ -505,65 +473,46 @@ async fn resolve_occurrence(
         return Ok(Some(HydrationResolution::Unavailable(state)));
     }
 
-    let mut payload_rows = conn
-        .query(
-            "SELECT content_hash, storage_kind, payload_ref,
-                    length(CAST(content AS BLOB)), legacy_source, legacy_truncated
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND session_id = ?2 AND message_id = ?3
-             LIMIT 2",
-            params![provider, session_id.as_str(), message_id.as_str()],
-        )
-        .await
-        .map_err(|_| ())?;
-    let Some(payload_row) = payload_rows.next().await.map_err(|_| ())? else {
-        return Ok(Some(HydrationResolution::Unavailable(
-            HydrationStateV1::RetainedButUnavailable,
-        )));
-    };
-    if payload_row.get::<i64>(4).map_err(|_| ())? != 0
-        || payload_row.get::<i64>(5).map_err(|_| ())? != 0
+    let envelope: CanonicalObservationEnvelopeV1 =
+        match serde_json::from_value(observation.payload().clone()) {
+            Ok(envelope) => envelope,
+            Err(_) => {
+                return Ok(Some(HydrationResolution::Unavailable(
+                    HydrationStateV1::UnverifiableLegacy,
+                )));
+            }
+        };
+    if envelope
+        .relations()
+        .message_id()
+        .is_none_or(|candidate| candidate.as_str() != message_id)
     {
         return Ok(Some(HydrationResolution::Unavailable(
             HydrationStateV1::UnverifiableLegacy,
         )));
     }
-    let content_hash: String = payload_row.get(0).map_err(|_| ())?;
-    let storage_kind: String = payload_row.get(1).map_err(|_| ())?;
-    if storage_kind == "inline" {
-        let byte_count = nonnegative_usize(payload_row.get::<Option<i64>>(3).map_err(|_| ())?)?;
-        return Ok(Some(HydrationResolution::Available(PayloadDescriptor {
-            source: PayloadSource::Occurrence {
-                provider: provider.to_string(),
-                session_id,
-                message_id,
-            },
-            byte_count,
-            content_hash,
-        })));
-    }
-    if storage_kind != "external" {
+    let Some(content) = envelope.facts().iter().find_map(|fact| match fact {
+        CanonicalObservationFactV1::Message { content, .. } => Some(content),
+        _ => None,
+    }) else {
         return Ok(Some(HydrationResolution::Unavailable(
-            HydrationStateV1::UnverifiableLegacy,
-        )));
-    }
-    let payload_ref: Option<String> = payload_row.get(2).map_err(|_| ())?;
-    let Some(payload_ref) = payload_ref else {
-        return Ok(Some(HydrationResolution::Unavailable(
-            HydrationStateV1::Deleted,
+            HydrationStateV1::RetainedButUnavailable,
         )));
     };
-    Ok(Some(
-        resolve_external_manifest(
-            conn,
-            provider,
-            &session_id,
-            &message_id,
-            &payload_ref,
-            &content_hash,
-        )
-        .await?,
-    ))
+    let content = match crate::global_db::observation_projection::canonical_fact_text(content) {
+        Ok(content) => Zeroizing::new(content.into_bytes()),
+        Err(_) => {
+            return Ok(Some(HydrationResolution::Unavailable(
+                HydrationStateV1::UnverifiableLegacy,
+            )));
+        }
+    };
+    let content_hash = sha256_hex(content.as_slice());
+    Ok(Some(HydrationResolution::Available(PayloadDescriptor {
+        byte_count: content.len(),
+        source: PayloadSource::Occurrence { content },
+        content_hash,
+    })))
 }
 
 async fn resolve_summary(
@@ -959,12 +908,16 @@ fn nonnegative_usize(value: Option<i64>) -> Result<usize, ()> {
 }
 
 fn content_hash_matches(expected: &str, bytes: &[u8]) -> bool {
+    expected.strip_prefix("sha256:").unwrap_or(expected) == sha256_hex(bytes)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut actual = String::with_capacity(64);
     for byte in digest {
         let _ = write!(&mut actual, "{byte:02x}");
     }
-    expected.strip_prefix("sha256:").unwrap_or(expected) == actual
+    actual
 }
 
 fn now_micros() -> i64 {
@@ -1413,8 +1366,9 @@ mod tests {
             .expect("session owner");
         insert_active_generation_for_session(&db, "session-2").await;
 
-        let payload = "authorized cross-session payload";
-        let content_hash = hash(payload.as_bytes());
+        let canonical_payload = "payload-1";
+        let legacy_projection_poison = "legacy projection poison";
+        let content_hash = hash(legacy_projection_poison.as_bytes());
         db.read_connection()
             .execute(
                 "INSERT INTO lcm_raw_messages (
@@ -1425,7 +1379,7 @@ mod tests {
                     ?1, 'message-1', 'session-2', 'assistant', 1, 1,
                     ?2, ?3, 'inline', NULL, ?2, ?2, 0, 0
                  )",
-                params![provider, payload, content_hash],
+                params![provider, legacy_projection_poison, content_hash],
             )
             .await
             .expect("raw message");
@@ -1443,7 +1397,7 @@ mod tests {
                 params![
                     observation.observation_id().as_str(),
                     anchor.anchor_id().as_str(),
-                    payload
+                    canonical_payload
                 ],
             )
             .await
@@ -1464,7 +1418,7 @@ mod tests {
             })
             .await
             .expect("cross-session hydration");
-        assert_eq!(output, payload.as_bytes());
+        assert_eq!(output, canonical_payload.as_bytes());
 
         drop(adapter);
         drop(read);
@@ -1704,8 +1658,9 @@ mod tests {
         let read = db.read_snapshot().await.expect("read snapshot");
         let adapter = GlobalDbTemporalHydrationPort::for_snapshot(&read, db.storage_root.as_path());
 
+        let canonical_occurrence_payload = "payload-1";
         for (anchor, expected) in [
-            (occurrence_anchor.anchor_id(), occurrence_payload),
+            (occurrence_anchor.anchor_id(), canonical_occurrence_payload),
             (summary_anchor.anchor_id(), summary_payload),
         ] {
             assert_eq!(
@@ -1762,7 +1717,7 @@ mod tests {
             )
             .await
             .expect("frozen snapshot remains authorized");
-        assert_eq!(frozen_output, occurrence_payload.as_bytes());
+        assert_eq!(frozen_output, canonical_occurrence_payload.as_bytes());
 
         let fresh_read = db.read_snapshot().await.expect("fresh read snapshot");
         let fresh_adapter =

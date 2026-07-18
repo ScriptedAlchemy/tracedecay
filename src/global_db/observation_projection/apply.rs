@@ -890,7 +890,9 @@ fn canonical_message_fields(
     Ok(None)
 }
 
-fn canonical_fact_text(value: &serde_json::Value) -> ProjectionStoreResult<String> {
+pub(in crate::global_db) fn canonical_fact_text(
+    value: &serde_json::Value,
+) -> ProjectionStoreResult<String> {
     if let Some(text) = value.as_str() {
         return Ok(text.to_owned());
     }
