@@ -3324,6 +3324,10 @@ async fn doctor_global_db_read_only(
 }
 
 async fn doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
+    doctor_runtime_value_inner(handshake, false).await
+}
+
+async fn doctor_runtime_value_inner(handshake: &DaemonHandshake, cold: bool) -> serde_json::Value {
     let Some(project_path) = handshake.project_path.as_deref() else {
         return doctor_runtime_unavailable(None, "project_path_missing");
     };
@@ -3382,6 +3386,36 @@ async fn doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value 
         },
     });
 
+    if cold {
+        // Cold Doctor must not open GlobalDb through authority-backed handles,
+        // start workers, or apply schema. Session temporal health uses the
+        // immutable path API; authority/ingest stay unread.
+        value["database"]["authority_audit_ok"] = json!(null);
+        value["database"]["authority_audit_reason"] = json!("authority_audit_not_run");
+        value["database"]["authority_audit_error"] = json!("authority_audit_not_run");
+        value["session_temporal_health"] = if !session_path.is_file() {
+            doctor_runtime_temporal_unavailable("session_store_missing")
+        } else {
+            match timeout(
+                Duration::from_secs(8),
+                crate::global_db::session_temporal::session_temporal_doctor_health_at(
+                    &session_path,
+                ),
+            )
+            .await
+            {
+                Ok(report) => doctor_runtime_temporal_report(report),
+                Err(_) => doctor_runtime_temporal_unavailable("session_health_timed_out"),
+            }
+        };
+        value["cursor_session_ingest"] = json!({
+            "status": "unavailable",
+            "reason": "session_store_unavailable",
+        });
+        value["cursor_session_placeholder_paths"] = json!([]);
+        return value;
+    }
+
     let registry = doctor_global_db_read_only(
         &handshake.client_identity.global_db_path,
         "doctor authority read-only",
@@ -3438,13 +3472,10 @@ async fn doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value 
 }
 
 async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
-    // Cold Doctor must not start workers or apply schema. Prefer the
-    // runtime-owned read-only API once `pr8/runtime` exports:
-    //   crate::doctor::cold_read_only_runtime_value(handshake) -> Value
-    // Until that symbol lands, keep the transport-local read-only open path.
-    // Database access scopes are process-local capabilities. A cold Doctor has
-    // no daemon process from which to inherit one, so install a bounded scope
-    // only while the explicitly read-only handles below are alive.
+    // Cold Doctor must not start workers, apply schema, or open GlobalDb through
+    // authority-backed handles. Install a bounded read-only scope only while the
+    // graph metadata open below is alive; session temporal health uses the
+    // immutable path API (`session_temporal_doctor_health_at`).
     let _read_only_scope = match crate::db::enter_daemon_database_scope(
         &handshake.client_identity.profile_root,
         0,
@@ -3458,7 +3489,7 @@ async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::V
             );
         }
     };
-    doctor_runtime_value(handshake).await
+    doctor_runtime_value_inner(handshake, true).await
 }
 
 async fn write_doctor_runtime_response(
@@ -4533,6 +4564,61 @@ mod doctor_runtime_route_tests {
         );
         assert!(!value.to_string().contains(&db_path.display().to_string()));
         connection.execute("ROLLBACK", ()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cold_complete_route_uses_immutable_session_health_without_authority_wal_shm() {
+        let root = tempfile::TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        let registry_path = profile.join("registry.db");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile.clone()),
+            global_db_path: Some(registry_path.clone()),
+        };
+        let initialized = TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize test project");
+        let session_path = initialized.store_layout().sessions_db_path.clone();
+        drop(initialized);
+        for path in [&session_path, &registry_path] {
+            for suffix in ["-wal", "-shm"] {
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                let _ = std::fs::remove_file(PathBuf::from(sidecar));
+            }
+        }
+        let handshake = handshake(project, profile.clone(), registry_path.clone());
+        let before = filesystem_manifest(root.path());
+
+        let value = cold_doctor_runtime_value(&handshake).await;
+
+        assert_eq!(filesystem_manifest(root.path()), before);
+        assert_eq!(
+            value.pointer("/doctor_runtime/status"),
+            Some(&serde_json::json!("complete"))
+        );
+        assert_eq!(
+            value.pointer("/session_temporal_health/status"),
+            Some(&serde_json::json!("complete"))
+        );
+        assert_eq!(
+            value.pointer("/database/authority_audit_reason"),
+            Some(&serde_json::json!("authority_audit_not_run"))
+        );
+        for path in [session_path.as_path(), registry_path.as_path()] {
+            for suffix in ["-wal", "-shm"] {
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                assert!(
+                    !PathBuf::from(sidecar).exists(),
+                    "cold doctor must not create {suffix} for {}",
+                    path.display()
+                );
+            }
+        }
     }
 }
 
