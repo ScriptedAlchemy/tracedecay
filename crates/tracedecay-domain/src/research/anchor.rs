@@ -307,6 +307,10 @@ pub enum AnchorProvenanceRelationV2 {
     Discussed,
     CopiedFrom,
     DerivedFrom,
+    Corrects,
+    Contradicts,
+    Supersedes,
+    Supports,
 }
 
 /// Owner-bound reference to an earlier anchor in the provenance graph.

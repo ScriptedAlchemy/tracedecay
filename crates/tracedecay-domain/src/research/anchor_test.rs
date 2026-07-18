@@ -74,6 +74,22 @@ fn entity_target(id: &str) -> RetrievalAnchorTargetV2 {
 }
 
 #[test]
+fn assertion_provenance_relations_have_stable_snake_case_wire_values() {
+    for (relation, expected) in [
+        (AnchorProvenanceRelationV2::Corrects, "corrects"),
+        (AnchorProvenanceRelationV2::Contradicts, "contradicts"),
+        (AnchorProvenanceRelationV2::Supersedes, "supersedes"),
+        (AnchorProvenanceRelationV2::Supports, "supports"),
+    ] {
+        assert_eq!(serde_json::to_value(relation).unwrap(), json!(expected));
+        assert_eq!(
+            serde_json::from_value::<AnchorProvenanceRelationV2>(json!(expected)).unwrap(),
+            relation
+        );
+    }
+}
+
+#[test]
 fn replay_derives_the_same_anchor_identity() {
     let first = RetrievalAnchorRecordV2::new(record_parts(
         entity_target("document.fixture"),
