@@ -165,6 +165,9 @@ async fn summary_node_preserves_source_lineage_and_expands_sources() {
     let db = open_lcm_db(&tmp).await;
     let store_ids =
         insert_raw_messages(&db, "cursor", "session-1", &["alpha", "beta", "gamma"]).await;
+    let mut first_source = raw_message("cursor", "session-1-message-1", "session-1", 1, "alpha");
+    first_source.timestamp = Some(1_715_000_001_000_000);
+    assert!(db.upsert_session_message(&first_source).await);
 
     let node = db
         .lcm_insert_summary_node(summary_draft(
@@ -207,6 +210,10 @@ async fn summary_node_preserves_source_lineage_and_expands_sources() {
     assert_eq!(
         expanded.sources[0].raw_message.as_ref().unwrap().message_id,
         "session-1-message-1"
+    );
+    assert_eq!(
+        expanded.sources[0].raw_message.as_ref().unwrap().timestamp,
+        Some(1_715_000_001)
     );
     assert_eq!(expanded.sources[1].content, "beta");
     assert_eq!(expanded.sources[2].content, "gamma");

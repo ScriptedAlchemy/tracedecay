@@ -3778,12 +3778,25 @@ impl GlobalDb {
         true
     }
 
+    fn normalize_session_message_timestamp(timestamp: Option<i64>) -> Option<i64> {
+        timestamp.map(|timestamp| {
+            if timestamp.unsigned_abs() >= 100_000_000_000 {
+                timestamp / 1_000_000
+            } else {
+                timestamp
+            }
+        })
+    }
+
     async fn upsert_session_message_in_existing_tx(
         &self,
         conn: &Connection,
         message: &SessionMessageRecord,
         payload_rollback: &mut crate::sessions::lcm::payload::PayloadFileRollback,
     ) -> Result<(), TranscriptPersistenceError> {
+        let mut canonical_message = message.clone();
+        canonical_message.timestamp = Self::normalize_session_message_timestamp(message.timestamp);
+        let message = &canonical_message;
         let raw = crate::sessions::lcm::raw::upsert_raw_message_with_payload_tracked(
             conn,
             &self.storage_root,
