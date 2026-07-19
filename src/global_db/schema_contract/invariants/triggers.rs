@@ -872,7 +872,9 @@ const SESSION_REFRESH_STATE_GUARDS: &[Trigger] = &[
                             AND (
                               (
                                 NEW.progress_ordinal = 0
-                                AND receipt.source_through = binding.source_frontier
+                                AND receipt.source_through >= binding.source_frontier
+                                AND receipt.source_through <=
+                                    json_extract(NEW.frontier_json, '$.committed_through')
                                 AND NOT EXISTS (
                                     SELECT 1
                                     FROM session_refresh_progress AS first_previous
@@ -902,8 +904,11 @@ const SESSION_REFRESH_STATE_GUARDS: &[Trigger] = &[
                                     ) > json_extract(
                                         previous.frontier_json, '$.committed_through'
                                     )
-                                    AND receipt.source_through = json_extract(
+                                    AND receipt.source_through >= json_extract(
                                         previous.frontier_json, '$.committed_through'
+                                    )
+                                    AND receipt.source_through <= json_extract(
+                                        NEW.frontier_json, '$.committed_through'
                                     )
                                     AND json_extract(NEW.coverage_json, '$.visible')
                                         >= json_extract(previous.coverage_json, '$.visible')
