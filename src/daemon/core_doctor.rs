@@ -130,12 +130,19 @@ fn doctor_runtime_store_paths(
     project_path: &Path,
     profile_root: &Path,
 ) -> std::result::Result<(PathBuf, PathBuf), &'static str> {
-    match crate::storage::read_enrollment_marker(project_path) {
+    let branch = crate::branch::current_branch(project_path);
+    doctor_runtime_store_paths_for_branch(project_path, profile_root, branch.as_deref())
+}
+
+fn doctor_runtime_store_paths_for_branch(
+    project_path: &Path,
+    profile_root: &Path,
+    branch: Option<&str>,
+) -> std::result::Result<(PathBuf, PathBuf), &'static str> {
+    let layout = match crate::storage::read_enrollment_marker(project_path) {
         Ok(Some(marker)) => {
-            let layout =
-                crate::storage::profile_sharded_layout(project_path, profile_root, &marker)
-                    .map_err(|_| "project_store_schema_unsupported")?;
-            Ok((layout.graph_db_path, layout.sessions_db_path))
+            crate::storage::profile_sharded_layout(project_path, profile_root, &marker)
+                .map_err(|_| "project_store_schema_unsupported")?
         }
         Ok(None) => {
             let data_root = crate::config::get_tracedecay_dir(project_path);
@@ -146,12 +153,17 @@ fn doctor_runtime_store_paths(
             if legacy_paths.0.is_file() {
                 return Ok(legacy_paths);
             }
-            let layout = crate::storage::default_profile_sharded_layout(project_path, profile_root)
-                .map_err(|_| "project_store_schema_unsupported")?;
-            Ok((layout.graph_db_path, layout.sessions_db_path))
+            crate::storage::default_profile_sharded_layout(project_path, profile_root)
+                .map_err(|_| "project_store_schema_unsupported")?
         }
-        Err(_) => Err("project_store_schema_unsupported"),
-    }
+        Err(_) => return Err("project_store_schema_unsupported"),
+    };
+    let (graph_path, _, _) = crate::tracedecay::TraceDecay::resolve_db_for_branch(
+        project_path,
+        &layout.data_root,
+        branch,
+    );
+    Ok((graph_path, layout.sessions_db_path))
 }
 
 async fn doctor_read_only_database(
@@ -861,6 +873,43 @@ mod doctor_runtime_route_tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn doctor_store_paths_follow_the_active_branch_database() {
+        let root = tempfile::TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile.clone()),
+            global_db_path: Some(profile.join("registry.db")),
+        };
+        let initialized = TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize branch-aware Doctor fixture");
+        let layout = initialized.store_layout().clone();
+        let default_graph = initialized.db_path().clone();
+        drop(initialized);
+
+        let branch_relpath = "branches/feature_doctor.db";
+        let branch_graph = layout.data_root.join(branch_relpath);
+        std::fs::create_dir_all(branch_graph.parent().unwrap()).unwrap();
+        std::fs::copy(&default_graph, &branch_graph).unwrap();
+        let mut meta = crate::branch_meta::BranchMeta::new_for_dir(&layout.data_root, "main");
+        meta.add_branch("feature/doctor", branch_relpath, "main");
+        crate::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
+
+        assert_eq!(
+            super::doctor_runtime_store_paths_for_branch(
+                &project,
+                &profile,
+                Some("feature/doctor"),
+            )
+            .expect("resolve branch-aware Doctor paths"),
+            (branch_graph, layout.sessions_db_path)
+        );
     }
 
     #[tokio::test]
