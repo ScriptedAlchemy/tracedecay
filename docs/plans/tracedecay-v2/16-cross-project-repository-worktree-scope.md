@@ -33,7 +33,10 @@ authorization authorities.
 - Typed `QueryCollectionId`, `WorkspaceCollectionId`, immutable collection revisions,
   canonical member ordering, membership snapshots, and policy-bound collection resolution.
 - Explicit-target, ambiguity, partial-coverage, freshness, and distributed-cursor rules.
-- External worktree discovery, safe visibility, cleanup eligibility, and daemon cleanup.
+- External worktree discovery, authorized native-Git worktree inventory, safe visibility,
+  cleanup eligibility, and daemon cleanup.
+- The reference-only branch-stack registry projection: typed stack/revision/node identity,
+  explicit dependency topology, inventory binding, and authorization-safe visibility.
 
 ## Does not own
 
@@ -44,6 +47,9 @@ authorization authorities.
 - Git index, hunk, and commit evidence or explicit index transactions; those are owned by
   [Plan 36](36-git-aware-change-context-and-index-transactions.md) and consume this plan's
   resolved repository/worktree identity.
+- Dependency-commit calculation, merge-base/tip snapshots, conflict classification,
+  integration previews, mechanical cross-merge mutation, receipts, or recovery; Plan 36
+  owns those. This plan supplies only authorized identity, inventory, and stack projection.
 - Provider `project_key`, process CWD, host profile, path hash, branch database, or store
   filename as public identity.
 - A path, resolved symlink, display label, branch display name, remote URL, Git common-dir
@@ -267,7 +273,9 @@ AuthorizedScopeRequest {
         | Commit(CommitId)
         | Collection(CollectionSelector)
         | Current,
-  requested_capability: ProjectDataRead | CodeSnapshotRead | WorktreeRead,
+  requested_capability: ProjectDataRead | CodeSnapshotRead | WorktreeRead
+                      | WorktreeInventoryRead | StackRead
+                      | StackPreflight | StackIntegrate,
   continuation: optional prior scope/cursor binding
 }
 
@@ -429,6 +437,220 @@ is idempotent and leaves all legacy records unresolved when a typed proof is abs
 - PR15 cannot enable Plan 36 stack projection or Plan 37 cross-worktree proximity until
   the identity, authorization, and non-escalation suites pass with deterministic
   scope-digest replay across process restart.
+
+## Native worktree inventory and branch-stack registry projection
+
+### Projection identity and invariants
+
+Git owns objects, refs, worktree administration, and reachability. It does not own a
+product-level branch-stack registry. PR15 therefore adds a reference-only projection whose
+identity is distinct from every Git identity:
+
+```text
+BranchStackId         = opaque stable registry identifier
+BranchStackRevisionId = immutable content-addressed projection revision
+StackNodeId           = opaque node identifier stable only within BranchStackId
+WorktreeInventorySnapshotId = immutable inventory observation
+WorktreeInventoryEpoch      = monotone per RepositoryId after a complete reconciliation
+
+BranchStackNode {
+  stack_id, node_id, project_id, repository_id,
+  branch_ref: BranchRef,
+  tip_commit_id: CommitId,
+  worktree_id: optional WorktreeId,
+  dependency_node_ids: ordered StackNodeId[],
+  source: ExplicitDeclaration | AuthorizedPullRequestBaseObservation,
+  source_record_digest
+}
+```
+
+`BranchStackId`, `StackNodeId`, a stack display name, and a node ordinal are projection
+identity only. They never replace `RepositoryId`, `ProjectId`, `WorktreeId`, `BranchRef`,
+or `CommitId`, and never grant access. A revision is publishable only when every node's
+repository/ref/commit relationship is proven at one inventory epoch and every dependency
+edge is explicit. Tracking refs, commit-message text, path layout, worktree directory
+names, common commit prefixes, or graph proximity cannot infer an authoritative stack
+edge. An authorized pull-request base observation may supply an edge only when the
+provider record names exact base/head refs and commits; it remains provider-observed
+provenance and becomes stale when either commit moves.
+
+The projection is acyclic. Duplicate branch refs, cross-repository edges, self-edges,
+missing dependency nodes, and a node whose tip is not exactly the object currently named
+by its declared branch ref reject publication. A branch may occur in at most one live node
+per stack revision.
+A worktree may be absent, but a present `WorktreeId` must be independently authorized and
+must currently prove the same repository/ref/tip relationship. Detached and unborn
+worktrees can appear in inventory, but cannot become stack nodes until an explicit typed
+branch/ref and commit relationship exists.
+
+### Native worktree inventory
+
+The daemon's fixed native-Git adapter reconciles `git worktree list --porcelain -z`,
+the repository's bounded common-directory worktree administrative records, and the
+already-proven locator observations. It never recursively scans parent directories and
+never treats an observed path as identity. One complete pass publishes:
+
+```text
+AuthorizedWorktreeInventorySnapshot {
+  snapshot_id, repository_id, inventory_epoch,
+  native_admin_digest, observed_at, completeness,
+  entries: ordered {
+    worktree_id, worktree_kind: Main | Linked | Bare,
+    branch_ref: optional BranchRef,
+    head_commit_id: optional CommitId,
+    head_state: Attached | Detached | Unborn | Missing,
+    admin_state: Present | Locked | Prunable | Missing | Ambiguous,
+    locator_observation_id: optional LocatorObservationId,
+    repository_state_snapshot_id: optional RepositoryStateSnapshotId
+  }[],
+  grant_digest, scope_digest, policy_epoch, coverage
+}
+```
+
+Entries sort by encoded `WorktreeId`; paths, discovery order, branch labels, and native
+output order are never stable ordering keys. `RepositoryStateSnapshotId` is an optional
+reference to Plan 36's independently captured dirty/index/operation state; PR15 does not
+interpret or persist that state. An incomplete native scan does not advance
+`WorktreeInventoryEpoch`, retire an identity, mark an absent path deleted, or make a stack
+revision current. Deletion retires a `WorktreeId` only after a complete reconciliation
+proves that its native administrative record is gone and cleanup/recovery has no
+indeterminate outcome.
+
+Inventory requires `WorktreeInventoryRead` on an explicitly authorized
+`RepositoryId` plus the exact visible `WorktreeId` set. Repository authorization alone
+does not enumerate sibling worktrees. Hidden entries do not contribute labels, paths,
+counts, stable ordinals, or absence-vs-denial distinctions. A Plan 37 daemon worker
+receives the same filtered snapshot as any other caller; daemon locality is not authority.
+
+### Stack resolution and authorized cross-worktree scope
+
+Stack requests never expand authorization. Resolution freezes the registry revision and
+inventory epoch, reauthorizes every candidate node, intersects with the request's exact
+worktree grant, and only then pins refs and commits:
+
+```text
+AuthorizedBranchStackRequest {
+  principal, operation, stack_id,
+  revision: Exact(BranchStackRevisionId) | Current,
+  node_selector: Exact(nonempty StackNodeId[]) | AllAuthorized,
+  requested_capability: StackRead | StackPreflight | StackIntegrate,
+  authorized_scope_grant, policy_epoch
+}
+
+AuthorizedBranchStackSnapshot {
+  stack_id, revision_id, inventory_snapshot_id, inventory_epoch,
+  visible_nodes: ordered BranchStackNode[],
+  visible_edges: ordered { dependency_node_id, dependent_node_id }[],
+  hidden_or_unavailable,
+  grant_digest, scope_digest, topology_digest, policy_epoch, coverage
+}
+```
+
+`Current` freezes one revision before authorization and never follows a later publish.
+`StackRead` does not imply `StackPreflight`; neither implies `StackIntegrate`.
+`StackIntegrate` is a separately delegated, operation-specific capability consumed only
+by Plan 36. `AllAuthorized` is valid only for `StackRead`; preflight and integration must
+name a nonempty exact node set, including the source and destination. A request naming an
+unauthorized node returns the same policy-safe
+`restricted_or_unavailable` shape as a missing node. A partially visible topology does
+not invent transitive edges, imply dependency readiness, or authorize traversal through a
+hidden node. Plan 36 must receive the exact `revision_id`, `inventory_epoch`,
+`scope_digest`, and ordered visible node set and fail stale rather than re-resolve to
+latest.
+
+### Exact files, store schema, APIs, and migration
+
+- `crates/tracedecay-domain/src/scope/worktree_inventory.rs` defines inventory IDs,
+  epochs, entry states, coverage, and canonical ordering.
+  `crates/tracedecay-domain/src/scope/branch_stack.rs` defines
+  `BranchStackId`, `BranchStackRevisionId`, `StackNodeId`, node/edge/source values, and
+  acyclic revision validation. `scope/mod.rs` and `lib.rs` re-export them.
+- `crates/tracedecay-application/src/scope/worktree_inventory.rs` and
+  `branch_stack.rs` own authorization-safe reconciliation and projection resolution;
+  `ports.rs` adds `NativeWorktreeInventory`, `BranchStackRegistryStore`, and
+  `StackScopeAuthorizer`.
+- `src/git/adapter/worktree_inventory.rs` is the only native worktree-list/admin-record
+  adapter. `src/daemon/git_inventory.rs` schedules bounded reconciliation and publishes
+  no state after an incomplete pass.
+- `crates/tracedecay-store/src/scope_stack.rs` and
+  `src/global_db/scope_stack/{schema,store,migration}.rs` own profile-global registry and
+  inventory projections. They store references and digests, never Git objects, index
+  bytes, patch bodies, credentials, or authorization grants.
+- `worktree_inventory_snapshots(snapshot_id, repository_id, inventory_epoch,
+  native_admin_digest, observed_at, completeness, coverage_digest)` is append-only with
+  unique `(repository_id, inventory_epoch)`.
+- `worktree_inventory_entries(snapshot_id, entry_ordinal, worktree_id,
+  branch_ref_payload, head_commit_payload, head_state, admin_state,
+  locator_observation_id, repository_state_snapshot_id)` has primary key
+  `(snapshot_id, entry_ordinal)`, unique `(snapshot_id, worktree_id)`, and typed payload
+  checks that bind every ref/commit to the snapshot repository.
+- `branch_stack_definitions(stack_id, project_id, repository_id, display_name,
+  created_at, retired_at)` owns metadata only.
+- `branch_stack_revisions(stack_id, revision_id, inventory_snapshot_id,
+  inventory_epoch, topology_digest, source_epoch, policy_digest, observed_at)` is
+  append-only with primary key `(stack_id, revision_id)`.
+- `branch_stack_revision_nodes(stack_id, revision_id, node_ordinal, node_id,
+  branch_ref_payload, tip_commit_payload, worktree_id, source_kind,
+  source_record_digest)` has unique node, branch-ref, and ordinal constraints per
+  revision.
+- `branch_stack_revision_edges(stack_id, revision_id, dependency_node_id,
+  dependent_node_id, edge_ordinal, source_kind, source_record_digest)` has a primary key
+  over the revision and ordered edge, rejects self-edges, and is published only after
+  whole-revision cycle validation.
+- `scope_stack_migration_quarantine(source_table, source_row_id, reason_code,
+  redacted_payload_digest, quarantined_at)` receives legacy path-, branch-label-, or
+  inferred-parent records. Migration publishes only a complete typed revision whose
+  repository/ref/commit proofs already exist; it is idempotent and never manufactures a
+  `WorktreeId` or dependency edge.
+
+```rust
+pub trait WorktreeInventoryService {
+    fn inventory(
+        &self,
+        request: AuthorizedWorktreeInventoryRequest,
+    ) -> Result<AuthorizedWorktreeInventorySnapshot, WorktreeInventoryError>;
+}
+
+pub trait BranchStackProjectionService {
+    fn resolve_stack(
+        &self,
+        request: AuthorizedBranchStackRequest,
+    ) -> Result<AuthorizedBranchStackSnapshot, BranchStackResolutionError>;
+}
+
+pub trait BranchStackRegistryStore {
+    fn publish_revision(
+        &self,
+        expected_current: Option<BranchStackRevisionId>,
+        revision: ValidatedBranchStackRevision,
+    ) -> Result<BranchStackRevisionId, BranchStackStoreError>;
+}
+```
+
+### Tests, benchmarks, and executable acceptance
+
+- `crates/tracedecay-domain/tests/worktree_stack_contract.rs` proves typed-ID
+  non-interchangeability, ref/commit repository binding, canonical ordering, cycle and
+  duplicate rejection, and byte-stable revision/topology digests.
+- `tests/scope_suite/worktree_inventory.rs` covers main/linked/bare, moved, symlinked,
+  detached, unborn, locked, prunable, deleted/recreated, missing-admin, incomplete-scan,
+  SHA-1/SHA-256, and process-restart fixtures without path identity.
+- `tests/scope_suite/authorized_stack_projection.rs` covers 1/2/8/32 nodes, denied
+  siblings, partially visible topology, explicit PR-base observations, ref/tip drift,
+  inventory-epoch drift, authorization revocation, and hidden-node non-enumeration.
+- `tests/scope_suite/stack_migration.rs` proves typed-only import, path/label quarantine,
+  idempotency, all-or-nothing revision publication, and zero invented dependency edges.
+- `benches/worktree_stack_scope.rs` records cold/warm inventory reconciliation and stack
+  resolution for 1/8/32/128 worktrees and nodes, complete versus partial native scans,
+  authorization intersection, topology validation, allocation count, and stale-revision
+  rejection. It reports p50/p95/p99 and input/output cardinality; no benchmark bypasses
+  authorization or native relationship proof.
+
+PR15 acceptance requires byte-identical inventory and stack revision digests across daemon
+restart; zero unauthorized worktree identity/count leakage; no epoch advance on partial
+reconciliation; exact stale errors for ref, tip, inventory, policy, grant, or revision
+drift; and a conformance fixture proving Plan 36 and Plan 37 consume the frozen authorized
+snapshot without re-discovery, CWD inference, or authority expansion.
 
 ## Collection implementation contract
 
