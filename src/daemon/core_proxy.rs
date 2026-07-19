@@ -1,0 +1,504 @@
+//! Stdio MCP proxy: forwards host traffic to the daemon over the broker
+//! transport, tracking initialize-route and tool-catalog metadata.
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
+use tokio::time::Duration;
+
+use super::{
+    DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake, binary_version,
+    client_connection, connect_to_daemon_connection, connect_to_daemon_connection_within,
+    connect_with_restart_grace, connection_for_socket_path, default_available_socket_path,
+    log_daemon_event, next_daemon_response_line, version_skew_action, write_daemon_preamble,
+};
+use crate::errors::{Result, TraceDecayError};
+use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, StdioTransport};
+
+/// Decides at `tracedecay serve` startup whether to proxy to the daemon.
+///
+/// A missing socket usually means "no daemon", but `tracedecay update`
+/// restarts the daemon service and shutdown unlinks the socket before the new
+/// daemon rebinds it; a serve process starting inside that window would
+/// otherwise silently commit to in-process mode for its whole lifetime. When
+/// a daemon service is installed for this socket, wait out that window with
+/// the same grace used for per-request connects before falling back.
+#[cfg(unix)]
+pub async fn should_proxy_serve_to_daemon(socket_path: &Path) -> bool {
+    let installed_socket = super::installed_service_socket_path().ok().flatten();
+    should_proxy_serve_to_daemon_with(
+        socket_path,
+        installed_socket.as_deref(),
+        super::DAEMON_RESTART_GRACE,
+        super::DAEMON_RESTART_POLL_INTERVAL,
+    )
+    .await
+}
+
+#[cfg(any(test, not(unix)))]
+pub(crate) fn proxy_required_by_platform(transport_supported: bool, endpoint_exists: bool) -> bool {
+    !transport_supported || endpoint_exists
+}
+
+/// Non-Unix clients always use the authenticated loopback broker. There is no
+/// in-process `SQLite` fallback.
+#[cfg(not(unix))]
+#[allow(clippy::unused_async)] // Preserve parity with the Unix async routing probe.
+pub async fn should_proxy_serve_to_daemon(socket_path: &Path) -> bool {
+    proxy_required_by_platform(false, socket_path.exists())
+}
+
+#[cfg(unix)]
+pub async fn proxy_stdio_to_daemon(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    replay_line: Option<String>,
+) -> Result<()> {
+    let mut transport = StdioTransport::new();
+    proxy_transport_to_daemon(socket_path, handshake, replay_line, &mut transport).await
+}
+
+#[cfg(not(unix))]
+pub async fn proxy_stdio_to_daemon(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    replay_line: Option<String>,
+) -> Result<()> {
+    let mut transport = StdioTransport::new();
+    if let Some(line) = replay_line {
+        proxy_one_request(socket_path, handshake, &line, &mut transport).await?;
+    }
+    while let Some(line) = transport.read_line().await? {
+        proxy_one_request(socket_path, handshake, &line, &mut transport).await?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+pub(crate) struct ProxyInitializeMetadata {
+    daemon_version: Option<String>,
+    tool_list_changed: bool,
+    route: Option<InitializeRouteMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InitializeRouteMetadata {
+    pub(super) project_path: PathBuf,
+    pub(super) allow_init: bool,
+}
+
+#[cfg(unix)]
+pub(crate) async fn should_proxy_serve_to_daemon_with(
+    socket_path: &Path,
+    installed_service_socket: Option<&Path>,
+    grace: Duration,
+    poll_interval: Duration,
+) -> bool {
+    if socket_path.exists() {
+        return true;
+    }
+    // Only wait when an installed service is expected to rebind this exact
+    // socket; otherwise in-process startup must stay instant.
+    if installed_service_socket != Some(socket_path) {
+        return false;
+    }
+    let connection = connection_for_socket_path(socket_path);
+    connect_with_restart_grace(&connection, grace, poll_interval)
+        .await
+        .is_ok()
+}
+
+#[cfg(unix)]
+pub async fn proxy_transport_to_daemon(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    replay_line: Option<String>,
+    transport: &mut impl McpTransport,
+) -> Result<()> {
+    let mut routed_handshake = handshake.clone();
+    if let Some(line) = replay_line {
+        reset_proxy_handshake_for_initialize(handshake, &mut routed_handshake, &line);
+        let metadata =
+            proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
+        apply_proxy_initialize_metadata(&mut routed_handshake, metadata);
+    }
+
+    while let Some(line) = transport.read_line().await? {
+        reset_proxy_handshake_for_initialize(handshake, &mut routed_handshake, &line);
+        let metadata =
+            proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
+        apply_proxy_initialize_metadata(&mut routed_handshake, metadata);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn apply_proxy_initialize_metadata(
+    handshake: &mut DaemonHandshake,
+    metadata: ProxyInitializeMetadata,
+) {
+    if let Some(route) = metadata.route {
+        if handshake.project_path.as_deref() != Some(route.project_path.as_path()) {
+            handshake.scope_prefix = None;
+        }
+        handshake.project_path = Some(route.project_path);
+        handshake.allow_init = route.allow_init;
+    }
+    if metadata.tool_list_changed {
+        handshake.tool_list_changed_capable = true;
+        if let Some(version) = metadata.daemon_version {
+            handshake.catalog_version = version;
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn reset_proxy_handshake_for_initialize(
+    base_handshake: &DaemonHandshake,
+    handshake: &mut DaemonHandshake,
+    line: &str,
+) {
+    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(line.trim()) else {
+        return;
+    };
+    if request.method != "initialize" {
+        return;
+    }
+    *handshake = base_handshake.clone();
+}
+
+pub(crate) async fn resolve_daemon_initialize_route(
+    params: Option<&serde_json::Value>,
+    registry: Option<&crate::global_db::GlobalDb>,
+) -> Option<InitializeRouteMetadata> {
+    let roots = crate::mcp::server::initialize_root_paths(params);
+    if let Some(registry) = registry {
+        for root in &roots {
+            let mut candidate = root.canonicalize().unwrap_or_else(|_| root.clone());
+            loop {
+                if registry
+                    .project_registry_context_by_alias(&candidate)
+                    .await
+                    .is_some()
+                {
+                    return Some(InitializeRouteMetadata {
+                        project_path: candidate,
+                        allow_init: false,
+                    });
+                }
+                if !candidate.pop() {
+                    break;
+                }
+            }
+            if let Some(git_root) = crate::worktree::git_worktree_root(root) {
+                let git_common_dir = crate::worktree::git_common_dir(&git_root);
+                if registry
+                    .project_registry_context_by_identity(&git_root, git_common_dir.as_deref())
+                    .await
+                    .is_some()
+                {
+                    return Some(InitializeRouteMetadata {
+                        project_path: git_root,
+                        allow_init: false,
+                    });
+                }
+            }
+        }
+    }
+    if let Some(project_path) =
+        crate::mcp::server::resolve_initialize_roots_project_path(params, registry).await
+    {
+        return Some(InitializeRouteMetadata {
+            project_path,
+            allow_init: false,
+        });
+    }
+
+    for root in roots {
+        if let Some(project_path) = crate::config::discover_project_root(&root) {
+            return Some(InitializeRouteMetadata {
+                project_path,
+                allow_init: false,
+            });
+        }
+        if let Some(git_root) = crate::worktree::git_worktree_root(&root) {
+            let allow_init = crate::config::load_sync_config(&git_root).auto_init;
+            return Some(InitializeRouteMetadata {
+                project_path: git_root,
+                allow_init,
+            });
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+pub(crate) async fn proxy_request_line_to_daemon(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    line: &str,
+    transport: &mut impl McpTransport,
+) -> Result<ProxyInitializeMetadata> {
+    if line.trim().is_empty() {
+        return Ok(ProxyInitializeMetadata::default());
+    }
+
+    match send_daemon_request_line(socket_path, handshake, line).await {
+        Ok(responses) => {
+            let metadata = proxy_initialize_metadata(line, &responses);
+            if let Some(warning) = daemon_version_skew_warning(line, &responses, binary_version()) {
+                eprintln!("[tracedecay] warning: {warning}");
+            }
+            for response in responses {
+                transport.write_line(&response).await?;
+                if !response.ends_with('\n') {
+                    transport.write_line("\n").await?;
+                }
+            }
+            transport.flush().await?;
+            Ok(metadata)
+        }
+        Err(err) => {
+            if let Some(response) = daemon_proxy_error_response(line, &err) {
+                let json_line = serde_json::to_string(&response)?;
+                transport.write_line(&json_line).await?;
+                transport.write_line("\n").await?;
+                transport.flush().await?;
+            } else {
+                log_daemon_event(
+                    "daemon_proxy_drop",
+                    &[
+                        ("outcome", "dropped_notification".to_string()),
+                        ("error", err.to_string()),
+                    ],
+                );
+            }
+            Ok(ProxyInitializeMetadata::default())
+        }
+    }
+}
+
+pub(crate) async fn send_daemon_request_line(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    line: &str,
+) -> Result<Vec<String>> {
+    send_daemon_request_line_with_liveness_poll(
+        socket_path,
+        handshake,
+        line,
+        DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn send_daemon_request_line_with_liveness_poll(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    line: &str,
+    liveness_poll_interval: Duration,
+    client_deadline: Option<DaemonClientDeadline>,
+) -> Result<Vec<String>> {
+    let connection = client_connection(socket_path)?;
+    let request = serde_json::from_str::<JsonRpcRequest>(line).ok();
+    let request_id = request.as_ref().and_then(|request| request.id.clone());
+    let request_label = request
+        .as_ref()
+        .map_or("daemon request", |request| request.method.as_str())
+        .to_string();
+    let stream = match client_deadline {
+        Some(deadline) => {
+            deadline
+                .run("connect", &request_label, async {
+                    connect_to_daemon_connection_within(&connection, Some(deadline)).await
+                })
+                .await?
+        }
+        None => connect_to_daemon_connection(&connection).await?,
+    };
+    let (reader, mut writer) = stream.into_split();
+
+    let write = async {
+        write_daemon_preamble(&mut writer, &connection, handshake).await?;
+        writer.write_all(line.as_bytes()).await?;
+        if !line.ends_with('\n') {
+            writer.write_all(b"\n").await?;
+        }
+        writer.flush().await?;
+        writer.shutdown().await?;
+        Ok(())
+    };
+    match client_deadline {
+        Some(deadline) => deadline.run("write", &request_label, write).await?,
+        None => write.await?,
+    }
+
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut responses = Vec::new();
+    let mut matched_response = request_id.is_none();
+    loop {
+        let read = next_daemon_response_line(
+            &mut reader,
+            &connection,
+            &request_label,
+            liveness_poll_interval,
+        );
+        let response_line = match client_deadline {
+            Some(deadline) => deadline.run("read", &request_label, read).await?,
+            None => read.await?,
+        };
+        let Some(response_line) = response_line else {
+            break;
+        };
+        if response_line.trim().is_empty() {
+            continue;
+        }
+        let is_matching_response = match client_deadline {
+            Some(deadline) => {
+                deadline
+                    .run("decode", &request_label, async {
+                        Ok(request_id.as_ref().is_some_and(|id| {
+                            serde_json::from_str::<serde_json::Value>(&response_line)
+                                .ok()
+                                .and_then(|value| value.get("id").cloned())
+                                .as_ref()
+                                == Some(id)
+                        }))
+                    })
+                    .await?
+            }
+            None => request_id.as_ref().is_some_and(|id| {
+                serde_json::from_str::<serde_json::Value>(&response_line)
+                    .ok()
+                    .and_then(|value| value.get("id").cloned())
+                    .as_ref()
+                    == Some(id)
+            }),
+        };
+        responses.push(format!("{response_line}\n"));
+        if is_matching_response {
+            matched_response = true;
+            break;
+        }
+    }
+    if !matched_response {
+        return Err(TraceDecayError::Config {
+            message: "daemon closed the connection after the request was sent but before returning a matching response; the outcome is unknown and the request was not retried"
+                .to_string(),
+        });
+    }
+    Ok(responses)
+}
+
+/// Extracts the daemon's advertised version from a proxied `initialize`
+/// response (`result.serverInfo.version`, which daemons have always sent).
+///
+/// This works against daemons older than the handshake version field, so a
+/// freshly-updated client can still detect a stale daemon left running by a
+/// non-systemd setup or a plain `tracedecay upgrade`.
+#[cfg(unix)]
+pub(crate) fn proxy_initialize_metadata(
+    request_line: &str,
+    responses: &[String],
+) -> ProxyInitializeMetadata {
+    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line) else {
+        return ProxyInitializeMetadata::default();
+    };
+    if request.method != "initialize" {
+        return ProxyInitializeMetadata::default();
+    }
+    let mut metadata = ProxyInitializeMetadata::default();
+    for line in responses {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if metadata.daemon_version.is_none() {
+            metadata.daemon_version = value
+                .pointer("/result/serverInfo/version")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+        }
+        metadata.tool_list_changed |= value
+            .pointer("/result/capabilities/tools/listChanged")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if metadata.route.is_none() {
+            metadata.route = value
+                .pointer("/result/_meta/tracedecayInitializeRoute")
+                .cloned()
+                .and_then(|route| serde_json::from_value(route).ok());
+        }
+    }
+    metadata
+}
+
+#[cfg(unix)]
+fn daemon_version_from_initialize_response(
+    request_line: &str,
+    responses: &[String],
+) -> Option<String> {
+    proxy_initialize_metadata(request_line, responses).daemon_version
+}
+
+/// The warning to surface when the daemon behind an `initialize` response is
+/// running a different binary version than this client.
+#[cfg(unix)]
+pub(crate) fn daemon_version_skew_warning(
+    request_line: &str,
+    responses: &[String],
+    client_version: &str,
+) -> Option<String> {
+    let daemon_version = daemon_version_from_initialize_response(request_line, responses)?;
+    if daemon_version == client_version {
+        return None;
+    }
+    let action = version_skew_action(&daemon_version, client_version);
+    Some(format!(
+        "TraceDecay daemon is version {daemon_version} but this client is {client_version} — \
+         {action}"
+    ))
+}
+
+#[cfg(unix)]
+fn daemon_proxy_error_response(line: &str, err: &TraceDecayError) -> Option<JsonRpcResponse> {
+    let request = serde_json::from_str::<JsonRpcRequest>(line).ok()?;
+    request.id.map(|id| {
+        JsonRpcResponse::error(
+            id,
+            ErrorCode::InternalError,
+            format!("TraceDecay daemon connection failed: {err}"),
+        )
+    })
+}
+
+#[cfg(not(unix))]
+async fn proxy_one_request(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    line: &str,
+    transport: &mut impl McpTransport,
+) -> Result<()> {
+    if line.trim().is_empty() {
+        return Ok(());
+    }
+    for response in send_daemon_request_line(socket_path, handshake, line).await? {
+        transport.write_line(&response).await?;
+        if !response.ends_with('\n') {
+            transport.write_line("\n").await?;
+        }
+    }
+    transport.flush().await?;
+    Ok(())
+}
+
+pub async fn proxy_stdio_to_default_daemon(
+    handshake: &DaemonHandshake,
+    replay_line: Option<String>,
+) -> Result<()> {
+    let socket_path = default_available_socket_path()?;
+    proxy_stdio_to_daemon(&socket_path, handshake, replay_line).await
+}

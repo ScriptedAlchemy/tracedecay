@@ -660,7 +660,7 @@ impl StoreAdministration {
                 .servers
                 .iter()
                 .filter(|(key, _)| key.owner.profile_root == profile_root)
-                .map(|(key, server)| (key.clone(), Arc::clone(server)))
+                .map(|(key, entry)| (key.clone(), Arc::clone(&entry.server)))
                 .collect::<Vec<_>>()
         };
         let mut outcomes = Vec::with_capacity(servers.len());

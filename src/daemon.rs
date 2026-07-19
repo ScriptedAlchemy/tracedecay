@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write;
-use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 #[cfg(unix)]
@@ -15,12 +15,12 @@ use tokio::net::UnixStream;
 #[cfg(unix)]
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
-use tokio::time::{Duration, Instant, timeout, timeout_at};
+use tokio::time::{Duration, timeout};
 
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
-use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, StdioTransport};
+use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use branch_add::{branch_add_response, coordinated_hook_branch_writer, parse_branch_add_request};
 use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
 #[cfg(all(unix, test))]
@@ -40,282 +40,31 @@ use transport::{BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint}
 
 pub const SERVICE_NAME: &str = "tracedecay.service";
 pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
-pub const HOOK_EVENT_METHOD: &str = "tracedecay/hookEvent";
 #[cfg(unix)]
 const TOOL_LIST_CHANGED_METHOD: &str = "notifications/tools/list_changed";
 #[cfg(unix)]
 const MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION: usize = 1_024;
-const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
-const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
-const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
-const MAX_CONCURRENT_DAEMON_CLIENTS: usize = 64;
-const DAEMON_SATURATION_RESPONSE_DEADLINE: Duration = Duration::from_millis(250);
-
-/// One monotonic wall-clock budget shared across daemon client connect, write,
-/// read, and decode stages. Outer CLI wrappers pass their Instant so a timeout
-/// cancels the in-flight stage rather than starting a fresh Duration clock.
-#[derive(Clone, Copy, Debug)]
-struct DaemonClientDeadline {
-    deadline: Instant,
-}
-
-impl DaemonClientDeadline {
-    fn until(deadline: Instant) -> Result<Self> {
-        if Instant::now() >= deadline {
-            return Err(TraceDecayError::Config {
-                message: "daemon client deadline already elapsed".to_string(),
-            });
-        }
-        Ok(Self { deadline })
-    }
-
-    fn remaining(&self) -> Result<Duration> {
-        self.deadline
-            .checked_duration_since(Instant::now())
-            .filter(|remaining| !remaining.is_zero())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "daemon client deadline already elapsed".to_string(),
-            })
-    }
-
-    async fn run<F, T>(&self, stage: &'static str, request_label: &str, fut: F) -> Result<T>
-    where
-        F: std::future::Future<Output = Result<T>>,
-    {
-        match timeout_at(self.deadline, fut).await {
-            Ok(result) => result,
-            Err(_) => Err(TraceDecayError::Config {
-                message: format!(
-                    "daemon {request_label} timed out during {stage} before deadline; request outcome may be unknown"
-                ),
-            }),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct DaemonClientAdmission {
-    permits: Arc<tokio::sync::Semaphore>,
-    capacity: usize,
-}
-
-enum DaemonClientAdmissionOutcome {
-    Admitted(tokio::sync::OwnedSemaphorePermit),
-    Saturated(DaemonClientSaturationResponse),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct DaemonClientSaturationResponse {
-    kind: DaemonClientSaturationKind,
-    retryable: bool,
-    capacity: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum DaemonClientSaturationKind {
-    ClientCapacityReached,
-}
-
-impl DaemonClientAdmission {
-    fn new(capacity: usize) -> Self {
-        Self {
-            permits: Arc::new(tokio::sync::Semaphore::new(capacity)),
-            capacity,
-        }
-    }
-
-    fn try_admit(&self) -> DaemonClientAdmissionOutcome {
-        match Arc::clone(&self.permits).try_acquire_owned() {
-            Ok(permit) => DaemonClientAdmissionOutcome::Admitted(permit),
-            Err(_) => DaemonClientAdmissionOutcome::Saturated(DaemonClientSaturationResponse {
-                kind: DaemonClientSaturationKind::ClientCapacityReached,
-                retryable: true,
-                capacity: self.capacity,
-            }),
-        }
-    }
-}
-
-impl DaemonClientSaturationResponse {
-    fn into_json_rpc_with_id(self, id: serde_json::Value) -> JsonRpcResponse {
-        JsonRpcResponse::error_with_data(
-            id,
-            ErrorCode::InternalError,
-            "daemon client capacity reached".to_string(),
-            serde_json::to_value(self).ok(),
-        )
-    }
-}
-
-async fn saturated_request_id(
-    transport: &mut BrokerStreamTransport,
-) -> Result<Option<serde_json::Value>> {
-    // A broker client sends a handshake before its JSON-RPC request, optionally
-    // preceded by an auth preface. Consume those frames so the rejection uses
-    // the request ID instead of being discarded as a notification.
-    let Some(first_line) = read_line_handling_wire_oversized(transport).await? else {
-        return Ok(None);
-    };
-    let handshake_line = if DaemonAuthPreface::from_line(&first_line).is_ok() {
-        let Some(handshake_line) = read_line_handling_wire_oversized(transport).await? else {
-            return Ok(None);
-        };
-        handshake_line
-    } else {
-        first_line
-    };
-    DaemonHandshake::from_line(&handshake_line)?;
-    let Some(request_line) = read_line_handling_wire_oversized(transport).await? else {
-        return Ok(None);
-    };
-    let request: JsonRpcRequest = serde_json::from_str(&request_line)?;
-    Ok(request.id)
-}
-
-async fn reject_saturated_daemon_client(
-    stream: BrokerStream,
-    response: DaemonClientSaturationResponse,
-) {
-    let mut transport = BrokerStreamTransport::new(stream);
-    let response = async {
-        let request_id = saturated_request_id(&mut transport)
-            .await?
-            .unwrap_or(serde_json::Value::Null);
-        write_json_rpc_response(&mut transport, &response.into_json_rpc_with_id(request_id)).await
-    };
-    match timeout(DAEMON_SATURATION_RESPONSE_DEADLINE, response).await {
-        Ok(Ok(())) => log_daemon_event(
-            "daemon_client",
-            &[("outcome", "client_capacity_reached".to_string())],
-        ),
-        Ok(Err(error)) => log_daemon_event(
-            "daemon_client",
-            &[
-                ("outcome", "saturation_response_failed".to_string()),
-                ("error", error.to_string()),
-            ],
-        ),
-        Err(_) => log_daemon_event(
-            "daemon_client",
-            &[("outcome", "saturation_response_timeout".to_string())],
-        ),
-    }
-}
-
-fn coordinated_dashboard_automation_writer(
-    administration: StoreAdministration,
-) -> crate::dashboard::DashboardAutomationWriter {
-    Arc::new(move |operation| {
-        let administration = administration.clone();
-        Box::pin(async move { administration.with_writer(operation).await })
-    })
-}
-
-fn coordinated_background_refresh_writer(
-    administration: StoreAdministration,
-) -> crate::mcp::server::BackgroundRefreshWriter {
-    Arc::new(move |request| {
-        let administration = administration.clone();
-        Box::pin(async move {
-            administration
-                .with_writer(|| async move {
-                    crate::mcp::server::execute_background_refresh_direct(request).await
-                })
-                .await
-        })
-    })
-}
-
-/// Upper bound on graceful-shutdown persistence work (per-server token
-/// persistence and WAL checkpoints). Must stay comfortably below systemd's
-/// stop timeout (90s by default) so the daemon exits cleanly instead of
-/// being killed with `SIGKILL` mid-checkpoint.
-#[cfg(unix)]
-const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
-#[cfg(unix)]
-const DAEMON_CLIENT_DRAIN_DEADLINE: Duration = Duration::from_secs(15);
-#[cfg(unix)]
-const DAEMON_TASK_ABORT_DEADLINE: Duration = Duration::from_secs(2);
-
-#[derive(Clone, Default)]
-pub(crate) struct DaemonLifecycle {
-    inner: Arc<DaemonLifecycleInner>,
-}
-
-#[derive(Default)]
-struct DaemonLifecycleInner {
-    draining: AtomicBool,
-    active: AtomicUsize,
-    idle: tokio::sync::Notify,
-    draining_notify: tokio::sync::Notify,
-}
-
-pub(crate) struct DaemonActivity {
-    inner: Arc<DaemonLifecycleInner>,
-}
-
-impl DaemonLifecycle {
-    pub(crate) fn accepting(&self) -> bool {
-        !self.inner.draining.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn try_enter(&self) -> Option<DaemonActivity> {
-        if !self.accepting() {
-            return None;
-        }
-        self.inner.active.fetch_add(1, Ordering::AcqRel);
-        if self.accepting() {
-            Some(DaemonActivity {
-                inner: Arc::clone(&self.inner),
-            })
-        } else {
-            if self.inner.active.fetch_sub(1, Ordering::AcqRel) == 1 {
-                self.inner.idle.notify_waiters();
-            }
-            None
-        }
-    }
-
-    fn begin_draining(&self) {
-        if !self.inner.draining.swap(true, Ordering::AcqRel) {
-            self.inner.draining_notify.notify_waiters();
-        }
-    }
-
-    pub(crate) async fn wait_for_draining(&self) {
-        loop {
-            let notified = self.inner.draining_notify.notified();
-            if !self.accepting() {
-                return;
-            }
-            notified.await;
-        }
-    }
-
-    #[cfg(unix)]
-    async fn wait_for_idle(&self) {
-        loop {
-            let notified = self.inner.idle.notified();
-            if self.inner.active.load(Ordering::Acquire) == 0 {
-                return;
-            }
-            notified.await;
-        }
-    }
-}
-
-impl Drop for DaemonActivity {
-    fn drop(&mut self) {
-        if self.inner.active.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.inner.idle.notify_waiters();
-        }
-    }
-}
+const MAX_CACHED_PROJECT_SERVERS: usize = 8;
 
 mod authority;
 mod branch_add;
 mod branch_admin;
+mod core_admission;
+mod core_client;
+mod core_doctor;
+mod core_handshake;
+mod core_hooks;
+mod core_lifecycle;
+mod core_logging;
+mod core_proxy;
+pub(crate) use core_admission::*;
+pub use core_client::*;
+pub(crate) use core_doctor::*;
+pub use core_handshake::*;
+pub use core_hooks::*;
+pub(crate) use core_lifecycle::*;
+pub use core_logging::*;
+pub use core_proxy::*;
 #[cfg(unix)]
 mod git_watch;
 #[cfg(unix)]
@@ -339,831 +88,6 @@ pub use service::{
     wait_for_installed_service_state, with_exclusive_maintenance_window,
     with_quiesced_installed_service,
 };
-
-/// A domain-catalogued host whose lifecycle hooks notify the daemon.
-pub use tracedecay_domain::HostIntegrationIdV1 as HookAgent;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HookRouteMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HookTerminalReceipt {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transcript_watermark: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DaemonHookEvent {
-    pub agent: String,
-    pub event: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rel_paths: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub route: Option<HookRouteMetadata>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub receipt: Option<HookTerminalReceipt>,
-}
-
-impl DaemonHookEvent {
-    fn new(
-        agent: HookAgent,
-        event: &'static str,
-        rel_paths: Vec<String>,
-        command: Option<String>,
-        cwd: Option<PathBuf>,
-    ) -> Self {
-        Self {
-            agent: agent.as_wire().to_string(),
-            event: event.to_string(),
-            rel_paths,
-            command,
-            cwd,
-            route: None,
-            receipt: None,
-        }
-    }
-
-    #[must_use]
-    pub fn with_route(mut self, route: Option<HookRouteMetadata>) -> Self {
-        self.route = route;
-        self
-    }
-
-    pub fn cursor_after_file_edit(rel_paths: Vec<String>) -> Self {
-        Self::new(HookAgent::Cursor, "afterFileEdit", rel_paths, None, None)
-    }
-
-    pub fn cursor_after_shell_execution(command: String, cwd: PathBuf) -> Self {
-        Self::new(
-            HookAgent::Cursor,
-            "afterShellExecution",
-            Vec::new(),
-            Some(command),
-            Some(cwd),
-        )
-    }
-
-    pub fn cursor_workspace_open(cwd: PathBuf) -> Self {
-        Self::new(
-            HookAgent::Cursor,
-            "workspaceOpen",
-            Vec::new(),
-            None,
-            Some(cwd),
-        )
-    }
-
-    /// A provider session started: let the daemon own branch tracking and
-    /// index refresh for the session's actual working directory.
-    pub fn session_start(agent: HookAgent, cwd: PathBuf) -> Self {
-        Self::new(agent, "sessionStart", Vec::new(), None, Some(cwd))
-    }
-
-    /// A file-edit tool finished: request targeted sync of the edited paths.
-    pub fn post_tool_use_edit(agent: HookAgent, rel_paths: Vec<String>, cwd: PathBuf) -> Self {
-        Self::new(agent, "postToolUseEdit", rel_paths, None, Some(cwd))
-    }
-
-    /// A shell command finished: let the daemon classify it (branch add,
-    /// worktree add, incremental sync, or noop).
-    pub fn post_tool_use_shell(agent: HookAgent, command: String, cwd: PathBuf) -> Self {
-        Self::new(
-            agent,
-            "postToolUseShell",
-            Vec::new(),
-            Some(command),
-            Some(cwd),
-        )
-    }
-
-    pub fn kiro_post_tool_use(rel_paths: Vec<String>, cwd: Option<PathBuf>) -> Self {
-        Self::new(HookAgent::Kiro, "postToolUse", rel_paths, None, cwd)
-    }
-
-    pub fn hermes_terminal_receipt(
-        cwd: PathBuf,
-        route: HookRouteMetadata,
-        receipt: HookTerminalReceipt,
-    ) -> Self {
-        let mut event = Self::new(
-            HookAgent::Hermes,
-            "terminalReceipt",
-            Vec::new(),
-            None,
-            Some(cwd),
-        );
-        event.route = Some(route);
-        event.receipt = Some(receipt);
-        event
-    }
-}
-
-/// Per-connection metadata sent before JSON-RPC traffic.
-///
-/// The daemon process is shared. This handshake tells that shared process which
-/// project, scope, timing preference, and client profile should apply to this
-/// connection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DaemonHandshake {
-    pub project_path: Option<PathBuf>,
-    pub scope_prefix: Option<String>,
-    pub timings: bool,
-    pub allow_init: bool,
-    #[serde(default)]
-    pub allow_initialize_root_routing: bool,
-    pub client_identity: DaemonClientIdentity,
-    /// Version of the tracedecay binary that opened this connection.
-    ///
-    /// `#[serde(default)]` keeps mixed-version pairs interoperable: a new
-    /// daemon reads handshakes from old clients (missing field → empty), and
-    /// old daemons ignore the extra field. The daemon uses it to detect and
-    /// log version skew, e.g. a stale daemon still serving after
-    /// `tracedecay update` replaced the binary.
-    #[serde(default)]
-    pub client_version: String,
-    /// Stable id for the connecting client process. A stdio MCP proxy reuses
-    /// this across its per-request daemon connections, allowing one
-    /// generation-local catalog refresh notification instead of one per
-    /// request. Old clients omit it and deserialize to an empty string.
-    #[serde(default)]
-    pub client_instance_id: String,
-    /// Whether this proxy already forwarded an initialize response declaring
-    /// `tools.listChanged=true` to its MCP host.
-    #[serde(default)]
-    pub tool_list_changed_capable: bool,
-    /// Daemon version whose initialize response established the host's
-    /// current tool catalog. A nonempty value proves explicit negotiation;
-    /// generation-local daemon state decides whether a refresh is due.
-    #[serde(default)]
-    pub catalog_version: String,
-}
-
-impl DaemonHandshake {
-    pub fn for_current_client(
-        project_path: Option<PathBuf>,
-        scope_prefix: Option<String>,
-        timings: bool,
-        allow_init: bool,
-    ) -> Result<Self> {
-        Ok(Self {
-            project_path,
-            scope_prefix,
-            timings,
-            allow_init,
-            allow_initialize_root_routing: false,
-            client_identity: DaemonClientIdentity::current()?,
-            client_version: binary_version().to_string(),
-            client_instance_id: crate::runtime_identity::process_run_id().to_string(),
-            tool_list_changed_capable: false,
-            catalog_version: String::new(),
-        })
-    }
-
-    fn open_options(&self) -> crate::tracedecay::TraceDecayOpenOptions {
-        crate::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(self.client_identity.profile_root.clone()),
-            global_db_path: Some(self.client_identity.global_db_path.clone()),
-        }
-    }
-
-    pub fn to_line(&self) -> Result<String> {
-        Ok(serde_json::to_string(self)?)
-    }
-
-    pub fn from_line(line: &str) -> Result<Self> {
-        Ok(serde_json::from_str(line.trim())?)
-    }
-}
-
-/// Version of this tracedecay binary, advertised in daemon handshakes and
-/// compared against peers to detect stale daemons after `tracedecay update`.
-fn binary_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
-/// The client version to report as skewed, or `None` when the versions match.
-///
-/// Old clients send no version (empty string); that is indistinguishable from
-/// "same version before this field existed", so it never counts as skew.
-#[cfg(unix)]
-fn client_version_skew(client_version: &str, daemon_version: &str) -> Option<String> {
-    if client_version.is_empty() || client_version == daemon_version {
-        return None;
-    }
-    Some(client_version.to_string())
-}
-
-#[cfg(unix)]
-fn release_version(version: &str) -> Option<(u64, u64, u64)> {
-    let core = version
-        .strip_prefix('v')
-        .unwrap_or(version)
-        .split(['-', '+'])
-        .next()?;
-    let mut parts = core.split('.');
-    let version = (
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-    );
-    parts.next().is_none().then_some(version)
-}
-
-#[cfg(unix)]
-fn version_skew_action(daemon_version: &str, client_version: &str) -> &'static str {
-    match release_version(daemon_version)
-        .zip(release_version(client_version))
-        .map(|(daemon, client)| daemon.cmp(&client))
-    {
-        Some(std::cmp::Ordering::Greater) => {
-            "restart or reconnect the MCP host so it loads the current TraceDecay client and tool catalog"
-        }
-        Some(std::cmp::Ordering::Less) => {
-            "run `tracedecay daemon restart` to load the current daemon binary"
-        }
-        _ => "restart or reconnect whichever TraceDecay component is stale",
-    }
-}
-
-pub async fn notify_hook_event(project_path: &Path, event: DaemonHookEvent) {
-    let _ = timeout(
-        HOOK_EVENT_NOTIFY_TIMEOUT,
-        notify_hook_event_inner(project_path, event),
-    )
-    .await;
-}
-
-async fn notify_hook_event_inner(project_path: &Path, event: DaemonHookEvent) {
-    #[cfg(unix)]
-    let connection = std::env::var_os(SOCKET_ENV)
-        .filter(|path| !path.is_empty())
-        .map(|path| connection_for_socket_path(Path::new(&path)))
-        .map_or_else(current_daemon_connection, Ok);
-    #[cfg(not(unix))]
-    let connection = current_daemon_connection();
-    let Ok(connection) = connection else {
-        return;
-    };
-    let Ok(handshake) =
-        DaemonHandshake::for_current_client(Some(project_path.to_path_buf()), None, false, false)
-    else {
-        return;
-    };
-    let Ok(params) = serde_json::to_value(event) else {
-        return;
-    };
-    let request = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: None,
-        method: HOOK_EVENT_METHOD.to_string(),
-        params: Some(params),
-    };
-    let Ok(line) = serde_json::to_string(&request) else {
-        return;
-    };
-    let Ok(stream) = BrokerStream::connect(&connection.endpoint).await else {
-        return;
-    };
-    let (_reader, mut writer) = stream.into_split();
-    if write_daemon_preamble(&mut writer, &connection, &handshake)
-        .await
-        .is_err()
-    {
-        return;
-    }
-    if writer.write_all(line.as_bytes()).await.is_err() {
-        return;
-    }
-    if writer.write_all(b"\n").await.is_err() {
-        return;
-    }
-    let _ = writer.flush().await;
-    let _ = writer.shutdown().await;
-}
-
-fn format_daemon_log_line(event: &str, fields: &[(&str, String)]) -> String {
-    let mut line = format!("[tracedecay] event={}", quote_log_value(event));
-    for (key, value) in fields {
-        line.push(' ');
-        line.push_str(key);
-        line.push('=');
-        line.push_str(&quote_log_value(value));
-    }
-    line
-}
-
-fn quote_log_value(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/' | b':'))
-    {
-        return value.to_string();
-    }
-
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            ch if ch.is_control() => {
-                let _ = write!(escaped, "\\u{{{:x}}}", ch as u32);
-            }
-            ch => escaped.push(ch),
-        }
-    }
-    format!("\"{escaped}\"")
-}
-
-fn log_daemon_event(event: &str, fields: &[(&str, String)]) {
-    eprintln!("{}", format_daemon_log_line(event, fields));
-}
-
-/// A single git-watcher lifecycle event recovered from the daemon log, for the
-/// `tracedecay doctor` watcher-health section.
-#[cfg(unix)]
-#[derive(Debug, Clone)]
-pub struct WatcherEvent {
-    /// The `git_watch_*` event name (`started`, `synced`, `degraded`, `restart`).
-    pub event: String,
-    /// The `project=` field, when present.
-    pub project: Option<String>,
-    /// The `action=`/`reason=` field, when present (context for the event).
-    pub detail: Option<String>,
-}
-
-/// Parses one daemon log line into a [`WatcherEvent`] when it is a `git_watch_*`
-/// event. Mirrors [`format_daemon_log_line`] (space-separated `key=value`, values
-/// optionally double-quoted). Returns `None` for non-watcher lines.
-#[cfg(unix)]
-fn parse_watcher_log_line(line: &str) -> Option<WatcherEvent> {
-    let idx = line.find("event=")?;
-    let rest = &line[idx + "event=".len()..];
-    let mut fields = parse_log_fields(rest);
-    let event = fields.remove("__first__")?;
-    if !event.starts_with("git_watch_") {
-        return None;
-    }
-    let detail = fields
-        .remove("action")
-        .or_else(|| fields.remove("reason"))
-        .or_else(|| fields.remove("branch"));
-    Some(WatcherEvent {
-        event,
-        project: fields.remove("project"),
-        detail,
-    })
-}
-
-/// Splits a `key=value key="quoted value" …` tail into a map. The leading value
-/// (the event name, which has no key) is stored under `__first__`.
-#[cfg(unix)]
-fn parse_log_fields(rest: &str) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    let bytes = rest.as_bytes();
-    let mut i = 0;
-    let mut first = true;
-    while i < bytes.len() {
-        while i < bytes.len() && bytes[i] == b' ' {
-            i += 1;
-        }
-        if i >= bytes.len() {
-            break;
-        }
-        if first {
-            // Leading unkeyed event-name token.
-            let start = i;
-            while i < bytes.len() && bytes[i] != b' ' {
-                i += 1;
-            }
-            out.insert("__first__".to_string(), unquote(&rest[start..i]));
-            first = false;
-            continue;
-        }
-        // key
-        let key_start = i;
-        while i < bytes.len() && bytes[i] != b'=' && bytes[i] != b' ' {
-            i += 1;
-        }
-        if i >= bytes.len() || bytes[i] != b'=' {
-            break;
-        }
-        let key = rest[key_start..i].to_string();
-        i += 1; // skip '='
-        let value = if i < bytes.len() && bytes[i] == b'"' {
-            i += 1;
-            let val_start = i;
-            while i < bytes.len() && bytes[i] != b'"' {
-                if bytes[i] == b'\\' {
-                    i += 1;
-                }
-                i += 1;
-            }
-            let v = rest[val_start..i.min(rest.len())].to_string();
-            if i < bytes.len() {
-                i += 1; // closing quote
-            }
-            v.replace("\\\"", "\"").replace("\\\\", "\\")
-        } else {
-            let val_start = i;
-            while i < bytes.len() && bytes[i] != b' ' {
-                i += 1;
-            }
-            rest[val_start..i].to_string()
-        };
-        out.insert(key, value);
-    }
-    out
-}
-
-#[cfg(unix)]
-fn unquote(s: &str) -> String {
-    s.trim_matches('"').to_string()
-}
-
-/// Reads recent `git_watch_*` events from the daemon log and returns the most
-/// recent event per project. Read-only; used by `tracedecay doctor`.
-///
-/// Source is platform-specific: systemd user journal on Linux, the launchd
-/// `daemon.err.log` on macOS. Returns an empty map when no log source is
-/// readable (the doctor treats that as "no watcher telemetry available").
-#[cfg(unix)]
-pub fn recent_watcher_events(max_lines: usize) -> HashMap<String, WatcherEvent> {
-    let text = read_daemon_log_tail(max_lines);
-    let mut latest: HashMap<String, WatcherEvent> = HashMap::new();
-    for line in text.lines() {
-        if let Some(ev) = parse_watcher_log_line(line) {
-            let key = ev.project.clone().unwrap_or_else(|| "<global>".to_string());
-            latest.insert(key, ev);
-        }
-    }
-    latest
-}
-
-/// Best-effort read of the tail of the daemon log across service runners.
-#[cfg(unix)]
-fn read_daemon_log_tail(max_lines: usize) -> String {
-    // macOS launchd: a plain err-log file next to the data dir.
-    if let Some(data_dir) = crate::config::user_data_dir() {
-        let err_log = data_dir.join("daemon.err.log");
-        if let Ok(contents) = std::fs::read_to_string(&err_log) {
-            let lines: Vec<&str> = contents.lines().collect();
-            let start = lines.len().saturating_sub(max_lines);
-            return lines[start..].join("\n");
-        }
-    }
-    // Linux systemd: pull recent journal lines for the user unit.
-    let output = std::process::Command::new("journalctl")
-        .args([
-            "--user",
-            "-u",
-            SERVICE_NAME,
-            "--no-pager",
-            "-n",
-            &max_lines.to_string(),
-        ])
-        .output();
-    match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
-        _ => String::new(),
-    }
-}
-
-pub fn unavailable_error(socket_path: &Path) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!(
-            "TraceDecay daemon socket '{}' is not available. Run `tracedecay daemon install-service` and ensure the service is running.",
-            socket_path.display()
-        ),
-    }
-}
-
-#[derive(Clone)]
-struct DaemonConnection {
-    endpoint: DaemonEndpoint,
-    auth_token: Option<String>,
-    authority_record: Option<authority::DaemonAuthorityRecord>,
-}
-
-fn current_daemon_connection() -> Result<DaemonConnection> {
-    let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
-        message: "could not determine TraceDecay user data directory".to_string(),
-    })?;
-    let record =
-        authority::current_record(&profile_root)?.ok_or_else(|| TraceDecayError::Config {
-            message:
-                "TraceDecay daemon authority record is not available. Start or restart the daemon."
-                    .to_string(),
-        })?;
-    Ok(DaemonConnection {
-        endpoint: record.endpoint.clone(),
-        auth_token: Some(record.auth_token.clone()),
-        authority_record: Some(record),
-    })
-}
-
-#[cfg(unix)]
-fn connection_for_socket_path(socket_path: &Path) -> DaemonConnection {
-    if let Ok(connection) = current_daemon_connection()
-        && let DaemonEndpoint::Unix(authority_path) = &connection.endpoint
-        && authority::canonical_identity_path(authority_path).ok()
-            == authority::canonical_identity_path(socket_path).ok()
-    {
-        return connection;
-    }
-    if let Some(profile_root) = socket_path.parent()
-        && let Ok(Some(record)) = authority::current_record(profile_root)
-        && let DaemonEndpoint::Unix(authority_path) = &record.endpoint
-        && authority::canonical_identity_path(authority_path).ok()
-            == authority::canonical_identity_path(socket_path).ok()
-    {
-        return DaemonConnection {
-            endpoint: record.endpoint.clone(),
-            auth_token: Some(record.auth_token.clone()),
-            authority_record: Some(record),
-        };
-    }
-    // Explicit paths are retained for test harnesses and legacy one-shot
-    // callers without a discoverable authority record. Default production
-    // routing always uses the authority record.
-    DaemonConnection {
-        endpoint: DaemonEndpoint::Unix(socket_path.to_path_buf()),
-        auth_token: None,
-        authority_record: None,
-    }
-}
-
-async fn ensure_daemon_connection_live(
-    connection: &DaemonConnection,
-    request_label: &str,
-) -> Result<()> {
-    if let Some(expected) = connection.authority_record.as_ref() {
-        let current = authority::current_record(&expected.profile_root)?;
-        let Some(current) = current else {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "daemon authority disappeared while request '{request_label}' was awaiting a response; the request was already sent and was not retried"
-                ),
-            });
-        };
-        if current.epoch != expected.epoch || current.process_run_id != expected.process_run_id {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "daemon restarted while request '{request_label}' was awaiting a response (expected epoch {}, current epoch {}); the request was already sent and was not retried",
-                    expected.epoch, current.epoch
-                ),
-            });
-        }
-    }
-
-    timeout(
-        DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT,
-        BrokerStream::connect(&connection.endpoint),
-    )
-    .await
-    .map_err(|_| TraceDecayError::Config {
-        message: format!(
-            "daemon health check timed out at '{}' while request '{request_label}' was awaiting a response; the request was already sent and was not retried",
-            connection.endpoint
-        ),
-    })?
-    .map(|_| ())
-    .map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "daemon became unreachable at '{}' while request '{request_label}' was awaiting a response: {error}; the request was already sent and was not retried",
-            connection.endpoint
-        ),
-    })
-}
-
-async fn next_daemon_response_line<R>(
-    reader: &mut R,
-    connection: &DaemonConnection,
-    request_label: &str,
-    liveness_poll_interval: Duration,
-) -> Result<Option<String>>
-where
-    R: tokio::io::AsyncBufRead + Unpin,
-{
-    use crate::application::host_admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
-
-    // Pin one frame-read future for the whole wait. Liveness polls must not
-    // recreate `read_bounded_mcp_line`: that future owns the partial-frame
-    // accumulator after bytes have already been consumed from `reader`.
-    let read = read_bounded_mcp_line(reader);
-    tokio::pin!(read);
-    loop {
-        tokio::select! {
-            result = &mut read => {
-                return match result {
-                    Ok(line) => Ok(line),
-                    Err(error) if is_wire_oversized_io_error(&error) => {
-                        Err(TraceDecayError::Config {
-                            message: format!(
-                                "daemon {request_label} response exceeded wire message bound ({})",
-                                crate::application::host_admission::WIRE_RECORD_TOO_LARGE
-                            ),
-                        })
-                    }
-                    Err(error) => Err(error.into()),
-                };
-            }
-            () = tokio::time::sleep(liveness_poll_interval) => {
-                ensure_daemon_connection_live(connection, request_label).await?;
-            }
-        }
-    }
-}
-
-// Windows discovers the current daemon through a fallible endpoint lookup;
-// Unix keeps the same cross-platform contract even though its path is infallible.
-#[allow(clippy::unnecessary_wraps)]
-fn client_connection(socket_path: &Path) -> Result<DaemonConnection> {
-    #[cfg(unix)]
-    {
-        Ok(connection_for_socket_path(socket_path))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = socket_path;
-        current_daemon_connection()
-    }
-}
-
-async fn write_daemon_preamble(
-    writer: &mut tokio::io::WriteHalf<BrokerStream>,
-    connection: &DaemonConnection,
-    handshake: &DaemonHandshake,
-) -> Result<()> {
-    if let Some(token) = connection.auth_token.as_deref() {
-        writer
-            .write_all(DaemonAuthPreface::new(token).to_line()?.as_bytes())
-            .await?;
-        writer.write_all(b"\n").await?;
-    }
-    writer.write_all(handshake.to_line()?.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-    Ok(())
-}
-
-fn default_available_socket_path() -> Result<PathBuf> {
-    let socket_path = default_socket_path()?;
-    #[cfg(unix)]
-    {
-        if socket_path.exists() {
-            Ok(socket_path)
-        } else {
-            Err(unavailable_error(&socket_path))
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        current_daemon_connection()?;
-        Ok(socket_path)
-    }
-}
-
-/// How long daemon clients keep retrying a failed connect before giving up.
-///
-/// `tracedecay update` restarts the daemon service (`systemctl --user restart`);
-/// between the old daemon unlinking its socket and the new one binding it,
-/// connects fail with `NotFound` or `ConnectionRefused`. Long-lived MCP
-/// sessions (Cursor's `tracedecay serve` stdio proxy) reconnect per request,
-/// so retrying inside this window lets a live session ride out a self-update
-/// instead of surfacing a hard JSON-RPC error.
-const DAEMON_RESTART_GRACE: Duration = Duration::from_secs(8);
-const DAEMON_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(200);
-
-fn is_transient_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
-    matches!(
-        kind,
-        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-    )
-}
-
-async fn connect_to_daemon_connection(connection: &DaemonConnection) -> Result<BrokerStream> {
-    connect_to_daemon_connection_within(connection, None).await
-}
-
-async fn connect_to_daemon_connection_within(
-    connection: &DaemonConnection,
-    client_deadline: Option<DaemonClientDeadline>,
-) -> Result<BrokerStream> {
-    let grace = match client_deadline {
-        Some(deadline) => deadline.remaining()?.min(DAEMON_RESTART_GRACE),
-        None => DAEMON_RESTART_GRACE,
-    };
-    connect_with_restart_grace(connection, grace, DAEMON_RESTART_POLL_INTERVAL).await
-}
-
-/// Connects to the daemon socket, tolerating a short restart outage.
-///
-/// Retrying here is safe: nothing has been written yet, so no request can be
-/// duplicated. Non-transient errors (e.g. permission denied) fail immediately.
-async fn connect_with_restart_grace(
-    connection: &DaemonConnection,
-    grace: Duration,
-    poll_interval: Duration,
-) -> Result<BrokerStream> {
-    let deadline = Instant::now() + grace;
-    loop {
-        match BrokerStream::connect(&connection.endpoint).await {
-            Ok(stream) => return Ok(stream),
-            Err(TraceDecayError::Io(err)) => {
-                if !is_transient_daemon_connect_error(err.kind()) || Instant::now() >= deadline {
-                    return Err(TraceDecayError::Config {
-                        message: format!(
-                            "could not connect to TraceDecay daemon endpoint '{}': {err}. The daemon may be restarting (e.g. after `tracedecay update`) — retry shortly, or check `tracedecay daemon status`.",
-                            connection.endpoint
-                        ),
-                    });
-                }
-                tokio::time::sleep(poll_interval).await;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-/// Decides at `tracedecay serve` startup whether to proxy to the daemon.
-///
-/// A missing socket usually means "no daemon", but `tracedecay update`
-/// restarts the daemon service and shutdown unlinks the socket before the new
-/// daemon rebinds it; a serve process starting inside that window would
-/// otherwise silently commit to in-process mode for its whole lifetime. When
-/// a daemon service is installed for this socket, wait out that window with
-/// the same grace used for per-request connects before falling back.
-#[cfg(unix)]
-pub async fn should_proxy_serve_to_daemon(socket_path: &Path) -> bool {
-    let installed_socket = installed_service_socket_path().ok().flatten();
-    should_proxy_serve_to_daemon_with(
-        socket_path,
-        installed_socket.as_deref(),
-        DAEMON_RESTART_GRACE,
-        DAEMON_RESTART_POLL_INTERVAL,
-    )
-    .await
-}
-
-#[cfg(unix)]
-async fn should_proxy_serve_to_daemon_with(
-    socket_path: &Path,
-    installed_service_socket: Option<&Path>,
-    grace: Duration,
-    poll_interval: Duration,
-) -> bool {
-    if socket_path.exists() {
-        return true;
-    }
-    // Only wait when an installed service is expected to rebind this exact
-    // socket; otherwise in-process startup must stay instant.
-    if installed_service_socket != Some(socket_path) {
-        return false;
-    }
-    let connection = connection_for_socket_path(socket_path);
-    connect_with_restart_grace(&connection, grace, poll_interval)
-        .await
-        .is_ok()
-}
-
-#[cfg(any(test, not(unix)))]
-fn proxy_required_by_platform(transport_supported: bool, endpoint_exists: bool) -> bool {
-    !transport_supported || endpoint_exists
-}
-
-/// Non-Unix clients always use the authenticated loopback broker. There is no
-/// in-process `SQLite` fallback.
-#[cfg(not(unix))]
-#[allow(clippy::unused_async)] // Preserve parity with the Unix async routing probe.
-pub async fn should_proxy_serve_to_daemon(socket_path: &Path) -> bool {
-    proxy_required_by_platform(false, socket_path.exists())
-}
 
 #[cfg(unix)]
 pub async fn run_foreground(socket_path: PathBuf) -> Result<()> {
@@ -1214,18 +138,20 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
                 continue;
             }
         };
+        let admission_class = permit.class();
         let auth_token = authority.auth_token().to_string();
         let client_lifecycle = lifecycle.clone();
         let store_administration = store_administration.clone();
         let project_open_gates = Arc::clone(&project_open_gates);
         clients.spawn(async move {
             let _permit = permit;
-            Box::pin(serve_windows_broker_client(
+            Box::pin(serve_windows_broker_client_with_class(
                 stream,
                 &auth_token,
                 &client_lifecycle,
                 store_administration,
                 project_open_gates,
+                admission_class,
                 #[cfg(test)]
                 None,
             ))
@@ -1239,631 +165,6 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     store_administration.shutdown_host_admission_replay().await;
     shutdown_project_servers(&store_administration).await;
     endpoint_cleanup
-}
-
-#[cfg(unix)]
-pub async fn proxy_stdio_to_daemon(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
-    replay_line: Option<String>,
-) -> Result<()> {
-    let mut transport = StdioTransport::new();
-    proxy_transport_to_daemon(socket_path, handshake, replay_line, &mut transport).await
-}
-
-#[cfg(unix)]
-pub async fn proxy_transport_to_daemon(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
-    replay_line: Option<String>,
-    transport: &mut impl McpTransport,
-) -> Result<()> {
-    let mut routed_handshake = handshake.clone();
-    if let Some(line) = replay_line {
-        reset_proxy_handshake_for_initialize(handshake, &mut routed_handshake, &line);
-        let metadata =
-            proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
-        apply_proxy_initialize_metadata(&mut routed_handshake, metadata);
-    }
-
-    while let Some(line) = transport.read_line().await? {
-        reset_proxy_handshake_for_initialize(handshake, &mut routed_handshake, &line);
-        let metadata =
-            proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
-        apply_proxy_initialize_metadata(&mut routed_handshake, metadata);
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-#[derive(Default)]
-struct ProxyInitializeMetadata {
-    daemon_version: Option<String>,
-    tool_list_changed: bool,
-    route: Option<InitializeRouteMetadata>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct InitializeRouteMetadata {
-    project_path: PathBuf,
-    allow_init: bool,
-}
-
-#[cfg(unix)]
-fn apply_proxy_initialize_metadata(
-    handshake: &mut DaemonHandshake,
-    metadata: ProxyInitializeMetadata,
-) {
-    if let Some(route) = metadata.route {
-        if handshake.project_path.as_deref() != Some(route.project_path.as_path()) {
-            handshake.scope_prefix = None;
-        }
-        handshake.project_path = Some(route.project_path);
-        handshake.allow_init = route.allow_init;
-    }
-    if metadata.tool_list_changed {
-        handshake.tool_list_changed_capable = true;
-        if let Some(version) = metadata.daemon_version {
-            handshake.catalog_version = version;
-        }
-    }
-}
-
-#[cfg(unix)]
-fn reset_proxy_handshake_for_initialize(
-    base_handshake: &DaemonHandshake,
-    handshake: &mut DaemonHandshake,
-    line: &str,
-) {
-    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(line.trim()) else {
-        return;
-    };
-    if request.method != "initialize" {
-        return;
-    }
-    *handshake = base_handshake.clone();
-}
-
-async fn resolve_daemon_initialize_route(
-    params: Option<&serde_json::Value>,
-    registry: Option<&crate::global_db::GlobalDb>,
-) -> Option<InitializeRouteMetadata> {
-    let roots = crate::mcp::server::initialize_root_paths(params);
-    if let Some(registry) = registry {
-        for root in &roots {
-            let mut candidate = root.canonicalize().unwrap_or_else(|_| root.clone());
-            loop {
-                if registry
-                    .project_registry_context_by_alias(&candidate)
-                    .await
-                    .is_some()
-                {
-                    return Some(InitializeRouteMetadata {
-                        project_path: candidate,
-                        allow_init: false,
-                    });
-                }
-                if !candidate.pop() {
-                    break;
-                }
-            }
-            if let Some(git_root) = crate::worktree::git_worktree_root(root) {
-                let git_common_dir = crate::worktree::git_common_dir(&git_root);
-                if registry
-                    .project_registry_context_by_identity(&git_root, git_common_dir.as_deref())
-                    .await
-                    .is_some()
-                {
-                    return Some(InitializeRouteMetadata {
-                        project_path: git_root,
-                        allow_init: false,
-                    });
-                }
-            }
-        }
-    }
-    if let Some(project_path) =
-        crate::mcp::server::resolve_initialize_roots_project_path(params, registry).await
-    {
-        return Some(InitializeRouteMetadata {
-            project_path,
-            allow_init: false,
-        });
-    }
-
-    for root in roots {
-        if let Some(project_path) = crate::config::discover_project_root(&root) {
-            return Some(InitializeRouteMetadata {
-                project_path,
-                allow_init: false,
-            });
-        }
-        if let Some(git_root) = crate::worktree::git_worktree_root(&root) {
-            let allow_init = crate::config::load_sync_config(&git_root).auto_init;
-            return Some(InitializeRouteMetadata {
-                project_path: git_root,
-                allow_init,
-            });
-        }
-    }
-    None
-}
-
-#[cfg(unix)]
-async fn proxy_request_line_to_daemon(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
-    line: &str,
-    transport: &mut impl McpTransport,
-) -> Result<ProxyInitializeMetadata> {
-    if line.trim().is_empty() {
-        return Ok(ProxyInitializeMetadata::default());
-    }
-
-    match send_daemon_request_line(socket_path, handshake, line).await {
-        Ok(responses) => {
-            let metadata = proxy_initialize_metadata(line, &responses);
-            if let Some(warning) = daemon_version_skew_warning(line, &responses, binary_version()) {
-                eprintln!("[tracedecay] warning: {warning}");
-            }
-            for response in responses {
-                transport.write_line(&response).await?;
-                if !response.ends_with('\n') {
-                    transport.write_line("\n").await?;
-                }
-            }
-            transport.flush().await?;
-            Ok(metadata)
-        }
-        Err(err) => {
-            if let Some(response) = daemon_proxy_error_response(line, &err) {
-                let json_line = serde_json::to_string(&response)?;
-                transport.write_line(&json_line).await?;
-                transport.write_line("\n").await?;
-                transport.flush().await?;
-            } else {
-                log_daemon_event(
-                    "daemon_proxy_drop",
-                    &[
-                        ("outcome", "dropped_notification".to_string()),
-                        ("error", err.to_string()),
-                    ],
-                );
-            }
-            Ok(ProxyInitializeMetadata::default())
-        }
-    }
-}
-
-async fn send_daemon_request_line(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
-    line: &str,
-) -> Result<Vec<String>> {
-    send_daemon_request_line_with_liveness_poll(
-        socket_path,
-        handshake,
-        line,
-        DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
-        None,
-    )
-    .await
-}
-
-async fn send_daemon_request_line_with_liveness_poll(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
-    line: &str,
-    liveness_poll_interval: Duration,
-    client_deadline: Option<DaemonClientDeadline>,
-) -> Result<Vec<String>> {
-    let connection = client_connection(socket_path)?;
-    let request = serde_json::from_str::<JsonRpcRequest>(line).ok();
-    let request_id = request.as_ref().and_then(|request| request.id.clone());
-    let request_label = request
-        .as_ref()
-        .map_or("daemon request", |request| request.method.as_str())
-        .to_string();
-    let stream = match client_deadline {
-        Some(deadline) => {
-            deadline
-                .run("connect", &request_label, async {
-                    connect_to_daemon_connection_within(&connection, Some(deadline)).await
-                })
-                .await?
-        }
-        None => connect_to_daemon_connection(&connection).await?,
-    };
-    let (reader, mut writer) = stream.into_split();
-
-    let write = async {
-        write_daemon_preamble(&mut writer, &connection, handshake).await?;
-        writer.write_all(line.as_bytes()).await?;
-        if !line.ends_with('\n') {
-            writer.write_all(b"\n").await?;
-        }
-        writer.flush().await?;
-        writer.shutdown().await?;
-        Ok(())
-    };
-    match client_deadline {
-        Some(deadline) => deadline.run("write", &request_label, write).await?,
-        None => write.await?,
-    }
-
-    let mut reader = tokio::io::BufReader::new(reader);
-    let mut responses = Vec::new();
-    let mut matched_response = request_id.is_none();
-    loop {
-        let read = next_daemon_response_line(
-            &mut reader,
-            &connection,
-            &request_label,
-            liveness_poll_interval,
-        );
-        let response_line = match client_deadline {
-            Some(deadline) => deadline.run("read", &request_label, read).await?,
-            None => read.await?,
-        };
-        let Some(response_line) = response_line else {
-            break;
-        };
-        if response_line.trim().is_empty() {
-            continue;
-        }
-        let is_matching_response = match client_deadline {
-            Some(deadline) => {
-                deadline
-                    .run("decode", &request_label, async {
-                        Ok(request_id.as_ref().is_some_and(|id| {
-                            serde_json::from_str::<serde_json::Value>(&response_line)
-                                .ok()
-                                .and_then(|value| value.get("id").cloned())
-                                .as_ref()
-                                == Some(id)
-                        }))
-                    })
-                    .await?
-            }
-            None => request_id.as_ref().is_some_and(|id| {
-                serde_json::from_str::<serde_json::Value>(&response_line)
-                    .ok()
-                    .and_then(|value| value.get("id").cloned())
-                    .as_ref()
-                    == Some(id)
-            }),
-        };
-        responses.push(format!("{response_line}\n"));
-        if is_matching_response {
-            matched_response = true;
-            break;
-        }
-    }
-    if !matched_response {
-        return Err(TraceDecayError::Config {
-            message: "daemon closed the connection after the request was sent but before returning a matching response; the outcome is unknown and the request was not retried"
-                .to_string(),
-        });
-    }
-    Ok(responses)
-}
-
-/// Extracts the daemon's advertised version from a proxied `initialize`
-/// response (`result.serverInfo.version`, which daemons have always sent).
-///
-/// This works against daemons older than the handshake version field, so a
-/// freshly-updated client can still detect a stale daemon left running by a
-/// non-systemd setup or a plain `tracedecay upgrade`.
-#[cfg(unix)]
-fn proxy_initialize_metadata(request_line: &str, responses: &[String]) -> ProxyInitializeMetadata {
-    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line) else {
-        return ProxyInitializeMetadata::default();
-    };
-    if request.method != "initialize" {
-        return ProxyInitializeMetadata::default();
-    }
-    let mut metadata = ProxyInitializeMetadata::default();
-    for line in responses {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if metadata.daemon_version.is_none() {
-            metadata.daemon_version = value
-                .pointer("/result/serverInfo/version")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string);
-        }
-        metadata.tool_list_changed |= value
-            .pointer("/result/capabilities/tools/listChanged")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        if metadata.route.is_none() {
-            metadata.route = value
-                .pointer("/result/_meta/tracedecayInitializeRoute")
-                .cloned()
-                .and_then(|route| serde_json::from_value(route).ok());
-        }
-    }
-    metadata
-}
-
-#[cfg(unix)]
-fn daemon_version_from_initialize_response(
-    request_line: &str,
-    responses: &[String],
-) -> Option<String> {
-    proxy_initialize_metadata(request_line, responses).daemon_version
-}
-
-/// The warning to surface when the daemon behind an `initialize` response is
-/// running a different binary version than this client.
-#[cfg(unix)]
-fn daemon_version_skew_warning(
-    request_line: &str,
-    responses: &[String],
-    client_version: &str,
-) -> Option<String> {
-    let daemon_version = daemon_version_from_initialize_response(request_line, responses)?;
-    if daemon_version == client_version {
-        return None;
-    }
-    let action = version_skew_action(&daemon_version, client_version);
-    Some(format!(
-        "TraceDecay daemon is version {daemon_version} but this client is {client_version} — \
-         {action}"
-    ))
-}
-
-#[cfg(unix)]
-fn daemon_proxy_error_response(line: &str, err: &TraceDecayError) -> Option<JsonRpcResponse> {
-    let request = serde_json::from_str::<JsonRpcRequest>(line).ok()?;
-    request.id.map(|id| {
-        JsonRpcResponse::error(
-            id,
-            ErrorCode::InternalError,
-            format!("TraceDecay daemon connection failed: {err}"),
-        )
-    })
-}
-
-#[cfg(not(unix))]
-pub async fn proxy_stdio_to_daemon(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
-    replay_line: Option<String>,
-) -> Result<()> {
-    let mut transport = StdioTransport::new();
-    if let Some(line) = replay_line {
-        proxy_one_request(socket_path, handshake, &line, &mut transport).await?;
-    }
-    while let Some(line) = transport.read_line().await? {
-        proxy_one_request(socket_path, handshake, &line, &mut transport).await?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-async fn proxy_one_request(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
-    line: &str,
-    transport: &mut impl McpTransport,
-) -> Result<()> {
-    if line.trim().is_empty() {
-        return Ok(());
-    }
-    for response in send_daemon_request_line(socket_path, handshake, line).await? {
-        transport.write_line(&response).await?;
-        if !response.ends_with('\n') {
-            transport.write_line("\n").await?;
-        }
-    }
-    transport.flush().await?;
-    Ok(())
-}
-
-pub async fn proxy_stdio_to_default_daemon(
-    handshake: &DaemonHandshake,
-    replay_line: Option<String>,
-) -> Result<()> {
-    let socket_path = default_available_socket_path()?;
-    proxy_stdio_to_daemon(&socket_path, handshake, replay_line).await
-}
-
-pub async fn call_tool(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
-    tool_name: &str,
-    arguments: serde_json::Value,
-) -> Result<serde_json::Value> {
-    call_tool_with_liveness_poll(
-        socket_path,
-        handshake,
-        tool_name,
-        arguments,
-        DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
-        None,
-    )
-    .await
-}
-
-pub async fn call_tool_within(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
-    tool_name: &str,
-    arguments: serde_json::Value,
-    deadline: Instant,
-) -> Result<serde_json::Value> {
-    call_tool_with_liveness_poll(
-        socket_path,
-        handshake,
-        tool_name,
-        arguments,
-        DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
-        Some(DaemonClientDeadline::until(deadline)?),
-    )
-    .await
-}
-
-async fn call_tool_with_liveness_poll(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
-    tool_name: &str,
-    arguments: serde_json::Value,
-    liveness_poll_interval: Duration,
-    client_deadline: Option<DaemonClientDeadline>,
-) -> Result<serde_json::Value> {
-    let connection = client_connection(socket_path)?;
-    let stream = match client_deadline {
-        Some(deadline) => {
-            deadline
-                .run("connect", tool_name, async {
-                    connect_to_daemon_connection_within(&connection, Some(deadline)).await
-                })
-                .await?
-        }
-        None => connect_to_daemon_connection(&connection).await?,
-    };
-    let (reader, mut writer) = stream.into_split();
-    let id = json!(1);
-    let request = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: Some(id.clone()),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": tool_name,
-            "arguments": arguments,
-        })),
-    };
-
-    let write = async {
-        write_daemon_preamble(&mut writer, &connection, handshake).await?;
-        writer
-            .write_all(serde_json::to_string(&request)?.as_bytes())
-            .await?;
-        writer.write_all(b"\n").await?;
-        writer.flush().await?;
-        writer.shutdown().await?;
-        Ok(())
-    };
-    match client_deadline {
-        Some(deadline) => deadline.run("write", tool_name, write).await?,
-        None => write.await?,
-    }
-
-    let mut reader = tokio::io::BufReader::new(reader);
-    loop {
-        let read =
-            next_daemon_response_line(&mut reader, &connection, tool_name, liveness_poll_interval);
-        let line = match client_deadline {
-            Some(deadline) => deadline.run("read", tool_name, read).await?,
-            None => read.await?,
-        };
-        let Some(line) = line else {
-            return Err(TraceDecayError::Config {
-                message: "daemon closed the connection after the tool request was sent but before returning a result; the outcome is unknown and the request was not retried"
-                    .to_string(),
-            });
-        };
-        let response = match client_deadline {
-            Some(deadline) => {
-                deadline
-                    .run("decode", tool_name, async {
-                        let value: serde_json::Value = serde_json::from_str(&line)?;
-                        if value.get("id") != Some(&id) {
-                            return Ok(None);
-                        }
-                        let response: JsonRpcResponse = serde_json::from_value(value)?;
-                        Ok(Some(response))
-                    })
-                    .await?
-            }
-            None => {
-                let value: serde_json::Value = serde_json::from_str(&line)?;
-                if value.get("id") != Some(&id) {
-                    None
-                } else {
-                    Some(serde_json::from_value(value)?)
-                }
-            }
-        };
-        let Some(response) = response else {
-            continue;
-        };
-        if let Some(error) = response.error {
-            return Err(TraceDecayError::Config {
-                message: format!("daemon tool call failed: {}", error.message),
-            });
-        }
-        return response.result.ok_or_else(|| TraceDecayError::Config {
-            message: "daemon tool call response did not include a result".to_string(),
-        });
-    }
-}
-
-pub async fn call_default_tool(
-    handshake: &DaemonHandshake,
-    tool_name: &str,
-    arguments: serde_json::Value,
-) -> Result<serde_json::Value> {
-    let socket_path = default_available_socket_path()?;
-    call_tool(&socket_path, handshake, tool_name, arguments).await
-}
-
-pub async fn call_default_tool_within(
-    handshake: &DaemonHandshake,
-    tool_name: &str,
-    arguments: serde_json::Value,
-    deadline: Instant,
-) -> Result<serde_json::Value> {
-    let socket_path = default_available_socket_path()?;
-    call_tool_within(&socket_path, handshake, tool_name, arguments, deadline).await
-}
-
-pub async fn call_default_doctor_runtime(
-    handshake: &DaemonHandshake,
-    arguments: serde_json::Value,
-) -> Result<serde_json::Value> {
-    if let Ok(socket_path) = default_available_socket_path()
-        && let Ok(result) =
-            call_tool(&socket_path, handshake, "tracedecay_runtime", arguments).await
-    {
-        return Ok(result);
-    }
-    Ok(doctor_runtime_tool_result(
-        cold_doctor_runtime_value(handshake).await,
-    ))
-}
-
-/// Extracts the single JSON payload from an MCP tool result while ignoring
-/// human-facing notice blocks.
-#[doc(hidden)]
-pub fn tool_json_payload(
-    result: &serde_json::Value,
-    tool_name: &str,
-) -> crate::errors::Result<serde_json::Value> {
-    let blocks = result
-        .get("content")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| crate::errors::TraceDecayError::Config {
-            message: format!("daemon tool {tool_name} returned no content blocks"),
-        })?;
-    let mut payloads = blocks
-        .iter()
-        .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
-        .filter_map(|text| serde_json::from_str(text).ok());
-    let payload = payloads
-        .next()
-        .ok_or_else(|| crate::errors::TraceDecayError::Config {
-            message: format!("daemon tool {tool_name} returned no JSON payload"),
-        })?;
-    if payloads.next().is_some() {
-        return Err(crate::errors::TraceDecayError::Config {
-            message: format!("daemon tool {tool_name} returned multiple JSON payloads"),
-        });
-    }
-    Ok(payload)
 }
 
 #[cfg(unix)]
@@ -1957,12 +258,16 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
                 continue;
             }
         };
+        let admission_class = permit.class();
         let engine = engine.clone();
         let auth_token = authority.auth_token().to_string();
         client_tasks.spawn(async move {
             let _permit = permit;
-            Box::pin(serve_authenticated_socket_client(
-                stream, engine, auth_token,
+            Box::pin(serve_authenticated_socket_client_with_class(
+                stream,
+                engine,
+                auth_token,
+                admission_class,
             ))
             .await
         });
@@ -2209,8 +514,13 @@ enum MaintenanceRekeyOutcome {
 /// Scope-specific MCP servers routed through one canonical physical DB owner.
 /// `Database` performs the actual same-process handle sharing; this registry
 /// keeps daemon cache aliases and branch-drift rekeys consistent with it.
+struct DatabaseOwnerEntry<Server> {
+    server: Server,
+    last_used: Instant,
+}
+
 struct DatabaseOwnerRegistry<Server = Arc<crate::mcp::McpServer>> {
-    servers: HashMap<ProjectServerKey, Server>,
+    servers: HashMap<ProjectServerKey, DatabaseOwnerEntry<Server>>,
     aliases: HashMap<ProjectRouteKey, ProjectServerKey>,
 }
 
@@ -2225,20 +535,39 @@ impl<Server> Default for DatabaseOwnerRegistry<Server> {
 
 impl<Server> DatabaseOwnerRegistry<Server> {
     fn get(&self, key: &ProjectServerKey) -> Option<&Server> {
-        self.servers.get(key)
+        self.servers.get(key).map(|entry| &entry.server)
     }
 
     fn insert(&mut self, key: ProjectServerKey, server: Server) {
-        self.servers.insert(key, server);
+        self.insert_at(key, server, Instant::now());
+    }
+
+    fn insert_at(&mut self, key: ProjectServerKey, server: Server, last_used: Instant) {
+        self.servers
+            .insert(key, DatabaseOwnerEntry { server, last_used });
     }
 
     fn get_route(&self, route: &ProjectRouteKey) -> Option<(&ProjectServerKey, &Server)> {
         let key = self.aliases.get(route)?;
-        self.servers.get_key_value(key)
+        let (key, entry) = self.servers.get_key_value(key)?;
+        Some((key, &entry.server))
+    }
+
+    fn get_route_and_touch(
+        &mut self,
+        route: &ProjectRouteKey,
+    ) -> Option<(&ProjectServerKey, &Server)> {
+        let key = self.aliases.get(route)?.clone();
+        let entry = self.servers.get_mut(&key)?;
+        entry.last_used = Instant::now();
+        Some((self.aliases.get(route)?, &entry.server))
     }
 
     fn bind_route(&mut self, route: ProjectRouteKey, key: ProjectServerKey) {
         debug_assert!(self.servers.contains_key(&key));
+        if let Some(entry) = self.servers.get_mut(&key) {
+            entry.last_used = Instant::now();
+        }
         self.aliases.insert(route, key);
     }
 
@@ -2264,6 +593,36 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         (candidate, true)
     }
 
+    fn bind_or_insert_route_bounded<F>(
+        &mut self,
+        route: ProjectRouteKey,
+        key: ProjectServerKey,
+        candidate: Server,
+        capacity: usize,
+        mut is_leased: F,
+    ) -> Option<(Server, bool)>
+    where
+        Server: Clone,
+        F: FnMut(&Server) -> bool,
+    {
+        if let Some(existing) = self.get(&key).cloned() {
+            self.bind_route(route, key);
+            return Some((existing, false));
+        }
+        while self.servers.len() >= capacity {
+            let evict = self
+                .servers
+                .iter()
+                .filter(|(_, entry)| !is_leased(&entry.server))
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())?;
+            self.servers.remove(&evict);
+            self.aliases.retain(|_, key| key != &evict);
+        }
+        self.insert_route(route, key, candidate.clone());
+        Some((candidate, true))
+    }
+
     fn rekey(&mut self, old: &ProjectServerKey, new: &ProjectServerKey) -> bool {
         if old == new {
             return true;
@@ -2285,7 +644,15 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     }
 
     fn values(&self) -> impl Iterator<Item = &Server> {
-        self.servers.values()
+        self.servers.values().map(|entry| &entry.server)
+    }
+}
+
+fn project_server_capacity_error() -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "daemon project server capacity reached (capacity={MAX_CACHED_PROJECT_SERVERS}); retry after active clients finish"
+        ),
     }
 }
 
@@ -2619,9 +986,9 @@ impl DaemonEngine {
             .unwrap_or_else(|_| project_path.clone());
         let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake)?;
         let cached = {
-            let servers = self.store_administration.project_servers().lock().await;
+            let mut servers = self.store_administration.project_servers().lock().await;
             servers
-                .get_route(&route)
+                .get_route_and_touch(&route)
                 .map(|(key, server)| (key.clone(), Arc::clone(server)))
         };
         if let Some((key, server)) = cached {
@@ -2631,9 +998,9 @@ impl DaemonEngine {
         let gate = project_open_gate(&self.project_open_gates, &route).await;
         let _singleflight = gate.lock().await;
         let cached = {
-            let servers = self.store_administration.project_servers().lock().await;
+            let mut servers = self.store_administration.project_servers().lock().await;
             servers
-                .get_route(&route)
+                .get_route_and_touch(&route)
                 .map(|(key, server)| (key.clone(), Arc::clone(server)))
         };
         if let Some((key, server)) = cached {
@@ -2734,12 +1101,22 @@ impl DaemonEngine {
         )
         .with_automation_scheduler_reconciler(reconciler);
         let candidate = crate::mcp::McpServer::new_with_context(context).await;
-        let (server, inserted) = self
+        let resolved = self
             .store_administration
             .project_servers()
             .lock()
             .await
-            .bind_or_insert_route(route, key.clone(), candidate);
+            .bind_or_insert_route_bounded(
+                route,
+                key.clone(),
+                candidate,
+                MAX_CACHED_PROJECT_SERVERS,
+                |server| Arc::strong_count(server) > 1,
+            );
+        let Some((server, inserted)) = resolved else {
+            route_registered.store(false, Ordering::Release);
+            return Err(project_server_capacity_error());
+        };
         if !inserted {
             route_registered.store(false, Ordering::Release);
         } else {
@@ -3069,6 +1446,7 @@ async fn serve_socket_client(stream: tokio::net::UnixStream, engine: DaemonEngin
         BrokerStream::Unix(stream),
         engine,
         None,
+        DaemonClientAdmissionClass::General,
     ))
     .await
 }
@@ -3079,7 +1457,29 @@ async fn serve_authenticated_socket_client(
     engine: DaemonEngine,
     auth_token: String,
 ) -> Result<()> {
-    Box::pin(serve_broker_socket_client(stream, engine, Some(auth_token))).await
+    Box::pin(serve_authenticated_socket_client_with_class(
+        stream,
+        engine,
+        auth_token,
+        DaemonClientAdmissionClass::General,
+    ))
+    .await
+}
+
+#[cfg(unix)]
+async fn serve_authenticated_socket_client_with_class(
+    stream: BrokerStream,
+    engine: DaemonEngine,
+    auth_token: String,
+    admission_class: DaemonClientAdmissionClass,
+) -> Result<()> {
+    Box::pin(serve_broker_socket_client(
+        stream,
+        engine,
+        Some(auth_token),
+        admission_class,
+    ))
+    .await
 }
 
 async fn apply_daemon_initialize_route(
@@ -3145,490 +1545,12 @@ async fn write_routed_initialize_response(
     Ok(true)
 }
 
-#[derive(Debug)]
-struct DoctorRuntimeRequest {
-    id: serde_json::Value,
-}
-
-fn doctor_runtime_request(request_line: &str) -> Option<DoctorRuntimeRequest> {
-    let request = serde_json::from_str::<JsonRpcRequest>(request_line.trim()).ok()?;
-    if request.method != "tools/call" {
-        return None;
-    }
-    let (tool_name, arguments) = projectless_tool_call(request.params.as_ref()).ok()?;
-    if tool_name != "tracedecay_runtime"
-        || arguments
-            .get("authority_audit")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
-        || arguments
-            .get("session_ingest_health")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
-        || arguments.get("format").and_then(serde_json::Value::as_str) != Some("json")
-    {
-        return None;
-    }
-    Some(DoctorRuntimeRequest {
-        id: request.id.unwrap_or(serde_json::Value::Null),
-    })
-}
-
-fn doctor_runtime_temporal_unavailable(reason: &str) -> serde_json::Value {
-    let finding = match reason {
-        "project_store_missing" | "session_store_missing" => "migration_gap",
-        _ => "compatibility_drift",
-    };
-    json!({
-        "status": if reason.ends_with("_locked") { "locked" } else { "unavailable" },
-        "reason": reason,
-        "findings": [{
-            "kind": finding,
-            "count": 1,
-        }],
-    })
-}
-
-fn doctor_runtime_temporal_report(
-    report: crate::global_db::SessionTemporalHealthReport,
-) -> serde_json::Value {
-    let mut value = serde_json::to_value(report).unwrap_or_else(|_| {
-        doctor_runtime_temporal_unavailable("session_health_serialization_failed")
-    });
-    let has_reason = value
-        .get("reason")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|reason| !reason.is_empty());
-    let unavailable_without_findings = value.get("status").and_then(serde_json::Value::as_str)
-        == Some("unavailable")
-        && value
-            .get("findings")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(Vec::is_empty);
-    // Preserve fixed path-API reasons (for example uncheckpointed_wal). Only
-    // synthesize a compatibility finding when the report is reason-less.
-    if unavailable_without_findings && !has_reason {
-        value["findings"] = json!([{
-            "kind": "compatibility_drift",
-            "count": 1,
-        }]);
-    }
-    value
-}
-
-fn doctor_runtime_unavailable(
-    project_path: Option<&Path>,
-    reason: &'static str,
-) -> serde_json::Value {
-    json!({
-        "tracedecay_version": env!("CARGO_PKG_VERSION"),
-        "database": {
-            "project_root": project_path,
-            "quick_check_ok": null,
-            "quick_check_error": reason,
-            "authority_audit_ok": null,
-            "authority_audit_reason": "authority_audit_not_run",
-            "authority_audit_error": "authority_audit_not_run",
-        },
-        "doctor_runtime": {
-            "status": if reason.ends_with("_locked") { "locked" } else { "unavailable" },
-            "reason": reason,
-            "read_only": true,
-        },
-        "session_temporal_health": doctor_runtime_temporal_unavailable(reason),
-        "cursor_session_ingest": {
-            "status": "unavailable",
-            "reason": "session_store_unavailable",
-        },
-    })
-}
-
-fn doctor_runtime_tool_result(value: serde_json::Value) -> serde_json::Value {
-    let text = serde_json::to_string(&value).unwrap_or_else(|_| {
-        r#"{"doctor_runtime":{"status":"unavailable","reason":"serialization_failed","read_only":true}}"#
-            .to_string()
-    });
-    json!({
-        "content": [{
-            "type": "text",
-            "text": text,
-        }],
-    })
-}
-
-const DOCTOR_GRAPH_SCHEMA_VERSION: i64 = 23;
-/// `SQLITE_OPEN_URI`, which libsql does not expose through [`libsql::OpenFlags`].
-const SQLITE_OPEN_URI: i32 = 0x0000_0040;
-
-fn doctor_runtime_store_paths(
-    project_path: &Path,
-    profile_root: &Path,
-) -> std::result::Result<(PathBuf, PathBuf), &'static str> {
-    match crate::storage::read_enrollment_marker(project_path) {
-        Ok(Some(marker)) => {
-            let layout =
-                crate::storage::profile_sharded_layout(project_path, profile_root, &marker)
-                    .map_err(|_| "project_store_schema_unsupported")?;
-            Ok((layout.graph_db_path, layout.sessions_db_path))
-        }
-        Ok(None) => {
-            let data_root = crate::config::get_tracedecay_dir(project_path);
-            let legacy_paths = (
-                data_root.join(crate::config::db_filename(&data_root)),
-                data_root.join("sessions.db"),
-            );
-            if legacy_paths.0.is_file() {
-                return Ok(legacy_paths);
-            }
-            let layout = crate::storage::default_profile_sharded_layout(project_path, profile_root)
-                .map_err(|_| "project_store_schema_unsupported")?;
-            Ok((layout.graph_db_path, layout.sessions_db_path))
-        }
-        Err(_) => Err("project_store_schema_unsupported"),
-    }
-}
-
-async fn doctor_read_only_database(
-    db_path: &Path,
-    intent: &str,
-) -> std::result::Result<crate::db::Database, &'static str> {
-    if !db_path.is_file() {
-        return Err("store_missing");
-    }
-    let authority = crate::db::DatabaseAuthority::for_runtime(db_path, intent)
-        .map_err(|_| "store_unavailable")?;
-    crate::db::Database::open_read_only(db_path, &authority)
-        .await
-        .map(|(database, _)| database)
-        .map_err(|error| {
-            let message = error.to_string().to_ascii_lowercase();
-            if message.contains("database is locked")
-                || message.contains("database table is locked")
-                || message.contains("sqlite_busy")
-            {
-                "store_locked"
-            } else {
-                "store_unavailable"
-            }
-        })
-}
-
-async fn doctor_connection_i64_result(
-    conn: &libsql::Connection,
-    query: &str,
-) -> std::result::Result<Option<i64>, libsql::Error> {
-    let mut rows = conn.query(query, ()).await?;
-    match rows.next().await? {
-        Some(row) => row.get(0).map(Some),
-        None => Ok(None),
-    }
-}
-
-async fn doctor_connection_i64(conn: &libsql::Connection, query: &str) -> Option<i64> {
-    doctor_connection_i64_result(conn, query)
-        .await
-        .ok()
-        .flatten()
-}
-
-async fn doctor_connection_text(conn: &libsql::Connection, query: &str) -> Option<String> {
-    let mut rows = conn.query(query, ()).await.ok()?;
-    rows.next().await.ok().flatten()?.get::<String>(0).ok()
-}
-
-async fn doctor_database_i64(database: &crate::db::Database, query: &str) -> Option<i64> {
-    doctor_connection_i64(database.conn(), query).await
-}
-
-async fn doctor_database_text(database: &crate::db::Database, query: &str) -> Option<String> {
-    doctor_connection_text(database.conn(), query).await
-}
-
-fn doctor_sidecar_size(db_path: &Path, suffix: &str) -> u64 {
-    let mut path = db_path.as_os_str().to_os_string();
-    path.push(suffix);
-    std::fs::metadata(PathBuf::from(path)).map_or(0, |metadata| metadata.len())
-}
-
-fn doctor_graph_error_reason(error: &libsql::Error) -> &'static str {
-    let message = error.to_string().to_ascii_lowercase();
-    if message.contains("locked") || message.contains("busy") {
-        "project_store_locked"
-    } else {
-        "project_store_unavailable"
-    }
-}
-
-fn doctor_uses_rollback_journal(db_path: &Path) -> bool {
-    let mut header = [0_u8; 20];
-    std::fs::File::open(db_path)
-        .and_then(|mut file| file.read_exact(&mut header))
-        .is_ok_and(|()| header[18] == 1 && header[19] == 1)
-}
-
-async fn doctor_global_db_read_only(
-    db_path: &Path,
-    intent: &str,
-) -> Option<crate::global_db::GlobalDb> {
-    let preflight = doctor_read_only_database(db_path, intent).await.ok()?;
-    let database = crate::global_db::GlobalDb::open_read_only_at(db_path).await;
-    drop(preflight);
-    database
-}
-
-async fn cold_doctor_graph_value(
-    project_path: &Path,
-    graph_path: &Path,
-) -> std::result::Result<serde_json::Value, &'static str> {
-    if !graph_path.is_file() {
-        return Err("project_store_missing");
-    }
-    if !crate::storage::has_sqlite_database_header(graph_path).unwrap_or(false) {
-        return Err("project_store_unavailable");
-    }
-    // `immutable=1` deliberately ignores a WAL. Refuse an incomplete
-    // snapshot rather than quietly reporting stale graph metadata.
-    if doctor_sidecar_size(graph_path, "-wal") > 0 {
-        return Err("project_store_uncheckpointed_wal");
-    }
-    let database = if doctor_uses_rollback_journal(graph_path) {
-        // A rollback-journal store can be checked with SQLite's ordinary
-        // read-only lock protocol without creating WAL/SHM sidecars. This
-        // preserves the typed locked result that immutable mode would hide.
-        libsql::Builder::new_local(graph_path)
-            .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .build()
-            .await
-            .map_err(|error| doctor_graph_error_reason(&error))?
-    } else {
-        let uri = crate::sqlite_read_snapshot::immutable_uri(graph_path)
-            .map_err(|_| "project_store_unavailable")?;
-        let flags = libsql::OpenFlags::SQLITE_OPEN_READ_ONLY
-            | libsql::OpenFlags::from_bits_retain(SQLITE_OPEN_URI);
-        libsql::Builder::new_local(uri)
-            .flags(flags)
-            .build()
-            .await
-            .map_err(|error| doctor_graph_error_reason(&error))?
-    };
-    let conn = database
-        .connect()
-        .map_err(|error| doctor_graph_error_reason(&error))?;
-    conn.execute_batch("PRAGMA query_only = ON; PRAGMA busy_timeout = 0;")
-        .await
-        .map_err(|error| doctor_graph_error_reason(&error))?;
-    let schema_version = match doctor_connection_i64_result(&conn, "PRAGMA user_version").await {
-        Ok(Some(version)) => version,
-        Ok(None) => return Err("project_store_unavailable"),
-        Err(error) => return Err(doctor_graph_error_reason(&error)),
-    };
-    if schema_version != DOCTOR_GRAPH_SCHEMA_VERSION {
-        return Err("project_store_schema_unsupported");
-    }
-    let canonical_graph_path = graph_path
-        .canonicalize()
-        .unwrap_or_else(|_| graph_path.to_path_buf());
-    Ok(json!({
-        "tracedecay_version": env!("CARGO_PKG_VERSION"),
-        "process": {
-            "pid": std::process::id(),
-        },
-        "database": {
-            "project_root": project_path,
-            "db_path": graph_path,
-            "canonical_db_path": canonical_graph_path,
-            "db_size_bytes": std::fs::metadata(graph_path).map_or(0, |metadata| metadata.len()),
-            "wal_size_bytes": doctor_sidecar_size(graph_path, "-wal"),
-            "shm_size_bytes": doctor_sidecar_size(graph_path, "-shm"),
-            "journal_mode": doctor_connection_text(&conn, "PRAGMA journal_mode").await,
-            "synchronous": doctor_connection_i64(&conn, "PRAGMA synchronous").await,
-            "page_size": doctor_connection_i64(&conn, "PRAGMA page_size").await,
-            "quick_check_ok": true,
-            "quick_check_error": null,
-            "schema_version": schema_version,
-        },
-        "doctor_runtime": {
-            "status": "complete",
-            "reason": null,
-            "read_only": true,
-        },
-    }))
-}
-
-async fn cold_doctor_runtime_value_for_paths(
-    project_path: &Path,
-    graph_path: &Path,
-    session_path: &Path,
-) -> serde_json::Value {
-    let mut value = match cold_doctor_graph_value(project_path, graph_path).await {
-        Ok(value) => value,
-        Err(reason) => return doctor_runtime_unavailable(Some(project_path), reason),
-    };
-    value["database"]["authority_audit_ok"] = json!(null);
-    value["database"]["authority_audit_reason"] = json!("authority_audit_not_run");
-    value["database"]["authority_audit_error"] = json!("authority_audit_not_run");
-    value["session_temporal_health"] = if !session_path.is_file() {
-        doctor_runtime_temporal_unavailable("session_store_missing")
-    } else {
-        match timeout(
-            Duration::from_secs(8),
-            crate::global_db::session_temporal::session_temporal_doctor_health_at(session_path),
-        )
-        .await
-        {
-            Ok(report) => doctor_runtime_temporal_report(report),
-            Err(_) => doctor_runtime_temporal_unavailable("session_health_timed_out"),
-        }
-    };
-    value["cursor_session_ingest"] = json!({
-        "status": "unavailable",
-        "reason": "session_store_unavailable",
-    });
-    value["cursor_session_placeholder_paths"] = json!([]);
-    value
-}
-
-async fn doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
-    doctor_runtime_value_inner(handshake, false).await
-}
-
-async fn doctor_runtime_value_inner(handshake: &DaemonHandshake, cold: bool) -> serde_json::Value {
-    let Some(project_path) = handshake.project_path.as_deref() else {
-        return doctor_runtime_unavailable(None, "project_path_missing");
-    };
-    let (graph_path, session_path) =
-        match doctor_runtime_store_paths(project_path, &handshake.client_identity.profile_root) {
-            Ok(paths) => paths,
-            Err(reason) => return doctor_runtime_unavailable(Some(project_path), reason),
-        };
-    if cold {
-        return cold_doctor_runtime_value_for_paths(project_path, &graph_path, &session_path).await;
-    }
-    let graph = match doctor_read_only_database(&graph_path, "doctor graph read-only").await {
-        Ok(graph) => graph,
-        Err("store_missing") => {
-            return doctor_runtime_unavailable(Some(project_path), "project_store_missing");
-        }
-        Err("store_locked") => {
-            return doctor_runtime_unavailable(Some(project_path), "project_store_locked");
-        }
-        Err(_) => {
-            return doctor_runtime_unavailable(Some(project_path), "project_store_unavailable");
-        }
-    };
-    let schema_version = match doctor_database_i64(&graph, "PRAGMA user_version").await {
-        Some(version) => version,
-        None => {
-            return doctor_runtime_unavailable(Some(project_path), "project_store_unavailable");
-        }
-    };
-    if schema_version != DOCTOR_GRAPH_SCHEMA_VERSION {
-        return doctor_runtime_unavailable(Some(project_path), "project_store_schema_unsupported");
-    }
-    let canonical_graph_path = graph_path
-        .canonicalize()
-        .unwrap_or_else(|_| graph_path.clone());
-    let mut value = json!({
-        "tracedecay_version": env!("CARGO_PKG_VERSION"),
-        "process": {
-            "pid": std::process::id(),
-        },
-        "database": {
-            "project_root": project_path,
-            "db_path": graph_path,
-            "canonical_db_path": canonical_graph_path,
-            "db_size_bytes": std::fs::metadata(&graph_path).map_or(0, |metadata| metadata.len()),
-            "wal_size_bytes": doctor_sidecar_size(&graph_path, "-wal"),
-            "shm_size_bytes": doctor_sidecar_size(&graph_path, "-shm"),
-            "journal_mode": doctor_database_text(&graph, "PRAGMA journal_mode").await,
-            "synchronous": doctor_database_i64(&graph, "PRAGMA synchronous").await,
-            "page_size": doctor_database_i64(&graph, "PRAGMA page_size").await,
-            "quick_check_ok": true,
-            "quick_check_error": null,
-            "schema_version": schema_version,
-        },
-        "doctor_runtime": {
-            "status": "complete",
-            "reason": null,
-            "read_only": true,
-        },
-    });
-
-    let registry = doctor_global_db_read_only(
-        &handshake.client_identity.global_db_path,
-        "doctor authority read-only",
-    )
-    .await;
-    let (authority_ok, authority_reason) = match registry.as_ref() {
-        Some(registry) => match registry.audit_observation_authority().await {
-            Ok(()) => (Some(true), None),
-            Err(_) => (Some(false), Some("authority_invariant_failed")),
-        },
-        None if handshake.client_identity.global_db_path.is_file() => {
-            (None, Some("authority_store_unavailable"))
-        }
-        None => (None, Some("authority_store_missing")),
-    };
-    value["database"]["authority_audit_ok"] = json!(authority_ok);
-    value["database"]["authority_audit_reason"] = json!(authority_reason);
-    value["database"]["authority_audit_error"] = json!(authority_reason);
-
-    let session_db =
-        doctor_global_db_read_only(&session_path, "doctor session temporal read-only").await;
-    value["session_temporal_health"] = match session_db.as_ref() {
-        Some(db) => {
-            match timeout(Duration::from_secs(8), db.session_temporal_doctor_health()).await {
-                Ok(report) => doctor_runtime_temporal_report(report),
-                Err(_) => doctor_runtime_temporal_unavailable("session_health_timed_out"),
-            }
-        }
-        None if session_path.is_file() => {
-            doctor_runtime_temporal_unavailable("session_store_unavailable")
-        }
-        None => doctor_runtime_temporal_unavailable("session_store_missing"),
-    };
-    value["cursor_session_ingest"] = match session_db.as_ref() {
-        Some(db) => {
-            serde_json::to_value(db.session_ingest_health_for_provider(Some("cursor")).await)
-                .unwrap_or_else(|_| {
-                    json!({
-                        "status": "unavailable",
-                        "reason": "session_ingest_serialization_failed",
-                    })
-                })
-        }
-        None => json!({
-            "status": "unavailable",
-            "reason": "session_store_unavailable",
-        }),
-    };
-    value["cursor_session_placeholder_paths"] = match session_db.as_ref() {
-        Some(db) => json!(db.literal_workspace_placeholder_transcript_paths(10).await),
-        None => json!([]),
-    };
-    value
-}
-
-async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
-    // Both stores use immutable `mode=ro` reads, so this route does not acquire
-    // database authority, create locks or sidecars, apply schema, or start workers.
-    doctor_runtime_value_inner(handshake, true).await
-}
-
-async fn write_doctor_runtime_response(
-    transport: &mut impl McpTransport,
-    handshake: &DaemonHandshake,
-    request: DoctorRuntimeRequest,
-) -> Result<()> {
-    let result = doctor_runtime_tool_result(doctor_runtime_value(handshake).await);
-    write_json_rpc_response(transport, &JsonRpcResponse::success(request.id, result)).await
-}
-
 #[cfg(unix)]
 async fn serve_broker_socket_client(
     stream: BrokerStream,
     engine: DaemonEngine,
     auth_token: Option<String>,
+    admission_class: DaemonClientAdmissionClass,
 ) -> Result<()> {
     let mut transport = BrokerStreamTransport::new(stream);
     if let Some(expected_token) = auth_token.as_deref() {
@@ -3667,6 +1589,18 @@ async fn serve_broker_socket_client(
     let Some(first_request_line) = first_request_line else {
         return Ok(());
     };
+    if admission_class == DaemonClientAdmissionClass::ReservedControl
+        && !is_reserved_control_request(&first_request_line)
+    {
+        drop(setup_activity);
+        reject_reserved_bulk_request(
+            &mut transport,
+            &first_request_line,
+            MAX_CONCURRENT_DAEMON_CLIENTS,
+        )
+        .await?;
+        return Ok(());
+    }
     if let Some(request) = doctor_runtime_request(&first_request_line) {
         drop(setup_activity);
         write_doctor_runtime_response(&mut transport, &handshake, request).await?;
@@ -3774,6 +1708,29 @@ async fn serve_windows_broker_client(
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<()> {
+    Box::pin(serve_windows_broker_client_with_class(
+        stream,
+        auth_token,
+        lifecycle,
+        store_administration,
+        project_open_gates,
+        DaemonClientAdmissionClass::General,
+        #[cfg(test)]
+        project_open_attempts,
+    ))
+    .await
+}
+
+#[cfg(any(not(unix), test))]
+async fn serve_windows_broker_client_with_class(
+    stream: BrokerStream,
+    auth_token: &str,
+    lifecycle: &DaemonLifecycle,
+    store_administration: StoreAdministration,
+    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    admission_class: DaemonClientAdmissionClass,
+    #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
+) -> Result<()> {
     let mut transport = BrokerStreamTransport::new(stream);
     let Some(preface_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
@@ -3797,6 +1754,18 @@ async fn serve_windows_broker_client(
     let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };
+    if admission_class == DaemonClientAdmissionClass::ReservedControl
+        && !is_reserved_control_request(&first_request_line)
+    {
+        drop(setup_activity);
+        reject_reserved_bulk_request(
+            &mut transport,
+            &first_request_line,
+            MAX_CONCURRENT_DAEMON_CLIENTS,
+        )
+        .await?;
+        return Ok(());
+    }
     if let Some(request) = doctor_runtime_request(&first_request_line) {
         drop(setup_activity);
         write_doctor_runtime_response(&mut transport, &handshake, request).await?;
@@ -3894,25 +1863,23 @@ async fn portable_project_server(
     #[cfg(test)] project_open_attempts: Option<&Arc<AtomicUsize>>,
 ) -> Result<Arc<crate::mcp::McpServer>> {
     let route = ProjectRouteKey::from_handshake(canonical_project_path, handshake)?;
-    if let Some(server) = store_administration
-        .project_servers()
-        .lock()
-        .await
-        .get_route(&route)
-        .map(|(_, server)| Arc::clone(server))
-    {
+    if let Some(server) = {
+        let mut servers = store_administration.project_servers().lock().await;
+        servers
+            .get_route_and_touch(&route)
+            .map(|(_, server)| Arc::clone(server))
+    } {
         return Ok(server);
     }
 
     let gate = project_open_gate(project_open_gates, &route).await;
     let _singleflight = gate.lock().await;
-    if let Some(server) = store_administration
-        .project_servers()
-        .lock()
-        .await
-        .get_route(&route)
-        .map(|(_, server)| Arc::clone(server))
-    {
+    if let Some(server) = {
+        let mut servers = store_administration.project_servers().lock().await;
+        servers
+            .get_route_and_touch(&route)
+            .map(|(_, server)| Arc::clone(server))
+    } {
         return Ok(server);
     }
 
@@ -3997,11 +1964,21 @@ async fn portable_project_server(
         },
     );
     let candidate = crate::mcp::McpServer::new_with_context(context).await;
-    let (resolved, inserted) = store_administration
+    let resolution = store_administration
         .project_servers()
         .lock()
         .await
-        .bind_or_insert_route(route, key, candidate);
+        .bind_or_insert_route_bounded(
+            route,
+            key,
+            candidate,
+            MAX_CACHED_PROJECT_SERVERS,
+            |server| Arc::strong_count(server) > 1,
+        );
+    let Some((resolved, inserted)) = resolution else {
+        route_registered.store(false, Ordering::Release);
+        return Err(project_server_capacity_error());
+    };
     if !inserted {
         route_registered.store(false, Ordering::Release);
     }
@@ -4120,8 +2097,28 @@ async fn write_project_open_error(
         .ok()
         .and_then(|request| request.id)
         .unwrap_or(serde_json::Value::Null);
-    let response = JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+    let response = project_open_error_response(id, error);
     write_json_rpc_response(transport, &response).await
+}
+
+fn project_open_error_response(id: serde_json::Value, error: &TraceDecayError) -> JsonRpcResponse {
+    match error {
+        TraceDecayError::Config { message }
+            if message.starts_with("daemon project server capacity reached") =>
+        {
+            JsonRpcResponse::error_with_data(
+                id,
+                ErrorCode::InternalError,
+                message.clone(),
+                Some(json!({
+                    "kind": "project_server_capacity_reached",
+                    "retryable": true,
+                    "capacity": MAX_CACHED_PROJECT_SERVERS,
+                })),
+            )
+        }
+        _ => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+    }
 }
 
 async fn write_json_rpc_response(
@@ -4424,538 +2421,6 @@ impl crate::mcp::McpTransport for BrokerStreamTransport {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests;
-
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-mod doctor_runtime_route_tests {
-    use std::path::{Path, PathBuf};
-
-    use super::{
-        DaemonClientIdentity, DaemonHandshake, cold_doctor_runtime_value, doctor_runtime_request,
-        doctor_runtime_store_paths,
-    };
-    use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-
-    fn handshake(
-        project_path: PathBuf,
-        profile_root: PathBuf,
-        global_db_path: PathBuf,
-    ) -> DaemonHandshake {
-        DaemonHandshake {
-            project_path: Some(project_path),
-            scope_prefix: None,
-            timings: false,
-            allow_init: false,
-            allow_initialize_root_routing: false,
-            client_identity: DaemonClientIdentity {
-                profile_root,
-                global_db_path,
-            },
-            client_version: env!("CARGO_PKG_VERSION").to_string(),
-            client_instance_id: "doctor-runtime-test".to_string(),
-            tool_list_changed_capable: false,
-            catalog_version: String::new(),
-        }
-    }
-
-    fn filesystem_manifest(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-        fn visit(root: &Path, current: &Path, entries: &mut Vec<(PathBuf, Vec<u8>)>) {
-            let mut children = std::fs::read_dir(current)
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .collect::<Vec<_>>();
-            children.sort();
-            for path in children {
-                let relative = path.strip_prefix(root).unwrap().to_path_buf();
-                if path.is_dir() {
-                    entries.push((relative, Vec::new()));
-                    visit(root, &path, entries);
-                } else {
-                    entries.push((relative, std::fs::read(&path).unwrap()));
-                }
-            }
-        }
-
-        let mut entries = Vec::new();
-        visit(root, root, &mut entries);
-        entries
-    }
-
-    async fn checkpoint_sqlite_wal(path: &Path) {
-        let database = libsql::Builder::new_local(path).build().await.unwrap();
-        let connection = database.connect().unwrap();
-        let mut rows = connection
-            .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
-            .await
-            .unwrap();
-        let row = rows.next().await.unwrap().unwrap();
-        assert_eq!(row.get::<i64>(0).unwrap(), 0, "checkpoint must not be busy");
-        assert_eq!(
-            row.get::<i64>(1).unwrap(),
-            row.get::<i64>(2).unwrap(),
-            "checkpoint must flush every WAL frame"
-        );
-    }
-
-    fn remove_sqlite_sidecars(path: &Path) {
-        for suffix in ["-wal", "-shm"] {
-            let mut sidecar = path.as_os_str().to_os_string();
-            sidecar.push(suffix);
-            let _ = std::fs::remove_file(PathBuf::from(sidecar));
-        }
-    }
-
-    fn has_non_empty_wal(path: &Path) -> bool {
-        let mut wal_path = path.as_os_str().to_os_string();
-        wal_path.push("-wal");
-        std::fs::metadata(PathBuf::from(wal_path))
-            .map(|metadata| metadata.len() > 0)
-            .unwrap_or(false)
-    }
-
-    #[test]
-    fn only_explicit_doctor_runtime_requests_take_the_safe_route() {
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 7,
-            "method": "tools/call",
-            "params": {
-                "name": "tracedecay_runtime",
-                "arguments": {
-                    "format": "json",
-                    "authority_audit": true,
-                    "session_ingest_health": true,
-                },
-            },
-        })
-        .to_string();
-        let parsed = doctor_runtime_request(&request).expect("doctor runtime request");
-        assert_eq!(parsed.id, serde_json::json!(7));
-
-        let ordinary = request.replace("\"authority_audit\":true", "\"authority_audit\":false");
-        assert!(doctor_runtime_request(&ordinary).is_none());
-    }
-
-    #[tokio::test]
-    async fn cold_missing_store_returns_typed_findings_without_creating_files() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
-        let before = filesystem_manifest(root.path());
-
-        let value = cold_doctor_runtime_value(&handshake).await;
-
-        assert_eq!(filesystem_manifest(root.path()), before);
-        assert_eq!(
-            value.pointer("/doctor_runtime/reason"),
-            Some(&serde_json::json!("project_store_missing"))
-        );
-        assert_eq!(
-            value.pointer("/session_temporal_health/status"),
-            Some(&serde_json::json!("unavailable"))
-        );
-        assert_eq!(
-            value.pointer("/session_temporal_health/findings/0/kind"),
-            Some(&serde_json::json!("migration_gap"))
-        );
-    }
-
-    #[tokio::test]
-    async fn malformed_store_returns_fixed_safe_error_without_sidecars() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(profile.join("registry.db")),
-        };
-        let initialized = TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize test project");
-        let db_path = initialized.db_path().clone();
-        drop(initialized);
-        std::fs::write(&db_path, b"malformed doctor fixture").unwrap();
-        for suffix in ["-wal", "-shm"] {
-            let mut sidecar = db_path.as_os_str().to_os_string();
-            sidecar.push(suffix);
-            let _ = std::fs::remove_file(PathBuf::from(sidecar));
-        }
-        let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
-        let before = filesystem_manifest(root.path());
-
-        let value = cold_doctor_runtime_value(&handshake).await;
-
-        assert_eq!(filesystem_manifest(root.path()), before);
-        assert_eq!(
-            value.pointer("/doctor_runtime/reason"),
-            Some(&serde_json::json!("project_store_unavailable"))
-        );
-        assert_eq!(
-            value.pointer("/database/quick_check_error"),
-            Some(&serde_json::json!("project_store_unavailable"))
-        );
-        assert!(!value.to_string().contains("malformed doctor fixture"));
-    }
-
-    #[tokio::test]
-    async fn old_graph_schema_returns_fixed_compatibility_finding_without_migrating() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        let data_root = crate::config::get_tracedecay_dir(&project);
-        std::fs::create_dir_all(&data_root).unwrap();
-        let db_path = data_root.join(crate::config::db_filename(&data_root));
-        let legacy = libsql::Builder::new_local(&db_path).build().await.unwrap();
-        let connection = legacy.connect().unwrap();
-        connection
-            .execute_batch("PRAGMA user_version=1; CREATE TABLE legacy_graph(id INTEGER);")
-            .await
-            .unwrap();
-        drop(connection);
-        drop(legacy);
-        let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
-        let before = filesystem_manifest(root.path());
-
-        let value = cold_doctor_runtime_value(&handshake).await;
-
-        assert_eq!(filesystem_manifest(root.path()), before);
-        assert_eq!(
-            value.pointer("/doctor_runtime/reason"),
-            Some(&serde_json::json!("project_store_schema_unsupported"))
-        );
-        assert_eq!(
-            value.pointer("/session_temporal_health/findings/0/kind"),
-            Some(&serde_json::json!("compatibility_drift"))
-        );
-    }
-
-    #[tokio::test]
-    async fn old_session_schema_returns_typed_findings_without_migrating() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(profile.join("registry.db")),
-        };
-        let initialized = TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize test project");
-        let session_path = initialized.store_layout().sessions_db_path.clone();
-        drop(initialized);
-        std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
-        let legacy = libsql::Builder::new_local(&session_path)
-            .build()
-            .await
-            .unwrap();
-        let connection = legacy.connect().unwrap();
-        connection
-            .execute("CREATE TABLE legacy_sessions(id INTEGER PRIMARY KEY)", ())
-            .await
-            .unwrap();
-        drop(connection);
-        drop(legacy);
-        let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
-        let before = filesystem_manifest(root.path());
-
-        let value = cold_doctor_runtime_value(&handshake).await;
-
-        assert_eq!(filesystem_manifest(root.path()), before);
-        assert_ne!(
-            value.pointer("/session_temporal_health/status"),
-            Some(&serde_json::json!("complete"))
-        );
-        assert!(
-            value
-                .pointer("/session_temporal_health/findings")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|findings| !findings.is_empty())
-        );
-    }
-
-    #[tokio::test]
-    async fn locked_store_returns_fixed_reason_without_filesystem_changes() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(profile.join("registry.db")),
-        };
-        let initialized = TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize test project");
-        let db_path = initialized.db_path().clone();
-        drop(initialized);
-        let locked = libsql::Builder::new_local(&db_path).build().await.unwrap();
-        let connection = locked.connect().unwrap();
-        connection
-            .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
-            .await
-            .unwrap();
-        let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
-        let before = filesystem_manifest(root.path());
-
-        let value = cold_doctor_runtime_value(&handshake).await;
-
-        assert_eq!(filesystem_manifest(root.path()), before);
-        assert_eq!(
-            value.pointer("/doctor_runtime/reason"),
-            Some(&serde_json::json!("project_store_locked"))
-        );
-        assert_eq!(
-            value.pointer("/doctor_runtime/status"),
-            Some(&serde_json::json!("locked"))
-        );
-        assert!(!value.to_string().contains(&db_path.display().to_string()));
-        connection.execute("ROLLBACK", ()).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn cold_complete_route_uses_immutable_session_health_without_authority_wal_shm() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        let registry_path = profile.join("registry.db");
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(registry_path.clone()),
-        };
-        let initialized = TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize test project");
-        let graph_path = initialized.db_path().clone();
-        let session_path = initialized.store_layout().sessions_db_path.clone();
-        assert_eq!(
-            doctor_runtime_store_paths(&project, &profile)
-                .expect("resolve initialized cold Doctor store paths"),
-            (graph_path.clone(), session_path.clone()),
-            "cold Doctor must resolve the initialized profile-sharded store"
-        );
-        drop(initialized);
-        checkpoint_sqlite_wal(&graph_path).await;
-        // Init leaves a zero-byte sessions placeholder; install + checkpoint a
-        // real temporal store so immutable=1 can observe a complete snapshot.
-        {
-            let session_db = crate::global_db::GlobalDb::open_at(&session_path)
-                .await
-                .expect("seed sessions store");
-            session_db
-                .checkpoint_result()
-                .await
-                .expect("checkpoint sessions store");
-            drop(session_db);
-        }
-        for path in [&graph_path, &session_path, &registry_path] {
-            remove_sqlite_sidecars(path);
-        }
-        let handshake = handshake(project, profile.clone(), registry_path.clone());
-        let before = filesystem_manifest(root.path());
-
-        let value = cold_doctor_runtime_value(&handshake).await;
-
-        assert_eq!(filesystem_manifest(root.path()), before);
-        assert_eq!(
-            value.pointer("/doctor_runtime/status"),
-            Some(&serde_json::json!("complete")),
-            "{value}"
-        );
-        assert_eq!(
-            value.pointer("/session_temporal_health/status"),
-            Some(&serde_json::json!("complete"))
-        );
-        assert_eq!(value.pointer("/session_temporal_health/reason"), None);
-        assert_eq!(
-            value.pointer("/database/authority_audit_reason"),
-            Some(&serde_json::json!("authority_audit_not_run"))
-        );
-        for path in [
-            graph_path.as_path(),
-            session_path.as_path(),
-            registry_path.as_path(),
-        ] {
-            for suffix in ["-wal", "-shm"] {
-                let mut sidecar = path.as_os_str().to_os_string();
-                sidecar.push(suffix);
-                assert!(
-                    !PathBuf::from(sidecar).exists(),
-                    "cold doctor must not create {suffix} for {}",
-                    path.display()
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn cold_uncheckpointed_session_wal_is_unavailable_without_artifacts() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        let registry_path = profile.join("registry.db");
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(registry_path.clone()),
-        };
-        let initialized = TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize test project");
-        let graph_path = initialized.db_path().clone();
-        let session_path = initialized.store_layout().sessions_db_path.clone();
-        drop(initialized);
-        checkpoint_sqlite_wal(&graph_path).await;
-        for path in [&graph_path, &registry_path] {
-            remove_sqlite_sidecars(path);
-        }
-        let session_db = crate::global_db::GlobalDb::open_at(&session_path)
-            .await
-            .expect("create an uncheckpointed temporal store");
-        assert!(
-            has_non_empty_wal(&session_path),
-            "fixture must retain a non-empty temporal WAL"
-        );
-        let handshake = handshake(project, profile.clone(), registry_path);
-        let before = filesystem_manifest(root.path());
-
-        let value = cold_doctor_runtime_value(&handshake).await;
-
-        assert_eq!(filesystem_manifest(root.path()), before);
-        assert_eq!(
-            value.pointer("/doctor_runtime/status"),
-            Some(&serde_json::json!("complete"))
-        );
-        assert_eq!(
-            value.pointer("/session_temporal_health/status"),
-            Some(&serde_json::json!("unavailable"))
-        );
-        assert_eq!(
-            value.pointer("/session_temporal_health/reason"),
-            Some(&serde_json::json!("uncheckpointed_wal"))
-        );
-        assert_eq!(
-            value.pointer("/session_temporal_health/findings"),
-            Some(&serde_json::json!([]))
-        );
-        drop(session_db);
-    }
-
-    #[tokio::test]
-    async fn cold_uncheckpointed_graph_wal_is_unavailable_without_artifacts() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        let registry_path = profile.join("registry.db");
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(registry_path.clone()),
-        };
-        let initialized = TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize test project");
-        let graph_path = initialized.db_path().clone();
-        drop(initialized);
-        let graph_db = libsql::Builder::new_local(&graph_path)
-            .build()
-            .await
-            .unwrap();
-        let graph_conn = graph_db.connect().unwrap();
-        graph_conn
-            .execute(
-                "CREATE TABLE cold_doctor_wal_probe(id INTEGER PRIMARY KEY)",
-                (),
-            )
-            .await
-            .unwrap();
-        assert!(
-            has_non_empty_wal(&graph_path),
-            "fixture must retain a non-empty graph WAL"
-        );
-        let handshake = handshake(project, profile.clone(), registry_path);
-        let before = filesystem_manifest(root.path());
-
-        let value = cold_doctor_runtime_value(&handshake).await;
-
-        assert_eq!(filesystem_manifest(root.path()), before);
-        assert_eq!(
-            value.pointer("/doctor_runtime/status"),
-            Some(&serde_json::json!("unavailable"))
-        );
-        assert_eq!(
-            value.pointer("/doctor_runtime/reason"),
-            Some(&serde_json::json!("project_store_uncheckpointed_wal"))
-        );
-        drop(graph_conn);
-        drop(graph_db);
-    }
-
-    #[tokio::test]
-    async fn cold_uninitialized_sessions_store_reports_fixed_reason_without_artifacts() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        let registry_path = profile.join("registry.db");
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(registry_path.clone()),
-        };
-        let initialized = TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize test project");
-        let graph_path = initialized.db_path().clone();
-        let session_path = initialized.store_layout().sessions_db_path.clone();
-        drop(initialized);
-        checkpoint_sqlite_wal(&graph_path).await;
-        for path in [&graph_path, &registry_path] {
-            remove_sqlite_sidecars(path);
-        }
-        std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
-        std::fs::write(&session_path, []).unwrap();
-        assert!(
-            session_path.is_file(),
-            "fixture must provide an uninitialized sessions placeholder"
-        );
-        assert!(
-            !crate::storage::has_sqlite_database_header(&session_path).unwrap_or(true),
-            "sessions placeholder must not be a SQLite database yet"
-        );
-        let handshake = handshake(project, profile.clone(), registry_path);
-        let before = filesystem_manifest(root.path());
-
-        let value = cold_doctor_runtime_value(&handshake).await;
-
-        assert_eq!(filesystem_manifest(root.path()), before);
-        assert_eq!(
-            value.pointer("/doctor_runtime/status"),
-            Some(&serde_json::json!("complete"))
-        );
-        assert_eq!(
-            value.pointer("/session_temporal_health/status"),
-            Some(&serde_json::json!("unavailable"))
-        );
-        assert_eq!(
-            value.pointer("/session_temporal_health/reason"),
-            Some(&serde_json::json!("session_store_uninitialized"))
-        );
-    }
-}
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]

@@ -1,0 +1,286 @@
+//! Daemon client admission: shared client deadlines, capacity admission, and
+//! typed saturation rejections.
+
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use tokio::time::{Duration, Instant, timeout, timeout_at};
+
+use super::{
+    BrokerStream, BrokerStreamTransport, DaemonAuthPreface, DaemonHandshake, JsonRpcRequest,
+    JsonRpcResponse, Result, StoreAdministration, TraceDecayError, log_daemon_event,
+    read_line_handling_wire_oversized, write_json_rpc_response,
+};
+use crate::mcp::ErrorCode;
+
+pub(crate) const MAX_CONCURRENT_DAEMON_CLIENTS: usize = 64;
+pub(crate) const RESERVED_DAEMON_CONTROL_CLIENTS: usize = 4;
+pub(crate) const DAEMON_SATURATION_RESPONSE_DEADLINE: Duration = Duration::from_millis(250);
+
+/// One monotonic wall-clock budget shared across daemon client connect, write,
+/// read, and decode stages. Outer CLI wrappers pass their Instant so a timeout
+/// cancels the in-flight stage rather than starting a fresh Duration clock.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DaemonClientDeadline {
+    deadline: Instant,
+}
+
+impl DaemonClientDeadline {
+    pub(crate) fn until(deadline: Instant) -> Result<Self> {
+        if Instant::now() >= deadline {
+            return Err(TraceDecayError::Config {
+                message: "daemon client deadline already elapsed".to_string(),
+            });
+        }
+        Ok(Self { deadline })
+    }
+
+    pub(crate) fn remaining(&self) -> Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "daemon client deadline already elapsed".to_string(),
+            })
+    }
+
+    pub(crate) async fn run<F, T>(
+        &self,
+        stage: &'static str,
+        request_label: &str,
+        fut: F,
+    ) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        match timeout_at(self.deadline, fut).await {
+            Ok(result) => result,
+            Err(_) => Err(TraceDecayError::Config {
+                message: format!(
+                    "daemon {request_label} timed out during {stage} before deadline; request outcome may be unknown"
+                ),
+            }),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct DaemonClientAdmission {
+    general_permits: Arc<tokio::sync::Semaphore>,
+    reserved_permits: Arc<tokio::sync::Semaphore>,
+    capacity: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DaemonClientAdmissionClass {
+    General,
+    ReservedControl,
+}
+
+pub(crate) struct DaemonClientPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    class: DaemonClientAdmissionClass,
+}
+
+impl DaemonClientPermit {
+    pub(crate) fn class(&self) -> DaemonClientAdmissionClass {
+        self.class
+    }
+}
+
+pub(crate) enum DaemonClientAdmissionOutcome {
+    Admitted(DaemonClientPermit),
+    Saturated(DaemonClientSaturationResponse),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DaemonClientSaturationResponse {
+    pub(crate) kind: DaemonClientSaturationKind,
+    pub(crate) retryable: bool,
+    pub(crate) capacity: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DaemonClientSaturationKind {
+    ClientCapacityReached,
+    BulkCapacityReached,
+}
+
+impl DaemonClientAdmission {
+    pub(crate) fn new(capacity: usize) -> Self {
+        let reserved = if capacity == 0 {
+            0
+        } else {
+            RESERVED_DAEMON_CONTROL_CLIENTS.min(capacity)
+        };
+        Self::with_reserved_capacity(capacity, reserved)
+    }
+
+    pub(crate) fn with_reserved_capacity(capacity: usize, reserved: usize) -> Self {
+        let reserved = reserved.min(capacity);
+        Self {
+            general_permits: Arc::new(tokio::sync::Semaphore::new(capacity - reserved)),
+            reserved_permits: Arc::new(tokio::sync::Semaphore::new(reserved)),
+            capacity,
+        }
+    }
+
+    pub(crate) fn try_admit(&self) -> DaemonClientAdmissionOutcome {
+        if let Ok(permit) = Arc::clone(&self.general_permits).try_acquire_owned() {
+            return DaemonClientAdmissionOutcome::Admitted(DaemonClientPermit {
+                _permit: permit,
+                class: DaemonClientAdmissionClass::General,
+            });
+        }
+        if let Ok(permit) = Arc::clone(&self.reserved_permits).try_acquire_owned() {
+            return DaemonClientAdmissionOutcome::Admitted(DaemonClientPermit {
+                _permit: permit,
+                class: DaemonClientAdmissionClass::ReservedControl,
+            });
+        }
+        DaemonClientAdmissionOutcome::Saturated(DaemonClientSaturationResponse {
+            kind: DaemonClientSaturationKind::ClientCapacityReached,
+            retryable: true,
+            capacity: self.capacity,
+        })
+    }
+}
+
+impl DaemonClientSaturationResponse {
+    pub(crate) fn into_json_rpc_with_id(self, id: serde_json::Value) -> JsonRpcResponse {
+        let message = match self.kind {
+            DaemonClientSaturationKind::ClientCapacityReached => "daemon client capacity reached",
+            DaemonClientSaturationKind::BulkCapacityReached => {
+                "daemon bulk capacity reached; reserved capacity is limited to health and status"
+            }
+        };
+        JsonRpcResponse::error_with_data(
+            id,
+            ErrorCode::InternalError,
+            message.to_string(),
+            serde_json::to_value(self).ok(),
+        )
+    }
+}
+
+pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
+    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line.trim()) else {
+        return false;
+    };
+    if request.method != "tools/call" {
+        return false;
+    }
+    let Ok((tool_name, _)) = super::projectless_tool_call(request.params.as_ref()) else {
+        return false;
+    };
+    matches!(
+        tool_name,
+        "tracedecay_status"
+            | "tracedecay_storage_status"
+            | "tracedecay_runtime"
+            | "tracedecay_health"
+            | "tracedecay_diagnostics"
+            | "tracedecay_diagnose"
+            | "tracedecay_memory_status"
+            | "tracedecay_lcm_status"
+            | "tracedecay_lcm_doctor"
+    )
+}
+
+pub(crate) async fn reject_reserved_bulk_request(
+    transport: &mut impl crate::mcp::McpTransport,
+    request_line: &str,
+    capacity: usize,
+) -> Result<()> {
+    let request_id = serde_json::from_str::<JsonRpcRequest>(request_line)
+        .ok()
+        .and_then(|request| request.id)
+        .unwrap_or(serde_json::Value::Null);
+    let response = DaemonClientSaturationResponse {
+        kind: DaemonClientSaturationKind::BulkCapacityReached,
+        retryable: true,
+        capacity,
+    }
+    .into_json_rpc_with_id(request_id);
+    write_json_rpc_response(transport, &response).await
+}
+
+async fn saturated_request_id(
+    transport: &mut BrokerStreamTransport,
+) -> Result<Option<serde_json::Value>> {
+    // A broker client sends a handshake before its JSON-RPC request, optionally
+    // preceded by an auth preface. Consume those frames so the rejection uses
+    // the request ID instead of being discarded as a notification.
+    let Some(first_line) = read_line_handling_wire_oversized(transport).await? else {
+        return Ok(None);
+    };
+    let handshake_line = if DaemonAuthPreface::from_line(&first_line).is_ok() {
+        let Some(handshake_line) = read_line_handling_wire_oversized(transport).await? else {
+            return Ok(None);
+        };
+        handshake_line
+    } else {
+        first_line
+    };
+    DaemonHandshake::from_line(&handshake_line)?;
+    let Some(request_line) = read_line_handling_wire_oversized(transport).await? else {
+        return Ok(None);
+    };
+    let request: JsonRpcRequest = serde_json::from_str(&request_line)?;
+    Ok(request.id)
+}
+
+pub(crate) async fn reject_saturated_daemon_client(
+    stream: BrokerStream,
+    response: DaemonClientSaturationResponse,
+) {
+    let mut transport = BrokerStreamTransport::new(stream);
+    let response = async {
+        let request_id = saturated_request_id(&mut transport)
+            .await?
+            .unwrap_or(serde_json::Value::Null);
+        write_json_rpc_response(&mut transport, &response.into_json_rpc_with_id(request_id)).await
+    };
+    match timeout(DAEMON_SATURATION_RESPONSE_DEADLINE, response).await {
+        Ok(Ok(())) => log_daemon_event(
+            "daemon_client",
+            &[("outcome", "client_capacity_reached".to_string())],
+        ),
+        Ok(Err(error)) => log_daemon_event(
+            "daemon_client",
+            &[
+                ("outcome", "saturation_response_failed".to_string()),
+                ("error", error.to_string()),
+            ],
+        ),
+        Err(_) => log_daemon_event(
+            "daemon_client",
+            &[("outcome", "saturation_response_timeout".to_string())],
+        ),
+    }
+}
+
+pub(super) fn coordinated_dashboard_automation_writer(
+    administration: StoreAdministration,
+) -> crate::dashboard::DashboardAutomationWriter {
+    Arc::new(move |operation| {
+        let administration = administration.clone();
+        Box::pin(async move { administration.with_writer(operation).await })
+    })
+}
+
+pub(super) fn coordinated_background_refresh_writer(
+    administration: StoreAdministration,
+) -> crate::mcp::server::BackgroundRefreshWriter {
+    Arc::new(move |request| {
+        let administration = administration.clone();
+        Box::pin(async move {
+            administration
+                .with_writer(|| async move {
+                    crate::mcp::server::execute_background_refresh_direct(request).await
+                })
+                .await
+        })
+    })
+}
