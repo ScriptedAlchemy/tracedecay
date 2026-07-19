@@ -5314,9 +5314,11 @@ async fn temporal_forward_migrates_eligible_legacy_sources_with_receipts() {
             )
             .await
             .unwrap();
-        let row = rows.next().await.unwrap().expect(
-            "projected observation must bind provenance to eligible lcm_raw_messages",
-        );
+        let row = rows
+            .next()
+            .await
+            .unwrap()
+            .expect("projected observation must bind provenance to eligible lcm_raw_messages");
         row.get::<String>(0).unwrap()
     };
     db.checkpoint().await;

@@ -529,13 +529,11 @@ mod lcm_definition_compatibility_tests {
         assert_closed_objects(&describe.input_schema);
         assert_closed_objects(&expand.input_schema);
         assert_eq!(
-            describe.input_schema["properties"]["target"]["oneOf"][1]["properties"]["node_id"]
-                ["type"],
+            describe.input_schema["properties"]["target"]["oneOf"][1]["properties"]["node_id"]["type"],
             "string"
         );
         assert_eq!(
-            expand.input_schema["properties"]["target"]["oneOf"][1]["properties"]["node_id"]
-                ["type"],
+            expand.input_schema["properties"]["target"]["oneOf"][1]["properties"]["node_id"]["type"],
             "string"
         );
         assert_eq!(

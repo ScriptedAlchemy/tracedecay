@@ -8,8 +8,8 @@ use tracedecay_domain::{
 
 use crate::global_db::{GlobalDb, GlobalDbReadSnapshot};
 use crate::query::temporal::ports::{
-    BindingDigest, KernelVersions, TemporalExecutionSnapshot, TemporalRetrievalScope,
-    TemporalSnapshotRequest, TemporalWatermarks,
+    BindingDigest, KernelVersions, TemporalExecutionSnapshot, TemporalSnapshotRequest,
+    TemporalWatermarks,
 };
 use crate::query::temporal::resolution::ValidatedAuthorization;
 use crate::sessions::lcm::{
@@ -357,7 +357,6 @@ async fn hydrate_anchor_content(
         grain,
     )
     .map_err(|_| CompatibilityReadError::Denied)?
-    .with_retrieval_scope(TemporalRetrievalScope::AllSessionsInAuthorizedRoot)
     .with_provider_scope(Some(provider.to_string()))
     .map_err(|_| CompatibilityReadError::Denied)?;
     let snapshot = TemporalExecutionSnapshot::new_authorized(

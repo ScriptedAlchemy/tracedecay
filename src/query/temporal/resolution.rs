@@ -910,18 +910,23 @@ fn summary_source_rejection(
         return Ok(Some(SummaryLineageRejection::SessionMismatch));
     }
     let horizon = summary.source_horizon();
+    let mut rejection = None;
     if let TemporalModeV1::AsOf { cutoff } = mode
         && summary.created_at() > cutoff
     {
-        return Ok(Some(SummaryLineageRejection::CreatedAfterCutoff));
+        prefer_summary_rejection(&mut rejection, SummaryLineageRejection::CreatedAfterCutoff);
     }
-    let Some(valid_through) = horizon.valid_through else {
-        return Ok(Some(SummaryLineageRejection::MissingValidHorizon));
+    let valid_through = match horizon.valid_through {
+        Some(valid_through) => Some(valid_through),
+        None => {
+            prefer_summary_rejection(&mut rejection, SummaryLineageRejection::MissingValidHorizon);
+            None
+        }
     };
-    if let TemporalModeV1::AsOf { cutoff } = mode
+    if let (TemporalModeV1::AsOf { cutoff }, Some(valid_through)) = (mode, valid_through)
         && (horizon.knowledge_through > cutoff || valid_through > cutoff)
     {
-        return Ok(Some(SummaryLineageRejection::HorizonAfterCutoff));
+        prefer_summary_rejection(&mut rejection, SummaryLineageRejection::HorizonAfterCutoff);
     }
     for anchor_id in summary.source_anchors() {
         control.checkpoint()?;
@@ -929,80 +934,117 @@ fn summary_source_rejection(
             .get(anchor_id)
             .copied()
             .unwrap_or(SummarySourceState::Missing);
-        match state {
+        let candidate = match state {
             SummarySourceState::Covered {
                 knowledge_at,
                 valid_time,
             } => {
                 if knowledge_at > horizon.knowledge_through {
-                    return Ok(Some(
-                        SummaryLineageRejection::SourceBeyondKnowledgeHorizon {
-                            anchor_id: anchor_id.clone(),
-                        },
-                    ));
-                }
-                match valid_time {
-                    TemporalValidityV1::Known { valid_at } if valid_at <= valid_through => {}
-                    TemporalValidityV1::Known { .. } => {
-                        return Ok(Some(SummaryLineageRejection::SourceBeyondValidHorizon {
-                            anchor_id: anchor_id.clone(),
-                        }));
+                    Some(SummaryLineageRejection::SourceBeyondKnowledgeHorizon {
+                        anchor_id: anchor_id.clone(),
+                    })
+                } else {
+                    match (valid_time, valid_through) {
+                        (TemporalValidityV1::Known { valid_at }, Some(valid_through))
+                            if valid_at <= valid_through =>
+                        {
+                            None
+                        }
+                        (TemporalValidityV1::Known { .. }, Some(_)) => {
+                            Some(SummaryLineageRejection::SourceBeyondValidHorizon {
+                                anchor_id: anchor_id.clone(),
+                            })
+                        }
+                        (TemporalValidityV1::Unknown, Some(_)) => {
+                            Some(SummaryLineageRejection::UnknownSourceValidTime {
+                                anchor_id: anchor_id.clone(),
+                            })
+                        }
+                        (_, None) => None,
                     }
-                    TemporalValidityV1::Unknown => {
-                        return Ok(Some(SummaryLineageRejection::UnknownSourceValidTime {
-                            anchor_id: anchor_id.clone(),
-                        }));
-                    }
                 }
             }
-            SummarySourceState::Stale => {
-                return Ok(Some(SummaryLineageRejection::StaleSource {
-                    anchor_id: anchor_id.clone(),
-                }));
-            }
-            SummarySourceState::Deleted => {
-                return Ok(Some(SummaryLineageRejection::DeletedSource {
-                    anchor_id: anchor_id.clone(),
-                }));
-            }
-            SummarySourceState::Redacted => {
-                return Ok(Some(SummaryLineageRejection::RedactedSource {
-                    anchor_id: anchor_id.clone(),
-                }));
-            }
-            SummarySourceState::Missing => {
-                return Ok(Some(SummaryLineageRejection::MissingSource {
-                    anchor_id: anchor_id.clone(),
-                }));
-            }
-            SummarySourceState::Unauthorized => {
-                return Ok(Some(SummaryLineageRejection::UnauthorizedSource {
-                    anchor_id: anchor_id.clone(),
-                }));
-            }
-            SummarySourceState::Locked => {
-                return Ok(Some(SummaryLineageRejection::LockedSource {
-                    anchor_id: anchor_id.clone(),
-                }));
-            }
-            SummarySourceState::Expired => {
-                return Ok(Some(SummaryLineageRejection::ExpiredSource {
-                    anchor_id: anchor_id.clone(),
-                }));
-            }
-            SummarySourceState::Unavailable => {
-                return Ok(Some(SummaryLineageRejection::UnavailableSource {
-                    anchor_id: anchor_id.clone(),
-                }));
-            }
-            SummarySourceState::Cycle => {
-                return Ok(Some(SummaryLineageRejection::CycleSource {
-                    anchor_id: anchor_id.clone(),
-                }));
-            }
+            SummarySourceState::Stale => Some(SummaryLineageRejection::StaleSource {
+                anchor_id: anchor_id.clone(),
+            }),
+            SummarySourceState::Deleted => Some(SummaryLineageRejection::DeletedSource {
+                anchor_id: anchor_id.clone(),
+            }),
+            SummarySourceState::Redacted => Some(SummaryLineageRejection::RedactedSource {
+                anchor_id: anchor_id.clone(),
+            }),
+            SummarySourceState::Missing => Some(SummaryLineageRejection::MissingSource {
+                anchor_id: anchor_id.clone(),
+            }),
+            SummarySourceState::Unauthorized => Some(SummaryLineageRejection::UnauthorizedSource {
+                anchor_id: anchor_id.clone(),
+            }),
+            SummarySourceState::Locked => Some(SummaryLineageRejection::LockedSource {
+                anchor_id: anchor_id.clone(),
+            }),
+            SummarySourceState::Expired => Some(SummaryLineageRejection::ExpiredSource {
+                anchor_id: anchor_id.clone(),
+            }),
+            SummarySourceState::Unavailable => Some(SummaryLineageRejection::UnavailableSource {
+                anchor_id: anchor_id.clone(),
+            }),
+            SummarySourceState::Cycle => Some(SummaryLineageRejection::CycleSource {
+                anchor_id: anchor_id.clone(),
+            }),
+        };
+        if let Some(candidate) = candidate {
+            prefer_summary_rejection(&mut rejection, candidate);
         }
     }
-    Ok(None)
+    Ok(rejection)
+}
+
+fn prefer_summary_rejection(
+    current: &mut Option<SummaryLineageRejection>,
+    candidate: SummaryLineageRejection,
+) {
+    let replace = current.as_ref().is_none_or(|existing| {
+        summary_rejection_order(&candidate) < summary_rejection_order(existing)
+    });
+    if replace {
+        *current = Some(candidate);
+    }
+}
+
+fn summary_rejection_order(rejection: &SummaryLineageRejection) -> (u8, u8, &str) {
+    let (privacy, kind, identity) = match rejection {
+        SummaryLineageRejection::UnauthorizedSource { anchor_id } => (0, 0, anchor_id.as_str()),
+        SummaryLineageRejection::SessionMismatch => (0, 1, ""),
+        SummaryLineageRejection::RedactedSource { anchor_id } => (1, 0, anchor_id.as_str()),
+        SummaryLineageRejection::DeletedSource { anchor_id } => (1, 1, anchor_id.as_str()),
+        SummaryLineageRejection::ExpiredSource { anchor_id } => (1, 2, anchor_id.as_str()),
+        SummaryLineageRejection::LockedSource { anchor_id } => (2, 0, anchor_id.as_str()),
+        SummaryLineageRejection::UnavailableSource { anchor_id } => (3, 0, anchor_id.as_str()),
+        SummaryLineageRejection::CycleSource { anchor_id } => (3, 1, anchor_id.as_str()),
+        SummaryLineageRejection::MissingSource { anchor_id } => (3, 2, anchor_id.as_str()),
+        SummaryLineageRejection::StaleSource { anchor_id } => (4, 0, anchor_id.as_str()),
+        SummaryLineageRejection::SourceBeyondKnowledgeHorizon { anchor_id } => {
+            (5, 0, anchor_id.as_str())
+        }
+        SummaryLineageRejection::UnknownSourceValidTime { anchor_id } => (5, 1, anchor_id.as_str()),
+        SummaryLineageRejection::SourceBeyondValidHorizon { anchor_id } => {
+            (5, 2, anchor_id.as_str())
+        }
+        SummaryLineageRejection::CreatedAfterCutoff => (6, 0, ""),
+        SummaryLineageRejection::HorizonAfterCutoff => (6, 1, ""),
+        SummaryLineageRejection::MissingValidHorizon => (6, 2, ""),
+        SummaryLineageRejection::MissingPredecessor {
+            predecessor_summary_id,
+        } => (7, 0, predecessor_summary_id.as_str()),
+        SummaryLineageRejection::IneligiblePredecessor {
+            predecessor_summary_id,
+        } => (7, 1, predecessor_summary_id.as_str()),
+        SummaryLineageRejection::HorizonRegression {
+            predecessor_summary_id,
+        } => (7, 2, predecessor_summary_id.as_str()),
+        SummaryLineageRejection::Cycle => (7, 3, ""),
+    };
+    (privacy, kind, identity)
 }
 
 fn summary_chain_rejection(
@@ -2225,15 +2267,15 @@ mod tests {
             (
                 SummarySourceState::Locked,
                 SummarySourceState::Expired,
-                SummaryLineageRejection::LockedSource {
-                    anchor_id: anchor("left"),
+                SummaryLineageRejection::ExpiredSource {
+                    anchor_id: anchor("right"),
                 },
             ),
             (
                 SummarySourceState::Expired,
                 SummarySourceState::Deleted,
-                SummaryLineageRejection::ExpiredSource {
-                    anchor_id: anchor("left"),
+                SummaryLineageRejection::DeletedSource {
+                    anchor_id: anchor("right"),
                 },
             ),
             (
@@ -2253,8 +2295,8 @@ mod tests {
             (
                 SummarySourceState::Stale,
                 SummarySourceState::Missing,
-                SummaryLineageRejection::StaleSource {
-                    anchor_id: anchor("left"),
+                SummaryLineageRejection::MissingSource {
+                    anchor_id: anchor("right"),
                 },
             ),
         ];

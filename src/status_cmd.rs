@@ -78,9 +78,7 @@ async fn daemon_tool_json_within(
     )
     .await
     .map_err(|_| tracedecay::errors::TraceDecayError::Config {
-        message: format!(
-            "timed out waiting for daemon tool {tool_name} before status deadline"
-        ),
+        message: format!("timed out waiting for daemon tool {tool_name} before status deadline"),
     })?
 }
 
@@ -378,5 +376,4 @@ mod tests {
         assert_eq!(args["include_session_ingest"], false);
         assert_eq!(args["include_staleness"], false);
     }
-
 }

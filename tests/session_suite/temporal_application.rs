@@ -26,7 +26,7 @@ use tracedecay::application::session::{
 };
 use tracedecay::global_db::GlobalDbSessionTemporalExecution;
 use tracedecay::query::temporal::context::{
-    CompactContext, ContextBudget, VersionedTokenEstimator,
+    CompactContext, ContextBudget, TokenPolicy, VersionedTokenEstimator,
 };
 use tracedecay::query::temporal::cursor::CursorError;
 use tracedecay::query::temporal::ports::{
@@ -229,8 +229,8 @@ impl VersionedTokenEstimator for Words {
         self.0
     }
 
-    fn estimate(&self, text: &str) -> u64 {
-        text.split_whitespace().count() as u64
+    fn token_policy(&self) -> TokenPolicy {
+        TokenPolicy::Whitespace
     }
 }
 
@@ -493,6 +493,7 @@ impl SessionTemporalExecutionPort for FakeExecutionPort {
                     session: None,
                     source: None,
                     evidence_role: None,
+                    contributions: Vec::new(),
                 });
             }
             Ok(SessionTemporalExecutionReport::new(
@@ -906,7 +907,9 @@ fn fixture_observation_for(
     let payload = serde_json::to_value(envelope).unwrap();
     let identity = ObservationIdentityMaterialV1::for_native_record(
         source,
-        ObservationScopeV1::Profile,
+        ObservationScopeV1::Project {
+            project_id: ProjectId::new("project.tracedecay").unwrap(),
+        },
         ObservationSourceGenerationV1::new(1).unwrap(),
         range,
         ObservationOrderingDomainV1::SnapshotOrder,
@@ -2117,7 +2120,7 @@ async fn production_root_scope_isolated_filtered_restartable_and_read_only() {
         fixture
             .execute(
                 "INSERT INTO sessions (provider, session_id, project_key, project_path)
-                 VALUES (?1, ?2, 'user', '/fixture')",
+                 VALUES (?1, ?2, 'project.tracedecay', '/fixture')",
                 libsql::params![*provider, *session_id],
             )
             .await
@@ -2425,7 +2428,7 @@ async fn production_occurrence_hydration_is_nonempty_and_external_payload_is_imm
     fixture
         .execute(
             "INSERT INTO sessions (provider, session_id, project_key, project_path)
-             VALUES ('provider.application', 'session.temporal.application', 'user', '/fixture')",
+             VALUES ('provider.application', 'session.temporal.application', 'project.tracedecay', '/fixture')",
             (),
         )
         .await
@@ -2742,6 +2745,14 @@ async fn production_complete_zero_preserves_authoritative_database_hash() {
     let db = open_lcm_db(&tmp).await;
     let fixture_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
     let fixture = fixture_db.connect().unwrap();
+    fixture
+        .execute(
+            "INSERT INTO sessions (provider, session_id, project_key, project_path)
+             VALUES ('provider.application', 'session.temporal.application', 'project.tracedecay', '/fixture')",
+            (),
+        )
+        .await
+        .unwrap();
     fixture
         .execute(
             "INSERT INTO session_query_cursor_keys

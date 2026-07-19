@@ -19,7 +19,8 @@ use crate::query::temporal::context::{ContextBudget, ContextError, VersionedToke
 use crate::query::temporal::cursor::CursorError;
 use crate::query::temporal::hydration::HydrationError;
 use crate::query::temporal::ports::{
-    ExecutionControl, ExecutionLimits, TemporalPortError, TemporalRetrievalScope,
+    ExecutionControl, ExecutionLimits, TemporalAuthorizedRoot, TemporalPortError,
+    TemporalRetrievalScope,
 };
 use crate::query::temporal::ranking::DiversityLimits;
 use crate::query::temporal::resolution::SummaryLineageRejection;
@@ -334,9 +335,10 @@ where
             return SessionRetrievalOutcome::Cancelled;
         }
 
-        let root_digest = digest_root(context.identity());
+        let root_digest = digest_root(grant.scope().authorized_root().identity());
         let grant_digest = digest_grant(&grant);
         let access_digest = digest_policy(grant.policy_digest());
+        let filter_digest = digest_filters(&query);
         let request_digest = digest_request(
             context,
             &query,
@@ -360,6 +362,11 @@ where
             query.temporal_mode,
             query.grain,
         )
+        .and_then(|request| request.with_filter_digest(filter_digest.clone()))
+        .and_then(|request| {
+            temporal_authorized_root(grant.scope().authorized_root().identity())
+                .and_then(|root| request.with_authorized_root(root))
+        })
         .map(|request| {
             request.with_retrieval_scope(temporal_retrieval_scope(&query.retrieval_scope))
         })
@@ -382,6 +389,7 @@ where
             self.configuration.ranking_version,
             configuration_digest,
         );
+        let expected_execution = execution.clone();
         let execution = async { self.execution.execute(execution, &self.estimator).await };
         tokio::pin!(execution);
         let cancellation = context.cancellation().cancelled();
@@ -403,7 +411,10 @@ where
             result = &mut execution => result,
         };
         match result {
-            Ok(report) => map_report(report, query.freshness_policy),
+            Ok(report) if expected_execution.validates_report(&report) => {
+                map_report(report, query.freshness_policy)
+            }
+            Ok(_) => SessionRetrievalOutcome::Unavailable,
             Err(error) => map_execution_error(error),
         }
     }
@@ -433,6 +444,24 @@ fn temporal_retrieval_scope(scope: &SessionRetrievalScope) -> TemporalRetrievalS
     }
 }
 
+fn temporal_authorized_root(
+    identity: &ResolvedSessionIdentity,
+) -> Result<TemporalAuthorizedRoot, TemporalPortError> {
+    match identity.owner() {
+        SessionOwner::Profile { .. } => TemporalAuthorizedRoot::profile(
+            identity.profile_id().as_str(),
+            identity.store_id().as_str(),
+            identity.root_id().as_str(),
+        ),
+        SessionOwner::Project { project_id, .. } => TemporalAuthorizedRoot::project(
+            identity.profile_id().as_str(),
+            project_id.as_str(),
+            identity.store_id().as_str(),
+            identity.root_id().as_str(),
+        ),
+    }
+}
+
 fn map_report(
     report: crate::application::session::ports::SessionTemporalExecutionReport,
     freshness_policy: SessionFreshnessPolicy,
@@ -458,6 +487,20 @@ fn map_report(
             .summary_omissions
             .iter()
             .map(|omission| &omission.rejection);
+        if omissions
+            .iter()
+            .any(|omission| omission.reason == ContextOmissionReasonV1::Unauthorized)
+            || summary_rejections.clone().any(|rejection| {
+                matches!(
+                    rejection,
+                    SummaryLineageRejection::UnauthorizedSource { .. }
+                        | SummaryLineageRejection::SessionMismatch
+                )
+            })
+            || coverage.hidden != 0
+        {
+            return SessionRetrievalOutcome::Denied;
+        }
         if omissions
             .iter()
             .any(|omission| omission.reason == ContextOmissionReasonV1::Locked)
@@ -490,20 +533,6 @@ fn map_report(
             || coverage.redacted != 0
         {
             return SessionRetrievalOutcome::Redacted;
-        }
-        if omissions
-            .iter()
-            .any(|omission| omission.reason == ContextOmissionReasonV1::Unauthorized)
-            || summary_rejections.clone().any(|rejection| {
-                matches!(
-                    rejection,
-                    SummaryLineageRejection::UnauthorizedSource { .. }
-                        | SummaryLineageRejection::SessionMismatch
-                )
-            })
-            || coverage.hidden != 0
-        {
-            return SessionRetrievalOutcome::Denied;
         }
         if omissions.iter().any(|omission| {
             matches!(
@@ -568,9 +597,15 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             TemporalPortError::Cancelled | TemporalPortError::DeadlineExceeded => {
                 SessionRetrievalOutcome::Cancelled
             }
-            TemporalPortError::BudgetExceeded { .. } => SessionRetrievalOutcome::BudgetExhausted,
+            TemporalPortError::BudgetExceeded { .. }
+            | TemporalPortError::ParticipantLimitExceeded { .. }
+            | TemporalPortError::ParticipantManifestBytesExceeded { .. } => {
+                SessionRetrievalOutcome::BudgetExhausted
+            }
             TemporalPortError::UnauthorizedSnapshot => SessionRetrievalOutcome::Denied,
             TemporalPortError::InvalidBinding { .. }
+            | TemporalPortError::EmptyParticipantManifest
+            | TemporalPortError::DuplicateParticipant
             | TemporalPortError::ZeroGeneration
             | TemporalPortError::ZeroVersion { .. }
             | TemporalPortError::Read { .. } => SessionRetrievalOutcome::Unavailable,
@@ -579,6 +614,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             CursorError::RootMismatch
             | CursorError::SessionMismatch
             | CursorError::WrongAccess
+            | CursorError::FilterMismatch
             | CursorError::TemporalModeMismatch
             | CursorError::GrainMismatch => SessionRetrievalOutcome::WrongScope,
             CursorError::Malformed | CursorError::Tampered | CursorError::SortKeyMismatch => {
@@ -589,6 +625,8 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             | CursorError::RankingMismatch
             | CursorError::ConfigurationMismatch
             | CursorError::GenerationMismatch
+            | CursorError::ParticipantManifestMismatch
+            | CursorError::EpochMismatch
             | CursorError::SourceWatermarkMismatch
             | CursorError::ProjectionWatermarkMismatch
             | CursorError::IndexWatermarkMismatch
@@ -703,7 +741,7 @@ fn digest_grant(grant: &crate::application::session::types::SessionAuthorization
             TemporalModeV1::Current | TemporalModeV1::Evolution | TemporalModeV1::Forensic => None,
         },
         grain: grant.scope().grain().as_str(),
-        root_digest: digest_root(grant.scope().identity()),
+        root_digest: digest_root(grant.scope().authorized_root().identity()),
     })
 }
 
@@ -815,6 +853,34 @@ fn digest_request(
         schema_version: configuration.schema_version,
         ranking_version: configuration.ranking_version,
         configuration_version: hex::encode(context.configuration_digest().as_bytes()),
+    })
+}
+
+fn digest_filters(query: &SessionTemporalQuery) -> String {
+    #[derive(Serialize)]
+    struct FilterBinding<'a> {
+        format_version: u8,
+        query: &'a str,
+        scope_kind: &'static str,
+        session_id: Option<&'a str>,
+        provider: Option<&'a str>,
+        temporal_mode: &'static str,
+        cutoff_micros: Option<i64>,
+        grain: &'static str,
+    }
+
+    sha256_json(&FilterBinding {
+        format_version: 1,
+        query: &query.query,
+        scope_kind: query.retrieval_scope.kind(),
+        session_id: query.retrieval_scope.session_id().map(SessionId::as_str),
+        provider: query.provider.as_deref(),
+        temporal_mode: query.temporal_mode.as_str(),
+        cutoff_micros: match query.temporal_mode {
+            TemporalModeV1::AsOf { cutoff } => Some(cutoff.0),
+            TemporalModeV1::Current | TemporalModeV1::Evolution | TemporalModeV1::Forensic => None,
+        },
+        grain: query.grain.as_str(),
     })
 }
 

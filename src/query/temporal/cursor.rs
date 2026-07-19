@@ -6,11 +6,11 @@ use tracedecay_domain::{
 
 use super::ports::{
     CursorKeyError, CursorSignature, SessionCursorAuthenticator, TemporalExecutionSnapshot,
-    TemporalRetrievalScope,
+    TemporalParticipantManifest, TemporalRetrievalScope,
 };
 
 const CURSOR_FORMAT_VERSION: &str = "1";
-const MAX_CURSOR_PAYLOAD_HEX_BYTES: usize = 32 * 1024;
+const MAX_CURSOR_PAYLOAD_HEX_BYTES: usize = 2 * 65_536;
 const MAX_CURSOR_KEY_ID_HEX_BYTES: usize = 2 * 1024;
 const MAX_SORT_KEY_STABLE_ID_BYTES: usize = 4 * 1024;
 
@@ -30,6 +30,8 @@ pub enum CursorError {
     Tampered,
     #[error("cursor belongs to a different request")]
     WrongRequest,
+    #[error("cursor semantic filters changed")]
+    FilterMismatch,
     #[error("cursor root binding changed")]
     RootMismatch,
     #[error("cursor retrieval scope or session binding changed")]
@@ -52,6 +54,10 @@ pub enum CursorError {
     KeyVersionMismatch,
     #[error("cursor execution generation changed")]
     GenerationMismatch,
+    #[error("cursor participant generation manifest changed")]
+    ParticipantManifestMismatch,
+    #[error("cursor snapshot epoch changed")]
+    EpochMismatch,
     #[error("cursor source watermark changed")]
     SourceWatermarkMismatch,
     #[error("cursor projection watermark changed")]
@@ -72,6 +78,7 @@ pub enum CursorError {
 #[serde(deny_unknown_fields)]
 struct CursorPayload {
     request_digest: String,
+    filter_digest: String,
     root_digest: String,
     scope_kind: CursorScopeKind,
     session_id: Option<String>,
@@ -86,6 +93,8 @@ struct CursorPayload {
     projection_watermark: u64,
     index_watermark: u64,
     summary_watermark: u64,
+    participant_manifest: TemporalParticipantManifest,
+    epoch_digest: String,
     schema_version: u32,
     ranking_version: u32,
     configuration_digest: String,
@@ -104,6 +113,7 @@ impl CursorPayload {
         snapshot.cursor_key().ok_or(CursorError::KeyUnavailable)?;
         Ok(Self {
             request_digest: snapshot.request_digest().as_str().to_string(),
+            filter_digest: snapshot.filter_digest().as_str().to_string(),
             root_digest: snapshot.root_digest().as_str().to_string(),
             scope_kind: cursor_scope_kind(snapshot.request().retrieval_scope()),
             session_id: snapshot
@@ -121,6 +131,8 @@ impl CursorPayload {
             projection_watermark: snapshot.watermarks().projection,
             index_watermark: snapshot.watermarks().index,
             summary_watermark: snapshot.watermarks().summary,
+            participant_manifest: snapshot.participant_manifest().clone(),
+            epoch_digest: snapshot.participant_manifest().epoch_digest().to_string(),
             schema_version: snapshot.versions().schema,
             ranking_version: snapshot.versions().ranking,
             configuration_digest: snapshot
@@ -259,6 +271,9 @@ fn verify_bindings(
     if payload.request_digest != expected.request_digest().as_str() {
         return Err(CursorError::WrongRequest);
     }
+    if payload.filter_digest != expected.filter_digest().as_str() {
+        return Err(CursorError::FilterMismatch);
+    }
     if payload.access_digest != expected.access_digest().as_str() {
         return Err(CursorError::WrongAccess);
     }
@@ -285,6 +300,12 @@ fn verify_bindings(
     }
     if payload.summary_watermark != expected_watermarks.summary {
         return Err(CursorError::SummaryWatermarkMismatch);
+    }
+    if &payload.participant_manifest != expected.participant_manifest() {
+        return Err(CursorError::ParticipantManifestMismatch);
+    }
+    if payload.epoch_digest != expected.participant_manifest().epoch_digest() {
+        return Err(CursorError::EpochMismatch);
     }
     if payload.schema_version != expected.versions().schema {
         return Err(CursorError::SchemaMismatch);
@@ -344,7 +365,8 @@ mod tests {
     use super::*;
     use crate::query::temporal::ports::{
         BindingDigest, CursorKeyError, CursorSignature, KernelVersions, SessionCursorAuthenticator,
-        TemporalExecutionSnapshot, TemporalSnapshotRequest, TemporalWatermarks,
+        TemporalExecutionSnapshot, TemporalParticipantGeneration, TemporalParticipantManifest,
+        TemporalSnapshotRequest, TemporalSourceAccess, TemporalWatermarks,
     };
 
     struct KeyAuth {
@@ -462,6 +484,28 @@ mod tests {
             knowledge_at_micros: 42,
             stable_id: "anchor-9".to_string(),
         }
+    }
+
+    fn participant_manifest(generation: u64) -> TemporalParticipantManifest {
+        TemporalParticipantManifest::new(vec![
+            TemporalParticipantGeneration::new(
+                SessionId::new("session-1").expect("session"),
+                "source-1",
+                TemporalWatermarks {
+                    generation,
+                    source: 11,
+                    projection: 13,
+                    index: 17,
+                    summary: 19,
+                },
+                23,
+                &BindingDigest::new("configuration", digest('3')).expect("configuration"),
+                &BindingDigest::new("authorization", digest('2')).expect("authorization"),
+                TemporalSourceAccess::Authorized,
+            )
+            .expect("participant"),
+        ])
+        .expect("manifest")
     }
 
     fn resign(
@@ -608,6 +652,41 @@ mod tests {
     }
 
     #[test]
+    fn cursor_binds_filters_participant_manifest_and_epoch_independently() {
+        let auth = auth(31);
+        let expected = snapshot('2', 13)
+            .with_participant_manifest(participant_manifest(7))
+            .expect("manifest");
+        let encoded = encode_cursor(&expected, &sort_key(), &auth).expect("encode");
+
+        let filter_drift = TemporalExecutionSnapshot::new(
+            expected
+                .request()
+                .clone()
+                .with_filter_digest(digest('9'))
+                .expect("filter"),
+            expected.watermarks(),
+            expected.versions().clone(),
+            expected.cursor_key().cloned(),
+        )
+        .expect("filter snapshot")
+        .with_participant_manifest(expected.participant_manifest().clone())
+        .expect("filter manifest");
+        assert_eq!(
+            verify_cursor(&encoded, &filter_drift, &auth),
+            Err(CursorError::FilterMismatch)
+        );
+
+        let participant_drift = snapshot('2', 13)
+            .with_participant_manifest(participant_manifest(8))
+            .expect("changed manifest");
+        assert_eq!(
+            verify_cursor(&encoded, &participant_drift, &auth),
+            Err(CursorError::ParticipantManifestMismatch)
+        );
+    }
+
+    #[test]
     fn malformed_cursor_is_typed() {
         assert_eq!(
             verify_cursor("not-a-cursor", &snapshot('2', 13), &auth(1)),
@@ -696,6 +775,10 @@ mod tests {
             CursorError::WrongRequest
         );
         mismatch!(
+            |payload: &mut CursorPayload| payload.filter_digest = digest('9'),
+            CursorError::FilterMismatch
+        );
+        mismatch!(
             |payload: &mut CursorPayload| payload.root_digest = digest('9'),
             CursorError::RootMismatch
         );
@@ -754,6 +837,10 @@ mod tests {
         mismatch!(
             |payload: &mut CursorPayload| payload.summary_watermark += 1,
             CursorError::SummaryWatermarkMismatch
+        );
+        mismatch!(
+            |payload: &mut CursorPayload| payload.epoch_digest = digest('9'),
+            CursorError::EpochMismatch
         );
         mismatch!(
             |payload: &mut CursorPayload| payload.last_sort_key.stable_id.clear(),

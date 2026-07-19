@@ -318,8 +318,14 @@ fn map_port_error(error: TemporalPortError) -> TemporalKernelError {
     match error {
         TemporalPortError::Cancelled => TemporalKernelError::Cancelled,
         TemporalPortError::DeadlineExceeded => TemporalKernelError::DeadlineExceeded,
-        TemporalPortError::BudgetExceeded { .. } => TemporalKernelError::BudgetExceeded,
+        TemporalPortError::BudgetExceeded { .. }
+        | TemporalPortError::ParticipantLimitExceeded { .. }
+        | TemporalPortError::ParticipantManifestBytesExceeded { .. } => {
+            TemporalKernelError::BudgetExceeded
+        }
         TemporalPortError::InvalidBinding { .. }
+        | TemporalPortError::EmptyParticipantManifest
+        | TemporalPortError::DuplicateParticipant
         | TemporalPortError::ZeroGeneration
         | TemporalPortError::UnauthorizedSnapshot
         | TemporalPortError::ZeroVersion { .. }
