@@ -15301,6 +15301,145 @@ async fn test_move_symbol_dry_run_reports_impact_and_writes_nothing() {
 }
 
 #[tokio::test]
+async fn test_move_symbol_resolves_qualified_names_like_bare_names() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    move_pricing_fixture(project).await;
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
+    let before_orders = fs::read_to_string(project.join("src/orders.rs")).unwrap();
+    let mut expected = None;
+
+    for symbol in [
+        "compute_grand_total",
+        "pricing::compute_grand_total",
+        "crate::pricing::compute_grand_total",
+        "src/pricing.rs::compute_grand_total",
+        r"src\pricing.rs::compute_grand_total",
+    ] {
+        let result = handle_tool_call(
+            &cg,
+            "tracedecay_move_symbol",
+            json!({ "symbol": symbol, "dest_file": "src/grand_total.rs" }),
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("move for {symbol:?} failed: {error}"));
+        let payload = move_payload(&result);
+        assert_eq!(payload["success"], true, "symbol {symbol:?}: {payload}");
+        assert_eq!(payload["dry_run"], true, "symbol {symbol:?}: {payload}");
+
+        if let Some(expected) = &expected {
+            assert_eq!(
+                payload["source_file"], expected["source_file"],
+                "symbol {symbol:?}: {payload}"
+            );
+            assert_eq!(
+                payload["moved_span"], expected["moved_span"],
+                "symbol {symbol:?}: {payload}"
+            );
+            assert_eq!(
+                payload["impact"], expected["impact"],
+                "symbol {symbol:?}: {payload}"
+            );
+            assert_eq!(
+                payload["applied_imports"], expected["applied_imports"],
+                "symbol {symbol:?}: {payload}"
+            );
+        } else {
+            expected = Some(payload);
+        }
+    }
+
+    assert_eq!(
+        fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
+        before_pricing
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/orders.rs")).unwrap(),
+        before_orders
+    );
+    assert!(!project.join("src/grand_total.rs").exists());
+}
+
+#[tokio::test]
+async fn test_move_symbol_only_prefers_callable_for_bare_names() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub mod a;\npub mod b;\n").unwrap();
+    fs::write(
+        project.join("src/a.rs"),
+        "pub mod common {\n    pub fn same() -> u32 { 1 }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("src/b.rs"),
+        "pub mod common {\n    pub struct same;\n}\n",
+    )
+    .unwrap();
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let before_a = fs::read_to_string(project.join("src/a.rs")).unwrap();
+    let before_b = fs::read_to_string(project.join("src/b.rs")).unwrap();
+
+    let bare = handle_tool_call(
+        &cg,
+        "tracedecay_move_symbol",
+        json!({ "symbol": "same", "dest_file": "src/moved.rs" }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let bare_payload = move_payload(&bare);
+    assert_eq!(bare_payload["success"], true, "payload: {bare_payload}");
+    assert_eq!(bare_payload["source_file"], "src/a.rs");
+
+    let qualified = handle_tool_call(
+        &cg,
+        "tracedecay_move_symbol",
+        json!({ "symbol": "common::same", "dest_file": "src/moved.rs" }),
+        None,
+        None,
+    )
+    .await
+    .expect_err("qualified function/struct collision must refuse the move");
+    assert!(
+        qualified.to_string().contains("is ambiguous"),
+        "qualified error: {qualified}"
+    );
+
+    let wrong_module = handle_tool_call(
+        &cg,
+        "tracedecay_move_symbol",
+        json!({ "symbol": "wrong::same", "dest_file": "src/moved.rs" }),
+        None,
+        None,
+    )
+    .await
+    .expect_err("wrong module must not fall back to the bare callable");
+    assert!(
+        wrong_module.to_string().contains("not found"),
+        "wrong-module error: {wrong_module}"
+    );
+
+    assert_eq!(
+        fs::read_to_string(project.join("src/a.rs")).unwrap(),
+        before_a
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/b.rs")).unwrap(),
+        before_b
+    );
+    assert!(!project.join("src/moved.rs").exists());
+}
+
+#[tokio::test]
 async fn test_move_symbol_apply_moves_and_rerun_errors_cleanly() {
     let dir = test_temp_dir();
     let project = dir.path();

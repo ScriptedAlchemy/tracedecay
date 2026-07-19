@@ -7,6 +7,103 @@ use super::sql::{collect_rows, path_prefix_like_value};
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
 
+/// Canonicalizes a caller-supplied qualified symbol name against stored graph
+/// names without turning a qualified request into a bare-name fallback.
+#[derive(Debug)]
+struct CanonicalQualifiedName {
+    normalized: String,
+    without_crate_prefix: String,
+    terminal_name: String,
+}
+
+impl CanonicalQualifiedName {
+    fn new(value: &str) -> Self {
+        let normalized = normalize_qualified_name(value);
+        let without_crate_prefix = strip_crate_prefix(&normalized).to_string();
+        let terminal_name = without_crate_prefix
+            .rsplit("::")
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        Self {
+            normalized,
+            without_crate_prefix,
+            terminal_name,
+        }
+    }
+
+    fn is_qualified(&self) -> bool {
+        self.normalized.contains("::")
+    }
+
+    fn matches(&self, node: &Node) -> bool {
+        let stored = normalize_qualified_name(&node.qualified_name);
+        let stored_without_crate_prefix = strip_crate_prefix(&stored);
+        if stored_without_crate_prefix == self.without_crate_prefix
+            || qualified_suffix_matches(stored_without_crate_prefix, &self.without_crate_prefix)
+        {
+            return true;
+        }
+
+        rust_module_qualified_name(node)
+            .is_some_and(|module_name| module_name == self.without_crate_prefix)
+    }
+
+    fn exactly_matches(&self, node: &Node) -> bool {
+        normalize_qualified_name(&node.qualified_name) == self.normalized
+    }
+}
+
+fn normalize_qualified_name(value: &str) -> String {
+    let normalized = value.trim().replace('\\', "/");
+    normalized
+        .strip_prefix("./")
+        .unwrap_or(&normalized)
+        .to_string()
+}
+
+fn strip_crate_prefix(value: &str) -> &str {
+    value.strip_prefix("crate::").unwrap_or(value)
+}
+
+fn qualified_suffix_matches(value: &str, suffix: &str) -> bool {
+    !suffix.is_empty()
+        && value
+            .strip_suffix(suffix)
+            .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with("::"))
+}
+
+fn rust_module_qualified_name(node: &Node) -> Option<String> {
+    let module = rust_module_path(&node.file_path)?;
+    let file_path = normalize_qualified_name(&node.file_path);
+    let stored = normalize_qualified_name(&node.qualified_name);
+    let suffix = stored.strip_prefix(&file_path)?.strip_prefix("::")?;
+    (!suffix.is_empty()).then(|| format!("{module}::{suffix}"))
+}
+
+fn rust_module_path(file_path: &str) -> Option<String> {
+    let file_path = normalize_qualified_name(file_path);
+    let source_relative = file_path
+        .rsplit_once("/src/")
+        .map(|(_, suffix)| suffix)
+        .or_else(|| file_path.strip_prefix("src/"))?;
+    let rust_relative = source_relative.strip_suffix(".rs")?;
+    let mut segments: Vec<&str> = rust_relative
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+
+    match segments.last().copied() {
+        Some("mod") => {
+            segments.pop();
+        }
+        Some("lib" | "main") if segments.len() == 1 => return None,
+        _ => {}
+    }
+
+    (!segments.is_empty()).then(|| segments.join("::"))
+}
+
 impl Database {
     /// Returns all nodes whose `name` column matches the given bare identifier.
     ///
@@ -40,17 +137,42 @@ impl Database {
     /// `idx_nodes_qualified_name` index for cross-run lookups by name,
     /// independent of content-hash IDs that change on edits.
     pub async fn get_nodes_by_qualified_name(&self, qname: &str) -> Result<Vec<Node>> {
+        let lookup = CanonicalQualifiedName::new(qname);
         let snapshot = self
             .begin_isolated_read_snapshot("get_nodes_by_qualified_name")
             .await?;
-        // Exact match first — preserves the precise-lookup contract.
+
+        // Bare names retain find_exact_symbol's indexed name-lookup behavior.
+        // Qualified requests are handled below and never fall back to this path.
+        if !lookup.is_qualified() {
+            let bare_sql = "SELECT id, kind, name, qualified_name, file_path,
+                            start_line, end_line, start_column, end_column,
+                            docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
+                     FROM nodes
+                     WHERE name = ?1
+                     LIMIT 200";
+            let mut rows = snapshot
+                .query(bare_sql, params![lookup.terminal_name.as_str()])
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to query bare symbol name: {e}"),
+                    operation: "get_nodes_by_qualified_name".to_string(),
+                })?;
+            let nodes = collect_rows(&mut rows, row_to_node, "get_nodes_by_qualified_name").await?;
+            drop(rows);
+            super::tx::commit(snapshot, "get_nodes_by_qualified_name").await?;
+            return Ok(nodes);
+        }
+
+        // Prefer a stored fully-qualified name exactly as before. This keeps
+        // cross-run callers that persist a graph-qualified name deterministic.
         let exact_sql = "SELECT id, kind, name, qualified_name, file_path,
                           start_line, end_line, start_column, end_column,
                           docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
                    FROM nodes
                    WHERE qualified_name = ?1";
         let mut rows = snapshot
-            .query(exact_sql, params![qname])
+            .query(exact_sql, params![lookup.normalized.as_str()])
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query by qualified_name: {e}"),
@@ -65,56 +187,40 @@ impl Database {
             return Ok(exact);
         }
 
-        // Fallback strategy depends on whether the user passed a qualified
-        // form or just a bare identifier:
-        //
-        // - `Type::method` (contains `::`) → suffix match. Recovers from
-        //   extractor quirks (duplicated path segments, file-path prefixes
-        //   the caller doesn't know about) and lets callers pass partial
-        //   module paths. The leading `%` defeats `idx_nodes_qualified_name`,
-        //   so this is a full table scan bounded by `LIMIT 50` — cheap at
-        //   typical graph sizes.
-        //
-        // - `foo` (no `::`) → exact `name = ?` match. Uses `idx_nodes_name`,
-        //   so it stays fast. Multiple nodes may share a name (overloads,
-        //   `new()` constructors), `LIMIT 50` is a safety net.
-        let (sql, pattern) = if qname.contains("::") {
-            (
-                "SELECT id, kind, name, qualified_name, file_path,
-                        start_line, end_line, start_column, end_column,
-                        docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
-                 FROM nodes
-                 WHERE qualified_name LIKE ?1
-                 LIMIT 50",
-                format!("%::{qname}"),
-            )
-        } else {
-            (
-                "SELECT id, kind, name, qualified_name, file_path,
-                        start_line, end_line, start_column, end_column,
-                        docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
-                 FROM nodes
-                 WHERE name = ?1
-                 LIMIT 50",
-                qname.to_string(),
-            )
-        };
-        let mut fallback_rows = snapshot
-            .query(sql, params![pattern.as_str()])
+        // Module spellings (for example `worktree::git_worktree_root`) do not
+        // literally occur in Rust's file-backed stored names
+        // (`src/worktree.rs::git_worktree_root`). Fetch only nodes with the
+        // requested terminal name, then match canonical module, crate, path,
+        // and suffix forms in memory. A wrong module therefore remains empty
+        // instead of silently selecting a same-named callable elsewhere.
+        let candidates_sql = "SELECT id, kind, name, qualified_name, file_path,
+                              start_line, end_line, start_column, end_column,
+                              docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
+                       FROM nodes
+                       WHERE name = ?1
+                       LIMIT 200";
+        let mut candidate_rows = snapshot
+            .query(candidates_sql, params![lookup.terminal_name.as_str()])
             .await
             .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query by qualified_name fallback: {e}"),
+                message: format!("failed to query qualified-name candidates: {e}"),
                 operation: "get_nodes_by_qualified_name".to_string(),
             })?;
-        let fallback = collect_rows(
-            &mut fallback_rows,
+        let mut matches = collect_rows(
+            &mut candidate_rows,
             row_to_node,
             "get_nodes_by_qualified_name",
         )
-        .await?;
-        drop(fallback_rows);
+        .await?
+        .into_iter()
+        .filter(|node| lookup.matches(node))
+        .collect::<Vec<_>>();
+        drop(candidate_rows);
+        if matches.iter().any(|node| lookup.exactly_matches(node)) {
+            matches.retain(|node| lookup.exactly_matches(node));
+        }
         super::tx::commit(snapshot, "get_nodes_by_qualified_name").await?;
-        Ok(fallback)
+        Ok(matches)
     }
 
     /// Returns nodes ranked by edge count for a given edge kind and direction,

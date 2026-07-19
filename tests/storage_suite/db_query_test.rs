@@ -2773,6 +2773,38 @@ async fn test_get_nodes_by_qualified_name_returns_all_matches() {
     assert!(none.is_empty());
 }
 
+#[tokio::test]
+async fn test_get_nodes_by_qualified_name_normalizes_module_and_crate_forms() {
+    let db = setup_db().await;
+    let mut node = sample_node("worktree-root", "git_worktree_root", "src/worktree.rs");
+    node.qualified_name = "src/worktree.rs::git_worktree_root".to_string();
+    db.insert_node(&node).await.expect("insert failed");
+
+    for query in [
+        "git_worktree_root",
+        "worktree::git_worktree_root",
+        "crate::worktree::git_worktree_root",
+        "src/worktree.rs::git_worktree_root",
+        r"src\worktree.rs::git_worktree_root",
+    ] {
+        let hits = db
+            .get_nodes_by_qualified_name(query)
+            .await
+            .unwrap_or_else(|error| panic!("query {query:?} failed: {error}"));
+        assert_eq!(hits.len(), 1, "query {query:?} returned {hits:?}");
+        assert_eq!(hits[0].id, "worktree-root", "query {query:?}");
+    }
+
+    let wrong_module = db
+        .get_nodes_by_qualified_name("other::git_worktree_root")
+        .await
+        .expect("query failed");
+    assert!(
+        wrong_module.is_empty(),
+        "wrong module must not fall back to the bare callable: {wrong_module:?}"
+    );
+}
+
 // -------------------------------------------------------------------------
 // attrs_start_line round-trip + backfill
 // -------------------------------------------------------------------------

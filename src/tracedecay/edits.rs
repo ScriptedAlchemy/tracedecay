@@ -836,10 +836,10 @@ pub(super) fn bounded_region_diff(
 
 /// Resolves a symbol name to a single node suitable for symbol-aware editing.
 ///
-/// Exact-qualified-name match wins; on ambiguity the resolver narrows to
-/// callable kinds (function/method/etc.). If still more than one candidate
-/// remains the edit is refused — silently picking the wrong site is far
-/// worse than asking the caller to disambiguate.
+/// Exact-qualified-name match wins. Bare-name ambiguity may narrow to callable
+/// kinds (function/method/etc.), but an explicitly qualified ambiguity always
+/// refuses the edit — silently picking the wrong site is worse than asking the
+/// caller to disambiguate.
 pub(super) async fn resolve_symbol_for_edit(cg: &TraceDecay, symbol: &str) -> Result<Node> {
     let nodes = cg.get_nodes_by_qualified_name(symbol).await?;
     let mut iter = nodes.into_iter();
@@ -853,6 +853,13 @@ pub(super) async fn resolve_symbol_for_edit(cg: &TraceDecay, symbol: &str) -> Re
         return Ok(first);
     }
     let total = rest.len() + 1;
+    if symbol.contains("::") {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "symbol '{symbol}' is ambiguous ({total} matches); pass an exact stored qualified name"
+            ),
+        });
+    }
     let mut callables: Vec<Node> = std::iter::once(first)
         .chain(rest)
         .filter(|n| {
