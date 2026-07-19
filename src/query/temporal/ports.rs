@@ -2895,16 +2895,20 @@ mod tests {
 
     #[test]
     fn execution_limits_reject_zero_and_absolute_ceilings() {
-        let mut oversize = ExecutionLimits::default();
-        oversize.candidate_limit = MAX_READ_ITEMS + 1;
+        let oversize = ExecutionLimits {
+            candidate_limit: MAX_READ_ITEMS + 1,
+            ..ExecutionLimits::default()
+        };
         assert_eq!(
             oversize.validate(),
             Err(TemporalPortError::BudgetExceeded {
                 resource: "candidate item count"
             })
         );
-        let mut zero = ExecutionLimits::default();
-        zero.record_item_bytes = 0;
+        let zero = ExecutionLimits {
+            record_item_bytes: 0,
+            ..ExecutionLimits::default()
+        };
         assert_eq!(
             zero.validate(),
             Err(TemporalPortError::BudgetExceeded {
@@ -2916,8 +2920,10 @@ mod tests {
 
     #[test]
     fn execution_snapshot_rejects_oversize_execution_limits() {
-        let mut limits = ExecutionLimits::default();
-        limits.candidate_limit = MAX_READ_ITEMS + 1;
+        let limits = ExecutionLimits {
+            candidate_limit: MAX_READ_ITEMS + 1,
+            ..ExecutionLimits::default()
+        };
         let request = TemporalSnapshotRequest::new(
             session_id(),
             digest('0'),

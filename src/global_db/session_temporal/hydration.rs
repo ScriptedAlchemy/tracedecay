@@ -1466,8 +1466,8 @@ mod tests {
             .expect("cross-session hydration");
         assert_eq!(output, payload.as_bytes());
 
-        drop(adapter);
-        drop(read);
+        let _ = adapter;
+        let _ = read;
         db.read_connection()
             .execute(
                 "UPDATE sessions

@@ -157,6 +157,7 @@ fn default_lcm_context_budget() -> ContextBudget {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lcm_retrieval_command(
     context: LcmHandlerContext<'_>,
     session_id: &str,
@@ -217,6 +218,8 @@ fn lcm_temporal_fields(temporal: &SessionTemporalMetadataView) -> Value {
 
 fn apply_lcm_temporal_fields(payload: &mut Value, temporal: &SessionTemporalMetadataView) {
     let fields = lcm_temporal_fields(temporal);
+    // Callers only ever pass a JSON object payload.
+    #[allow(clippy::expect_used)]
     let payload = payload.as_object_mut().expect("LCM payload object");
     for key in [
         "anchors",
@@ -422,6 +425,9 @@ pub(in super::super) async fn handle_lcm_load_session(
             ));
         }
     };
+    // The match above returns early for every terminal outcome, so a
+    // non-terminal outcome always carries a page.
+    #[allow(clippy::expect_used)]
     let page = page.expect("page exists for non-terminal LCM outcome");
     let messages = page
         .results

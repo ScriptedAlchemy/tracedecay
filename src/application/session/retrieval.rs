@@ -805,6 +805,8 @@ fn digest_request(
 }
 
 fn sha256_json(value: &impl Serialize) -> String {
+    // The canonical request binding is plain serializable data; encoding it cannot fail.
+    #[allow(clippy::expect_used)]
     let encoded = serde_json::to_vec(value).expect("canonical request binding is serializable");
     sha256_binding(&encoded)
 }

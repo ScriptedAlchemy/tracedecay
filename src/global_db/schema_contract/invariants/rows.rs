@@ -51,9 +51,7 @@ const EXPENSIVE_ROW_AUDIT_VIOLATIONS: &[&str] = &[
 ];
 
 fn classify_invariant_row_audit(invariant: &Invariant) -> Option<InvariantRowAuditCategory> {
-    if invariant.audit_query.is_none() {
-        return None;
-    }
+    invariant.audit_query.as_ref()?;
     if BOUNDED_ROW_AUDIT_VIOLATIONS.contains(&invariant.violation) {
         Some(InvariantRowAuditCategory::Bounded)
     } else {

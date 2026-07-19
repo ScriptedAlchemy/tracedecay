@@ -1138,6 +1138,7 @@ async fn require_candidate_root_authority(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn query_candidate_clause(
     conn: &Connection,
     scope: &TemporalRetrievalScope,
@@ -2848,7 +2849,7 @@ mod tests {
             "publication_json",
         ] {
             assert!(
-                records.contains(&format!("length(CAST(")),
+                records.contains("length(CAST("),
                 "{field} must be byte-bounded in its UNION arm"
             );
             assert!(records.contains(field));

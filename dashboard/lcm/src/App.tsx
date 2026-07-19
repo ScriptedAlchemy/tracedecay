@@ -7,6 +7,11 @@
  * class names, DOM structure, API query shapes, pagination/dedupe behavior,
  * drawer back-stack, focus management, and reload-token refetch patterns are
  * preserved. Only surface syntax changed (`React.createElement` → JSX).
+ *
+ * Render sections live in sibling components (`TopBar`, `SearchShell`,
+ * `StoreStatePanels`, `StatRow`, `ChartCards`, `DistributionCards`,
+ * `RecentLists`, `LcmDrawer`); this file owns all state, effects, and
+ * callbacks and passes props down unchanged.
  */
 
 import React, {
@@ -22,58 +27,18 @@ import {
   SEARCH_FETCH_LIMIT,
   SEARCH_PAGE_SIZE,
   SESSION_FETCH_BATCH,
-  fmtInt,
   friendlyError,
   mergeSearchPayload,
-  sessionLabel,
-  sessionTail,
-  short,
-  stripMd,
-  summaryTitle,
 } from "./helpers";
-import {
-  CompressionBars,
-  Drawer,
-  DrawerError,
-  MessageDetail,
-  NodeDetail,
-  Pager,
-  SearchResultCard,
-  SessionDetail,
-  TimelineChart,
-  TimeText,
-  toolBadge,
-} from "./components";
-import {
-  BarList,
-  EmptyState,
-  ErrorPanel,
-  SkeletonLines,
-  Stat,
-} from "../../lib/primitives";
 import { StoreHealthCard } from "./StoreHealth";
-
-function storageScopeLabel(scope: string | undefined): string | null {
-  if (scope === "project_local") return "Project store";
-  if (scope === "profile_sharded") return "User project store";
-  if (scope === "global") return "Global store";
-  return null;
-}
-
-function missingStoreTitle(scope: string | undefined): string {
-  if (scope === "global") return "Global LCM database not found";
-  return "Project session store not found";
-}
-
-function emptyStoreCopy(scope: string | undefined): string {
-  if (scope === "project_local") {
-    return "This project's active session store exists but holds no messages yet. Cursor sessions are ingested by its end-of-turn hook; Claude/Codex/Vibe/Cline transcripts are swept automatically when the MCP server or this dashboard starts. Run an agent turn in this project and refresh.";
-  }
-  if (scope === "profile_sharded") {
-    return "This project's user-level session store exists but holds no messages yet. Cursor sessions are ingested by its end-of-turn hook; Claude/Codex/Vibe/Cline transcripts are swept automatically when the MCP server or this dashboard starts. Run an agent turn in this project and refresh.";
-  }
-  return "The global database exists, but it does not contain raw messages or summary nodes. Once sessions are ingested, this page will fill with timelines, compression ratios, searchable messages, and summary-node drilldowns.";
-}
+import { TopBar } from "./TopBar";
+import { SearchShell } from "./SearchShell";
+import { StoreStatePanels } from "./StoreStatePanels";
+import { StatRow } from "./StatRow";
+import { ChartCards } from "./ChartCards";
+import { DistributionCards } from "./DistributionCards";
+import { RecentLists } from "./RecentLists";
+import { LcmDrawer } from "./LcmDrawer";
 
 function App(): React.ReactElement {
   const [q, setQ] = useState("");
@@ -515,7 +480,6 @@ function App(): React.ReactElement {
 
   const top = stack.length ? stack[stack.length - 1] : null;
   const overview = (data && data.overview) || {};
-  const comp = overview.compression || {};
   const sources = overview.source_counts || [];
   const hasLcmRows = Boolean(
     Number(overview.messages_total) ||
@@ -723,736 +687,113 @@ function App(): React.ReactElement {
   );
   const totalSearchMatches = totalMessageCount + totalNodeCount;
 
-  let drawerTitle = "";
-  let drawerBody: React.ReactNode = null;
-  if (top) {
-    if (top.loading) {
-      drawerTitle =
-        top.kind === "node"
-          ? `Node #${top.id}`
-          : top.kind === "message"
-            ? `Message #${top.id}`
-            : `Session ${short(top.id, 40)}`;
-      drawerBody = (
-        <EmptyState className="hermes-lcm-empty">Loading…</EmptyState>
-      );
-    } else if (top.error) {
-      drawerTitle =
-        top.kind === "node"
-          ? `Node #${top.id}`
-          : top.kind === "message"
-            ? `Message #${top.id}`
-            : `Session ${short(top.id, 40)}`;
-      const current = top;
-      drawerBody = (
-        <DrawerError
-          kind={current.kind}
-          message={current.error}
-          onRetry={function () {
-            updateStackEntry(
-              function (entry) {
-                return entry === current;
-              },
-              function (entry) {
-                return Object.assign({}, entry, { loading: true, error: "" });
-              },
-            );
-            if (current.kind === "node") fetchNode(current.id);
-            else if (current.kind === "message")
-              fetchMessageContext(current.data && current.data.message);
-            else fetchSession(current.id, 0, false, current.activeMessageId);
-          }}
-        />
-      );
-    } else if (top.kind === "node") {
-      drawerTitle = `Node #${top.id}`;
-      drawerBody = (
-        <NodeDetail
-          data={top.data}
-          onOpenNode={openNode}
-          onOpenSession={openSession}
-          onOpenMessage={openMessage}
-        />
-      );
-    } else if (top.kind === "message") {
-      drawerTitle = `Message #${top.id}`;
-      drawerBody = (
-        <MessageDetail
-          data={top.data}
-          onOpenNode={openNode}
-          onOpenSession={openSession}
-        />
-      );
-    } else {
-      drawerTitle = `Session ${short(top.id, 40)}`;
-      drawerBody = (
-        <SessionDetail
-          data={top.data}
-          onOpenNode={openNode}
-          onOpenMessage={openMessage}
-          onLoadMore={function () {
-            loadMoreSession(top.id);
-          }}
-          loadingMore={!!top.loadingMore}
-          activeMessageId={top.activeMessageId}
-        />
-      );
-    }
-  }
-
-  // Search results render directly under the toolbar (see placement below)
-  // so typing a query gives immediate visible feedback instead of appending
-  // results below the overview cards, off-screen.
-  const searchShell = searchActive ? (
-    <div className="hermes-lcm-card hermes-lcm-wide hermes-lcm-search-shell">
-      <div className="hermes-lcm-search-head">
-        <div>
-          <h3>Search</h3>
-          <div className="hermes-lcm-search-subtitle" role="status">
-            {searchPending
-              ? "Waiting for typing to pause…"
-              : searching
-                ? "Searching messages and summary nodes…"
-                : debouncedQ && searchData
-                  ? `${fmtInt(totalSearchMatches)} matches for "${short(debouncedQ, 36)}".`
-                  : "Use / to focus and arrows to move through the current page."}
-          </div>
-        </div>
-        <div className="hermes-lcm-badge-row">
-          {debouncedQ ? toolBadge(`"${short(debouncedQ, 36)}"`) : null}
-          {searchData && searchData.engine === "fts"
-            ? toolBadge("FTS ranked", "ok")
-            : null}
-          {searchData && searchData.engine === "like"
-            ? toolBadge("LIKE fallback", "warn")
-            : null}
-          {!searchPending && !searching && debouncedQ && searchData
-            ? toolBadge(fmtInt(totalSearchMatches) + " hits")
-            : null}
-        </div>
-      </div>
-      {searchError ? (
-        <div className="hermes-lcm-error" role="alert">
-          <div>
-            <strong>Search failed. </strong>
-            {searchError +
-              " — results below may be incomplete; this is not an empty result."}
-          </div>
-          <button
-            type="button"
-            className="hermes-lcm-btn"
-            onClick={function () {
-              setSearchRetryToken(function (n) {
-                return n + 1;
-              });
-            }}
-          >
-            Retry search
-          </button>
-        </div>
-      ) : null}
-      {!searchPending && searching && !searchData ? (
-        <div className="hermes-lcm-grid">
-          <div className="hermes-lcm-card">
-            <SkeletonLines
-              count={5}
-              widths={["95%", "90%", "88%", "92%", "70%"]}
-            />
-          </div>
-          <div className="hermes-lcm-card">
-            <SkeletonLines count={4} widths={["92%", "84%", "88%", "68%"]} />
-          </div>
-        </div>
-      ) : null}
-      {!searchPending &&
-      !searching &&
-      debouncedQ &&
-      !searchError &&
-      totalSearchMatches === 0 ? (
-        <EmptyState className="hermes-lcm-empty">
-          <strong>No matches found.</strong>
-          {
-            " Try removing a facet or a punctuation-heavy query so the backend can stay on the ranked FTS path."
-          }
-        </EmptyState>
-      ) : null}
-      {totalSearchMatches > 0 ? (
-        <div className="hermes-lcm-grid">
-          <div className="hermes-lcm-card">
-            <div className="hermes-lcm-section-head">
-              <h3>
-                {totalMessageCount > fetchedMessageCount
-                  ? `Matching Messages (${fmtInt(fetchedMessageCount)} of ${fmtInt(totalMessageCount)})`
-                  : `Matching Messages (${fmtInt(fetchedMessageCount)})`}
-              </h3>
-              <div className="hermes-lcm-dim">
-                Click for full content and session context
-              </div>
-            </div>
-            <div className="hermes-lcm-results">
-              {visibleMessages.length ? (
-                visibleMessages.map(function (m, idx) {
-                  const resultKey = "message:" + m.store_id;
-                  const selected = selectedResultIndex === idx;
-                  return (
-                    <SearchResultCard
-                      key={resultKey}
-                      resultRef={function (el) {
-                        if (el) resultRefs.current[resultKey] = el;
-                        else delete resultRefs.current[resultKey];
-                      }}
-                      kind="message"
-                      item={m}
-                      query={debouncedQ}
-                      selected={selected}
-                      onFocus={function () {
-                        setSelectedResultIndex(idx);
-                      }}
-                      onOpen={function () {
-                        openMessage(m);
-                      }}
-                    />
-                  );
-                })
-              ) : (
-                <EmptyState className="hermes-lcm-empty">
-                  No matching messages on this page.
-                </EmptyState>
-              )}
-            </div>
-            <Pager
-              page={searchMessagePage}
-              totalPages={messageTotalPages}
-              onChange={setSearchMessagePage}
-            />
-          </div>
-          <div className="hermes-lcm-card">
-            <div className="hermes-lcm-section-head">
-              <h3>
-                {totalNodeCount > fetchedNodeCount
-                  ? `Matching Summaries (${fmtInt(fetchedNodeCount)} of ${fmtInt(totalNodeCount)})`
-                  : `Matching Summaries (${fmtInt(fetchedNodeCount)})`}
-              </h3>
-              <div className="hermes-lcm-dim">
-                Open a node to follow its source links
-              </div>
-            </div>
-            <div className="hermes-lcm-results">
-              {visibleNodes.length ? (
-                visibleNodes.map(function (n, idx) {
-                  const absoluteIndex = visibleMessages.length + idx;
-                  const resultKey = "node:" + n.node_id;
-                  const selected = selectedResultIndex === absoluteIndex;
-                  return (
-                    <SearchResultCard
-                      key={resultKey}
-                      resultRef={function (el) {
-                        if (el) resultRefs.current[resultKey] = el;
-                        else delete resultRefs.current[resultKey];
-                      }}
-                      kind="node"
-                      item={n}
-                      query={debouncedQ}
-                      selected={selected}
-                      onFocus={function () {
-                        setSelectedResultIndex(absoluteIndex);
-                      }}
-                      onOpen={function () {
-                        openNode(n.node_id);
-                      }}
-                    />
-                  );
-                })
-              ) : (
-                <EmptyState className="hermes-lcm-empty">
-                  No matching summaries on this page.
-                </EmptyState>
-              )}
-            </div>
-            <Pager
-              page={searchNodePage}
-              totalPages={nodeTotalPages}
-              onChange={setSearchNodePage}
-            />
-          </div>
-        </div>
-      ) : null}
-      {hasMoreServerResults ? (
-        <div className="hermes-lcm-actions hermes-lcm-fetch-more">
-          <button
-            type="button"
-            className="hermes-lcm-btn"
-            disabled={loadingMoreResults}
-            onClick={fetchMoreResults}
-          >
-            {loadingMoreResults
-              ? "Fetching more results…"
-              : `Fetch next ${fmtInt(SEARCH_FETCH_LIMIT)} from server`}
-          </button>
-          <span className="hermes-lcm-dim">
-            {`${fmtInt(fetchedMessageCount + fetchedNodeCount)} of ${fmtInt(totalSearchMatches)} loaded`}
-          </span>
-        </div>
-      ) : null}
-    </div>
-  ) : null;
-  const lcmScopeLabel = data ? storageScopeLabel(data.storage_scope) : null;
-
   return (
     <div className="hermes-lcm" ref={rootRef}>
-      <div className="hermes-lcm-top">
-        <div className="hermes-lcm-search-wrap">
-          <input
-            ref={searchInputRef}
-            className="hermes-lcm-search"
-            value={q}
-            type="search"
-            placeholder="Search messages and summaries"
-            aria-label="Search messages and summaries"
-            onChange={function (e) {
-              setQ(e.target.value || "");
-            }}
-            onKeyDown={function (e) {
-              if (e.key === "ArrowDown" && keyboardResults.length) {
-                e.preventDefault();
-                setSelectedResultIndex(0);
-              }
-            }}
-          />
-          {q ? (
-            <button
-              type="button"
-              className="hermes-lcm-btn hermes-lcm-clear"
-              aria-label="Clear search query"
-              onClick={function () {
-                setQ("");
-                setSearchData(null);
-                setSearchError("");
-              }}
-            >
-              Clear
-            </button>
-          ) : null}
-        </div>
-        <select
-          className="hermes-lcm-select"
-          value={role}
-          aria-label="Filter by role"
-          onChange={function (e) {
-            setRole(e.target.value);
-          }}
-        >
-          <option value="">All roles</option>
-          <option value="user">user</option>
-          <option value="assistant">assistant</option>
-          <option value="tool">tool</option>
-          <option value="system">system</option>
-        </select>
-        <select
-          className="hermes-lcm-select"
-          value={source}
-          aria-label="Filter by source"
-          onChange={function (e) {
-            setSource(e.target.value);
-          }}
-        >
-          <option value="">All sources</option>
-          {sources.map(function (s) {
-            return (
-              <option key={s.source} value={s.source}>
-                {short(s.source, 18)}
-              </option>
-            );
-          })}
-        </select>
-        <div
-          className={
-            "hermes-lcm-status" +
-            (overviewError ? " hermes-lcm-status-err" : "")
-          }
-          role="status"
-        >
-          {overviewLoading || chartsLoading
-            ? "Loading overview"
-            : overviewError
-              ? "Server unreachable"
-              : data && data.exists
-                ? "Database detected"
-                : "Database missing"}
-        </div>
-      </div>
-      <div className="hermes-lcm-shortcuts">
-        <span>`/` focus search</span>
-        <span>Arrow keys browse results</span>
-        <span>Enter opens detail</span>
-      </div>
-      <div className="hermes-lcm-path">
-        {data ? (
-          <>
-            {lcmScopeLabel ? (
-              <span
-                className={
-                  "hermes-lcm-tag" +
-                  (data.storage_scope === "global" ? "" : " hermes-lcm-tag-src")
-                }
-              >
-                {lcmScopeLabel}
-              </span>
-            ) : null}
-            <span>{data.path}</span>
-          </>
-        ) : (
-          ""
-        )}
-      </div>
+      <TopBar
+        searchInputRef={searchInputRef}
+        q={q}
+        onQueryChange={setQ}
+        keyboardResultCount={keyboardResults.length}
+        onSelectFirstResult={function () {
+          setSelectedResultIndex(0);
+        }}
+        onClearQuery={function () {
+          setQ("");
+          setSearchData(null);
+          setSearchError("");
+        }}
+        role={role}
+        onRoleChange={setRole}
+        source={source}
+        onSourceChange={setSource}
+        sources={sources}
+        overviewError={overviewError}
+        overviewLoading={overviewLoading}
+        chartsLoading={chartsLoading}
+        data={data}
+      />
 
-      {searchShell}
+      <SearchShell
+        searchActive={searchActive}
+        debouncedQ={debouncedQ}
+        searchPending={searchPending}
+        searching={searching}
+        searchData={searchData}
+        searchError={searchError}
+        totalSearchMatches={totalSearchMatches}
+        totalMessageCount={totalMessageCount}
+        totalNodeCount={totalNodeCount}
+        fetchedMessageCount={fetchedMessageCount}
+        fetchedNodeCount={fetchedNodeCount}
+        visibleMessages={visibleMessages}
+        visibleNodes={visibleNodes}
+        selectedResultIndex={selectedResultIndex}
+        onSelectResult={setSelectedResultIndex}
+        resultRefs={resultRefs}
+        onOpenMessage={openMessage}
+        onOpenNode={openNode}
+        searchMessagePage={searchMessagePage}
+        searchNodePage={searchNodePage}
+        messageTotalPages={messageTotalPages}
+        nodeTotalPages={nodeTotalPages}
+        onMessagePageChange={setSearchMessagePage}
+        onNodePageChange={setSearchNodePage}
+        hasMoreServerResults={hasMoreServerResults}
+        loadingMoreResults={loadingMoreResults}
+        onFetchMore={fetchMoreResults}
+        onRetrySearch={function () {
+          setSearchRetryToken(function (n) {
+            return n + 1;
+          });
+        }}
+      />
 
-      {/* Unreachable server: a distinguishable error hero with retry — never
-          the zeroed stats / "No data" cards that imply an empty database. */}
-      {serverUnreachable ? (
-        <div className="hermes-lcm-empty-panel hermes-lcm-offline" role="alert">
-          <div
-            className="hermes-lcm-empty-orb hermes-lcm-offline-orb"
-            aria-hidden="true"
-          />
-          <div className="hermes-lcm-empty-copy">
-            <div className="hermes-lcm-empty-kicker">Connection problem</div>
-            <h2>Can't reach the tracedecay server</h2>
-            <p>
-              The LCM overview request failed, so no counts or timelines can be
-              shown. Your data is not gone — the dashboard just can't talk to
-              the server right now.
-            </p>
-            <div className="hermes-lcm-offline-actions">
-              <button
-                type="button"
-                className="hermes-lcm-btn"
-                onClick={function () {
-                  setReloadToken(function (n) {
-                    return n + 1;
-                  });
-                }}
-              >
-                ↻ Retry now
-              </button>
-              <span className="hermes-lcm-dim">{overviewError}</span>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <StoreStatePanels
+        serverUnreachable={serverUnreachable}
+        staleData={staleData}
+        overviewError={overviewError}
+        data={data}
+        hasLcmRows={hasLcmRows}
+        onRetry={function () {
+          setReloadToken(function (n) {
+            return n + 1;
+          });
+        }}
+      />
 
-      {staleData ? (
-        <ErrorPanel
-          error={`Refresh failed (${overviewError}) — showing previously loaded data.`}
+      <StatRow data={data} overviewLoading={overviewLoading} />
+
+      {serverUnreachable ? null : (
+        <ChartCards
+          chartsError={chartsError}
+          timeline={timeline}
+          compression={compression}
+          chartsLoading={chartsLoading}
           onRetry={function () {
             setReloadToken(function (n) {
               return n + 1;
             });
           }}
-          className="hermes-lcm-error"
+          onOpenSession={openSession}
         />
-      ) : null}
-      {data && data.error ? (
-        <ErrorPanel error={data.error} className="hermes-lcm-error" />
-      ) : null}
-
-      {data && !data.exists ? (
-        <div className="hermes-lcm-empty-panel">
-          <div className="hermes-lcm-empty-orb" aria-hidden="true" />
-          <div className="hermes-lcm-empty-copy">
-            <div className="hermes-lcm-empty-kicker">
-              Lossless Context Store
-            </div>
-            <h2>{missingStoreTitle(data.storage_scope)}</h2>
-            <p>
-              The dashboard can render once the session store exists. Until
-              then, the search, timeline, and detail views remain unavailable.
-            </p>
-          </div>
-        </div>
-      ) : null}
-
-      {data && data.exists && !hasLcmRows ? (
-        <div className="hermes-lcm-empty-panel">
-          <div className="hermes-lcm-empty-orb" aria-hidden="true" />
-          <div className="hermes-lcm-empty-copy">
-            <div className="hermes-lcm-empty-kicker">
-              Lossless Context Store
-            </div>
-            <h2>No LCM sessions indexed yet</h2>
-            <p>{emptyStoreCopy(data.storage_scope)}</p>
-          </div>
-        </div>
-      ) : null}
-
-      {/* Stats render only from a successful overview payload; zeros are then
-          genuinely "empty database", never a masked fetch failure. */}
-      {data ? (
-        <div className="hermes-lcm-statrow">
-          <Stat
-            className="hermes-lcm-stat"
-            variant="compact"
-            value={fmtInt(overview.messages_total)}
-            label="messages"
-          />
-          <Stat
-            className="hermes-lcm-stat"
-            variant="compact"
-            value={fmtInt(overview.sessions_total)}
-            label="sessions"
-          />
-          <Stat
-            className="hermes-lcm-stat"
-            variant="compact"
-            value={fmtInt(overview.summary_nodes_total)}
-            label="summary nodes"
-          />
-          <Stat
-            className="hermes-lcm-stat"
-            variant="compact"
-            value={comp.ratio ? comp.ratio + "×" : "—"}
-            label="compression"
-          />
-          <Stat
-            className="hermes-lcm-stat"
-            variant="compact"
-            value={`${fmtInt(comp.source_token_count)}→${fmtInt(comp.token_count)}`}
-            label="tokens kept"
-          />
-        </div>
-      ) : overviewLoading ? (
-        <div className="hermes-lcm-statrow">
-          <div className="hermes-lcm-stat hermes-lcm-skeleton">
-            <SkeletonLines count={2} widths={["55%", "35%"]} />
-          </div>
-          <div className="hermes-lcm-stat hermes-lcm-skeleton">
-            <SkeletonLines count={2} widths={["45%", "30%"]} />
-          </div>
-          <div className="hermes-lcm-stat hermes-lcm-skeleton">
-            <SkeletonLines count={2} widths={["62%", "38%"]} />
-          </div>
-          <div className="hermes-lcm-stat hermes-lcm-skeleton">
-            <SkeletonLines count={2} widths={["50%", "36%"]} />
-          </div>
-          <div className="hermes-lcm-stat hermes-lcm-skeleton">
-            <SkeletonLines count={2} widths={["60%", "42%"]} />
-          </div>
-        </div>
-      ) : null}
-
-      {serverUnreachable ? null : (
-        <div className="hermes-lcm-grid">
-          <div className="hermes-lcm-card hermes-lcm-wide">
-            <h3>Message Timeline (per day · dots = summaries)</h3>
-            {chartsError && !timeline ? (
-              <ErrorPanel
-                error={chartsError}
-                onRetry={function () {
-                  setReloadToken(function (n) {
-                    return n + 1;
-                  });
-                }}
-                className="hermes-lcm-error"
-              />
-            ) : chartsLoading && !timeline ? (
-              <SkeletonLines
-                count={5}
-                widths={["100%", "95%", "90%", "92%", "88%"]}
-              />
-            ) : (
-              <TimelineChart
-                buckets={(timeline && timeline.buckets) || []}
-                nodeBuckets={(timeline && timeline.node_buckets) || []}
-                undatedCount={
-                  (timeline && timeline.undated && timeline.undated.count) || 0
-                }
-              />
-            )}
-          </div>
-          <div className="hermes-lcm-card hermes-lcm-wide">
-            <h3>Compression by Session (kept vs saved)</h3>
-            {chartsError && !compression ? (
-              <ErrorPanel
-                error={chartsError}
-                onRetry={function () {
-                  setReloadToken(function (n) {
-                    return n + 1;
-                  });
-                }}
-                className="hermes-lcm-error"
-              />
-            ) : chartsLoading && !compression ? (
-              <SkeletonLines count={4} widths={["98%", "90%", "84%", "88%"]} />
-            ) : (
-              <CompressionBars
-                groups={(compression && compression.groups) || []}
-                onPick={function (g) {
-                  openSession(g.session_id != null ? g.session_id : g.key);
-                }}
-              />
-            )}
-          </div>
-        </div>
       )}
 
       {serverUnreachable ? null : (
-        <div className="hermes-lcm-grid">
-          <div className="hermes-lcm-card">
-            <h3>By Source</h3>
-            <BarList
-              rows={(sources || []).map(function (s) {
-                return {
-                  source: s.source == null ? "(none)" : s.source,
-                  count: s.count,
-                  value: fmtInt(s.count),
-                };
-              })}
-              keyName="source"
-              proportional
-              valueName="count"
-              emptyText="No data"
-              onPick={function (row) {
-                const v = String(row.source);
-                setSource(v === "(none)" ? "unknown" : v);
-              }}
-            />
-          </div>
-          <div className="hermes-lcm-card">
-            <h3>By Role</h3>
-            <BarList
-              rows={(overview.role_counts || []).map(function (r) {
-                return {
-                  role: r.role == null ? "(none)" : r.role,
-                  count: r.count,
-                  value: fmtInt(r.count),
-                };
-              })}
-              keyName="role"
-              proportional
-              valueName="count"
-              emptyText="No data"
-              onPick={function (row) {
-                setRole(String(row.role));
-              }}
-            />
-          </div>
-          <div className="hermes-lcm-card">
-            <h3>Summary Depth</h3>
-            <BarList
-              rows={(overview.depth_counts || []).map(function (r) {
-                return {
-                  depth: r.depth == null ? "(none)" : r.depth,
-                  count: r.count,
-                  value: fmtInt(r.count),
-                };
-              })}
-              keyName="depth"
-              proportional
-              valueName="count"
-              emptyText="No data"
-            />
-          </div>
-        </div>
+        <DistributionCards
+          sources={sources}
+          roleCounts={overview.role_counts || []}
+          depthCounts={overview.depth_counts || []}
+          onSourceChange={setSource}
+          onRoleChange={setRole}
+        />
       )}
 
       {serverUnreachable ? null : (
-        <div className="hermes-lcm-grid">
-          <div className="hermes-lcm-card">
-            <h3>Recent Sessions</h3>
-            <div className="hermes-lcm-rows">
-              {((data && data.latest_sessions) || []).length ? (
-                ((data && data.latest_sessions) || []).map(function (s, idx) {
-                  const tail = sessionTail(s.session_id);
-                  return (
-                    <button
-                      key={s.session_id + ":" + idx}
-                      type="button"
-                      className="hermes-lcm-row"
-                      onClick={function () {
-                        openSession(s.session_id);
-                      }}
-                    >
-                      <div className="hermes-lcm-row-main">
-                        <span className="hermes-lcm-row-title">
-                          {sessionLabel(s.session_id)}
-                        </span>
-                        {tail ? (
-                          <span className="hermes-lcm-row-id">{tail}</span>
-                        ) : null}
-                      </div>
-                      <div className="hermes-lcm-row-meta">
-                        <span className="hermes-lcm-pill">
-                          {fmtInt(s.message_count) + " msgs"}
-                        </span>
-                        <TimeText
-                          className="hermes-lcm-dim"
-                          epoch={s.last_timestamp}
-                        />
-                      </div>
-                    </button>
-                  );
-                })
-              ) : data ? (
-                <EmptyState className="hermes-lcm-empty">
-                  No sessions
-                </EmptyState>
-              ) : (
-                <SkeletonLines count={3} widths={["92%", "84%", "76%"]} />
-              )}
-            </div>
-          </div>
-          <div className="hermes-lcm-card">
-            <h3>Latest Summaries</h3>
-            <div className="hermes-lcm-rows">
-              {((data && data.latest_summary_nodes) || []).length ? (
-                ((data && data.latest_summary_nodes) || []).map(function (n) {
-                  const title = summaryTitle(n.summary);
-                  const preview = stripMd(n.summary);
-                  return (
-                    <button
-                      key={n.node_id}
-                      type="button"
-                      className="hermes-lcm-row"
-                      onClick={function () {
-                        openNode(n.node_id);
-                      }}
-                    >
-                      <div className="hermes-lcm-row-meta">
-                        <span className="hermes-lcm-pill hermes-lcm-pill-accent">
-                          {"D" + n.depth}
-                        </span>
-                        {n.category ? (
-                          <span className="hermes-lcm-pill">{n.category}</span>
-                        ) : null}
-                        <span className="hermes-lcm-dim">
-                          {sessionLabel(n.session_id)}
-                        </span>
-                        {n.token_count != null ? (
-                          <span className="hermes-lcm-dim">
-                            {fmtInt(n.token_count) + " tok"}
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="hermes-lcm-row-title">
-                        {short(title, 80)}
-                      </div>
-                      <div className="hermes-lcm-row-sub">
-                        {short(preview, 150)}
-                      </div>
-                    </button>
-                  );
-                })
-              ) : data ? (
-                <EmptyState className="hermes-lcm-empty">
-                  No summaries
-                </EmptyState>
-              ) : (
-                <SkeletonLines count={3} widths={["90%", "82%", "74%"]} />
-              )}
-            </div>
-          </div>
-        </div>
+        <RecentLists
+          data={data}
+          onOpenSession={openSession}
+          onOpenNode={openNode}
+        />
       )}
 
       {!serverUnreachable && data?.exists && (
@@ -1461,15 +802,20 @@ function App(): React.ReactElement {
         </div>
       )}
 
-      <Drawer
-        open={!!top}
-        title={drawerTitle}
+      <LcmDrawer
+        top={top}
         canBack={stack.length > 1}
         onBack={goBack}
         onClose={closeDrawer}
-      >
-        {drawerBody}
-      </Drawer>
+        updateStackEntry={updateStackEntry}
+        fetchNode={fetchNode}
+        fetchMessageContext={fetchMessageContext}
+        fetchSession={fetchSession}
+        onOpenNode={openNode}
+        onOpenSession={openSession}
+        onOpenMessage={openMessage}
+        onLoadMoreSession={loadMoreSession}
+      />
     </div>
   );
 }

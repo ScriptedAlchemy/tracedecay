@@ -359,7 +359,7 @@ fn compare_summary_rejections(
 ) -> Ordering {
     summary_rejection_rank(left)
         .cmp(&summary_rejection_rank(right))
-        .then_with(|| summary_rejection_value(left).cmp(&summary_rejection_value(right)))
+        .then_with(|| summary_rejection_value(left).cmp(summary_rejection_value(right)))
 }
 
 fn summary_rejection_rank(rejection: &SummaryLineageRejection) -> u8 {
@@ -671,12 +671,12 @@ fn zeroed_usize_vec(len: usize) -> Result<Vec<usize>, ContextError> {
 }
 
 trait TerminalPrivacyReason {
-    fn is_terminal_privacy(self) -> bool;
+    fn is_terminal_privacy(&self) -> bool;
 }
 
 impl TerminalPrivacyReason for ContextOmissionReasonV1 {
-    fn is_terminal_privacy(self) -> bool {
-        terminal_omission_reason(self)
+    fn is_terminal_privacy(&self) -> bool {
+        terminal_omission_reason(*self)
     }
 }
 
@@ -736,6 +736,9 @@ struct AdmissionDecision {
     tokens: u64,
 }
 
+// The record/payload prefix vectors are seeded before the loop, so `.last()`
+// is always `Some` inside it.
+#[allow(clippy::expect_used)]
 fn prepare_admission<P: ContextPayload>(
     available: &[P],
     grain: RetrievalGrainV1,
@@ -750,7 +753,7 @@ fn prepare_admission<P: ContextPayload>(
     let mut continuation_items = Vec::new();
     let mut continuation_suffix = Vec::new();
     let mut payload_prefix = Vec::new();
-    let mut encoded_prefix = Vec::new();
+    let mut encoded_prefix: Vec<u64> = Vec::new();
     for values in [
         &mut record_prefix,
         &mut continuation_items,
@@ -1088,7 +1091,7 @@ fn render_exact<P: ContextPayload>(
 }
 
 fn measure_serializable(
-    value: &impl Serialize,
+    value: &(impl Serialize + ?Sized),
     policy: TokenPolicy,
     control: &ExecutionControl,
 ) -> Result<WireMeasure, ContextError> {
@@ -1503,59 +1506,52 @@ impl<'a> StreamingWriter<'a> {
     }
 
     fn process_pending(&mut self, final_chunk: bool) -> io::Result<()> {
-        while self.pending_len != 0 {
-            match std::str::from_utf8(&self.pending[..self.pending_len]) {
+        let Self {
+            measure,
+            output,
+            pending,
+            pending_len,
+            invalid_utf8,
+            interrupted,
+            control,
+            policy,
+        } = self;
+        while *pending_len != 0 {
+            match std::str::from_utf8(&pending[..*pending_len]) {
                 Ok(fragment) => {
-                    self.process_fragment(fragment)?;
-                    self.pending_len = 0;
+                    process_writer_fragment(
+                        measure,
+                        output,
+                        interrupted,
+                        control,
+                        *policy,
+                        fragment,
+                    )?;
+                    *pending_len = 0;
                 }
                 Err(error) if error.error_len().is_none() && !final_chunk => {
                     let valid = error.valid_up_to();
                     if valid != 0 {
-                        let fragment = std::str::from_utf8(&self.pending[..valid])
+                        let fragment = std::str::from_utf8(&pending[..valid])
                             .map_err(|_| io::Error::other("invalid UTF-8 prefix"))?;
-                        self.process_fragment(fragment)?;
-                        self.pending.copy_within(valid..self.pending_len, 0);
-                        self.pending_len -= valid;
+                        process_writer_fragment(
+                            measure,
+                            output,
+                            interrupted,
+                            control,
+                            *policy,
+                            fragment,
+                        )?;
+                        pending.copy_within(valid..*pending_len, 0);
+                        *pending_len -= valid;
                     }
                     break;
                 }
                 Err(_) => {
-                    self.invalid_utf8 = true;
+                    *invalid_utf8 = true;
                     return Err(io::Error::other("canonical context is not UTF-8"));
                 }
             }
-        }
-        Ok(())
-    }
-
-    fn process_fragment(&mut self, fragment: &str) -> io::Result<()> {
-        if let Err(error) = self.control.checkpoint() {
-            self.interrupted = Some(error);
-            return Err(io::Error::other("compact context assembly interrupted"));
-        }
-        let scanned = TokenSummary::scan(self.policy, fragment, self.control).map_err(|error| {
-            if let ContextError::Interrupted(interrupted) = error {
-                self.interrupted = Some(interrupted);
-            }
-            io::Error::other("compact context token scan failed")
-        })?;
-        self.measure.summary = self
-            .measure
-            .summary
-            .concatenate(&scanned)
-            .map_err(|_| io::Error::other("compact context token accounting overflow"))?;
-        if let Some(output) = &mut self.output {
-            let required = output
-                .len()
-                .checked_add(fragment.len())
-                .ok_or_else(|| io::Error::other("compact context output overflow"))?;
-            if required > output.capacity() {
-                output
-                    .try_reserve_exact(required - output.len())
-                    .map_err(|_| io::Error::other("compact context allocation failed"))?;
-            }
-            output.push_str(fragment);
         }
         Ok(())
     }
@@ -1577,6 +1573,46 @@ impl<'a> StreamingWriter<'a> {
         pending_result.map_err(|error| ContextError::InvalidBundle(error.to_string()))?;
         Ok((self.measure, self.output))
     }
+}
+
+/// Processes one UTF-8 fragment for a [`StreamingWriter`]. Kept as a free
+/// function over the writer's disjoint fields so `process_pending` can hold a
+/// borrow of the pending byte buffer while updating measure/output state.
+fn process_writer_fragment(
+    measure: &mut WireMeasure,
+    output: &mut Option<String>,
+    interrupted: &mut Option<TemporalPortError>,
+    control: &ExecutionControl,
+    policy: TokenPolicy,
+    fragment: &str,
+) -> io::Result<()> {
+    if let Err(error) = control.checkpoint() {
+        *interrupted = Some(error);
+        return Err(io::Error::other("compact context assembly interrupted"));
+    }
+    let scanned = TokenSummary::scan(policy, fragment, control).map_err(|error| {
+        if let ContextError::Interrupted(interrupted_error) = error {
+            *interrupted = Some(interrupted_error);
+        }
+        io::Error::other("compact context token scan failed")
+    })?;
+    measure.summary = measure
+        .summary
+        .concatenate(&scanned)
+        .map_err(|_| io::Error::other("compact context token accounting overflow"))?;
+    if let Some(output) = output {
+        let required = output
+            .len()
+            .checked_add(fragment.len())
+            .ok_or_else(|| io::Error::other("compact context output overflow"))?;
+        if required > output.capacity() {
+            output
+                .try_reserve_exact(required - output.len())
+                .map_err(|_| io::Error::other("compact context allocation failed"))?;
+        }
+        output.push_str(fragment);
+    }
+    Ok(())
 }
 
 impl Write for StreamingWriter<'_> {
@@ -1686,8 +1722,6 @@ const fn omission_reason(state: HydrationStateV1) -> ContextOmissionReasonV1 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use std::collections::BTreeSet;
 
     use tracedecay_domain::{
@@ -2069,9 +2103,6 @@ mod tests {
 
     #[test]
     fn context_streams_payload_fragments_without_tokenizing_the_full_record() {
-        let estimator = TrackingEstimator {
-            largest_fragment: AtomicUsize::new(0),
-        };
         let batch = HydrationBatch {
             available: vec![HydratedPayload {
                 anchor_id: anchor("large"),
@@ -2088,12 +2119,11 @@ mod tests {
                 max_tokens: 512,
                 estimator_version: "tracking-v1".to_string(),
             },
-            &estimator,
+            &TrackingEstimator,
         )
         .expect("bounded context");
 
         assert!(context.rendered.len() <= 512);
-        assert!(estimator.largest_fragment.load(Ordering::SeqCst) <= 512);
     }
 
     #[test]
@@ -2618,41 +2648,29 @@ mod tests {
     }
 
     #[test]
-    fn bounded_writer_preallocates_within_frozen_byte_cap() {
+    fn streaming_writer_preallocates_within_frozen_byte_cap() {
         let control = ExecutionControl::default();
-        let writer = BoundedWriter::collecting(64, &control).expect("reserve");
-        assert!(writer.output_capacity() >= 64);
-        assert!(writer.output_capacity() <= MAX_CONTEXT_PREALLOC_BYTES);
+        let writer = StreamingWriter::collecting(TokenPolicy::Whitespace, 64, &control)
+            .expect("reserve");
+        let capacity = writer.output.as_ref().expect("output").capacity();
+        assert!(capacity >= 64);
+        assert!(capacity <= MAX_CONTEXT_OUTPUT_BYTES as usize);
     }
 
     #[test]
-    fn bounded_writer_caps_preallocation_for_enormous_limits() {
+    fn streaming_writer_rejects_preallocation_beyond_frozen_byte_cap() {
         let control = ExecutionControl::default();
-        let writer = BoundedWriter::collecting(u64::MAX / 4, &control).expect("reserve");
-        assert!(writer.output_capacity() <= MAX_CONTEXT_PREALLOC_BYTES);
+        let result = StreamingWriter::collecting(TokenPolicy::Whitespace, u64::MAX / 4, &control);
+        assert!(matches!(
+            result,
+            Err(ContextError::BudgetExceeded { resource: "byte" })
+        ));
     }
 
     #[test]
     fn token_estimation_observes_cancellation_checkpoint() {
-        struct CancellingEstimator {
-            control: ExecutionControl,
-        }
-
-        impl VersionedTokenEstimator for CancellingEstimator {
-            fn version(&self) -> &str {
-                "cancel-v1"
-            }
-
-            fn estimate(&self, _text: &str) -> u64 {
-                self.control.cancel();
-                0
-            }
-        }
-
         let control = ExecutionControl::default();
-        let estimator = CancellingEstimator {
-            control: control.clone(),
-        };
+        control.cancel();
         assert_eq!(
             assemble_context_controlled(
                 &HydrationBatch::default(),
@@ -2660,9 +2678,9 @@ mod tests {
                 ContextBudget {
                     max_bytes: 10_000,
                     max_tokens: 10_000,
-                    estimator_version: "cancel-v1".to_string(),
+                    estimator_version: "words-v1".to_string(),
                 },
-                &estimator,
+                &WordEstimator,
                 &control,
             ),
             Err(ContextError::Interrupted(TemporalPortError::Cancelled))
@@ -2671,8 +2689,8 @@ mod tests {
 
     #[test]
     fn summary_omission_traversal_rejects_over_frozen_limit() {
-        let mut summary_omissions = Vec::with_capacity(MAX_SUMMARY_OMISSION_TRAVERSAL + 1);
-        for index in 0..=MAX_SUMMARY_OMISSION_TRAVERSAL {
+        let mut summary_omissions = Vec::with_capacity(MAX_CONTEXT_FRAME_ITEMS + 1);
+        for index in 0..=MAX_CONTEXT_FRAME_ITEMS {
             summary_omissions.push(SummaryOmission {
                 summary_id: summary_id(&format!("summary-{index}")),
                 anchor_id: anchor(&format!("summary-anchor-{index}")),

@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write;
 
 use libsql::{Connection, params};
 use serde_json::{Value, json};
@@ -1051,12 +1050,7 @@ async fn validate_canonical_assertion_completeness(
 fn digest_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    let mut encoded = String::with_capacity(71);
-    encoded.push_str("sha256:");
-    for byte in hasher.finalize() {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    encoded
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 pub(in crate::global_db) async fn record_canonical_observation_effect(

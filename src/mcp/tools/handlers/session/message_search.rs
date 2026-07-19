@@ -386,6 +386,7 @@ pub(crate) struct SessionTemporalMetadataView {
 
 #[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)] // The injected compatibility boundary preserves every typed terminal state.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum LcmDescribeServiceOutcome {
     Complete {
         description: LcmDescribeResponse,
@@ -406,6 +407,7 @@ pub(crate) enum LcmDescribeServiceOutcome {
 
 #[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)] // The injected compatibility boundary preserves every typed terminal state.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum LcmExpandServiceOutcome {
     Complete {
         expansion: LcmExpandResponse,

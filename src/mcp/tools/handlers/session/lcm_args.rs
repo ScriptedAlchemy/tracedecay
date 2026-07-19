@@ -223,10 +223,10 @@ pub(super) fn lcm_roles_arg(args: &Value) -> Result<Vec<String>> {
             .collect::<Result<Vec<_>>>()?,
         Some(_) => return Err(argument_error("roles must be an array")),
     };
-    if let Some(role) = optional_non_empty_string_arg(args, "role")? {
-        if !roles.iter().any(|candidate| candidate == role) {
-            roles.push(role.to_string());
-        }
+    if let Some(role) = optional_non_empty_string_arg(args, "role")?
+        && !roles.iter().any(|candidate| candidate == role)
+    {
+        roles.push(role.to_string());
     }
     Ok(roles)
 }

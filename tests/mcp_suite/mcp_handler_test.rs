@@ -15310,7 +15310,7 @@ async fn test_move_symbol_resolves_qualified_names_like_bare_names() {
 
     let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
     let before_orders = fs::read_to_string(project.join("src/orders.rs")).unwrap();
-    let mut expected = None;
+    let mut expected: Option<Value> = None;
 
     for symbol in [
         "compute_grand_total",

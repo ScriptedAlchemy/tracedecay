@@ -405,10 +405,10 @@ impl DaemonEngine {
                 None => (None, None),
             }
         };
-        if let Some(mut handle) = finished {
-            if let Some(task) = handle.task.take() {
-                let _ = task.await;
-            }
+        if let Some(mut handle) = finished
+            && let Some(task) = handle.task.take()
+        {
+            let _ = task.await;
         }
 
         #[cfg(test)]
@@ -821,6 +821,7 @@ fn observed_scheduler_lifecycle(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_automation_scheduler_loop(
     project_path: PathBuf,
     handshake: DaemonHandshake,

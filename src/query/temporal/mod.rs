@@ -89,7 +89,7 @@ pub async fn execute_temporal_kernel(
         return Err(TemporalKernelError::InvalidLimit);
     }
     let snapshot = &request.snapshot;
-    check_control(&snapshot)?;
+    check_control(snapshot)?;
     let limits = snapshot.request().limits();
     if request.limit > limits.hydration_limit {
         return Err(TemporalKernelError::BudgetExceeded);
@@ -98,9 +98,9 @@ pub async fn execute_temporal_kernel(
     let after = request
         .cursor
         .as_deref()
-        .map(|cursor| verify_cursor(cursor, &snapshot, authenticator))
+        .map(|cursor| verify_cursor(cursor, snapshot, authenticator))
         .transpose()?;
-    check_control(&snapshot)?;
+    check_control(snapshot)?;
     let plan = candidates::plan_candidates(&request.query);
     let candidate_page_items = limits.candidate_limit.min(64);
     let candidate_limits = PageLimits::new(
@@ -113,7 +113,7 @@ pub async fn execute_temporal_kernel(
     let mut candidate_state = CandidateReadState::new(candidate_limits);
     let mut candidates = Vec::with_capacity(limits.candidate_limit.min(256));
     loop {
-        let page = pull_candidate_page(read_port, &snapshot, &plan, &mut candidate_state)
+        let page = pull_candidate_page(read_port, snapshot, &plan, &mut candidate_state)
             .await
             .map_err(map_port_error)?;
         let status = page.status();
@@ -134,7 +134,7 @@ pub async fn execute_temporal_kernel(
     let mut record_state = TemporalRecordReadState::new(record_limits);
     let mut records = TemporalRecordBatch::default();
     loop {
-        let page = pull_temporal_record_page(read_port, &snapshot, &candidates, &mut record_state)
+        let page = pull_temporal_record_page(read_port, snapshot, &candidates, &mut record_state)
             .await
             .map_err(map_port_error)?;
         let status = page.status();
@@ -185,7 +185,7 @@ pub async fn execute_temporal_kernel(
     )
     .map_err(map_port_error)?;
     visible_anchors.extend(summary_eligibility.eligible_anchor_ids.clone());
-    check_control(&snapshot)?;
+    check_control(snapshot)?;
     let all_candidates = candidates;
     let all_candidate_anchors = all_candidates
         .iter()
@@ -206,10 +206,10 @@ pub async fn execute_temporal_kernel(
         .iter()
         .map(|candidate| candidate.anchor_id.clone())
         .collect::<Vec<_>>();
-    let hydration = hydrate_selected(hydration_port, &snapshot, &anchors)
+    let hydration = hydrate_selected(hydration_port, snapshot, &anchors)
         .await
         .map_err(map_hydration_error)?;
-    check_control(&snapshot)?;
+    check_control(snapshot)?;
     let frames = temporal_context_frames(
         &all_candidate_anchors,
         &visible_anchors,
@@ -227,12 +227,12 @@ pub async fn execute_temporal_kernel(
         snapshot.request().execution_control(),
     )
     .map_err(map_context_error)?;
-    check_control(&snapshot)?;
+    check_control(snapshot)?;
     let next_cursor = if has_more {
         ranked
             .last()
             .map(stable_sort_key)
-            .map(|sort_key| encode_cursor(&snapshot, &sort_key, authenticator))
+            .map(|sort_key| encode_cursor(snapshot, &sort_key, authenticator))
             .transpose()?
     } else {
         None
@@ -341,7 +341,7 @@ fn map_hydration_error(error: HydrationError) -> TemporalKernelError {
     match error {
         HydrationError::Interrupted(error) => map_port_error(error),
         HydrationError::BudgetExceeded { .. } => TemporalKernelError::BudgetExceeded,
-        HydrationError::Unavailable { .. } | HydrationError::InvalidDenial => {
+        HydrationError::Unavailable | HydrationError::InvalidDenial => {
             TemporalKernelError::Hydration(error)
         }
     }
@@ -679,7 +679,9 @@ mod scope_tests {
         let unauthorized = omission(
             "unauthorized",
             "summary-unauthorized",
-            SummaryLineageRejection::UnauthorizedSource,
+            SummaryLineageRejection::UnauthorizedSource {
+                anchor_id: anchor("source-unauthorized"),
+            },
         );
         let mismatch = omission(
             "mismatch",
@@ -725,7 +727,9 @@ mod scope_tests {
         let predecessor = SummaryOmission {
             summary_id: predecessor_id.clone(),
             anchor_id: anchor("summary-hidden-predecessor"),
-            rejection: SummaryLineageRejection::UnauthorizedSource,
+            rejection: SummaryLineageRejection::UnauthorizedSource {
+                anchor_id: anchor("source-predecessor"),
+            },
         };
         let first_id = SessionSummaryIdV1::new("first-dependent").expect("valid summary id");
         let first = omission(
@@ -808,7 +812,9 @@ mod scope_tests {
         let hidden = omission(
             "hidden",
             "summary-hidden",
-            SummaryLineageRejection::UnauthorizedSource,
+            SummaryLineageRejection::UnauthorizedSource {
+                anchor_id: anchor("source-hidden"),
+            },
         );
         let redacted = omission(
             "redacted",

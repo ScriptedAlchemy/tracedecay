@@ -320,6 +320,8 @@ pub(super) fn def_message_search() -> ToolDefinition {
 
 fn closed_project_selector_object(description: &str, verb: &str) -> Value {
     let mut schema = project_selector_object(description, verb);
+    // project_selector_object always builds a schema object.
+    #[allow(clippy::expect_used)]
     schema
         .as_object_mut()
         .expect("project selector schema must be an object")

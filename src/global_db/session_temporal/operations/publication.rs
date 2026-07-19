@@ -153,6 +153,7 @@ fn validate_publication_shape(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_canonical_node(
     conn: &Connection,
     summary_id: &str,

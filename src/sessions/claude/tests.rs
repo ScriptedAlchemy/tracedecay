@@ -825,3 +825,129 @@ fn claude_workflow_lookalike_emits_no_workflow_lifecycle() {
         );
     }
 }
+
+#[test]
+fn claude_task_create_and_update_emit_workflow_lifecycle_facts() {
+    let record = json!({
+        "type": "assistant",
+        "cwd": "/redacted/project",
+        "sessionId": "claude-task-session",
+        "uuid": "claude-task-1",
+        "timestamp": "2026-01-01T00:00:05.000Z",
+        "message": {
+            "id": "msg_claude_task_create",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call_task_create_1",
+                    "name": "TaskCreate",
+                    "input": {
+                        "subject": "Gather simplify review scope",
+                        "description": "Collect the branch and working-tree diffs.",
+                        "activeForm": "Gathering simplify review scope"
+                    }
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_task_update_1",
+                    "name": "TaskUpdate",
+                    "input": {
+                        "taskId": "1",
+                        "status": "in_progress"
+                    }
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_read_1",
+                    "name": "Read",
+                    "input": {"file_path": "src/lib.rs"}
+                }
+            ]
+        }
+    });
+    let bytes = serde_json::to_vec(&record).unwrap();
+    let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
+    let parsed = crate::privacy::parse_normalized_observation_record_v1(
+        &bytes,
+        range,
+        tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
+        |native| {
+            let stable = canonical::stable_record_id(&native, "claude-task-session", 0)?;
+            canonical::normalize(&native, "claude-task-session", stable, range)
+        },
+    )
+    .unwrap();
+    let envelope = serde_json::from_value::<tracedecay_domain::CanonicalObservationEnvelopeV1>(
+        parsed.value().clone(),
+    )
+    .unwrap();
+    let lifecycle = envelope
+        .facts()
+        .iter()
+        .filter_map(|fact| match fact {
+            tracedecay_domain::CanonicalObservationFactV1::WorkflowLifecycle {
+                semantic_kind,
+                provider_reference,
+                item_id,
+                state,
+                status,
+                content,
+                ..
+            } => Some((
+                *semantic_kind,
+                provider_reference.as_deref(),
+                item_id.as_deref(),
+                state.as_deref(),
+                status.as_deref(),
+                content.clone(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(lifecycle.len(), 2, "only the two task tool calls lifecycle");
+
+    let (kind, provider_reference, item_id, state, status, content) = &lifecycle[0];
+    assert_eq!(
+        *kind,
+        tracedecay_domain::CanonicalWorkflowSemanticKindV1::Task
+    );
+    assert_eq!(*state, Some("TaskCreate"));
+    assert_eq!(*provider_reference, None);
+    assert_eq!(*item_id, None);
+    assert_eq!(*status, None);
+    assert_eq!(
+        content
+            .as_ref()
+            .and_then(|content| content.get("subject"))
+            .and_then(serde_json::Value::as_str),
+        Some("Gather simplify review scope")
+    );
+
+    let (kind, provider_reference, item_id, state, status, content) = &lifecycle[1];
+    assert_eq!(
+        *kind,
+        tracedecay_domain::CanonicalWorkflowSemanticKindV1::Task
+    );
+    assert_eq!(*state, Some("TaskUpdate"));
+    assert_eq!(*provider_reference, Some("1"));
+    assert_eq!(*item_id, Some("1"));
+    assert_eq!(*status, Some("in_progress"));
+    assert_eq!(
+        content
+            .as_ref()
+            .and_then(|content| content.get("taskId"))
+            .and_then(serde_json::Value::as_str),
+        Some("1")
+    );
+
+    // The ordinary tool call stays a plain ToolInvocation with no lifecycle.
+    assert!(envelope.facts().iter().any(|fact| matches!(
+        fact,
+        tracedecay_domain::CanonicalObservationFactV1::ToolInvocation { name, .. }
+            if name == "TaskCreate"
+    )));
+    let rendered = serde_json::to_string(parsed.value()).unwrap();
+    assert!(!rendered.contains("\"type\":\"tool_use\""));
+}

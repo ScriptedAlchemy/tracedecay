@@ -3,8 +3,8 @@ use tracedecay_domain::{
     CanonicalBoundaryKindV1, CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1,
     CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
     CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1,
-    CanonicalWorkflowEvidenceKindV1, ObservationId, ObservationOrderingDomainV1,
-    ObservationSourceRangeV1, ProviderId, SessionId,
+    CanonicalWorkflowEvidenceKindV1, CanonicalWorkflowSemanticKindV1, ObservationId,
+    ObservationOrderingDomainV1, ObservationSourceRangeV1, ProviderId, SessionId,
 };
 
 use crate::accounting::parser::parse_timestamp;
@@ -346,6 +346,7 @@ fn append_message_facts(
                         arguments: block.get("input").cloned().unwrap_or(Value::Null),
                     });
                 }
+                append_task_lifecycle_fact(name, block.get("input"), facts);
             }
             Some("tool_result") => facts.push(CanonicalObservationFactV1::ToolResult {
                 invocation_id: block
@@ -379,6 +380,46 @@ fn append_message_facts(
     }
 }
 
+/// Claude Code tracks a session's work as a task list (`TaskCreate` /
+/// `TaskUpdate` tool calls; per-session state mirrored under
+/// `~/.claude/tasks/<session>/`). Each call is one lifecycle event on one task
+/// item. The native input rides in `content` verbatim; ids and statuses are
+/// never synthesized (`TaskCreate` carries no task id or status in its input —
+/// the id only arrives later via `toolUseResult`).
+fn append_task_lifecycle_fact(
+    name: &str,
+    input: Option<&Value>,
+    facts: &mut Vec<CanonicalObservationFactV1>,
+) {
+    let event = match name {
+        "TaskCreate" => "TaskCreate",
+        "TaskUpdate" => "TaskUpdate",
+        _ => return,
+    };
+    let task_id = input
+        .and_then(|input| input.get("taskId"))
+        .and_then(Value::as_str)
+        .filter(|task_id| !task_id.is_empty())
+        .map(str::to_string);
+    let status = input
+        .and_then(|input| input.get("status"))
+        .and_then(Value::as_str)
+        .filter(|status| !status.is_empty())
+        .map(str::to_string);
+    facts.push(CanonicalObservationFactV1::WorkflowLifecycle {
+        semantic_kind: CanonicalWorkflowSemanticKindV1::Task,
+        provider_reference: task_id.clone(),
+        item_id: task_id,
+        parent_reference: None,
+        list_reference: None,
+        state: Some(event.to_string()),
+        status,
+        item_order: None,
+        revision: None,
+        event_sequence: None,
+        content: input.cloned(),
+    });
+}
 fn append_non_message_fact(
     facts: &mut Vec<CanonicalObservationFactV1>,
     native: &Value,

@@ -385,6 +385,9 @@ where
         }
     }
 
+    // The outcome enum carries receipts/handles by value; boxing its variants
+    // for this private Result would churn the public refresh API.
+    #[allow(clippy::result_large_err)]
     fn authorize_handle(
         &self,
         context: &RequestContext,
@@ -427,6 +430,9 @@ struct RefreshDigests {
     join: SessionRefreshDigest,
 }
 
+// The outcome enum carries receipts/handles by value; boxing its variants
+// for this private Result would churn the public refresh API.
+#[allow(clippy::result_large_err)]
 fn authorize<A>(
     authorizer: &A,
     context: &RequestContext,

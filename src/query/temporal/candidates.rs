@@ -141,6 +141,8 @@ fn split_quoted(text: &str) -> (Vec<String>, String) {
             if character == '\\' {
                 match chars.peek().copied() {
                     Some('"') | Some('\\') => {
+                        // The escape target was just peeked, so it is present.
+                        #[allow(clippy::expect_used)]
                         let escaped = chars.next().expect("peeked escape target");
                         current.push(escaped);
                         remainder.push(' ');

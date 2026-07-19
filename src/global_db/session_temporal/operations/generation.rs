@@ -124,6 +124,8 @@ pub(super) async fn publish_candidate_generation(
             params![session_id],
         )
         .await?;
+    // An aggregate SELECT with COALESCE always returns exactly one row.
+    #[allow(clippy::unwrap_used)]
     let max_generation: i64 = max_rows.next().await?.unwrap().get(0)?;
     let candidate = max_generation + 1;
     let source_frontier = sources
@@ -475,7 +477,7 @@ pub(super) async fn generation_watermarks(
         .await?;
     rows.next()
         .await?
-        .ok_or_else(|| LcmError::StaleSummaryGeneration {
+        .ok_or(LcmError::StaleSummaryGeneration {
             expected: generation,
             actual: 0,
         })?

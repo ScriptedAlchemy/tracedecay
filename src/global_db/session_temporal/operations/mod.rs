@@ -72,6 +72,7 @@ pub(super) struct CanonicalPublicationManifest {
 }
 
 impl CanonicalPublicationManifest {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn from_publication(
         draft: &LcmSummaryNodeDraft,
         summary_hash: String,

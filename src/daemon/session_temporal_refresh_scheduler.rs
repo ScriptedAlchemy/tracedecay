@@ -185,6 +185,8 @@ impl<'a> PendingBeginRequestGuard<'a> {
         }
     }
 
+    // Armed guards always hold a request; request() is only called before disarm().
+    #[allow(clippy::expect_used)]
     fn request(&self) -> &SessionRefreshBeginOrJoinRequestV1 {
         self.request.as_ref().expect("pending request disarmed")
     }
@@ -216,6 +218,8 @@ impl<'a> RecoverySelectionGuard<'a> {
     }
 
     fn complete(&mut self, operation: &str) {
+        // complete() is only called for the operation at the front of the queue.
+        #[allow(clippy::expect_used)]
         let selected = self
             .pending
             .pop_front()
@@ -625,6 +629,8 @@ impl SessionTemporalRefreshSchedulerRegistry {
             .get(&owner)
             .is_some_and(|entry| entry.task.is_finished())
         {
+            // Confirmed present by the check above while holding the lock.
+            #[allow(clippy::expect_used)]
             let finished = project.remove(&owner).expect("finished entry disappeared");
             let route = finished.wake.clone();
             finished.shutdown().await;
@@ -662,6 +668,8 @@ impl SessionTemporalRefreshSchedulerRegistry {
             .get(&database_path)
             .is_some_and(|entry| entry.task.is_finished())
         {
+            // Confirmed present by the check above while holding the lock.
+            #[allow(clippy::expect_used)]
             let finished = profile
                 .remove(&database_path)
                 .expect("finished entry disappeared");
@@ -1860,7 +1868,7 @@ mod tests {
             .persist_session_refresh_projection_batch(progress.clone(), batch)
             .await
             .unwrap();
-        drop(store);
+        let _ = store;
 
         let state = Arc::new(SessionTemporalRefreshWakeState::default());
         let report = run_session_temporal_refresh_pass(

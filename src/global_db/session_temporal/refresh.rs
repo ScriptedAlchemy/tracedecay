@@ -1,5 +1,3 @@
-use std::fmt::Write;
-
 use libsql::{Connection, Row, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -185,7 +183,7 @@ impl GlobalDb {
                 ],
             )
             .await
-            .map_err(|error| map_begin_conflict(error))?;
+            .map_err(map_begin_conflict)?;
         transaction
             .execute(
                 "INSERT INTO session_temporal_generations (
@@ -700,12 +698,7 @@ fn config_digest() -> String {
 fn digest_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    let mut encoded = String::with_capacity(71);
-    encoded.push_str("sha256:");
-    for byte in hasher.finalize() {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    encoded
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 fn operation_id_for_digest(

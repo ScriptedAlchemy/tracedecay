@@ -12,7 +12,7 @@ use tracedecay_domain::{
 };
 
 use super::candidates::{CandidateChannel, CandidatePlan};
-use super::context::{ContextBudget, VersionedTokenEstimator};
+use super::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use super::cursor::CursorError;
 use super::hydration::{
     HydrationAuthorization, HydrationDenial, HydrationFuture, HydrationGrant, HydrationSink,
@@ -203,8 +203,8 @@ impl VersionedTokenEstimator for Words {
         "words-v1"
     }
 
-    fn estimate(&self, text: &str) -> u64 {
-        text.split_whitespace().count() as u64
+    fn token_policy(&self) -> TokenPolicy {
+        TokenPolicy::Whitespace
     }
 }
 

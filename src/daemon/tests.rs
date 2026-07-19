@@ -2241,10 +2241,7 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     save_scheduled_automation(&dashboard_root, true).await;
     save_scheduler_control(
         &dashboard_root,
-        &AutomationSchedulerControl {
-            paused: true,
-            ..AutomationSchedulerControl::default()
-        },
+        &AutomationSchedulerControl { paused: true },
     )
     .await
     .expect("pause scheduler work");
@@ -4722,10 +4719,7 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
         .expect("enable automation");
     save_scheduler_control(
         &cg.store_layout().dashboard_root,
-        &AutomationSchedulerControl {
-            paused: true,
-            ..AutomationSchedulerControl::default()
-        },
+        &AutomationSchedulerControl { paused: true },
     )
     .await
     .expect("pause scheduler work");

@@ -9,8 +9,14 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod agent_codex_test;
+mod agent_cursor_test;
+mod agent_hermes_test;
+mod agent_install_test;
+mod agent_misc_test;
+mod agent_registry_test;
 mod agent_targets_test;
-mod agent_test;
+mod agent_test_support;
 mod claude_agent_test;
 mod claude_plugin_bundle_test;
 mod claude_plugin_schema_test;

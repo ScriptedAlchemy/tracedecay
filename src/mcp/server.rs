@@ -49,7 +49,7 @@ use crate::mcp::tool_analytics::{
 };
 use crate::path_tree::format_compact_annotated_path_list;
 use crate::query::temporal::TemporalKernelResult;
-use crate::query::temporal::context::VersionedTokenEstimator;
+use crate::query::temporal::context::{TokenPolicy, VersionedTokenEstimator};
 use crate::sessions::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
@@ -1418,8 +1418,8 @@ impl VersionedTokenEstimator for MessageSearchWordEstimator {
         "words-v1"
     }
 
-    fn estimate(&self, text: &str) -> u64 {
-        text.split_whitespace().count() as u64
+    fn token_policy(&self) -> TokenPolicy {
+        TokenPolicy::Whitespace
     }
 }
 
@@ -2395,14 +2395,14 @@ fn message_search_result_matches(
         return false;
     }
     let timestamp = result.message.timestamp;
-    !filters
+    filters
         .time_range
         .start_time
-        .is_some_and(|start| timestamp.is_none_or(|value| value < start))
-        && !filters
+        .is_none_or(|start| timestamp.is_some_and(|value| value >= start))
+        && filters
             .time_range
             .end_time
-            .is_some_and(|end| timestamp.is_none_or(|value| value > end))
+            .is_none_or(|end| timestamp.is_some_and(|value| value <= end))
 }
 
 /// Cohesive dependencies used to construct an MCP server.

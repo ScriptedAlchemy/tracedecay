@@ -894,15 +894,15 @@ pub(in crate::global_db) async fn ensure_session_temporal_schema(
     conn: &Connection,
 ) -> crate::errors::Result<()> {
     let version = schema_version(conn).await?;
-    if let Some(version) = version {
-        if version > SESSION_TEMPORAL_SCHEMA_VERSION {
-            return Err(global_db_operation_message(
-                OPERATION,
-                format!(
-                    "database session temporal schema version {version} is newer than supported version {SESSION_TEMPORAL_SCHEMA_VERSION}"
-                ),
-            ));
-        }
+    if let Some(version) = version
+        && version > SESSION_TEMPORAL_SCHEMA_VERSION
+    {
+        return Err(global_db_operation_message(
+            OPERATION,
+            format!(
+                "database session temporal schema version {version} is newer than supported version {SESSION_TEMPORAL_SCHEMA_VERSION}"
+            ),
+        ));
     }
 
     let rebuild_fts = version.is_none() || temporal_fts_is_missing(conn).await?;

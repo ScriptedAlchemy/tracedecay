@@ -535,43 +535,213 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         active_project_session_db,
         options.session_authorities.project_retrieval,
     );
+    if let Some(result) = dispatch_graph_tools(tool_name, cg, &args, selected_scope_prefix).await {
+        return result;
+    }
+    if let Some(result) = dispatch_info_tools(
+        tool_name,
+        cg,
+        &args,
+        server_stats,
+        scope_prefix,
+        selected_scope_prefix,
+        active_project_session_db,
+        &options,
+    )
+    .await
+    {
+        return result;
+    }
+    if let Some(result) = dispatch_admin_tools(tool_name, cg, &args, &options).await {
+        return result;
+    }
+    if let Some(result) =
+        dispatch_analysis_tools(tool_name, cg, &args, scope_prefix, &options).await
+    {
+        return result;
+    }
+    if let Some(result) = dispatch_git_tools(tool_name, cg, &args).await {
+        return result;
+    }
+    if let Some(result) = dispatch_edit_tools(tool_name, cg, &args).await {
+        return result;
+    }
+    if let Some(result) = dispatch_health_tools(
+        tool_name,
+        cg,
+        &args,
+        scope_prefix,
+        active_project_session_db,
+        &options,
+    )
+    .await
+    {
+        return result;
+    }
+    if let Some(result) = dispatch_memory_tools(tool_name, cg, &args, &options).await {
+        return result;
+    }
+    if let Some(result) =
+        dispatch_session_workflow_tools(tool_name, cg, &args, active_project_session_db, &options)
+            .await
+    {
+        return result;
+    }
     match tool_name {
-        "tracedecay_search" => graph::handle_search(cg, args, selected_scope_prefix).await,
-        "tracedecay_grep" => grep::handle_grep(cg, args, selected_scope_prefix).await,
-        "tracedecay_ast_grep_search" => {
-            ast_grep_search::handle_ast_grep_search(cg, args, selected_scope_prefix).await
+        name if name.starts_with("tracedecay_lcm_") => {
+            dispatch_lcm_tool(name, args, active_lcm_context).await
         }
-        "tracedecay_retrieve" => handle_retrieve(cg, &args),
-        "tracedecay_context" => graph::handle_context(cg, args, selected_scope_prefix).await,
-        "tracedecay_callers" => graph::handle_callers(cg, args).await,
-        "tracedecay_callees" => graph::handle_callees(cg, args).await,
-        "tracedecay_impact" => graph::handle_impact(cg, args).await,
-        "tracedecay_node" => graph::handle_node(cg, args).await,
+        _ => Err(TraceDecayError::Config {
+            message: format!("unknown tool: {tool_name}"),
+        }),
+    }
+}
+
+/// Dispatch code-graph navigation and lookup tools (`tracedecay_search`,
+/// `tracedecay_callers`, ...). Returns `None` when `tool_name` belongs to a
+/// different domain so the caller can try the next dispatch group.
+async fn dispatch_graph_tools(
+    tool_name: &str,
+    cg: &TraceDecay,
+    args: &Value,
+    selected_scope_prefix: Option<&str>,
+) -> Option<Result<ToolResult>> {
+    let result = match tool_name {
+        "tracedecay_search" => graph::handle_search(cg, args.clone(), selected_scope_prefix).await,
+        "tracedecay_grep" => grep::handle_grep(cg, args.clone(), selected_scope_prefix).await,
+        "tracedecay_ast_grep_search" => {
+            ast_grep_search::handle_ast_grep_search(cg, args.clone(), selected_scope_prefix).await
+        }
+        "tracedecay_retrieve" => handle_retrieve(cg, args),
+        "tracedecay_context" => {
+            graph::handle_context(cg, args.clone(), selected_scope_prefix).await
+        }
+        "tracedecay_callers" => graph::handle_callers(cg, args.clone()).await,
+        "tracedecay_callees" => graph::handle_callees(cg, args.clone()).await,
+        "tracedecay_impact" => graph::handle_impact(cg, args.clone()).await,
+        "tracedecay_node" => graph::handle_node(cg, args.clone()).await,
+        "tracedecay_similar" => graph::handle_similar(cg, args.clone()).await,
+        "tracedecay_rename_preview" => graph::handle_rename_preview(cg, args.clone()).await,
+        "tracedecay_implementations" => {
+            graph::handle_implementations(cg, args.clone(), selected_scope_prefix).await
+        }
+        "tracedecay_callers_for" => graph::handle_callers_for(cg, args.clone()).await,
+        "tracedecay_call_chain" => graph::handle_call_chain(cg, args.clone()).await,
+        "tracedecay_file_dependents" => graph::handle_file_dependents(cg, args.clone()).await,
+        "tracedecay_find_exact_symbol" => {
+            graph::handle_find_exact_symbol(cg, args.clone(), selected_scope_prefix).await
+        }
+        "tracedecay_by_qualified_name" => graph::handle_by_qualified_name(cg, args.clone()).await,
+        "tracedecay_signature" => graph::handle_signature(cg, args.clone()).await,
+        "tracedecay_impls" => graph::handle_impls(cg, args.clone()).await,
+        "tracedecay_derives" => graph::handle_derives(cg, args.clone()).await,
+        _ => return None,
+    };
+    Some(result)
+}
+
+/// Dispatch project-info, registry, and file-inspection tools
+/// (`tracedecay_status`, `tracedecay_project_list`, `tracedecay_read`, ...).
+async fn dispatch_info_tools(
+    tool_name: &str,
+    cg: &TraceDecay,
+    args: &Value,
+    server_stats: Option<Value>,
+    scope_prefix: Option<&str>,
+    selected_scope_prefix: Option<&str>,
+    active_project_session_db: Option<&Arc<GlobalDb>>,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Option<Result<ToolResult>> {
+    let result = match tool_name {
         "tracedecay_status" => {
             info::handle_status(
                 cg,
-                args,
+                args.clone(),
                 server_stats,
                 scope_prefix,
                 active_project_session_db.map(Arc::as_ref),
             )
             .await
         }
+        "tracedecay_active_project" => Ok(info::handle_active_project(
+            cg,
+            args,
+            server_stats,
+            scope_prefix,
+        )),
+        "tracedecay_storage_status" => {
+            info::handle_storage_status(cg, args.clone(), scope_prefix).await
+        }
+        "tracedecay_project_list" => {
+            info::handle_project_list(
+                cg,
+                args.clone(),
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
+        }
+        "tracedecay_project_search" => {
+            info::handle_project_search(
+                cg,
+                args.clone(),
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
+        }
+        "tracedecay_project_context" => {
+            info::handle_project_context(
+                cg,
+                args.clone(),
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
+        }
+        "tracedecay_files" => info::handle_files(cg, args.clone(), selected_scope_prefix).await,
+        "tracedecay_admin_sync" => info::handle_admin_sync(cg, args.clone()).await,
+        "tracedecay_port_status" => info::handle_port_status(cg, args.clone()).await,
+        "tracedecay_port_order" => info::handle_port_order(cg, args.clone()).await,
+        "tracedecay_simplify_scan" => {
+            info::handle_simplify_scan(cg, args.clone(), scope_prefix).await
+        }
+        "tracedecay_type_hierarchy" => info::handle_type_hierarchy(cg, args.clone()).await,
+        "tracedecay_body" => info::handle_body(cg, args.clone(), selected_scope_prefix).await,
+        "tracedecay_todos" => info::handle_todos(cg, args.clone(), scope_prefix).await,
+        "tracedecay_read" => info::handle_read(cg, args.clone()).await,
+        "tracedecay_outline" => info::handle_outline(cg, args.clone()).await,
+        "tracedecay_config" => info::handle_config(cg, args),
+        "tracedecay_signature_search" => {
+            info::handle_signature_search(cg, args.clone(), selected_scope_prefix).await
+        }
+        _ => return None,
+    };
+    Some(result)
+}
+
+/// Dispatch administrative tools (`tracedecay_hook_runtime`,
+/// `tracedecay_admin_cli`, `tracedecay_admin_project`).
+async fn dispatch_admin_tools(
+    tool_name: &str,
+    cg: &TraceDecay,
+    args: &Value,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Option<Result<ToolResult>> {
+    let result = match tool_name {
         "tracedecay_hook_runtime" => {
             hook_runtime::handle_hook_runtime(
                 cg,
-                args,
+                args.clone(),
                 options.global_db,
                 options.session_authorities,
             )
             .await
         }
-        "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args).await,
-        "tracedecay_admin_sync" => info::handle_admin_sync(cg, args).await,
         "tracedecay_admin_cli" => {
             admin_cli::handle_admin_cli(
                 cg,
-                args,
+                args.clone(),
                 options.global_db,
                 options.profile_root,
                 options.session_authorities,
@@ -581,147 +751,173 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_admin_project" => {
             admin_project::handle_admin_project(
                 cg,
-                args,
+                args.clone(),
                 options.global_db,
                 options.automation_scheduler_reconciler.clone(),
             )
             .await
         }
-        "tracedecay_active_project" => Ok(info::handle_active_project(
-            cg,
-            &args,
-            server_stats,
-            scope_prefix,
-        )),
-        "tracedecay_storage_status" => info::handle_storage_status(cg, args, scope_prefix).await,
-        "tracedecay_project_list" => {
-            info::handle_project_list(
-                cg,
-                args,
-                options.global_db,
-                options.allow_default_registry_fallback,
-            )
-            .await
+        _ => return None,
+    };
+    Some(result)
+}
+
+/// Dispatch static-analysis report tools (`tracedecay_dead_code`,
+/// `tracedecay_complexity`, `tracedecay_diagnostics`, ...).
+async fn dispatch_analysis_tools(
+    tool_name: &str,
+    cg: &TraceDecay,
+    args: &Value,
+    scope_prefix: Option<&str>,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Option<Result<ToolResult>> {
+    let result = match tool_name {
+        "tracedecay_dead_code" => analysis::handle_dead_code(cg, args.clone(), scope_prefix).await,
+        "tracedecay_module_api" => {
+            analysis::handle_module_api(cg, args.clone(), scope_prefix).await
         }
-        "tracedecay_project_search" => {
-            info::handle_project_search(
-                cg,
-                args,
-                options.global_db,
-                options.allow_default_registry_fallback,
-            )
-            .await
-        }
-        "tracedecay_project_context" => {
-            info::handle_project_context(
-                cg,
-                args,
-                options.global_db,
-                options.allow_default_registry_fallback,
-            )
-            .await
-        }
-        "tracedecay_files" => info::handle_files(cg, args, selected_scope_prefix).await,
-        "tracedecay_affected" => git::handle_affected(cg, args).await,
-        "tracedecay_dead_code" => analysis::handle_dead_code(cg, args, scope_prefix).await,
-        "tracedecay_diff_context" => git::handle_diff_context(cg, args).await,
-        "tracedecay_module_api" => analysis::handle_module_api(cg, args, scope_prefix).await,
-        "tracedecay_circular" => analysis::handle_circular(cg, args).await,
-        "tracedecay_hotspots" => analysis::handle_hotspots(cg, args, scope_prefix).await,
-        "tracedecay_similar" => graph::handle_similar(cg, args).await,
-        "tracedecay_rename_preview" => graph::handle_rename_preview(cg, args).await,
+        "tracedecay_circular" => analysis::handle_circular(cg, args.clone()).await,
+        "tracedecay_hotspots" => analysis::handle_hotspots(cg, args.clone(), scope_prefix).await,
         "tracedecay_unused_imports" => {
-            analysis::handle_unused_imports(cg, args, scope_prefix).await
+            analysis::handle_unused_imports(cg, args.clone(), scope_prefix).await
         }
-        "tracedecay_rank" => analysis::handle_rank(cg, args, scope_prefix).await,
-        "tracedecay_largest" => analysis::handle_largest(cg, args, scope_prefix).await,
-        "tracedecay_coupling" => analysis::handle_coupling(cg, args, scope_prefix).await,
+        "tracedecay_rank" => analysis::handle_rank(cg, args.clone(), scope_prefix).await,
+        "tracedecay_largest" => analysis::handle_largest(cg, args.clone(), scope_prefix).await,
+        "tracedecay_coupling" => analysis::handle_coupling(cg, args.clone(), scope_prefix).await,
         "tracedecay_inheritance_depth" => {
-            analysis::handle_inheritance_depth(cg, args, scope_prefix).await
+            analysis::handle_inheritance_depth(cg, args.clone(), scope_prefix).await
         }
-        "tracedecay_distribution" => analysis::handle_distribution(cg, args, scope_prefix).await,
-        "tracedecay_recursion" => analysis::handle_recursion(cg, args, scope_prefix).await,
-        "tracedecay_complexity" => analysis::handle_complexity(cg, args, scope_prefix).await,
-        "tracedecay_doc_coverage" => analysis::handle_doc_coverage(cg, args, scope_prefix).await,
-        "tracedecay_god_class" => analysis::handle_god_class(cg, args, scope_prefix).await,
-        "tracedecay_changelog" => git::handle_changelog(cg, args).await,
-        "tracedecay_port_status" => info::handle_port_status(cg, args).await,
-        "tracedecay_port_order" => info::handle_port_order(cg, args).await,
-        "tracedecay_commit_context" => git::handle_commit_context(cg, args).await,
-        "tracedecay_pr_context" => git::handle_pr_context(cg, args).await,
-        "tracedecay_simplify_scan" => info::handle_simplify_scan(cg, args, scope_prefix).await,
-        "tracedecay_test_map" => health::handle_test_map(cg, args, scope_prefix).await,
-        "tracedecay_type_hierarchy" => info::handle_type_hierarchy(cg, args).await,
-        "tracedecay_branch_search" => git::handle_branch_search(cg, args).await,
-        "tracedecay_branch_diff" => git::handle_branch_diff(cg, args).await,
-        "tracedecay_branch_list" => Ok(git::handle_branch_list(cg, &args)),
-        "tracedecay_str_replace" => edit::handle_str_replace(cg, args).await,
-        "tracedecay_multi_str_replace" => edit::handle_multi_str_replace(cg, args).await,
-        "tracedecay_insert_at" => edit::handle_insert_at(cg, args).await,
-        "tracedecay_ast_grep_rewrite" => edit::handle_ast_grep_rewrite(cg, args).await,
-        "tracedecay_gini" => health::handle_gini(cg, args, scope_prefix).await,
-        "tracedecay_dependency_depth" => {
-            health::handle_dependency_depth(cg, args, scope_prefix).await
+        "tracedecay_distribution" => {
+            analysis::handle_distribution(cg, args.clone(), scope_prefix).await
         }
-        "tracedecay_health" => health::handle_health(cg, args, scope_prefix).await,
-        "tracedecay_redundancy" => redundancy::handle_redundancy(cg, args, scope_prefix).await,
-        "tracedecay_runtime" => {
-            health::handle_runtime(
-                cg,
-                args,
-                options.global_db,
-                active_project_session_db.map(Arc::as_ref),
-            )
-            .await
+        "tracedecay_recursion" => analysis::handle_recursion(cg, args.clone(), scope_prefix).await,
+        "tracedecay_complexity" => {
+            analysis::handle_complexity(cg, args.clone(), scope_prefix).await
         }
-        "tracedecay_dsm" => health::handle_dsm(cg, args, scope_prefix).await,
-        "tracedecay_test_risk" => health::handle_test_risk(cg, args, scope_prefix).await,
-        "tracedecay_session_start" => health::handle_session_start(cg, args, scope_prefix).await,
-        "tracedecay_session_end" => health::handle_session_end(cg, args, scope_prefix).await,
-        "tracedecay_body" => info::handle_body(cg, args, selected_scope_prefix).await,
-        "tracedecay_todos" => info::handle_todos(cg, args, scope_prefix).await,
-        "tracedecay_read" => info::handle_read(cg, args).await,
-        "tracedecay_outline" => info::handle_outline(cg, args).await,
-        "tracedecay_config" => info::handle_config(cg, &args),
-        "tracedecay_signature_search" => {
-            info::handle_signature_search(cg, args, selected_scope_prefix).await
+        "tracedecay_doc_coverage" => {
+            analysis::handle_doc_coverage(cg, args.clone(), scope_prefix).await
         }
-        "tracedecay_implementations" => {
-            graph::handle_implementations(cg, args, selected_scope_prefix).await
-        }
+        "tracedecay_god_class" => analysis::handle_god_class(cg, args.clone(), scope_prefix).await,
         "tracedecay_unsafe_patterns" => {
-            analysis::handle_unsafe_patterns(cg, args, scope_prefix).await
+            analysis::handle_unsafe_patterns(cg, args.clone(), scope_prefix).await
         }
         "tracedecay_diagnostics" => {
             analysis::handle_diagnostics(
                 cg,
-                args,
+                args.clone(),
                 options.diagnostics_cache,
                 options.diagnostics_lsp,
             )
             .await
         }
-        "tracedecay_constructors" => analysis::handle_constructors(cg, args, scope_prefix).await,
-        "tracedecay_field_sites" => analysis::handle_field_sites(cg, args, scope_prefix).await,
-        "tracedecay_callers_for" => graph::handle_callers_for(cg, args).await,
-        "tracedecay_call_chain" => graph::handle_call_chain(cg, args).await,
-        "tracedecay_file_dependents" => graph::handle_file_dependents(cg, args).await,
-        "tracedecay_replace_symbol" => edit::handle_replace_symbol(cg, args).await,
-        "tracedecay_insert_at_symbol" => edit::handle_insert_at_symbol(cg, args).await,
-        "tracedecay_move_symbol" => edit::handle_move_symbol(cg, args).await,
-        "tracedecay_find_exact_symbol" => {
-            graph::handle_find_exact_symbol(cg, args, selected_scope_prefix).await
+        "tracedecay_constructors" => {
+            analysis::handle_constructors(cg, args.clone(), scope_prefix).await
         }
-        "tracedecay_by_qualified_name" => graph::handle_by_qualified_name(cg, args).await,
-        "tracedecay_signature" => graph::handle_signature(cg, args).await,
-        "tracedecay_impls" => graph::handle_impls(cg, args).await,
-        "tracedecay_diagnose" => workflow::handle_diagnose(cg, args).await,
-        "tracedecay_run_affected_tests" => workflow::handle_run_affected_tests(cg, args).await,
-        "tracedecay_derives" => graph::handle_derives(cg, args).await,
+        "tracedecay_field_sites" => {
+            analysis::handle_field_sites(cg, args.clone(), scope_prefix).await
+        }
+        _ => return None,
+    };
+    Some(result)
+}
+
+/// Dispatch git-aware tools (`tracedecay_affected`, `tracedecay_changelog`,
+/// branch and PR context helpers).
+async fn dispatch_git_tools(
+    tool_name: &str,
+    cg: &TraceDecay,
+    args: &Value,
+) -> Option<Result<ToolResult>> {
+    let result = match tool_name {
+        "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args.clone()).await,
+        "tracedecay_affected" => git::handle_affected(cg, args.clone()).await,
+        "tracedecay_diff_context" => git::handle_diff_context(cg, args.clone()).await,
+        "tracedecay_changelog" => git::handle_changelog(cg, args.clone()).await,
+        "tracedecay_commit_context" => git::handle_commit_context(cg, args.clone()).await,
+        "tracedecay_pr_context" => git::handle_pr_context(cg, args.clone()).await,
+        "tracedecay_branch_search" => git::handle_branch_search(cg, args.clone()).await,
+        "tracedecay_branch_diff" => git::handle_branch_diff(cg, args.clone()).await,
+        "tracedecay_branch_list" => Ok(git::handle_branch_list(cg, args)),
+        _ => return None,
+    };
+    Some(result)
+}
+
+/// Dispatch source-editing tools (`tracedecay_str_replace`,
+/// `tracedecay_move_symbol`, ...).
+async fn dispatch_edit_tools(
+    tool_name: &str,
+    cg: &TraceDecay,
+    args: &Value,
+) -> Option<Result<ToolResult>> {
+    let result = match tool_name {
+        "tracedecay_str_replace" => edit::handle_str_replace(cg, args.clone()).await,
+        "tracedecay_multi_str_replace" => edit::handle_multi_str_replace(cg, args.clone()).await,
+        "tracedecay_insert_at" => edit::handle_insert_at(cg, args.clone()).await,
+        "tracedecay_ast_grep_rewrite" => edit::handle_ast_grep_rewrite(cg, args.clone()).await,
+        "tracedecay_replace_symbol" => edit::handle_replace_symbol(cg, args.clone()).await,
+        "tracedecay_insert_at_symbol" => edit::handle_insert_at_symbol(cg, args.clone()).await,
+        "tracedecay_move_symbol" => edit::handle_move_symbol(cg, args.clone()).await,
+        _ => return None,
+    };
+    Some(result)
+}
+
+/// Dispatch code-health and session-baseline tools (`tracedecay_health`,
+/// `tracedecay_test_risk`, `tracedecay_runtime`, ...).
+async fn dispatch_health_tools(
+    tool_name: &str,
+    cg: &TraceDecay,
+    args: &Value,
+    scope_prefix: Option<&str>,
+    active_project_session_db: Option<&Arc<GlobalDb>>,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Option<Result<ToolResult>> {
+    let result = match tool_name {
+        "tracedecay_test_map" => health::handle_test_map(cg, args.clone(), scope_prefix).await,
+        "tracedecay_gini" => health::handle_gini(cg, args.clone(), scope_prefix).await,
+        "tracedecay_dependency_depth" => {
+            health::handle_dependency_depth(cg, args.clone(), scope_prefix).await
+        }
+        "tracedecay_health" => health::handle_health(cg, args.clone(), scope_prefix).await,
+        "tracedecay_redundancy" => {
+            redundancy::handle_redundancy(cg, args.clone(), scope_prefix).await
+        }
+        "tracedecay_runtime" => {
+            health::handle_runtime(
+                cg,
+                args.clone(),
+                options.global_db,
+                active_project_session_db.map(Arc::as_ref),
+            )
+            .await
+        }
+        "tracedecay_dsm" => health::handle_dsm(cg, args.clone(), scope_prefix).await,
+        "tracedecay_test_risk" => health::handle_test_risk(cg, args.clone(), scope_prefix).await,
+        "tracedecay_session_start" => {
+            health::handle_session_start(cg, args.clone(), scope_prefix).await
+        }
+        "tracedecay_session_end" => {
+            health::handle_session_end(cg, args.clone(), scope_prefix).await
+        }
+        _ => return None,
+    };
+    Some(result)
+}
+
+/// Dispatch memory, skill, and analytics tools (`tracedecay_fact_store`,
+/// `tracedecay_skill_list`, `tracedecay_analytics`, ...).
+async fn dispatch_memory_tools(
+    tool_name: &str,
+    cg: &TraceDecay,
+    args: &Value,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Option<Result<ToolResult>> {
+    let result = match tool_name {
         "tracedecay_fact_store" => {
             memory::handle_fact_store(
                 cg,
-                args,
+                args.clone(),
                 options.global_db,
                 options.allow_default_registry_fallback,
             )
@@ -730,7 +926,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_fact_feedback" => {
             memory::handle_fact_feedback(
                 cg,
-                args,
+                args.clone(),
                 options.global_db,
                 options.allow_default_registry_fallback,
             )
@@ -739,31 +935,50 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_memory_status" => {
             memory::handle_memory_status(
                 cg,
-                args,
+                args.clone(),
                 options.global_db,
                 options.allow_default_registry_fallback,
             )
             .await
         }
         "tracedecay_automation_run_artifact_view" => {
-            skills::handle_automation_run_artifact_view(cg, args).await
+            skills::handle_automation_run_artifact_view(cg, args.clone()).await
         }
         "tracedecay_analytics" => {
             analytics::handle_analytics(
                 cg,
-                args,
+                args.clone(),
                 options.global_db,
                 options.allow_default_registry_fallback,
             )
             .await
         }
-        "tracedecay_skill_list" => skills::handle_skill_list(cg, args).await,
-        "tracedecay_skill_view" => skills::handle_skill_view(cg, args).await,
-        "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(cg, &args),
+        "tracedecay_skill_list" => skills::handle_skill_list(cg, args.clone()).await,
+        "tracedecay_skill_view" => skills::handle_skill_view(cg, args.clone()).await,
+        "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(cg, args),
+        _ => return None,
+    };
+    Some(result)
+}
+
+/// Dispatch session, dashboard, and workflow tools (`tracedecay_dashboard`,
+/// `tracedecay_message_search`, `tracedecay_workflows`, ...).
+async fn dispatch_session_workflow_tools(
+    tool_name: &str,
+    cg: &TraceDecay,
+    args: &Value,
+    active_project_session_db: Option<&Arc<GlobalDb>>,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Option<Result<ToolResult>> {
+    let result = match tool_name {
+        "tracedecay_diagnose" => workflow::handle_diagnose(cg, args.clone()).await,
+        "tracedecay_run_affected_tests" => {
+            workflow::handle_run_affected_tests(cg, args.clone()).await
+        }
         "tracedecay_dashboard" => {
             dashboard::handle_dashboard(
                 cg,
-                args,
+                args.clone(),
                 active_project_session_db,
                 options.automation_scheduler_reconciler.clone(),
                 options.automation_writer.clone(),
@@ -771,27 +986,26 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
             .await
         }
         "tracedecay_session_refresh" => {
-            session::handle_session_refresh(args, options.session_authorities.refresh_services())
-                .await
+            session::handle_session_refresh(
+                args.clone(),
+                options.session_authorities.refresh_services(),
+            )
+            .await
         }
         "tracedecay_message_search" => {
             Box::pin(session::message_search::handle_message_search_with_service(
                 Some(cg.project_root()),
                 session::message_search::SessionRetrievalStoreScope::Project,
-                args,
+                args.clone(),
                 options.session_authorities.project_retrieval,
             ))
             .await
         }
-        "tracedecay_sessions_for" => session::handle_sessions_for(cg, args).await,
-        "tracedecay_workflows" => workflow_query::handle_workflows(cg, args).await,
-        name if name.starts_with("tracedecay_lcm_") => {
-            dispatch_lcm_tool(name, args, active_lcm_context).await
-        }
-        _ => Err(TraceDecayError::Config {
-            message: format!("unknown tool: {tool_name}"),
-        }),
-    }
+        "tracedecay_sessions_for" => session::handle_sessions_for(cg, args.clone()).await,
+        "tracedecay_workflows" => workflow_query::handle_workflows(cg, args.clone()).await,
+        _ => return None,
+    };
+    Some(result)
 }
 
 #[cfg(test)]
@@ -879,8 +1093,8 @@ mod tests {
             .unwrap_or_else(|| panic!("{function_name} does not match on tool_name"))
             .1;
         let handler_arms = match_source
-            .split_once("_ => Err")
-            .unwrap_or_else(|| panic!("{function_name} does not have an unknown-tool fallback"))
+            .split_once("_ =>")
+            .unwrap_or_else(|| panic!("{function_name} does not have a wildcard fallback arm"))
             .0;
 
         handler_arms
@@ -922,6 +1136,19 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let mut handler_names = dispatch_tool_names_from_source("handle_tool_call");
         handler_names.extend(dispatch_tool_names_from_source("dispatch_lcm_tool"));
+        for dispatch_fn in [
+            "dispatch_graph_tools",
+            "dispatch_info_tools",
+            "dispatch_admin_tools",
+            "dispatch_analysis_tools",
+            "dispatch_git_tools",
+            "dispatch_edit_tools",
+            "dispatch_health_tools",
+            "dispatch_memory_tools",
+            "dispatch_session_workflow_tools",
+        ] {
+            handler_names.extend(dispatch_tool_names_from_source(dispatch_fn));
+        }
         for internal in INTERNAL_DAEMON_TOOL_NAMES {
             handler_names.remove(*internal);
         }

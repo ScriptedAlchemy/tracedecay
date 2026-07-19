@@ -716,6 +716,7 @@ pub async fn run_user_session_reflector_with_backend_and_retrieval(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session_reflector_for_store<A: FactCompatibilityStore>(
     dashboard_root: PathBuf,
     sessions_db_path: PathBuf,
@@ -2305,6 +2306,8 @@ async fn production_user_automation_retrieval(
 }
 
 fn unavailable_automation_retrieval(reason: &'static str) -> Box<dyn AutomationSessionRetrieval> {
+    // The static fallback session id is a fixed, valid identifier.
+    #[allow(clippy::expect_used)]
     Box::new(UnavailableAutomationSessionRetrieval {
         anchor_session_id: SessionId::new("session.automation.unavailable")
             .expect("static automation session id is valid"),
@@ -2847,12 +2850,12 @@ fn recent_session_slices_from_temporal(
             let head = messages
                 .iter()
                 .take(head_count)
-                .map(|item| replay_message(item))
+                .map(&replay_message)
                 .collect::<Vec<_>>();
             let tail = messages
                 .iter()
                 .skip(tail_start)
-                .map(|item| replay_message(item))
+                .map(replay_message)
                 .collect::<Vec<_>>();
             for item in messages.iter().take(head_count) {
                 selected_anchors.insert(item.anchor_id.clone());

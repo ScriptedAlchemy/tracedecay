@@ -1514,7 +1514,7 @@ async fn import_legacy_item(
         CanonicalObservationIdV1::new(item.observation_id.clone()).map_err(|error| {
             db_message(
                 "import legacy temporal occurrence",
-                &format!("invalid observation identity: {error}"),
+                format!("invalid observation identity: {error}"),
             )
         })?;
     let occurrence_id =

@@ -542,14 +542,14 @@ pub(super) async fn handle_runtime(
                 }
             }
         );
-        if let Some((authority_audit_ok, authority_audit_error)) = authority {
-            if let Some(database) = value.get_mut("database").and_then(Value::as_object_mut) {
-                database.insert("authority_audit_ok".to_string(), json!(authority_audit_ok));
-                database.insert(
-                    "authority_audit_error".to_string(),
-                    json!(authority_audit_error),
-                );
-            }
+        if let Some((authority_audit_ok, authority_audit_error)) = authority
+            && let Some(database) = value.get_mut("database").and_then(Value::as_object_mut)
+        {
+            database.insert("authority_audit_ok".to_string(), json!(authority_audit_ok));
+            database.insert(
+                "authority_audit_error".to_string(),
+                json!(authority_audit_error),
+            );
         }
         if let Some(temporal) = temporal {
             value["session_temporal_health"] = temporal;
