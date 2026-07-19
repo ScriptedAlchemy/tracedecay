@@ -505,13 +505,15 @@ where
 
     // A linked worktree may have its own profile shard while sharing a Git
     // common directory with every sibling checkout. A non-excluded exact
-    // manifest overrides the selected identity. Otherwise, a healthy and
-    // populated marker/registry-selected layout is authoritative without
-    // probing historical roots. A pristine or unhealthy selection retains
-    // the shared-Git recovery path.
+    // manifest overrides the selected identity. A healthy and populated
+    // marker/registry-selected layout is authoritative only when its manifest
+    // names this exact checkout; a sibling-root selection must retain the
+    // shared-Git recovery path.
     let selected_is_sole_exact_root =
         selected_manifest_matches_exact_root && exact_manifests.is_empty();
-    let matching_manifests = if !exact_manifests.is_empty() || selected_layout_is_authoritative {
+    let matching_manifests = if !exact_manifests.is_empty()
+        || (selected_layout_is_authoritative && selected_manifest_matches_exact_root)
+    {
         exact_manifests
     } else {
         let project_git_common_dir = (!is_detached_linked_worktree(project_root))
@@ -1461,7 +1463,7 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_shared_identity_skips_historical_git_discovery() {
+    fn authoritative_non_exact_identity_retains_historical_git_discovery() {
         fn write_manifest(profile_root: &Path, project_id: &str, project_root: &Path) {
             let data_root = profile_root.join("projects").join(project_id);
             fs::create_dir_all(&data_root).unwrap();
@@ -1508,11 +1510,12 @@ mod tests {
             )
             .unwrap();
 
-        assert!(layouts.is_empty());
+        assert_eq!(layouts.len(), 1);
         assert!(!selected_is_sole_exact_root);
-        assert!(
-            resolver_calls.borrow().is_empty(),
-            "a healthy selected shared identity must not probe historical roots"
+        assert_eq!(
+            resolver_calls.borrow().as_slice(),
+            [worktree_root.clone(), historical_root.clone()],
+            "a healthy selected identity from a sibling root must retain shared-Git recovery"
         );
 
         resolver_calls.borrow_mut().clear();

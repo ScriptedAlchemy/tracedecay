@@ -385,6 +385,34 @@ pub fn quiesce_installed_service_under_lease() -> Result<DaemonServiceState> {
     quiesce_installed_service()
 }
 
+/// Restores an installed service that was running before restart quiesced it.
+/// This deliberately reuses the existing unit instead of rewriting it because
+/// the caller invokes it only after exclusive lifecycle acquisition failed.
+#[doc(hidden)]
+pub fn restore_quiesced_installed_service(previous_state: DaemonServiceState) -> Result<()> {
+    if !cfg!(any(target_os = "linux", target_os = "macos"))
+        || !previous_state.is_running()
+    {
+        return Ok(());
+    }
+    let service_path = service_unit_path()?;
+    if !service_path.exists() {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "cannot restore missing TraceDecay daemon service '{}'",
+                service_path.display()
+            ),
+        });
+    }
+    let unit = read_service_unit(&service_path)?;
+    let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
+    ServiceRunner::current()?.restore_after_quiesce(
+        &service_path,
+        &socket_path,
+        previous_state,
+    )
+}
+
 fn quiesce_installed_service() -> Result<DaemonServiceState> {
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
         return Ok(DaemonServiceState::Missing);
@@ -766,6 +794,27 @@ impl ServiceRunner {
         match self {
             Self::Systemd => run_systemctl(&["stop", super::SERVICE_NAME]),
             Self::Launchd => launchd_before_uninstall(true),
+        }
+    }
+
+    fn restore_after_quiesce(
+        &self,
+        service_path: &Path,
+        socket_path: &Path,
+        previous_state: DaemonServiceState,
+    ) -> Result<()> {
+        if !previous_state.is_running() {
+            return Ok(());
+        }
+        match self {
+            Self::Systemd => run_systemctl(&["start", super::SERVICE_NAME]),
+            Self::Launchd => {
+                launchd_refresh(service_path, socket_path)?;
+                if !previous_state.is_enabled() {
+                    run_launchctl(&["disable", &launchd_service_target()?])?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1627,6 +1676,55 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(log).expect("systemctl log"),
             "--user is-active --quiet tracedecay.service\n--user is-enabled tracedecay.service\n--user stop tracedecay.service\n--user daemon-reload\n--user enable tracedecay.service\n--user restart tracedecay.service\n"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restore_quiesced_service_starts_existing_unit_without_rewriting_it() {
+        let _env_lock = lock_user_data_dir_test_env();
+        let dir = TempDir::new().expect("temp dir");
+        let config_home = dir.path().join("config");
+        let fake_bin = dir.path().join("bin");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+        std::fs::create_dir_all(&home).expect("home dir");
+
+        let systemctl = fake_bin.join("systemctl");
+        let log = dir.path().join("systemctl.log");
+        std::fs::write(
+            &systemctl,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\nexit 0\n",
+        )
+        .expect("fake systemctl");
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+            .expect("systemctl permissions");
+
+        let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _data_guard =
+            EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
+        let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+        let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+        let service_path = config_home
+            .join("systemd/user")
+            .join(crate::daemon::SERVICE_NAME);
+        std::fs::create_dir_all(service_path.parent().expect("service parent"))
+            .expect("service dir");
+        let original_unit =
+            "[Service]\nExecStart=/old/tracedecay daemon run --socket /custom/tracedecay.sock\n";
+        std::fs::write(&service_path, original_unit).expect("existing service unit");
+
+        super::restore_quiesced_installed_service(DaemonServiceState::RunningEnabled)
+            .expect("restore service");
+
+        assert_eq!(
+            std::fs::read_to_string(service_path).expect("service unit"),
+            original_unit
+        );
+        assert_eq!(
+            std::fs::read_to_string(log).expect("systemctl log"),
+            "--user start tracedecay.service\n"
         );
     }
 

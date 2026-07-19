@@ -170,7 +170,8 @@ pub use service::{
     installed_service_socket_path, quiesce_installed_service_for_restart,
     quiesce_installed_service_under_lease, refresh_installed_service,
     refresh_installed_service_under_lease, refresh_installed_service_under_lease_with_state,
-    refresh_service, service_spec, service_status, socket_path_or_default, uninstall_service,
+    refresh_service, restore_quiesced_installed_service, service_spec, service_status,
+    socket_path_or_default, uninstall_service,
 };
 
 /// A host whose lifecycle hooks notify the daemon.

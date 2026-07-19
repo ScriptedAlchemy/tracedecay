@@ -215,6 +215,16 @@ impl DaemonEngine {
                 if !self.lifecycle.accepting() {
                     return;
                 }
+                let owner_is_current = self
+                    .store_administration
+                    .project_servers()
+                    .lock()
+                    .await
+                    .get(&key)
+                    .is_some();
+                if !owner_is_current {
+                    return;
+                }
                 {
                     let schedulers = self
                         .store_administration
