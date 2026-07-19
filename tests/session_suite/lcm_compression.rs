@@ -2818,7 +2818,7 @@ async fn boundary_continuation_with_matching_bound_session_records_no_cooldown()
 
     let response = db.lcm_preflight(request).await.unwrap();
 
-    assert!(response.should_compress);
+    assert!(response.should_compress, "{response:?}");
     assert_eq!(response.reason, "threshold_backlog_ready");
 }
 

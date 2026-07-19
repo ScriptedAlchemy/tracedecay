@@ -17,7 +17,7 @@ use crate::sessions::lcm::{
 pub(crate) use publication::publish_immutable_summary;
 
 pub(super) const PUBLICATION_ROUTE: &str = "lcm_summary_lineage_v1";
-pub(super) const SANITIZER_VERSION: &str = "tracedecay.lcm-summary-publication.v1";
+pub(crate) const SANITIZER_VERSION: &str = "tracedecay.lcm-summary-publication.v1";
 pub(super) const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,7 +160,7 @@ impl CanonicalPublicationManifest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct FrozenPublicationReceipt {
+pub(crate) struct FrozenPublicationReceipt {
     pub summary_id: String,
     pub disposition: String,
     pub published_at: i64,
@@ -170,7 +170,7 @@ pub(super) struct FrozenPublicationReceipt {
     pub publication_manifest_digest: String,
 }
 
-pub(super) fn receipt_id(summary_id: &str, summary_hash: &str) -> String {
+pub(crate) fn receipt_id(summary_id: &str, summary_hash: &str) -> String {
     format!(
         "receipt_summary_{}",
         raw::sha256_hex(&format!("{summary_id}\0{summary_hash}"))

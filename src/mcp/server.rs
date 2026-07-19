@@ -1430,6 +1430,7 @@ struct DaemonSessionRetrievalAuthorizer {
     identity: ResolvedSessionIdentity,
     session_id: SessionId,
     retrieval_scope: SessionRetrievalScope,
+    temporal_mode: TemporalModeV1,
     grain: RetrievalGrainV1,
     provider: Option<String>,
     grant_id: &'static str,
@@ -1451,7 +1452,7 @@ impl SessionScopeAuthorizer for DaemonSessionRetrievalAuthorizer {
         if request.session_id() != &self.session_id
             || request.retrieval_scope() != &self.retrieval_scope
             || request.provider_scope() != self.provider.as_deref()
-            || request.temporal_mode() != TemporalModeV1::Current
+            || request.temporal_mode() != self.temporal_mode
             || request.grain() != self.grain
             || request.access() != SessionAccess::Hydrate
         {
@@ -1548,6 +1549,7 @@ impl DaemonSessionRetrievalService {
                 identity: self.root.identity.clone(),
                 session_id: command.query().session_id().clone(),
                 retrieval_scope: command.query().retrieval_scope().clone(),
+                temporal_mode: command.query().temporal_mode(),
                 grain: command.query().grain(),
                 provider: command.query().provider().map(str::to_owned),
                 grant_id,

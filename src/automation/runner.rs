@@ -1879,9 +1879,7 @@ async fn run_combined_review_for_retrieval(
             }
         };
     let skill_bundle =
-        match build_skill_writer_evidence(retrieval, Some(cg.project_root()), options.skill_writer)
-            .await?
-        {
+        match build_skill_writer_evidence(retrieval, None, options.skill_writer).await? {
             SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
             SkillWriterEvidenceOutcome::Skipped { .. } => {
                 return Ok(CombinedReviewDispatch::NotCombined {

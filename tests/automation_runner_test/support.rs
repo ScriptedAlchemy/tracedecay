@@ -30,6 +30,7 @@ pub(crate) use tracedecay::automation::runner::{
     AutomationTemporalEvidenceItem, AutomationTemporalRetrieval, CombinedReviewAutomationOptions,
     CombinedReviewDispatch, MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
     SkillWriterAutomationOptions, run_memory_curator_with_backend,
+    run_skill_writer_with_backend_and_retrieval,
 };
 pub(crate) use tracedecay::errors::TraceDecayError;
 pub(crate) use tracedecay::global_db::GlobalDb;

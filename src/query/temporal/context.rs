@@ -1990,7 +1990,12 @@ mod tests {
         assert_eq!(parsed["payloads"][1]["encoding"], "bytes");
         assert_eq!(
             parsed["payloads"][1]["data"],
-            serde_json::json!([0, 255, 34, 92])
+            serde_json::Value::Array(
+                [0_u64, 255, 34, 92]
+                    .into_iter()
+                    .map(serde_json::Value::from)
+                    .collect()
+            )
         );
         assert_eq!(parsed["payloads"][2]["encoding"], "utf8");
         assert_eq!(parsed["payloads"][2]["data"], decomposed);

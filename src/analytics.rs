@@ -178,13 +178,22 @@ pub fn underused_tool_family_signals<'a>(
 
     for observation in observations {
         let text = observation.text.unwrap_or_default();
+        let command_hint = observation
+            .metadata_json
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .as_ref()
+            .and_then(command_from_metadata);
+        let relevance_text = command_hint
+            .as_deref()
+            .map(|command| format!("{command}\n{text}"));
+        let text_with_command = relevance_text.as_deref().unwrap_or(text);
         for event in infer_usage_events(
             observation.tool_names,
             observation.metadata_json,
             Some(text),
         ) {
             if event.kind == UsageKind::Tool {
-                record_tool_family(&mut families, &event.name, text);
+                record_tool_family(&mut families, &event.name, text_with_command);
             }
         }
     }

@@ -515,6 +515,9 @@ fn load_managed_skill_unlocked(profile_root: &Path, id: &str) -> Result<ManagedS
 }
 
 pub async fn list_managed_skills(profile_root: &Path) -> Result<Vec<ManagedSkill>> {
+    if !managed_skill_root(profile_root).exists() {
+        return Ok(Vec::new());
+    }
     let _lock = lock_skill_store_async(profile_root).await?;
     list_managed_skills_unlocked(profile_root)
 }

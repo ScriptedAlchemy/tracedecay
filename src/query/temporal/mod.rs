@@ -12,7 +12,7 @@ use thiserror::Error;
 use tracedecay_domain::{
     CompactContextConflictV1, CompactContextLineageEdgeV1, CompactContextOmissionV1,
     ContextOmissionReasonV1, HydrationStateV1, RetrievalAnchorId, SessionSummaryRecordV1,
-    TemporalAssertionKindV1, TemporalCoverageCountsV1,
+    TemporalAssertionKindV1, TemporalCoverageCountsV1, TemporalModeV1,
 };
 
 use self::context::{
@@ -101,7 +101,16 @@ pub async fn execute_temporal_kernel(
         .map(|cursor| verify_cursor(cursor, &snapshot, authenticator))
         .transpose()?;
     check_control(&snapshot)?;
-    let plan = candidates::plan_candidates(&request.query);
+    let plan = if request.query.trim().is_empty()
+        && snapshot.temporal_mode() == TemporalModeV1::Forensic
+        && matches!(
+            snapshot.request().retrieval_scope(),
+            TemporalRetrievalScope::Session(_)
+        ) {
+        candidates::plan_scope_candidates()
+    } else {
+        candidates::plan_candidates(&request.query)
+    };
     let candidate_page_items = limits.candidate_limit.min(64);
     let candidate_limits = PageLimits::new(
         limits.candidate_limit,

@@ -3346,6 +3346,7 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
     const SESSION_QUERY: &str = "
         SELECT candidate.node_id, candidate.session_id
         FROM lcm_summary_nodes AS candidate
+             INDEXED BY idx_lcm_summary_nodes_codex_pending_session_order
         JOIN session_summary_nodes AS authority
           ON authority.summary_id = candidate.node_id
          AND authority.session_id = candidate.session_id
@@ -3384,6 +3385,7 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
     const ROOT_QUERY: &str = "
         SELECT candidate.node_id, candidate.session_id
         FROM lcm_summary_nodes AS candidate
+             INDEXED BY idx_lcm_summary_nodes_codex_pending_root_order
         JOIN session_summary_nodes AS authority
           ON authority.summary_id = candidate.node_id
          AND authority.session_id = candidate.session_id

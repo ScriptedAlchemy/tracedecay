@@ -390,25 +390,14 @@ where
             configuration_digest,
         );
         let expected_execution = execution.clone();
-        let execution = async { self.execution.execute(execution, &self.estimator).await };
-        tokio::pin!(execution);
-        let cancellation = context.cancellation().cancelled();
-        tokio::pin!(cancellation);
-        let deadline =
-            tokio::time::sleep_until(tokio::time::Instant::from_std(context.deadline().instant()));
-        tokio::pin!(deadline);
-
-        let result = tokio::select! {
-            biased;
-            _ = &mut cancellation => {
-                cancellation_control.cancel();
-                return SessionRetrievalOutcome::Cancelled;
-            }
-            _ = &mut deadline => {
-                cancellation_control.cancel();
-                return SessionRetrievalOutcome::Cancelled;
-            }
-            result = &mut execution => result,
+        let result = match context
+            .run_interruptible(self.execution.execute(execution, &self.estimator), || {
+                cancellation_control.cancel()
+            })
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => return SessionRetrievalOutcome::Cancelled,
         };
         match result {
             Ok(report) if expected_execution.validates_report(&report) => {

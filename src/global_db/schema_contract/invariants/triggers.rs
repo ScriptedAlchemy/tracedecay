@@ -1799,3 +1799,20 @@ pub(in crate::global_db) async fn restore_immutability_after_canonical_repair(
     }
     Ok(())
 }
+
+pub(in crate::global_db) async fn suspend_session_invariants_for_schema_upgrade(
+    conn: &Connection,
+) -> crate::errors::Result<()> {
+    for invariant in INVARIANTS {
+        for trigger in invariant
+            .triggers
+            .iter()
+            .filter(|trigger| trigger.table.starts_with("session_"))
+        {
+            conn.execute(&format!("DROP TRIGGER IF EXISTS \"{}\"", trigger.name), ())
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        }
+    }
+    Ok(())
+}

@@ -294,8 +294,8 @@ mod tests {
 
     use super::*;
     use crate::query::temporal::ports::{
-        BindingDigest, ExecutionLimits, KernelVersions, TemporalExecutionSnapshot,
-        TemporalPortError, TemporalSnapshotRequest, TemporalWatermarks,
+        BindingDigest, ExecutionControl, ExecutionLimits, KernelVersions,
+        TemporalExecutionSnapshot, TemporalPortError, TemporalSnapshotRequest, TemporalWatermarks,
     };
     use crate::query::temporal::resolution::ValidatedAuthorization;
     use crate::query::temporal::test_support::block_on;
@@ -715,8 +715,6 @@ mod tests {
     #[test]
     fn hydration_checkpoints_between_anchors() {
         block_on(async {
-            use crate::query::temporal::ports::ExecutionControl;
-
             struct CancelAfterFirstRead {
                 control: ExecutionControl,
                 reads: AtomicUsize,

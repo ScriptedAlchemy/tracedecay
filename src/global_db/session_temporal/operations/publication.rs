@@ -128,7 +128,7 @@ pub(crate) async fn publish_immutable_summary(
 
     // Compatibility is deliberately last: a projection failure rolls back all
     // canonical rows and lets the outer payload rollback guard remove files.
-    compatibility::project_canonical_summary(conn, summary_id, &manifest).await?;
+    compatibility::project_canonical_summary(conn, summary_id, &manifest, created_at).await?;
 
     Ok(LcmSummaryPublicationReceipt {
         summary: summary_node(summary_id, &manifest, created_at),
@@ -242,7 +242,6 @@ async fn exact_replay_receipt(
         || manifest.predecessor_summary_id != publication.predecessor_summary_id
         || manifest.logical_identity_digest != expected_identity
         || manifest.receipt_id != expected_receipt
-        || manifest.summary_anchor_id != format!("anchor_summary_{}", raw::sha256_hex(summary_id))
     {
         return Err(conflict(summary_id));
     }

@@ -152,6 +152,7 @@ async fn combined_review_fails_closed_before_cross_authority_proposal_writes() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
+    let _global_db = isolate_global_db(&cg);
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(combined_output_fixture());
 
@@ -283,6 +284,7 @@ async fn combined_review_falls_back_when_evidence_is_unavailable() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
+    let _global_db = isolate_global_db(&cg);
     // No seeded session evidence: the reflector evidence bundle is empty, so
     // the combined path defers to the per-task runs (which record their own
     // skips).

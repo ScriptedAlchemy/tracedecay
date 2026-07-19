@@ -1715,6 +1715,7 @@ struct CandidateWire<'a> {
 impl MeasuredTemporalValue for RankingCandidate {
     fn measured_encoded_bytes(&self) -> Result<usize, TemporalPortError> {
         let channel = match self.channel {
+            super::candidates::CandidateChannel::Scope => "scope",
             super::candidates::CandidateChannel::ExactMessage => "exact_message",
             super::candidates::CandidateChannel::Phrase => "phrase",
             super::candidates::CandidateChannel::Entity => "entity",

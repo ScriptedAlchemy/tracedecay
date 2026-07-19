@@ -180,6 +180,13 @@ async fn activate_test_temporal_generation(
         .map(|input| input.source_frontier)
         .max()
         .expect("temporal fixture requires canonical observations");
+    let snapshot_at = inputs
+        .iter()
+        .map(|input| input.occurrence.knowledge_at.0)
+        .max()
+        .unwrap_or_default()
+        .max(99)
+        .saturating_add(1);
     let active_generation = SessionProjectionGenerationV1::new(1).unwrap();
     let candidate_generation = SessionProjectionGenerationV1::new(2).unwrap();
     let cursor_key = SignedCursorKeyRefV1 {
@@ -203,7 +210,7 @@ async fn activate_test_temporal_generation(
             .with_cursor_key(cursor_key);
     let snapshot = SessionTemporalSnapshotV1::new(
         session_id.clone(),
-        UtcMicros(100),
+        UtcMicros(snapshot_at),
         watermarks.clone(),
         SessionTemporalCapabilitiesV1::new([
             SessionTemporalCapabilityV1::FrozenWatermarks,
@@ -258,6 +265,44 @@ pub(crate) async fn handle_tool_call(
         obj.entry("format".to_string())
             .or_insert_with(|| serde_json::json!("json"));
     }
+    if matches!(
+        tool_name,
+        "tracedecay_message_search"
+            | "tracedecay_lcm_load_session"
+            | "tracedecay_lcm_grep"
+            | "tracedecay_lcm_describe"
+            | "tracedecay_lcm_expand"
+            | "tracedecay_lcm_expand_query"
+    ) {
+        let server = McpServer::new(TraceDecay::open(cg.project_root()).await?, None).await;
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": args,
+            },
+        })
+        .to_string();
+        let response = crate::mcp_server_test::run_server_with_messages(server, vec![request])
+            .await
+            .into_iter()
+            .next()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!("{tool_name} returned no MCP response"),
+            })?;
+        let response: Value =
+            serde_json::from_str(&response).map_err(|error| TraceDecayError::Config {
+                message: format!("{tool_name} returned invalid MCP JSON: {error}"),
+            })?;
+        if let Some(error) = response.get("error") {
+            return Err(TraceDecayError::Config {
+                message: format!("{tool_name} failed over MCP: {error}"),
+            });
+        }
+        return Ok(ToolResult::new(response["result"].clone(), Vec::new()));
+    }
     tracedecay::mcp::handle_tool_call(cg, tool_name, args, server_stats, scope_prefix).await
 }
 
@@ -303,6 +348,32 @@ struct HomeEnvGuard {
     previous_home: Option<OsString>,
     previous_userprofile: Option<OsString>,
     previous_data_dir: Option<OsString>,
+}
+
+struct TestEnvVarGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl TestEnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for TestEnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 }
 
 impl HomeEnvGuard {
@@ -1919,9 +1990,15 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         expand.input_schema["required"],
         json!(["provider", "session_id", "target"])
     );
-    assert!(expand.input_schema["properties"].get("target").is_some());
+    let target_variants = expand.input_schema["properties"]["target"]["oneOf"]
+        .as_array()
+        .expect("expand target must be a discriminated union");
+    let raw_message_target = target_variants
+        .iter()
+        .find(|target| target["properties"]["kind"]["const"] == "raw_message")
+        .expect("expand target must include raw messages");
     assert_eq!(
-        expand.input_schema["properties"]["target"]["properties"]["store_id"]["type"],
+        raw_message_target["properties"]["store_id"]["type"],
         json!("integer")
     );
     assert_eq!(
@@ -8943,6 +9020,52 @@ async fn seed_temporal_lcm_session_message(
         text.into(),
         CanonicalMessageRoleV1::Assistant,
         ordinal,
+        ordinal + 1,
+        UtcMicros(ordinal + 1),
+    )
+    .await
+}
+
+async fn seed_temporal_lcm_session_message_at(
+    cg: &TraceDecay,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    role: CanonicalMessageRoleV1,
+    ordinal: i64,
+    timestamp: i64,
+) -> TemporalLcmProjectionInput {
+    persist_temporal_lcm_observation(
+        cg,
+        session_id,
+        message_id,
+        text.into(),
+        role,
+        ordinal,
+        timestamp,
+        UtcMicros(timestamp.saturating_mul(1_000_000)),
+    )
+    .await
+}
+
+async fn seed_temporal_lcm_session_message_at_micros(
+    cg: &TraceDecay,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    role: CanonicalMessageRoleV1,
+    ordinal: i64,
+    timestamp: i64,
+) -> TemporalLcmProjectionInput {
+    persist_temporal_lcm_observation(
+        cg,
+        session_id,
+        message_id,
+        text.into(),
+        role,
+        ordinal,
+        timestamp,
+        UtcMicros(timestamp),
     )
     .await
 }
@@ -8961,6 +9084,8 @@ async fn seed_temporal_lcm_tool_result_message(
         text.into(),
         CanonicalMessageRoleV1::Tool,
         ordinal,
+        ordinal + 1,
+        UtcMicros(ordinal + 1),
     )
     .await;
     let db = open_active_project_session_db(cg).await;
@@ -8982,6 +9107,8 @@ async fn persist_temporal_lcm_observation(
     text: String,
     role: CanonicalMessageRoleV1,
     ordinal: i64,
+    message_timestamp: i64,
+    ingested_at: UtcMicros,
 ) -> TemporalLcmProjectionInput {
     let provider = ProviderId::new("cursor").unwrap();
     let session_id = SessionId::new(session_id).unwrap();
@@ -9013,7 +9140,7 @@ async fn persist_temporal_lcm_observation(
             role: role.clone(),
             content: Value::String(text),
             model: Some("test-model".to_string()),
-            timestamp: Some(ordinal + 1),
+            timestamp: Some(message_timestamp),
         }],
     };
     let envelope = CanonicalObservationEnvelopeV1::new(
@@ -9074,7 +9201,7 @@ async fn persist_temporal_lcm_observation(
     let anchor = build_observation_retrieval_anchor_v2(
         &observation,
         projection_generation.clone(),
-        UtcMicros(ordinal + 1),
+        ingested_at,
         authorization,
     )
     .unwrap();
@@ -9108,7 +9235,7 @@ async fn persist_temporal_lcm_observation(
         "message_id": message_id,
         "agent_id": null,
         "role": role,
-        "knowledge_at": anchor.ingested_at(),
+        "knowledge_at": ingested_at,
         "valid_time": {"kind": "unknown"},
         "evidence": {
             "authority": "canonical_observation",
@@ -9463,6 +9590,7 @@ async fn lcm_doctor_clean_apply_is_denied_by_default() {
 #[tokio::test]
 async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
     let (cg, _env, _dir) = setup_empty_project().await;
+    let _apply_enabled = TestEnvVarGuard::set("LCM_DOCTOR_CLEAN_APPLY_ENABLED", "true");
     seed_lcm_session_message(
         &cg,
         "cron-20260414",
@@ -9517,7 +9645,6 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
             "provider": "cursor",
             "mode": "clean",
             "apply": true,
-            "doctor_clean_apply_enabled": true,
             "ignore_session_patterns": ["cron-*"]
         }),
         None,
@@ -9554,6 +9681,7 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
 #[tokio::test]
 async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_samples() {
     let (cg, _env, _dir) = setup_empty_project().await;
+    let _apply_enabled = TestEnvVarGuard::set("LCM_DOCTOR_CLEAN_APPLY_ENABLED", "true");
     let db = open_active_project_session_db(&cg).await;
     for idx in 0..21 {
         seed_lcm_session_message_in_db(
@@ -9583,7 +9711,6 @@ async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_sam
             "provider": "cursor",
             "mode": "clean",
             "apply": true,
-            "doctor_clean_apply_enabled": true,
             "ignore_message_patterns": ["^Cronjob Response:"]
         }),
         None,
@@ -9738,6 +9865,7 @@ async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodie
 #[tokio::test]
 async fn lcm_doctor_gc_mode_preview_and_apply_reports_without_body_leaks() {
     let (cg, _env, _dir) = setup_empty_project().await;
+    let _apply_enabled = TestEnvVarGuard::set("LCM_GC_APPLY_ENABLED", "true");
     seed_lcm_session_message(
         &cg,
         "gc-preview-session",
@@ -9787,8 +9915,7 @@ async fn lcm_doctor_gc_mode_preview_and_apply_reports_without_body_leaks() {
         json!({
             "provider": "cursor",
             "mode": "gc",
-            "apply": true,
-            "lcm_gc_apply_enabled": true
+            "apply": true
         }),
         None,
         None,
@@ -10422,7 +10549,10 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
     let full_text = format!("orchard dispatch {}", "external-payload-body ".repeat(220));
-    seed_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text, 1).await;
+    let projection =
+        seed_temporal_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text, 1).await;
+    let temporal_db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&temporal_db, "lcm-session", vec![projection]).await;
     let db = open_project_session_db(cg.project_root())
         .await
         .expect("project-local session db should open");
@@ -11428,45 +11558,38 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
 #[tokio::test]
 async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    seed_lcm_session_message_with_role_source_timestamp(
+    let old = seed_temporal_lcm_session_message_at_micros(
         &cg,
         "lcm-native-filters",
         "lcm-native-old-cli-assistant",
         "orchard native old cli assistant",
+        CanonicalMessageRoleV1::Assistant,
         1,
-        LcmMessageContext {
-            role: "assistant",
-            source: "cli",
-            timestamp: 10,
-        },
+        10,
     )
     .await;
-    seed_lcm_session_message_with_role_source_timestamp(
+    let user = seed_temporal_lcm_session_message_at_micros(
         &cg,
         "lcm-native-filters",
         "lcm-native-new-cli-user",
         "orchard native new cli user",
+        CanonicalMessageRoleV1::User,
         2,
-        LcmMessageContext {
-            role: "user",
-            source: "cli",
-            timestamp: 20,
-        },
+        20,
     )
     .await;
-    seed_lcm_session_message_with_role_source_timestamp(
+    let newer = seed_temporal_lcm_session_message_at_micros(
         &cg,
         "lcm-native-filters",
         "lcm-native-new-api-assistant",
         "orchard native new api assistant",
+        CanonicalMessageRoleV1::Assistant,
         3,
-        LcmMessageContext {
-            role: "assistant",
-            source: "api",
-            timestamp: 30,
-        },
+        30,
     )
     .await;
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-native-filters", vec![old, user, newer]).await;
 
     let grep = handle_tool_call(
         &cg,
@@ -11476,8 +11599,6 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
             "query": "orchard native",
             "scope": "session",
             "session_id": "lcm-native-filters",
-            "sort": "recency",
-            "source": "cli",
             "role": "assistant",
             "start_time": 5,
             "end_time": 25,
@@ -11489,13 +11610,14 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
     .await
     .unwrap();
     let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
-    assert_eq!(grep_payload["status"], "ok");
+    assert_eq!(grep_payload["status"], "partial");
     assert_eq!(grep_payload["count"], 1);
+    assert_eq!(grep_payload["omitted"], 3);
     assert_eq!(
         grep_payload["hits"][0]["message_id"],
         "lcm-native-old-cli-assistant"
     );
-    assert_eq!(grep_payload["sort"], "recency");
+    assert_eq!(grep_payload["sort"], "relevance");
 
     let loaded = handle_tool_call(
         &cg,
@@ -11515,7 +11637,7 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
     .await
     .unwrap();
     let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
-    assert_eq!(loaded_payload["status"], "ok");
+    assert_eq!(loaded_payload["status"], "ok", "payload: {loaded_payload}");
     assert_eq!(loaded_payload["content_limit"], 20_000);
     assert_eq!(loaded_payload["content_limit_clamped_from"], 25_000);
     assert_eq!(
@@ -11533,45 +11655,38 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
 async fn lcm_grep_accepts_string_timestamp_filters() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
-    seed_lcm_session_message_with_role_source_timestamp(
+    let old = seed_temporal_lcm_session_message_at(
         &cg,
         "lcm-string-timestamps",
         "lcm-string-timestamps-old",
         "orchard string timestamp old",
+        CanonicalMessageRoleV1::Assistant,
         1,
-        LcmMessageContext {
-            role: "assistant",
-            source: "cli",
-            timestamp: 10,
-        },
+        10,
     )
     .await;
-    seed_lcm_session_message_with_role_source_timestamp(
+    let target = seed_temporal_lcm_session_message_at(
         &cg,
         "lcm-string-timestamps",
         "lcm-string-timestamps-target",
         "orchard string timestamp target",
+        CanonicalMessageRoleV1::Assistant,
         2,
-        LcmMessageContext {
-            role: "assistant",
-            source: "cli",
-            timestamp: 20,
-        },
+        20,
     )
     .await;
-    seed_lcm_session_message_with_role_source_timestamp(
+    let new = seed_temporal_lcm_session_message_at(
         &cg,
         "lcm-string-timestamps",
         "lcm-string-timestamps-new",
         "orchard string timestamp new",
+        CanonicalMessageRoleV1::Assistant,
         3,
-        LcmMessageContext {
-            role: "assistant",
-            source: "cli",
-            timestamp: 30,
-        },
+        30,
     )
     .await;
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-string-timestamps", vec![old, target, new]).await;
 
     let grep = handle_tool_call(
         &cg,
@@ -11591,8 +11706,9 @@ async fn lcm_grep_accepts_string_timestamp_filters() {
     .await
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
-    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["status"], "partial", "payload: {payload}");
     assert_eq!(payload["count"], 1);
+    assert_eq!(payload["omitted"], 3);
     assert_eq!(
         payload["hits"][0]["message_id"],
         "lcm-string-timestamps-target"
@@ -11607,32 +11723,28 @@ async fn lcm_grep_accepts_relative_time_filters() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    seed_lcm_session_message_with_role_source_timestamp(
+    let old = seed_temporal_lcm_session_message_at(
         &cg,
         "lcm-relative-timestamps",
         "lcm-relative-timestamps-old",
         "orchard relative timestamp old",
+        CanonicalMessageRoleV1::Assistant,
         1,
-        LcmMessageContext {
-            role: "assistant",
-            source: "cli",
-            timestamp: now - 7200,
-        },
+        now - 7200,
     )
     .await;
-    seed_lcm_session_message_with_role_source_timestamp(
+    let new = seed_temporal_lcm_session_message_at(
         &cg,
         "lcm-relative-timestamps",
         "lcm-relative-timestamps-new",
         "orchard relative timestamp new",
+        CanonicalMessageRoleV1::Assistant,
         2,
-        LcmMessageContext {
-            role: "assistant",
-            source: "cli",
-            timestamp: now - 300,
-        },
+        now - 300,
     )
     .await;
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-relative-timestamps", vec![old, new]).await;
 
     let grep = handle_tool_call(
         &cg,
@@ -11651,8 +11763,9 @@ async fn lcm_grep_accepts_relative_time_filters() {
     .await
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
-    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["status"], "partial", "payload: {payload}");
     assert_eq!(payload["count"], 1);
+    assert_eq!(payload["omitted"], 2);
     assert_eq!(
         payload["hits"][0]["message_id"],
         "lcm-relative-timestamps-new"
@@ -11724,14 +11837,18 @@ async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_arg
 #[tokio::test]
 async fn lcm_load_session_accepts_valid_integer_args() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    seed_lcm_session_message(
+    let projection = seed_temporal_lcm_session_message_at_micros(
         &cg,
         "lcm-valid-integers",
         "lcm-valid-integers-message",
         "valid integer argument body",
+        CanonicalMessageRoleV1::Assistant,
         1,
+        2,
     )
     .await;
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-valid-integers", vec![projection]).await;
 
     let result = handle_tool_call(
         &cg,
@@ -11752,7 +11869,11 @@ async fn lcm_load_session_accepts_valid_integer_args() {
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
     assert_eq!(payload["status"], "ok");
-    assert_eq!(payload["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        payload["messages"].as_array().unwrap().len(),
+        1,
+        "payload: {payload}"
+    );
     assert_eq!(
         payload["messages"][0]["content"].as_str().unwrap(),
         "valid in"
@@ -11762,16 +11883,21 @@ async fn lcm_load_session_accepts_valid_integer_args() {
 #[tokio::test]
 async fn lcm_large_json_response_stays_parseable_after_truncation() {
     let (cg, _env, _dir) = setup_empty_project().await;
+    let mut projections = Vec::new();
     for index in 0..4 {
-        seed_lcm_session_message(
-            &cg,
-            "lcm-large-json",
-            &format!("lcm-large-json-message-{index}"),
-            format!("large json response {index} {}", "payload ".repeat(1100)),
-            index + 1,
-        )
-        .await;
+        projections.push(
+            seed_temporal_lcm_session_message(
+                &cg,
+                "lcm-large-json",
+                &format!("lcm-large-json-message-{index}"),
+                format!("large json response {index} {}", "payload ".repeat(1100)),
+                index + 1,
+            )
+            .await,
+        );
     }
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-large-json", projections).await;
 
     let result = handle_tool_call(
         &cg,

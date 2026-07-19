@@ -570,10 +570,11 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     let backend = InspectSkillWriterUsageBackend;
     let config = enabled_skill_writer_config();
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer_with_backend_and_retrieval(
         &cg,
         &config,
         &backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
         manual_skill_writer_options(&profile_root),
     )
     .await
@@ -603,10 +604,11 @@ async fn skill_writer_evidence_includes_underused_tool_family_summary() {
     let backend = InspectSkillWriterUnderusedBackend;
     let config = enabled_skill_writer_config();
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer_with_backend_and_retrieval(
         &cg,
         &config,
         &backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
         SkillWriterAutomationOptions {
             trigger: AutomationTrigger::ManualCli,
             provider: "cursor".to_string(),

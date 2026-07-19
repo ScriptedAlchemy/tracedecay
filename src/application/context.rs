@@ -311,6 +311,12 @@ pub struct RequestContext {
     budgets: RequestBudgets,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestInterruption {
+    Cancelled,
+    DeadlineExceeded,
+}
+
 impl RequestContext {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -371,6 +377,40 @@ impl RequestContext {
 
     pub const fn budgets(&self) -> RequestBudgets {
         self.budgets
+    }
+
+    pub async fn interrupted(&self) -> RequestInterruption {
+        let cancelled = self.cancellation.cancelled();
+        tokio::pin!(cancelled);
+        let deadline =
+            tokio::time::sleep_until(tokio::time::Instant::from_std(self.deadline.instant()));
+        tokio::pin!(deadline);
+        tokio::select! {
+            biased;
+            _ = &mut cancelled => RequestInterruption::Cancelled,
+            _ = &mut deadline => RequestInterruption::DeadlineExceeded,
+        }
+    }
+
+    pub async fn run_interruptible<T, F>(
+        &self,
+        future: impl std::future::Future<Output = T>,
+        on_interruption: F,
+    ) -> Result<T, RequestInterruption>
+    where
+        F: FnOnce(),
+    {
+        tokio::pin!(future);
+        let interrupted = self.interrupted();
+        tokio::pin!(interrupted);
+        tokio::select! {
+            biased;
+            result = &mut future => Ok(result),
+            interruption = &mut interrupted => {
+                on_interruption();
+                Err(interruption)
+            },
+        }
     }
 }
 

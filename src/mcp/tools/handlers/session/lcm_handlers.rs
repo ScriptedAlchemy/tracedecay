@@ -24,6 +24,19 @@ use crate::sessions::lcm::{
     LcmExpandQueryPagination, LcmExpandQueryResponse, LcmExpandQuerySynthesisPrompt,
 };
 
+async fn missing_lcm_read_store(
+    context: LcmHandlerContext<'_>,
+    args: &Value,
+) -> Option<ToolResult> {
+    if context.retrieval_service.is_some() {
+        return None;
+    }
+    match open_lcm_storage(context, args, LcmOpenMode::ReadOnlyOrMissing).await {
+        LcmStorageResolution::Available(_) => None,
+        LcmStorageResolution::Unavailable(result) => Some(result),
+    }
+}
+
 pub(in super::super) async fn handle_lcm_status(
     context: LcmHandlerContext<'_>,
     args: Value,
@@ -388,6 +401,9 @@ pub(in super::super) async fn handle_lcm_load_session(
             end_time: non_negative_i64_arg_alias(&args, "end_time", "time_to")?,
         },
     )?;
+    if let Some(result) = missing_lcm_read_store(context, &args).await {
+        return Ok(result);
+    }
     let outcome = match context.retrieval_service {
         Some(service) => service.execute(command).await,
         None => SessionRetrievalServiceOutcome::Unavailable,
@@ -529,6 +545,9 @@ pub(in super::super) async fn handle_lcm_grep(
         lcm_roles_arg(&args)?,
         message_search_time_range(&args)?,
     )?;
+    if let Some(result) = missing_lcm_read_store(context, &args).await {
+        return Ok(result);
+    }
     let outcome = match context.retrieval_service {
         Some(service) => service.execute(command).await,
         None => SessionRetrievalServiceOutcome::Unavailable,
@@ -608,6 +627,9 @@ pub(in super::super) async fn handle_lcm_describe(
     };
     let session_id =
         SessionId::new(session_id).map_err(|error| argument_error(error.to_string()))?;
+    if let Some(result) = missing_lcm_read_store(context, &args).await {
+        return Ok(result);
+    }
     let outcome = match context.retrieval_service {
         Some(service) => {
             service
@@ -715,6 +737,9 @@ pub(in super::super) async fn handle_lcm_expand(
     };
     let session_id =
         SessionId::new(session_id).map_err(|error| argument_error(error.to_string()))?;
+    if let Some(result) = missing_lcm_read_store(context, &args).await {
+        return Ok(result);
+    }
     let outcome = match context.retrieval_service {
         Some(service) => {
             service
@@ -971,6 +996,9 @@ pub(in super::super) async fn handle_lcm_expand_query(
         max_tokens,
         context_max_tokens,
     };
+    if let Some(result) = missing_lcm_read_store(context, &args).await {
+        return Ok(result);
+    }
     if !request.node_ids.is_empty() {
         let Some(service) = context.retrieval_service else {
             return Ok(lcm_typed_outcome(

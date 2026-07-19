@@ -64,6 +64,40 @@ const EXACT_CANDIDATE_QUERY: &str = "
           ), 'claude') AS BLOB)) <= ?11
     ORDER BY o.knowledge_at DESC, o.occurrence_id
     LIMIT ?12";
+const SCOPE_CANDIDATE_QUERY: &str = "
+    SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
+           o.message_id, o.turn_id, o.session_id, o.role,
+           COALESCE(json_extract(
+               provider_observation.observation_json, '$.identity.source.provider'
+           ), 'claude')
+    FROM session_occurrences AS o
+    JOIN observations AS provider_observation
+      ON provider_observation.observation_id = o.source_observation_id
+    WHERE o.session_id = ?1 AND o.generation = ?2
+      AND (?3 IS NULL OR COALESCE(json_extract(
+          provider_observation.observation_json, '$.identity.source.provider'
+      ), 'claude') = ?3)
+      AND (o.knowledge_at < ?4 OR (o.knowledge_at = ?4 AND o.occurrence_id > ?5))
+      AND length(CAST(o.occurrence_id AS BLOB)) <= ?6
+      AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?7
+      AND length(CAST(COALESCE(o.message_id, '') AS BLOB)) <= ?8
+      AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?8
+      AND length(CAST(o.session_id AS BLOB)) <= ?8
+      AND length(CAST(o.role AS BLOB)) <= ?8
+      AND length(CAST(COALESCE(json_extract(
+          provider_observation.observation_json, '$.identity.source.provider'
+      ), 'claude') AS BLOB)) <= ?8
+      AND length(CAST(o.occurrence_id AS BLOB))
+          + length(CAST(o.retrieval_anchor_id AS BLOB))
+          + length(CAST(COALESCE(o.message_id, '') AS BLOB))
+          + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
+          + length(CAST(o.session_id AS BLOB))
+          + length(CAST(o.role AS BLOB))
+          + length(CAST(COALESCE(json_extract(
+              provider_observation.observation_json, '$.identity.source.provider'
+          ), 'claude') AS BLOB)) <= ?9
+    ORDER BY o.knowledge_at DESC, o.occurrence_id
+    LIMIT ?10";
 const OCCURRENCE_FTS_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
            o.message_id, o.turn_id, o.session_id, o.role,
@@ -1164,7 +1198,8 @@ async fn require_candidate_root_authority(
                  LIMIT 1
              )"
         }
-        CandidateChannel::ExactMessage
+        CandidateChannel::Scope
+        | CandidateChannel::ExactMessage
         | CandidateChannel::Phrase
         | CandidateChannel::Entity
         | CandidateChannel::Time
@@ -1262,6 +1297,12 @@ async fn query_candidate_clause(
     let root_project_key =
         root_project_key.map(|project_key| SqlValue::Text(project_key.to_string()));
     let (sql, params) = match (scope, clause.channel) {
+        (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::Scope) => {
+            return Err(read_message(
+                CANDIDATE_OPERATION,
+                "scope scans require an exact session",
+            ));
+        }
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::ExactMessage) => (
             ROOT_EXACT_CANDIDATE_QUERY,
             vec![
@@ -1354,6 +1395,21 @@ async fn query_candidate_clause(
                 provider,
                 SqlValue::Text(fts_phrase(&clause.value)),
                 SqlValue::Text(clause.value.clone()),
+                SqlValue::Integer(cursor.knowledge_at),
+                SqlValue::Text(cursor.stable_id.clone()),
+                SqlValue::Integer(source_stable_cap),
+                SqlValue::Integer(anchor_cap),
+                SqlValue::Integer(metadata_cap),
+                SqlValue::Integer(item_cap),
+                SqlValue::Integer(limit),
+            ],
+        ),
+        (TemporalRetrievalScope::Session(session_id), CandidateChannel::Scope) => (
+            SCOPE_CANDIDATE_QUERY,
+            vec![
+                SqlValue::Text(session_id.as_str().to_string()),
+                SqlValue::Integer(generation),
+                provider,
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.stable_id.clone()),
                 SqlValue::Integer(source_stable_cap),
@@ -1466,6 +1522,7 @@ fn candidate_from_row(
 
 const fn candidate_score(channel: CandidateChannel) -> i64 {
     match channel {
+        CandidateChannel::Scope => 100,
         CandidateChannel::ExactMessage => 1_000,
         CandidateChannel::Phrase => 800,
         CandidateChannel::Entity => 700,

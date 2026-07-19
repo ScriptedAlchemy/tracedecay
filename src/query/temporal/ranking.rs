@@ -349,7 +349,8 @@ const fn rank_tier(channel: CandidateChannel) -> RankTier {
     match channel {
         CandidateChannel::ExactMessage => RankTier::ExactMessage,
         CandidateChannel::Phrase => RankTier::ExactPhrase,
-        CandidateChannel::Entity
+        CandidateChannel::Scope
+        | CandidateChannel::Entity
         | CandidateChannel::Time
         | CandidateChannel::Lexical
         | CandidateChannel::Summary => RankTier::Approximate,
