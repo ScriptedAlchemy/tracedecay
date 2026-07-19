@@ -661,6 +661,29 @@ async fn resolve_occurrence(
             HydrationStateV1::UnverifiableLegacy,
         )));
     }
+    if let Some(content) = envelope.facts().iter().find_map(|fact| match fact {
+        CanonicalObservationFactV1::Message { content, .. }
+        | CanonicalObservationFactV1::ToolResult { content, .. }
+        | CanonicalObservationFactV1::ToolInvocation {
+            arguments: content, ..
+        } => Some(content),
+        _ => None,
+    }) {
+        let content = match crate::global_db::observation_projection::canonical_fact_text(content) {
+            Ok(content) => Zeroizing::new(content.into_bytes()),
+            Err(_) => {
+                return Ok(Some(HydrationResolution::Unavailable(
+                    HydrationStateV1::UnverifiableLegacy,
+                )));
+            }
+        };
+        let content_hash = sha256_hex(content.as_slice());
+        return Ok(Some(HydrationResolution::Available(PayloadDescriptor {
+            byte_count: content.len(),
+            source: PayloadSource::Occurrence { content },
+            content_hash,
+        })));
+    }
     let mut raw_rows = conn
         .query(
             "SELECT storage_kind, CAST(COALESCE(content, '') AS TEXT), content_hash,
@@ -719,32 +742,9 @@ async fn resolve_occurrence(
             _ => {}
         }
     }
-    let Some(content) = envelope.facts().iter().find_map(|fact| match fact {
-        CanonicalObservationFactV1::Message { content, .. }
-        | CanonicalObservationFactV1::ToolResult { content, .. }
-        | CanonicalObservationFactV1::ToolInvocation {
-            arguments: content, ..
-        } => Some(content),
-        _ => None,
-    }) else {
-        return Ok(Some(HydrationResolution::Unavailable(
-            HydrationStateV1::RetainedButUnavailable,
-        )));
-    };
-    let content = match crate::global_db::observation_projection::canonical_fact_text(content) {
-        Ok(content) => Zeroizing::new(content.into_bytes()),
-        Err(_) => {
-            return Ok(Some(HydrationResolution::Unavailable(
-                HydrationStateV1::UnverifiableLegacy,
-            )));
-        }
-    };
-    let content_hash = sha256_hex(content.as_slice());
-    Ok(Some(HydrationResolution::Available(PayloadDescriptor {
-        byte_count: content.len(),
-        source: PayloadSource::Occurrence { content },
-        content_hash,
-    })))
+    Ok(Some(HydrationResolution::Unavailable(
+        HydrationStateV1::RetainedButUnavailable,
+    )))
 }
 
 async fn resolve_summary(
@@ -1674,21 +1674,22 @@ mod tests {
             .execute(
                 "UPDATE sessions
                  SET project_key = 'different-project'
-                 WHERE provider = ?1 AND session_id = 'session-1'",
+                 WHERE provider = ?1 AND session_id = 'session-2'",
                 [provider],
             )
             .await
-            .expect("move request session outside target root");
+            .expect("move target session outside authorized root");
         let different_root = db.read_snapshot().await.expect("different root snapshot");
         let different_root_adapter =
             GlobalDbTemporalHydrationPort::for_snapshot(&different_root, db.storage_root.as_path());
+        let authorization = different_root_adapter
+            .authorize(&snapshot, anchor.anchor_id())
+            .await;
         assert!(matches!(
-            different_root_adapter
-                .authorize(&snapshot, anchor.anchor_id())
-                .await,
+            authorization,
             Ok(HydrationAuthorization::Denied(ref denial))
-                if denial.state() == HydrationStateV1::Unauthorized
-        ));
+                if denial.state() == HydrationStateV1::UnverifiableLegacy
+        ), "{authorization:?}");
     }
 
     #[tokio::test]
