@@ -415,11 +415,16 @@ Examples:
   tracedecay sessions search \"auth refactor\"     Full-text transcript search
   tracedecay sessions search \"bug\" --limit 5 --provider cursor
   tracedecay sessions search \"plan\" --project-path /path/to/repo
+  tracedecay sessions refresh start --project-id project.id --session-id session.id --provider cursor --source 4 --target 9
+  tracedecay sessions refresh join --project-id project.id --session-id session.id --provider cursor --source 4 --target 9
+  tracedecay sessions refresh resume --project-id project.id --session-id session.id --provider cursor --source 4 --target 9
   tracedecay sessions refresh begin --project-id project.id --session-id session.id --provider cursor --source 4 --target 9
   tracedecay sessions refresh status --profile-id profile.id --session-id session.id --provider cursor --source 4 --target 9 --handle opaque.handle
   tracedecay sessions refresh cancel --project-path /path/to/repo --session-id session.id --provider cursor --source 4 --target 9 --handle opaque.handle --json
 
-`--handle` is the opaque daemon-local capability returned by begin. The \
+`--handle` is the opaque daemon-local capability returned by start, join, \
+resume, or begin. status is read-only and never requests durable cancellation; \
+request abort or deadline outcomes also never imply durable cancellation. The \
 deprecated `--operation-id` alias is accepted for migration only; an internal \
 operation id is not a refresh capability. The deprecated ingest `--provider` \
 option is accepted for migration only; source admission sweeps all supported \

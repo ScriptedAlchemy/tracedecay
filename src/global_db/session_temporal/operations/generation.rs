@@ -384,10 +384,10 @@ async fn copy_active_projection(
          FROM session_occurrences WHERE session_id = ?1 AND generation = ?3",
         "INSERT INTO session_logical_copy_edges (
             session_id, generation, occurrence_id, copied_from_occurrence_id,
-            proof_json, created_at
+            proof_json, knowledge_at, valid_time_json, created_at
          )
          SELECT session_id, ?2, occurrence_id, copied_from_occurrence_id,
-                proof_json, created_at
+                proof_json, knowledge_at, valid_time_json, created_at
          FROM session_logical_copy_edges WHERE session_id = ?1 AND generation = ?3",
         "INSERT INTO session_turn_members (
             session_id, generation, turn_id, occurrence_id, ordinal

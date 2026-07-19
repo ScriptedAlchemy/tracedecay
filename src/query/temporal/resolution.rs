@@ -1200,6 +1200,8 @@ mod tests {
                 source_occurrence_id: first.occurrence_id.clone(),
                 provider_record_id,
             },
+            knowledge_at: copied.knowledge_at,
+            valid_time: copied.valid_time,
         };
 
         let resolved = resolve_temporal(
@@ -2335,6 +2337,8 @@ mod tests {
                 source_occurrence_id: source.occurrence_id.clone(),
                 provider_record_id,
             },
+            knowledge_at: occurrence.knowledge_at,
+            valid_time: occurrence.valid_time,
         }
     }
 

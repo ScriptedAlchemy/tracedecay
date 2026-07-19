@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tracedecay_domain::{
     LogicalCopyRecordV1, RetrievalAnchorId, SessionEvidenceMetadataV1, SessionId,
     SessionSummaryIdV1, SessionSummaryRecordV1, SignedCursorKeyRefV1, SummaryPublicationMetadataV1,
-    SummarySourceHorizonV1, TemporalModeV1, UtcMicros,
+    SummarySourceHorizonV1, TemporalModeV1, TemporalValidityV1, UtcMicros,
 };
 
 use crate::global_db::GlobalDbReadSnapshot;
@@ -1728,7 +1728,7 @@ fn build_record_query(
              SELECT c.ordinal, 2,
                     e.occurrence_id || ':' || e.copied_from_occurrence_id,
                     'copy', e.occurrence_id, e.copied_from_occurrence_id, NULL,
-                    e.created_at, NULL, NULL, e.proof_json, NULL, NULL, NULL, NULL,
+                    e.knowledge_at, e.valid_time_json, NULL, e.proof_json, NULL, NULL, NULL, NULL,
                     e.session_id
              FROM candidate AS c
              JOIN session_occurrences AS target
@@ -2155,11 +2155,19 @@ fn temporal_record_from_row(row: &Row) -> Result<TemporalRecord, TemporalPortErr
                 evidence: authorized_evidence(evidence),
             }))
         }
-        "copy" => Ok(TemporalRecord::Copy(LogicalCopyRecordV1 {
-            occurrence_id: parse_text(required_string(row, 4)?, RECORD_OPERATION)?,
-            copied_from_occurrence_id: parse_text(required_string(row, 5)?, RECORD_OPERATION)?,
-            proof: parse_json(&required_string(row, 10)?, RECORD_OPERATION)?,
-        })),
+        "copy" => {
+            let valid_time = match required_string(row, 8) {
+                Ok(encoded) => parse_json(&encoded, RECORD_OPERATION)?,
+                Err(_) => TemporalValidityV1::Unknown,
+            };
+            Ok(TemporalRecord::Copy(LogicalCopyRecordV1 {
+                occurrence_id: parse_text(required_string(row, 4)?, RECORD_OPERATION)?,
+                copied_from_occurrence_id: parse_text(required_string(row, 5)?, RECORD_OPERATION)?,
+                knowledge_at: UtcMicros(required_i64(row, 7)?),
+                valid_time,
+                proof: parse_json(&required_string(row, 10)?, RECORD_OPERATION)?,
+            }))
+        }
         "summary" => summary_from_row(row).map(TemporalRecord::Summary),
         "summary_source" => summary_source_from_row(row).map(TemporalRecord::SummarySource),
         _ => Err(read_message(
@@ -3221,8 +3229,11 @@ mod tests {
                 );
              INSERT INTO session_logical_copy_edges (
                 session_id, generation, occurrence_id, copied_from_occurrence_id,
-                proof_json, created_at
-             ) VALUES ('session-b', 1, 'same-id', 'source-b', '{}', 5);
+                proof_json, knowledge_at, valid_time_json, created_at
+             ) VALUES (
+                'session-b', 1, 'same-id', 'source-b', '{}', 5,
+                '{\"kind\":\"unknown\"}', 5
+             );
              INSERT INTO session_assertions (
                 session_id, generation, assertion_id, assertion_kind,
                 subject_anchor_id, object_anchor_id, knowledge_at,
