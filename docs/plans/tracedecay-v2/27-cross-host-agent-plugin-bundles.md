@@ -17,7 +17,9 @@ Doctor/health/remediation kernel; [Plan 11](11-dashboard-frontend.md) renders
 its canonical findings and legal actions. This plan supplies typed diagnostic,
 conformance, and remediation-operation inputs to that kernel.
 PR17 extends the same catalog/bundles with Plan 24 task context and Plan 32
-runtime execution adapters; it does not create a host-local board or scheduler.
+runtime execution adapters plus a worktree/task/cross-merge/fanout/native-
+execution capability projection; it does not create a host-local board,
+scheduler, topology policy, Git operator, or workflow authority.
 
 ## Outcome
 
@@ -26,7 +28,10 @@ host-native adapters. Each host keeps its native strengths and reports
 unsupported capabilities explicitly while using the same daemon,
 authorization, privacy, memory, and tool semantics. Source connectors publish
 an observation-backed, authorization-bounded capability contract that query
-planners consume only through compact derived descriptors.
+planners consume only through compact derived descriptors. Worktree awareness,
+task events, cross-merge routes, hook/LSP fanout, CLI fallback, and native
+Claude/Codex execution are reported through one derived host capability view,
+with explicit unsupported states and no copied workflow authority.
 
 ## Owns
 
@@ -43,6 +48,12 @@ planners consume only through compact derived descriptors.
 - Claude Code, Codex, Cursor, Hermes, and Kiro hook, tool-discovery, command,
   skill, and agent adapters where each host supports those capabilities.
 - Capability negotiation and explicit host-difference reporting.
+- A deterministic `HostWorkCapabilityCatalogV1` projection for worktree
+  awareness, task-event ingress/delivery, cross-merge preflight/apply routing,
+  hook/LSP/native-diagnostics fanout, CLI fallback, and native Claude Code/
+  Codex backend availability. It references Plan 08 capability IDs, Plan 20
+  policy/configuration, and owner receipts; it defines no second callable
+  capability or workflow catalog.
 - Host lifecycle operation mechanics: install, update, repair, uninstall,
   backup/restore, explicit confirmation, receipts, and rollback/recovery for
   TraceDecay-owned host configuration (PR13).
@@ -60,6 +71,11 @@ planners consume only through compact derived descriptors.
 - A requirement that MCP be installed; the CLI and daemon API are the baseline.
 - Workflow JavaScript, incremental PR-series scripts, Markdown task parsers, rewrite-plan executors, progress ledgers, or generated plan state.
 - Silent emulation of a capability the host cannot support.
+- Topology policy, worktree/branch/ref creation, merge decisions, task graph
+  transitions, runtime admission, native Git preflight/apply, LSP finding
+  semantics, or proximity/review semantics. Plans 20, 24, 32, 36, 35, and 37
+  retain those authorities respectively; this plan projects and transports
+  their typed operations and evidence only.
 - GitHub REST/GraphQL identity, finding ownership, comment posting, or a
   second durable finding store; ingestion delegates to the read-only adapter
   path and Plan 09/Plan 37 advisory findings.
@@ -155,6 +171,292 @@ pub struct HostBundleManifestV1 {
   catalog and pins installed artifacts to a compatible TraceDecay protocol and
   catalog revision, reporting skew clearly.
 - Keep host-local files free of copied product logic and durable project/session/fact state.
+
+### Worktree, task-event, fanout, and native-execution capability view (PR17)
+
+`HostWorkCapabilityCatalogV1` is a deterministic observed projection of
+`HostIntegrationManifestV1`, Plan 08 bindings, one pinned Plan 20
+configuration/topology snapshot, Plan 27 native conformance probes, and the
+available owner operations. It is not another semantic catalog and is never
+written by a host adapter.
+
+The exact types are added to
+`crates/tracedecay-domain/src/integration.rs`:
+
+```rust
+pub enum HostWorkCapabilityKindV1 {
+    WorktreeAwareness,
+    TaskEventIngress,
+    TaskEventDelivery,
+    CrossMergePreflight,
+    CrossMergeApply,
+    HookFanout,
+    LspFindingFanout,
+    NativeDiagnosticsFanout,
+    CliFallback,
+    NativeExecution(NativeAgentBackendV1),
+}
+
+pub enum NativeAgentBackendV1 {
+    ClaudeCodeCli,
+    CodexAppServer,
+    CodexCli,
+}
+
+pub enum HostCapabilityTransportV1 {
+    Hook,
+    Lsp,
+    NativeDiagnostics,
+    Mcp,
+    Cli,
+    DaemonApi,
+    NativeProcessProtocol,
+}
+
+pub enum HostCapabilityReasonV1 {
+    HostApiAbsent,
+    HostRegistrationUnsupported,
+    ComponentNotInstalled,
+    ConfigurationDisabled,
+    PolicyForbidden,
+    ProtocolVersionUnsupported,
+    NativeExecutableAbsent,
+    NativeCapabilityProbeFailed,
+    ScopeUnresolved,
+    OwnerOperationUnavailable,
+    Plan36MutationUnsupported,
+    Plan32RuntimeUnavailable,
+}
+
+pub enum HostCapabilityStateV1 {
+    Supported,
+    Degraded {
+        reason: HostCapabilityReasonV1,
+    },
+    Unavailable {
+        reason: HostCapabilityReasonV1,
+    },
+}
+
+pub struct HostWorkCapabilityRecordV1 {
+    pub binding_id: BindingId,
+    pub capability_id: CapabilityId,
+    pub kind: HostWorkCapabilityKindV1,
+    pub state: HostCapabilityStateV1,
+    pub transports: Vec<HostCapabilityTransportV1>,
+    pub conformance_receipt_anchor_id: RetrievalAnchorId,
+    pub owner_operation_binding: Option<BindingId>,
+}
+
+pub struct HostWorkCapabilityCatalogV1 {
+    pub schema_version: u16,
+    pub host: HostKind,
+    pub integration_manifest_digest: ManifestDigest,
+    pub catalog_digest: CatalogDigest,
+    pub configuration_snapshot_id: ConfigurationSnapshotId,
+    pub topology_policy_digest: TopologyPolicyDigest,
+    pub host_registration_receipt_anchor_id: RetrievalAnchorId,
+    pub records: Vec<HostWorkCapabilityRecordV1>,
+    pub observed_at_ms: i64,
+    pub expires_at_ms: i64,
+    pub record_digest: HostWorkCapabilityCatalogDigest,
+}
+
+pub struct HostWorktreeContextV1 {
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub authorized_scope_digest: AuthorizedScopeDigest,
+    pub worktree_capture_anchor_id: RetrievalAnchorId,
+    pub ref_snapshot_anchor_id: Option<RetrievalAnchorId>,
+    pub head_object_anchor_id: Option<RetrievalAnchorId>,
+    pub source_observation_anchor_id: RetrievalAnchorId,
+}
+
+pub enum HostTaskEventKindV1 {
+    ContextPresented,
+    Started,
+    Progress,
+    Blocked,
+    HandoffPresented,
+    CancellationObserved,
+    TerminalReceiptObserved,
+}
+
+pub struct HostTaskEventEnvelopeV1 {
+    pub host_event_id: HostEventId,
+    pub host: HostKind,
+    pub task_id: TaskId,
+    pub work_item_version_id: WorkItemVersionId,
+    pub event_kind: HostTaskEventKindV1,
+    pub worktree: HostWorktreeContextV1,
+    pub workflow_run_id: Option<WorkflowRunId>,
+    pub workflow_attempt_id: Option<WorkflowAttemptId>,
+    pub event_observation_anchor_id: RetrievalAnchorId,
+    pub referenced_receipt_anchor_ids: Vec<RetrievalAnchorId>,
+    pub provider_sequence: Option<ProviderEventSequence>,
+}
+
+pub struct HostCrossMergeRouteV1 {
+    pub mode: CrossMergeModeV1,
+    pub source_worktree_anchor_id: RetrievalAnchorId,
+    pub destination_worktree_anchor_id: RetrievalAnchorId,
+    pub destination_ref_anchor_id: RetrievalAnchorId,
+    pub task_decision_anchor_id: Option<RetrievalAnchorId>,
+    pub runtime_admission_receipt_anchor_id: Option<RetrievalAnchorId>,
+    pub preflight_anchor_id: Option<RetrievalAnchorId>,
+    pub preflight_binding_id: BindingId,
+    pub apply_binding_id: Option<BindingId>,
+    pub state: HostCapabilityStateV1,
+    pub configuration_snapshot_id: ConfigurationSnapshotId,
+    pub topology_policy_digest: TopologyPolicyDigest,
+}
+```
+
+`BindingId`, `CapabilityId`, and `CatalogDigest` remain Plan 08 authorities.
+`ConfigurationSnapshotId`, `TopologyPolicyDigest`, and `CrossMergeModeV1`
+remain Plan 20 authorities. `TaskId`/`WorkItemVersionId` remain Plan 24
+authorities; `WorkflowRunId`/`WorkflowAttemptId` remain Plan 32 authorities;
+worktree/ref/object and receipt anchors remain Plan 13 references to Plan
+16/36/32 owner records. The types above cannot mint or reinterpret any of them.
+
+The projector canonicalizes records by
+`(kind discriminant, capability_id, binding_id)`, rejects duplicates, requires
+one state per kind/backend, and derives `record_digest` from the complete
+ordered records plus manifest/catalog/configuration/topology and registration
+receipt identities. `observed_at_ms` and `expires_at_ms` bound freshness and are
+not capability authority. Expiry yields `Unavailable`, never stale
+`Supported`.
+
+#### Worktree awareness
+
+- A host observation may supply CWD, repository locator, branch text, or native
+  session metadata only as resolver input. Plan 16 resolves scope and Plan 36
+  captures native Git state; Plan 13 anchors the result. The host receives
+  `HostWorktreeContextV1` only after exact authorization and cannot convert a
+  path, matching `HEAD`, branch label, remote, profile, or host workspace into
+  worktree authority.
+- Moved and symlinked roots follow Plan 13's fresh native-identity proof.
+  Ambiguous, escaped, removed, or stale roots set `WorktreeAwareness` to
+  `Degraded`/`Unavailable` with `ScopeUnresolved`; adapters never substitute
+  CWD, the first workspace, or another checkout.
+
+#### Task events and workflow authority
+
+- Native adapters emit a bounded provider event candidate without an anchor.
+  Plan 03 canonicalizes it first; only then does Plan 27 project the
+  `HostTaskEventEnvelopeV1` with `event_observation_anchor_id`. Delivery uses
+  the Plan 09 application operation. Host files, hooks, LSP sessions, MCP
+  servers, and native processes keep no task event log.
+- `ContextPresented`, `Started`, `Progress`, `Blocked`, `HandoffPresented`, and
+  `CancellationObserved` do not mutate Plan 24 or Plan 32 state.
+  `TerminalReceiptObserved` references an existing Plan 32 receipt anchor and
+  cannot synthesize success from process exit, stdout, a host task status, or
+  an agent summary. Only Plan 24's version-checked command changes the work
+  graph; only Plan 32's fenced runtime command changes run/lease/attempt/effect
+  state.
+- Missing provider sequence is explicit. Ordering may use provider-native
+  sequence only within its declared source domain; timestamps, hook arrival,
+  or host display order never establish task causality.
+
+#### Cross-merge routing
+
+- A host projection may expose only Plan 09 operations bound to Plan 20's
+  effective `CrossMergeModeV1`, Plan 24's accepted decision, Plan 32's admitted
+  runtime effect, and Plan 36's exact native preflight/apply capability.
+  `HostCrossMergeRouteV1` carries IDs and state, never a Git command, patch,
+  branch-name template, credentials, or mutation grant.
+  A task-linked apply route requires task-decision, runtime-admission, and
+  preflight anchors; a read-only availability view leaves those optional fields
+  absent and cannot be submitted as an apply request.
+- `Disabled` and policy/protected-ref rejection are `Unavailable {
+  PolicyForbidden }`. `ManualReceiptOnly` exposes ingestion of an exact native
+  provider observation and anchored receipt drilldown only.
+  `FastForwardOnly` and `MergeCommit` expose apply only when
+  Plan 36 implements and conforms the exact fixed operation; under Plan 36's
+  current excluded-operation contract they are `Unavailable {
+  Plan36MutationUnsupported }`. There is no shell fallback.
+- Rebase, amend, force ref update, force push, destructive reset, branch
+  deletion, and equivalent history rewriting have no enum variant, operation
+  binding, CLI fallback, or host projection.
+
+#### Hook/LSP/native-diagnostics fanout and CLI fallback
+
+- Plan 37 owns feedback/proximity/review finding semantics and lifecycle. Plan
+  35 owns LSP negotiation, field projection, publication, clearing, and stale-
+  result suppression. Plan 27 owns only host registration and fanout routing:
+  hooks, MCP, CLI, the Plan 35 Claude LSP route, and the Cursor desktop native-
+  diagnostics route all receive the same Plan 09 result/anchor IDs.
+- A catalog record lists only surfaces that passed native conformance. LSP
+  absence never becomes `Degraded` LSP through hooks; it is
+  `Unavailable { HostApiAbsent }` while the independent hook/MCP/CLI records
+  may remain supported. One failed surface cannot suppress or relabel another.
+- `Core` CLI is the baseline transport, not an automatic execution substitute.
+  CLI fallback is `Supported` only when the same application operation, DTO,
+  authorization, policy snapshot, and receipt semantics are available and Plan
+  20 permits fallback. Otherwise the requested surface/backend returns its
+  exact unsupported state. Adapters never silently switch LSP to CLI,
+  app-server to CLI, Claude to Hermes, or a host-native task action to a local
+  workflow.
+
+#### Native Claude Code and Codex execution
+
+- `NativeExecution(ClaudeCodeCli)`,
+  `NativeExecution(CodexAppServer)`, and `NativeExecution(CodexCli)` are three
+  independent records. Plan 27 discovers configured executables and proves
+  protocol/version/capability conformance against the pinned Plan 20 snapshot.
+  Plan 32 alone invokes, supervises, cancels, fences, and records attempts.
+- Claude-designated work requires `ClaudeCodeCli`; Hermes Anthropic, an API,
+  SDK, or Claude-compatible protocol cannot satisfy it. Codex app-server is the
+  primary Codex backend. `CodexCli` remains unavailable unless the pinned Plan
+  20 fallback policy, Plan 06 route, Plan 27 conformance record, and Plan 32
+  admission all permit it. Requested and actual backend remain distinct in the
+  Plan 32 receipt.
+- Missing binary, unsupported version, malformed protocol, absent interception,
+  sandbox/approval mismatch, lost resume support, or stale conformance evidence
+  is a typed degraded/unavailable record. No adapter installs, upgrades,
+  rewrites config, widens environment/network/filesystem grants, or chooses
+  another backend to make the probe pass.
+
+#### Files, persistence, fixtures, and acceptance
+
+- `crates/tracedecay-domain/src/integration.rs` owns the wire types above.
+  `crates/tracedecay-domain/tests/host_work_capability_contract.rs` freezes
+  canonical ordering/digests, one-state-per-capability, reason codes, task-event
+  references, and cross-merge route validation.
+- `src/agents/host_capability_catalog.rs` derives the catalog.
+  `src/agents/worktree_context.rs`, `src/agents/task_event_projection.rs`,
+  `src/agents/cross_merge_projection.rs`, and
+  `src/agents/native_execution_projection.rs` build the four bounded
+  projections. `src/application/host_integration.rs` authorizes and composes
+  owner operations; host adapters contain no policy or workflow branching.
+- No Plan 27 configuration or capability-state migration is created. Plan 20's
+  `20260719_work_topology_policy_v1` migration is the sole topology
+  configuration source. Conformance/task-event inputs are Plan 03 canonical
+  observations with Plan 13 anchors; runtime/native Git receipts stay in Plan
+  32/36 owner stores. The catalog is rebuilt deterministically and never
+  persisted as authority.
+- `tests/agent_suite/host_work_capability_test.rs` covers each host/kind/backend
+  state, expiry, digest determinism, unsupported reasons, no state inheritance,
+  and no duplicate Plan 08 semantics.
+  `tests/agent_suite/task_event_projection_test.rs` covers native sequence,
+  missing sequence, replay, wrong task/worktree/attempt, process-exit-without-
+  receipt, and no graph/runtime mutation.
+  `tests/agent_suite/cross_merge_projection_test.rs` covers every Plan 20 mode,
+  stale policy/snapshot, protected refs, Plan 36 unsupported apply, no shell
+  fallback, and force/rebase non-representability.
+  `tests/agent_suite/fanout_fallback_test.rs` covers hook/LSP/native-
+  diagnostics/MCP/CLI independence and semantic parity.
+  `tests/agent_suite/native_execution_capability_test.rs` covers native Claude
+  Code, Codex app-server, policy-eligible Codex CLI, and all explicit
+  unavailable/degraded states without backend substitution.
+- Exact fixtures live under
+  `tests/fixtures/host_work_capabilities/{claude,codex,cursor,hermes,kiro}/`.
+  Each directory contains `supported.json`, `degraded.json`,
+  `unavailable.json`, `expired.json`, `wrong-worktree.json`, and
+  `stale-configuration.json`; Claude adds `native-claude-code.json`; Codex adds
+  `app-server.json`, `cli-policy-disabled.json`, and
+  `cli-policy-enabled.json`; Cursor adds `desktop-native-diagnostics.json` and
+  `cloud-no-lsp.json`.
 
 ### Source-capability and connector contract (PR13)
 
@@ -768,6 +1070,25 @@ pub struct SourceRefreshReceiptV1 {
   `SourceCapabilityProjectionV1` directly, turn source freshness, similarity,
   or connector availability into task truth, or store a host-local capability
   view.
+- [Plan 32](32-dynamic-workflow-runtime-and-sdk.md) owns runtime admission,
+  scheduling, leases, attempts, provider invocation/supervision, effects,
+  cancellation, artifacts, and terminal receipts. Plan 27 reports conforming
+  host/native backend routes and transports addressed envelopes only; it
+  cannot start an attempt, settle an effect, retry, or synthesize a receipt.
+- [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) owns the LSP
+  gateway, capability negotiation, finding-field projection, publication,
+  clearing, and stale-result suppression. Plan 27 registers the Claude plugin
+  and records whether that route conforms; it does not fan out arbitrary task
+  or workflow events through LSP.
+- [Plan 36](36-git-aware-change-context-and-index-transactions.md) owns native
+  repository/worktree/ref/object capture, read-only preflight evidence, and any
+  fixed Git operation it explicitly admits. Plan 27 publishes only the
+  corresponding host route. Current excluded merge/ref-mutation operations
+  remain typed unsupported and never gain a host shell fallback.
+- [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
+  owns feedback-cycle, GitHub/CI advisory, review, and proximity semantics and
+  lifecycle. Plan 27 delivers the one Plan 09 result through conforming host
+  surfaces without redefining findings, thresholds, suppression, or adoption.
 
 Implementation is phased and reviewable:
 
@@ -793,9 +1114,13 @@ Implementation is phased and reviewable:
    `src/agents/work_mcp_bundle.rs`, Plan 24 manifest transport in
    `src/application/task_source_capabilities.rs`, and conformance in
    `tests/agent_suite/work_bundle_projection_test.rs` and
-   `tests/session_suite/source_capability_manifest.rs`, using the same V1
-   manifest, signed selection, and receipt types. It adds no connector store,
-   semantic IR, planner authority, or embeddings schema.
+   `tests/session_suite/source_capability_manifest.rs`; implement the derived
+   work-capability view in `src/agents/host_capability_catalog.rs` and the
+   worktree/task-event/cross-merge/native-execution projections in the exact
+   files listed above. All use the same V1 manifest, signed selection, Plan 20
+   snapshot, and owner receipt types. PR17 adds no connector store, semantic
+   IR, planner/runtime/Git authority, capability-state table, or embeddings
+   schema.
 
 The PR13 fixture and test matrix is exact:
 
@@ -920,6 +1245,26 @@ The PR13 fixture and test matrix is exact:
   identities for canonical finding construction and remediation orchestration;
   the Plan 11 dashboard renders the result.
 - Cross-host handoff preserves repository/worktree, session, parent/subagent, privacy, and provenance identity.
+- PR17 `HostWorkCapabilityCatalogV1` fixtures prove deterministic projection
+  from one manifest/catalog/configuration/topology snapshot; one explicit state
+  per worktree/task-event/cross-merge/fanout/fallback/native-backend capability;
+  expiry to unavailable; typed reason preservation; and no host-local policy,
+  task, runtime, Git, finding, or capability authority.
+- Worktree-awareness fixtures prove native Plan 16/36/13 identity for ordinary,
+  moved, symlinked, removed, ambiguous, detached, and wrong-worktree cases;
+  path/CWD/branch/remote equality never upgrades capability state or task
+  context.
+- Task-event fixtures prove replay convergence, provider-sequence scope,
+  missing-sequence truthfulness, exact `TaskId`/work-item-version/worktree/
+  attempt addressing, and that progress, blocked, cancellation, process exit,
+  and host terminal text cannot mutate Plan 24/32 or synthesize success.
+- Cross-merge fixtures prove Plan 20 policy and protected refs, Plan 24 decision,
+  Plan 32 admission, Plan 36 preflight/apply availability, and Plan 13 receipts
+  remain distinct; current unsupported native apply stays unavailable; and no
+  force/rebase/history rewrite or shell fallback is representable.
+- Fanout/fallback fixtures prove hooks, Plan 35 LSP, Cursor native diagnostics,
+  MCP, and CLI carry the same Plan 09 result where supported, keep independent
+  states, and never silently substitute one surface/backend for another.
 - PR17 cross-host task execution fixtures preserve exact Plan 24/32 identity,
   reject stale lease/graph versions and wrong worktrees, report requested versus
   actual model/provider/effort, and prove each host bundle has no durable task

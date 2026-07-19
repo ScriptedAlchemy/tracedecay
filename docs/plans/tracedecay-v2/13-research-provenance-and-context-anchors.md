@@ -27,6 +27,11 @@ and index rebuilds, while deletion and retention remain explicit.
 - Immutable Git evidence coordinates: canonical repository identity; commit,
   tree, and blob object identity; parent/side role; path identity; and retained
   index or worktree-capture watermark when no immutable Git object exists.
+- Immutable bindings for repository/worktree captures, branch/ref snapshots,
+  native commit/tree/blob objects, pull-request and check snapshots, conflict
+  snapshots, and integration preflight/terminal receipts. These bindings carry
+  only exact native identities and authorized receipt references; they never
+  copy Git objects, patches, GitHub bodies, CI logs, or host-local summaries.
 - PR/comment coordinates bound through
   [Plan 36](36-git-aware-change-context-and-index-transactions.md)
   `PullRequestSnapshot`, `ReviewThreadAnchor`, and `CommentAnchor` identity.
@@ -50,6 +55,11 @@ and index rebuilds, while deletion and retention remain explicit.
 - Transport `rh_` response handles, MCP task IDs, workflow IDs, or collection
   cursors. Those are transport or paging artifacts, not durable evidence identity.
 - GitHub API ingress, comment writes, or CI execution authority.
+- Repository/worktree discovery, Git object/ref interpretation, PR/check
+  provider ingress, conflict handling, preflight computation, integration
+  authorization, or Git application. Plan 36 owns native Git identity and
+  read-only/preflight semantics; Plan 24 owns task decisions; Plan 32 owns
+  admitted runtime effects; and Plan 27 owns host transport and conformance.
 - Candidate generation, ranking, diversification, temporal answer selection, summary
   payload publication, or context rendering. Those remain
   [Plan 23](23-session-lcm-temporal-retrieval-and-evaluation.md) responsibilities.
@@ -111,6 +121,340 @@ and index rebuilds, while deletion and retention remain explicit.
 16. Git provenance, capture/projection watermarks, and later code-index generation
     watermarks remain separate typed evidence. Resolution reports each and any drift;
     path/line similarity cannot silently upgrade mismatched evidence.
+17. A worktree, branch, check, conflict, preflight, or integration anchor denotes one
+    immutable observation or terminal receipt, never a mutable checkout, ref, PR,
+    task, host capability, or permission. Capturing a later `HEAD`, branch target,
+    check rerun, conflict state, or receipt creates a new target and explicit lineage;
+    it never retargets an existing anchor.
+18. Native Git object targets contain the canonical `RepositoryId`, native object
+    format, object kind, and exact object ID from Plan 36's native capture. A branch,
+    tag, symbolic ref, current `HEAD`, path, diff digest, GitHub label, or timestamp
+    cannot substitute for that object identity.
+19. Pull-request targets reference the exact Plan 36 `PullRequestSnapshot`;
+    check targets reference the exact Plan 27-decoded, Plan 03-canonicalized
+    observation consumed by Plan 37. They retain provider locators only as
+    privacy-domain-bound digests. They do not duplicate GitHub review text,
+    check output, CI logs, patch hunks, provider cursors, or mutable
+    REST/GraphQL response payloads.
+20. Conflict and preflight targets reference an exact Plan 36 `RepositorySnapshot`,
+    unmerged-stage or preflight receipt digest, normalized operation/options digest,
+    and policy/configuration revision. They are read-only evidence and cannot be
+    replayed as an apply instruction.
+21. Integration-receipt targets bind a typed request, exact preflight anchor,
+    repository/worktree/branch/commit anchors, policy decision, and the owning
+    Plan 24 decision and Plan 32/36 terminal receipts. Plan 13 stores no merge
+    command, patch, credentials, host command line, or authority grant, and
+    receipt possession never authorizes an integration action.
+22. Task, worktree, and cross-merge summaries retain an ordered, lossless
+    `RetrievalAnchorId` lineage to every exact source. A Plan 23 summary or Plan 24
+    task projection may abbreviate presentation, but its prose, score, status, branch
+    label, or aggregate cannot become replacement evidence.
+
+## Native Git, worktree, and integration-receipt anchors
+
+PR7 extends `RetrievalAnchorTargetV3`; it does not create a parallel public
+topology ID family. Plan 16 owns canonical project/repository/worktree
+relationships, Plan 36 owns native Git capture and object/ref interpretation,
+Plan 27 owns provider/host observation decoding into Plan 03 canonical
+observations, Plan 24 owns task decisions and task-to-evidence links, and Plan
+32 owns admitted effects and terminal runtime receipts. Plan 13 stores
+immutable, payload-free references to those owner records.
+
+The exact domain types are in
+`crates/tracedecay-domain/src/research/git_anchor.rs` and are exported from
+`crates/tracedecay-domain/src/research/mod.rs`:
+
+```rust
+pub enum GitTopologyAnchorRefV1 {
+    RepositoryCapture(RepositoryCaptureAnchorRefV1),
+    WorktreeCapture(WorktreeCaptureAnchorRefV1),
+    RefSnapshot(RefSnapshotAnchorRefV1),
+    NativeObject(NativeGitObjectAnchorRefV1),
+    PullRequest(PullRequestSnapshotAnchorRefV1),
+    Check(CheckSnapshotAnchorRefV1),
+    Conflict(ConflictSnapshotAnchorRefV1),
+    Preflight(TopologyPreflightAnchorRefV1),
+    IntegrationReceipt(IntegrationReceiptAnchorRefV1),
+}
+
+pub struct RepositoryCaptureAnchorRefV1 {
+    pub repository_id: RepositoryId,
+    pub repository_snapshot_id: RepositorySnapshotId,
+    pub repository_snapshot_digest: RepositorySnapshotDigest,
+    pub object_format: GitObjectFormat,
+    pub native_common_dir_id: NativeGitCommonDirId,
+}
+
+pub struct WorktreeCaptureAnchorRefV1 {
+    pub repository_capture_anchor_id: RetrievalAnchorId,
+    pub worktree_id: WorktreeId,
+    pub native_worktree_admin_id: NativeWorktreeAdminId,
+    pub repository_snapshot_id: RepositorySnapshotId,
+    pub head_state_digest: GitHeadStateDigest,
+    pub index_tree_object_id: Option<GitObjectId>,
+    pub capture_receipt_id: RepositoryCaptureReceiptId,
+}
+
+pub struct RefSnapshotAnchorRefV1 {
+    pub repository_capture_anchor_id: RetrievalAnchorId,
+    pub full_ref_name: CanonicalGitRefName,
+    pub ref_kind: GitRefKind,
+    pub target_object_anchor_id: Option<RetrievalAnchorId>,
+    pub symbolic_target: Option<CanonicalGitRefName>,
+}
+
+pub struct NativeGitObjectAnchorRefV1 {
+    pub repository_capture_anchor_id: RetrievalAnchorId,
+    pub object_format: GitObjectFormat,
+    pub object_kind: NativeGitObjectKind,
+    pub object_id: GitObjectId,
+}
+
+pub struct PullRequestSnapshotAnchorRefV1 {
+    pub repository_capture_anchor_id: RetrievalAnchorId,
+    pub pull_request_snapshot_id: PullRequestSnapshotId,
+    pub base_object_anchor_id: RetrievalAnchorId,
+    pub head_object_anchor_id: RetrievalAnchorId,
+    pub merge_base_object_anchor_id: Option<RetrievalAnchorId>,
+    pub provider_observation_anchor_id: RetrievalAnchorId,
+    pub snapshot_digest: PullRequestSnapshotDigest,
+}
+
+pub struct CheckSnapshotAnchorRefV1 {
+    pub connector_id: SourceConnectorId,
+    pub root_id: SourceRootId,
+    pub object_id: SourceObjectId,
+    pub object_version: SourceObjectVersion,
+    pub observation_anchor_id: RetrievalAnchorId,
+    pub repository_capture_anchor_id: RetrievalAnchorId,
+    pub commit_object_anchor_id: RetrievalAnchorId,
+    pub record_digest: CheckSnapshotDigest,
+}
+
+pub struct ConflictSnapshotAnchorRefV1 {
+    pub worktree_capture_anchor_id: RetrievalAnchorId,
+    pub repository_snapshot_id: RepositorySnapshotId,
+    pub unmerged_stage_digest: UnmergedStageDigest,
+    pub operation_state_digest: GitOperationStateDigest,
+}
+
+pub struct TopologyPreflightAnchorRefV1 {
+    pub source_worktree_anchor_id: RetrievalAnchorId,
+    pub destination_worktree_anchor_id: RetrievalAnchorId,
+    pub source_object_anchor_ids: Vec<RetrievalAnchorId>,
+    pub destination_ref_anchor_id: RetrievalAnchorId,
+    pub configuration_snapshot_id: ConfigurationSnapshotId,
+    pub topology_policy_digest: TopologyPolicyDigest,
+    pub normalized_operation_digest: GitOperationDigest,
+    pub native_preflight_receipt_id: GitReadOnlyPlanReceiptId,
+    pub native_preflight_receipt_digest: GitReadOnlyPlanReceiptDigest,
+}
+
+pub enum IntegrationOwnerReceiptRefV1 {
+    Plan03CanonicalObservation {
+        observation_anchor_id: RetrievalAnchorId,
+        observation_digest: CanonicalObservationDigest,
+    },
+    Plan32RuntimeEffect {
+        receipt_id: WorkflowTerminalReceiptId,
+        receipt_digest: WorkflowTerminalReceiptDigest,
+    },
+    Plan36NativeGitOperation {
+        receipt_id: GitOperationReceiptId,
+        receipt_digest: GitOperationReceiptDigest,
+    },
+}
+
+pub struct IntegrationReceiptAnchorRefV1 {
+    pub integration_request_id: TopologyIntegrationRequestId,
+    pub preflight_anchor_id: RetrievalAnchorId,
+    pub source_worktree_anchor_id: RetrievalAnchorId,
+    pub destination_worktree_anchor_id: RetrievalAnchorId,
+    pub source_object_anchor_ids: Vec<RetrievalAnchorId>,
+    pub destination_ref_anchor_id: RetrievalAnchorId,
+    pub configuration_snapshot_id: ConfigurationSnapshotId,
+    pub topology_policy_digest: TopologyPolicyDigest,
+    pub task_decision_anchor_id: Option<RetrievalAnchorId>,
+    pub owner_receipt: IntegrationOwnerReceiptRefV1,
+}
+```
+
+`RepositorySnapshotId`, `RepositorySnapshotDigest`, `GitObjectFormat`,
+`NativeGitCommonDirId`, `NativeWorktreeAdminId`, `GitHeadStateDigest`,
+`RepositoryCaptureReceiptId`, `CanonicalGitRefName`, `GitRefKind`,
+`NativeGitObjectKind`, `GitObjectId`, `PullRequestSnapshotId`,
+`PullRequestSnapshotDigest`, `UnmergedStageDigest`,
+`GitOperationStateDigest`, `GitOperationDigest`,
+`GitReadOnlyPlanReceiptId`, and `GitReadOnlyPlanReceiptDigest` are Plan 36
+native-capture/read-only-plan newtypes.
+Plan 13 imports them and cannot derive substitutes. `RepositoryId` and
+`WorktreeId` are Plan 16 scope identities. `SourceConnectorId`, `SourceRootId`,
+`SourceObjectId`, and `SourceObjectVersion` are Plan 27 observation-decoder
+identities; their sanitized durable record resolves through Plan 03.
+`ConfigurationSnapshotId` and `TopologyPolicyDigest` are Plan 20 identities.
+`CanonicalObservationDigest` is a Plan 03 identity.
+`WorkflowTerminalReceiptId`/`WorkflowTerminalReceiptDigest` are Plan 32
+identities; `GitOperationReceiptId`/`GitOperationReceiptDigest` are Plan 36
+identities. `CheckSnapshotDigest` is the canonical Plan 27 check-observation
+record digest.
+`RetrievalAnchorTargetV3` adds only
+`GitTopology(GitTopologyAnchorRefV1)`; every public lookup still starts with
+`RetrievalAnchorId`.
+
+The PR/check/conflict/preflight structs contain only the exact references shown.
+None contains a copied Git object, patch, provider body, CI log, task record,
+command line, credential, grant, or host summary.
+Preflight and integration source-object vectors are nonempty, ordered, and
+duplicate-free. A task-linked integration requires
+`task_decision_anchor_id`; a non-task manual observation leaves it absent
+rather than manufacturing a task relation.
+Constructors reject owner/privacy/repository/capture/object-format mismatch,
+cross-repository native apply, a destination ref outside the destination
+capture, a preflight that does not bind the same source set, or an owner receipt
+whose typed owner and digest do not match the referenced record.
+
+`RepositoryCaptureAnchorRefV1` identity is the Plan 16 `RepositoryId` plus the
+exact Plan 36 native repository snapshot identity, object format, and common-Git-
+directory identity. `WorktreeCaptureAnchorRefV1` identity additionally binds the
+Plan 16 `WorktreeId`, native linked-worktree administrative identity, captured
+HEAD/index state, and capture receipt. A path, CWD, remote URL, branch name,
+inode, timestamp, matching `HEAD`, copied object bytes, or content hash is never
+capture identity. A native object anchor is valid only when Plan 36 proved that
+object readable in the named capture. Later object loss yields `unavailable`;
+resolution never consults an ambient ref to replace it.
+
+A branch or tag anchor is one `RefSnapshotAnchorRefV1`, not the mutable ref.
+Movement creates another target with lineage to the prior ref snapshot. Commit,
+tree, and blob anchors bind native object kind, native object format, object ID,
+and repository capture. SHA-1 and SHA-256 IDs are never compared without their
+object-format and repository-capture bindings.
+`target_object_anchor_id` is absent only for a Plan 36-proven unborn symbolic
+ref; direct refs and attached symbolic refs require the exact object anchor.
+
+Moving a checkout root or reaching it through a symlink changes routing only
+after a fresh Plan 16/36 resolution proves the same `RepositoryId`,
+`WorktreeId`, and `NativeWorktreeAdminId`. The resolver then appends a
+`MovedFrom` or `ResolvedViaSymlink` locator observation with a privacy-domain-
+bound locator digest. Path-string equality, matching `HEAD`, inode reuse,
+matching remotes, or symlink target text cannot prove continuity. A symlink
+escape, ambiguous native admin identity, or missing proof returns
+`ambiguous`/`unavailable`; it never rekeys the old anchor or reveals the prior
+raw path.
+
+### Lossless `TaskId` and integration drilldown
+
+Plan 24's existing `TaskEvidenceLinkRevision` is the only task-to-anchor edge.
+Plan 13 does not store `TaskId`, work-item status, task labels, readiness, or
+acceptance. A task or integration summary uses `AnchorLineageRefV3` with a
+strictly ordered `source_ordinal`; its constructor requires every immediate
+source anchor and rejects prose, scores, branch labels, statuses, timestamps,
+provider text, CI output, patches, or aggregate digests as source evidence.
+
+```text
+TaskId (= WorkItemId)
+  -> Plan 24 WorkItemVersionId and TaskEvidenceLinkRevision
+  -> Plan 13 RetrievalAnchorId / ordered AnchorLineageRefV3
+  -> repository/worktree/ref/object/PR/check/conflict/preflight anchors
+  -> Plan 24 decision, Plan 32 runtime, and Plan 36 native-operation receipts
+  -> current-authorized owning record or safe disposition
+```
+
+Every page, expansion, and hydration reauthorizes each hop. A missing,
+redacted, deleted, expired, drifted, ambiguous, or unavailable source remains a
+typed omission; a summary cannot collapse it into success. Receipt possession
+grants no policy, runtime, Git, provider, or host authority.
+
+### Implementation allocation and migration
+
+- `crates/tracedecay-domain/src/research/{git_anchor,anchor,id,resolution,mod}.rs`
+  owns `GitTopologyAnchorRefV1`, payload-free owner references,
+  `TopologyIntegrationRequestId`, `IntegrationOwnerReceiptRefV1`, identity
+  derivation, and closed validation errors. It does not define
+  Plan 16/20/24/27/32/36 owner records.
+- `crates/tracedecay-store/src/evidence/git_anchor.rs` defines
+  `GitTopologyAnchorWriteV1`, `GitTopologyAnchorResolutionV1`, and
+  `GitTopologyAnchorStore`. `src/application/evidence/git_anchor.rs` resolves
+  current authorization and owner receipts through typed read ports. Neither
+  layer invokes Git, GitHub, CI, host processes, task mutation, or workflow
+  execution.
+- `src/global_db/evidence_assembly/git_anchor.rs` owns the SQLite adapter.
+  Migration `20260719_git_topology_anchor_v1` creates
+  `git_anchor_targets(anchor_id, target_kind, owner_kind, owner_record_id,
+  owner_record_digest)`,
+  `git_anchor_repository_captures(anchor_id, repository_id,
+  repository_snapshot_id, repository_snapshot_digest, object_format,
+  native_common_dir_id)`,
+  `git_anchor_worktree_captures(anchor_id, repository_capture_anchor_id,
+  worktree_id, native_worktree_admin_id, repository_snapshot_id,
+  head_state_digest, index_tree_object_id, capture_receipt_id)`,
+  `git_anchor_ref_snapshots(anchor_id, repository_capture_anchor_id,
+  full_ref_name, ref_kind, target_object_anchor_id, symbolic_target)`,
+  `git_anchor_objects(anchor_id, repository_capture_anchor_id, object_format,
+  object_kind, object_id)`,
+  `git_anchor_pull_requests(anchor_id, repository_capture_anchor_id,
+  pull_request_snapshot_id, base_object_anchor_id, head_object_anchor_id,
+  merge_base_object_anchor_id, provider_observation_anchor_id,
+  snapshot_digest)`,
+  `git_anchor_checks(anchor_id, connector_id, root_id, object_id,
+  object_version, observation_anchor_id, repository_capture_anchor_id,
+  commit_object_anchor_id, record_digest)`,
+  `git_anchor_conflicts(anchor_id, worktree_capture_anchor_id,
+  repository_snapshot_id, unmerged_stage_digest, operation_state_digest)`,
+  `git_anchor_preflights(anchor_id, source_worktree_anchor_id,
+  destination_worktree_anchor_id, configuration_snapshot_id,
+  topology_policy_digest, native_preflight_receipt_id,
+  native_preflight_receipt_digest, normalized_operation_digest)`, and
+  `git_anchor_integration_receipts(anchor_id, integration_request_id,
+  preflight_anchor_id, source_worktree_anchor_id,
+  destination_worktree_anchor_id, destination_ref_anchor_id,
+  configuration_snapshot_id, topology_policy_digest, task_decision_anchor_id,
+  owner_kind, owner_receipt_id, owner_receipt_digest)`.
+- All tables are append-only, every ID/digest column is `NOT NULL` except
+  `symbolic_target`, `target_object_anchor_id`, `index_tree_object_id`,
+  `merge_base_object_anchor_id`, and `task_decision_anchor_id`; every anchor
+  reference has `ON UPDATE RESTRICT ON DELETE RESTRICT`, and preflight/
+  integration source-object membership is stored in
+  `git_anchor_source_objects(anchor_id, source_ordinal,
+  source_object_anchor_id)` with primary key `(anchor_id, source_ordinal)`.
+  Required indexes are
+  `idx_git_anchor_object(repository_capture_anchor_id, object_kind, object_id)`,
+  `idx_git_anchor_worktree(repository_capture_anchor_id,
+  native_worktree_admin_id)`,
+  `idx_git_anchor_owner(owner_kind, owner_record_id)`, and
+  `idx_git_anchor_integration_owner(owner_kind, owner_receipt_id)`. Ordered
+  summary drilldown reuses Plan 13's existing
+  `retrieval_anchor_lineage_reverse` and `idx_lineage_reverse_source`; this
+  migration creates no second lineage table. Exact immutable update/delete
+  triggers cover every new table.
+- Backfill requires an exact Plan 36 capture/snapshot, native object/ref or
+  Plan 27 provider-observation identity, and complete owner/privacy binding.
+  Legacy path-, branch-, timestamp-, GitHub-label-, check-name-, or digest-only
+  records remain `UnverifiableLegacy`. Migration and consolidation never query
+  current `HEAD`, follow a symlink, fetch a provider, copy an owner receipt, or
+  synthesize a target. Any identity mismatch rolls back the whole transaction.
+
+### Tests and acceptance
+
+- `crates/tracedecay-domain/tests/git_anchor_contract.rs` proves deterministic
+  target IDs, repository/object-format separation, exact commit/tree/blob
+  binding, ref-movement rekeying, receipt-owner separation, ordered source
+  membership, and rejection of path/CWD/ref/timestamp/content-hash authority.
+- `crates/tracedecay-store/tests/git_anchor_contract.rs` proves atomic
+  publish/replay/rollback, immutable rows, current authorization and disposition
+  parity, owner routing, no copied owner payload, and no receipt-as-capability.
+- `tests/git_suite/anchor_provenance.rs` covers linked, moved, removed, symlinked,
+  escaped, detached, unborn, dirty, and conflicted worktrees; rewritten refs;
+  missing objects; SHA-1/SHA-256 repositories; exact PR/check observations; and
+  exact preflight/integration receipt references.
+- `tests/work_suite/task_topology_drilldown.rs` starts from an authorized
+  `TaskId`, traverses `TaskEvidenceLinkRevision` and every ordered anchor to the
+  same Plan 16/24/27/32/36 owner records, preserves typed omissions, rejects
+  missing or reordered sources, and proves summary text and copied host/task/
+  Git/provider payloads cannot satisfy drilldown.
+- `tests/storage_suite/git_topology_anchor_migration.rs` proves exact schema,
+  indexes, triggers, idempotent exact-only backfill, moved/symlink non-inference,
+  dispositions-first consolidation, rollback, and absence of payload-bearing
+  columns.
 
 ## Immutable evidence-span contract
 
@@ -607,6 +951,17 @@ redacted payload.
   Plan 24's `TaskEvidenceSpan` is therefore a task-domain binding view over
   `EvidenceSpanIdV1` and its `RetrievalAnchorId`; its work-item, coordinate, content
   digest, score, and representation fields cannot derive or re-key source evidence.
+- Plan 20 owns topology configuration and policy digests; Plan 32 owns runtime
+  admission, effects, and terminal receipts; and Plan 36 owns native Git
+  repository/worktree/ref/object identity, snapshots, preflights, and admitted
+  Git-operation receipts. Plan 13 anchors exact owner records and ordered
+  lineage only. It cannot turn a policy revision, task decision, preflight,
+  receipt, or anchor possession into mutation authority.
+- Plan 35 owns diagnostic identity projection through the daemon LSP gateway,
+  while Plan 37 owns feedback, review/CI advisory findings, and proximity
+  semantics. Either may cite Plan 13 anchors; neither may copy topology
+  evidence into an LSP/host payload as replacement authority, and Plan 13 does
+  not redefine their finding or delivery models.
 - Plan 08 owns callable source-capability definitions, stable `CapabilityId`, and
   `CatalogDigest`. Plan 27 owns host adapters, provider-native ordering evidence,
   `HostIntegrationManifestV1`, source connector/root bindings,
