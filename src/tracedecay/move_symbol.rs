@@ -187,7 +187,7 @@ impl TraceDecay {
             )
             .await?,
         );
-        if let Some(hint) = self.module_missing_hint(&dest_rel, &dest_original).await {
+        if let Some(hint) = self.module_missing_hint(&dest_rel).await {
             impact.push(hint);
         }
         impact.extend(cfg_context_hints(&moved_text, &dest_rel));
@@ -292,8 +292,15 @@ impl TraceDecay {
                 },
             });
         }
-        self.reindex_file(&dest_rel).await?;
-        self.reindex_file(&source_rel).await?;
+        // A move changes symbol identity because the destination path is part
+        // of the node ID. Reindexing the two files independently can drop
+        // unchanged callers: the destination is indexed while the old source
+        // symbol still exists, then deleting that old node removes its incoming
+        // call edges without re-extracting the caller. Run the daemon-owned
+        // project sync once over the completed two-file move so both files are
+        // indexed in one generation and affected references are re-resolved
+        // before a follow-up refactor starts.
+        self.sync().await?;
 
         Ok(MoveResult {
             success: true,
@@ -436,8 +443,23 @@ impl TraceDecay {
                 continue;
             }
             if stmt.leaves.len() == 1 && !stmt.glob {
-                // Unambiguous single-item import: copy it verbatim.
-                out.auto_imports.push(stmt.text.clone());
+                if let Some(import) = portable_dependency_import(&stmt.text) {
+                    out.auto_imports.push(import);
+                } else {
+                    out.hints.push(MoveHint {
+                        kind: "import_needed".to_string(),
+                        file: dest_rel.to_string(),
+                        line: None,
+                        detail: format!(
+                            "moved body uses a source-relative import from {source_rel}: `{}`",
+                            stmt.text.trim()
+                        ),
+                        suggestion: Some(format!(
+                            "resolve `{}` against the source module and add a destination-stable import",
+                            stmt.text.trim()
+                        )),
+                    });
+                }
                 // Orphaned-import: source no longer needs it after the move.
                 let leaf = &stmt.leaves[0].binding;
                 if !word_present(&source_code_only, leaf) {
@@ -547,43 +569,40 @@ impl TraceDecay {
     }
 
     /// Hint when the destination file's module is not declared anywhere in the
-    /// crate (a fresh module file needs a `mod` statement to compile).
-    async fn module_missing_hint(&self, dest_rel: &str, dest_original: &str) -> Option<MoveHint> {
-        // Only relevant for a fresh/near-empty destination module.
-        let dest_had_items = !self
-            .get_nodes_by_file(dest_rel)
-            .await
-            .unwrap_or_default()
-            .iter()
-            .any(|n| is_importable_item(&n.kind));
-        let dest_is_new = dest_original.trim().is_empty() || dest_had_items;
-        if !dest_is_new {
-            return None;
-        }
+    /// crate. Existing-but-unlinked files need the same hint as fresh files.
+    async fn module_missing_hint(&self, dest_rel: &str) -> Option<MoveHint> {
         let stem = module_stem(dest_rel)?;
         if self.module_declared(dest_rel, &stem) {
             return None;
         }
+        let parent = self.declaring_parent_file(dest_rel);
         Some(MoveHint {
             kind: "module_missing".to_string(),
-            file: crate_root_file(dest_rel),
+            file: parent.clone(),
             line: None,
             detail: format!("module `{stem}` for {dest_rel} is not declared in the crate"),
-            suggestion: Some(format!(
-                "add `pub mod {stem};` to {}",
-                crate_root_file(dest_rel)
-            )),
+            suggestion: Some(format!("add `mod {stem};` to {parent}")),
         })
+    }
+
+    /// The nearest existing file that could declare `dest_rel`'s module,
+    /// falling back to the exact parent-module path that must be created.
+    fn declaring_parent_file(&self, dest_rel: &str) -> String {
+        let candidates = parent_module_candidates(dest_rel);
+        candidates
+            .iter()
+            .find(|candidate| self.project_root.join(candidate).is_file())
+            .cloned()
+            .or_else(|| candidates.into_iter().next())
+            .unwrap_or_else(|| crate_root_file(dest_rel))
     }
 
     /// True when some file that could be the parent module of `dest_rel`
     /// already contains a `mod <stem>;` declaration.
     fn module_declared(&self, dest_rel: &str, stem: &str) -> bool {
-        let needle_a = format!("mod {stem};");
-        let needle_b = format!("mod {stem} ");
         for candidate in parent_module_candidates(dest_rel) {
             if let Ok(text) = std::fs::read_to_string(self.project_root.join(&candidate))
-                && (text.contains(&needle_a) || text.contains(&needle_b))
+                && source_declares_external_module(&text, stem)
             {
                 return true;
             }
@@ -790,23 +809,72 @@ fn crate_root_file(dest_rel: &str) -> String {
 
 /// Files that could declare `dest_rel`'s module with a `mod` statement.
 fn parent_module_candidates(dest_rel: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(parent) = dest_rel.rsplit_once('/').map(|(p, _)| p) {
-        out.push(format!("{parent}/mod.rs"));
-        out.push(format!("{parent}.rs"));
-        out.push(format!("{parent}/lib.rs"));
-        out.push(format!("{parent}/main.rs"));
-        // grandparent for `foo/mod.rs`-style parents
-    }
-    // Crate roots.
-    if let Some(prefix) = dest_rel.rfind("src/").map(|i| &dest_rel[..i + 4]) {
-        out.push(format!("{prefix}lib.rs"));
-        out.push(format!("{prefix}main.rs"));
+    let Some(stem) = dest_rel.strip_suffix(".rs") else {
+        return Vec::new();
+    };
+    let parts: Vec<&str> = stem.split('/').filter(|part| !part.is_empty()).collect();
+    let src_idx = parts.iter().rposition(|part| *part == "src");
+    let (prefix, tail) = match src_idx {
+        Some(index) => (
+            format!("{}/", parts[..=index].join("/")),
+            &parts[index + 1..],
+        ),
+        None => (String::new(), parts.as_slice()),
+    };
+    let Some(file_stem) = tail.last() else {
+        return Vec::new();
+    };
+    let parent_segments = if *file_stem == "mod" {
+        &tail[..tail.len().saturating_sub(2)]
     } else {
-        out.push("src/lib.rs".to_string());
-        out.push("src/main.rs".to_string());
+        &tail[..tail.len() - 1]
+    };
+    if parent_segments.is_empty() {
+        let root = if prefix.is_empty() {
+            "src/".to_string()
+        } else {
+            prefix
+        };
+        return vec![format!("{root}lib.rs"), format!("{root}main.rs")];
     }
-    out
+    let parent = format!("{prefix}{}", parent_segments.join("/"));
+    vec![format!("{parent}.rs"), format!("{parent}/mod.rs")]
+}
+
+/// Parse-level check for an external `mod name;` declaration. Text matches
+/// alone are unsafe here: comments, strings, and inline `mod name { ... }`
+/// blocks do not connect `name.rs` to the module tree.
+fn source_declares_external_module(source: &str, expected: &str) -> bool {
+    let Ok(language) = crate::extraction::ts_provider::try_language("rust") else {
+        return false;
+    };
+    let mut parser = Parser::new();
+    if parser.set_language(&language).is_err() {
+        return false;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return false;
+    };
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+    loop {
+        let node = cursor.node();
+        if node.kind() == "mod_item"
+            && node.child_by_field_name("body").is_none()
+            && node
+                .child_by_field_name("name")
+                .and_then(|name| name.utf8_text(source.as_bytes()).ok())
+                == Some(expected)
+        {
+            return true;
+        }
+        if !cursor.goto_next_sibling() {
+            return false;
+        }
+    }
 }
 
 /// Collects identifier tokens from source text (Rust identifier rules). Used to
@@ -851,6 +919,36 @@ fn parse_use_statements(source: &str) -> Vec<UseStatement> {
         Some(stmts) => stmts,
         None => parse_use_statements_linescan(source),
     }
+}
+
+/// Return a destination-stable dependency import.
+///
+/// `self::` and `super::` are relative to the source module and would silently
+/// change meaning after a move, so they require an explicit hint instead of
+/// auto-insertion. A source `pub use` is reduced to a private `use`: the moved
+/// body needs the binding, not a new public re-export from the destination.
+fn portable_dependency_import(statement: &str) -> Option<String> {
+    let trimmed = statement.trim();
+    let (path, was_public) = if let Some(path) = trimmed.strip_prefix("pub use ") {
+        (path, true)
+    } else if let Some(path) = trimmed.strip_prefix("use ") {
+        (path, false)
+    } else {
+        return None;
+    };
+    let path = path.trim_start();
+    if path == "self;"
+        || path.starts_with("self::")
+        || path == "super;"
+        || path.starts_with("super::")
+    {
+        return None;
+    }
+    Some(if was_public {
+        format!("use {path}")
+    } else {
+        trimmed.to_string()
+    })
 }
 
 /// Tree-sitter path: collect every `use_declaration` node (top-level and inside
@@ -1219,6 +1317,54 @@ mod tests {
         assert!(appeared.contains("was created while the move was being prepared"));
     }
 
+    #[tokio::test]
+    async fn move_symbol_apply_refreshes_caller_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(
+            project.join("src/lib.rs"),
+            "pub mod source;\npub mod caller;\npub mod destination;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("src/source.rs"),
+            "pub fn moved() -> u32 { 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("src/caller.rs"),
+            "use crate::source::moved;\npub fn caller() -> u32 { moved() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("src/destination.rs"),
+            "pub fn existing() -> u32 { 0 }\n",
+        )
+        .unwrap();
+
+        let cg = TraceDecay::init(project).await.unwrap();
+        cg.index_all().await.unwrap();
+        let result = cg
+            .move_symbol("moved", "src/destination.rs", false, false)
+            .await
+            .unwrap();
+        assert!(result.success, "move result: {result:?}");
+
+        let moved = cg
+            .get_nodes_by_qualified_name("moved")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|node| node.file_path == "src/destination.rs")
+            .expect("moved symbol should be indexed at the destination");
+        let callers = cg.get_callers(&moved.id, 1).await.unwrap();
+        assert!(
+            callers.iter().any(|(caller, _)| caller.name == "caller"),
+            "caller graph must be fresh for the next refactor step: {callers:?}"
+        );
+    }
+
     #[test]
     fn rust_module_path_maps_src_layout() {
         assert_eq!(
@@ -1258,6 +1404,46 @@ mod tests {
     }
 
     #[test]
+    fn parent_module_candidates_follow_rust_file_layout() {
+        assert_eq!(
+            parent_module_candidates("src/foo.rs"),
+            vec!["src/lib.rs", "src/main.rs"]
+        );
+        assert_eq!(
+            parent_module_candidates("src/foo/bar.rs"),
+            vec!["src/foo.rs", "src/foo/mod.rs"]
+        );
+        assert_eq!(
+            parent_module_candidates("src/foo/mod.rs"),
+            vec!["src/lib.rs", "src/main.rs"]
+        );
+        assert_eq!(
+            parent_module_candidates("src/foo/bar/mod.rs"),
+            vec!["src/foo.rs", "src/foo/mod.rs"]
+        );
+        assert_eq!(
+            parent_module_candidates("evals/fixture/src/foo/bar.rs"),
+            vec!["evals/fixture/src/foo.rs", "evals/fixture/src/foo/mod.rs"]
+        );
+    }
+
+    #[test]
+    fn external_module_detection_ignores_comments_strings_and_inline_modules() {
+        assert!(source_declares_external_module(
+            "#[cfg(feature = \"x\")]\npub mod child;\n",
+            "child"
+        ));
+        assert!(!source_declares_external_module(
+            "// mod child;\nconst NOTE: &str = \"mod child;\";\n",
+            "child"
+        ));
+        assert!(!source_declares_external_module(
+            "mod child { pub fn inline() {} }\n",
+            "child"
+        ));
+    }
+
+    #[test]
     fn body_identifiers_collects_names_not_numbers() {
         let ids = body_identifiers("let x = LineItem { unit_price: 3u64 };");
         assert!(ids.contains("LineItem"));
@@ -1279,6 +1465,32 @@ mod tests {
         assert_eq!(stmts[2].leaves[0].binding, "Y");
         assert_eq!(stmts[2].leaves[1].binding, "Z");
         assert!(stmts[3].glob);
+    }
+
+    #[test]
+    fn portable_dependency_import_rejects_source_relative_paths() {
+        assert_eq!(
+            portable_dependency_import("use crate::shared::Thing;").as_deref(),
+            Some("use crate::shared::Thing;")
+        );
+        assert_eq!(
+            portable_dependency_import("use external_crate::Thing;").as_deref(),
+            Some("use external_crate::Thing;")
+        );
+        assert_eq!(portable_dependency_import("use self::Thing;"), None);
+        assert_eq!(portable_dependency_import("use super::Thing;"), None);
+        assert_eq!(
+            portable_dependency_import("use super::parent::Thing;"),
+            None
+        );
+    }
+
+    #[test]
+    fn portable_dependency_import_does_not_create_a_new_reexport() {
+        assert_eq!(
+            portable_dependency_import("pub use crate::shared::Thing;").as_deref(),
+            Some("use crate::shared::Thing;")
+        );
     }
 
     #[test]
