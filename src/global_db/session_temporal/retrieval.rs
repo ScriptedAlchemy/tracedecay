@@ -3933,7 +3933,7 @@ mod tests {
         candidate.session = Some("session-b".to_string());
         let query = build_record_query(
             &scope,
-            &scoped_snapshot(1, None),
+            &root_snapshot_with_mode(1, None, TemporalModeV1::Current),
             &[candidate],
             0,
             &RecordCursor {
