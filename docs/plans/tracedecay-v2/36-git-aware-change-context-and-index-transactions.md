@@ -552,10 +552,30 @@ inventory, stack, graph/catalog/test, policy, and authorization epoch.
 
 Only `FastForward` and one ordinary `TwoParentMerge` are valid. Octopus, squash,
 cherry-pick, rebase, amend, synthetic parent lists, unrelated-history merge, conflict
-commit, empty-policy bypass, and history rewrite are impossible to encode. A repository
-whose policy requires merge hooks not supported by the fixed adapter or disallows
-plumbing-created merge commits is preview-only. Signing uses the pinned native Git signing
-operation; no request can disable a required signature or hook policy.
+commit, empty-policy bypass, and history rewrite are impossible to encode.
+
+V1's hook/signing/message contract is closed:
+
+```text
+MechanicalMergeCommitPolicyV1 {
+  hook_policy: VerifiedNoApplicableHooks,
+  signing_policy: UnsignedPermitted | SignatureRequired { signing_key_ref },
+  message_policy: FixedStackIntegrationMessageV1
+}
+```
+
+The adapter resolves system/global/local/worktree `core.hooksPath` and the repository's
+native hook locations under the pinned config policy. Any configured executable
+`pre-commit`, `pre-merge-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`, or
+`post-merge` hook returns `UnsupportedHookPolicy` and keeps integration preview-only;
+V1 never invokes, bypasses, or approximates merge-hook behavior. A fast-forward creates
+no commit and has `hook_outcome = NotApplicable` and
+`signing_outcome = NotApplicable`. A two-parent merge uses native `commit-tree` with the
+required signing policy. `FixedStackIntegrationMessageV1` is generated only from encoded
+source/destination `StackNodeId`, source/destination `CommitId`, direction, and
+`preview_id`; no branch label, path, commit subject, PR text, agent text, or caller
+template enters it. A repository that disallows plumbing-created merge commits is
+preview-only. No request can disable a required signature or alter this policy.
 
 ### Daemon transaction, receipt, and recovery
 
@@ -747,7 +767,8 @@ approval, conflict-free result, integration commit, or success receipt.
   drift and partial coverage block; textually clean semantic conflicts escalate; no
   fixture auto-resolves a semantic conflict.
 - `tests/git_stack_suite/integration.rs` covers human and delegated-agent approvals,
-  fast-forward and two-parent merge, required hook/signing policies, checked-out and
+  fast-forward and two-parent merge, rejection of every V1-inapplicable hook path,
+  unsigned-permitted and signature-required policy, fixed message bytes, checked-out and
   unoccupied destination refs, source immutability, stale fields independently, external
   ref/index/worktree races, cancellation at every journal phase, and one-use replay.
 - `tests/git_stack_suite/recovery.rs` fault-injects process death and I/O failure before
