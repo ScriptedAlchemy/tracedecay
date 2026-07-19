@@ -337,12 +337,6 @@ impl DaemonEngine {
                 retirements
             })
             .await;
-        let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
-            for retirement in retirements {
-                retirement.wait().await;
-            }
-        })
-        .await;
         self.store_administration
             .with_writer(|| async {
                 self.store_administration
@@ -352,6 +346,12 @@ impl DaemonEngine {
                     .clear();
             })
             .await;
+        let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
+            for retirement in retirements {
+                retirement.wait().await;
+            }
+        })
+        .await;
     }
 }
 

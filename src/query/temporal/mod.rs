@@ -199,6 +199,8 @@ pub async fn execute_temporal_kernel(
     if let Some(after) = &after {
         ranked.retain(|candidate| is_after(candidate, after));
     }
+    let mut ranked_anchors = BTreeSet::new();
+    ranked.retain(|candidate| ranked_anchors.insert(candidate.anchor_id.clone()));
 
     let has_more = ranked.len() > request.limit;
     ranked.truncate(request.limit);
@@ -318,8 +320,14 @@ fn map_port_error(error: TemporalPortError) -> TemporalKernelError {
     match error {
         TemporalPortError::Cancelled => TemporalKernelError::Cancelled,
         TemporalPortError::DeadlineExceeded => TemporalKernelError::DeadlineExceeded,
-        TemporalPortError::BudgetExceeded { .. } => TemporalKernelError::BudgetExceeded,
+        TemporalPortError::BudgetExceeded { .. }
+        | TemporalPortError::ParticipantLimitExceeded { .. }
+        | TemporalPortError::ParticipantManifestBytesExceeded { .. } => {
+            TemporalKernelError::BudgetExceeded
+        }
         TemporalPortError::InvalidBinding { .. }
+        | TemporalPortError::EmptyParticipantManifest
+        | TemporalPortError::DuplicateParticipant
         | TemporalPortError::ZeroGeneration
         | TemporalPortError::UnauthorizedSnapshot
         | TemporalPortError::ZeroVersion { .. }

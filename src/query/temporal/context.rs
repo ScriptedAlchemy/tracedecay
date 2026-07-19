@@ -201,6 +201,21 @@ fn assemble_context_parts_with_frames<P: ContextPayload, U: ContextUnavailable>(
         });
     }
     preserve_rejected_summary_details(&mut bundle, &summary_omissions, control)?;
+    let mut available_ids = available
+        .iter()
+        .map(|payload| payload.anchor_id().clone())
+        .collect::<Vec<_>>();
+    available_ids.sort();
+    for omission in &mut bundle.omissions {
+        if !omission.reason.is_terminal_privacy()
+            && omission
+                .anchor_id
+                .as_ref()
+                .is_some_and(|anchor| available_ids.binary_search(anchor).is_ok())
+        {
+            omission.anchor_id = None;
+        }
+    }
     bundle.omissions.sort_by(compare_omissions);
 
     let policy = estimator.token_policy();

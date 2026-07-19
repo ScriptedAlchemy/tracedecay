@@ -463,8 +463,8 @@ assert calls[6][0] == "tracedecay_lcm_expand"
 assert calls[6][1]["target"] == {"kind": "raw_message", "store_id": 42}
 assert calls[6][1]["session_id"] == "session-foreign"
 assert calls[6][1]["content_limit"] == 308
-assert calls[6][1]["source_offset"] == 3
-assert calls[6][1]["source_limit"] == 2
+assert "source_offset" not in calls[6][1]
+assert "source_limit" not in calls[6][1]
 assert "store_id" not in calls[6][1]
 assert "max_tokens" not in calls[6][1]
 assert calls[7][0] == "tracedecay_lcm_grep"
@@ -4806,6 +4806,7 @@ fn generated_skill_mirrors_session_context_retrieval_contract() {
         "`temporal_mode=current`",
         "`temporal_mode=forensic`",
         "`next_cursor`",
+        "same target, source limit, and content slice",
         "`coverage`",
         "`anchors`",
         "needs_synthesis=true",

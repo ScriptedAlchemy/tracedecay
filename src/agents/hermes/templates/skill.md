@@ -59,7 +59,8 @@ compresses a session.
    `source_limit`, and the opaque continuation cursor apply only to summary
    source pages; raw and external payload expansion use content pagination.
    Continue a summary page only by returning its opaque `next_cursor`
-   unchanged.
+   unchanged with the same target, source limit, and content slice; changing a
+   bound continuation input is denied.
 4. `lcm_expand_query` / `tracedecay_lcm_expand_query` can assemble bounded
    context. When it returns `needs_synthesis=true`, the host must synthesize
    from that context; only use the direct answer when synthesis is not needed.

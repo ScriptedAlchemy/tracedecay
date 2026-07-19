@@ -43,7 +43,27 @@ use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::storage::{
     resolve_layout_for_current_profile, resolve_lcm_payload_root, resolve_response_handle_root,
 };
+use tracedecay::store::{GlobalDbObservationStore, GlobalDbSessionTemporalStore};
 use tracedecay::tracedecay::TraceDecay;
+use tracedecay_domain::{
+    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion,
+    DurableObservationV1, MessageOccurrenceIdV1, MessageOccurrenceRecordV1, ObservationId,
+    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, PayloadReferenceV1, ProjectId, ProjectionGenerationId,
+    ProjectionOutputOrdinalV1, ProviderId, RetentionClass, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SessionProjectionGenerationV1,
+    SignedCursorKeyRefV1, UtcMicros, derive_exact_observation_anchor_id,
+};
+use tracedecay_store::{
+    AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
+    SessionFrozenWatermarksV1, SessionGenerationActivationRequestV1,
+    SessionGenerationRebuildRequestV1, SessionTemporalCapabilitiesV1, SessionTemporalCapabilityV1,
+    SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore, SessionTemporalSnapshotV1,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+};
 
 pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 const MCP_TEST_RESPONSE_CHAR_LIMIT: usize = 15_000;
@@ -144,45 +164,86 @@ async fn open_test_db_connection(db_path: &Path) -> TestDbConnection {
     TestDbConnection { _db: db, conn }
 }
 
-async fn activate_test_temporal_generation(conn: &libsql::Connection, session_id: &str) -> i64 {
-    let mut rows = conn
-        .query(
-            "SELECT MAX(generation) FROM session_temporal_generations WHERE session_id = ?1",
-            [session_id],
+struct TemporalLcmProjectionInput {
+    occurrence: MessageOccurrenceRecordV1,
+    source_frontier: u64,
+}
+
+async fn activate_test_temporal_generation(
+    db: &GlobalDb,
+    session_id: &str,
+    inputs: Vec<TemporalLcmProjectionInput>,
+) -> u64 {
+    let session_id = SessionId::new(session_id).unwrap();
+    let source_frontier = inputs
+        .iter()
+        .map(|input| input.source_frontier)
+        .max()
+        .expect("temporal fixture requires canonical observations");
+    let active_generation = SessionProjectionGenerationV1::new(1).unwrap();
+    let candidate_generation = SessionProjectionGenerationV1::new(2).unwrap();
+    let cursor_key = SignedCursorKeyRefV1 {
+        key_id: SessionCursorKeyIdV1::new("cursor.test").unwrap(),
+        version: SessionCursorVersionV1::new(1).unwrap(),
+    };
+    let temporal = open_test_db_connection(db.db_path()).await;
+    temporal
+        .execute(
+            "INSERT INTO session_query_cursor_keys (
+                 key_id, key_version, key_material, created_at, retired_at
+             )
+             SELECT ?1, 1, ?2, 1, NULL
+             WHERE NOT EXISTS (SELECT 1 FROM session_query_cursor_keys)",
+            libsql::params![cursor_key.key_id.as_str(), vec![0x45_u8; 32]],
         )
         .await
         .unwrap();
-    let generation = rows
-        .next()
+    let watermarks =
+        SessionFrozenWatermarksV1::new(active_generation, source_frontier, source_frontier, 0)
+            .with_cursor_key(cursor_key);
+    let snapshot = SessionTemporalSnapshotV1::new(
+        session_id.clone(),
+        UtcMicros(100),
+        watermarks.clone(),
+        SessionTemporalCapabilitiesV1::new([
+            SessionTemporalCapabilityV1::FrozenWatermarks,
+            SessionTemporalCapabilityV1::GenerationRebuild,
+        ]),
+    );
+    let store = GlobalDbSessionTemporalStore::new(db);
+    store
+        .begin_session_generation_rebuild(
+            SessionGenerationRebuildRequestV1::new(
+                session_id.clone(),
+                candidate_generation,
+                snapshot.clone(),
+            )
+            .unwrap(),
+        )
         .await
-        .unwrap()
-        .and_then(|row| row.get::<Option<i64>>(0).ok().flatten())
-        .unwrap_or(1);
-    drop(rows);
-    let watermarks = json!({
-        "active_generation": generation,
-        "cursor_key": {"key_id": "cursor.test", "version": 1},
-        "projection_frontier": 1,
-        "source_frontier": 1,
-        "summary_frontier": 1,
-    })
-    .to_string();
-    conn.execute(
-        "INSERT INTO session_temporal_generations (
-             session_id, generation, state, frozen_watermarks_json,
-             created_at, ready_at, activated_at, completed_at
-         ) VALUES (?1, ?2, 'active', ?3, 1, 1, 1, NULL)
-         ON CONFLICT(session_id, generation) DO UPDATE SET
-             state = 'active',
-             frozen_watermarks_json = excluded.frozen_watermarks_json,
-             ready_at = 1,
-             activated_at = 1,
-             completed_at = NULL",
-        libsql::params![session_id, generation, watermarks],
-    )
-    .await
-    .unwrap();
-    generation
+        .unwrap();
+    store
+        .persist_session_temporal_projection_batch(
+            SessionTemporalProjectionBatchV1::new(
+                session_id.clone(),
+                candidate_generation,
+                watermarks,
+                inputs.into_iter().map(|input| input.occurrence).collect(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    store
+        .activate_session_temporal_generation(
+            SessionGenerationActivationRequestV1::new(session_id, candidate_generation, snapshot)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    candidate_generation.value()
 }
 
 pub(crate) async fn handle_tool_call(
@@ -8868,6 +8929,201 @@ async fn seed_lcm_tool_result_message_for_provider(
     );
 }
 
+async fn seed_temporal_lcm_session_message(
+    cg: &TraceDecay,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) -> TemporalLcmProjectionInput {
+    persist_temporal_lcm_observation(
+        cg,
+        session_id,
+        message_id,
+        text.into(),
+        CanonicalMessageRoleV1::Assistant,
+        ordinal,
+    )
+    .await
+}
+
+async fn seed_temporal_lcm_tool_result_message(
+    cg: &TraceDecay,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) -> TemporalLcmProjectionInput {
+    let projection = persist_temporal_lcm_observation(
+        cg,
+        session_id,
+        message_id,
+        text.into(),
+        CanonicalMessageRoleV1::Tool,
+        ordinal,
+    )
+    .await;
+    let db = open_active_project_session_db(cg).await;
+    let projected = db
+        .get_session_message("cursor", message_id)
+        .await
+        .expect("canonical tool result must project to the compatibility store");
+    assert!(
+        db.upsert_session_message(&projected).await,
+        "canonical compatibility output must apply the bounded payload policy"
+    );
+    projection
+}
+
+async fn persist_temporal_lcm_observation(
+    cg: &TraceDecay,
+    session_id: &str,
+    message_id: &str,
+    text: String,
+    role: CanonicalMessageRoleV1,
+    ordinal: i64,
+) -> TemporalLcmProjectionInput {
+    let provider = ProviderId::new("cursor").unwrap();
+    let session_id = SessionId::new(session_id).unwrap();
+    let scope = ObservationScopeV1::Project {
+        project_id: ProjectId::new(
+            cg.store_layout()
+                .identity
+                .project_id
+                .clone()
+                .expect("test project id"),
+        )
+        .unwrap(),
+    };
+    let source =
+        ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone()).unwrap();
+    let source_frontier = u64::try_from(ordinal).unwrap().saturating_add(1);
+    let range = ObservationSourceRangeV1::new(source_frontier - 1, source_frontier).unwrap();
+    let stable_record_id =
+        ObservationId::new(format!("record.mcp.{session_id}.{message_id}")).unwrap();
+    let relations = CanonicalObservationRelationsV1::new(session_id.clone())
+        .with_message_id(ObservationId::new(message_id).unwrap());
+    let facts = match role {
+        CanonicalMessageRoleV1::Tool => vec![CanonicalObservationFactV1::ToolResult {
+            invocation_id: None,
+            content: Value::String(text),
+            success: Some(true),
+        }],
+        _ => vec![CanonicalObservationFactV1::Message {
+            role: role.clone(),
+            content: Value::String(text),
+            model: Some("test-model".to_string()),
+            timestamp: Some(ordinal + 1),
+        }],
+    };
+    let envelope = CanonicalObservationEnvelopeV1::new(
+        provider,
+        "message",
+        stable_record_id.clone(),
+        relations,
+        facts,
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+    )
+    .unwrap();
+    let payload = serde_json::to_value(envelope).unwrap();
+    let receipt = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new(format!("receipt.mcp.{session_id}.{message_id}")).unwrap(),
+            ComponentVersion::new("sanitizer.mcp-fixture.v1").unwrap(),
+        )
+        .unwrap(),
+        SanitizerDispositionV1::Accepted,
+        SensitivityV1::NonSensitive,
+        Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+    )
+    .unwrap();
+    let observation = DurableObservationV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
+            source,
+            scope,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            stable_record_id,
+        )
+        .unwrap(),
+        receipt,
+        RetentionClass::new("retention.mcp-fixture").unwrap(),
+        payload,
+    )
+    .unwrap();
+    let db = open_active_project_session_db(cg).await;
+    let observation_store = GlobalDbObservationStore::new(&db);
+    let previous_cursor = observation_store
+        .get_source_cursor(observation.source(), observation.scope())
+        .await
+        .unwrap();
+    let next_cursor = ObservationSourceCursorV1::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        observation.identity().generation(),
+        observation.identity().ordering_domain(),
+        observation.identity().position().end(),
+    )
+    .unwrap();
+    let write = ObservationWrite::new(observation.clone(), previous_cursor, next_cursor).unwrap();
+    let projection_generation = ProjectionGenerationId::new("projection.mcp-fixture.v1").unwrap();
+    let authorization =
+        build_observation_resolution_authorization_v1(&observation, "observation-capture.v1")
+            .unwrap();
+    let anchor = build_observation_retrieval_anchor_v2(
+        &observation,
+        projection_generation.clone(),
+        UtcMicros(ordinal + 1),
+        authorization,
+    )
+    .unwrap();
+    observation_store
+        .persist_observation(
+            AnchoredObservationWrite::new(write, anchor.clone(), projection_generation).unwrap(),
+        )
+        .await
+        .unwrap();
+    observation_store
+        .project_observation(observation.observation_id())
+        .await
+        .unwrap();
+    let output_ordinal = ProjectionOutputOrdinalV1::new(0);
+    let occurrence = serde_json::from_value(json!({
+        "occurrence_id": MessageOccurrenceIdV1::derive(
+            observation.observation_id(),
+            output_ordinal,
+        ),
+        "source_observation_id": observation.observation_id(),
+        "projection_output_ordinal": output_ordinal,
+        "retrieval_anchor_id": derive_exact_observation_anchor_id(
+            observation.scope(),
+            observation.observation_id(),
+        ).unwrap(),
+        "session_id": session_id,
+        "thread_id": null,
+        "thread_grouping": null,
+        "turn_id": null,
+        "turn_grouping": null,
+        "message_id": message_id,
+        "agent_id": null,
+        "role": role,
+        "knowledge_at": anchor.ingested_at(),
+        "valid_time": {"kind": "unknown"},
+        "evidence": {
+            "authority": "canonical_observation",
+            "evidence_class": anchor.evidence_class(),
+            "source_anchor_id": anchor.anchor_id(),
+            "sanitization_receipt": observation.receipt().receipt(),
+        },
+    }))
+    .unwrap();
+    TemporalLcmProjectionInput {
+        occurrence,
+        source_frontier,
+    }
+}
+
 struct LcmMessageContext<'a> {
     role: &'a str,
     source: &'a str,
@@ -11049,7 +11305,7 @@ async fn lcm_status_reports_lifecycle_fields_from_active_project() {
 #[tokio::test]
 async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     let (cg, _dir) = setup_project().await;
-    seed_lcm_session_message(
+    let source_projection = seed_temporal_lcm_session_message(
         &cg,
         "lcm-describe-targets",
         "lcm-describe-source",
@@ -11057,7 +11313,7 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
         1,
     )
     .await;
-    seed_lcm_tool_result_message(
+    let external_projection = seed_temporal_lcm_tool_result_message(
         &cg,
         "lcm-describe-targets",
         "lcm-describe-tool",
@@ -11068,6 +11324,12 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     let db = open_project_session_db(cg.project_root())
         .await
         .expect("project-local session db should open");
+    activate_test_temporal_generation(
+        &db,
+        "lcm-describe-targets",
+        vec![source_projection, external_projection],
+    )
+    .await;
     let source = db
         .lcm_load_raw_message("cursor", "lcm-describe-source")
         .await
@@ -11096,22 +11358,6 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
         })
         .await
         .expect("summary should insert");
-    let temporal = open_test_db_connection(&project_session_db_path(&cg)).await;
-    let generation = activate_test_temporal_generation(&temporal, "lcm-describe-targets").await;
-    temporal
-        .execute(
-            "INSERT OR REPLACE INTO session_summary_availability (
-                 session_id, generation, summary_id, availability,
-                 source_horizon_json, reason, checked_at
-             )
-             SELECT session_id, ?1, summary_id, 'available',
-                    source_horizon_json, NULL, 1
-             FROM session_summary_nodes
-             WHERE summary_id = ?2",
-            libsql::params![generation, summary.node_id.as_str()],
-        )
-        .await
-        .unwrap();
     let server = real_mcp_server(cg).await;
 
     let node_result = handle_real_server_tool_call(
@@ -11125,7 +11371,7 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     )
     .await;
     let node_payload: Value = serde_json::from_str(extract_real_server_text(&node_result)).unwrap();
-    assert_eq!(node_payload["status"], "ok");
+    assert_eq!(node_payload["status"], "ok", "{node_payload}");
     assert_eq!(node_payload["description"]["target"], "summary_node");
     assert_eq!(
         node_payload["description"]["summary_node"]["node_id"],
@@ -11154,7 +11400,7 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     .await;
     let payload_payload: Value =
         serde_json::from_str(extract_real_server_text(&payload_result)).unwrap();
-    assert_eq!(payload_payload["status"], "ok");
+    assert_eq!(payload_payload["status"], "ok", "{payload_payload}");
     assert_eq!(payload_payload["description"]["target"], "external_payload");
     assert_eq!(
         payload_payload["description"]["external_payload"]["payload_ref"],
@@ -11550,7 +11796,7 @@ async fn lcm_large_json_response_stays_parseable_after_truncation() {
 #[tokio::test]
 async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    seed_lcm_session_message(
+    let projection = seed_temporal_lcm_session_message(
         &cg,
         "lcm-large-expand-query",
         "lcm-large-expand-query-message",
@@ -11561,9 +11807,14 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
         1,
     )
     .await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    activate_test_temporal_generation(&db, "lcm-large-expand-query", vec![projection]).await;
 
-    let result = handle_tool_call(
-        &cg,
+    let server = real_mcp_server(cg).await;
+    let result = handle_real_server_tool_call(
+        &server,
         "tracedecay_lcm_expand_query",
         json!({
             "provider": "cursor",
@@ -11573,12 +11824,9 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
             "context_max_tokens": 65536,
             "max_tokens": 128
         }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
+    .await;
+    let text = extract_real_server_text(&result);
     let payload: Value =
         serde_json::from_str(text).expect("large expand-query response must remain valid JSON");
 
@@ -11586,7 +11834,7 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
         payload["truncated"], true,
         "must not use generic truncation"
     );
-    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["status"], "partial");
     assert_eq!(payload["needs_synthesis"], true);
     assert_eq!(
         payload["prompt"],
@@ -11612,13 +11860,13 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
         "MCP expand-query context should stay compact"
     );
     assert!(text.len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
-    close_test_graph(cg).await;
+    server.shutdown().await;
 }
 
 #[tokio::test]
 async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    seed_lcm_session_message(
+    let projection = seed_temporal_lcm_session_message(
         &cg,
         "lcm-huge-prompt-expand-query",
         "lcm-huge-prompt-expand-query-message",
@@ -11629,6 +11877,7 @@ async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
     let db = open_project_session_db(cg.project_root())
         .await
         .expect("project-local session db should open");
+    activate_test_temporal_generation(&db, "lcm-huge-prompt-expand-query", vec![projection]).await;
     let raw = db
         .lcm_load_raw_message("cursor", "lcm-huge-prompt-expand-query-message")
         .await
@@ -11661,8 +11910,9 @@ async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
         "QUERY_OVERFLOW ".repeat(12_000)
     );
 
-    let result = handle_tool_call(
-        &cg,
+    let server = real_mcp_server(cg).await;
+    let result = handle_real_server_tool_call(
+        &server,
         "tracedecay_lcm_expand_query",
         json!({
             "provider": "cursor",
@@ -11673,12 +11923,9 @@ async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
             "context_max_tokens": 65536,
             "max_tokens": 128
         }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
+    .await;
+    let text = extract_real_server_text(&result);
     let payload: Value =
         serde_json::from_str(text).expect("oversized expand-query response must remain valid JSON");
 
@@ -11701,6 +11948,7 @@ async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
             .contains("QUESTION:")
     );
     assert!(text.len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
+    server.shutdown().await;
 }
 
 #[cfg(unix)]
@@ -14074,21 +14322,25 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
 async fn lcm_expand_paginates_summary_sources_over_mcp() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let mut store_ids = Vec::new();
+    let mut projections = Vec::new();
     for index in 1..=4 {
         let message_id = format!("page-msg-{index}");
-        seed_lcm_session_message(
-            &cg,
-            "lcm-page-session",
-            &message_id,
-            format!("paged source body {index}"),
-            index,
-        )
-        .await;
+        projections.push(
+            seed_temporal_lcm_session_message(
+                &cg,
+                "lcm-page-session",
+                &message_id,
+                format!("paged source body {index}"),
+                index,
+            )
+            .await,
+        );
         store_ids.push(lcm_raw_store_id(&cg, &message_id).await);
     }
     let db = open_project_session_db(cg.project_root())
         .await
         .expect("project-local session db should open");
+    activate_test_temporal_generation(&db, "lcm-page-session", projections).await;
     let summary = db
         .lcm_insert_summary_node(LcmSummaryNodeDraft {
             provider: "cursor".to_string(),
@@ -14112,22 +14364,6 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
         .await
         .expect("summary should insert");
     let summary_id = summary.node_id.clone();
-    let temporal = open_test_db_connection(&project_session_db_path(&cg)).await;
-    let generation = activate_test_temporal_generation(&temporal, "lcm-page-session").await;
-    temporal
-        .execute(
-            "INSERT OR REPLACE INTO session_summary_availability (
-                 session_id, generation, summary_id, availability,
-                 source_horizon_json, reason, checked_at
-             )
-             SELECT session_id, ?1, summary_id, 'available',
-                    source_horizon_json, NULL, 1
-             FROM session_summary_nodes
-             WHERE summary_id = ?2",
-            libsql::params![generation, summary_id.as_str()],
-        )
-        .await
-        .unwrap();
     let server = real_mcp_server(cg).await;
 
     let result = handle_real_server_tool_call(
@@ -14144,7 +14380,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     .await;
     let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
 
-    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["status"], "ok", "{payload}");
     let sources = payload["expansion"]["summary_sources"].as_array().unwrap();
     assert_eq!(sources.len(), 2);
     assert_eq!(sources[0]["raw_message"]["store_id"], json!(store_ids[1]));
@@ -14165,6 +14401,55 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     let cursor = payload["next_cursor"]
         .as_str()
         .expect("summary source page should return an opaque cursor");
+
+    let tampered = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "target": {"kind": "summary_node", "node_id": summary_id},
+            "source_limit": 2,
+            "cursor": format!("{cursor}00")
+        }),
+    )
+    .await;
+    let tampered: Value = serde_json::from_str(extract_real_server_text(&tampered)).unwrap();
+    assert_eq!(tampered["status"], "denied", "{tampered}");
+
+    let rebound = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "target": {"kind": "summary_node", "node_id": summary_id},
+            "source_limit": 1,
+            "cursor": cursor
+        }),
+    )
+    .await;
+    let rebound: Value = serde_json::from_str(extract_real_server_text(&rebound)).unwrap();
+    assert_eq!(rebound["status"], "denied", "{rebound}");
+
+    let private_terminal = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "target": {"kind": "summary_node", "node_id": "summary.missing"},
+            "source_limit": 2,
+            "cursor": cursor
+        }),
+    )
+    .await;
+    let private_terminal: Value =
+        serde_json::from_str(extract_real_server_text(&private_terminal)).unwrap();
+    assert_eq!(
+        private_terminal["status"], "denied",
+        "cursor authentication must precede target-state disclosure: {private_terminal}"
+    );
 
     let continued = handle_real_server_tool_call(
         &server,
@@ -14194,7 +14479,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
 #[tokio::test]
 async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    seed_lcm_session_message(
+    let origin_projection = seed_temporal_lcm_session_message(
         &cg,
         "lcm-origin-session",
         "origin-message",
@@ -14202,7 +14487,7 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
         1,
     )
     .await;
-    seed_lcm_session_message(
+    let active_projection = seed_temporal_lcm_session_message(
         &cg,
         "lcm-active-session",
         "active-message",
@@ -14211,9 +14496,23 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
     )
     .await;
     let origin_store_id = lcm_raw_store_id(&cg, "origin-message").await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    activate_test_temporal_generation(&db, "lcm-origin-session", vec![origin_projection]).await;
+    activate_test_temporal_generation(&db, "lcm-active-session", vec![active_projection]).await;
     let temporal = open_test_db_connection(&project_session_db_path(&cg)).await;
-    activate_test_temporal_generation(&temporal, "lcm-origin-session").await;
-    activate_test_temporal_generation(&temporal, "lcm-active-session").await;
+    temporal
+        .execute(
+            "UPDATE lcm_raw_messages
+             SET content = 'legacy projection poison',
+                 snippet_text = 'legacy projection poison',
+                 index_text = 'legacy projection poison'
+             WHERE store_id = ?1",
+            [origin_store_id],
+        )
+        .await
+        .unwrap();
     let server = real_mcp_server(cg).await;
 
     let result = handle_real_server_tool_call(
@@ -14228,7 +14527,7 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
     .await;
     let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
 
-    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["status"], "ok", "{payload}");
     assert_eq!(payload["expansion"]["kind"], "raw_message");
     assert_eq!(payload["expansion"]["from_current_session"], false);
     assert_eq!(
@@ -14247,9 +14546,9 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
 }
 
 #[tokio::test]
-async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
+async fn lcm_expand_real_service_preserves_immutable_anchor_state() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    seed_lcm_session_message(
+    let projection = seed_temporal_lcm_session_message(
         &cg,
         "lcm-state-session",
         "state-message",
@@ -14258,8 +14557,11 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
     )
     .await;
     let store_id = lcm_raw_store_id(&cg, "state-message").await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    activate_test_temporal_generation(&db, "lcm-state-session", vec![projection]).await;
     let conn = open_test_db_connection(&project_session_db_path(&cg)).await;
-    activate_test_temporal_generation(&conn, "lcm-state-session").await;
     let server = real_mcp_server(cg).await;
     let initial = handle_real_server_tool_call(
         &server,
@@ -14272,23 +14574,24 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
     )
     .await;
     let initial: Value = serde_json::from_str(extract_real_server_text(&initial)).unwrap();
-    assert_eq!(initial["status"], "ok");
+    assert_eq!(initial["status"], "ok", "{initial}");
     let anchor = initial["anchors"][0].as_str().unwrap().to_string();
 
-    for (payload_access, expected_status) in [
-        ("redacted", "redacted"),
-        ("quarantined", "locked"),
-        ("deleted", "deleted"),
-        ("unavailable", "unavailable"),
-    ] {
-        conn.execute(
-            "UPDATE retrieval_anchors
-             SET anchor_json = json_set(anchor_json, '$.payload_access', ?1)
-             WHERE anchor_id = ?2",
-            libsql::params![payload_access, anchor.as_str()],
-        )
-        .await
-        .unwrap();
+    for payload_access in ["redacted", "quarantined", "deleted", "unavailable"] {
+        let error = conn
+            .execute(
+                "UPDATE retrieval_anchors
+                 SET anchor_json = json_set(anchor_json, '$.payload_access', ?1)
+                 WHERE anchor_id = ?2",
+                libsql::params![payload_access, anchor.as_str()],
+            )
+            .await
+            .expect_err("retained anchor authority must be immutable");
+        assert!(
+            error
+                .to_string()
+                .contains("retrieval anchors are immutable")
+        );
         let result = handle_real_server_tool_call(
             &server,
             "tracedecay_lcm_expand",
@@ -14300,8 +14603,8 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
         )
         .await;
         let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
-        assert_eq!(payload["status"], expected_status, "{payload}");
-        assert!(payload["expansion"].as_array().unwrap().is_empty());
+        assert_eq!(payload["status"], "ok", "{payload}");
+        assert_eq!(payload["anchors"][0], anchor);
     }
     server.shutdown().await;
 }
@@ -14310,7 +14613,7 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
 async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let body = format!("data:image/png;base64,{}", "A".repeat(220_000));
-    seed_lcm_tool_result_message(
+    let origin_projection = seed_temporal_lcm_tool_result_message(
         &cg,
         "lcm-origin-session",
         "origin-external-message",
@@ -14318,7 +14621,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
         1,
     )
     .await;
-    seed_lcm_session_message(
+    let active_projection = seed_temporal_lcm_session_message(
         &cg,
         "lcm-active-session",
         "active-message",
@@ -14327,9 +14630,29 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     )
     .await;
     let origin_store_id = lcm_raw_store_id(&cg, "origin-external-message").await;
-    let temporal = open_test_db_connection(&project_session_db_path(&cg)).await;
-    activate_test_temporal_generation(&temporal, "lcm-origin-session").await;
-    activate_test_temporal_generation(&temporal, "lcm-active-session").await;
+    let db = open_project_session_db(cg.project_root())
+        .await
+        .expect("project-local session db should open");
+    activate_test_temporal_generation(&db, "lcm-origin-session", vec![origin_projection]).await;
+    activate_test_temporal_generation(&db, "lcm-active-session", vec![active_projection]).await;
+    db.lcm_insert_summary_node(LcmSummaryNodeDraft {
+        provider: "cursor".to_string(),
+        conversation_id: "lcm-origin-session".to_string(),
+        session_id: "lcm-origin-session".to_string(),
+        depth: 0,
+        summary_text: "external payload attestation".to_string(),
+        source_refs: vec![LcmSourceRef::RawMessage {
+            store_id: origin_store_id,
+        }],
+        source_token_count: 1,
+        summary_token_count: 1,
+        source_time_start: Some(1),
+        source_time_end: Some(1),
+        expand_hint: Some("external payload fixture".to_string()),
+        metadata_json: None,
+    })
+    .await
+    .expect("external payload must receive a canonical summary attestation");
     let server = real_mcp_server(cg).await;
 
     let raw_result = handle_real_server_tool_call(
@@ -14343,7 +14666,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     )
     .await;
     let raw_payload: Value = serde_json::from_str(extract_real_server_text(&raw_result)).unwrap();
-    assert_eq!(raw_payload["status"], "ok");
+    assert_eq!(raw_payload["status"], "ok", "{raw_payload}");
     assert_eq!(raw_payload["expansion"]["from_current_session"], false);
     assert!(raw_payload["expansion"]["externalized_note"].is_null());
     let payload_ref = raw_payload["expansion"]["payload_ref"]
@@ -14382,7 +14705,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     )
     .await;
     let payload: Value = serde_json::from_str(extract_real_server_text(&payload_result)).unwrap();
-    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["status"], "ok", "{payload}");
     assert_eq!(payload["expansion"]["kind"], "external_payload");
     assert!(
         payload["expansion"]["content"]

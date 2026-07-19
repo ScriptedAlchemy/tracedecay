@@ -5,9 +5,9 @@ use serde_json::json;
 use sha2::Digest;
 use tempfile::TempDir;
 use tracedecay::application::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
-    PolicyDigest, ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedGitRoute,
-    ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline, PolicyDigest,
+    ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedSessionIdentity, SessionRootId,
+    SessionStoreId,
 };
 use tracedecay::application::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
@@ -24,11 +24,10 @@ use tracedecay::sessions::lcm::types::{
 use tracedecay::sessions::lcm::{LcmError, LcmSourceRef, LcmSummaryNodeDraft};
 use tracedecay::store::{GlobalDbObservationStore, GlobalDbSessionTemporalStore};
 use tracedecay_domain::{
-    ActorId, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1, DurableObservationV1,
-    MessageOccurrenceIdV1, MessageOccurrenceRecordV1, ObservationId, ProjectId,
-    ProjectionOutputOrdinalV1, RepositoryId, RetrievalGrainV1, SessionCursorKeyIdV1,
-    SessionCursorVersionV1, SessionId, SessionProjectionGenerationV1, SignedCursorKeyRefV1,
-    TemporalModeV1, UtcMicros, WorktreeId,
+    ActorId, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1, CanonicalObservationIdV1,
+    DurableObservationV1, MessageOccurrenceIdV1, MessageOccurrenceRecordV1, ObservationId,
+    ProjectionOutputOrdinalV1, RetrievalGrainV1, SessionCursorKeyIdV1, SessionCursorVersionV1,
+    SessionId, SessionProjectionGenerationV1, SignedCursorKeyRefV1, TemporalModeV1, UtcMicros,
 };
 use tracedecay_store::{
     ObservationProjectionStore, ObservationReplayRequest, ObservationStore,
@@ -39,7 +38,7 @@ use tracedecay_store::{
     SessionTemporalProjectionStore, SessionTemporalSnapshotV1,
 };
 
-use crate::common::{isolated_lcm_db_path, lcm_dag_message, lcm_dag_session, open_lcm_db};
+use crate::common::{isolated_lcm_db_path, lcm_dag_session, open_lcm_db};
 
 const SESSION_ID: &str = "codex-golden-session";
 const SAFE_PHRASE: &str = "The billing pipeline regression is fixed.";
@@ -93,13 +92,39 @@ impl VersionedTokenEstimator for Words {
     }
 }
 
-async fn admit_checked_in_codex_fixture(
-    tmp: &TempDir,
-    db: &GlobalDb,
-) -> (
-    DurableObservationV1,
-    tracedecay_domain::RetrievalAnchorRecordV2,
-) {
+struct AdmittedCodexFixture {
+    message: DurableObservationV1,
+    message_anchor: tracedecay_domain::RetrievalAnchorRecordV2,
+    temporal_sources: Vec<(
+        DurableObservationV1,
+        tracedecay_domain::RetrievalAnchorRecordV2,
+        usize,
+    )>,
+}
+
+impl AdmittedCodexFixture {
+    fn occurrences(&self) -> Vec<MessageOccurrenceRecordV1> {
+        self.temporal_sources
+            .iter()
+            .flat_map(|(observation, anchor, output_count)| {
+                (0..*output_count).map(|output_ordinal| {
+                    occurrence(observation, anchor, u32::try_from(output_ordinal).unwrap())
+                })
+            })
+            .collect()
+    }
+
+    fn output_manifest(&self) -> Vec<(CanonicalObservationIdV1, usize)> {
+        self.temporal_sources
+            .iter()
+            .map(|(observation, _, output_count)| {
+                (observation.observation_id().clone(), *output_count)
+            })
+            .collect()
+    }
+}
+
+async fn admit_checked_in_codex_fixture(tmp: &TempDir, db: &GlobalDb) -> AdmittedCodexFixture {
     let session_meta =
         include_str!("../fixtures/provider_normalization/codex/session_meta.input.json");
     let agent_message =
@@ -121,12 +146,16 @@ async fn admit_checked_in_codex_fixture(
         "checked-in JSONL fixtures must retain their record terminators"
     );
 
-    let transcript = tmp.path().join("codex-golden-session.jsonl");
-    fs::write(
-        &transcript,
-        [session_meta, agent_message, function_call].concat(),
-    )
-    .unwrap();
+    let transcript_dir = tmp.path().join(".codex/sessions/2026/01/01");
+    fs::create_dir_all(&transcript_dir).unwrap();
+    let transcript = transcript_dir.join("rollout-2026-01-01T00-00-00-codex-golden-session.jsonl");
+    let mut transcript_bytes = Vec::new();
+    for fixture in [session_meta, agent_message, function_call] {
+        let record: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        serde_json::to_writer(&mut transcript_bytes, &record).unwrap();
+        transcript_bytes.push(b'\n');
+    }
+    fs::write(&transcript, transcript_bytes).unwrap();
     let expected_bytes = fs::metadata(&transcript).unwrap().len();
     let progress = codex::try_admit_codex_jsonl_observations_for_profile(
         &transcript,
@@ -158,6 +187,7 @@ async fn admit_checked_in_codex_fixture(
     );
 
     let mut message = None;
+    let mut temporal_sources = Vec::new();
     let mut saw_redacted_function_call = false;
     for stored in &replay {
         let observation = stored.observation();
@@ -178,6 +208,13 @@ async fn admit_checked_in_codex_fixture(
             "binding fixture projection receipt",
             &format!("{projection:?}"),
         );
+        if let tracedecay_store::ProjectionPersistOutcome::Projected(projected) = &projection {
+            temporal_sources.push((
+                observation.clone(),
+                stored.retrieval_anchor().clone(),
+                projected.output_count(),
+            ));
+        }
 
         for fact in envelope.facts() {
             match fact {
@@ -200,7 +237,21 @@ async fn admit_checked_in_codex_fixture(
         saw_redacted_function_call,
         "production canonicalization must retain typed shell invocation while dropping arguments"
     );
-    message.expect("production canonicalization must retain the checked-in agent message")
+    let (message, message_anchor) =
+        message.expect("production canonicalization must retain the checked-in agent message");
+    assert_eq!(
+        temporal_sources
+            .iter()
+            .map(|(_, _, output_count)| output_count)
+            .sum::<usize>(),
+        2,
+        "message and sanitized tool invocation must both reach temporal projection"
+    );
+    AdmittedCodexFixture {
+        message,
+        message_anchor,
+        temporal_sources,
+    }
 }
 
 fn canonical_message_id(observation: &DurableObservationV1) -> ObservationId {
@@ -266,9 +317,34 @@ fn snapshot(
 fn occurrence(
     observation: &DurableObservationV1,
     anchor: &tracedecay_domain::RetrievalAnchorRecordV2,
+    output_ordinal: u32,
 ) -> MessageOccurrenceRecordV1 {
-    let output_ordinal = ProjectionOutputOrdinalV1::new(0);
-    let message_id = canonical_message_id(observation);
+    let output_ordinal = ProjectionOutputOrdinalV1::new(output_ordinal);
+    let envelope: CanonicalObservationEnvelopeV1 =
+        serde_json::from_value(observation.payload().clone()).unwrap();
+    let relations = envelope.relations();
+    let message_id = relations
+        .message_id()
+        .unwrap_or_else(|| envelope.stable_record_id());
+    let role = envelope
+        .facts()
+        .iter()
+        .find_map(|fact| match fact {
+            CanonicalObservationFactV1::Message { role, .. } => Some(role.clone()),
+            CanonicalObservationFactV1::ToolInvocation { .. } => {
+                Some(tracedecay_domain::CanonicalMessageRoleV1::Assistant)
+            }
+            CanonicalObservationFactV1::ToolResult { .. } => {
+                Some(tracedecay_domain::CanonicalMessageRoleV1::Tool)
+            }
+            _ => None,
+        })
+        .expect("temporal observation must carry one canonical output fact");
+    let grouping = || json!({"kind": "provider_native"});
+    let valid_time = anchor.occurred_at().map_or_else(
+        || json!({"kind": "unknown"}),
+        |interval| json!({"kind": "known", "valid_at": interval.start}),
+    );
     serde_json::from_value(json!({
         "occurrence_id": MessageOccurrenceIdV1::derive(
             observation.observation_id(),
@@ -277,11 +353,16 @@ fn occurrence(
         "source_observation_id": observation.observation_id(),
         "projection_output_ordinal": output_ordinal,
         "retrieval_anchor_id": anchor.anchor_id(),
-        "session_id": SESSION_ID,
+        "session_id": relations.session_id(),
+        "thread_id": relations.thread_id().map(|id| id.as_str()),
+        "thread_grouping": relations.thread_id().map(|_| grouping()),
+        "turn_id": relations.turn_id().map(|id| id.as_str()),
+        "turn_grouping": relations.turn_id().map(|_| grouping()),
         "message_id": message_id,
-        "role": "assistant",
+        "agent_id": relations.agent_id().map(|id| id.as_str()),
+        "role": role,
         "knowledge_at": anchor.ingested_at(),
-        "valid_time": {"kind": "unknown"},
+        "valid_time": valid_time,
         "evidence": {
             "authority": "canonical_observation",
             "evidence_class": anchor.evidence_class(),
@@ -315,16 +396,10 @@ fn request_context(policy_digest: [u8; 32], request_id: &str) -> RequestContext 
     RequestContext::new(
         ActorId::new("actor.temporal-privacy").unwrap(),
         RequestId::new(request_id).unwrap(),
-        ResolvedSessionIdentity::for_project(
+        ResolvedSessionIdentity::for_profile(
             ProfileId::new("profile.temporal-privacy").unwrap(),
-            ProjectId::new("project.tracedecay").unwrap(),
-            SessionStoreId::new("store.project.tracedecay").unwrap(),
+            SessionStoreId::new("store.profile.temporal-privacy").unwrap(),
             SessionRootId::new("root.temporal-privacy").unwrap(),
-            ResolvedGitRoute::new(
-                RepositoryId::new("repository.tracedecay").unwrap(),
-                WorktreeId::new("worktree.main").unwrap(),
-                BranchId::new("branch.temporal-privacy").unwrap(),
-            ),
         ),
         CapabilityDigest::new(DIGEST),
         PolicyDigest::new(policy_digest),
@@ -482,15 +557,15 @@ async fn sanitized_capture_stays_private_through_temporal_summary_and_context() 
     let path = isolated_lcm_db_path(&tmp);
     let db = open_lcm_db(&tmp).await;
     seed_cursor_key(&path).await;
-    let (observation, anchor) = admit_checked_in_codex_fixture(&tmp, &db).await;
+    let fixture = admit_checked_in_codex_fixture(&tmp, &db).await;
+    let occurrences = fixture.occurrences();
+    let observation = fixture.message;
+    let anchor = fixture.message_anchor;
     let message_id = canonical_message_id(&observation);
     let observation_json = serde_json::to_string(&observation).unwrap();
     assert!(observation_json.contains(SAFE_PHRASE));
     assert_no_canary("stored observation JSON", &observation_json);
 
-    let _ = db
-        .upsert_session(&lcm_dag_session("codex", SESSION_ID))
-        .await;
     let owner_db = libsql::Builder::new_local(&path).build().await.unwrap();
     let owner_conn = owner_db.connect().unwrap();
     owner_conn
@@ -504,15 +579,6 @@ async fn sanitized_capture_stays_private_through_temporal_summary_and_context() 
         .unwrap();
     drop(owner_conn);
     drop(owner_db);
-    let _ = db
-        .upsert_session_message(&lcm_dag_message(
-            "codex",
-            message_id.as_str(),
-            SESSION_ID,
-            1,
-            SAFE_PHRASE,
-        ))
-        .await;
     let raw = db
         .lcm_load_raw_message("codex", message_id.as_str())
         .await
@@ -520,12 +586,6 @@ async fn sanitized_capture_stays_private_through_temporal_summary_and_context() 
     assert_no_canary("sanitized raw projection", &format!("{raw:?}"));
 
     let publication = summary_publication("summary.temporal.privacy", raw.store_id);
-    let summary = db
-        .lcm_publish_immutable_summary(publication.clone())
-        .await
-        .unwrap();
-    assert_no_canary("summary publication receipt", &format!("{summary:?}"));
-
     let session_id = SessionId::new(SESSION_ID).unwrap();
     let temporal_store = GlobalDbSessionTemporalStore::new(&db);
     temporal_store
@@ -545,7 +605,7 @@ async fn sanitized_capture_stays_private_through_temporal_summary_and_context() 
                 session_id.clone(),
                 generation(2),
                 watermarks(1, FIXTURE_SOURCE_FRONTIER),
-                vec![occurrence(&observation, &anchor)],
+                occurrences,
                 vec![],
                 vec![],
             )
@@ -573,10 +633,16 @@ async fn sanitized_capture_stays_private_through_temporal_summary_and_context() 
         .await
         .unwrap();
     assert_no_canary("generation activation receipt", &format!("{activation:?}"));
+    let summary = db
+        .lcm_publish_immutable_summary(publication.clone())
+        .await
+        .unwrap();
+    assert_no_canary("summary publication receipt", &format!("{summary:?}"));
 
     assert_eq!(
         fts_count(&path, "session_occurrences_fts", SAFE_TERM).await,
-        1
+        2,
+        "active and superseded generations must both retain the sanitized occurrence"
     );
     assert_eq!(
         fts_count(&path, "session_occurrences_fts", NATIVE_TOKEN_CANARY).await,
@@ -601,7 +667,8 @@ async fn sanitized_capture_stays_private_through_temporal_summary_and_context() 
         .retrieve(&context, temporal_query(SAFE_TERM))
         .await;
     match &authorized {
-        SessionRetrievalOutcome::Complete { items, .. } => {
+        SessionRetrievalOutcome::Complete { items, .. }
+        | SessionRetrievalOutcome::Partial { items, .. } => {
             assert_eq!(items[0].ranked.len(), 1);
             assert!(items[0].context.rendered.contains(SAFE_PHRASE));
         }
@@ -760,16 +827,16 @@ async fn sanitized_temporal_state_stays_private_across_reopen_and_rebuild_replay
     let tmp = TempDir::new().unwrap();
     let path = isolated_lcm_db_path(&tmp);
     let session_id = SessionId::new(SESSION_ID).unwrap();
-    let observation_id = {
+    let (observation_id, output_manifest) = {
         let db = open_lcm_db(&tmp).await;
         seed_cursor_key(&path).await;
-        let (observation, anchor) = admit_checked_in_codex_fixture(&tmp, &db).await;
+        let fixture = admit_checked_in_codex_fixture(&tmp, &db).await;
+        let occurrences = fixture.occurrences();
+        let output_manifest = fixture.output_manifest();
+        let observation = fixture.message;
         let observation_id = observation.observation_id().clone();
         assert_no_canary("pre-reopen observation", &format!("{observation:?}"));
 
-        let _ = db
-            .upsert_session(&lcm_dag_session("codex", SESSION_ID))
-            .await;
         let owner_db = libsql::Builder::new_local(&path).build().await.unwrap();
         let owner_conn = owner_db.connect().unwrap();
         owner_conn
@@ -806,7 +873,7 @@ async fn sanitized_temporal_state_stays_private_across_reopen_and_rebuild_replay
                     session_id.clone(),
                     generation(2),
                     watermarks(1, FIXTURE_SOURCE_FRONTIER),
-                    vec![occurrence(&observation, &anchor)],
+                    occurrences,
                     vec![],
                     vec![],
                 )
@@ -822,7 +889,7 @@ async fn sanitized_temporal_state_stays_private_across_reopen_and_rebuild_replay
             "pre-reopen projection receipt",
             &format!("{projection_receipt:?}"),
         );
-        observation_id
+        (observation_id, output_manifest)
     };
 
     // Reopen through the production open path used by daemon/process restart.
@@ -853,8 +920,22 @@ async fn sanitized_temporal_state_stays_private_across_reopen_and_rebuild_replay
         .iter()
         .find(|row| row.observation().observation_id() == &observation_id)
         .expect("sanitized observation must survive reopen");
-    let observation = stored.observation().clone();
-    let anchor = stored.retrieval_anchor().clone();
+    let occurrences = output_manifest
+        .iter()
+        .flat_map(|(observation_id, output_count)| {
+            let row = replay
+                .iter()
+                .find(|row| row.observation().observation_id() == observation_id)
+                .expect("every projected observation must survive reopen");
+            (0..*output_count).map(|output_ordinal| {
+                occurrence(
+                    row.observation(),
+                    row.retrieval_anchor(),
+                    u32::try_from(output_ordinal).unwrap(),
+                )
+            })
+        })
+        .collect();
     assert_no_canary("post-reopen observation", &format!("{stored:?}"));
     assert_eq!(
         temporal_store
@@ -863,7 +944,7 @@ async fn sanitized_temporal_state_stays_private_across_reopen_and_rebuild_replay
                     session_id.clone(),
                     generation(2),
                     watermarks(1, FIXTURE_SOURCE_FRONTIER),
-                    vec![occurrence(&observation, &anchor)],
+                    occurrences,
                     vec![],
                     vec![],
                 )

@@ -1,6 +1,6 @@
 use std::cmp;
 
-use libsql::{Connection, Row, Value as SqlValue};
+use libsql::{Connection, Row, Value as SqlValue, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tracedecay_domain::{
     LogicalCopyRecordV1, RetrievalAnchorId, SessionEvidenceMetadataV1, SessionId,
@@ -29,7 +29,10 @@ const MIN_CURSOR_CAPACITY: usize = 96;
 const MAX_SUMMARY_SOURCES_PER_RECORD: usize = 256;
 const EXACT_CANDIDATE_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
-           o.message_id, o.turn_id, o.session_id, o.role
+           o.message_id, o.turn_id, o.session_id, o.role,
+           COALESCE(json_extract(
+               provider_observation.observation_json, '$.identity.source.provider'
+           ), 'claude')
     FROM session_occurrences_fts
     JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
     JOIN observations AS provider_observation
@@ -47,17 +50,26 @@ const EXACT_CANDIDATE_QUERY: &str = "
       AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?10
       AND length(CAST(o.session_id AS BLOB)) <= ?10
       AND length(CAST(o.role AS BLOB)) <= ?10
+      AND length(CAST(COALESCE(json_extract(
+          provider_observation.observation_json, '$.identity.source.provider'
+      ), 'claude') AS BLOB)) <= ?10
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.retrieval_anchor_id AS BLOB))
           + length(CAST(COALESCE(o.message_id, '') AS BLOB))
           + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
           + length(CAST(o.session_id AS BLOB))
-          + length(CAST(o.role AS BLOB)) <= ?11
+          + length(CAST(o.role AS BLOB))
+          + length(CAST(COALESCE(json_extract(
+              provider_observation.observation_json, '$.identity.source.provider'
+          ), 'claude') AS BLOB)) <= ?11
     ORDER BY o.knowledge_at DESC, o.occurrence_id
     LIMIT ?12";
 const OCCURRENCE_FTS_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
-           o.message_id, o.turn_id, o.session_id, o.role
+           o.message_id, o.turn_id, o.session_id, o.role,
+           COALESCE(json_extract(
+               provider_observation.observation_json, '$.identity.source.provider'
+           ), 'claude')
     FROM session_occurrences_fts
     JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
     JOIN observations AS provider_observation
@@ -74,17 +86,26 @@ const OCCURRENCE_FTS_QUERY: &str = "
       AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?9
       AND length(CAST(o.session_id AS BLOB)) <= ?9
       AND length(CAST(o.role AS BLOB)) <= ?9
+      AND length(CAST(COALESCE(json_extract(
+          provider_observation.observation_json, '$.identity.source.provider'
+      ), 'claude') AS BLOB)) <= ?9
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.retrieval_anchor_id AS BLOB))
           + length(CAST(COALESCE(o.message_id, '') AS BLOB))
           + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
           + length(CAST(o.session_id AS BLOB))
-          + length(CAST(o.role AS BLOB)) <= ?10
+          + length(CAST(o.role AS BLOB))
+          + length(CAST(COALESCE(json_extract(
+              provider_observation.observation_json, '$.identity.source.provider'
+          ), 'claude') AS BLOB)) <= ?10
     ORDER BY o.knowledge_at DESC, o.occurrence_id
     LIMIT ?11";
 const TIME_CANDIDATE_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
-           o.message_id, o.turn_id, o.session_id, o.role
+           o.message_id, o.turn_id, o.session_id, o.role,
+           COALESCE(json_extract(
+               provider_observation.observation_json, '$.identity.source.provider'
+           ), 'claude')
     FROM session_occurrences AS o INDEXED BY idx_session_occurrences_generation_order
     JOIN observations AS provider_observation
       ON provider_observation.observation_id = o.source_observation_id
@@ -100,17 +121,24 @@ const TIME_CANDIDATE_QUERY: &str = "
       AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?10
       AND length(CAST(o.session_id AS BLOB)) <= ?10
       AND length(CAST(o.role AS BLOB)) <= ?10
+      AND length(CAST(COALESCE(json_extract(
+          provider_observation.observation_json, '$.identity.source.provider'
+      ), 'claude') AS BLOB)) <= ?10
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.retrieval_anchor_id AS BLOB))
           + length(CAST(COALESCE(o.message_id, '') AS BLOB))
           + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
           + length(CAST(o.session_id AS BLOB))
-          + length(CAST(o.role AS BLOB)) <= ?11
+          + length(CAST(o.role AS BLOB))
+          + length(CAST(COALESCE(json_extract(
+              provider_observation.observation_json, '$.identity.source.provider'
+          ), 'claude') AS BLOB)) <= ?11
     ORDER BY o.knowledge_at DESC, o.occurrence_id
     LIMIT ?12";
 const SUMMARY_CANDIDATE_QUERY: &str = "
     SELECT n.summary_id, n.summary_anchor_id, n.created_at,
-           NULL, NULL, n.session_id, 'summary'
+           NULL, NULL, n.session_id, 'summary',
+           json_extract(n.publication_json, '$.provider')
     FROM session_summary_nodes_fts
     JOIN session_summary_nodes AS n ON n.rowid = session_summary_nodes_fts.rowid
     JOIN session_summary_availability AS a
@@ -153,14 +181,21 @@ const SUMMARY_CANDIDATE_QUERY: &str = "
       AND length(CAST(n.summary_id AS BLOB)) <= ?7
       AND length(CAST(n.summary_anchor_id AS BLOB)) <= ?8
       AND length(CAST(n.session_id AS BLOB)) <= ?9
+      AND length(CAST(COALESCE(
+          json_extract(n.publication_json, '$.provider'), ''
+      ) AS BLOB)) <= ?9
       AND length(CAST(n.summary_id AS BLOB))
           + length(CAST(n.summary_anchor_id AS BLOB))
-          + length(CAST(n.session_id AS BLOB)) <= ?10
+          + length(CAST(n.session_id AS BLOB))
+          + length(CAST(COALESCE(
+              json_extract(n.publication_json, '$.provider'), ''
+          ) AS BLOB)) <= ?10
     ORDER BY n.created_at DESC, n.summary_id
     LIMIT ?11";
 const ROOT_EXACT_CANDIDATE_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
-           o.message_id, o.turn_id, o.session_id, o.role
+           o.message_id, o.turn_id, o.session_id, o.role,
+           authority_session.provider
     FROM session_occurrences_fts
     JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
     JOIN session_temporal_generations AS frozen
@@ -207,19 +242,22 @@ const ROOT_EXACT_CANDIDATE_QUERY: &str = "
       AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?10
       AND length(CAST(o.session_id AS BLOB)) <= ?10
       AND length(CAST(o.role AS BLOB)) <= ?10
+      AND length(CAST(authority_session.provider AS BLOB)) <= ?10
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.retrieval_anchor_id AS BLOB))
           + length(CAST(COALESCE(o.message_id, '') AS BLOB))
           + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
           + length(CAST(o.session_id AS BLOB))
-          + length(CAST(o.role AS BLOB)) <= ?11
+          + length(CAST(o.role AS BLOB))
+          + length(CAST(authority_session.provider AS BLOB)) <= ?11
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.session_id AS BLOB)) + 9 <= ?12
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
     LIMIT ?13";
 const ROOT_OCCURRENCE_FTS_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
-           o.message_id, o.turn_id, o.session_id, o.role
+           o.message_id, o.turn_id, o.session_id, o.role,
+           authority_session.provider
     FROM session_occurrences_fts
     JOIN session_occurrences AS o ON o.rowid = session_occurrences_fts.rowid
     JOIN session_temporal_generations AS frozen
@@ -265,19 +303,22 @@ const ROOT_OCCURRENCE_FTS_QUERY: &str = "
       AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?9
       AND length(CAST(o.session_id AS BLOB)) <= ?9
       AND length(CAST(o.role AS BLOB)) <= ?9
+      AND length(CAST(authority_session.provider AS BLOB)) <= ?9
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.retrieval_anchor_id AS BLOB))
           + length(CAST(COALESCE(o.message_id, '') AS BLOB))
           + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
           + length(CAST(o.session_id AS BLOB))
-          + length(CAST(o.role AS BLOB)) <= ?10
+          + length(CAST(o.role AS BLOB))
+          + length(CAST(authority_session.provider AS BLOB)) <= ?10
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.session_id AS BLOB)) + 9 <= ?11
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
     LIMIT ?12";
 const ROOT_TIME_CANDIDATE_QUERY: &str = "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
-           o.message_id, o.turn_id, o.session_id, o.role
+           o.message_id, o.turn_id, o.session_id, o.role,
+           authority_session.provider
     FROM session_temporal_generations AS frozen
     JOIN session_occurrences AS o
       ON o.session_id = frozen.session_id
@@ -322,19 +363,22 @@ const ROOT_TIME_CANDIDATE_QUERY: &str = "
       AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?10
       AND length(CAST(o.session_id AS BLOB)) <= ?10
       AND length(CAST(o.role AS BLOB)) <= ?10
+      AND length(CAST(authority_session.provider AS BLOB)) <= ?10
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.retrieval_anchor_id AS BLOB))
           + length(CAST(COALESCE(o.message_id, '') AS BLOB))
           + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
           + length(CAST(o.session_id AS BLOB))
-          + length(CAST(o.role AS BLOB)) <= ?11
+          + length(CAST(o.role AS BLOB))
+          + length(CAST(authority_session.provider AS BLOB)) <= ?11
       AND length(CAST(o.occurrence_id AS BLOB))
           + length(CAST(o.session_id AS BLOB)) + 9 <= ?12
     ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id
     LIMIT ?13";
 const ROOT_SUMMARY_CANDIDATE_QUERY: &str = "
     SELECT n.summary_id, n.summary_anchor_id, n.created_at,
-           NULL, NULL, n.session_id, 'summary'
+           NULL, NULL, n.session_id, 'summary',
+           authority_session.provider
     FROM session_summary_nodes_fts
     JOIN session_summary_nodes AS n ON n.rowid = session_summary_nodes_fts.rowid
     JOIN session_summary_availability AS a
@@ -403,9 +447,11 @@ const ROOT_SUMMARY_CANDIDATE_QUERY: &str = "
       AND length(CAST(n.summary_id AS BLOB)) <= ?7
       AND length(CAST(n.summary_anchor_id AS BLOB)) <= ?8
       AND length(CAST(n.session_id AS BLOB)) <= ?9
+      AND length(CAST(authority_session.provider AS BLOB)) <= ?9
       AND length(CAST(n.summary_id AS BLOB))
           + length(CAST(n.summary_anchor_id AS BLOB))
-          + length(CAST(n.session_id AS BLOB)) <= ?10
+          + length(CAST(n.session_id AS BLOB))
+          + length(CAST(authority_session.provider AS BLOB)) <= ?10
       AND length(CAST(n.summary_id AS BLOB))
           + length(CAST(n.session_id AS BLOB)) + 9 <= ?11
     ORDER BY n.created_at DESC, n.session_id, n.summary_id
@@ -427,61 +473,145 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
     ) -> Result<(), TemporalPortError> {
         let control = snapshot.request().execution_control();
         control.checkpoint()?;
-        let generation = i64::try_from(snapshot.watermarks().generation)
-            .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
-        let mut rows = self
-            .read
-            .query(
-                "SELECT state, frozen_watermarks_json
-                 FROM session_temporal_generations
-                 WHERE session_id = ?1 AND generation = ?2
-                 LIMIT 2",
-                (snapshot.request().session_id().as_str(), generation),
-            )
-            .await
-            .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
-        control.checkpoint()?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?
-            .ok_or_else(|| read_message(SNAPSHOT_OPERATION, "frozen generation is missing"))?;
-        let state: String = row
-            .get(0)
-            .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
-        let encoded: String = row
-            .get(1)
-            .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
-        if rows
-            .next()
-            .await
-            .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?
-            .is_some()
-        {
-            return Err(read_message(
-                SNAPSHOT_OPERATION,
-                "frozen generation is not unique",
-            ));
+        if !snapshot.has_authoritative_participant_manifest() {
+            if matches!(
+                snapshot.retrieval_scope(),
+                TemporalRetrievalScope::AllSessionsInAuthorizedRoot
+            ) {
+                return Err(TemporalPortError::UnauthorizedSnapshot);
+            }
+            let generation = i64::try_from(snapshot.watermarks().generation)
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+            let mut rows = self
+                .read
+                .query(
+                    "SELECT state, frozen_watermarks_json
+                     FROM session_temporal_generations
+                     WHERE session_id = ?1 AND generation = ?2
+                     LIMIT 2",
+                    (snapshot.request().session_id().as_str(), generation),
+                )
+                .await
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?
+                .ok_or_else(|| read_message(SNAPSHOT_OPERATION, "frozen generation is missing"))?;
+            let state: String = row
+                .get(0)
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+            let encoded: String = row
+                .get(1)
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+            if rows
+                .next()
+                .await
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?
+                .is_some()
+            {
+                return Err(read_message(
+                    SNAPSHOT_OPERATION,
+                    "frozen generation is not unique",
+                ));
+            }
+            let frozen: FrozenWatermarksWire = serde_json::from_str(&encoded)
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+            let watermarks = snapshot.watermarks();
+            if state != "active"
+                || frozen.active_generation > watermarks.generation
+                || frozen.source_frontier != watermarks.source
+                || frozen.projection_frontier != watermarks.projection
+                || frozen.summary_frontier != watermarks.summary
+                || frozen.cursor_key.as_ref() != snapshot.cursor_key()
+            {
+                return Err(read_message(
+                    SNAPSHOT_OPERATION,
+                    "snapshot does not match the active frozen generation",
+                ));
+            }
+            return control.checkpoint();
         }
-        if state != "active" {
-            return Err(read_message(
-                SNAPSHOT_OPERATION,
-                "frozen generation is not active",
-            ));
-        }
-        let frozen: FrozenWatermarksWire = serde_json::from_str(&encoded)
-            .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
-        let watermarks = snapshot.watermarks();
-        if frozen.active_generation > watermarks.generation
-            || frozen.source_frontier != watermarks.source
-            || frozen.projection_frontier != watermarks.projection
-            || frozen.summary_frontier != watermarks.summary
-            || frozen.cursor_key.as_ref() != snapshot.cursor_key()
-        {
-            return Err(read_message(
-                SNAPSHOT_OPERATION,
-                "snapshot does not match the active frozen generation",
-            ));
+        let project_key = snapshot
+            .request()
+            .authorized_root()
+            .ok_or(TemporalPortError::UnauthorizedSnapshot)?
+            .project_key();
+        for participant in snapshot.participant_manifest().entries() {
+            control.checkpoint()?;
+            if participant.access()
+                != crate::query::temporal::ports::TemporalSourceAccess::Authorized
+                || participant.configuration_digest()
+                    != snapshot.versions().configuration_digest.as_str()
+                || participant.authorization_digest() != snapshot.access_digest().as_str()
+            {
+                return Err(TemporalPortError::UnauthorizedSnapshot);
+            }
+            let generation = i64::try_from(participant.generation())
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+            let mut rows = self
+                .read
+                .query(
+                    "SELECT generation.state, generation.frozen_watermarks_json
+                     FROM session_temporal_generations AS generation
+                     JOIN sessions AS source
+                       ON source.session_id = generation.session_id
+                      AND source.provider = ?3
+                      AND source.project_key = ?4
+                     WHERE generation.session_id = ?1
+                       AND generation.generation = ?2
+                     LIMIT 2",
+                    params![
+                        participant.session_id().as_str(),
+                        generation,
+                        participant.source_id(),
+                        project_key
+                    ],
+                )
+                .await
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?
+                .ok_or_else(|| {
+                    read_message(
+                        SNAPSHOT_OPERATION,
+                        "frozen participant generation is missing",
+                    )
+                })?;
+            let state: String = row
+                .get(0)
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+            let encoded: String = row
+                .get(1)
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+            if rows
+                .next()
+                .await
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?
+                .is_some()
+            {
+                return Err(read_message(
+                    SNAPSHOT_OPERATION,
+                    "frozen participant generation is not unique",
+                ));
+            }
+            let frozen: FrozenWatermarksWire = serde_json::from_str(&encoded)
+                .map_err(|error| read_error(SNAPSHOT_OPERATION, error))?;
+            let watermarks = participant.watermarks();
+            if state != "active"
+                || frozen.active_generation > watermarks.generation
+                || frozen.source_frontier != watermarks.source
+                || frozen.projection_frontier != watermarks.projection
+                || frozen.summary_frontier != watermarks.summary
+                || frozen.cursor_key.as_ref() != snapshot.cursor_key()
+            {
+                return Err(read_message(
+                    SNAPSHOT_OPERATION,
+                    "snapshot does not match the active participant generation",
+                ));
+            }
         }
         control.checkpoint()
     }
@@ -500,7 +630,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             return Ok(PageStatus::Complete);
         }
         self.validate_snapshot(snapshot).await?;
-        let root_project_key = authorized_root_project_key(self.read, scope, snapshot).await?;
+        let root_project_key = authorized_root_project_key(scope, snapshot)?;
         let mut cursor = CandidateCursor::decode(request.keyset())?;
         if cursor.clause >= plan.clauses().len() {
             return Ok(PageStatus::Complete);
@@ -559,7 +689,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                     clause: cursor.clause,
                     knowledge_at: candidate.knowledge_at_micros,
                     session_id: candidate.session.clone().unwrap_or_default(),
-                    stable_id: candidate.source.clone().unwrap_or_default(),
+                    stable_id: candidate.retriever_record_id.clone(),
                 });
                 sink.push(candidate)?;
             }
@@ -599,7 +729,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             return Ok(PageStatus::Complete);
         }
         self.validate_snapshot(snapshot).await?;
-        let root_project_key = authorized_root_project_key(self.read, scope, snapshot).await?;
+        let root_project_key = authorized_root_project_key(scope, snapshot)?;
         let control = snapshot.request().execution_control();
         let mut cursor = RecordCursor::decode(request.keyset())?;
         if cursor.candidate >= candidates.len() {
@@ -924,58 +1054,18 @@ fn bounded_window_end(total: usize, start: usize, capacity: usize) -> usize {
     cmp::min(total, start.saturating_add(capacity))
 }
 
-async fn authorized_root_project_key(
-    conn: &Connection,
+fn authorized_root_project_key<'a>(
     scope: &TemporalRetrievalScope,
-    snapshot: &TemporalExecutionSnapshot,
-) -> Result<Option<String>, TemporalPortError> {
+    snapshot: &'a TemporalExecutionSnapshot,
+) -> Result<Option<&'a str>, TemporalPortError> {
     if !matches!(scope, TemporalRetrievalScope::AllSessionsInAuthorizedRoot) {
         return Ok(None);
     }
-    let session_id = snapshot.request().session_id().as_str();
-    let mut rows = match snapshot.provider_scope() {
-        Some(provider) => {
-            conn.query(
-                "SELECT DISTINCT project_key
-                 FROM sessions
-                 WHERE provider = ?1 AND session_id = ?2
-                 LIMIT 2",
-                (provider, session_id),
-            )
-            .await
-        }
-        None => {
-            conn.query(
-                "SELECT DISTINCT project_key
-                 FROM sessions
-                 WHERE session_id = ?1
-                 LIMIT 2",
-                [session_id],
-            )
-            .await
-        }
-    }
-    .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|error| read_error(CANDIDATE_OPERATION, error))?
-        .ok_or_else(|| read_message(CANDIDATE_OPERATION, "authorized root is missing"))?;
-    let project_key: String = row
-        .get(0)
-        .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
-    if rows
-        .next()
-        .await
-        .map_err(|error| read_error(CANDIDATE_OPERATION, error))?
-        .is_some()
-    {
-        return Err(read_message(
-            CANDIDATE_OPERATION,
-            "authorized root is ambiguous",
-        ));
-    }
-    Ok(Some(project_key))
+    snapshot
+        .request()
+        .authorized_root()
+        .map(|root| Some(root.project_key()))
+        .ok_or(TemporalPortError::UnauthorizedSnapshot)
 }
 
 async fn require_candidate_root_authority(
@@ -994,16 +1084,13 @@ async fn require_candidate_root_authority(
                 "root-wide candidate is missing session identity",
             )
         })?;
-    let source_id = candidate
-        .source
-        .as_deref()
-        .filter(|source| !source.is_empty())
-        .ok_or_else(|| {
-            read_message(
-                RECORD_OPERATION,
-                "root-wide candidate is missing source identity",
-            )
-        })?;
+    let source_id = candidate.retriever_record_id.as_str();
+    if source_id.is_empty() {
+        return Err(read_message(
+            RECORD_OPERATION,
+            "root-wide candidate is missing retriever record identity",
+        ));
+    }
     let provider = provider.map_or(SqlValue::Null, |value| SqlValue::Text(value.to_string()));
     let params = vec![
         SqlValue::Text(candidate.anchor_id.to_string()),
@@ -1157,12 +1244,7 @@ async fn query_candidate_clause(
         value.metadata_field_bytes()
     });
     let stable_cap = caps.map_or(request.max_item_bytes(), |value| value.stable_id_bytes());
-    let source_stable_cap = stable_cap
-        .checked_sub(candidate_prefix(clause.channel).len().saturating_add(1))
-        .ok_or(TemporalPortError::BudgetExceeded {
-            resource: "candidate stable id bytes",
-        })?
-        .min(metadata_cap);
+    let source_stable_cap = stable_cap.min(metadata_cap);
     let source_stable_cap =
         i64::try_from(source_stable_cap).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
     let stable_cap =
@@ -1345,7 +1427,7 @@ async fn query_candidate_clause(
 fn candidate_from_row(
     row: &Row,
     channel: CandidateChannel,
-    scope: &TemporalRetrievalScope,
+    _scope: &TemporalRetrievalScope,
 ) -> Result<RankingCandidate, TemporalPortError> {
     let source_id: String = row
         .get(0)
@@ -1356,17 +1438,13 @@ fn candidate_from_row(
     let session: String = row
         .get(5)
         .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
-    let stable_id = match scope {
-        TemporalRetrievalScope::Session(_) => {
-            format!("{}:{source_id}", candidate_prefix(channel))
-        }
-        TemporalRetrievalScope::AllSessionsInAuthorizedRoot => {
-            format!("{}:{session}:{source_id}", candidate_prefix(channel))
-        }
-    };
+    let source_partition: String = row
+        .get(7)
+        .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
     Ok(RankingCandidate {
-        stable_id,
+        stable_id: anchor.clone(),
         anchor_id: parse_text(anchor, CANDIDATE_OPERATION)?,
+        retriever_record_id: source_id,
         channel,
         raw_score: candidate_score(channel),
         knowledge_at_micros: row
@@ -1379,22 +1457,11 @@ fn candidate_from_row(
             .get(4)
             .map_err(|error| read_error(CANDIDATE_OPERATION, error))?,
         session: Some(session),
-        source: Some(source_id),
+        source: Some(source_partition),
         evidence_role: row
             .get(6)
             .map_err(|error| read_error(CANDIDATE_OPERATION, error))?,
     })
-}
-
-const fn candidate_prefix(channel: CandidateChannel) -> &'static str {
-    match channel {
-        CandidateChannel::ExactMessage => "exact",
-        CandidateChannel::Phrase => "phrase",
-        CandidateChannel::Entity => "entity",
-        CandidateChannel::Time => "time",
-        CandidateChannel::Lexical => "lexical",
-        CandidateChannel::Summary => "summary",
-    }
 }
 
 const fn candidate_score(channel: CandidateChannel) -> i64 {
@@ -1609,6 +1676,18 @@ fn build_record_query(
             .provider_scope()
             .map_or(SqlValue::Null, |value| SqlValue::Text(value.to_string())),
     );
+    let root_param = params.len() + 1;
+    params.push(match scope {
+        TemporalRetrievalScope::Session(_) => SqlValue::Null,
+        TemporalRetrievalScope::AllSessionsInAuthorizedRoot => SqlValue::Text(
+            snapshot
+                .request()
+                .authorized_root()
+                .ok_or(TemporalPortError::UnauthorizedSnapshot)?
+                .project_key()
+                .to_string(),
+        ),
+    });
     let cutoff_param = params.len() + 1;
     params.push(SqlValue::Integer(match snapshot.temporal_mode() {
         TemporalModeV1::AsOf { cutoff } => cutoff.0,
@@ -1653,9 +1732,21 @@ fn build_record_query(
     let sql = format!(
         "WITH candidate_input(ordinal, session_id, anchor_id) AS (VALUES {values}),
          candidate(ordinal, session_id, anchor_id) AS (
-             SELECT MIN(ordinal), session_id, anchor_id
-             FROM candidate_input
-             GROUP BY session_id, anchor_id
+             SELECT MIN(input.ordinal), input.session_id, input.anchor_id
+             FROM candidate_input AS input
+             WHERE ?{root_param} IS NULL
+                OR EXISTS (
+                    SELECT 1
+                    FROM sessions AS root_session
+                    WHERE root_session.session_id = input.session_id
+                      AND root_session.project_key = ?{root_param}
+                      AND (
+                          ?{provider_param} IS NULL
+                          OR root_session.provider = ?{provider_param}
+                      )
+                    LIMIT 1
+                )
+             GROUP BY input.session_id, input.anchor_id
          ),
          records AS (
              SELECT c.ordinal, 0 AS kind_rank, o.occurrence_id AS stable_id,
@@ -2033,6 +2124,7 @@ fn build_record_query(
         copy_join = mode.copy_join,
         copy_predicate = mode.copy_predicate,
         summary_predicate = mode.summary_predicate,
+        root_param = root_param,
     );
     Ok(RecordQuery { sql, params })
 }
@@ -2202,7 +2294,36 @@ fn summary_from_row(row: &Row) -> Result<SessionSummaryRecordV1, TemporalPortErr
             .map_err(|error| read_error(RECORD_OPERATION, error))?;
     }
     if let Some(publication) = optional_string(row, 13)? {
-        let publication: SummaryPublicationMetadataV1 = parse_json(&publication, RECORD_OPERATION)?;
+        let value: serde_json::Value = parse_json(&publication, RECORD_OPERATION)?;
+        let publication = if value.get("version").is_some() {
+            let configuration_digest = value["configuration_digest"]
+                .as_str()
+                .map(|digest| {
+                    if digest.starts_with("sha256:") {
+                        digest.to_owned()
+                    } else {
+                        format!("sha256:{digest}")
+                    }
+                })
+                .ok_or_else(|| {
+                    read_message(
+                        RECORD_OPERATION,
+                        "summary publication configuration digest is unavailable",
+                    )
+                })?;
+            serde_json::json!({
+                "model_route": value["model_route"],
+                "configuration_digest": configuration_digest,
+                "sanitization_receipt": {
+                    "receipt_id": value["sanitization_receipt"],
+                    "sanitizer_version": super::operations::SANITIZER_VERSION,
+                },
+            })
+        } else {
+            value
+        };
+        let publication: SummaryPublicationMetadataV1 = serde_json::from_value(publication)
+            .map_err(|error| read_error(RECORD_OPERATION, error))?;
         summary = summary
             .with_publication(publication)
             .map_err(|error| read_error(RECORD_OPERATION, error))?;
@@ -2288,7 +2409,8 @@ mod tests {
     use super::*;
     use crate::global_db::GlobalDb;
     use crate::query::temporal::ports::{
-        BindingDigest, KernelVersions, TemporalSnapshotRequest, TemporalWatermarks,
+        BindingDigest, KernelVersions, TemporalAuthorizedRoot, TemporalSnapshotRequest,
+        TemporalWatermarks,
     };
     use crate::query::temporal::resolution::ValidatedAuthorization;
 
@@ -2398,6 +2520,11 @@ mod tests {
             RetrievalGrainV1::Session,
         )
         .expect("request")
+        .with_authorized_root(
+            TemporalAuthorizedRoot::profile("profile-1", "store-1", "root-1")
+                .expect("profile root"),
+        )
+        .expect("authorized root")
         .with_retrieval_scope(TemporalRetrievalScope::AllSessionsInAuthorizedRoot)
         .with_provider_scope(provider.map(str::to_string))
         .expect("provider scope");
@@ -2434,13 +2561,14 @@ mod tests {
         RankingCandidate {
             stable_id: "exact:occurrence-1".to_string(),
             anchor_id: RetrievalAnchorId::new(anchor_id).expect("anchor"),
+            retriever_record_id: "occurrence-1".to_string(),
             channel: CandidateChannel::ExactMessage,
             raw_score: 1_000,
             knowledge_at_micros: 1,
             logical_message: Some("message-1".to_string()),
             turn: None,
             session: Some("session-snapshot".to_string()),
-            source: Some("occurrence-1".to_string()),
+            source: Some("claude".to_string()),
             evidence_role: Some("user".to_string()),
         }
     }
@@ -3200,6 +3328,11 @@ mod tests {
         let conn = db.read_connection();
         conn.execute_batch(
             "PRAGMA foreign_keys = OFF;
+             INSERT INTO sessions (
+                provider, session_id, project_key, project_path
+             ) VALUES
+                ('claude', 'session-a', 'user', '/root-record-test'),
+                ('claude', 'session-b', 'user', '/root-record-test');
              INSERT INTO observations (
                 observation_id, payload_digest, receipt_id, observation_json,
                 committed_cursor_json
@@ -3527,13 +3660,14 @@ mod tests {
             .map(|ordinal| RankingCandidate {
                 stable_id: format!("exact:occurrence-{ordinal}"),
                 anchor_id: RetrievalAnchorId::new(format!("anchor-{ordinal}")).expect("anchor"),
+                retriever_record_id: format!("occurrence-{ordinal}"),
                 channel: CandidateChannel::ExactMessage,
                 raw_score: 1_000,
                 knowledge_at_micros: 1,
                 logical_message: None,
                 turn: None,
                 session: Some("session-snapshot".to_string()),
-                source: Some(format!("occurrence-{ordinal}")),
+                source: Some("claude".to_string()),
                 evidence_role: Some("user".to_string()),
             })
             .collect::<Vec<_>>();

@@ -1083,7 +1083,7 @@ async fn stage_rebuild_message(
             state.projector_owned,
         )
     });
-    let transition = message_transition(
+    let (transition, _) = message_transition(
         conn,
         sequence,
         projection,

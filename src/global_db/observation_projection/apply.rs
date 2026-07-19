@@ -890,7 +890,9 @@ fn canonical_message_fields(
     Ok(None)
 }
 
-fn canonical_fact_text(value: &serde_json::Value) -> ProjectionStoreResult<String> {
+pub(in crate::global_db) fn canonical_fact_text(
+    value: &serde_json::Value,
+) -> ProjectionStoreResult<String> {
     if let Some(text) = value.as_str() {
         return Ok(text.to_owned());
     }
@@ -1442,7 +1444,7 @@ async fn apply_rows(
             state.projector_owned,
         )
     });
-    let transition = message_transition(
+    let (transition, preserve_protected_payload) = message_transition(
         conn,
         sequence,
         projection,
@@ -1511,6 +1513,7 @@ async fn apply_rows(
             message_id: message.message_id.clone(),
         })?;
     if projected_message.provider != "hermes"
+        && !preserve_protected_payload
         && !crate::sessions::lcm::raw::upsert_projected_raw_message(conn, &projected_message).await
     {
         return Err(storage_message(

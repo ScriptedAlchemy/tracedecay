@@ -5,7 +5,7 @@ use serde_json::json;
 
 use crate::sessions::lcm::types::{LcmError, LcmImmutableSummaryPublication};
 
-use super::{PUBLICATION_ROUTE, PreparedSource};
+use super::PUBLICATION_ROUTE;
 
 const MAX_LINEAGE_DEPTH: usize = 64;
 const MAX_LINEAGE_NODES: usize = 4_096;
@@ -113,7 +113,6 @@ pub(super) async fn publish_candidate_generation(
     summary_id: &str,
     predecessor: Option<&str>,
     source_horizon_json: &str,
-    sources: &[PreparedSource],
     now: i64,
 ) -> Result<i64, LcmError> {
     let active = active_generation(conn, session_id).await?;
@@ -126,16 +125,37 @@ pub(super) async fn publish_candidate_generation(
         .await?;
     let max_generation: i64 = max_rows.next().await?.unwrap().get(0)?;
     let candidate = max_generation + 1;
-    let source_frontier = sources
-        .iter()
-        .map(|source| source.timestamp)
-        .max()
-        .unwrap_or_default();
+    let (source_frontier, projection_frontier, summary_frontier, cursor_key) =
+        if let Some(active) = active {
+            let mut rows = conn
+                .query(
+                    "SELECT frozen_watermarks_json
+                     FROM session_temporal_generations
+                     WHERE session_id = ?1 AND generation = ?2 AND state = 'active'",
+                    params![session_id, active],
+                )
+                .await?;
+            let Some(row) = rows.next().await? else {
+                return Err(stale_generation(conn, session_id, active).await?);
+            };
+            let encoded = row.get::<String>(0)?;
+            let frozen: serde_json::Value = serde_json::from_str(&encoded)
+                .map_err(|error| LcmError::Db(format!("invalid active watermarks: {error}")))?;
+            (
+                frozen["source_frontier"].as_u64().unwrap_or_default(),
+                frozen["projection_frontier"].as_u64().unwrap_or_default(),
+                frozen["summary_frontier"].as_u64().unwrap_or_default(),
+                frozen["cursor_key"].clone(),
+            )
+        } else {
+            (0, 0, 0, serde_json::Value::Null)
+        };
     let watermarks = json!({
-        "active_generation": active,
+        "active_generation": active.unwrap_or(candidate),
+        "cursor_key": cursor_key,
         "source_frontier": source_frontier,
-        "projection_frontier": max_generation,
-        "summary_frontier": summary_id,
+        "projection_frontier": projection_frontier,
+        "summary_frontier": summary_frontier.saturating_add(1),
         "route": PUBLICATION_ROUTE,
     })
     .to_string();
@@ -208,7 +228,7 @@ pub(super) async fn publish_candidate_generation(
         let changed = conn
             .execute(
                 "UPDATE session_temporal_generations
-                 SET state = 'superseded', completed_at = ?3
+                 SET state = 'superseded', completed_at = MAX(?3, activated_at)
                  WHERE session_id = ?1 AND generation = ?2 AND state = 'active'",
                 params![session_id, expected, now],
             )

@@ -122,6 +122,24 @@ fn fixture_hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+#[test]
+fn mcp_session_adapters_have_no_local_lcm_storage_authority() {
+    let server = include_str!("../server.rs");
+    for forbidden in [
+        ".lcm_describe(",
+        ".lcm_expand(",
+        "get_session_message(",
+        "lcm_anchor_state",
+        "lcm_temporal_metadata",
+        "lcm_occurrence_anchor",
+    ] {
+        assert!(
+            !server.contains(forbidden),
+            "MCP server must delegate `{forbidden}` through typed session ports"
+        );
+    }
+}
+
 fn fixture_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
     SanitizationReceiptV1::new(
         SanitizationReceiptRefV1::new(
@@ -400,6 +418,16 @@ async fn retained_project_and_profile_handles_construct_retrieval_services() {
 }
 
 #[tokio::test]
+async fn fresh_direct_root_constructs_the_project_retrieval_service() {
+    let (cg, _dir, _pin) = indexed_project().await;
+    let server = McpServer::new(cg, None).await;
+
+    assert!(server.session_db.is_some());
+    assert!(server.project_session_retrieval_service.is_some());
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn transport_selects_one_service_and_all_registered_never_invokes() {
     let (server, _dir, _pin, _project, _profile) = server_with_authorities().await;
 
@@ -525,6 +553,18 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
     .await;
     assert_eq!(first["outcome"], "partial", "{first}");
     assert_eq!(first["count"], 1);
+    assert!(
+        first["results"][0]["message"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("orchard evidence")),
+        "search must emit canonical hydrated text: {first}"
+    );
+    assert!(
+        !first["results"][0]["message"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("legacy projection poison")),
+        "legacy compatibility text must never override hydration: {first}"
+    );
     assert_eq!(first["temporal"]["freshness"]["state"], "fresh");
     assert_eq!(first["refresh_required"], false);
     assert_eq!(
