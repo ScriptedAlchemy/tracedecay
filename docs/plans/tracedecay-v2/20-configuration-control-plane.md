@@ -336,6 +336,8 @@ pub struct WorkTopologyPolicyV1 {
     pub schema_version: u16,
     pub placement: WorktreePlacementModeV1,
     pub roots: Vec<WorktreeRootPolicyV1>,
+    pub branch_topology: BranchTopologyPolicyV1,
+    pub review_topology: ReviewTopologyPolicyV1,
     pub branch_naming: BranchNamingPolicyV1,
     pub concurrency: TopologyConcurrencyPolicyV1,
     pub cross_merge: CrossMergePolicyV1,
@@ -364,6 +366,34 @@ pub struct WorktreeRootPolicyV1 {
 pub enum RepositoryPlacementScopeV1 {
     AllAuthorized,
     Allowlist(NonEmptyVec<RepositoryId>),
+}
+
+pub struct BranchTopologyPolicyV1 {
+    pub allowed: NonEmptySet<BranchTopologyKindV1>,
+}
+
+pub enum BranchTopologyKindV1 {
+    NoBranches,
+    Unbranched,
+    IndependentBranches,
+    LocalStack,
+}
+
+pub struct ReviewTopologyPolicyV1 {
+    pub allowed: NonEmptySet<ReviewTopologyKindV1>,
+    pub github_stacked_prs: GitHubStackedPullRequestPolicyV1,
+}
+
+pub enum ReviewTopologyKindV1 {
+    NoReview,
+    IndependentReview,
+    StandardPullRequests,
+    GitHubStackedPullRequests,
+}
+
+pub enum GitHubStackedPullRequestPolicyV1 {
+    Disabled,
+    ProbePrivatePreview,
 }
 
 pub struct BranchNamingPolicyV1 {
@@ -404,6 +434,7 @@ pub enum CrossMergeModeV1 {
     ManualReceiptOnly,
     FastForwardOnly,
     MergeCommit,
+    CherryPickExactCommits,
 }
 
 pub struct CrossMergePolicyV1 {
@@ -526,9 +557,19 @@ pub enum TopologyNotificationLevelV1 {
       `IndependentReviewCount(NonZeroU16)`, or
       `CodeOwnerAndIndependentReview`; reviews resolve through Plan 24/37
       anchored evidence rather than host-local approval text.
-      Enabling `FastForwardOnly` or `MergeCommit` requires `RequireClean`, at
-      least one `RequiredCheckV1`, non-`None` review, fresh preflight, and a
-      protected-ref rule set no weaker than the safe default.
+      Enabling `FastForwardOnly`, `MergeCommit`, or
+      `CherryPickExactCommits` requires `RequireClean`, at least one
+      `RequiredCheckV1`, fresh preflight, and a protected-ref rule set no weaker
+      than the safe default. `ReviewRequirementV1` is evaluated when configured
+      but does not require pull requests or a review topology. Placement,
+      branch, review, and integration settings are evaluated independently; no
+      setting enables or requires another dimension.
+      `GitHubStackedPullRequests` is legal only when
+      `github_stacked_prs = ProbePrivatePreview`; Plan 27 must still report
+      `Enabled` for the exact repository. `Unavailable`,
+      `PrivatePreviewDisabled`, and `Degraded` remain truthful states and the
+      standard-Git/other-forge path remains available. Config never assumes
+      private-preview enrollment.
       `allow_cross_repository = true` is valid only with
       `ManualReceiptOnly`; it records external evidence and never authorizes
       fetch, object import, or native apply across repositories.
@@ -539,8 +580,14 @@ pub enum TopologyNotificationLevelV1 {
       legal. `HistoryRewritePolicyV1` has no permissive variant: force ref
       updates, force push, rebase, amend, reset-based history replacement, and
       equivalent host operations are unrepresentable in config, dry-run,
-      runtime admission, and rollback.
+      runtime admission, and rollback. This prohibits TraceDecay execution; it
+      does not turn Plan 21's separately authorized inert external GitHub stack
+      handoff into an execution effect.
     - The safe default is exact: `ExistingWorktreeOnly`; no configured roots;
+      branch topology allows only `NoBranches`, `Unbranched`, and
+      `IndependentBranches`; review topology allows only `NoReview`,
+      `IndependentReview`, and `StandardPullRequests`;
+      `GitHubStackedPullRequestPolicyV1::Disabled`;
       branch prefix `tracedecay/` with
       `[TaskIdDigestPrefix { bytes: 10 }, WorkClass,
       MonotonicCollisionOrdinal]`, slash separator, maximum 200 bytes, and
@@ -554,10 +601,12 @@ pub enum TopologyNotificationLevelV1 {
       and no finite retention expiry; notifications `CriticalOnly`.
     - `CrossMergeModeV1::ManualReceiptOnly` records evidence of an independently
       performed integration but never treats a host summary as proof.
-      `FastForwardOnly` and `MergeCommit` can become effective only when Plan 36
-      exposes the corresponding fixed native preflight/apply operation and Plan
-      27 reports a conforming route. Under Plan 36's current excluded-operation
-      contract they resolve as typed `unsupported`, not shell fallback.
+      `FastForwardOnly`, `MergeCommit`, and `CherryPickExactCommits` become
+      effective only when Plan 36 reports the corresponding fixed native
+      preflight/apply operation and Plan 27 reports a conforming route. A clean,
+      authorized, no-conflict, policy-approved operation may then apply through
+      Plan 36; every other state remains preview-only or typed unavailable,
+      never shell fallback.
     - Every topology evaluation pins `ConfigurationSnapshotId`,
       `effective_behavior_digest`, topology schema revision, Plan 16
       `ResolvedScopeSet` digest, source/destination Plan 36 repository snapshot
@@ -611,9 +660,12 @@ pub enum TopologyNotificationLevelV1 {
   projectless-Hermes constraints, deny precedence, allow intersection, redacted error
   equivalence, digest stability, and rollback receipt encoding.
 - `crates/tracedecay-domain/tests/topology_policy_contract.rs` proves complete
-  decoding, safe defaults, canonical ordering/digests, closed branch components,
+  decoding, safe defaults, canonical ordering/digests, four independent
+  topology dimensions, no-Git and decoupled topology cases, all four GitHub
+  stack capability outcomes with generic fallback, closed branch components,
   root/ref validation, nonempty executable-mode gates, protected-ref floor,
-  unrepresentable force/rebase, and forward-rollback validation.
+  eligible merge/cherry-pick policy, unrepresentable force/rebase execution,
+  inert external handoff, and forward-rollback validation.
 - `src/config.rs` remains the module root. `src/config/registry.rs`,
   `src/config/resolver.rs`, `src/config/scope_control.rs`, and
   `src/config/topology.rs` register the four typed definitions and implement

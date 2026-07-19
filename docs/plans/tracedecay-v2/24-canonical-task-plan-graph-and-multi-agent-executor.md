@@ -158,26 +158,38 @@ revision, or historical placement revisions. One placement or branch may serve
 several tasks, and one task may produce several branches, commits, or pull
 requests; neither direction creates or merges task identity.
 
-Physical placement and delivery topology are orthogonal:
+Execution placement, branch topology, review topology, and integration strategy
+are four independent dimensions:
 
-- `InPlace`, `LinkedWorktree`, and `IsolatedClone` say where a Plan 32 attempt
-  may execute.
-- `SingleBranch` and `StackedBranches` say how produced commits are ordered for
-  integration. `StackedBranches` is therefore not a fourth filesystem kind.
-  Every stack node independently chooses a linked-worktree or isolated-clone
-  placement; an accepted policy may additionally bind a pre-existing clean
-  in-place checkout, but an autonomous stack never switches branches in a
-  user's ambient checkout.
+- optional `WorkspacePlacementIntentV1` says where a Plan 32 attempt may
+  execute;
+- `BranchTopologyV1` says whether repository output is unbranched, uses
+  independent branches, or participates in a Plan 16 local branch stack;
+- `ReviewTopologyV1` says whether review is absent, independent, standard
+  pull requests, or GitHub Stacked PRs; and
+- `IntegrationStrategyV1` says whether integration is absent, externally
+  observed, fast-forward, two-parent merge, or exact ordered cherry-pick.
 
-Absence of a topology revision means no placement may be materialized and no
-Git mutation may run. Topology never derives from CWD, current branch, a task
-title, a provider workspace, an existing worktree name, or a pull-request base.
+A linked worktree may be unbranched, independently branched, or locally
+stacked without any pull request. A pull-request stack may use ordinary
+checkouts and branches without a TraceDecay-managed worktree. No-Git tasks
+remain first-class and use no placement, `NoBranches`, `NoReview`, and
+`NoIntegration`; none of those values weakens task evidence or acceptance.
+`GitHubStackedPullRequests` is an optional capability-backed review adapter,
+never the generic branch or review model.
+
+Absence of a topology revision means no topology-controlled placement or Git
+mutation may run; it does not make the task invalid or non-executable through
+a non-repository provider. Topology never derives from CWD, current branch, a
+task title, a provider workspace, an existing worktree name, or a pull-request
+base.
 
 ### Task DAG and branch-stack DAG are different graphs
 
 The task DAG contains Plan 24 `WorkDependencyEdge` values. It alone contributes
 to task readiness, critical path, acceptance, blocker, and supersession
-semantics. The branch-stack DAG contains `BranchStackEdgeV1` values. An edge
+semantics. The Plan 16 local branch-stack DAG contains its validated edge
+values. An edge
 `parent -> child` means only that the child's delivery branch must contain the
 parent's required commit frontier before the child is published or retargeted.
 It does not mean the parent task is a semantic prerequisite, and satisfying it
@@ -203,11 +215,13 @@ pub struct TaskExecutionTopologyRevisionV1 {
     pub work_plan_version_id: WorkPlanVersionId,
     pub work_item_id: WorkItemId,
     pub work_item_version_id: WorkItemVersionId,
-    pub placement: WorkspacePlacementIntentV1,
-    pub delivery: BranchDeliveryTopologyV1,
-    pub required_commits: RequiredCommitSetV1,
-    pub verification: IntegrationVerificationContractV1,
-    pub retention: PlacementRetentionPolicyV1,
+    pub execution_placement: Option<WorkspacePlacementIntentV1>,
+    pub branch_topology: BranchTopologyV1,
+    pub review_topology: ReviewTopologyV1,
+    pub integration_strategy: IntegrationStrategyV1,
+    pub required_commits: Option<RequiredCommitSetV1>,
+    pub verification: Option<IntegrationVerificationContractV1>,
+    pub retention: Option<PlacementRetentionPolicyV1>,
     pub policy_revision: PolicyRevision,
     pub configuration_revision: ConfigurationRevision,
     pub authorized_scope_digest: AuthorizedScopeDigest,
@@ -238,47 +252,56 @@ pub enum CloneObjectIsolationV1 {
     NoHardlinksLocalOnly,
 }
 
-pub enum BranchDeliveryTopologyV1 {
-    SingleBranch {
-        branch: PlannedBranchRefV1,
+pub enum BranchTopologyV1 {
+    NoBranches,
+    Unbranched,
+    IndependentBranches {
+        branches: NonEmptyVec<PlannedBranchRefV1>,
     },
-    StackedBranches {
+    LocalStack {
+        stack_id: BranchStackId,
         stack_revision_id: BranchStackRevisionId,
     },
 }
 
-pub struct BranchStackRevisionV1 {
+pub enum ReviewTopologyV1 {
+    NoReview,
+    IndependentReview,
+    StandardPullRequests {
+        pull_requests: NonEmptyVec<PullRequestIdentity>,
+    },
+    GitHubStackedPullRequests {
+        capability_snapshot: GitHubStackCapabilitySnapshotRefV1,
+        stack_snapshot: GitHubStackSnapshotRefV1,
+    },
+}
+
+pub enum IntegrationStrategyV1 {
+    NoIntegration,
+    ExternalObservedOnly,
+    FastForwardOnly,
+    CreateTwoParentMergeCommit {
+        message: ValidatedCommitMessage,
+        signing: CommitSigningPolicyV1,
+    },
+    CherryPickExactCommits {
+        ordered_commits: NonEmptyVec<CommitObjectId>,
+    },
+}
+
+pub struct TaskBranchTopologyBindingV1 {
     pub stack_id: BranchStackId,
-    pub revision_id: BranchStackRevisionId,
-    pub repository_id: RepositoryId,
-    pub root_target: ExactRefTargetV1,
-    pub nodes: NonEmptyVec<BranchStackNodeV1>,
-    pub edges: Vec<BranchStackEdgeV1>,
-    pub pull_requests: Vec<StackedPullRequestBindingV1>,
-    pub autonomy: Option<StackAutonomyGrantRefV1>,
-    pub retention: StackRetentionPolicyV1,
-    pub digest: Digest,
-}
-
-pub struct BranchStackNodeV1 {
-    pub node_id: BranchStackNodeId,
-    pub branch: PlannedBranchRefV1,
-    pub placement: WorkspacePlacementIntentV1,
+    pub stack_revision_id: BranchStackRevisionId,
+    pub node_id: StackNodeId,
     pub task_bindings: NonEmptySet<TaskPlacementBindingV1>,
-    pub required_commits: RequiredCommitSetV1,
-}
-
-pub struct BranchStackEdgeV1 {
-    pub parent: BranchStackNodeId,
-    pub child: BranchStackNodeId,
-    pub required_parent_frontier: CommitFrontierSelectorV1,
+    pub required_parent_frontier: Option<CommitFrontierSelectorV1>,
 }
 
 pub struct TaskPlacementBindingV1 {
     pub work_item_id: WorkItemId,
     pub work_item_version_id: WorkItemVersionId,
     pub topology_revision_id: TaskExecutionTopologyRevisionId,
-    pub stack_node_id: Option<BranchStackNodeId>,
+    pub stack_node_id: Option<StackNodeId>,
     pub relation: TaskPlacementRelationV1,
 }
 
@@ -370,14 +393,21 @@ pub enum IntegrationTestFailurePolicyV1 {
 }
 ```
 
+`NoBranches` and `NoIntegration` require `required_commits = None` and
+`verification = None`. No managed placement requires `retention = None`.
+Repository-backed variants require only the fields used by their independently
+selected dimensions; validation never manufactures a branch, review, commit,
+or integration requirement from placement.
+
 `VersionedOperationRef` names a cataloged typed operation and canonical typed
 arguments; it never contains a command line, shell fragment, script body, or
 ambient package-manager lookup. `RequiredCommitV1` is the only way task
 semantics may require a commit. Branch ancestry discovered at runtime is
 evidence and cannot create that requirement retroactively.
 
-Topology and stack revisions use the same proposal lifecycle as other Plan 24
-artifacts:
+Task execution topology revisions use the same proposal lifecycle as other
+Plan 24 artifacts. Referenced Plan 16 local-stack revisions and Plan 37 GitHub
+stack snapshots retain their owner lifecycle and are never republished here:
 
 ```text
 Proposed -> UnderReview -> Accepted | Rejected
@@ -407,7 +437,7 @@ pub struct CrossMergeProposalV1 {
     pub expected_target_head: CommitObjectId,
     pub required_commits: RequiredCommitSetV1,
     pub produced_commits: ProducedCommitSetRefV1,
-    pub strategy: CrossMergeStrategyV1,
+    pub strategy: IntegrationStrategyV1,
     pub verification: IntegrationVerificationContractV1,
     pub publication: PublicationIntentV1,
     pub pull_request_action: PullRequestStackActionV1,
@@ -422,14 +452,6 @@ pub enum CrossMergePurposeV1 {
     TaskIntegration,
     StackUpstreamRefresh,
     StackCollapseAfterParentIntegration,
-}
-
-pub enum CrossMergeStrategyV1 {
-    FastForwardOnly,
-    CreateTwoParentMergeCommit {
-        message: ValidatedCommitMessage,
-        signing: CommitSigningPolicyV1,
-    },
 }
 
 pub enum PublicationIntentV1 {
@@ -485,12 +507,16 @@ pub enum IntegrationSemanticStateV1 {
 }
 ```
 
-No accepted strategy performs rebase, squash, cherry-pick, octopus merge,
-amend, reset, revert, branch deletion, or any force variant. A merge conflict
-is evidence for `Conflict`; it is never a request for Plan 32, a provider, or a
-model to choose lines, regenerate files, accept one side, or synthesize a
-resolution. Semantic conflict resolution requires a new or successor Plan 24
-task/proposal with its own acceptance contract.
+Accepted native strategies are limited to fast-forward, one ordinary
+conflict-free two-parent merge, or an exact ordered cherry-pick of
+single-parent commits. Plan 36 must classify the chosen operation
+`MechanicalIntegrationEligible` after complete native and semantic preflight.
+No accepted strategy performs rebase, squash, octopus merge, amend, reset,
+revert, branch deletion, or any force variant. A conflict is evidence for
+`Conflict`; it is never a request for Plan 32, a provider, or a model to choose
+lines, regenerate files, accept one side, or synthesize a resolution. Semantic
+conflict resolution requires a new or successor Plan 24 task/proposal with its
+own acceptance contract.
 
 `StackAutonomyGrantV1` is an optional, explicit Plan 09 authorization over one
 accepted stack revision. It pins actor, repositories, local and remote refs,
@@ -511,20 +537,21 @@ For an accepted stack, Plan 24 derives this order and no other:
 1. A child may execute before its parent is accepted only when the task DAG
    independently permits it, but publication remains blocked until its
    `StackParentFrontier` requirement is satisfied.
-2. Upstream refresh merges the exact parent frontier into the child with
-   `FastForwardOnly` or `CreateTwoParentMergeCommit`; it never rebases or
-   rewrites the child's produced commits.
+2. Local upstream refresh uses the exact accepted `IntegrationStrategyV1`.
+   Fast-forward, two-parent merge, and exact ordered cherry-pick are eligible
+   only through Plan 36 preflight/apply/receipt operations; refresh never
+   rebases or force-pushes.
 3. Parent integration is evidenced before child refresh. Child verification
    passes on the refreshed exact tree before any remote publication.
 4. A remote update is an ordinary fast-forward update only. Non-fast-forward
    rejection, remote drift, or inability to prove the remote result stops the
    state machine; `--force`, `--force-with-lease`, API `force=true`, and their
    equivalents are forbidden even under a human grant.
-5. After the refreshed head is published, a pull request may be retargeted
-   from the exact parent head branch to the exact parent target branch using a
-   version-checked provider operation. Retargeting changes only the base ref;
-   it cannot edit title/body, post comments, resolve review threads, dismiss
-   reviews, merge, close, or reopen the pull request.
+5. Standard pull-request retargeting and GitHub Stacked PR server behavior are
+   review-topology adapter concerns, not local branch-stack semantics.
+   TraceDecay observes the exact provider result and may emit an explicitly
+   authorized human handoff, but never invokes a cascading rebase,
+   force-push, or inferred retarget.
 6. Parent rejection, closure without integration, base drift, stale provider
    version, or a failed retarget blocks descendants and requires a new Plan 24
    proposal. No child is silently detached or reordered.
@@ -532,7 +559,7 @@ For an accepted stack, Plan 24 derives this order and no other:
    child publication and retarget effects follow a stable topological order
    `(stack depth, parent node id, child node id, proposal id)`.
 
-Stack revisions, proposal decisions, produced/required commit checks, and
+Referenced stack revisions, proposal decisions, produced/required commit checks, and
 integration receipt links are immutable history. Local placements are retained
 until every produced commit is anchored, every effect is reconciled, every
 required receipt is acknowledged, and the accepted retention deadline passes.
@@ -576,8 +603,7 @@ stack, commit, or pull-request history.
 Plan 24 persists only immutable semantic revisions and runtime receipt links.
 `src/global_db/work/schema.rs` creates append-only
 `work_topology_revisions`, `work_topology_bindings`,
-`work_branch_stack_revisions`, `work_branch_stack_nodes`,
-`work_branch_stack_edges`, `work_stack_pr_bindings`,
+`work_branch_topology_bindings`, `work_review_topology_bindings`,
 `work_stack_autonomy_grants`, `work_cross_merge_proposals`,
 `work_cross_merge_decisions`, and `work_integration_receipt_links`. Current
 revision pointers use expected-version compare-and-swap in the existing work
@@ -634,10 +660,12 @@ Plan 16 remains authority for canonical repository/checkout/worktree identity,
 scope resolution, discovery, and general cleanup eligibility. Its broad
 prohibition on product-created worktrees is superseded only by a Plan 32
 placement admitted from the exact accepted types above; Plan 24 creates
-nothing. Plan 36 remains authority for native Git evidence and its public
-`stage_hunks`, `unstage_hunks`, and `commit_index` operations. Plan 32's fixed
-runtime-only placement/integration adapter does not add a general Git command
-surface or broaden Plan 36's public mutation API.
+nothing. Plan 36 remains authority for native Git evidence and every typed
+native Git preflight/apply/receipt operation, including `stage_hunks`,
+`unstage_hunks`, `commit_index`, and eligible native integration. Plan 32 owns
+placement, leases, effect admission, deadlines, and runtime reconciliation,
+and invokes Plan 36 only through Plan 09; it owns no second native Git adapter
+or general Git command surface.
 
 ## Executable task retrieval and evidence contract
 
@@ -2452,8 +2480,9 @@ Plan 24 owns and creates:
 - `crates/tracedecay-domain/src/work/graph.rs`: graph events, edges,
   readiness inputs, legal transitions, and proposal revisions;
 - `crates/tracedecay-domain/src/work/topology.rs`: topology identities,
-  placement intents, task-placement bindings, branch-stack revisions and
-  edges, stack PR bindings, retention, and autonomy-grant references;
+  placement intents, independent branch/review/integration dimensions,
+  task-placement and Plan 16 local-stack bindings, Plan 27/37 GitHub stack
+  snapshot references, retention, and autonomy-grant references;
 - `crates/tracedecay-domain/src/work/integration.rs`: required and produced
   commit contracts, cross-merge proposals, verification contracts, semantic
   states, and Plan 32 receipt references;
@@ -2473,12 +2502,12 @@ Plan 24 owns and creates:
   `crates/tracedecay-store/src/work/traits.rs`,
   `crates/tracedecay-store/src/work/topology.rs`, and
   `crates/tracedecay-store/src/work/integration.rs`: task graph event/head,
-  task-evidence-link, topology/stack/proposal/decision/receipt-link,
+  task-evidence-link, topology/reference/proposal/decision/receipt-link,
   relation-selection, and projection store ports;
 - `src/global_db/work/mod.rs`, `src/global_db/work/schema.rs`,
   `src/global_db/work/projection.rs`, `src/global_db/work/query.rs`,
   `src/global_db/work/topology.rs`, and `src/global_db/work/integration.rs`:
-  owner-shard tables, transactional heads, immutable topology/stack/proposal
+  owner-shard tables, transactional heads, immutable topology/reference/proposal
   revisions, deterministic projection, and bounded relation reads;
 - `src/query/task_retrieval/mod.rs`,
   `src/query/task_retrieval/planner.rs`,
@@ -2666,8 +2695,8 @@ The following tests are named deliverables, not examples:
   requested/actual route evidence, and Plan 32 completion without Plan 24
   acceptance.
 - `tests/work_suite/topology.rs` loads
-  `tests/fixtures/work_topology/{identity_invariance,task_dag,branch_stack_dag,many_to_many,stack_order,stack_retention}.json`.
-  It proves all physical/delivery topology changes preserve `TaskId`, task and
+  `tests/fixtures/work_topology/{identity_invariance,task_dag,branch_stack_dag,many_to_many,dimension_independence,no_git,worktree_unbranched,local_stack_no_pr,pr_stack_no_worktree,stack_order,stack_retention}.json`.
+  It proves all placement/branch/review/integration changes preserve `TaskId`, task and
   stack cycles are rejected independently, stack edges never unlock tasks,
   task dependencies never order refs, one task/branch many-to-many bindings
   remain explicit, topology absence performs no placement, and stale topology
@@ -2675,10 +2704,11 @@ The following tests are named deliverables, not examples:
 - `tests/work_suite/integration_semantics.rs` loads
   `tests/fixtures/work_topology/{required_commits,produced_commits,cross_merge,upstream_refresh,pr_retarget,conflict}.json`.
   It proves exact commit requirements and ancestry states, proposal lifecycle
-  and expiry, stable stack ordering, parent-close blocking, version-checked PR
-  retarget semantics, immutable receipt links, forward-repair-only partial
-  outcomes, and rejection of rebase, squash, cherry-pick, revert, reset,
-  branch deletion, force push, and semantic auto-resolution.
+  and expiry, stable stack ordering, parent-close blocking, provider-observed
+  review-topology changes, immutable receipt links, forward-repair-only partial
+  outcomes, and rejection of rebase, squash, unapproved or conflicted
+  cherry-pick, revert, reset, branch deletion, force push, and semantic
+  auto-resolution.
 - `tests/session_suite/task_rooted_retrieval.rs` remains Plan 23-owned and proves
   TaskId-derived exact selectors match direct Plan 23 queries without changing
   the kernel.
@@ -2712,7 +2742,7 @@ Plan 26 records these metric series with scope/cohort suppression:
 - `work_topology_identity_violation_total`;
 - `work_topology_dag_conflation_total`;
 - `work_topology_proposals_total{placement,decision}`;
-- `work_branch_stack_proposals_total{decision}`;
+- `work_branch_topology_bindings_total{kind,decision}`;
 - `work_cross_merge_proposals_total{purpose,decision}`;
 - `work_integration_receipts_total{semantic_state}`;
 - `work_integration_force_push_attempt_total`;
@@ -2784,9 +2814,10 @@ Rollout gates are exact:
   autonomy is Plan 32 execution of an exact Plan 24-authorized placement or
   cross-merge proposal under a current scoped grant, fenced leases, native Git
   preflight, required verification, and the state machine in Plan 32. No path
-  ever stashes, cleans, resets, rebases, squashes, cherry-picks, reverts,
-  deletes a branch, moves a ref backward, force-pushes, or resolves a semantic
-  conflict automatically.
+  ever stashes, cleans, resets, rebases, squashes, reverts, deletes a branch,
+  moves a ref backward, force-pushes, resolves a semantic conflict, or
+  cherry-picks outside Plan 36's exact clean authorized policy-approved
+  operation.
 - GitHub review data is read-only ingress. No task, workflow, board action,
   route policy, or model may post, update, resolve, dismiss, or reply to a
   GitHub comment.
@@ -2848,8 +2879,9 @@ Acceptance requires direct tests proving:
   as-of history, and deterministic projector rebuild;
 - exact project/repository/worktree/branch/snapshot scope and many-to-many
   relations across sessions, agents, tools, code, commits, PRs, and checks;
-- optional in-place, linked-worktree, isolated-clone, single-branch, and
-  stacked-branch topology revisions preserve `TaskId`; task and stack DAG
+- optional in-place, linked-worktree, isolated-clone, no-branch, unbranched,
+  independent-branch, local-stack, independent-review, standard-PR, and
+  GitHub-stacked-PR topology revisions preserve `TaskId`; task and stack DAG
   cycles/readiness remain independent; exact required/produced commits,
   accepted cross-merge proposals, stack refresh/retarget order, retention, and
   immutable integration receipt links remain graph evidence rather than

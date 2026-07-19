@@ -143,6 +143,13 @@ them into this executable path:
   / [Plan 32](32-dynamic-workflow-runtime-and-sdk.md) at PR17. Canonical retrieval
   rejects expertise context; expertise is interactive-only and never durable
   evidence, completion, or routing authority.
+- **Execution/review/integration topology:** host-neutral TaskId/Kanban does not
+  require Git. Plan 16/36/37 PR15 work owns local worktree/branch scope, typed
+  native Git integration, central daemon fanout, and the optional
+  private-preview GitHub Stacked PR adapter; Plan 24/32 PR17 work owns the four
+  independent placement/branch/review/integration dimensions and runtime
+  orchestration. Standard Git/other-forge/no-Git fallback remains valid. None
+  of this is PR8 scope.
 - **LSP handoff / dashboard / observability / performance:** Plan 35/09 handoff,
   Plan 11 dashboard, Plan 26 observations, Plan 33 PR20 optimization — each in
   its indexed PR, never as PR8 work.

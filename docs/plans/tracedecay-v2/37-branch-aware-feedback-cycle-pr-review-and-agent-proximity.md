@@ -21,13 +21,14 @@ CI-failure localization, read-only ingestion/surfacing of existing GitHub
 bot/maintainer PR review comments and threads, and tiered concurrent-agent
 proximity — all four read-only/advisory pillars simultaneously available by
 the end of PR13. PR14 adds dashboard/Doctor consumption of that same shipped
-state (not first availability). PR15 extends scope to multi-root/cross-project.
+state (not first availability). PR15 extends scope to multi-root/cross-project
+and adds the optional read-only GitHub Stacked PR capability adapter.
 PR16 defines node-local overlay/proximity computation and remote-authority
 fencing for durable delivery. PR17 may compose these already-shipped
 operations as typed workflow steps through
 [Plan 32](32-dynamic-workflow-runtime-and-sdk.md); PR17 is not first
 availability of any capability defined here, introduces no external effect,
-and performs no GitHub write of any kind.
+and this plan's PR17 slice performs no GitHub write of any kind.
 
 This plan is the architectural center for every closed-loop, branch-aware
 semantic-feedback decision in the V2 plan set — trigger sources, the one-shot
@@ -185,8 +186,8 @@ explicit, policy-approved Plan 36 operation, never feedback-cycle authority.
   execute an explicitly admitted task step, but this cycle supplies advisory
   evidence only, never generic editor or agent ownership, and performs no
   GitHub write.
-- Stack mutation or semantic conflict resolution. Plan 36 alone owns
-  `integrate_stack_edge`, its exact approval, native transaction, receipt, and
+- Native integration or semantic conflict resolution. Plan 36 alone owns
+  `apply_native_integration`, its exact approval, native transaction, receipt, and
   recovery. A policy-delegated agent may separately submit that operation for
   a `MechanicalIntegrationEligible` preview; Plan 37 never submits it,
   interprets approval, resolves a semantic conflict, or turns fanout into an
@@ -895,8 +896,9 @@ PR15 adds exactly one `StackSignalCoordinator` per daemon node. It consumes only
   `AuthorizedWorktreeInventorySnapshot` values with exact scope/grant/policy digests;
 - Plan 36 `RepositoryStateSnapshotV1`, `TipSnapshotV1`,
   `MergeBaseSnapshotV1`, `DependencyCommitSetV1`,
-  `StackConflictReportV1`, `StackIntegrationPreviewV1`, and terminal
-  `StackIntegrationReceiptV1` values;
+  `StackConflictReportV1`, `NativeIntegrationPreviewV1`, and terminal
+  `NativeIntegrationReceiptV1` values whose topology binding is
+  `LocalStackEdge`;
 - this plan's read-only `PullRequestSnapshot` and CI observation values with typed
   `RepositoryId`, `BranchRef`, and `CommitId`; and
 - existing authorized agent/session/worktree presence and Plan 05 graph/test
@@ -961,8 +963,8 @@ StackSignalObservationV1 {
       current_observation_id: CiObservationId,
       evaluated_commit: CommitId, current_tip: CommitId
     },
-  integration_preview_id: optional StackIntegrationPreviewId,
-  integration_receipt_id: optional StackIntegrationReceiptId,
+  integration_preview_id: optional NativeIntegrationPreviewId,
+  integration_receipt_id: optional NativeIntegrationReceiptId,
   analysis_epoch_digest: optional Digest,
   graph_generation: optional GraphGeneration,
   observed_at, valid_at, expires_at, coverage, signal_evidence_digest
@@ -1015,7 +1017,7 @@ StackFanoutItemV1 {
     preview_id, preview_digest, analysis_epoch_digest,
     source_node_id, destination_node_id, direction, mechanical_mode,
     approval_required = true,
-    apply_operation = "integrate_stack_edge",
+    apply_operation = "apply_native_integration",
     advisory_only = true
   },
   semantic_escalation: optional {
@@ -1028,7 +1030,7 @@ StackFanoutItemV1 {
 `mechanical_suggestion` exists only when Plan 36 says
 `MechanicalIntegrationEligible`; it is an inert reference, not approval or execution.
 An authorized policy-delegated agent may separately facilitate Plan 36's exact apply
-operation after obtaining `StackIntegrationApprovalV1`. Plan 37 never issues that
+operation after obtaining `NativeIntegrationApprovalV1`. Plan 37 never issues that
 approval or calls apply. `semantic_escalation` exists for every native conflict,
 blocking potential semantic conflict, or incomplete required conflict layer, and excludes
 the mechanical suggestion. There is no "accept risk," auto-resolve, ours/theirs, or model
@@ -1224,6 +1226,103 @@ stack/PR/CI drift, and integration terminal signals; central restart-stable
 dedupe/debounce; zero dropped state transitions; zero hidden-root/actor/count leakage;
 mechanical suggestions that remain inert until separately approved in Plan 36; semantic
 conflict escalation with no apply path; and zero GitHub writes or CI reruns.
+
+### 3E. Optional GitHub Stacked PR capability adapter
+
+This is review topology, not task, placement, branch, or integration
+topology. Plan 27 probes and packages the adapter and publishes the exact
+`GitHubStackCapabilityStateV1` values `Unavailable`,
+`PrivatePreviewDisabled`, `Enabled`, or `Degraded { reason }`. Plan 37 owns the
+read-only provider snapshot:
+
+```text
+GitHubStackSnapshotV1 {
+  snapshot_id, capability_snapshot_id,
+  repository_id, provider_stack_id, final_target_ref,
+  layers: ordered {
+    provider_position, pull_request_id,
+    head_ref, head_commit_id, base_ref, base_commit_id,
+    state, protection_state, ci_state, merge_queue_state
+  }[],
+  merge_path: Direct | StackAwareMergeQueue,
+  provider_version, fetched_at, expires_at, coverage, snapshot_digest
+}
+
+GitHubStackSnapshotRefV1 = AuthorizedRef<GitHubStackSnapshotV1>
+
+GitHubStackExternalOperationV1 =
+  Init | Add | Rebase | Push | Submit | Sync | Modify | Unstack | Checkout
+  | MergeSelectedLayer { pull_request_id, expected_stack_snapshot_id }
+```
+
+`crates/tracedecay-domain/src/feedback/github_stack.rs` owns this snapshot and
+validation; `src/daemon/feedback/github_stack_ingest.rs` owns the read-only
+provider adapter; and
+`crates/tracedecay-store/src/feedback/github_stack.rs` stores immutable
+capability/snapshot records and transition references. Plan 21 binds read and
+external-handoff request surfaces; Plan 35 and Plan 11 expose the same daemon
+result. None owns a provider mutation client.
+`feedback_github_stack_capability_snapshots(snapshot_id, repository_id, state,
+reason, api_revision, cli_revision, observed_at, expires_at, evidence_anchor_id,
+snapshot_digest)` and
+`feedback_github_stack_snapshots(snapshot_id, capability_snapshot_id,
+repository_id, provider_stack_id, final_target_ref_payload, merge_path,
+provider_version, fetched_at, expires_at, coverage_digest, snapshot_digest)`
+are append-only. `feedback_github_stack_layers(snapshot_id, provider_position,
+pull_request_id, head_ref_payload, head_commit_payload, base_ref_payload,
+base_commit_payload, state, protection_state, ci_state, merge_queue_state)`
+has unique position/PR constraints and publishes only after whole-stack
+linearity validation.
+
+The adapter accepts only a same-repository, strictly linear ordered stack.
+Each layer's base ref and commit must name the layer immediately below it; the
+bottom layer targets `final_target_ref`. Provider stack ID, API position, PR
+identity, base/head refs, and base/head commits are all required and are never
+reconstructed from branch names or pull-request text. Every layer preserves
+the final target branch's rules, protections, and CI evaluation. The provider
+stack map/navigation and direct-versus-stack-aware merge-queue state are
+observed, not recomputed by TraceDecay.
+
+GitHub's merge action is modeled exactly: selecting a layer atomically includes
+that layer and every unmerged lower layer. A partial merge leaves higher layers
+open and GitHub rebases/retargets the remaining linear stack so its lowest
+unmerged layer targets the updated final branch. The server result always
+creates a new snapshot; no existing Plan 16 local-stack revision or Plan 24
+task topology is rewritten. A branched local stack, cross-repository PR chain,
+missing position, broken base chain, or partially visible layer set is not a
+GitHub stack snapshot and falls back to standard pull-request/Git evidence.
+
+The optional `gh stack` extension is capability evidence only. The recognized
+private-preview command family is `init`, `add`, `rebase`, `push`, `submit`,
+`sync`, `modify`, `unstack`, and `checkout`; ordinary Git, GitHub UI/API, and
+standard PR tools remain valid. GitHub documents that cascading rebase/sync
+rewrites and force-pushes stack branches (`push` uses force-with-lease).
+TraceDecay therefore never invokes `gh stack rebase`, `push`, `submit`,
+`sync`, `modify`, or any server/API cascading rebase or force update
+automatically. It may only observe the resulting snapshots or emit an inert
+`RequestExternalStackOperationV1` handoff after exact human/policy
+authorization; the human/provider performs the operation and Plan 37 ingests
+the new state. No provider capability can weaken Plan 36's prohibition on
+automatic rebase or force-push.
+
+As of **2026-07-19**, GitHub Stacked PRs and `gh-stack` are private preview and
+must be enabled per repository. Normative provider references:
+
+- [GitHub Stacked PRs overview](https://github.github.com/gh-stack/)
+- [Working with Stacked PRs](https://github.github.com/gh-stack/guides/stacked-prs/)
+- [`gh stack` CLI reference](https://github.github.com/gh-stack/reference/cli/)
+- [GitHub public roadmap issue #1218](https://github.com/github/roadmap/issues/1218)
+- [GitHub REST pull-request schema](https://docs.github.com/en/rest/pulls/pulls?apiVersion=2026-03-10)
+
+`tests/feedback_suite/github_stack_capability.rs` covers all four capability
+states, 1/2/8/32-layer linear stacks,
+same-repository and base-chain validation, final-target protection/CI
+inheritance, stack map/navigation, direct and stack-aware merge queues, atomic
+lower-layer inclusion, partial-merge rebase/retarget observation, API
+stack-ID/position/base-ref decoding, every recognized CLI command, and proof
+that no TraceDecay path invokes a cascading rebase, force-push, or provider
+write. Standard-Git and other-forge fixtures must pass with the adapter absent,
+disabled, and degraded.
 
 ### 4. Read-only GitHub PR review ingestion (never an LSP transport, never a write path)
 
@@ -1439,7 +1538,8 @@ reporting total/returned/omitted counts, reasons, and authorized expansion.
   availability of any pillar.
 - PR15 extends every pillar's scope to multi-root/cross-project targets
   through [Plan 16](16-cross-project-repository-worktree-scope.md) and adds
-  §3D's central daemon stack signal/preflight/fanout layer over Plans 16/36;
+  §3D's central daemon stack signal/preflight/fanout layer over Plans 16/36
+  plus §3E's optional GitHub Stacked PR capability/snapshot adapter;
   no pillar's first availability depends on PR15.
 - PR16 defines node-local overlay/proximity computation and remote-authority
   fencing for durable delivery through
@@ -1539,11 +1639,11 @@ PR6 boundary.
 | PR9 | No new authority here. [Plan 36](36-git-aware-change-context-and-index-transactions.md) ships typed repository/commit-snapshot identity (base/head and merge-base `CommitId`, HEAD/`BranchRef`) and read-only diff/hunk intelligence, and [Plan 05](05-query-crate.md) ships the composed revision-range diff/hunk query primitives that this cycle's GitHub remap and CI localization later consume. Plan 32's workflow kernel is not required here or anywhere else in this milestone. |
 | PR11 | [Plan 09](09-application-crate.md) ships the concrete typed feedback-cycle request/result, orchestration, and the one-shot termination taxonomy (§2). First pillar (post-edit diagnostics+impact) begins shipping. |
 | PR12 | [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) gateway triggers and the explicit MCP/CLI/API diagnostics-call trigger bound once by [Plan 21](21-cli-mcp-tool-surface-and-output-unification.md) (§6). Completes the post-edit diagnostics-and-impact pillar for LSP/MCP/CLI. |
-| PR13 | **First coherent milestone (§7).** Hook and agent stop/pre-stop-gate triggers, host delivery-adapter parity through [Plan 27](27-cross-host-agent-plugin-bundles.md); first availability of CI-failure localization (§5), read-only GitHub review-comment/thread ingestion and surfacing (§4), and tiered concurrent-agent proximity (§3). All four pillars are simultaneously available across hook/MCP/CLI/LSP surfaces. `FeedbackEvidencePacketV1` and `ProximityContributionV1` ship reference-only behind the PR13 packet gate (§3C); TaskId linking, fusion rank influence, and expertise remain disabled. No GitHub write exists at PR13 or at any later PR. |
+| PR13 | **First coherent milestone (§7).** Hook and agent stop/pre-stop-gate triggers, host delivery-adapter parity through [Plan 27](27-cross-host-agent-plugin-bundles.md); first availability of CI-failure localization (§5), read-only GitHub review-comment/thread ingestion and surfacing (§4), and tiered concurrent-agent proximity (§3). All four pillars are simultaneously available across hook/MCP/CLI/LSP surfaces. `FeedbackEvidencePacketV1` and `ProximityContributionV1` ship reference-only behind the PR13 packet gate (§3C); TaskId linking, fusion rank influence, and expertise remain disabled. No Plan 37 GitHub write exists at PR13 or at any later PR. |
 | PR14 | Dashboard/Doctor/observability consumption of the same typed cycle, GitHub-ingested, CI-localization, and proximity state already shipped at PR13, through [Plan 11](11-dashboard-frontend.md) and [Plan 26](26-observability-accounting-and-usage.md). Not first availability. |
-| PR15 | Multi-root/cross-project cycle, GitHub-remap, CI-localization, and proximity scope through [Plan 16](16-cross-project-repository-worktree-scope.md), plus §3D's one daemon-local stack coordinator for dependency-ready commits, actual/potential conflicts, upstream stack/PR/CI drift, restart-stable dedupe/debounce, and inert Plan 36 mechanical-integration handoff. No pillar's first availability depends on PR15; no GitHub write or automatic agent continuation exists. |
+| PR15 | Multi-root/cross-project cycle, GitHub-remap, CI-localization, and proximity scope through [Plan 16](16-cross-project-repository-worktree-scope.md), plus §3D's one daemon-local stack coordinator for dependency-ready commits, actual/potential conflicts, upstream stack/PR/CI drift, restart-stable dedupe/debounce, and inert Plan 36 mechanical-integration handoff, and §3E's optional private-preview GitHub Stacked PR capability/snapshot adapter with mandatory standard-Git/other-forge fallback. No pillar's first availability depends on PR15; no GitHub write or automatic agent continuation exists. |
 | PR16 | Node-local overlay and remote-authority rules through [Plan 28](28-remote-multi-machine-shared-brain.md): unsaved overlays and proximity computation stay node-local; durable cycle state, GitHub-ingested evidence, and CI-localization evidence are fenced through shard authority. No pillar's first availability depends on PR16. |
-| PR17 | Plan 24 adds explicit `TaskFeedbackLinkRevisionV1`, TaskId-rooted retrieval through its canonical `TaskEvidenceRequest`/`TaskEvidencePacket`, exactly one proximity primitive, and provenance/diversity/feedback observations. Plan 37/09 add the default-off demonstrated-expertise producer and consent/decay/projection gates in §§3B–3C. Plan 32 may optionally compose the already-shipped read-only advisory operations through its existing `WorkflowStepV1`/`NormalizedEvidenceEnvelopeV1`/`EvidencePacketSetV1` runtime contracts; it does not own linking, retrieval, consent, decay, or rank policy. Not first availability of the four pillars; no GitHub write; no new authority. |
+| PR17 | Plan 24 adds explicit `TaskFeedbackLinkRevisionV1`, TaskId-rooted retrieval through its canonical `TaskEvidenceRequest`/`TaskEvidencePacket`, exactly one proximity primitive, and provenance/diversity/feedback observations. Plan 37/09 add the default-off demonstrated-expertise producer and consent/decay/projection gates in §§3B–3C. Plan 32 may optionally compose the already-shipped read-only advisory operations through its existing `WorkflowStepV1`/`NormalizedEvidenceEnvelopeV1`/`EvidencePacketSetV1` runtime contracts; it does not own linking, retrieval, consent, decay, or rank policy. Not first availability of the four pillars; no Plan 37 GitHub write; no new authority. |
 
 ## Acceptance
 
@@ -1636,6 +1736,12 @@ PR6 boundary.
   semantic conflicts and incomplete coverage always escalate; and no acknowledgement,
   transition, resolution, or dedupe state writes GitHub, reruns CI, or continues an
   agent.
+- **GitHub stack adapter fixtures (§3E)** prove all four capability states,
+  same-repository linearity, final-target protection/CI semantics, API
+  ID/position/base-ref decoding, atomic lower-layer inclusion, partial-merge
+  rebase/retarget observation, direct/merge-queue state, complete `gh stack`
+  command recognition, mandatory generic fallback, and zero TraceDecay
+  force-push, rebase, or provider mutation.
 - **TaskId retrieval/fusion fixtures** prove `TaskId` resolves the canonical
   Plan 24 `WorkItemId` and pins `WorkItemVersionId`; current/as-of/evolution/
   forensic modes expand exact anchors; the registry contains exactly one

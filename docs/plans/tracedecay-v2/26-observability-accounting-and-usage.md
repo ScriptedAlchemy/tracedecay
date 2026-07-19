@@ -95,7 +95,10 @@ Every operational and product metric states what was measured, over which popula
   (`denied`) only. Plan 35 semantic-evidence provider states (unsupported,
   absent, indexing, stale, cancelled, timed-out, failed, partial versus
   supported plus completed plus complete-coverage zero-findings) remain a
-  third set. Attempted outbound GitHub writes emit separate `policy=denied`
+      third set. GitHub Stacked PR capability
+      (`Unavailable | PrivatePreviewDisabled | Enabled | Degraded`) is a
+      fourth independent set and never becomes comment lifecycle, ingress
+      outcome, or semantic-evidence provider state. Attempted outbound GitHub writes emit separate `policy=denied`
   and `effect=suppressed` observations before any call, never a lifecycle or
   ingress value. No `posted`, `updated`, `dismissed`, or `replied` lifecycle
   exists; `resolved` is the observed read-only lifecycle value. All metrics remain
@@ -159,6 +162,8 @@ read models. The exact event payloads in
   (`work.integration.transition.observed.v1`);
 - `WorkStackDriftObservedV1`
   (`work.stack_drift.observed.v1`);
+- `GitHubStackCapabilityObservedV1`
+  (`work.github_stack_capability.observed.v1`);
 - `WorkDuplicateEffortObservedV1`
   (`work.duplicate_effort.observed.v1`);
 - `WorkBlockedIntervalObservedV1`
@@ -190,6 +195,13 @@ Plan 32 `ProgressFrontier` during the interval and are not linked by an
 adjudicated duplicate-work relation. Heartbeats, queued work, card presence,
 provider child processes, and transport fanout never count as useful
 concurrency.
+It separately records privacy-safe classes for execution placement
+(`None | InPlace | LinkedWorktree | IsolatedClone`), branch topology
+(`NoBranches | Unbranched | IndependentBranches | LocalStack`), review
+topology (`NoReview | IndependentReview | StandardPullRequests |
+GitHubStackedPullRequests`), and integration strategy (`NoIntegration |
+ExternalObservedOnly | FastForwardOnly | MergeCommit |
+CherryPickExactCommits`). These dimensions are never derived from one another.
 
 `WorkConflictPredictionObservedV1` records prediction identity, prediction
 time before integration, `Mechanical | Semantic | Combined`, predicted
@@ -215,9 +227,9 @@ Unsupported | Unknown`. It records operation kind
 GraphOnly | ExternalObserved | Unknown`, source/target scope classes,
 dependency-commit coverage, required-test/check coverage, and owner-receipt
 class. `ApplyRequested` can exist only for an owning typed operation that
-actually supports apply; current Plan 36 read-only merge/rebase/cherry-pick
-plans therefore emit preview or external-observation phases, not a fictional
-TraceDecay apply. `NativeIntegratedObserved` requires native Git evidence that
+actually supports apply. Plan 36 supports clean, authorized, no-conflict,
+policy-approved fast-forward, two-parent merge, and exact ordered cherry-pick;
+rebase remains external observation only. `NativeIntegratedObserved` requires native Git evidence that
 the exact target snapshot contains the declared integration result; a Plan 24
 proposal decision, card move, process exit, or CI result cannot synthesize it.
 
@@ -231,6 +243,14 @@ DuplicateEffect | NotDuplicate | Censored | Unknown` relation plus bounded
 wall, token, cost, test, and effect quantities with their evidence class.
 Similarity, proximity, same path, or concurrent execution alone never labels
 duplicate work.
+
+`GitHubStackCapabilityObservedV1` records exactly `Unavailable |
+PrivatePreviewDisabled | Enabled | Degraded`, capability/probe revision,
+complete/partial coverage, and standard-Git/other-forge fallback availability.
+It never labels repository, stack, PR, branch, user, or provider position.
+Stack-operation observations distinguish direct versus stack-aware merge queue,
+atomic lower-layer inclusion, and partial-merge rebase/retarget as provider
+outcomes; they never report a TraceDecay rebase or force-push effect.
 
 `WorkBlockedIntervalObservedV1` records one exact valid-time interval and
 `Dependency | NeedsInput | Capability | Policy | Scope | Conflict | Lease |
@@ -431,7 +451,8 @@ The minimum cross-cutting V1 event payloads added by this plan are:
 - `ExecutionTopologySampledV1`,
   `WorkConflictPredictionObservedV1`, `WorkConflictOutcomeLinkedV1`,
   `WorkIntegrationTransitionObservedV1`, `WorkStackDriftObservedV1`,
-  `WorkDuplicateEffortObservedV1`, `WorkBlockedIntervalObservedV1`,
+  `GitHubStackCapabilityObservedV1`, `WorkDuplicateEffortObservedV1`,
+  `WorkBlockedIntervalObservedV1`,
   `WorkRerunObservedV1`, `WorkExecutionLeakObservedV1`, and
   `WorkDeliveryFanoutObservedV1`, with event-kind strings fixed in the
   execution-topology section above;
@@ -821,7 +842,8 @@ queryable.
 - `execution-topology` shows requested/accepted/admitted/active/useful
   concurrency and fanout, independently adjudicated duplicate work,
   mechanical/semantic conflict confusion matrices, ready-to-integrated
-  latency, observed native-merge outcomes, stale-stack age, unioned and
+  latency, observed native fast-forward/merge/cherry-pick outcomes, stale-stack
+  age, GitHub stack capability state and generic-fallback availability, unioned and
   cause-attributed blocked time, runtime/test/CI reruns, duplicate effects,
   operational/privacy leaks, and delivery fanout. Every card exposes support,
   eligible denominator, censoring/unknowns, interval coverage, horizon,
@@ -951,7 +973,8 @@ decision with collision, ambiguity, maintenance, and privacy review.
   supersession, target drift, cancellation, missing receipt, and incomplete
   horizon censor. Observed merge success remains separate from required test/
   CI completion, Plan 24 acceptance, escaped defects, and TraceDecay operation
-  support; read-only Plan 36 merge previews never emit fictional apply events.
+  support; Plan 36 preview-only results never emit fictional apply events, and
+  apply events require the exact owner receipt.
 - Stale-stack and blocked-time fixtures coalesce duplicate/overlapping
   intervals deterministically, keep open intervals visible at the watermark,
   preserve per-cause overlap separately from unioned wall time, and handle

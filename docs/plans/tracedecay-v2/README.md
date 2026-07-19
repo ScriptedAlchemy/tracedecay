@@ -88,6 +88,14 @@ requirements and boundaries, not separate crate-first work queues.
   envelopes. Observability descriptors are Plan 26; PR20 performance
   optimization is Plan 33. Active executable work remains PR8 temporal
   retrieval in [NEXT.md](NEXT.md).
+- TaskId, the task graph, and Kanban are host-neutral and require no Git,
+  worktree, branch, pull request, GitHub, or stack. Execution placement, branch
+  topology, review topology, and integration strategy are independent.
+  Plan 16 owns local repository/worktree/branch-stack scope; Plan 27/37 own the
+  optional GitHub Stacked PR capability/snapshot adapter; Plan 36 owns native
+  Git preflight/apply/receipts; Plans 20/21/35 gate policy, surfaces, and
+  handoffs; Plan 32 owns runtime orchestration. The private-preview GitHub
+  adapter never replaces standard Git, another forge, or no-Git work.
 - High-confidence architecture and explicit rejection findings are normative.
   Medium-confidence model, ranking, topology, renderer, calibration, and
   optimization mechanisms are versioned candidates that ship only after
@@ -106,8 +114,10 @@ requirements and boundaries, not separate crate-first work queues.
 - [Git intelligence and safe repository operations](36-git-aware-change-context-and-index-transactions.md)
   progress from PR7 provenance anchors through PR9 read-only semantic evidence,
   PR11 daemon-serialized index/commit transactions, and PR12 shared surface
-  bindings. They never autonomously mutate branches, worktrees, refs, or
-  published history.
+  bindings. PR15 adds only clean, authorized, no-conflict, policy-approved
+  fast-forward/two-parent-merge/exact-cherry-pick operations with durable
+  receipts. TraceDecay never automatically rebases, force-pushes, resolves a
+  semantic conflict, or invokes GitHub's cascading stack rewrite.
 - PR17 delivers the [canonical product task/work graph and Kanban/DAG/timeline/
   causal/workload projections](24-canonical-task-plan-graph-and-multi-agent-executor.md)
   plus advisory task-shape/decomposition/sizing/model-routing intelligence,

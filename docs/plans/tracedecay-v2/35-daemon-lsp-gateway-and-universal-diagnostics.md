@@ -122,7 +122,7 @@ architecture.
   [28](28-remote-multi-machine-shared-brain.md) own those contracts.
 - Hook decoding, host capability detection, event replay spooling, task
   placement/readiness, conflict/proximity calculation, Git/ref/commit truth,
-  cross-merge preview/application/status/cancellation, or their receipts.
+  native-integration preview/application/status/cancellation, or their receipts.
   Plans 07, 24, 36, 37, 09, and 21 own those contracts and effects.
 - Completion, formatting, or arbitrary vendor-specific LSP methods until a
   separate product requirement and conformance gate justify them.
@@ -310,6 +310,9 @@ pub enum LspCrossWorktreeKind {
     ReadyCommit {
         stack_id: CommitStackId,
     },
+    ReviewTopologyCapability {
+        state: GitHubStackCapabilityStateV1,
+    },
 }
 ```
 
@@ -317,6 +320,9 @@ pub enum LspCrossWorktreeKind {
 24 task/readiness and Plan 36 stack joins. PR13/PR15 capability snapshots omit
 it; receiving it under an earlier snapshot is a typed protocol-skew failure,
 not a cue to infer readiness from commit or test existence.
+`ReviewTopologyCapability` is unconstructable before PR15 lands the exact Plan
+27 capability probe and Plan 37 read-only snapshot; it never implies a
+provider write or removes the generic fallback.
 
 The DTO contains no path, URI, branch label, source, diff, task narrative,
 tool payload, test log, conflict body, merge preview, cursor page, or receipt
@@ -344,8 +350,9 @@ authority.
    the root, task, peer, ref/commit, finding, and receipt relation. A stale
    epoch never rebinds to the worktree currently occupying the same path.
 3. Plan 24 supplies task placement and dependency-ready state; Plan 36 supplies
-   ref/commit/stack identity and read-only merge evidence; Plan 37 supplies
-   conflict/proximity findings. The gateway calculates none of them.
+   ref/commit/stack identity plus native-integration preflight/apply capability
+   and receipt evidence; Plan 37 supplies conflict/proximity findings and
+   read-only GitHub stack snapshots. The gateway calculates none of them.
 4. A current exact `FileId`/`SymbolId`/content/generation join routes an
    affected-symbol, conflict, or ready-commit cue to the owning document.
    Cross-root related locations are included only when every location is
@@ -354,7 +361,8 @@ authority.
 5. A source-ranged current cue publishes through
    `textDocument/publishDiagnostics` or `textDocument/diagnostic`. A state
    change triggers `workspace/diagnostic/refresh` for capable pull clients.
-   Root-level stale-epoch or ready-commit state without a truthful current
+   Root-level stale-epoch, ready-commit, or review-topology capability state
+   without a truthful current
    range uses one bounded `window/showMessage` notification; it is never forced
    onto line zero or another file. A client/host that cannot provide the
    required status channel receives the same cue through Plan 21/27, not a
@@ -362,8 +370,8 @@ authority.
 
 `Diagnostic.source` is `tracedecay-worktree`.
 `Diagnostic.code` is exactly one of
-`affected-symbol`, `cross-worktree-conflict`, `stale-worktree-epoch`, or
-`ready-commit`. The message contains only the kind, coarse relation, freshness,
+`affected-symbol`, `cross-worktree-conflict`, `stale-worktree-epoch`,
+`ready-commit`, or `review-topology-capability`. The message contains only the kind, coarse relation, freshness,
 coverage, and one legal next action in at most 512 UTF-8 bytes.
 `Diagnostic.data` is a versioned allowlist containing projection ID/revision,
 kind, current root WorktreeId/epoch, optional independently authorized peer
@@ -398,13 +406,15 @@ receive command-only `quickfix` actions:
 - a task-linked cue may offer the internal `OpenTask` handoff;
 - stale-epoch may offer `OpenInvestigation` scoped to refresh/rebind guidance;
 - ready-commit may offer `OpenInvestigation` scoped to Plan 21's
-  cross-merge dry-run surface.
+  native-integration dry-run surface;
+- review-topology capability may offer `OpenInvestigation` scoped to the
+  Plan 21/11 capability and generic-fallback view.
 
 Those are internal Rust variants, not serialized command names. Every action
 contains no `edit`, no disabled-reason oracle, and only one 60-second,
 single-use, session/root/projection/authorization-bound `HandoffToken`.
 Execution reauthorizes all IDs and opens or returns the owning Plan 21/11
-surface. It does not run cross-merge dry-run itself, apply a merge, resolve a
+surface. It does not run native-integration dry-run itself, apply an integration, resolve a
 conflict, refresh Git, mutate a task, invoke a tool, schedule an agent, or
 return bulk evidence. `workspace/applyEdit` is never used.
 
@@ -573,7 +583,7 @@ return bulk evidence. `workspace/applyEdit` is never used.
   paths, URLs, query text, or executable arguments. General code actions and
   commands remain unavailable. The same two commands cover affected-symbol,
   conflict, stale-epoch, and ready-commit handoffs; no third worktree command
-  or LSP-side cross-merge operation is added.
+  or LSP-side native-integration operation is added.
 - A method outside this set, or a request the active analyzer declares
   unsupported, returns an explicit typed capability-unavailable outcome. The
   gateway never guesses a fallback result or synthesizes a plausible-looking
@@ -1056,13 +1066,15 @@ The cross-worktree milestone gates are:
    ready-commit input, implement debounce/reserved queues/gap recovery, and
    pass path-free schema plus no-peer-transport tests.
 2. **M35.W2 — multi-root subscription (PR15):** bind the revisioned root
-   vector, independent epochs/cursors/coverage, exact related locations, and
+   vector, independent epochs/cursors/coverage, exact related locations,
+   Plan 27/37 GitHub stack capability state plus generic-fallback handoff, and
    hidden-root non-enumeration.
 3. **M35.W3 — TaskId/ready join (PR17):** add independently authorized
    TaskId, placement, dependency-ready, stack, and receipt join IDs without
    adding bulk retrieval or any task/runtime authority.
 4. **M35.W4 — handoff-only actions (PR18):** advertise exactly the two frozen
-   commands for conformant clients and prove affected/conflict/stale/ready
+   commands for conformant clients and prove affected/conflict/stale/ready/
+   review-capability
    actions cannot edit or execute work.
 5. **M35.W5 — performance promotion:** pass 1/4/8-root payload, debounce,
    saturation, restart, cursor-gap, p95/p99, and privacy canaries on the same
@@ -1223,6 +1235,9 @@ The cross-worktree milestone gates are:
   `worktree_events_arrive_only_from_daemon_projection`,
   `stale_worktree_epoch_clears_before_republish`,
   `ready_commit_is_advisory_and_version_bound`,
+  `github_stack_capability_states_are_exact`,
+  `github_stack_unavailable_preserves_generic_handoff`,
+  `github_stack_handoff_never_invokes_provider`,
   `cross_worktree_gap_clears_and_resnapshots`,
   `hidden_peer_projection_is_non_enumerating`,
   `non_ranged_worktree_state_never_uses_fake_location`,

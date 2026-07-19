@@ -29,7 +29,8 @@ and index rebuilds, while deletion and retention remain explicit.
   index or worktree-capture watermark when no immutable Git object exists.
 - Immutable bindings for repository/worktree captures, branch/ref snapshots,
   native commit/tree/blob objects, pull-request and check snapshots, conflict
-  snapshots, and integration preflight/terminal receipts. These bindings carry
+  snapshots, GitHub stack capability/snapshots, and native-integration
+  preflight/terminal receipts. These bindings carry
   only exact native identities and authorized receipt references; they never
   copy Git objects, patches, GitHub bodies, CI logs, or host-local summaries.
 - PR/comment coordinates bound through
@@ -58,8 +59,9 @@ and index rebuilds, while deletion and retention remain explicit.
 - Repository/worktree discovery, Git object/ref interpretation, PR/check
   provider ingress, conflict handling, preflight computation, integration
   authorization, or Git application. Plan 36 owns native Git identity and
-  read-only/preflight semantics; Plan 24 owns task decisions; Plan 32 owns
-  admitted runtime effects; and Plan 27 owns host transport and conformance.
+  typed preflight/apply/receipt semantics; Plan 24 owns task decisions; Plan
+  32 owns admitted runtime effects; Plan 27 owns host/forge capability probing
+  and transport conformance; and Plan 37 owns read-only GitHub stack snapshots.
 - Candidate generation, ranking, diversification, temporal answer selection, summary
   payload publication, or context rendering. Those remain
   [Plan 23](23-session-lcm-temporal-retrieval-and-evaluation.md) responsibilities.
@@ -135,7 +137,10 @@ and index rebuilds, while deletion and retention remain explicit.
     observation consumed by Plan 37. They retain provider locators only as
     privacy-domain-bound digests. They do not duplicate GitHub review text,
     check output, CI logs, patch hunks, provider cursors, or mutable
-    REST/GraphQL response payloads.
+    REST/GraphQL response payloads. GitHub stack targets separately reference
+    the exact Plan 27 `GitHubStackCapabilitySnapshotV1` and Plan 37
+    `GitHubStackSnapshotV1`; provider stack ID, position, base/head refs, and
+    final-target identity never become generic branch-stack or task identity.
 20. Conflict and preflight targets reference an exact Plan 36 `RepositorySnapshot`,
     unmerged-stage or preflight receipt digest, normalized operation/options digest,
     and policy/configuration revision. They are read-only evidence and cannot be
@@ -145,7 +150,7 @@ and index rebuilds, while deletion and retention remain explicit.
     Plan 24 decision and Plan 32/36 terminal receipts. Plan 13 stores no merge
     command, patch, credentials, host command line, or authority grant, and
     receipt possession never authorizes an integration action.
-22. Task, worktree, and cross-merge summaries retain an ordered, lossless
+22. Task, worktree, and native-integration summaries retain an ordered, lossless
     `RetrievalAnchorId` lineage to every exact source. A Plan 23 summary or Plan 24
     task projection may abbreviate presentation, but its prose, score, status, branch
     label, or aggregate cannot become replacement evidence.
@@ -444,8 +449,10 @@ grants no policy, runtime, Git, provider, or host authority.
   parity, owner routing, no copied owner payload, and no receipt-as-capability.
 - `tests/git_suite/anchor_provenance.rs` covers linked, moved, removed, symlinked,
   escaped, detached, unborn, dirty, and conflicted worktrees; rewritten refs;
-  missing objects; SHA-1/SHA-256 repositories; exact PR/check observations; and
-  exact preflight/integration receipt references.
+  missing objects; SHA-1/SHA-256 repositories; exact PR/check observations;
+  Plan 27 GitHub stack capability and Plan 37 stack snapshots without
+  task/local-stack identity conflation; and exact preflight/integration receipt
+  references.
 - `tests/work_suite/task_topology_drilldown.rs` starts from an authorized
   `TaskId`, traverses `TaskEvidenceLinkRevision` and every ordered anchor to the
   same Plan 16/24/27/32/36 owner records, preserves typed omissions, rejects

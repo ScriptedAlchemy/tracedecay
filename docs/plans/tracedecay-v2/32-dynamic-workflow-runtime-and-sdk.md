@@ -40,24 +40,26 @@ identity. Plan 32 never derives a placement from CWD or task text, converts a
 branch-stack edge into a task dependency, or treats branch ancestry as task
 readiness.
 
-Physical placement and delivery order remain separate dimensions. Plan 32
-implements the Plan 24-owned `InPlace`, `LinkedWorktree`, and `IsolatedClone`
-placement intents. It executes `SingleBranch` or `StackedBranches` delivery
-only from the exact accepted topology revision. A stacked branch always runs
-in its node's accepted physical placement. Autonomous integration may consume
-commits produced in an explicitly opted-in in-place checkout, but it never
-uses a user's in-place checkout as an integration target or switches its
-branch.
+Execution placement, branch topology, review topology, and integration
+strategy remain independent dimensions. Plan 32 implements an optional
+Plan 24 `WorkspacePlacementIntentV1`; no-Git work and work with no managed
+placement remain valid. It never derives `BranchTopologyV1`,
+`ReviewTopologyV1`, or `IntegrationStrategyV1` from placement. A linked
+worktree may be unbranched, independently branched, or locally stacked with no
+pull request; a pull-request stack may exist without a TraceDecay-managed
+worktree. Autonomous integration may consume commits produced in an explicitly
+opted-in in-place checkout, but it never uses a user's in-place checkout as an
+integration target or switches its branch.
 
 Plan 16 remains the canonical repository/checkout/worktree identity and scope
-resolver. Plan 36 remains native Git evidence authority and the public owner of
-`stage_hunks`, `unstage_hunks`, and `commit_index`. PR17 adds a narrow
-daemon-internal placement/integration effect adapter, not a general Git tool:
-it accepts only Plan 24's exact accepted types, exposes no raw arguments, and
-is unreachable from a provider or transport without Plan 09 admission. This
-later, narrower PR17 contract is the sole exception to Plan 16's general
-no-worktree-creation rule and Plan 36's general no-merge/ref/remote-mutation
-rule. Their public APIs remain unchanged.
+resolver. Plan 36 remains native Git evidence authority and owns every typed
+native Git preflight/apply/receipt operation, including eligible
+fast-forward, two-parent merge, and exact ordered cherry-pick. Plan 32 owns the
+placement/integration state machine, leases, effect budget, deadlines, and
+reconciliation; it invokes Plan 36 only through a Plan 09 operation binding
+after Plan 20 policy and authorization pass. It exposes no raw Git arguments
+and owns no second native Git adapter. PR17 placement materialization is the
+sole narrow exception to Plan 16's general no-worktree-creation rule.
 
 ### Runtime-owned placement, lease, and receipt types
 
@@ -355,14 +357,18 @@ revert, moves a remote backward, or retargets a pull request by inference.
 
 ### Native Git preflight and fixed adapter
 
-`src/workflow_runtime/native_git.rs` is a closed, typed adapter over the
-configured native Git executable. It constructs fixed argument vectors
-internally and accepts no raw flags, command strings, environment fragments,
-shell, aliases, pager, editor, credential helper override, hooks bypass, or
-user-owned Git configuration mutation. It supports SHA-1 and SHA-256 object
-formats only after capability probing and pins executable identity/version,
-object format, repository format, common-directory identity, relevant
-configuration digest, and normalized operation revision in every receipt.
+Plan 36 owns `NativeGitExecutionPort` in
+`crates/tracedecay-application/src/git/native_operations.rs` and the closed
+adapter over the configured native Git executable. Plan 32's
+`src/workflow_runtime/native_git_effects.rs` only reserves effects, invokes
+that Plan 09-bound port, and records the returned receipt. The Plan 36 adapter
+constructs fixed argument vectors internally and accepts no raw flags, command
+strings, environment fragments, shell, aliases, pager, editor, credential
+helper override, hooks bypass, or user-owned Git configuration mutation. It
+supports SHA-1 and SHA-256 object formats only after capability probing and
+pins executable identity/version, object format, repository format,
+common-directory identity, relevant configuration digest, and normalized
+operation revision in every receipt.
 
 ```rust
 pub trait NativeGitExecutionPort {
@@ -396,12 +402,6 @@ pub trait NativeGitExecutionPort {
         request: CompareAndSwapLocalRefV1,
     ) -> Result<LocalRefUpdateReceiptV1, NativeGitError>;
 
-    async fn publish_fast_forward(
-        &self,
-        permit: EffectPermitV1,
-        request: PublishFastForwardRefV1,
-    ) -> Result<RemoteRefUpdateReceiptV1, NativeGitError>;
-
     async fn inspect_effect(
         &self,
         permit: EffectPermitV1,
@@ -413,6 +413,14 @@ pub trait NativeGitExecutionPort {
         permit: EffectPermitV1,
         request: ReleaseEphemeralPlacementV1,
     ) -> Result<PlacementReleaseReceiptV1, NativeGitError>;
+}
+
+pub trait RemoteRefPublicationPort {
+    async fn publish_fast_forward(
+        &self,
+        permit: EffectPermitV1,
+        request: PublishFastForwardRefV1,
+    ) -> Result<RemoteRefUpdateReceiptV1, RemotePublicationError>;
 }
 ```
 
@@ -453,8 +461,10 @@ verification operation then runs against the detached exact candidate
 generation. Only after all pass, the target is revalidated and updated by
 compare-and-swap.
 
-Remote publication uses only an ordinary fast-forward push of the exact local
-candidate to the exact accepted remote/ref. The adapter rejects every force,
+Plan 32's `RemoteRefPublicationPort` uses only an ordinary fast-forward push
+of the exact local candidate to the exact accepted remote/ref. It is a
+separate runtime effect from Plan 36's local native integration. The adapter
+rejects every force,
 force-with-lease, force-if-includes, mirror, delete, prune, tag, wildcard,
 refspec expansion, or config-based rewrite form. It checks the expected remote
 head immediately before push, treats ordinary non-fast-forward rejection as
@@ -504,9 +514,12 @@ serializes every shared target ref. Independent nodes may prepare and verify
 concurrently, but a child cannot publish or retarget until the exact parent
 integration receipt and required commit frontier are committed.
 
-Upstream refresh merges the parent frontier into the child; it never rebases,
-squashes, cherry-picks, amends, or force-pushes. After parent integration,
-child candidate verification, and child fast-forward publication,
+Upstream refresh applies the exact accepted Plan 24 integration strategy
+through Plan 36. It may fast-forward, create one conflict-free two-parent
+merge, or cherry-pick an exact ordered set of single-parent commits when Plan
+36 classifies the operation `MechanicalIntegrationEligible`; it never rebases,
+squashes, amends, or force-pushes. For standard pull requests only, after
+parent integration, child candidate verification, and child fast-forward publication,
 `PullRequestMutationPort::retarget_base` may change only the exact PR base ref
 using expected provider version/base/head and an effect permit:
 
@@ -527,10 +540,13 @@ pub trait PullRequestMutationPort {
 ```
 
 This port cannot create/merge/close/reopen a PR, edit title/body, request or
-dismiss review, or post/update/resolve/reply to comments. Plan 37 remains
-read-only ingress. Parent closure without exact integration, provider-version
-drift, review-state policy failure, or retarget denial blocks descendants and
-returns `Partial` or `Conflicted`; it never guesses a new base.
+dismiss review, or post/update/resolve/reply to comments. It is never used for
+`GitHubStackedPullRequests`: GitHub owns stack-wide merge/rebase/retarget
+effects, and TraceDecay only observes them or emits an explicitly authorized
+human handoff. Plan 37 remains read-only ingress. Parent closure without exact
+integration, provider-version drift, review-state policy failure, or retarget
+denial blocks descendants and returns `Partial` or `Conflicted`; it never
+guesses a new base.
 
 Stack/runtime history, exact PR base/head observations, and integration
 receipts follow Plan 24/26 retention. Local materializations additionally
@@ -547,7 +563,7 @@ Git capability evidence, and the workflow control envelope. Capabilities are
 operation-specific:
 `UseInPlaceCheckout`, `CreateLinkedWorktree`, `CreateIsolatedClone`,
 `CreateLocalBranch`, `CreateMergeCommit`, `AdvanceLocalRef`,
-`PublishFastForwardRef`, `RetargetPullRequestBase`, and
+`CherryPickExactCommits`, `PublishFastForwardRef`, `RetargetPullRequestBase`, and
 `ReleaseExecutionPlacement`. Each binds repository, placement/ref/PR, actor,
 effect count, deadline, policy revision, and revocation generation. No
 capability permits force push, backward ref movement, branch deletion, rebase,
@@ -658,7 +674,7 @@ section are contract names, not examples:
   `recovery.rs`, `queries.rs`, `placement.rs`, and `integration.rs`:
   application commands, ports, and views;
 - `src/workflow_runtime/kernel.rs`, `planner.rs`, `fanout.rs`,
-  `synthesis.rs`, `placement.rs`, `native_git.rs`, `integration.rs`,
+  `synthesis.rs`, `placement.rs`, `native_git_effects.rs`, `integration.rs`,
   `stack.rs`, `pull_requests.rs`, and
   `providers/{native_process,claude_code_cli,codex_app_server,codex_cli}.rs`:
   daemon implementations;
@@ -1727,10 +1743,11 @@ placement generation/lease, exact produced/required commits, dirty/conflicted
 quarantine, retention, safe cleanup, and no ambient CWD/ref/path authority.
 Integration fixtures cover separate task and branch-stack DAGs, native Git
 preflight, candidate verification before target-ref movement, ordinary
-fast-forward publication, ordered upstream refresh and PR retarget, partial
-effects, and recovery at every state transition. They prove no rebase, squash,
-cherry-pick, reset, revert, branch deletion, backward ref movement, force push,
-or semantic conflict resolution.
+  fast-forward publication, ordered upstream refresh and standard-PR retarget,
+  partial effects, and recovery at every state transition. They prove no rebase,
+  squash, reset, revert, branch deletion, backward ref movement, force push,
+  semantic conflict resolution, or cherry-pick outside Plan 36's exact clean
+  authorized policy-approved operation.
 Minimal-repair and decision fixtures cover invalidation fencing, unaffected
 proof, unknown-effect reconciliation, stale proposals, new-attempt history,
 explicit human override, cancellation, and timeout without approval or
@@ -1778,10 +1795,15 @@ The checked-in manifests under `tests/fixtures/workflow_git/` are:
 - `linked_worktree.toml`, `worktree_holder_race.toml`,
   `isolated_clone.toml`, `clone_hardlink_canary.toml`, and
   `symlink_escape.toml`;
+- `no_git_task.toml`, `worktree_unbranched.toml`,
+  `worktree_independent_branch.toml`, `local_stack_without_pr.toml`, and
+  `pr_stack_without_managed_worktree.toml`;
 - `sha1_repository.toml`, `sha256_repository.toml`,
   `sparse_repository.toml`, `submodule_repository.toml`, and
   `unsupported_repository.toml`;
 - `fast_forward.toml`, `two_parent_merge.toml`,
+  `cherry_pick_exact.toml`, `cherry_pick_reordered.toml`,
+  `cherry_pick_merge_commit.toml`, `cherry_pick_conflict.toml`,
   `native_conflict.toml`, `required_commit_missing.toml`,
   `test_failure.toml`, and `target_ref_race.toml`;
 - `remote_fast_forward.toml`, `remote_non_fast_forward.toml`,
@@ -1841,8 +1863,9 @@ cargo test --all-features --test workflow_runtime_suite retry_recovery
 
 ### PR17C: Placement, native Git integration, and stack execution
 
-Implement `placement.rs`, `native_git.rs`, `integration.rs`, `stack.rs`, and
-`pull_requests.rs` after the failing fixture corpus. Land strict preflight,
+Implement `placement.rs`, `native_git_effects.rs`, `integration.rs`, `stack.rs`,
+and `pull_requests.rs` after the failing fixture corpus. Land strict preflight
+against Plan 36's typed native-operation port,
 physical placement materialization, child lease scopes, produced/required
 commit checks, candidate preparation, cataloged verification, local-ref CAS,
 ordinary fast-forward publication, exact PR-base retarget, retention, cleanup,

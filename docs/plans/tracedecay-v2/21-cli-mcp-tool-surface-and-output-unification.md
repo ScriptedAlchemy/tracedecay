@@ -275,15 +275,21 @@ The internal semantic operation IDs and temporary paired bindings are exact:
   `worktree_stack_status`; effect `Read`.
 - `worktree.dependency_ready.read.v1`: CLI `worktree dependency-ready`; MCP
   `worktree_dependency_ready`; effect `Read`.
-- `worktree.cross_merge.preview.v1`: CLI
-  `worktree cross-merge dry-run`; MCP `worktree_cross_merge_dry_run`; effect
+- `worktree.native_integration.preview.v1`: CLI
+  `worktree integrate dry-run`; MCP `worktree_native_integration_dry_run`; effect
   `Preview`.
-- `worktree.cross_merge.apply.v1`: CLI `worktree cross-merge apply`; MCP
-  `worktree_cross_merge_apply`; effect `Write`.
-- `worktree.cross_merge.status.v1`: CLI `worktree cross-merge status`; MCP
-  `worktree_cross_merge_status`; effect `Read`.
-- `worktree.cross_merge.cancel.v1`: CLI `worktree cross-merge cancel`; MCP
-  `worktree_cross_merge_cancel`; effect `Write` with control capability.
+- `worktree.native_integration.apply.v1`: CLI `worktree integrate apply`; MCP
+  `worktree_native_integration_apply`; effect `Write`.
+- `worktree.native_integration.status.v1`: CLI `worktree integrate status`; MCP
+  `worktree_native_integration_status`; effect `Read`.
+- `worktree.native_integration.cancel.v1`: CLI `worktree integrate cancel`; MCP
+  `worktree_native_integration_cancel`; effect `Write` with control capability.
+- `worktree.github_stack.status.v1`: CLI `worktree github-stack status`; MCP
+  `worktree_github_stack_status`; effect `Read`.
+- `worktree.github_stack.request_external.v1`: CLI
+  `worktree github-stack request`; MCP
+  `worktree_github_stack_request_external`; effect `Write` to local handoff
+  state only, with zero GitHub or Git invocation.
 - `worktree.conflict.list.v1`: CLI `worktree conflicts`; MCP
   `worktree_conflicts`; effect `Read`.
 - `worktree.proximity.list.v1`: CLI `worktree proximity`; MCP
@@ -329,6 +335,21 @@ pub struct StackStatusRequest {
     pub page: PageRequest,
 }
 
+pub struct GitHubStackStatusRequestV1 {
+    pub repository_id: RepositoryId,
+    pub capability_snapshot_id: GitHubStackCapabilitySnapshotId,
+    pub stack_snapshot_id: Option<GitHubStackSnapshotId>,
+    pub page: PageRequest,
+}
+
+pub struct RequestExternalStackOperationV1 {
+    pub repository_id: RepositoryId,
+    pub stack_snapshot_id: GitHubStackSnapshotId,
+    pub operation: GitHubStackExternalOperationV1,
+    pub authorization_grant_id: AuthorizationGrantId,
+    pub reason: SafeReason,
+}
+
 pub struct DependencyReadyRequest {
     pub task_id: TaskId,
     pub work_item_version_id: WorkItemVersionId,
@@ -337,31 +358,32 @@ pub struct DependencyReadyRequest {
     pub expected_readiness: Option<ReadinessDigest>,
 }
 
-pub struct CrossMergePreviewRequest {
+pub struct NativeIntegrationPreflightRequestV1 {
     pub task_id: Option<TaskId>,
     pub source: WorktreeAddress,
     pub source_stack: NonEmptyVec<CommitId>,
     pub destination: WorktreeAddress,
+    pub strategy: IntegrationStrategyV1,
     pub expected_merge_base: CommitId,
     pub expected_destination_generation: CodeGenerationId,
     pub readiness_digest: Option<ReadinessDigest>,
 }
 
-pub struct CrossMergeApplyRequest {
-    pub preview_id: CrossMergePreviewId,
-    pub preview_digest: CrossMergePreviewDigest,
+pub struct ApplyNativeIntegrationRequestV1 {
+    pub preview_id: NativeIntegrationPreviewId,
+    pub preview_digest: NativeIntegrationPreviewDigest,
     pub idempotency_key: IdempotencyKey,
     pub authorization_grant_id: AuthorizationGrantId,
 }
 
-pub struct CrossMergeStatusRequest {
-    pub operation_id: CrossMergeOperationId,
+pub struct NativeIntegrationStatusRequestV1 {
+    pub operation_id: NativeIntegrationOperationId,
     pub cursor: Option<OperationEventCursor>,
 }
 
-pub struct CrossMergeCancelRequest {
-    pub operation_id: CrossMergeOperationId,
-    pub expected_operation_version: CrossMergeOperationVersion,
+pub struct CancelNativeIntegrationRequestV1 {
+    pub operation_id: NativeIntegrationOperationId,
+    pub expected_operation_version: NativeIntegrationOperationVersion,
     pub idempotency_key: IdempotencyKey,
 }
 ```
@@ -394,26 +416,30 @@ observed/expiry time, coverage, anchors, and suppression state. Hidden peers
 collapse to a coarse `restricted_overlap` without identity, count, task,
 branch, path, or timing disclosure.
 
-### Cross-merge authority and state machine
+### Native-integration authority and state machine
 
-Plan 21 owns only bindings and rendering. `cross_merge_apply` cannot enter any
-callable profile until a coordinated Plan 36 owner change defines and tests
-the daemon-owned `CrossMergeTransaction`; Plan 16 scope resolution and Plan 09
-authorization/effect receipts are also prerequisites. Until that owner
-contract exists, dry-run may return a read-only merge plan, but apply/status/
-cancel must be absent rather than advertised as unsupported.
+Plan 21 owns only bindings and rendering. Plan 36 owns
+`NativeIntegrationPreviewV1`, `ApplyNativeIntegrationRequestV1`,
+`NativeIntegrationJournalV1`, and `NativeIntegrationReceiptV1`; Plan 16 scope
+resolution and Plan 09 authorization/effect receipts are prerequisites.
+`preflight_native_integration`, `apply_native_integration`,
+`native_integration_status`, and `cancel_native_integration` enter a callable
+profile only when the matching Plan 36 operation, Plan 20 policy, and Plan 27
+route are available. Unavailable operations remain typed unavailable; they are
+never permanently omitted after owner conformance or replaced by shell.
 This family does not alias or widen the existing `git_preview`/`git_apply`
 index-and-hunk bindings.
 
 The owner contract is constrained here so adapter behavior is unambiguous:
 
-- Dry-run resolves one source commit stack and one destination worktree/ref,
-  constructs the merge through an isolated native-Git index, and returns
+- Dry-run resolves one source commit set and one destination worktree/ref,
+  constructs the fast-forward, two-parent merge, or exact ordered cherry-pick
+  through an isolated native-Git index, and returns
   exact base/source/destination identities, candidate tree/commit identity,
   conflicts, changed files/symbols, affected tests, required checks,
   policy/hooks/signing requirements, expiry, and an immutable preview digest.
   It mutates no ref, index, worktree, task, or runtime state.
-- Apply requires explicit `CrossMergeApply` capability, the same authorized
+- Apply requires explicit `NativeIntegrationApply` capability, the same authorized
   source/destination identities, an unexpired preview, exact source commit
   stack, destination epoch/head/ref/generation CAS, readiness digest when
   task-linked, and an idempotency key. The routed daemon serializes the
@@ -445,7 +471,7 @@ Conflict is a typed terminal result with conflict IDs and safe affected
 symbol/file IDs, not a partially successful merge or permission to edit
 another worktree.
 
-`CrossMergeReceiptV1` contains operation/preview/idempotency identities,
+`NativeIntegrationReceiptV1` contains operation/preview/idempotency identities,
 actor/transport/effect class, source/destination WorktreeIds and epochs,
 ordered source commit IDs, base and before/after destination commit/tree/ref
 identities, task/readiness identities when present, native Git/hook/signing
@@ -501,10 +527,10 @@ Owner types and handlers must exist before adapters bind:
   `crates/tracedecay-application/src/work/{projection,commands}.rs` own
   TaskId placement and dependency-ready semantics.
 - Plan 36/09:
-  `crates/tracedecay-domain/src/git/cross_merge.rs`,
-  `crates/tracedecay-application/src/git/cross_merge.rs`, and the native Git
+  `crates/tracedecay-domain/src/git/integration.rs`,
+  `crates/tracedecay-application/src/git/native_integration.rs`, and the native Git
   adapter own preview, apply, journal, reconciliation, cancellation, and
-  receipts. Those owner files require the coordinated Plan 36 change above.
+  receipts.
 - Plan 37/09:
   `crates/tracedecay-domain/src/feedback/proximity.rs` and
   `crates/tracedecay-application/src/feedback/cycle.rs` own conflict/proximity
@@ -517,24 +543,29 @@ Owner types and handlers must exist before adapters bind:
 - Parity fixtures:
   `tests/mcp_suite/worktree_parity.rs`,
   `tests/core_cli_suite/worktree_output.rs`,
-  `tests/worktree_operations_suite/{placement,stack,dependency_ready,cross_merge,conflict_proximity,receipts}.rs`,
+  `tests/worktree_operations_suite/{placement,stack,github_stack,dependency_ready,native_integration,conflict_proximity,receipts}.rs`,
   and `tests/fixtures/interface_output/human-v1/worktree/`.
 
 Milestones are:
 
-1. **M21.W1 — read model:** bind placement, stack, dependency-ready,
-   conflict, proximity, and receipt reads after owner handlers pass; exit
+1. **M21.W1 — read model:** bind placement, local stack, GitHub stack
+   capability/snapshot, dependency-ready, conflict, proximity, and receipt
+   reads after owner handlers pass; exit
    requires path-free identity, cursor/auth parity, and no adapter-local
    readiness.
-2. **M21.W2 — preview:** bind cross-merge dry-run to the Plan 36 read-only
-   plan; exit requires deterministic preview digest, conflict/test coverage,
-   zero native mutation, and reversible truncation.
-3. **M21.W3 — effect:** after the coordinated Plan 36 owner contract lands,
-   bind apply/status/cancel; exit requires CAS, explicit grants, daemon-only
-   writes, effect-unknown reconciliation, and cancel/commit race fixtures.
-4. **M21.W4 — bounded rollout:** pass payload, cursor, saturation, latency,
-   restart, and hidden-peer canaries in the internal profile.
-5. **M21.W5 — PR18 freeze:** Plan 17 chooses public names and compatibility
+2. **M21.W2 — preview:** bind native-integration dry-run to Plan 36; exit
+   requires deterministic preview digest, conflict/test coverage, zero native
+   mutation, and reversible truncation.
+3. **M21.W3 — effect:** bind Plan 36 apply/status/cancel whenever the owner
+   capability is available; exit requires CAS, explicit grants, daemon-only
+   writes, effect-unknown reconciliation, fast-forward/merge/cherry-pick
+   fixtures, and cancel/commit race fixtures.
+4. **M21.W4 — bounded rollout:** bind the inert
+   `RequestExternalStackOperationV1` handoff, then pass payload, cursor,
+   saturation, latency, restart, hidden-peer, private-preview-disabled, and
+   generic-fallback canaries in the internal profile. No test invokes GitHub or
+   `gh stack`.
+5. **M21.W5 — PR18 freeze:** PR18 chooses public names and compatibility
    policy, adds them to discovery/help/SDKs, and removes or explicitly expires
    every internal spelling.
 
@@ -786,8 +817,8 @@ Dependency order is fixed:
    their owning application handlers exist; no stub or advertised unavailable
    method is counted as shipped.
 8. Cross-worktree read and preview bindings follow M21.W1–W2. Apply, status,
-   and cancel remain absent until the coordinated Plan 36 transaction owner
-   passes M21.W3; internal rollout precedes the PR18 public-name freeze.
+   and cancel become callable when the Plan 36 owner capability passes M21.W3;
+   internal rollout precedes the PR18 public-name freeze.
 9. Delete `admin_cli` and duplicate render/query/error helpers, then enforce
    architecture and facade budgets. PR18 SDK bindings remain a later,
    independently reviewed gate.

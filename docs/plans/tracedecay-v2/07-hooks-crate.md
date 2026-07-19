@@ -293,7 +293,9 @@ native ref/commit/conflict authority from parsing a shell command.
   into an admitted neighbor.
 - **PR17 — task joins:** optional `TaskId` placement and ready-commit events
   require Plan 24 version/readiness evidence and remain observations. They do
-  not schedule work or authorize the cross-merge effect bound by Plan 21.
+  not schedule work or authorize the native-integration effect bound by Plan
+  21. GitHub stack capability and review topology are daemon-derived Plan
+  27/37 observations, never hook-derived branch or path inference.
 
 ## Files and dependency order
 

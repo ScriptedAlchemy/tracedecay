@@ -16,8 +16,10 @@ fixtures, and cutover for every supported host.
 Doctor/health/remediation kernel; [Plan 11](11-dashboard-frontend.md) renders
 its canonical findings and legal actions. This plan supplies typed diagnostic,
 conformance, and remediation-operation inputs to that kernel.
-PR17 extends the same catalog/bundles with Plan 24 task context and Plan 32
-runtime execution adapters plus a worktree/task/cross-merge/fanout/native-
+PR15 adds the optional GitHub Stacked PR private-preview capability probe used
+by Plan 37, without making it a required host capability. PR17 extends the
+same catalog/bundles with Plan 24 task context and Plan 32
+runtime execution adapters plus a worktree/task/native-integration/fanout/native-
 execution capability projection; it does not create a host-local board,
 scheduler, topology policy, Git operator, or workflow authority.
 
@@ -29,7 +31,7 @@ unsupported capabilities explicitly while using the same daemon,
 authorization, privacy, memory, and tool semantics. Source connectors publish
 an observation-backed, authorization-bounded capability contract that query
 planners consume only through compact derived descriptors. Worktree awareness,
-task events, cross-merge routes, hook/LSP fanout, CLI fallback, and native
+task events, native-integration routes, hook/LSP fanout, CLI fallback, and native
 Claude/Codex execution are reported through one derived host capability view,
 with explicit unsupported states and no copied workflow authority.
 
@@ -49,7 +51,7 @@ with explicit unsupported states and no copied workflow authority.
   skill, and agent adapters where each host supports those capabilities.
 - Capability negotiation and explicit host-difference reporting.
 - A deterministic `HostWorkCapabilityCatalogV1` projection for worktree
-  awareness, task-event ingress/delivery, cross-merge preflight/apply routing,
+  awareness, task-event ingress/delivery, native-integration preflight/apply routing,
   hook/LSP/native-diagnostics fanout, CLI fallback, and native Claude Code/
   Codex backend availability. It references Plan 08 capability IDs, Plan 20
   policy/configuration, and owner receipts; it defines no second callable
@@ -172,9 +174,10 @@ pub struct HostBundleManifestV1 {
   catalog revision, reporting skew clearly.
 - Keep host-local files free of copied product logic and durable project/session/fact state.
 
-### Worktree, task-event, fanout, and native-execution capability view (PR17)
+### Forge-stack, worktree, task-event, fanout, and execution capability view (PR15/PR17)
 
-`HostWorkCapabilityCatalogV1` is a deterministic observed projection of
+PR15 lands `GitHubStackCapabilitySnapshotV1` for the optional Plan 37
+read-only adapter. PR17 lands `HostWorkCapabilityCatalogV1` as a deterministic observed projection of
 `HostIntegrationManifestV1`, Plan 08 bindings, one pinned Plan 20
 configuration/topology snapshot, Plan 27 native conformance probes, and the
 available owner operations. It is not another semantic catalog and is never
@@ -188,8 +191,8 @@ pub enum HostWorkCapabilityKindV1 {
     WorktreeAwareness,
     TaskEventIngress,
     TaskEventDelivery,
-    CrossMergePreflight,
-    CrossMergeApply,
+    NativeIntegrationPreflight,
+    NativeIntegrationApply,
     HookFanout,
     LspFindingFanout,
     NativeDiagnosticsFanout,
@@ -224,7 +227,7 @@ pub enum HostCapabilityReasonV1 {
     NativeCapabilityProbeFailed,
     ScopeUnresolved,
     OwnerOperationUnavailable,
-    Plan36MutationUnsupported,
+    NativeIntegrationUnavailable,
     Plan32RuntimeUnavailable,
 }
 
@@ -288,7 +291,7 @@ pub struct HostTaskEventEnvelopeV1 {
     pub task_id: TaskId,
     pub work_item_version_id: WorkItemVersionId,
     pub event_kind: HostTaskEventKindV1,
-    pub worktree: HostWorktreeContextV1,
+    pub execution_context: HostTaskExecutionContextV1,
     pub workflow_run_id: Option<WorkflowRunId>,
     pub workflow_attempt_id: Option<WorkflowAttemptId>,
     pub event_observation_anchor_id: RetrievalAnchorId,
@@ -296,7 +299,16 @@ pub struct HostTaskEventEnvelopeV1 {
     pub provider_sequence: Option<ProviderEventSequence>,
 }
 
-pub struct HostCrossMergeRouteV1 {
+pub enum HostTaskExecutionContextV1 {
+    NonRepository {
+        project_id: ProjectId,
+        authorized_scope_digest: AuthorizedScopeDigest,
+        source_observation_anchor_id: RetrievalAnchorId,
+    },
+    Repository(HostWorktreeContextV1),
+}
+
+pub struct HostNativeIntegrationRouteV1 {
     pub mode: CrossMergeModeV1,
     pub source_worktree_anchor_id: RetrievalAnchorId,
     pub destination_worktree_anchor_id: RetrievalAnchorId,
@@ -310,6 +322,30 @@ pub struct HostCrossMergeRouteV1 {
     pub configuration_snapshot_id: ConfigurationSnapshotId,
     pub topology_policy_digest: TopologyPolicyDigest,
 }
+
+pub enum GitHubStackCapabilityStateV1 {
+    Unavailable,
+    PrivatePreviewDisabled,
+    Enabled,
+    Degraded {
+        reason: GitHubStackCapabilityReasonV1,
+    },
+}
+
+pub struct GitHubStackCapabilitySnapshotV1 {
+    pub snapshot_id: GitHubStackCapabilitySnapshotId,
+    pub repository_id: RepositoryId,
+    pub state: GitHubStackCapabilityStateV1,
+    pub api_revision: Option<ProviderApiRevision>,
+    pub cli_extension_revision: Option<ProviderCliRevision>,
+    pub observed_at: Timestamp,
+    pub expires_at: Timestamp,
+    pub evidence_anchor_id: RetrievalAnchorId,
+    pub snapshot_digest: Digest,
+}
+
+pub type GitHubStackCapabilitySnapshotRefV1 =
+    AuthorizedRef<GitHubStackCapabilitySnapshotV1>;
 ```
 
 `BindingId`, `CapabilityId`, and `CatalogDigest` remain Plan 08 authorities.
@@ -318,6 +354,17 @@ remain Plan 20 authorities. `TaskId`/`WorkItemVersionId` remain Plan 24
 authorities; `WorkflowRunId`/`WorkflowAttemptId` remain Plan 32 authorities;
 worktree/ref/object and receipt anchors remain Plan 13 references to Plan
 16/36/32 owner records. The types above cannot mint or reinterpret any of them.
+
+`GitHubStackCapabilitySnapshotV1` is an optional forge-adapter probe, not a
+host, task, branch, worktree, review, or integration authority. `Unavailable`
+means the adapter/API cannot be used; `PrivatePreviewDisabled` means the
+repository is not enrolled; `Enabled` means the exact private-preview API
+shape passed conformance; and `Degraded` means an enrolled capability is
+partial, stale, version-skewed, or failing. No state is inferred from a branch
+chain or installed `gh` binary. The standard Git and generic other-forge
+routes are mandatory regardless of this state. Plan 37 owns the read-only
+provider snapshot semantics; Plan 27 owns probe, packaging, registration, and
+transport conformance only.
 
 The projector canonicalizes records by
 `(kind discriminant, capability_id, binding_id)`, rejects duplicates, requires
@@ -354,16 +401,20 @@ not capability authority. Expiry yields `Unavailable`, never stale
   an agent summary. Only Plan 24's version-checked command changes the work
   graph; only Plan 32's fenced runtime command changes run/lease/attempt/effect
   state.
+- `HostTaskExecutionContextV1::NonRepository` is a first-class no-Git path.
+  It carries no repository/worktree/ref surrogate and never disables task,
+  Kanban, workflow, or receipt semantics. Repository context is present only
+  after Plan 16 resolves and authorizes it.
 - Missing provider sequence is explicit. Ordering may use provider-native
   sequence only within its declared source domain; timestamps, hook arrival,
   or host display order never establish task causality.
 
-#### Cross-merge routing
+#### Native-integration routing
 
 - A host projection may expose only Plan 09 operations bound to Plan 20's
   effective `CrossMergeModeV1`, Plan 24's accepted decision, Plan 32's admitted
   runtime effect, and Plan 36's exact native preflight/apply capability.
-  `HostCrossMergeRouteV1` carries IDs and state, never a Git command, patch,
+  `HostNativeIntegrationRouteV1` carries IDs and state, never a Git command, patch,
   branch-name template, credentials, or mutation grant.
   A task-linked apply route requires task-decision, runtime-admission, and
   preflight anchors; a read-only availability view leaves those optional fields
@@ -371,10 +422,11 @@ not capability authority. Expiry yields `Unavailable`, never stale
 - `Disabled` and policy/protected-ref rejection are `Unavailable {
   PolicyForbidden }`. `ManualReceiptOnly` exposes ingestion of an exact native
   provider observation and anchored receipt drilldown only.
-  `FastForwardOnly` and `MergeCommit` expose apply only when
-  Plan 36 implements and conforms the exact fixed operation; under Plan 36's
-  current excluded-operation contract they are `Unavailable {
-  Plan36MutationUnsupported }`. There is no shell fallback.
+  `FastForwardOnly`, `MergeCommit`, and `CherryPickExactCommits` expose apply
+  only when Plan 36 conforms the exact fixed operation. Clean, authorized,
+  no-conflict, policy-approved requests route to Plan 36; other cases are
+  preview-only or `Unavailable { NativeIntegrationUnavailable }`. There is no
+  shell fallback.
 - Rebase, amend, force ref update, force push, destructive reset, branch
   deletion, and equivalent history rewriting have no enum variant, operation
   binding, CLI fallback, or host projection.
@@ -422,10 +474,12 @@ not capability authority. Expiry yields `Unavailable`, never stale
 - `crates/tracedecay-domain/src/integration.rs` owns the wire types above.
   `crates/tracedecay-domain/tests/host_work_capability_contract.rs` freezes
   canonical ordering/digests, one-state-per-capability, reason codes, task-event
-  references, and cross-merge route validation.
+  references, native-integration route validation, and the four GitHub stack
+  capability states.
 - `src/agents/host_capability_catalog.rs` derives the catalog.
   `src/agents/worktree_context.rs`, `src/agents/task_event_projection.rs`,
-  `src/agents/cross_merge_projection.rs`, and
+  `src/agents/native_integration_projection.rs`,
+  `src/agents/github_stack_capability.rs`, and
   `src/agents/native_execution_projection.rs` build the four bounded
   projections. `src/application/host_integration.rs` authorizes and composes
   owner operations; host adapters contain no policy or workflow branching.
@@ -439,11 +493,16 @@ not capability authority. Expiry yields `Unavailable`, never stale
   state, expiry, digest determinism, unsupported reasons, no state inheritance,
   and no duplicate Plan 08 semantics.
   `tests/agent_suite/task_event_projection_test.rs` covers native sequence,
-  missing sequence, replay, wrong task/worktree/attempt, process-exit-without-
-  receipt, and no graph/runtime mutation.
-  `tests/agent_suite/cross_merge_projection_test.rs` covers every Plan 20 mode,
-  stale policy/snapshot, protected refs, Plan 36 unsupported apply, no shell
+  missing sequence, replay, no-Git context, wrong task/worktree/attempt,
+  process-exit-without-receipt, and no graph/runtime mutation.
+  `tests/agent_suite/native_integration_projection_test.rs` covers every Plan
+  20 mode, stale policy/snapshot, protected refs, eligible Plan 36
+  fast-forward/merge/cherry-pick apply, unavailable owner operations, no shell
   fallback, and force/rebase non-representability.
+  `tests/agent_suite/github_stack_capability_test.rs` covers `Unavailable`,
+  `PrivatePreviewDisabled`, `Enabled`, and `Degraded`, exact repository
+  binding, expiry, version skew, and mandatory standard-Git/other-forge
+  fallback.
   `tests/agent_suite/fanout_fallback_test.rs` covers hook/LSP/native-
   diagnostics/MCP/CLI independence and semantic parity.
   `tests/agent_suite/native_execution_capability_test.rs` covers native Claude
@@ -457,6 +516,9 @@ not capability authority. Expiry yields `Unavailable`, never stale
   `app-server.json`, `cli-policy-disabled.json`, and
   `cli-policy-enabled.json`; Cursor adds `desktop-native-diagnostics.json` and
   `cloud-no-lsp.json`.
+  `tests/fixtures/github_stack_capabilities/` contains
+  `unavailable.json`, `private-preview-disabled.json`, `enabled.json`,
+  `degraded.json`, and `generic-fallback.json`.
 
 ### Source-capability and connector contract (PR13)
 
@@ -1110,13 +1172,19 @@ Implementation is phased and reviewable:
    `tests/agent_suite/host_bundle_lifecycle_test.rs`, fixtures under
    `tests/fixtures/source_connectors/github_review/` and
    `tests/fixtures/host_bundles/{claude,codex,cursor,hermes,kiro}/`.
-3. **PR17 work projection:** implement `WorkMcp` projection in
+3. **PR15 optional GitHub stack capability:** implement
+   `src/agents/github_stack_capability.rs` and
+   `tests/agent_suite/github_stack_capability_test.rs`; publish only the four
+   typed capability states and conformance evidence consumed by Plan 37.
+   Standard-Git/other-forge fallback passes with the adapter unavailable,
+   private-preview-disabled, or degraded.
+4. **PR17 work projection:** implement `WorkMcp` projection in
    `src/agents/work_mcp_bundle.rs`, Plan 24 manifest transport in
    `src/application/task_source_capabilities.rs`, and conformance in
    `tests/agent_suite/work_bundle_projection_test.rs` and
    `tests/session_suite/source_capability_manifest.rs`; implement the derived
    work-capability view in `src/agents/host_capability_catalog.rs` and the
-   worktree/task-event/cross-merge/native-execution projections in the exact
+   worktree/task-event/native-integration/native-execution projections in the exact
    files listed above. All use the same V1 manifest, signed selection, Plan 20
    snapshot, and owner receipt types. PR17 adds no connector store, semantic
    IR, planner/runtime/Git authority, capability-state table, or embeddings

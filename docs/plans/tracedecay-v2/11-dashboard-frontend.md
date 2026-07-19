@@ -3,8 +3,9 @@
 ## Status / Role
 
 Normative product plan. Every product PR ships its usable UI slice with its backend behavior. PR14 completes the shared shell and the full Brain, Explorer, Loom, Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory, Costs, and Settings experience. PR17 adds the first-class Work workspace and task-graph projections owned semantically by [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md).
-PR17 also adds the execution-topology lens specified below: optional worktree
-and stacked-branch lanes, dependency-commit and merge-order rails,
+PR17 also adds the execution-topology lens specified below: independent
+execution-placement, branch-topology, review-topology, and integration-strategy
+lanes, dependency-commit and merge-order rails,
 conflict/proximity evidence, integration proposals and receipts, test/CI state,
 and temporal replay over the same canonical Work selection.
 
@@ -108,7 +109,9 @@ surfaces rather than another dashboard package or route-local contract:
   `WorkItemInspector.tsx`, `TaskProposalPreview.tsx`,
   `AuxiliaryAttemptInspector.tsx`, and the exact topology components under
   `dashboard/work/src/topology/`: `ExecutionTopologyToolbar.tsx`,
-  `TopologyLaneBoard.tsx`, `WorktreeLane.tsx`, `BranchStackLane.tsx`,
+  `TopologyLaneBoard.tsx`, `ExecutionPlacementLane.tsx`,
+  `BranchTopologyLane.tsx`, `ReviewTopologyLane.tsx`,
+  `IntegrationStrategyLane.tsx`,
   `DependencyCommitRail.tsx`, `MergeOrderRail.tsx`,
   `ConflictProximityHeatmap.tsx`, `ExecutionTruthStrip.tsx`,
   `ExecutionTopologyInspector.tsx`, `IntegrationProposalPanel.tsx`,
@@ -246,6 +249,16 @@ payload contains:
   `branch_stack_lanes`; unsupported, unavailable, denied, partial, stale, or
   omitted lane families remain explicit and never disappear into the base
   Kanban;
+- four independently decoded dimensions:
+  `execution_placement`, `branch_topology`, `review_topology`, and
+  `integration_strategy`. No-Git tasks, unbranched worktrees, local stacks
+  without pull requests, and pull-request stacks without managed worktrees
+  remain renderable and never synthesize one another;
+- GitHub Stacked PR capability state exactly `Unavailable |
+  PrivatePreviewDisabled | Enabled | Degraded`, with provider stack ID,
+  position, base/head/final-target identity, merge-queue mode, and fallback
+  availability only when authorized. Provider stack order never replaces the
+  local branch-stack or task DAG;
 - separate repository dirty state, native worktree lifecycle/lock state, Plan
   32 lease/authority state, task readiness, runtime state, and evidence health.
   `dirty`, `locked`, `leased`, `blocked`, and `conflicting` are never aliases;
@@ -265,8 +278,8 @@ payload contains:
   playback. Frames reference events and entities by stable ID and never
   interpolate repository history, invent causality, or replay an effect; and
 - application-supplied `TopologyLegalActionV1` values. The action union is
-  `RequestDryRun | RequestApply | RequestCancel | Inspect | ExpandEvidence |
-  Refresh`; each mutating request carries operation/action ID, expected graph,
+  `RequestDryRun | RequestApply | RequestCancel | RequestExternalHandoff |
+  Inspect | ExpandEvidence | Refresh`; each mutating request carries operation/action ID, expected graph,
   work-item, repository-snapshot, runtime, lease-authority and policy versions
   as applicable, idempotency key, expiry, confirmation requirement, and safe
   reason schema.
@@ -274,7 +287,8 @@ payload contains:
 The generated event union is exactly `SnapshotReplaced |
 WorktreeStateChanged | BranchStackChanged | DependencyCommitChanged |
 MergeOrderChanged | ConflictProximityChanged | IntegrationProposalChanged |
-IntegrationOperationChanged | TestCheckChanged | TopologyFrameAppended`.
+IntegrationOperationChanged | ReviewTopologyCapabilityChanged |
+TestCheckChanged | TopologyFrameAppended`.
 Every event carries stream/run identity, event and entity revision, scope,
 observation time, source watermark, and coverage. `topologyEventReducer.ts`
 deduplicates by stream/event/revision, rejects stale generations, retains
@@ -313,10 +327,12 @@ substitutes for the lossless TaskId drill-down.
 selected exact version. `RequestDryRun` is always effect-free and returns a
 new immutable preview or a typed stale/denied/locked/unsupported result.
 `RequestApply` is present only where an owning application operation has
-mutation authority: current V2 Plan 36 native-Git merge/rebase/cherry-pick
-plans remain read-only and therefore never expose apply, while Plan 24 graph
-proposal application and Plan 36's three allowed index/commit operations may
-do so through their own contracts. `RequestCancel` requests cancellation from
+mutation authority. Plan 36 exposes it for clean, authorized, no-conflict,
+policy-approved fast-forward, two-parent merge, and exact ordered cherry-pick,
+as well as its index/commit operations; rebase and force-push never expose it.
+GitHub Stacked PR operations expose only an inert explicitly authorized
+external handoff, never a browser-owned provider mutation. `RequestCancel`
+requests cancellation from
 the owning operation/runtime and does not predict whether the native commit
 point was crossed. The dialog never optimistically changes a lane, dirty
 state, ref, proposal, run, test, or CI result. Reload by operation ID resumes
@@ -603,9 +619,11 @@ graph-equivalent task; median Single Ease Question is ≥6/7 and SUS is ≥80.
    timeline, causal, workload, repository, delegation, and attempt lenses.
 8. **PR17 Gate B — Work intelligence/runtime:** proposal diffs, route/exclusion
    evidence, requested/actual identity, attempts, receipts, and recovery.
-9. **PR17 Gate C — execution topology:** worktree/stack lane-family states,
-   dependency commits, merge order, dirty/lease truth, conflict/proximity,
-   tests/CI, TaskId drill-down, and dual-time playback over the same selection.
+9. **PR17 Gate C — execution topology:** independent placement/branch/review/
+   integration lane-family states, no-Git and decoupled topology cases,
+   dependency commits, merge order, GitHub stack capability/fallback, dirty/
+   lease truth, conflict/proximity, tests/CI, TaskId drill-down, and dual-time
+   playback over the same selection.
 10. **PR17 Gate D — governed integration controls:** dry-run/apply/cancel
     request rendering, stale/denied/locked/unsupported/effect-unknown outcomes,
     crash-safe receipt resume, authority-negative tests, topology performance,
@@ -722,8 +740,11 @@ cargo check --all-features
   cancellation escalation, restart/resume, artifacts, and all terminal states
   without browser-local process execution, output parsing, provider selection,
   or graph/runtime mutation.
-- PR17 execution-topology fixtures cover optional/unsupported worktree and
-  stack lanes, exact dependency commits, proposed versus observed merge order,
+- PR17 execution-topology fixtures cover no-Git tasks, optional/unsupported
+  worktree and local-stack lanes, all four independent dimensions,
+  local-stack-without-PR and PR-stack-without-worktree, all four GitHub stack
+  capability states plus generic fallback, exact dependency commits, proposed
+  versus observed merge order,
   every dirty/worktree/lease state, mechanical versus semantic conflict
   disagreement, required/observed tests and CI, drift/retarget, concurrent
   edit proximity, crash/restart receipt recovery, branch retention, and
@@ -734,12 +755,12 @@ cargo check --all-features
   row and inspector. Missing, stale, partial, denied, locked, redacted, and
   unsupported data remains visible and cannot fall back to path, lane, branch
   label, current checkout, or latest graph version.
-- Authority-negative tests prove `RequestDryRun`, `RequestApply`, and
-  `RequestCancel` are submitted only from application-supplied action
+- Authority-negative tests prove `RequestDryRun`, `RequestApply`,
+  `RequestCancel`, and `RequestExternalHandoff` are submitted only from application-supplied action
   references with exact expected versions and idempotency identity; duplicate
   clicks return one receipt, stale previews cannot apply, cancellation never
-  rewrites a committed receipt, and an unsupported Git merge/rebase/
-  cherry-pick operation never gains an apply control.
+  rewrites a committed receipt, and an ineligible/unsupported native
+  integration, rebase, or force operation never gains an apply control.
 - PR17 dashboard fixtures render each canonical auxiliary-provider finding and
   cross-owner disagreement from Plan 14, preserve Plan 20 desired/observed
   revisions and Plan 27/32/26 provenance, and invoke only the supplied typed

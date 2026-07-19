@@ -273,9 +273,9 @@ AuthorizedScopeRequest {
         | Commit(CommitId)
         | Collection(CollectionSelector)
         | Current,
-  requested_capability: ProjectDataRead | CodeSnapshotRead | WorktreeRead
-                      | WorktreeInventoryRead | StackRead
-                      | StackPreflight | StackIntegrate,
+    requested_capability: ProjectDataRead | CodeSnapshotRead | WorktreeRead
+                        | WorktreeInventoryRead | StackRead
+                        | NativeIntegrationPreflight | NativeIntegrationApply,
   continuation: optional prior scope/cursor binding
 }
 
@@ -451,6 +451,14 @@ is idempotent and leaves all legacy records unresolved when a typed proof is abs
 
 ## Native worktree inventory and branch-stack registry projection
 
+This section owns local Git branch/worktree scope only. It does not own task
+dependencies, review topology, pull-request stacks, or integration strategy.
+A worktree may be unbranched, independently branched, or bound to a local
+stack; a local stack may have no managed worktree and no pull request.
+GitHub Stacked PR identity, capability state, and linear provider semantics are
+separate Plan 27/37 review-topology observations joined here only through exact
+repository/ref/commit identity.
+
 ### Projection identity and invariants
 
 Git owns objects, refs, worktree administration, and reachability. It does not own a
@@ -470,7 +478,7 @@ BranchStackNode {
   tip_commit_id: CommitId,
   worktree_id: optional WorktreeId,
   dependency_node_ids: ordered StackNodeId[],
-  source: ExplicitDeclaration | AuthorizedPullRequestBaseObservation,
+  source: ExplicitDeclaration | AcceptedTaskBranchTopology,
   source_record_digest
 }
 ```
@@ -480,10 +488,10 @@ identity only. They never replace `RepositoryId`, `ProjectId`, `WorktreeId`, `Br
 or `CommitId`, and never grant access. A revision is publishable only when every node's
 repository/ref/commit relationship is proven at one inventory epoch and every dependency
 edge is explicit. Tracking refs, commit-message text, path layout, worktree directory
-names, common commit prefixes, or graph proximity cannot infer an authoritative stack
-edge. An authorized pull-request base observation may supply an edge only when the
-provider record names exact base/head refs and commits; it remains provider-observed
-provenance and becomes stale when either commit moves.
+names, common commit prefixes, graph proximity, pull-request bases, or provider stack
+position cannot infer an authoritative local-stack edge. A provider review-topology
+observation may be joined for display and drift evidence only; it never creates or
+reorders this registry.
 
 The projection is acyclic. Duplicate branch refs, cross-repository edges, self-edges,
 missing dependency nodes, and a node whose tip is not exactly the object currently named
@@ -544,7 +552,8 @@ AuthorizedBranchStackRequest {
   principal, operation, stack_id,
   revision: Exact(BranchStackRevisionId) | Current,
   node_selector: Exact(nonempty StackNodeId[]) | AllAuthorized,
-  requested_capability: StackRead | StackPreflight | StackIntegrate,
+  requested_capability:
+    StackRead | NativeIntegrationPreflight | NativeIntegrationApply,
   authorized_scope_grant, policy_epoch
 }
 
@@ -558,9 +567,10 @@ AuthorizedBranchStackSnapshot {
 ```
 
 `Current` freezes one revision before authorization and never follows a later publish.
-`StackRead` does not imply `StackPreflight`; neither implies `StackIntegrate`.
-`StackIntegrate` is a separately delegated, operation-specific capability consumed only
-by Plan 36. `AllAuthorized` is valid only for `StackRead`; preflight and integration must
+`StackRead` does not imply `NativeIntegrationPreflight`; neither implies
+`NativeIntegrationApply`. `NativeIntegrationApply` is a separately delegated,
+operation-specific capability consumed only by Plan 36. `AllAuthorized` is
+valid only for `StackRead`; preflight and integration must
 name a nonempty exact node set, including the source and destination. A request naming an
 unauthorized node returns the same policy-safe
 `restricted_or_unavailable` shape as a missing node. A partially visible topology does
@@ -647,7 +657,9 @@ pub trait BranchStackRegistryStore {
   detached, unborn, locked, prunable, deleted/recreated, missing-admin, incomplete-scan,
   SHA-1/SHA-256, and process-restart fixtures without path identity.
 - `tests/scope_suite/authorized_stack_projection.rs` covers 1/2/8/32 nodes, denied
-  siblings, partially visible topology, explicit PR-base observations, ref/tip drift,
+  siblings, stacks with no managed worktree or PR, partially visible topology,
+  rejected PR-base inference, exact
+  review-topology joins, ref/tip drift,
   inventory-epoch drift, authorization revocation, project/repository/worktree/stack
   capability non-implication, stack/node grant-digest replay, and hidden-node
   non-enumeration.

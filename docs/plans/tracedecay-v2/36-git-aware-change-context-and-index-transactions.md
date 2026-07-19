@@ -8,14 +8,16 @@ TraceDecay makes repository state useful to agents without becoming a Git
 implementation or an unrestricted Git command runner. Native Git remains the
 authority for repository objects, refs, the working tree, the index, attributes,
 ignore rules, and commit creation. TraceDecay adds generation-bound provenance,
-typed read-only intelligence, and three narrowly authorized index mutations:
-`stage_hunks`, `unstage_hunks`, and `commit_index`. After Plan 16's PR15 typed
-worktree/stack scope ships, this plan adds one separately authorized mechanical
-stack mutation: `integrate_stack_edge`.
+typed read-only intelligence, and typed native Git preflight/apply/receipt
+operations. PR11 first exposes the narrowly authorized `stage_hunks`,
+`unstage_hunks`, and `commit_index` mutations. PR15 adds
+`preflight_native_integration`, `apply_native_integration`,
+`native_integration_status`, and `cancel_native_integration` for an exact
+independent-branch or Plan 16 local-stack edge.
 
 Every mutation is previewed from an exact repository snapshot, checked again at
 apply time, serialized by the daemon, and returned with a durable receipt. A
-stale preview never edits the index. CLI and MCP expose the same application
+stale preview never mutates an index, worktree, object, or ref. CLI and MCP expose the same application
 operations, schemas, errors, and receipts.
 
 ## Boundaries
@@ -24,10 +26,12 @@ This plan does not create:
 
 - a shadow Git object database, index, ref store, history model, or patch engine;
 - a generic `git exec`, arbitrary subprocess, or user-supplied Git argument path;
-- a generic or autonomous merge, rebase, cherry-pick, revert, ref movement,
+- a generic or unrestricted merge, rebase, cherry-pick, revert, ref movement,
   history rewrite, fetch, pull, push, branch deletion, tag mutation, or remote
-  mutation; `integrate_stack_edge` is the sole merge exception and accepts only
-  a frozen Plan 16 stack edge plus a conflict-free policy-approved preview;
+  mutation; `apply_native_integration` is the sole local branch/ref integration
+  exception and accepts only an exact frozen source/target scope, optionally
+  bound to a Plan 16 stack edge, plus a clean conflict-free policy-approved
+  preview for fast-forward, two-parent merge, or exact ordered cherry-pick;
 - implicit staging, committing, conflict resolution, or checkout changes; or
 - a claim that graph or session evidence overrides native repository state.
 
@@ -36,6 +40,14 @@ impact analysis, predicted conflicts, affected tests, and verification guidance.
 It never turns that evidence into mutation authority.
 
 ## Delivery ownership
+
+Plan 36 owns native mechanics and receipts. Plan 20 owns configuration and
+policy gates; Plan 21 owns CLI/MCP binding and rendering; Plan 35 owns LSP
+notification/handoff exposure; Plan 11 owns dashboard presentation; Plan 09
+owns authorization and effect admission; and Plan 32 owns workflow leases,
+deadlines, budgets, and runtime state. None may reimplement, permanently hide,
+or advertise a mechanical apply operation before the Plan 36 capability
+record says it is available.
 
 ### PR7: repository provenance
 
@@ -180,19 +192,22 @@ classification, and stable error taxonomy. Neither transport contains Git
 logic, opens repository internals, accepts opaque Git arguments, or implements a
 fallback mutation path when the daemon is unavailable.
 
-### PR15: native stack snapshots, conflict preflight, and mechanical integration
+### PR15: native topology snapshots, conflict preflight, and mechanical integration
 
-PR15 consumes Plan 16's exact `AuthorizedBranchStackSnapshot`. It adds
-dependency-commit calculation, merge-base and tip snapshots, repository/worktree/index
-state capture, native `merge-tree` plus temporary-index preflight, the layered conflict
-engine, and `integrate_stack_edge`.
+PR15 consumes exact Plan 16 repository/worktree/ref scope and, when the
+operation follows a declared local stack edge, its
+`AuthorizedBranchStackSnapshot`. It adds dependency-commit calculation,
+merge-base and tip snapshots, repository/worktree/index state capture, native
+merge/cherry-pick plus temporary-index preflight, the layered conflict engine,
+and the four native-integration operations.
 
 An authorized human or policy-delegated agent may facilitate
-`integrate_stack_edge` only when the exact preview is classified
-`MechanicalIntegrationEligible`. The operation is limited to fast-forwarding or creating
-one ordinary conflict-free two-parent merge on one declared stack edge. Semantic
-conflicts, incomplete evidence, ambiguous merge bases, or unsupported Git state always
-escalate; no policy or agent override can make this operation guess a resolution.
+`apply_native_integration` only when the exact preview is classified
+`MechanicalIntegrationEligible`. The operation is limited to fast-forwarding,
+creating one ordinary conflict-free two-parent merge, or cherry-picking an
+exact ordered set of single-parent commits. Semantic conflicts, incomplete
+evidence, ambiguous merge bases, or unsupported Git state always escalate; no
+policy or agent override can make this operation guess a resolution.
 
 PR15 extends the shared CLI/MCP catalog with the same application request/result types.
 It adds no raw Git command surface, no GitHub write, no remote operation, and no
@@ -275,7 +290,7 @@ Cancellation before native commit leaves state unchanged. Cancellation after a
 native transaction reaches its commit point returns the committed receipt; it
 must not report cancellation as if no mutation occurred.
 
-## Stack snapshot and staleness contract
+## Native integration snapshot and staleness contract
 
 ### Repository, tip, merge-base, and dependency-commit snapshots
 
@@ -284,7 +299,8 @@ observation:
 
 ```text
 RepositoryStateSnapshotV1 {
-  snapshot_id, project_id, repository_id, worktree_id,
+  snapshot_id, project_id, repository_id,
+  checkout_or_worktree_id: optional CheckoutOrWorktreeId,
   observation_epoch,
   object_format, git_version, adapter_revision,
   head: { state: Attached | Detached | Unborn,
@@ -307,9 +323,12 @@ RepositoryStateSnapshotV1 {
 }
 
 TipSnapshotV1 {
-  stack_id, stack_revision_id, node_id,
+  repository_id, role: Source | Destination,
   branch_ref, tip_commit_id, tip_tree_id, parent_commit_ids,
-  repository_state_snapshot_id, inventory_epoch
+  repository_state_snapshot_id,
+  stack_binding: optional {
+    stack_id, stack_revision_id, node_id, inventory_epoch
+  }
 }
 
 MergeBaseSnapshotV1 {
@@ -320,7 +339,10 @@ MergeBaseSnapshotV1 {
 }
 
 DependencyCommitSetV1 {
-  source_node_id, destination_node_id, direction,
+  source_tip_snapshot_id, destination_tip_snapshot_id, direction,
+  stack_edge: optional {
+    stack_id, stack_revision_id, source_node_id, destination_node_id
+  },
   merge_base_snapshot_id,
   commits: topological-oldest-first {
     commit_id, tree_id, parent_commit_ids, patch_id,
@@ -333,9 +355,11 @@ DependencyCommitSetV1 {
 }
 ```
 
-`direction` is `PropagateDependencyToDependent` or
-`LandDependentIntoDependency`; the source/destination relationship must match that
-direction on one exact declared Plan 16 edge. Dependency commits are exactly commits
+`direction` is `PropagateDependencyToDependent`,
+`LandDependentIntoDependency`, or `IntegrateIndependentBranch`. A stack
+direction must match one exact declared Plan 16 edge; independent-branch
+integration must omit `stack_edge` and carry an explicit Plan 24 proposal.
+Dependency commits are exactly commits
 reachable from the source tip and not from the destination tip, ordered by native
 topological order and then `CommitId` for a deterministic tie break. `Ready` requires
 every selected commit parent to be reachable from the destination tip or an earlier
@@ -355,9 +379,15 @@ silently changes the graph.
 Every preflight and conflict result binds one immutable epoch:
 
 ```text
-StackAnalysisEpochV1 {
-  repository_id, stack_id, stack_revision_id,
-  inventory_snapshot_id, inventory_epoch, scope_digest,
+NativeIntegrationAnalysisEpochV1 {
+  repository_id,
+  topology_binding:
+    IndependentBranches { source_ref, destination_ref, proposal_revision_id }
+    | LocalStackEdge {
+        stack_id, stack_revision_id, source_node_id, destination_node_id,
+        inventory_snapshot_id, inventory_epoch
+      },
+  scope_digest,
   source_tip_snapshot_id, destination_tip_snapshot_id,
   source_repository_state_snapshot_id,
   destination_repository_state_snapshot_id,
@@ -387,12 +417,17 @@ Git flags, merge drivers, filters, or hooks.
 
 The fixed sequence is:
 
-1. Revalidate the Plan 16 scope, exact stack edge, source/destination refs and tips,
-   complete repository snapshots, and `StackAnalysisEpochV1`.
+1. Revalidate the Plan 16 scope, exact independent-branch proposal or local
+   stack edge, source/destination refs and tips, complete repository snapshots,
+   and `NativeIntegrationAnalysisEpochV1`.
 2. Run the adapter's pinned native merge-base and dependency-commit operations.
-3. Run native `merge-tree --write-tree` with the pinned tips, adapter revision, rename
-   profile, attributes/config policy, and isolated object directory. Capture the candidate
-   tree or exact native conflict stages/messages; never parse human display text when a
+3. Run the fixed strategy-specific native plumbing with the pinned tips,
+   adapter revision, rename profile, attributes/config policy, and isolated
+   object directory. Fast-forward proves ancestry; two-parent merge uses
+   `merge-tree --write-tree`; exact cherry-pick walks the preview-bound
+   single-parent commits in order and applies each parent-to-commit delta to
+   the prior candidate tree. Capture every intermediate candidate tree or
+   exact native conflict stage/message; never parse human display text when a
    plumbing record exists.
 4. Seed the temporary index from the destination tree, read the candidate tree into it,
    round-trip it through `write-tree`, and require byte-identical tree identity. Inspect
@@ -410,16 +445,20 @@ revalidates the native candidate under the repository mutation queue; it never p
 stale temporary object or trusts a prior filesystem path.
 
 ```text
-StackIntegrationPreviewV1 {
+NativeIntegrationPreviewV1 {
   preview_id, schema_version, analysis_epoch,
-  source_node_id, destination_node_id, direction,
+  source_tip_snapshot_id, destination_tip_snapshot_id, direction,
+  stack_edge: optional { stack_id, stack_revision_id,
+                         source_node_id, destination_node_id },
   dependency_commit_set_id, source_tip, destination_tip,
   merge_base_snapshot_id, candidate_tree_id,
   native_preflight_digest, conflict_report_id,
   eligibility: MechanicalIntegrationEligible
              | SemanticReviewRequired | NativeConflict
              | IncompleteEvidence | Unsupported | Stale,
-  mechanical_mode: optional FastForward | TwoParentMerge,
+  mechanical_mode: optional FastForward | TwoParentMerge
+                            | CherryPickExactCommits,
+  ordered_cherry_pick_commits: CommitId[],
   required_hook_signing_policy, approval_scope,
   created_at, expires_at, preview_digest
 }
@@ -513,23 +552,23 @@ also blocks. There is no auto-resolution rule, language-model resolution, "ours/
 default, confidence threshold, or policy bypass. A human resolves semantically through
 normal repository work, then requests a fresh snapshot and preview.
 
-## Policy-approved mechanical cross-merge
+## Policy-approved mechanical native integration
 
 ### Authorization and eligibility
 
-`integrate_stack_edge` accepts no branch label, path, SHA string, patch, commit list,
-message template, or Git argument. It accepts only:
+`apply_native_integration` accepts no branch label, path, free-form SHA
+string, patch, caller-supplied commit list, message template, or Git argument.
+It accepts only:
 
 ```text
-ApplyStackIntegrationRequestV1 {
+ApplyNativeIntegrationRequestV1 {
   preview_id, preview_digest,
-  approval: StackIntegrationApprovalV1 {
+  approval: NativeIntegrationApprovalV1 {
     approval_id, principal, delegated_agent_id: optional AgentId,
-    capability = StackIntegrate,
+    capability = NativeIntegrationApply,
     preview_id, preview_digest, analysis_epoch_digest, scope_digest,
-    stack_id, stack_revision_id,
-    source_node_id, destination_node_id, direction,
-    mechanical_mode: FastForward | TwoParentMerge,
+    topology_binding_digest,
+    mechanical_mode: FastForward | TwoParentMerge | CherryPickExactCommits,
     policy_digest, policy_epoch, issued_at, expires_at, nonce
   },
   cancellation_token
@@ -537,30 +576,44 @@ ApplyStackIntegrationRequestV1 {
 ```
 
 An agent may submit this request only when a policy authority has delegated the exact
-`StackIntegrate` capability and issued the exact approval above. General repository write,
-task execution, shell, collection, worktree-read, or proximity permission is
-insufficient. Approval is one-use and content-bound. The daemon reauthorizes it before
-the first native mutation and again before ref commit.
+`NativeIntegrationApply` capability and issued the exact approval above. General
+repository write, task execution, shell, collection, worktree-read, stack-read, or
+proximity permission is insufficient. Approval is one-use and content-bound. The daemon
+reauthorizes it before the first native mutation and again before ref commit.
 
-Mechanical eligibility requires: one visible declared stack edge; unique merge base;
+Mechanical eligibility requires an exact authorized independent-branch proposal or one
+visible declared local-stack edge; unique merge base;
 complete object history and all six conflict layers; no `Actual` or blocking `Potential`
 finding; every present bound worktree clean with a clean real index and no in-progress
 operation; no active holder that lacks an integration-safe quiescence acknowledgement;
 exact source/destination tips; supported object/index/filter/hook/signing/filesystem
 state; no candidate collision with untracked or ignored content; and a current scope,
-inventory, stack, graph/catalog/test, policy, and authorization epoch.
+topology binding, graph/catalog/test, policy, and authorization epoch.
 
-Only `FastForward` and one ordinary `TwoParentMerge` are valid. Octopus, squash,
-cherry-pick, rebase, amend, synthetic parent lists, unrelated-history merge, conflict
-commit, empty-policy bypass, and history rewrite are impossible to encode.
+Lowering is exhaustive: Plan 24 `FastForwardOnly` maps to `FastForward`,
+`CreateTwoParentMergeCommit` maps to `TwoParentMerge`, and
+`CherryPickExactCommits` maps to the same-named Plan 36 mode. Plan 20
+`FastForwardOnly`, `MergeCommit`, and `CherryPickExactCommits` respectively
+gate those mappings. Every other Plan 24 strategy is preview/external-only and
+cannot reach apply.
+
+Only `FastForward`, one ordinary `TwoParentMerge`, and
+`CherryPickExactCommits` are valid. Cherry-pick accepts only the exact
+preview-bound topological order of single-parent commits, rejects merge
+commits, duplicate patch IDs, and every conflict or semantic blocker. Octopus,
+squash, rebase, amend, synthetic parent lists, unrelated-history merge,
+conflict commit, caller-chosen `--mainline`, empty-policy bypass, and history
+rewrite are impossible to encode.
 
 V1's hook/signing/message contract is closed:
 
 ```text
-MechanicalMergeCommitPolicyV1 {
+MechanicalIntegrationCommitPolicyV1 {
   hook_policy: VerifiedNoApplicableHooks,
   signing_policy: UnsignedPermitted | SignatureRequired { signing_key_ref },
-  message_policy: FixedStackIntegrationMessageV1
+  message_policy:
+    FixedNativeIntegrationMessageV1
+    | PreserveExactSourceCommitMessage
 }
 ```
 
@@ -570,28 +623,33 @@ native hook locations under the pinned config policy. Any configured executable
 `post-merge` hook returns `UnsupportedHookPolicy` and keeps integration preview-only;
 V1 never invokes, bypasses, or approximates merge-hook behavior. A fast-forward creates
 no commit and has `hook_outcome = NotApplicable` and
-`signing_outcome = NotApplicable`. A two-parent merge uses native `commit-tree` with the
-required signing policy. `FixedStackIntegrationMessageV1` is generated only from encoded
-source/destination `StackNodeId`, source/destination `CommitId`, direction, and
-`preview_id`; no branch label, path, commit subject, PR text, agent text, or caller
-template enters it. A repository that disallows plumbing-created merge commits is
-preview-only. No request can disable a required signature or alter this policy.
+`signing_outcome = NotApplicable`. A two-parent merge and every cherry-picked
+commit use native commit creation with the required signing policy.
+`FixedNativeIntegrationMessageV1` is generated only from encoded source/
+destination identity, commit IDs, strategy, and `preview_id`.
+`PreserveExactSourceCommitMessage` is legal only for cherry-pick and reads the
+message from the preview-bound native commit object; caller, branch, path, PR,
+agent, and prompt text never enter it. A repository that disallows the
+required plumbing-created commits is preview-only. No request can disable a
+required signature or alter this policy.
 
 ### Daemon transaction, receipt, and recovery
 
-All index and stack mutations share the same per-`RepositoryId` daemon queue.
-`integrate_stack_edge` additionally acquires source and destination worktree leases in
-encoded `WorktreeId` order. The leases exclude TraceDecay operations, not external Git;
-native state is therefore compare-and-swap checked at every commit boundary.
+All index and native-integration mutations share the same per-`RepositoryId`
+daemon queue. `apply_native_integration` additionally acquires source and
+destination worktree leases, when present, in encoded `WorktreeId` order. The
+leases exclude TraceDecay operations, not external Git; native state is
+therefore compare-and-swap checked at every commit boundary.
 
 The daemon writes and fsyncs a durable journal before touching durable repository state:
 
 ```text
-StackIntegrationJournalV1 {
+NativeIntegrationJournalV1 {
   transaction_id, preview_id, approval_id, repository_id,
-  source_worktree_id, destination_worktree_id,
+  source_worktree_id: optional WorktreeId,
+  destination_worktree_id: optional WorktreeId,
   old_source_tip, old_destination_tip, candidate_tree_id,
-  candidate_commit_id: optional CommitId,
+  candidate_commit_ids: CommitId[],
   old_index_checksum, old_index_tree_id,
   phase: Prepared | CandidateCreated | WorktreeUpdating | IndexSwapped
        | RefCommitted | Verifying | Committed
@@ -600,9 +658,10 @@ StackIntegrationJournalV1 {
 }
 ```
 
-Apply recreates the candidate with native Git, verifies its tree against the preview, runs
-the pinned hook/signing policy when a merge commit is required, and creates either the
-exact fast-forward target or one two-parent merge commit. If the destination ref is not
+Apply recreates the candidate with native Git, verifies its tree against the
+preview, runs the pinned hook/signing policy when commits are required, and
+creates the exact fast-forward target, one two-parent merge commit, or the
+exact ordered cherry-pick commit chain. If the destination ref is not
 checked out, apply performs only a native transactional compare-and-swap ref update. If it
 is checked out in exactly one authorized destination worktree, the daemon requires the
 clean snapshot, materializes the candidate through the verified temporary index,
@@ -621,14 +680,15 @@ tree/index. Any external drift that prevents proof or rollback yields `NeedsInsp
 the daemon never guesses, retries the merge, or emits success.
 
 ```text
-StackIntegrationReceiptV1 {
+NativeIntegrationReceiptV1 {
   receipt_id, transaction_id, preview_id, approval_id,
-  actor, delegated_agent_id, repository_id, stack_id, stack_revision_id,
-  source_node_id, destination_node_id, direction, mechanical_mode,
+  actor, delegated_agent_id, repository_id, topology_binding,
+  source_tip_snapshot_id, destination_tip_snapshot_id,
+  direction, mechanical_mode,
   analysis_epoch_digest, scope_digest, conflict_report_id,
   old_source_tip, old_destination_tip, new_destination_tip,
   merge_base_snapshot_id, dependency_commit_set_id,
-  candidate_tree_id, created_commit_id: optional CommitId,
+  candidate_tree_id, created_commit_ids: CommitId[],
   old_repository_state_snapshot_id, final_repository_state_snapshot_id,
   hook_outcomes, signing_outcome, native_ref_transaction_digest,
   outcome: Committed | AbortedNoChange | RolledBack | NeedsInspection,
@@ -652,36 +712,44 @@ replays an integration or creates a second commit.
   canonical encoding, digest, ordering, legal transition, and validation invariant.
   `crates/tracedecay-domain/src/git/mod.rs` and `lib.rs` re-export them.
 - `crates/tracedecay-application/src/git/snapshot.rs`,
-  `stack_preflight.rs`, `conflict_engine.rs`, `integrate_stack.rs`, and
+  `native_operations.rs`,
+  `native_integration_preflight.rs`, `conflict_engine.rs`,
+  `native_integration.rs`, and
   `recovery.rs` own the use cases. They consume Plan 16's `ScopeResolver` and
   `BranchStackProjectionService`; transports and agents cannot bypass either.
+  `native_operations.rs` defines the Plan 36 `NativeGitExecutionPort` consumed
+  by Plan 32 for placement and local integration; Plan 32's remote publication
+  and provider ports are separate runtime effects.
 - `src/git/adapter/repository_state.rs`, `commit_graph.rs`, `merge_tree.rs`,
-  `temporary_index.rs`, `hooks_signing.rs`, and `ref_transaction.rs` are the only native
+  `cherry_pick.rs`, `temporary_index.rs`, `hooks_signing.rs`, and
+  `ref_transaction.rs` are the only native
   Git implementations. Every operation has a closed typed option profile and scrubs
   ambient config/environment not explicitly admitted by repository policy.
-- `src/daemon/git_transactions/queue.rs`, `journal.rs`, `apply_stack.rs`, and
+- `src/daemon/git_transactions/queue.rs`, `journal.rs`,
+  `apply_native_integration.rs`, and
   `recovery.rs` own serialization, fsync boundaries, worktree leases, startup recovery,
   and repository mutation quarantine.
-- `src/mcp/tools/definitions/git_stack.rs`,
-  `src/mcp/tools/handlers/git_stack.rs`, and `src/cli/git_stack.rs` are thin Plan 21
-  bindings for `stack_snapshot`, `stack_preflight`, `stack_conflicts`,
-  `integrate_stack_edge`, and `stack_integration_receipt`. They accept no arbitrary Git
-  flags or paths.
-- `crates/tracedecay-store/src/git_stack.rs` and
-  `src/global_db/git_stack/{schema,store,migration}.rs` own append-only snapshot,
+- `src/mcp/tools/definitions/git_integration.rs`,
+  `src/mcp/tools/handlers/git_integration.rs`, and
+  `src/cli/git_integration.rs` are thin Plan 21 bindings for
+  `stack_snapshot`, `preflight_native_integration`,
+  `apply_native_integration`, `native_integration_status`, and
+  `cancel_native_integration`. They accept no arbitrary Git flags or paths.
+- `crates/tracedecay-store/src/git_integration.rs` and
+  `src/global_db/git_integration/{schema,store,migration}.rs` own append-only snapshot,
   preview, finding, journal, and receipt storage.
 
 ```rust
-pub trait GitStackIntelligence {
+pub trait NativeIntegrationIntelligence {
     fn snapshot(
         &self,
-        request: StackSnapshotRequestV1,
-    ) -> Result<StackSnapshotResultV1, GitStackError>;
+        request: NativeIntegrationSnapshotRequestV1,
+    ) -> Result<NativeIntegrationSnapshotResultV1, GitStackError>;
 
     fn preflight(
         &self,
-        request: StackPreflightRequestV1,
-    ) -> Result<StackIntegrationPreviewV1, GitStackError>;
+        request: NativeIntegrationPreflightRequestV1,
+    ) -> Result<NativeIntegrationPreviewV1, GitStackError>;
 }
 
 pub trait StackConflictEngine {
@@ -691,51 +759,62 @@ pub trait StackConflictEngine {
     ) -> Result<StackConflictReportV1, ConflictEngineError>;
 }
 
-pub trait StackIntegrationService {
+pub trait NativeIntegrationService {
     fn apply(
         &self,
-        request: ApplyStackIntegrationRequestV1,
-    ) -> Result<StackIntegrationReceiptV1, StackIntegrationError>;
+        request: ApplyNativeIntegrationRequestV1,
+    ) -> Result<NativeIntegrationReceiptV1, NativeIntegrationError>;
+
+    fn status(
+        &self,
+        request: NativeIntegrationStatusRequestV1,
+    ) -> Result<NativeIntegrationStatusV1, NativeIntegrationError>;
+
+    fn cancel(
+        &self,
+        request: CancelNativeIntegrationRequestV1,
+    ) -> Result<NativeIntegrationCancellationV1, NativeIntegrationError>;
 
     fn recover(
         &self,
-        transaction_id: StackIntegrationTransactionId,
-    ) -> Result<StackIntegrationReceiptV1, StackRecoveryError>;
+        transaction_id: NativeIntegrationTransactionId,
+    ) -> Result<NativeIntegrationReceiptV1, NativeIntegrationRecoveryError>;
 }
 ```
 
 ### Store schema and migration
 
-- `git_repository_state_snapshots(snapshot_id, repository_id, worktree_id,
+- `git_repository_state_snapshots(snapshot_id, repository_id, checkout_or_worktree_id,
   observation_epoch, head_commit_payload, branch_ref_payload, refs_digest,
   index_checksum, index_tree_id, index_state, working_tree_state,
   working_tree_digest, operation_state, capability_digest, captured_at,
   coverage_digest, snapshot_digest)` is append-only with unique
-  `(repository_id, worktree_id, observation_epoch)`.
-- `git_stack_analysis_epochs(epoch_id, stack_id, stack_revision_id,
-  inventory_snapshot_id, inventory_epoch, scope_digest, source_tip_snapshot_id,
+  `(repository_id, observation_epoch, snapshot_digest)`.
+- `git_native_integration_analysis_epochs(epoch_id, topology_binding_kind,
+  topology_binding_digest, scope_digest, source_tip_snapshot_id,
   destination_tip_snapshot_id, merge_base_snapshot_id, dependency_commit_set_id,
   graph_generation, schema_catalog_revision, migration_catalog_revision,
   test_map_revision, adapter_revision, authorization_grant_id, grant_digest,
   policy_digest, policy_epoch, epoch_digest)` is immutable.
-- `git_stack_previews(preview_id, epoch_id, source_node_id, destination_node_id,
-  direction, candidate_tree_id, conflict_report_id, eligibility, mechanical_mode,
+- `git_native_integration_previews(preview_id, epoch_id, direction,
+  candidate_tree_id, conflict_report_id, eligibility, mechanical_mode,
+  ordered_cherry_pick_commit_digest,
   created_at, expires_at, preview_digest)` stores no patch or object body.
-- `git_stack_conflict_findings(report_id, finding_ordinal, finding_id, certainty,
+- `git_integration_conflict_findings(report_id, finding_ordinal, finding_id, certainty,
   layer, class, severity, disposition, source_anchor_digest,
   destination_anchor_digest, relation_path_digest, producer_revision, coverage_digest,
   evidence_digest)` has unique `(report_id, finding_id)` and canonical ordinal order.
-- `git_stack_integration_journal(transaction_id, phase, phase_epoch, preview_id,
+- `git_native_integration_journal(transaction_id, phase, phase_epoch, preview_id,
   approval_id, repository_id, source_worktree_id, destination_worktree_id,
-  old_source_tip, old_destination_tip, candidate_tree_id, candidate_commit_id,
+  old_source_tip, old_destination_tip, candidate_tree_id, candidate_commit_ids_digest,
   old_index_checksum, old_index_tree_id, started_at, updated_at, journal_digest)` is
   updateable only by legal compare-and-swap phase transitions.
-- `git_stack_integration_receipts(receipt_id, transaction_id, preview_id, approval_id,
+- `git_native_integration_receipts(receipt_id, transaction_id, preview_id, approval_id,
   outcome, old_destination_tip, new_destination_tip, candidate_tree_id,
-  created_commit_id, old_snapshot_id, final_snapshot_id, native_ref_transaction_digest,
+  created_commit_ids_digest, old_snapshot_id, final_snapshot_id, native_ref_transaction_digest,
   recovery_digest, committed_at, receipt_schema_version, receipt_digest)` is append-only
   and unique by transaction ID.
-- `git_stack_migration_quarantine(source_table, source_row_id, reason_code,
+- `git_integration_migration_quarantine(source_table, source_row_id, reason_code,
   redacted_payload_digest, quarantined_at)` receives legacy branch names, path-keyed
   worktrees, untyped SHAs, inferred parent links, cached conflict guesses, and mutation
   logs without exact native receipts.
@@ -746,39 +825,44 @@ format, exact ref/commit relationship, and content digest validate; otherwise it
 quarantines the row. Re-execution is idempotent. No migration synthesizes a stack edge,
 approval, conflict-free result, integration commit, or success receipt.
 
-## Stack tests, benchmarks, and executable acceptance
+## Native integration tests, benchmarks, and executable acceptance
 
-- `crates/tracedecay-domain/tests/git_stack_contract.rs` covers canonical IDs/digests,
-  legal journal transitions, one-use approvals, direction/edge validation, exhaustive
-  enums, and rejection of every untyped path/ref/SHA/Git-argument input.
-- `tests/git_stack_suite/repository_state.rs` covers clean, staged, unstaged, untracked,
+- `crates/tracedecay-domain/tests/git_integration_contract.rs` covers canonical
+  IDs/digests, legal journal transitions, one-use approvals, independent-branch
+  and local-stack bindings, exhaustive enums, and rejection of every untyped
+  path/ref/SHA/Git-argument input.
+- `tests/git_integration_suite/repository_state.rs` covers clean, staged, unstaged, untracked,
   ignored collision, conflicted, detached, unborn, sparse, split-index, submodule,
   filter, non-UTF-8, SHA-1/SHA-256, in-progress operation, shallow, partial-clone,
   promisor, replace-ref, graft, and corrupt-object states.
-- `tests/git_stack_suite/dependency_commits.rs` covers linear, forked, merge-heavy,
+- `tests/git_integration_suite/dependency_commits.rs` covers linear, forked, merge-heavy,
   multiple-base, missing-parent, multi-dependency, both integration directions,
   deterministic topological ordering, and every readiness outcome.
-- `tests/git_stack_suite/native_preflight.rs` differential-tests pinned native Git for
-  fast-forward, clean two-parent merge, every index stage, rename threshold, mode,
+- `tests/git_integration_suite/native_preflight.rs` differential-tests pinned
+  native Git for fast-forward, clean two-parent merge, ordered single-parent
+  cherry-pick, every index stage, rename threshold, mode,
   binary, symlink, submodule, sparse, filter, case-fold, untracked/ignored collision, and
   proves the real refs, index, and worktrees are byte-identical before/after preview.
-- `tests/git_stack_suite/conflict_layers.rs` has positive and negative fixtures for every
+- `tests/git_integration_suite/conflict_layers.rs` has positive and negative fixtures for every
   file, hunk, symbol, schema, migration, and test-write class; generation/catalog/test-map
   drift and partial coverage block; textually clean semantic conflicts escalate; no
   fixture auto-resolves a semantic conflict.
-- `tests/git_stack_suite/integration.rs` covers human and delegated-agent approvals,
-  fast-forward and two-parent merge, rejection of every V1-inapplicable hook path,
+- `tests/git_integration_suite/integration.rs` covers human and delegated-agent approvals,
+  fast-forward, two-parent merge, and exact ordered cherry-pick, plus rejection of
+  merge commits, reordered commits, duplicate patch IDs, conflicts, and every
+  V1-inapplicable hook path,
   unsigned-permitted and signature-required policy, fixed message bytes, checked-out and
   unoccupied destination refs, source immutability, stale fields independently, external
   ref/index/worktree races, cancellation at every journal phase, and one-use replay.
-- `tests/git_stack_suite/recovery.rs` fault-injects process death and I/O failure before
+- `tests/git_integration_suite/recovery.rs` fault-injects process death and I/O failure before
   and after every fsync/index/ref boundary and proves exactly one of `Committed`,
   `AbortedNoChange`, `RolledBack`, or `NeedsInspection`, with no duplicate commit or
   receipt and mutation quarantine on ambiguity.
-- `tests/git_stack_suite/authorization.rs` proves project/repository/worktree/stack read,
+- `tests/git_integration_suite/authorization.rs` proves project/repository/worktree/stack read,
   preflight, and integrate capabilities do not imply one another; hidden nodes leak no
   identity/count; task, collection, proximity, or daemon locality grants no mutation.
-- `benches/git_stack.rs` measures snapshot, dependency closure, merge-tree/temp-index
+- `benches/git_integration.rs` measures snapshot, dependency closure,
+  merge/cherry-pick temp-index
   preflight, each conflict layer, receipt write, and restart recovery for 2/8/32/128
   nodes; 10/100/1,000 dependency commits; and 10/100/1,000 changed files/symbols/tests.
   It records p50/p95/p99, allocations, native subprocess count, bytes read/written, and
@@ -786,19 +870,19 @@ approval, conflict-free result, integration commit, or success receipt.
   baseline and rejects an unexplained p95 regression above 10%.
 
 ```sh
-cargo test -p tracedecay-domain --test git_stack_contract --all-features
-cargo test --all-features --test git_stack_suite
-cargo bench --bench git_stack --all-features
+cargo test -p tracedecay-domain --test git_integration_contract --all-features
+cargo test --all-features --test git_integration_suite
+cargo bench --bench git_integration --all-features
 cargo check --all-features
 ```
 
-PR15 stack acceptance requires deterministic dependency/merge-base/tip/epoch/conflict
+PR15 native-integration acceptance requires deterministic dependency/merge-base/tip/epoch/conflict
 digests across restart; native-Git differential parity; complete dirty/index-state
 truthfulness; zero real-state mutation during preflight; semantic escalation on every
 blocking potential conflict; exact delegated approval; one durable terminal receipt per
 apply; fault-injected recovery with no ambiguous success; no GitHub/remote write; and no
 mutation outside `stage_hunks`, `unstage_hunks`, `commit_index`, or the exact
-`integrate_stack_edge` operation.
+`apply_native_integration` operation.
 
 ## Failure semantics
 
@@ -919,11 +1003,13 @@ This plan is complete only when native Git remains the observable authority;
 PR7 provenance is generation-bound; PR9 intelligence is read-only and truthful,
 including typed `PullRequestSnapshot`, `ReviewThreadAnchor`, and `CommentAnchor`
 identity with exact-current remap rules and no fuzzy upgrade; PR11 exposes only
-the three daemon-serialized mutations with `HunkRef` compare-and-swap; PR12
-provides schema-identical CLI/MCP behavior; PR15 adds only the exact
-policy-approved `integrate_stack_edge` mutation over Plan 16 scope, complete
-native/semantic preflight, and terminal receipt/recovery; stale or unsupported
-state fails closed; semantic conflicts escalate; privacy defaults hold; crash
+  the three daemon-serialized mutations with `HunkRef` compare-and-swap; PR12
+  provides schema-identical CLI/MCP behavior; PR15 adds only the exact
+  policy-approved `apply_native_integration` mutation over Plan 16 scope for
+  eligible fast-forward, two-parent merge, and exact ordered cherry-pick,
+  complete native/semantic preflight, and terminal receipt/recovery; stale or
+  unsupported state fails closed; semantic conflicts escalate; privacy
+  defaults hold; crash
 recovery is unambiguous; durable evidence remains on Plan 13 anchors rather
 than transport `rh_` handles; and the full acceptance matrix passes on
 supported platforms.
