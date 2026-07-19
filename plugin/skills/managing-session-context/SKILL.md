@@ -44,8 +44,8 @@ with `tracedecay_project_search`/`tracedecay_project_context`, then pass
    its body, then `tracedecay_lcm_expand` (`provider`, `session_id`, target) to
    open one raw message, summary node, or external payload. Page immediate
    summary sources with `source_offset`/`source_limit`. Continue only with the
-   returned opaque `next_cursor` and the same target, source limit, and content
-   slice; changing a bound continuation input is denied. For a bounded prompt
+   returned opaque `next_cursor` unchanged with the same target, source limit, and content slice;
+   changing a bound continuation input is denied. For a bounded prompt
    context, `tracedecay_lcm_expand_query` takes `provider`, `session_id`, and
    `prompt`: when it returns `needs_synthesis=true`, the host must synthesize
    from the bounded context; use its direct answer only when synthesis is not

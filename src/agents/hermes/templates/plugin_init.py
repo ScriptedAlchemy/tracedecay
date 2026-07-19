@@ -238,6 +238,7 @@ LCM_NATIVE_SCHEMAS = [
                     "description": "Externalized payload ref filename to inspect.",
                 },
             },
+            "required": [],
             "oneOf": [
                 {
                     "not": {
@@ -292,6 +293,7 @@ LCM_NATIVE_SCHEMAS = [
                     "description": "Authenticated opaque summary-source continuation cursor.",
                 },
             },
+            "required": [],
             "oneOf": [
                 {
                     "required": ["node_id"],
