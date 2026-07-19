@@ -19,7 +19,7 @@ use crate::query::temporal::hydration::{
     HydrationSink, TemporalHydrationPort,
 };
 use crate::query::temporal::ports::{
-    ExecutionControl, TemporalExecutionSnapshot, TemporalRetrievalScope,
+    ExecutionControl, TemporalExecutionSnapshot, TemporalRetrievalScope, TemporalSourceAccess,
 };
 use crate::sessions::lcm::payload::{expand_payload, validate_payload_ref};
 
@@ -380,7 +380,7 @@ async fn resolve_current(
     if matches!(
         snapshot.retrieval_scope(),
         TemporalRetrievalScope::AllSessionsInAuthorizedRoot
-    ) && authorized_root_owner(conn, snapshot).await?.as_ref() != Some(anchor.owner())
+    ) && authorized_root_owner(snapshot).as_ref() != Some(anchor.owner())
     {
         return Ok(HydrationResolution::Unavailable(
             HydrationStateV1::Unauthorized,
@@ -437,6 +437,11 @@ async fn resolve_occurrence(
             .await
         }
         TemporalRetrievalScope::AllSessionsInAuthorizedRoot => {
+            let project_key = snapshot
+                .request()
+                .authorized_root()
+                .ok_or(())?
+                .project_key();
             conn.query(
                 "SELECT occurrence.session_id, occurrence.message_id,
                         observation.observation_id, observation.observation_json
@@ -447,10 +452,18 @@ async fn resolve_occurrence(
                   AND generation.state = 'active'
                  JOIN observations observation
                    ON observation.observation_id = occurrence.source_observation_id
+                 JOIN sessions authority_session
+                   ON authority_session.session_id = occurrence.session_id
+                  AND authority_session.provider = COALESCE(
+                      json_extract(observation.observation_json, '$.identity.source.provider'),
+                      'claude'
+                  )
+                  AND authority_session.project_key = ?2
                  WHERE occurrence.retrieval_anchor_id = ?1
+                   AND (?3 IS NULL OR authority_session.provider = ?3)
                  ORDER BY occurrence.session_id, occurrence.occurrence_id
                  LIMIT 2",
-                [anchor_id.as_str()],
+                params![anchor_id.as_str(), project_key, snapshot.provider_scope()],
             )
             .await
         }
@@ -487,6 +500,9 @@ async fn resolve_occurrence(
         )));
     }
     let provider = observation.source().provider().as_str();
+    if let Some(state) = participant_access_state(snapshot, &session_id, provider) {
+        return Ok(Some(HydrationResolution::Unavailable(state)));
+    }
     let expected_owner = session_owner(conn, provider, &session_id).await?;
     let provider_matches = snapshot
         .provider_scope()
@@ -592,6 +608,11 @@ async fn resolve_summary(
             .await
         }
         TemporalRetrievalScope::AllSessionsInAuthorizedRoot => {
+            let project_key = snapshot
+                .request()
+                .authorized_root()
+                .ok_or(())?
+                .project_key();
             conn.query(
                 "SELECT node.session_id, generation.generation,
                         node.summary_id, node.publication_json,
@@ -601,14 +622,20 @@ async fn resolve_summary(
                  JOIN session_temporal_generations generation
                    ON generation.session_id = node.session_id
                   AND generation.state = 'active'
+                 JOIN sessions authority_session
+                   ON authority_session.session_id = node.session_id
+                  AND authority_session.provider =
+                      json_extract(node.publication_json, '$.provider')
+                  AND authority_session.project_key = ?2
                  LEFT JOIN session_summary_availability availability
                    ON availability.session_id = node.session_id
                   AND availability.generation = generation.generation
                   AND availability.summary_id = node.summary_id
                  WHERE node.summary_anchor_id = ?1
+                   AND (?3 IS NULL OR authority_session.provider = ?3)
                  ORDER BY node.session_id, node.summary_id
                  LIMIT 2",
-                [anchor_id.as_str()],
+                params![anchor_id.as_str(), project_key, snapshot.provider_scope()],
             )
             .await
         }
@@ -642,6 +669,10 @@ async fn resolve_summary(
             )));
         }
     };
+    if let Some(state) = participant_access_state(snapshot, &session_id, manifest.provider.as_str())
+    {
+        return Ok(Some(HydrationResolution::Unavailable(state)));
+    }
     let expected_owner = session_owner(conn, &manifest.provider, &session_id).await?;
     let owner_matches = manifest.owner_json == owner_json
         && expected_owner
@@ -829,42 +860,11 @@ async fn resolve_external_manifest(
     }))
 }
 
-async fn authorized_root_owner(
-    conn: &Connection,
-    snapshot: &TemporalExecutionSnapshot,
-) -> Result<Option<ObservationScopeV1>, ()> {
-    let session_id = snapshot.request().session_id().as_str();
-    let mut rows = match snapshot.provider_scope() {
-        Some(provider) => {
-            conn.query(
-                "SELECT DISTINCT project_key
-                 FROM sessions
-                 WHERE provider = ?1 AND session_id = ?2
-                 LIMIT 2",
-                params![provider, session_id],
-            )
-            .await
-        }
-        None => {
-            conn.query(
-                "SELECT DISTINCT project_key
-                 FROM sessions
-                 WHERE session_id = ?1
-                 LIMIT 2",
-                [session_id],
-            )
-            .await
-        }
-    }
-    .map_err(|_| ())?;
-    let Some(row) = rows.next().await.map_err(|_| ())? else {
-        return Ok(None);
-    };
-    let project_key: String = row.get(0).map_err(|_| ())?;
-    if rows.next().await.map_err(|_| ())?.is_some() {
-        return Ok(None);
-    }
-    Ok(owner_from_project_key(project_key))
+fn authorized_root_owner(snapshot: &TemporalExecutionSnapshot) -> Option<ObservationScopeV1> {
+    snapshot
+        .request()
+        .authorized_root()
+        .and_then(|root| owner_from_project_key(root.project_key().to_string()))
 }
 
 async fn session_owner(
@@ -899,6 +899,35 @@ fn owner_from_project_key(project_key: String) -> Option<ObservationScopeV1> {
     ProjectId::new(project_key)
         .ok()
         .map(|project_id| ObservationScopeV1::Project { project_id })
+}
+
+fn participant_access_state(
+    snapshot: &TemporalExecutionSnapshot,
+    session_id: &str,
+    source_id: &str,
+) -> Option<HydrationStateV1> {
+    if !snapshot.has_authoritative_participant_manifest() {
+        return None;
+    }
+    let access = snapshot
+        .participant_manifest()
+        .entries()
+        .iter()
+        .find(|participant| {
+            participant.session_id().as_str() == session_id && participant.source_id() == source_id
+        })
+        .map_or(TemporalSourceAccess::Unauthorized, |participant| {
+            participant.access()
+        });
+    match access {
+        TemporalSourceAccess::Authorized => None,
+        TemporalSourceAccess::Unavailable => Some(HydrationStateV1::RetainedButUnavailable),
+        TemporalSourceAccess::Locked => Some(HydrationStateV1::Locked),
+        TemporalSourceAccess::RetentionWithheld => Some(HydrationStateV1::RetentionExpired),
+        TemporalSourceAccess::Deleted => Some(HydrationStateV1::Deleted),
+        TemporalSourceAccess::Redacted => Some(HydrationStateV1::Redacted),
+        TemporalSourceAccess::Unauthorized => Some(HydrationStateV1::Unauthorized),
+    }
 }
 
 fn classify_current_access(
@@ -1005,8 +1034,8 @@ mod tests {
     use super::*;
     use crate::global_db::GlobalDb;
     use crate::query::temporal::ports::{
-        BindingDigest, ExecutionLimits, KernelVersions, TemporalPortError, TemporalSnapshotRequest,
-        TemporalWatermarks,
+        BindingDigest, ExecutionLimits, KernelVersions, TemporalAuthorizedRoot, TemporalPortError,
+        TemporalSnapshotRequest, TemporalWatermarks,
     };
     use crate::query::temporal::resolution::ValidatedAuthorization;
     use crate::store::GlobalDbObservationStore;
@@ -1327,6 +1356,11 @@ mod tests {
                 RetrievalGrainV1::LogicalMessage,
             )
             .expect("request")
+            .with_authorized_root(
+                TemporalAuthorizedRoot::profile("profile-1", "store-1", "root-1")
+                    .expect("profile root"),
+            )
+            .expect("authorized root")
             .with_retrieval_scope(scope),
             TemporalWatermarks {
                 generation: 1,

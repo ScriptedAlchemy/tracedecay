@@ -493,6 +493,7 @@ impl SessionTemporalExecutionPort for FakeExecutionPort {
                     session: None,
                     source: None,
                     evidence_role: None,
+                    contributions: Vec::new(),
                 });
             }
             Ok(SessionTemporalExecutionReport::new(

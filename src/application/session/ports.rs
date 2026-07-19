@@ -101,6 +101,25 @@ impl AuthorizedTemporalExecutionRequest {
             context_budget: self.context_budget,
         }
     }
+
+    pub(crate) fn validates_report(&self, report: &SessionTemporalExecutionReport) -> bool {
+        let snapshot = &report.result().snapshot;
+        let actual = snapshot.request();
+        actual.root_digest() == self.snapshot_request.root_digest()
+            && actual.request_digest() == self.snapshot_request.request_digest()
+            && actual.filter_digest() == self.snapshot_request.filter_digest()
+            && actual.access_digest() == self.snapshot_request.access_digest()
+            && actual.retrieval_scope() == self.snapshot_request.retrieval_scope()
+            && actual.authorized_root() == self.snapshot_request.authorized_root()
+            && actual.provider_scope() == self.snapshot_request.provider_scope()
+            && actual.temporal_mode() == self.snapshot_request.temporal_mode()
+            && actual.grain() == self.snapshot_request.grain()
+            && actual.limits() == self.snapshot_request.limits()
+            && snapshot.authorization().is_authorized()
+            && snapshot.versions().schema == self.schema_version
+            && snapshot.versions().ranking == self.ranking_version
+            && snapshot.versions().configuration_digest.as_str() == self.configuration_digest
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

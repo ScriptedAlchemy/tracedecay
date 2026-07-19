@@ -318,8 +318,14 @@ fn map_port_error(error: TemporalPortError) -> TemporalKernelError {
     match error {
         TemporalPortError::Cancelled => TemporalKernelError::Cancelled,
         TemporalPortError::DeadlineExceeded => TemporalKernelError::DeadlineExceeded,
-        TemporalPortError::BudgetExceeded { .. } => TemporalKernelError::BudgetExceeded,
+        TemporalPortError::BudgetExceeded { .. }
+        | TemporalPortError::ParticipantLimitExceeded { .. }
+        | TemporalPortError::ParticipantManifestBytesExceeded { .. } => {
+            TemporalKernelError::BudgetExceeded
+        }
         TemporalPortError::InvalidBinding { .. }
+        | TemporalPortError::EmptyParticipantManifest
+        | TemporalPortError::DuplicateParticipant
         | TemporalPortError::ZeroGeneration
         | TemporalPortError::UnauthorizedSnapshot
         | TemporalPortError::ZeroVersion { .. }
@@ -679,7 +685,9 @@ mod scope_tests {
         let unauthorized = omission(
             "unauthorized",
             "summary-unauthorized",
-            SummaryLineageRejection::UnauthorizedSource,
+            SummaryLineageRejection::UnauthorizedSource {
+                anchor_id: anchor("source-unauthorized"),
+            },
         );
         let mismatch = omission(
             "mismatch",
@@ -725,7 +733,9 @@ mod scope_tests {
         let predecessor = SummaryOmission {
             summary_id: predecessor_id.clone(),
             anchor_id: anchor("summary-hidden-predecessor"),
-            rejection: SummaryLineageRejection::UnauthorizedSource,
+            rejection: SummaryLineageRejection::UnauthorizedSource {
+                anchor_id: anchor("source-hidden-predecessor"),
+            },
         };
         let first_id = SessionSummaryIdV1::new("first-dependent").expect("valid summary id");
         let first = omission(
@@ -808,7 +818,9 @@ mod scope_tests {
         let hidden = omission(
             "hidden",
             "summary-hidden",
-            SummaryLineageRejection::UnauthorizedSource,
+            SummaryLineageRejection::UnauthorizedSource {
+                anchor_id: anchor("source-hidden"),
+            },
         );
         let redacted = omission(
             "redacted",

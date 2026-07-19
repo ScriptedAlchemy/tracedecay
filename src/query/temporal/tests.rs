@@ -232,6 +232,7 @@ fn candidate(stable_id: &str, anchor_id: &str, raw_score: i64) -> RankingCandida
     RankingCandidate {
         stable_id: stable_id.to_string(),
         anchor_id: anchor(anchor_id),
+        retriever_record_id: stable_id.to_string(),
         channel: CandidateChannel::Phrase,
         raw_score,
         knowledge_at_micros: raw_score,
@@ -800,11 +801,7 @@ fn unauthorized_mixed_source_permutations_are_publicly_indistinguishable() {
             let port = FakeReadPort::new(
                 vec![candidate("private-summary", "summary-private", 10)],
                 vec![
-                    TemporalRecord::Summary(summary_with_sources(
-                        "private",
-                        &source_anchors,
-                        7,
-                    )),
+                    TemporalRecord::Summary(summary_with_sources("private", &source_anchors, 7)),
                     summary_source("redacted-source", SummarySourceState::Redacted),
                     summary_source("unauthorized-source", SummarySourceState::Unauthorized),
                 ],
