@@ -1,6 +1,6 @@
 # Git intelligence and safe repository operations
 
-Status: planned across PR7, PR9, PR11, and PR12
+Status: planned across PR7, PR9, PR11, PR12, and PR15
 
 ## Outcome
 
@@ -9,7 +9,9 @@ implementation or an unrestricted Git command runner. Native Git remains the
 authority for repository objects, refs, the working tree, the index, attributes,
 ignore rules, and commit creation. TraceDecay adds generation-bound provenance,
 typed read-only intelligence, and three narrowly authorized index mutations:
-`stage_hunks`, `unstage_hunks`, and `commit_index`.
+`stage_hunks`, `unstage_hunks`, and `commit_index`. After Plan 16's PR15 typed
+worktree/stack scope ships, this plan adds one separately authorized mechanical
+stack mutation: `integrate_stack_edge`.
 
 Every mutation is previewed from an exact repository snapshot, checked again at
 apply time, serialized by the daemon, and returned with a durable receipt. A
@@ -22,8 +24,10 @@ This plan does not create:
 
 - a shadow Git object database, index, ref store, history model, or patch engine;
 - a generic `git exec`, arbitrary subprocess, or user-supplied Git argument path;
-- autonomous merge, rebase, cherry-pick, revert, ref movement, history rewrite,
-  fetch, pull, push, branch deletion, tag mutation, or remote mutation;
+- a generic or autonomous merge, rebase, cherry-pick, revert, ref movement,
+  history rewrite, fetch, pull, push, branch deletion, tag mutation, or remote
+  mutation; `integrate_stack_edge` is the sole merge exception and accepts only
+  a frozen Plan 16 stack edge plus a conflict-free policy-approved preview;
 - implicit staging, committing, conflict resolution, or checkout changes; or
 - a claim that graph or session evidence overrides native repository state.
 
@@ -176,9 +180,28 @@ classification, and stable error taxonomy. Neither transport contains Git
 logic, opens repository internals, accepts opaque Git arguments, or implements a
 fallback mutation path when the daemon is unavailable.
 
+### PR15: native stack snapshots, conflict preflight, and mechanical integration
+
+PR15 consumes Plan 16's exact `AuthorizedBranchStackSnapshot`. It adds
+dependency-commit calculation, merge-base and tip snapshots, repository/worktree/index
+state capture, native `merge-tree` plus temporary-index preflight, the layered conflict
+engine, and `integrate_stack_edge`.
+
+An authorized human or policy-delegated agent may facilitate
+`integrate_stack_edge` only when the exact preview is classified
+`MechanicalIntegrationEligible`. The operation is limited to fast-forwarding or creating
+one ordinary conflict-free two-parent merge on one declared stack edge. Semantic
+conflicts, incomplete evidence, ambiguous merge bases, or unsupported Git state always
+escalate; no policy or agent override can make this operation guess a resolution.
+
+PR15 extends the shared CLI/MCP catalog with the same application request/result types.
+It adds no raw Git command surface, no GitHub write, no remote operation, and no
+background merge loop.
+
 ## Repository snapshot identity
 
-Every read result and write preview carries a `RepositorySnapshot` containing:
+Every read result and write preview carries a content-addressed
+`RepositoryStateSnapshotId` and its `RepositoryStateSnapshotV1` containing:
 
 - canonical project, repository, and checkout/worktree identity;
 - object format and repository-format capabilities;
@@ -252,6 +275,531 @@ Cancellation before native commit leaves state unchanged. Cancellation after a
 native transaction reaches its commit point returns the committed receipt; it
 must not report cancellation as if no mutation occurred.
 
+## Stack snapshot and staleness contract
+
+### Repository, tip, merge-base, and dependency-commit snapshots
+
+The fixed adapter captures all state used by stack analysis in one daemon-serialized
+observation:
+
+```text
+RepositoryStateSnapshotV1 {
+  snapshot_id, project_id, repository_id, worktree_id,
+  observation_epoch,
+  object_format, git_version, adapter_revision,
+  head: { state: Attached | Detached | Unborn,
+          branch_ref: optional BranchRef, commit_id: optional CommitId },
+  refs_digest,
+  index: {
+    checksum, tree_id, state: Clean | Staged | Unmerged
+                              | IntentToAdd | Split | Sparse | Unreadable,
+    unmerged_stage_digest
+  },
+  working_tree: {
+    state: Clean | TrackedDirty | UntrackedOnly | Mixed
+           | Conflicted | Unreadable,
+    tracked_digest, untracked_name_digest, ignored_collision_digest
+  },
+  operation_state: None | Merge | Rebase | CherryPick | Revert
+                   | Bisect | Sequencer | Unknown,
+  attributes_digest, sparse_digest, submodule_digest,
+  filesystem_capabilities_digest, captured_at, coverage
+}
+
+TipSnapshotV1 {
+  stack_id, stack_revision_id, node_id,
+  branch_ref, tip_commit_id, tip_tree_id, parent_commit_ids,
+  repository_state_snapshot_id, inventory_epoch
+}
+
+MergeBaseSnapshotV1 {
+  source_tip, destination_tip,
+  merge_base_commit_ids: ordered nonempty CommitId[],
+  strategy: Unique | MultipleBasesUnsupported,
+  native_options_digest, observed_at
+}
+
+DependencyCommitSetV1 {
+  source_node_id, destination_node_id, direction,
+  merge_base_snapshot_id,
+  commits: topological-oldest-first {
+    commit_id, tree_id, parent_commit_ids, patch_id,
+    changed_path_digest
+  }[],
+  closure_digest,
+  readiness: Ready | MissingDeclaredDependency | MissingObject
+             | ShallowBoundary | PromisorUnavailable | Stale,
+  coverage
+}
+```
+
+`direction` is `PropagateDependencyToDependent` or
+`LandDependentIntoDependency`; the source/destination relationship must match that
+direction on one exact declared Plan 16 edge. Dependency commits are exactly commits
+reachable from the source tip and not from the destination tip, ordered by native
+topological order and then `CommitId` for a deterministic tie break. `Ready` requires
+every selected commit parent to be reachable from the destination tip or an earlier
+selected commit and every declared predecessor required by the source node to be
+reachable from the destination or included closure. This is Git dependency readiness
+only; PR and CI state remain external observations surfaced by Plan 37.
+
+A multiple-base/criss-cross result remains valid read-only evidence but is
+`MultipleBasesUnsupported` for mechanical integration. Missing, shallow, partial-clone,
+promisor, replaced-object, grafted-history, or corrupt-object coverage is explicit and
+blocks integration. Replace refs and grafts are disabled by the fixed adapter unless the
+pinned repository policy explicitly admits and fingerprints them; no ambient Git config
+silently changes the graph.
+
+### Analysis epoch
+
+Every preflight and conflict result binds one immutable epoch:
+
+```text
+StackAnalysisEpochV1 {
+  repository_id, stack_id, stack_revision_id,
+  inventory_snapshot_id, inventory_epoch, scope_digest,
+  source_tip_snapshot_id, destination_tip_snapshot_id,
+  source_repository_state_snapshot_id,
+  destination_repository_state_snapshot_id,
+  merge_base_snapshot_id, dependency_commit_set_id,
+  graph_generation, schema_catalog_revision,
+  migration_catalog_revision, test_map_revision,
+  adapter_revision, authorization_grant_id, grant_digest,
+  policy_digest, policy_epoch
+}
+```
+
+Any change to a bound ref/tip/tree, worktree relationship, dirty/index/operation state,
+inventory or stack revision, scope/grant, graph/catalog/test revision, Git adapter,
+repository policy, or authorization makes the epoch stale. Stale means re-snapshot and
+re-preview; it never means advance one field to current while retaining the rest. A
+complete observation increments `observation_epoch` only after all requested native state
+has been captured. Partial capture does not advance it and cannot prove cleanliness.
+
+## Native merge-tree and temporary-index preflight
+
+Preflight is read-only with respect to repository refs, checked-out worktrees, and real
+indexes. The daemon creates a private transaction directory with mode `0700`, a temporary
+index selected only through daemon-owned `GIT_INDEX_FILE`, and a temporary object
+directory selected through daemon-owned `GIT_OBJECT_DIRECTORY` with the repository object
+store as read-only alternates. User input cannot set environment variables, paths, config,
+Git flags, merge drivers, filters, or hooks.
+
+The fixed sequence is:
+
+1. Revalidate the Plan 16 scope, exact stack edge, source/destination refs and tips,
+   complete repository snapshots, and `StackAnalysisEpochV1`.
+2. Run the adapter's pinned native merge-base and dependency-commit operations.
+3. Run native `merge-tree --write-tree` with the pinned tips, adapter revision, rename
+   profile, attributes/config policy, and isolated object directory. Capture the candidate
+   tree or exact native conflict stages/messages; never parse human display text when a
+   plumbing record exists.
+4. Seed the temporary index from the destination tree, read the candidate tree into it,
+   round-trip it through `write-tree`, and require byte-identical tree identity. Inspect
+   index stages, modes, case collisions, sparse/submodule/filter capability, and
+   candidate-path collisions without touching the real index or worktree.
+5. Diff merge base/source/destination/candidate through fixed native plumbing, construct
+   typed file/hunk inputs, join only generation-matched graph/catalog/test evidence, and
+   run every conflict-engine layer.
+6. Delete the private index/object directory on expiry or failure. The preview stores only
+   typed IDs, digests, bounded messages, and Plan 13 anchors. It copies no Git object,
+   index bytes, patch body, schema body, migration body, test body, or source content.
+
+Previews expire after 300 seconds or earlier policy expiry. The apply path recreates and
+revalidates the native candidate under the repository mutation queue; it never promotes a
+stale temporary object or trusts a prior filesystem path.
+
+```text
+StackIntegrationPreviewV1 {
+  preview_id, schema_version, analysis_epoch,
+  source_node_id, destination_node_id, direction,
+  dependency_commit_set_id, source_tip, destination_tip,
+  merge_base_snapshot_id, candidate_tree_id,
+  native_preflight_digest, conflict_report_id,
+  eligibility: MechanicalIntegrationEligible
+             | SemanticReviewRequired | NativeConflict
+             | IncompleteEvidence | Unsupported | Stale,
+  mechanical_mode: optional FastForward | TwoParentMerge,
+  required_hook_signing_policy, approval_scope,
+  created_at, expires_at, preview_digest
+}
+```
+
+## Layered conflict engine
+
+Native conflicts and semantic risks are separate dimensions. The engine never suppresses
+a native conflict because graph evidence appears safe, and never calls a textually clean
+merge mechanically safe when a required semantic layer is partial.
+
+```text
+StackConflictFindingV1 {
+  finding_id, report_id,
+  certainty: Actual | Potential,
+  layer: File | Hunk | Symbol | Schema | Migration | TestWrite,
+  class, source_addresses[], destination_addresses[],
+  source_anchor_ids[], destination_anchor_ids[],
+  relation_path_ids[], severity,
+  disposition: BlocksMechanicalIntegration | Advisory,
+  producer_revision, coverage, evidence_digest
+}
+
+StackConflictReportV1 {
+  report_id, analysis_epoch,
+  native_outcome: Clean | Conflicted | Unsupported,
+  layer_outcomes: ordered {
+    layer, CompleteNoConflict | CompleteWithConflict
+           | Partial | Unsupported | Stale
+  }[],
+  findings: ordered StackConflictFindingV1[],
+  report_digest
+}
+```
+
+The six required layers are:
+
+- **File:** native add/add, modify/delete, rename/rename, rename/delete, directory/file,
+  mode, symlink, submodule, binary, case-fold, sparse-path, ignored/untracked collision,
+  and file-kind conflicts. Native unmerged stages are `Actual`; disjoint but incompatible
+  path operations are `Potential`.
+- **Hunk:** base-mapped source/destination changed ranges, overlapping context, adjacent
+  edits whose normalized patch application order changes the candidate, and one-side
+  deletion of the other side's edited range. Native overlap is `Actual`; exact
+  generation-matched range interaction without native failure is `Potential`.
+- **Symbol:** same-symbol writes; signature, visibility, trait/interface, type, field, or
+  public-API changes against changed callers/implementations/constructors/field sites;
+  and delete/move/rename against an independently changed dependent. Symbol joins require
+  exact snapshot generation and stable symbol identity.
+- **Schema:** incompatible edits to the same versioned configuration, API, wire, event,
+  persistence, or serialization schema node; field-number/name/type/default/requiredness
+  collisions; and producer/consumer version skew. Only registered versioned schema
+  adapters participate; an unrecognized required schema is incomplete coverage.
+- **Migration:** duplicate version/order keys, divergent edits to one migration, two
+  migrations mutating the same table/index/constraint in incompatible order, destructive
+  change before dependent backfill, and down/up dependency inversion. Migration order and
+  namespace come from the pinned catalog, never filename similarity alone.
+- **TestWrite:** both sides write the same test, fixture, golden/snapshot, seed, fuzz
+  corpus, or generated expectation; one side changes a production symbol while the other
+  changes its directly mapped regression test or expectation; and incompatible test
+  target/config changes. Test mapping uses the pinned Plan 05 test map and records unknown
+  coverage rather than assuming independence.
+
+Finding `class` is a tagged exhaustive enum, not free text:
+
+```text
+FileConflictClass =
+  AddAdd | ModifyDelete | RenameRename | RenameDelete | DirectoryFile
+  | Mode | Symlink | Submodule | Binary | CaseFold | SparsePath
+  | UntrackedCollision | IgnoredCollision | FileKind
+HunkConflictClass =
+  OverlappingRange | ContextOrder | EditedDeletedRange
+SymbolConflictClass =
+  SameSymbolWrite | SignatureCaller | VisibilityCaller
+  | TraitImplementation | TypeOrFieldUse | DeleteMoveRenameDependent
+SchemaConflictClass =
+  FieldNumber | FieldName | FieldType | Default | Requiredness
+  | ProducerConsumerVersion | SerializationShape
+MigrationConflictClass =
+  DuplicateOrderKey | DivergentMigration | SharedObjectOrder
+  | DestructiveBeforeBackfill | DirectionInversion
+TestWriteConflictClass =
+  SameTest | SameFixture | SameGoldenOrSnapshot | SameSeedOrCorpus
+  | ProductionTestContract | TestTargetConfiguration
+```
+
+All `Actual` findings block. Every `Potential` finding with
+`BlocksMechanicalIntegration` blocks and escalates to a human with exact anchors and
+relation paths. Partial, stale, denied, or unsupported coverage in any required layer
+also blocks. There is no auto-resolution rule, language-model resolution, "ours/theirs"
+default, confidence threshold, or policy bypass. A human resolves semantically through
+normal repository work, then requests a fresh snapshot and preview.
+
+## Policy-approved mechanical cross-merge
+
+### Authorization and eligibility
+
+`integrate_stack_edge` accepts no branch label, path, SHA string, patch, commit list,
+message template, or Git argument. It accepts only:
+
+```text
+ApplyStackIntegrationRequestV1 {
+  preview_id, preview_digest,
+  approval: StackIntegrationApprovalV1 {
+    approval_id, principal, delegated_agent_id: optional AgentId,
+    capability = StackIntegrate,
+    preview_id, preview_digest, analysis_epoch_digest, scope_digest,
+    stack_id, stack_revision_id,
+    source_node_id, destination_node_id, direction,
+    mechanical_mode: FastForward | TwoParentMerge,
+    policy_digest, policy_epoch, issued_at, expires_at, nonce
+  },
+  cancellation_token
+}
+```
+
+An agent may submit this request only when a policy authority has delegated the exact
+`StackIntegrate` capability and issued the exact approval above. General repository write,
+task execution, shell, collection, worktree-read, or proximity permission is
+insufficient. Approval is one-use and content-bound. The daemon reauthorizes it before
+the first native mutation and again before ref commit.
+
+Mechanical eligibility requires: one visible declared stack edge; unique merge base;
+complete object history and all six conflict layers; no `Actual` or blocking `Potential`
+finding; every present bound worktree clean with a clean real index and no in-progress
+operation; no active holder that lacks an integration-safe quiescence acknowledgement;
+exact source/destination tips; supported object/index/filter/hook/signing/filesystem
+state; no candidate collision with untracked or ignored content; and a current scope,
+inventory, stack, graph/catalog/test, policy, and authorization epoch.
+
+Only `FastForward` and one ordinary `TwoParentMerge` are valid. Octopus, squash,
+cherry-pick, rebase, amend, synthetic parent lists, unrelated-history merge, conflict
+commit, empty-policy bypass, and history rewrite are impossible to encode.
+
+V1's hook/signing/message contract is closed:
+
+```text
+MechanicalMergeCommitPolicyV1 {
+  hook_policy: VerifiedNoApplicableHooks,
+  signing_policy: UnsignedPermitted | SignatureRequired { signing_key_ref },
+  message_policy: FixedStackIntegrationMessageV1
+}
+```
+
+The adapter resolves system/global/local/worktree `core.hooksPath` and the repository's
+native hook locations under the pinned config policy. Any configured executable
+`pre-commit`, `pre-merge-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`, or
+`post-merge` hook returns `UnsupportedHookPolicy` and keeps integration preview-only;
+V1 never invokes, bypasses, or approximates merge-hook behavior. A fast-forward creates
+no commit and has `hook_outcome = NotApplicable` and
+`signing_outcome = NotApplicable`. A two-parent merge uses native `commit-tree` with the
+required signing policy. `FixedStackIntegrationMessageV1` is generated only from encoded
+source/destination `StackNodeId`, source/destination `CommitId`, direction, and
+`preview_id`; no branch label, path, commit subject, PR text, agent text, or caller
+template enters it. A repository that disallows plumbing-created merge commits is
+preview-only. No request can disable a required signature or alter this policy.
+
+### Daemon transaction, receipt, and recovery
+
+All index and stack mutations share the same per-`RepositoryId` daemon queue.
+`integrate_stack_edge` additionally acquires source and destination worktree leases in
+encoded `WorktreeId` order. The leases exclude TraceDecay operations, not external Git;
+native state is therefore compare-and-swap checked at every commit boundary.
+
+The daemon writes and fsyncs a durable journal before touching durable repository state:
+
+```text
+StackIntegrationJournalV1 {
+  transaction_id, preview_id, approval_id, repository_id,
+  source_worktree_id, destination_worktree_id,
+  old_source_tip, old_destination_tip, candidate_tree_id,
+  candidate_commit_id: optional CommitId,
+  old_index_checksum, old_index_tree_id,
+  phase: Prepared | CandidateCreated | WorktreeUpdating | IndexSwapped
+       | RefCommitted | Verifying | Committed
+       | RollingBack | RolledBack | NeedsInspection,
+  phase_epoch, started_at, updated_at, journal_digest
+}
+```
+
+Apply recreates the candidate with native Git, verifies its tree against the preview, runs
+the pinned hook/signing policy when a merge commit is required, and creates either the
+exact fast-forward target or one two-parent merge commit. If the destination ref is not
+checked out, apply performs only a native transactional compare-and-swap ref update. If it
+is checked out in exactly one authorized destination worktree, the daemon requires the
+clean snapshot, materializes the candidate through the verified temporary index,
+atomically replaces the real index, updates the exact destination ref with native
+`update-ref` old/new compare-and-swap, and verifies HEAD, ref, index tree, worktree digest,
+commit parents, tree, and signature. The source worktree is never modified.
+
+Git does not provide one filesystem transaction spanning worktree files, index, object
+store, and refs. "Atomic" here therefore means: the daemon admits no concurrent
+TraceDecay mutation, emits no success before all final native state matches, journals
+every intermediate phase durably, and can prove one terminal outcome. Before ref commit,
+failure restores the old clean tree/index from native objects. After ref commit, recovery
+first rolls forward to the committed candidate; if that is impossible and the ref still
+equals the candidate, it compare-and-swap rolls the ref back and restores the old
+tree/index. Any external drift that prevents proof or rollback yields `NeedsInspection`;
+the daemon never guesses, retries the merge, or emits success.
+
+```text
+StackIntegrationReceiptV1 {
+  receipt_id, transaction_id, preview_id, approval_id,
+  actor, delegated_agent_id, repository_id, stack_id, stack_revision_id,
+  source_node_id, destination_node_id, direction, mechanical_mode,
+  analysis_epoch_digest, scope_digest, conflict_report_id,
+  old_source_tip, old_destination_tip, new_destination_tip,
+  merge_base_snapshot_id, dependency_commit_set_id,
+  candidate_tree_id, created_commit_id: optional CommitId,
+  old_repository_state_snapshot_id, final_repository_state_snapshot_id,
+  hook_outcomes, signing_outcome, native_ref_transaction_digest,
+  outcome: Committed | AbortedNoChange | RolledBack | NeedsInspection,
+  recovery_actions[], started_at, committed_at: optional Timestamp,
+  receipt_schema_version, receipt_digest
+}
+```
+
+Only `Committed` is success. `AbortedNoChange` proves no durable index/ref/worktree
+change. `RolledBack` proves restoration to the exact old snapshot. `NeedsInspection`
+blocks further TraceDecay mutation for that repository until an authorized reconciliation
+proves and records the native state. Recovery is idempotent by transaction ID; it never
+replays an integration or creates a second commit.
+
+## Exact files, schemas, APIs, and migration
+
+### Files and ports
+
+- `crates/tracedecay-domain/src/git/repository_state.rs`,
+  `stack_snapshot.rs`, `conflict.rs`, and `integration.rs` define every V1 type above,
+  canonical encoding, digest, ordering, legal transition, and validation invariant.
+  `crates/tracedecay-domain/src/git/mod.rs` and `lib.rs` re-export them.
+- `crates/tracedecay-application/src/git/snapshot.rs`,
+  `stack_preflight.rs`, `conflict_engine.rs`, `integrate_stack.rs`, and
+  `recovery.rs` own the use cases. They consume Plan 16's `ScopeResolver` and
+  `BranchStackProjectionService`; transports and agents cannot bypass either.
+- `src/git/adapter/repository_state.rs`, `commit_graph.rs`, `merge_tree.rs`,
+  `temporary_index.rs`, `hooks_signing.rs`, and `ref_transaction.rs` are the only native
+  Git implementations. Every operation has a closed typed option profile and scrubs
+  ambient config/environment not explicitly admitted by repository policy.
+- `src/daemon/git_transactions/queue.rs`, `journal.rs`, `apply_stack.rs`, and
+  `recovery.rs` own serialization, fsync boundaries, worktree leases, startup recovery,
+  and repository mutation quarantine.
+- `src/mcp/tools/definitions/git_stack.rs`,
+  `src/mcp/tools/handlers/git_stack.rs`, and `src/cli/git_stack.rs` are thin Plan 21
+  bindings for `stack_snapshot`, `stack_preflight`, `stack_conflicts`,
+  `integrate_stack_edge`, and `stack_integration_receipt`. They accept no arbitrary Git
+  flags or paths.
+- `crates/tracedecay-store/src/git_stack.rs` and
+  `src/global_db/git_stack/{schema,store,migration}.rs` own append-only snapshot,
+  preview, finding, journal, and receipt storage.
+
+```rust
+pub trait GitStackIntelligence {
+    fn snapshot(
+        &self,
+        request: StackSnapshotRequestV1,
+    ) -> Result<StackSnapshotResultV1, GitStackError>;
+
+    fn preflight(
+        &self,
+        request: StackPreflightRequestV1,
+    ) -> Result<StackIntegrationPreviewV1, GitStackError>;
+}
+
+pub trait StackConflictEngine {
+    fn classify(
+        &self,
+        input: StackConflictInputV1,
+    ) -> Result<StackConflictReportV1, ConflictEngineError>;
+}
+
+pub trait StackIntegrationService {
+    fn apply(
+        &self,
+        request: ApplyStackIntegrationRequestV1,
+    ) -> Result<StackIntegrationReceiptV1, StackIntegrationError>;
+
+    fn recover(
+        &self,
+        transaction_id: StackIntegrationTransactionId,
+    ) -> Result<StackIntegrationReceiptV1, StackRecoveryError>;
+}
+```
+
+### Store schema and migration
+
+- `git_repository_state_snapshots(snapshot_id, repository_id, worktree_id,
+  observation_epoch, head_commit_payload, branch_ref_payload, refs_digest,
+  index_checksum, index_tree_id, index_state, working_tree_state,
+  working_tree_digest, operation_state, capability_digest, captured_at,
+  coverage_digest, snapshot_digest)` is append-only with unique
+  `(repository_id, worktree_id, observation_epoch)`.
+- `git_stack_analysis_epochs(epoch_id, stack_id, stack_revision_id,
+  inventory_snapshot_id, inventory_epoch, scope_digest, source_tip_snapshot_id,
+  destination_tip_snapshot_id, merge_base_snapshot_id, dependency_commit_set_id,
+  graph_generation, schema_catalog_revision, migration_catalog_revision,
+  test_map_revision, adapter_revision, authorization_grant_id, grant_digest,
+  policy_digest, policy_epoch, epoch_digest)` is immutable.
+- `git_stack_previews(preview_id, epoch_id, source_node_id, destination_node_id,
+  direction, candidate_tree_id, conflict_report_id, eligibility, mechanical_mode,
+  created_at, expires_at, preview_digest)` stores no patch or object body.
+- `git_stack_conflict_findings(report_id, finding_ordinal, finding_id, certainty,
+  layer, class, severity, disposition, source_anchor_digest,
+  destination_anchor_digest, relation_path_digest, producer_revision, coverage_digest,
+  evidence_digest)` has unique `(report_id, finding_id)` and canonical ordinal order.
+- `git_stack_integration_journal(transaction_id, phase, phase_epoch, preview_id,
+  approval_id, repository_id, source_worktree_id, destination_worktree_id,
+  old_source_tip, old_destination_tip, candidate_tree_id, candidate_commit_id,
+  old_index_checksum, old_index_tree_id, started_at, updated_at, journal_digest)` is
+  updateable only by legal compare-and-swap phase transitions.
+- `git_stack_integration_receipts(receipt_id, transaction_id, preview_id, approval_id,
+  outcome, old_destination_tip, new_destination_tip, candidate_tree_id,
+  created_commit_id, old_snapshot_id, final_snapshot_id, native_ref_transaction_digest,
+  recovery_digest, committed_at, receipt_schema_version, receipt_digest)` is append-only
+  and unique by transaction ID.
+- `git_stack_migration_quarantine(source_table, source_row_id, reason_code,
+  redacted_payload_digest, quarantined_at)` receives legacy branch names, path-keyed
+  worktrees, untyped SHAs, inferred parent links, cached conflict guesses, and mutation
+  logs without exact native receipts.
+
+Migration creates empty V1 tables and imports no mutable preview, journal, or receipt.
+It may import a prior read-only snapshot only when all typed Plan 16 IDs, native object
+format, exact ref/commit relationship, and content digest validate; otherwise it
+quarantines the row. Re-execution is idempotent. No migration synthesizes a stack edge,
+approval, conflict-free result, integration commit, or success receipt.
+
+## Stack tests, benchmarks, and executable acceptance
+
+- `crates/tracedecay-domain/tests/git_stack_contract.rs` covers canonical IDs/digests,
+  legal journal transitions, one-use approvals, direction/edge validation, exhaustive
+  enums, and rejection of every untyped path/ref/SHA/Git-argument input.
+- `tests/git_stack_suite/repository_state.rs` covers clean, staged, unstaged, untracked,
+  ignored collision, conflicted, detached, unborn, sparse, split-index, submodule,
+  filter, non-UTF-8, SHA-1/SHA-256, in-progress operation, shallow, partial-clone,
+  promisor, replace-ref, graft, and corrupt-object states.
+- `tests/git_stack_suite/dependency_commits.rs` covers linear, forked, merge-heavy,
+  multiple-base, missing-parent, multi-dependency, both integration directions,
+  deterministic topological ordering, and every readiness outcome.
+- `tests/git_stack_suite/native_preflight.rs` differential-tests pinned native Git for
+  fast-forward, clean two-parent merge, every index stage, rename threshold, mode,
+  binary, symlink, submodule, sparse, filter, case-fold, untracked/ignored collision, and
+  proves the real refs, index, and worktrees are byte-identical before/after preview.
+- `tests/git_stack_suite/conflict_layers.rs` has positive and negative fixtures for every
+  file, hunk, symbol, schema, migration, and test-write class; generation/catalog/test-map
+  drift and partial coverage block; textually clean semantic conflicts escalate; no
+  fixture auto-resolves a semantic conflict.
+- `tests/git_stack_suite/integration.rs` covers human and delegated-agent approvals,
+  fast-forward and two-parent merge, rejection of every V1-inapplicable hook path,
+  unsigned-permitted and signature-required policy, fixed message bytes, checked-out and
+  unoccupied destination refs, source immutability, stale fields independently, external
+  ref/index/worktree races, cancellation at every journal phase, and one-use replay.
+- `tests/git_stack_suite/recovery.rs` fault-injects process death and I/O failure before
+  and after every fsync/index/ref boundary and proves exactly one of `Committed`,
+  `AbortedNoChange`, `RolledBack`, or `NeedsInspection`, with no duplicate commit or
+  receipt and mutation quarantine on ambiguity.
+- `tests/git_stack_suite/authorization.rs` proves project/repository/worktree/stack read,
+  preflight, and integrate capabilities do not imply one another; hidden nodes leak no
+  identity/count; task, collection, proximity, or daemon locality grants no mutation.
+- `benches/git_stack.rs` measures snapshot, dependency closure, merge-tree/temp-index
+  preflight, each conflict layer, receipt write, and restart recovery for 2/8/32/128
+  nodes; 10/100/1,000 dependency commits; and 10/100/1,000 changed files/symbols/tests.
+  It records p50/p95/p99, allocations, native subprocess count, bytes read/written, and
+  per-layer coverage. The gate compares the same pinned runner/corpus to the checked-in
+  baseline and rejects an unexplained p95 regression above 10%.
+
+```sh
+cargo test -p tracedecay-domain --test git_stack_contract --all-features
+cargo test --all-features --test git_stack_suite
+cargo bench --bench git_stack --all-features
+cargo check --all-features
+```
+
+PR15 stack acceptance requires deterministic dependency/merge-base/tip/epoch/conflict
+digests across restart; native-Git differential parity; complete dirty/index-state
+truthfulness; zero real-state mutation during preflight; semantic escalation on every
+blocking potential conflict; exact delegated approval; one durable terminal receipt per
+apply; fault-injected recovery with no ambiguous success; no GitHub/remote write; and no
+mutation outside `stage_hunks`, `unstage_hunks`, `commit_index`, or the exact
+`integrate_stack_edge` operation.
+
 ## Failure semantics
 
 Stable failures distinguish at least:
@@ -265,7 +813,11 @@ Stable failures distinguish at least:
   sparse path, submodule mutation, or file kind;
 - partial-hunk selection that cannot form a valid patch;
 - native index transaction, hook, signing, identity, message, or ref-update
-  failure; and
+  failure;
+- stale stack/inventory/analysis epoch, dependency-not-ready, native or semantic
+  conflict, incomplete conflict-layer coverage, unsupported merge base, approval
+  mismatch/replay/expiry, worktree holder not quiescent, recovery-required, or
+  repository mutation quarantine; and
 - daemon unavailable, queue unavailable, authorization denied, cancellation,
   or indeterminate crash recovery.
 
@@ -282,11 +834,11 @@ and sanitizes remote credentials. Telemetry records operation kind, latency,
 counts, typed failure reason, and capability usage; it does not record patch
 content, commit messages, identities, repository URLs, or path names.
 
-Read authorization is path- and repository-scoped. Mutation additionally
-requires an explicit capability for the exact operation and repository, a live
-preview authorization, and daemon policy approval. Receipts retain digests and
-minimal audit metadata under configured retention; sensitive rendered evidence
-is not made durable by default.
+Read authorization is exact Plan 16 project/repository/worktree/snapshot scope and may
+be narrowed by path. Mutation additionally requires an explicit capability for the exact
+operation, repository, worktree set, and stack edge, a live preview authorization, and
+daemon policy approval. Receipts retain digests and minimal audit metadata under
+configured retention; sensitive rendered evidence is not made durable by default.
 
 ## Exhaustive acceptance matrix
 
@@ -334,7 +886,15 @@ Acceptance requires fixtures and end-to-end tests for:
   than clean; and
 - rejection fixtures proving PR9 identity operations remain read-only identity
   and remap only and never perform GitHub API ingress or comment writes now or
-  at PR17.
+  at PR17;
+- Plan 16 stack fixtures proving only exact authorized nodes and declared edges reach
+  preflight, denied siblings do not affect public counts, and every stack/inventory/scope
+  epoch drift blocks;
+- native merge-tree/temporary-index differential fixtures proving no real ref/index/
+  worktree mutation during preview and exact candidate-tree parity; and
+- integration/recovery fixtures proving mechanical-only admission, semantic escalation,
+  exact approval, compare-and-swap ref movement, source-worktree immutability, one
+  terminal receipt, and no ambiguous success across every injected crash boundary.
 
 ## Lossless evidence boundary
 
@@ -360,7 +920,10 @@ PR7 provenance is generation-bound; PR9 intelligence is read-only and truthful,
 including typed `PullRequestSnapshot`, `ReviewThreadAnchor`, and `CommentAnchor`
 identity with exact-current remap rules and no fuzzy upgrade; PR11 exposes only
 the three daemon-serialized mutations with `HunkRef` compare-and-swap; PR12
-provides schema-identical CLI/MCP behavior; stale or unsupported state fails
-closed; privacy defaults hold; crash recovery is unambiguous; durable evidence
-remains on Plan 13 anchors rather than transport `rh_` handles; and the full
-acceptance matrix passes on supported platforms.
+provides schema-identical CLI/MCP behavior; PR15 adds only the exact
+policy-approved `integrate_stack_edge` mutation over Plan 16 scope, complete
+native/semantic preflight, and terminal receipt/recovery; stale or unsupported
+state fails closed; semantic conflicts escalate; privacy defaults hold; crash
+recovery is unambiguous; durable evidence remains on Plan 13 anchors rather
+than transport `rh_` handles; and the full acceptance matrix passes on
+supported platforms.

@@ -3,8 +3,9 @@
 ## Status / role
 
 Planned across PR9, PR11–PR17. PR9 adds no new authority here: it ships
-Plan 36's repository/commit snapshot identity (base/head SHA, merge base,
-HEAD/ref state) and Plan 36/Plan 05's read-only diff and hunk intelligence
+Plan 36's typed repository/commit snapshot identity (base/head `CommitId`,
+merge-base `CommitId`, HEAD/`BranchRef` state) and Plan 36/Plan 05's read-only
+diff and hunk intelligence
 that GitHub-comment remap and CI-failure localization later consume; Plan 32's
 workflow/effect/audit/receipt kernel is not required for any read-only/advisory
 capability this plan defines. PR11 ships the concrete typed feedback-cycle
@@ -90,7 +91,11 @@ never the universal transport. TraceDecay never posts, updates, resolves,
 dismisses, or replies to a GitHub PR comment or thread; it surfaces ingested,
 remapped, read-only GitHub evidence, localizes CI failures, and reports
 advisory concurrent-agent proximity — nothing in this architecture writes to
-GitHub, applies a fix, or continues an agent automatically.
+GitHub, applies a fix, or continues an agent automatically. At PR15 the daemon
+also centralizes stack fanout for dependency-ready commits, native/semantic
+conflicts, and upstream stack/PR/CI drift. It may surface an inert reference to
+a Plan 36 mechanical-integration preview; applying that preview is a separate,
+explicit, policy-approved Plan 36 operation, never feedback-cycle authority.
 
 ## Owns
 
@@ -121,6 +126,11 @@ GitHub, applies a fix, or continues an agent automatically.
   contract, warning classes, thresholds, freshness/expiry, and privacy
   controls, built from existing agent/session/worktree/branch observations and
   graph neighborhoods rather than a new coordination or scheduling authority.
+- The one daemon-local stack signal coordinator and authorized fanout contract
+  for dependency-ready commit sets, actual and potential conflict reports,
+  upstream stack-tip/base drift, pull-request snapshot drift, and CI commit
+  drift, including central dedupe/debounce, state transitions, and
+  policy-safe recipient selection (§3D).
 - The producer-side contracts for `FeedbackEvidencePacketV1`,
   `ProximityContributionV1`, and opt-in
   `DemonstratedExpertiseSignalRevisionV1`, including consent, authorization,
@@ -175,6 +185,12 @@ GitHub, applies a fix, or continues an agent automatically.
   execute an explicitly admitted task step, but this cycle supplies advisory
   evidence only, never generic editor or agent ownership, and performs no
   GitHub write.
+- Stack mutation or semantic conflict resolution. Plan 36 alone owns
+  `integrate_stack_edge`, its exact approval, native transaction, receipt, and
+  recovery. A policy-delegated agent may separately submit that operation for
+  a `MechanicalIntegrationEligible` preview; Plan 37 never submits it,
+  interprets approval, resolves a semantic conflict, or turns fanout into an
+  automatic agent continuation.
 - Host packaging, install/repair/uninstall mechanics, or the canonical
   host-integration catalog — [Plan 27](27-cross-host-agent-plugin-bundles.md)
   owns those; this plan only defines which delivery adapter a host receives
@@ -240,7 +256,8 @@ GitHub, applies a fix, or continues an agent automatically.
   relations. Missing or stale destination evidence is partial/stale, never
   clean; commit-granular source history and PR/merge grouping remain separate
   evidence.
-- Cycle-request inputs bind: project/repository/worktree/branch/ref/HEAD SHA;
+- Cycle-request inputs bind typed `ProjectId`, `RepositoryId`, `WorktreeId`,
+  `BranchRef`, and HEAD `CommitId`;
   clean source-generation identity or an explicitly tagged
   ephemeral-overlay identity; file digest and document version;
   agent/session/turn identity; changed files/ranges/symbols; the exact
@@ -283,7 +300,8 @@ GitHub, applies a fix, or continues an agent automatically.
   `clean` nor adapter silence. `clean` requires supported, completed, complete
   coverage and zero active findings.
 - Dedupe/idempotency keys bind trigger, address
-  (project/branch/file/range/symbol), diagnostic/evidence/finding identity,
+  (`ProjectId`/`RepositoryId`/`WorktreeId`/`BranchRef`/file/range/symbol),
+  diagnostic/evidence/finding identity,
   and delivery channel so that hook, MCP, LSP, dashboard, and CLI delivery of
   the same evidence never duplicate. Because no GitHub write exists, dedupe
   never has to justify or bound outbound comment volume — it exists purely to
@@ -294,9 +312,10 @@ GitHub, applies a fix, or continues an agent automatically.
   [Plan 34](34-workspace-refactoring-and-api-migration.md)'s
   `EditTransaction` remains the only apply path for supported
   rename/refactor candidates surfaced as an inert suggested next action.
-- No scheduling, leasing, or locking of any kind rides on this cycle or its
-  proximity warnings. Plan 24/32 work or runtime state requires a separate,
-  explicit, authorized product command.
+- No agent/task/workflow scheduling, assignment lease, or file lock rides on
+  this cycle or its proximity warnings. Plan 24/32 work or runtime state
+  requires a separate, explicit, authorized product command. §3D's bounded
+  read-only preflight queue is daemon computation, not product work admission.
 - Unsaved overlays may produce immediate session-only feedback for the
   authorized client that owns the overlay. That feedback is never durable:
   it cannot enter a capsule, envelope, checkpoint, receipt, feedback-history
@@ -315,6 +334,10 @@ GitHub, applies a fix, or continues an agent automatically.
   owned by [Plan 05](05-query-crate.md) and
   [Plan 25](25-code-intelligence-indexing-crate.md). This plan adds no
   second observation, session, or graph model.
+- The same daemon process owns the sole stack signal coordinator (§3D). Hook,
+  LSP, MCP, CLI, dashboard, GitHub-ingress, CI-ingress, and agent adapters may
+  submit typed observations, but none performs local stack fanout, dedupe,
+  debounce, preflight scheduling, or recipient selection.
 - **Immediate tier:** exact same file/range/symbol qualifying conflicts emit
   immediately, without waiting on a risk-threshold evaluation.
 - **Threshold tier:** same package/crate, shared callers/dependencies/tests,
@@ -360,8 +383,14 @@ The Plan 37 producer emits one reference-only `FeedbackEvidencePacketV1`:
 FeedbackEvidencePacketV1 {
   packet_id, schema_version = 1, cycle_result_id,
   scope: {
-    project_id, repository_id, worktree_id, branch_id,
-    base_sha, head_sha, merge_base_sha, code_generation
+    project_id: ProjectId,
+    repository_id: RepositoryId,
+    worktree_id: WorktreeId,
+    branch_ref: BranchRef,
+    base_commit_id: CommitId,
+    head_commit_id: CommitId,
+    merge_base_commit_ids: CommitId[],
+    code_generation
   },
   producer: { operation_id, revision, node_id },
   findings: [{
@@ -399,7 +428,7 @@ ProximityContributionV1 {
   warning_id, warning_class,
   source_observation_ids[],
   retrieval_anchor_ids[],
-  address: { project_id, repository_id, worktree_id, branch_id,
+  address: { project_id, repository_id, worktree_id, branch_ref,
              file_id, range, symbol_id },
   relation_paths[],
   risk_inputs: {
@@ -431,7 +460,7 @@ TaskFeedbackLinkRevisionV1 {
   link_id, revision, TaskId, WorkItemId, WorkItemVersionId,
   packet_id, cycle_result_id, finding_id, retrieval_anchor_id,
   relation_kind: Supports | Contradicts | Risk | Overlap | ReviewInput,
-  scope_digest, head_sha, code_generation, evidence_watermark,
+  scope_digest, head_commit_id, code_generation, evidence_watermark,
   producer, actor, authorization_grant_id,
   observed_at, valid_from, valid_until,
   state: Active | Stale | Superseded | Revoked,
@@ -708,12 +737,14 @@ permitted:
 
 - `crates/tracedecay-domain/src/feedback/mod.rs`,
   `crates/tracedecay-domain/src/feedback/evidence_packet.rs`,
-  `crates/tracedecay-domain/src/feedback/proximity.rs`, and
+  `crates/tracedecay-domain/src/feedback/proximity.rs`,
+  `crates/tracedecay-domain/src/feedback/stack_signal.rs`, and
   `crates/tracedecay-domain/src/feedback/expertise.rs` own the pure V1 values,
   enums, validation, decay calculation, and prohibited-purpose invariants.
 - `crates/tracedecay-application/src/feedback/mod.rs`,
   `crates/tracedecay-application/src/feedback/cycle.rs`,
-  `crates/tracedecay-application/src/feedback/task_retrieval.rs`, and
+  `crates/tracedecay-application/src/feedback/task_retrieval.rs`,
+  `crates/tracedecay-application/src/feedback/stack_fanout.rs`, and
   `crates/tracedecay-application/src/feedback/expertise.rs` own Plan 09
   orchestration, authorization/consent rechecks, operation IDs, and typed
   application errors. PR11's application-crate migration places the canonical
@@ -726,12 +757,15 @@ permitted:
   move this module as one unit, but this plan creates no second implementation.
 - `crates/tracedecay-store/src/feedback/mod.rs`,
   `crates/tracedecay-store/src/feedback/packet.rs`,
-  `crates/tracedecay-store/src/feedback/task_link.rs`, and
+  `crates/tracedecay-store/src/feedback/task_link.rs`,
+  `crates/tracedecay-store/src/feedback/stack_signal.rs`, and
   `crates/tracedecay-store/src/feedback/expertise.rs` own persistence ports,
   immutable revisions, tombstones, and projector rebuild.
 - `src/daemon/feedback/mod.rs`, `src/daemon/feedback/github_ingest.rs`,
-  `src/daemon/feedback/ci_localization.rs`, and
-  `src/daemon/feedback/proximity.rs` own daemon composition over the application
+  `src/daemon/feedback/ci_localization.rs`,
+  `src/daemon/feedback/proximity.rs`,
+  `src/daemon/feedback/stack_coordinator.rs`, and
+  `src/daemon/feedback/stack_fanout.rs` own daemon composition over the application
   ports; GitHub transport, CI parsing, and proximity observation never enter
   task retrieval or adapters.
 - `src/mcp/tools/definitions/feedback.rs`,
@@ -749,6 +783,11 @@ permitted:
 - `tests/feedback_suite/main.rs`,
   `tests/feedback_suite/task_retrieval.rs`,
   `tests/feedback_suite/proximity_provenance.rs`,
+  `tests/feedback_suite/stack_signals.rs`,
+  `tests/feedback_suite/stack_fanout.rs`,
+  `tests/feedback_suite/stack_mechanical_handoff.rs`,
+  `tests/feedback_suite/stack_privacy.rs`,
+  `tests/feedback_suite/stack_github_read_only.rs`,
   `tests/feedback_suite/expertise_privacy.rs`,
   `tests/feedback_suite/github_read_only.rs`,
   `tests/feedback_suite/metrics_rollout.rs`,
@@ -763,8 +802,11 @@ gain/overlap/top-k displacement/stale rate, complete/partial/degraded query
 rate, latency by retriever, omissions, authorization denials, consented-event
 eligibility and abstention, attribution false-positive rate, anchor and
 explanation completeness, decayed/expired-signal rate, revocation/deletion
-propagation latency, small-cohort suppression, privacy-canary leakage, and
-attempted GitHub writes (required to remain zero).
+propagation latency, stack signals/transitions by kind, preflight fanout/join
+count, dedupe suppression, debounce latency, stale-epoch rejection, fanout
+batch depth, dropped transitions (required to remain zero), small-cohort
+suppression, privacy-canary leakage, and attempted GitHub writes (required to
+remain zero).
 
 Explicit feedback is stored as
 `RetrievalFeedbackObservationV1 { query_id, canonical_result_id,
@@ -818,6 +860,13 @@ Rollout is gated and reversible:
    suppression of every cohort smaller than 20, retention enforcement, zero
    cross-scope privacy canaries, and revocation propagation plus remote-cache
    purge within five minutes.
+6. **PR15 stack-fanout gate:** all §3D signal kinds, transition edges,
+   authorization boundaries, debounce classes, restart watermarks, batch
+   overflow, and Plan 36 handoff states pass on the pinned stack corpus before
+   central fanout is enabled. Deterministic replay/digest equality and legal
+   transition coverage are 100%; dropped transitions, hidden-scope canary
+   leaks, Plan 37 apply calls, CI reruns, outbound GitHub writes, and semantic
+   auto-resolutions are zero.
 
 Each gate produces an immutable Plan 26
 `FeedbackRolloutGateEvidenceV1 { gate, corpus_digest, evaluation_window,
@@ -828,12 +877,353 @@ privacy policy, or authorization policy invalidates the affected gate and
 returns that feature to shadow/default-off state until a new evidence record
 passes.
 
-Rollback disables the proximity rank contribution and expertise projection
-independently. Base TaskId retrieval, Plan 37 delivery, canonical evidence,
-and read-only GitHub ingestion remain available. A gate failure, privacy
-canary, attempted authority override, prohibited-purpose request, stale-rate
-breach, unexplained result, or any attempted GitHub write trips the relevant
-circuit breaker and cannot degrade to silent success.
+Rollback disables the proximity rank contribution, expertise projection, and
+PR15 stack preflight/fanout independently. Base TaskId retrieval, Plan 37
+non-stack delivery, canonical evidence, and read-only GitHub ingestion remain
+available. A gate failure, privacy canary, attempted authority override,
+prohibited-purpose request, stale-rate breach, dropped stack transition,
+semantic auto-resolution attempt, unexplained result, or any attempted GitHub
+write trips the relevant circuit breaker and cannot degrade to silent success.
+
+### 3D. Central daemon stack proximity, drift, and fanout
+
+#### One coordinator, exact inputs
+
+PR15 adds exactly one `StackSignalCoordinator` per daemon node. It consumes only:
+
+- Plan 16 `AuthorizedBranchStackSnapshot` and
+  `AuthorizedWorktreeInventorySnapshot` values with exact scope/grant/policy digests;
+- Plan 36 `RepositoryStateSnapshotV1`, `TipSnapshotV1`,
+  `MergeBaseSnapshotV1`, `DependencyCommitSetV1`,
+  `StackConflictReportV1`, `StackIntegrationPreviewV1`, and terminal
+  `StackIntegrationReceiptV1` values;
+- this plan's read-only `PullRequestSnapshot` and CI observation values with typed
+  `RepositoryId`, `BranchRef`, and `CommitId`; and
+- existing authorized agent/session/worktree presence and Plan 05 graph/test
+  neighborhoods.
+
+Adapters submit observations to the coordinator; they do not compare tips, schedule
+preflight, select recipients, persist dedupe keys, or emit warnings themselves. Plan 28
+may run one coordinator per node, but node-local coordinators never merge authority:
+remote observations enter only through Plan 28's fenced durable replication contract,
+and unsaved overlays remain node-local and non-durable.
+
+The canonical observation is:
+
+```text
+StackSignalObservationV1 {
+  signal_id, schema_version = 1,
+  kind: DependencyReady | ActualConflict | PotentialConflict
+      | UpstreamStackTipAdvanced | UpstreamStackBaseDrift
+      | PullRequestSnapshotDrift | CiCommitDrift
+      | IntegrationCommitted | IntegrationNeedsInspection,
+  scope: {
+    project_id: ProjectId, repository_id: RepositoryId,
+    stack_id: BranchStackId, stack_revision_id: BranchStackRevisionId,
+    inventory_snapshot_id: WorktreeInventorySnapshotId,
+    inventory_epoch: WorktreeInventoryEpoch,
+    scope_digest, authorization_grant_id, grant_digest,
+    policy_digest, policy_epoch
+  },
+  address:
+    Node {
+      node_id: StackNodeId, worktree_id: optional WorktreeId,
+      branch_ref: BranchRef, tip: CommitId
+    }
+    | Edge {
+      source_node_id: StackNodeId, destination_node_id: StackNodeId,
+      source_worktree_id: optional WorktreeId,
+      destination_worktree_id: optional WorktreeId,
+      source_branch_ref: BranchRef, destination_branch_ref: BranchRef,
+      source_tip: CommitId, destination_tip: CommitId,
+      merge_base_commit_ids: CommitId[]
+    },
+  dependency_commit_set_id: optional DependencyCommitSetId,
+  dependency_commit_ids: bounded CommitId[],
+  conflict_report_id: optional StackConflictReportId,
+  conflict_finding_ids: bounded StackConflictFindingId[],
+  drift: optional
+    Stack {
+      prior_revision_id: BranchStackRevisionId,
+      current_revision_id: BranchStackRevisionId,
+      prior_tip: CommitId, current_tip: CommitId
+    }
+    | PullRequest {
+      prior_snapshot_id: PullRequestSnapshotId,
+      current_snapshot_id: PullRequestSnapshotId,
+      prior_base: CommitId, prior_head: CommitId,
+      prior_merge_bases: CommitId[],
+      current_base: CommitId, current_head: CommitId,
+      current_merge_bases: CommitId[]
+    }
+    | Ci {
+      prior_observation_id: CiObservationId,
+      current_observation_id: CiObservationId,
+      evaluated_commit: CommitId, current_tip: CommitId
+    },
+  integration_preview_id: optional StackIntegrationPreviewId,
+  integration_receipt_id: optional StackIntegrationReceiptId,
+  analysis_epoch_digest: optional Digest,
+  graph_generation: optional GraphGeneration,
+  observed_at, valid_at, expires_at, coverage, signal_evidence_digest
+}
+```
+
+Every optional field is kind-checked. `DependencyReady` requires a nonempty Plan 36
+commit set whose readiness is exactly `Ready`. `ActualConflict` requires at least one
+Plan 36 `Actual` finding. `PotentialConflict` requires at least one blocking
+`Potential` finding. Dependency, conflict, and integration signals require `Edge`;
+PR/CI node drift may use `Node`. Drift kinds require the matching `drift` variant and all
+non-drift kinds reject it. Stack drift requires old/new typed stack revisions or tips;
+pull-request drift requires old/new immutable PR snapshots with changed base/head/
+merge-base commit identity; CI drift requires that the observed run/check commit no
+longer equals the node tip or PR head it was evaluated for. Dependency/conflict/
+integration signals require an analysis epoch; other signals may carry one only when
+Plan 36 enrichment produced it. `IntegrationCommitted` requires a `Committed` receipt;
+`IntegrationNeedsInspection` requires a `NeedsInspection` receipt. Missing or partial
+provider coverage produces a stale/partial signal, never a claim that upstream is current.
+
+`dependency_commit_ids` is bounded to 64 IDs in the inline signal; larger sets retain the
+complete Plan 36 set by ID and report total/returned/omitted counts plus an authorized
+cursor. No source, patch, PR body, CI log, conflict body, private session content, or
+untracked content is copied into this record.
+
+#### Read-only preflight fanout
+
+For a new committed tip or stack revision, the coordinator walks only visible declared
+dependency edges in canonical Plan 16 order. It creates at most one read-only Plan 36
+preflight request per distinct `(scope_digest, stack_revision_id, inventory_epoch,
+source_tip_snapshot_id, destination_tip_snapshot_id, direction, policy_epoch)`; Plan 36
+then issues the resulting analysis epoch. Propagation preflight runs when a declared
+dependency tip advances; landing-direction preflight runs only for an explicit authorized
+PR/stack-watch request. The daemon worker must hold `StackPreflight` for the exact nodes;
+daemon locality and recipient `StackRead` are insufficient. The default concurrency limit
+is four per repository and sixteen per daemon. A duplicate request joins the in-flight
+result. Cancellation, budget exhaustion, stale scope, or authorization loss stops pending
+work and produces typed partial coverage; it never relaunches against current tips.
+
+The result fanout is exhaustive:
+
+```text
+StackFanoutItemV1 {
+  signal_id, signal_key, signal_kind,
+  recipient_scope_digest, recipient_delivery_id,
+  urgency: Immediate | NextBoundary | Idle | OnRequest,
+  state: New | Updated | Superseded | Resolved | Expired,
+  safe_summary, finding_ids[], retrieval_anchor_ids[],
+  mechanical_suggestion: optional {
+    preview_id, preview_digest, analysis_epoch_digest,
+    source_node_id, destination_node_id, direction, mechanical_mode,
+    approval_required = true,
+    apply_operation = "integrate_stack_edge",
+    advisory_only = true
+  },
+  semantic_escalation: optional {
+    conflict_report_id, blocking_finding_ids[], required_human_review = true
+  },
+  observed_at, expires_at, coverage
+}
+```
+
+`mechanical_suggestion` exists only when Plan 36 says
+`MechanicalIntegrationEligible`; it is an inert reference, not approval or execution.
+An authorized policy-delegated agent may separately facilitate Plan 36's exact apply
+operation after obtaining `StackIntegrationApprovalV1`. Plan 37 never issues that
+approval or calls apply. `semantic_escalation` exists for every native conflict,
+blocking potential semantic conflict, or incomplete required conflict layer, and excludes
+the mechanical suggestion. There is no "accept risk," auto-resolve, ours/theirs, or model
+override path.
+
+#### Authorized recipient selection
+
+A recipient is eligible only when its current Plan 16 grant includes `StackRead` for the
+exact `BranchStackId` and visible node set. Delivery additionally requires either
+attachment to an affected exact `WorktreeId` or an explicit watch preference for that
+stack; the preference is a selector, never a grant. Conflict details require access to
+both addressed nodes and their anchors. The coordinator reauthorizes at enqueue and
+delivery. A session attached only to a project, collection, sibling worktree, same path,
+same branch label, or same daemon is ineligible.
+
+Fanout reveals no hidden actor, session, worktree, node, branch, PR, CI run, count, or
+absence-vs-denial distinction. A coarse overlap warning may say that an authorized
+address has an external conflict without identifying the hidden side only when policy
+explicitly permits that safe shape. Otherwise there is no item. Delivery batches contain
+at most 64 recipients and 128 signals; overflow drains through deterministic batches
+ordered by `(urgency, signal_kind, address_digest, signal_id,
+recipient_delivery_id)` and is
+never silently dropped. Every batch reports total/returned/omitted and a durable
+watermark.
+
+#### Central dedupe and debounce
+
+The coordinator, not adapters, owns:
+
+```text
+StackSignalCorrelationKeyV1 = digest(
+  schema_version, scope_digest, stack_id, address, policy_digest, privacy_revision
+)
+
+StackSignalKeyV1 = digest(
+  StackSignalCorrelationKeyV1, stack_revision_id, inventory_epoch,
+  signal_kind, commit_vector_digest, signal_evidence_digest,
+  analysis_epoch_digest
+)
+
+StackDeliveryKeyV1 = digest(
+  StackSignalKeyV1, recipient_delivery_id, delivery_surface, finding_ids
+)
+```
+
+Plan 20 registers these exact settings in
+`src/config/definitions/feedback.rs`:
+
+```text
+feedback.stack_fanout.debounce.dependency_ready_ms = 250   (0..5000)
+feedback.stack_fanout.debounce.potential_conflict_ms = 250 (0..5000)
+feedback.stack_fanout.debounce.upstream_drift_ms = 1000    (0..10000)
+feedback.stack_fanout.dedupe_ttl_ms = 300000               (1000..3600000)
+feedback.stack_fanout.max_preflight_per_repository = 4     (1..16)
+feedback.stack_fanout.max_preflight_per_daemon = 16        (1..64)
+feedback.stack_fanout.max_recipients_per_batch = 64        (1..256)
+feedback.stack_fanout.max_signals_per_batch = 128          (1..512)
+```
+
+`ActualConflict`, `IntegrationNeedsInspection`, authorization revocation, and privacy
+revocation have zero debounce. Exact duplicate actual conflicts still emit once per
+delivery key within the dedupe TTL; a changed conflict fingerprint or state transition
+emits immediately. Dependency-ready and potential-conflict bursts coalesce for 250 ms;
+stack/PR/CI upstream drift coalesces for 1000 ms. Debounce freezes the first authorized
+scope/epoch and may only add observations that match it; drift starts a new key rather
+than mutating the batch.
+
+Observation IDs and provider fetch IDs are not key material;
+`signal_evidence_digest` hashes the typed dependency closure, conflict-finding set, or
+old/new drift commit vectors, so an identical provider refresh dedupes while changed
+evidence emits. Every transition emits once even inside the TTL. Legal transitions are
+`New -> Updated | Superseded | Resolved | Expired` and
+`Updated -> Updated | Superseded | Resolved | Expired`;
+`Superseded | Resolved | Expired` are terminal. Potential-to-actual, ready-to-stale,
+PR/CI head change, conflict-set change, integration completion, and recovery-required are
+distinct transitions. Restart restores dedupe deadlines and watermarks from durable
+clean-state records. Session-only overlay keys remain memory-only and are discarded on
+disconnect/restart. Dedupe never hides coverage deterioration, authorization revocation,
+or a new blocking finding.
+
+No dedupe or debounce state is an approval, lock, lease, task, workflow run, Git receipt,
+GitHub delivery record, or CI rerun request. GitHub remains read-only ingress: no signal,
+transition, mechanical suggestion, fanout acknowledgement, or resolved state posts,
+updates, resolves, dismisses, reacts to, or replies to GitHub.
+
+#### Store schema, application API, and migration
+
+- `feedback_stack_signal_observations(signal_id, signal_kind, project_id,
+  repository_id, stack_id, stack_revision_id, inventory_snapshot_id, inventory_epoch,
+  address_kind, node_id, source_node_id, destination_node_id, branch_ref_payload,
+  tip_payload, source_tip_payload, destination_tip_payload, analysis_epoch_digest,
+  dependency_commit_set_id, conflict_report_id, drift_kind,
+  prior_drift_record_id, current_drift_record_id, drift_digest, integration_preview_id,
+  integration_receipt_id, observed_at, valid_at, expires_at, coverage_digest,
+  signal_evidence_digest)` is append-only and stores no payload body. Checks require exactly the
+  node-address columns or edge-address columns and reject cross-repository ref/commit
+  payloads.
+- `feedback_stack_signal_transitions(correlation_key, transition_ordinal,
+  prior_signal_id, next_signal_id, prior_state, next_state, reason, observed_at,
+  transition_digest)` is append-only with primary key
+  `(correlation_key, transition_ordinal)` and rejects illegal transitions.
+- `feedback_stack_dedupe(signal_key, first_seen_at, last_seen_at, suppress_until,
+  expires_at, latest_signal_id, state, watermark)` is a restart-stable projection rebuilt
+  from observations/transitions; it carries no source content or recipient identity.
+- `feedback_stack_fanout_batches(batch_id, signal_key, batch_ordinal, watermark,
+  total_recipients, returned_recipients, omitted_recipients, created_at,
+  expires_at, batch_digest)` is append-only.
+- `feedback_stack_fanout_deliveries(batch_id, delivery_ordinal,
+  recipient_delivery_id, delivery_surface, delivery_key, outcome, delivered_at,
+  expires_at)` is retention-bounded; `recipient_delivery_id` is a policy-scoped opaque ID,
+  never an actor-listing key.
+
+`src/global_db/feedback_stack/{schema,store,migration}.rs` implements these tables for
+clean committed stack evidence. Dirty/unsaved observations are prohibited from this
+store. Migration creates empty V1 tables and imports no adapter-local dedupe cache,
+path-keyed recipient, branch label, untyped SHA, inferred stack edge, approval, or
+delivery history. Re-execution is idempotent.
+
+```rust
+pub trait StackSignalCoordinator {
+    fn observe(
+        &self,
+        observation: StackSignalObservationV1,
+    ) -> Result<StackSignalEvaluationV1, StackSignalError>;
+
+    fn reconcile_stack(
+        &self,
+        request: AuthorizedStackReconcileRequestV1,
+    ) -> Result<StackReconcileResultV1, StackSignalError>;
+}
+
+pub trait StackFanoutService {
+    fn fanout(
+        &self,
+        request: AuthorizedStackFanoutRequestV1,
+    ) -> Result<StackFanoutBatchV1, StackFanoutError>;
+
+    fn snapshot(
+        &self,
+        request: AuthorizedStackSignalSnapshotRequestV1,
+    ) -> Result<StackSignalSnapshotV1, StackFanoutError>;
+}
+```
+
+Plan 21 binds read-only `feedback_stack_snapshot` and
+`feedback_stack_expand` operations. The existing five surfaces render the corresponding
+section of the one Plan 09 result. No `feedback_stack_apply`, GitHub-write, CI-rerun,
+agent-followup, or adapter-local fanout operation exists.
+
+#### Tests, benchmarks, and PR15 acceptance
+
+- `tests/feedback_suite/stack_signals.rs` covers every signal kind and optional-field
+  invariant; 1/2/8/32-node stacks; both dependency directions; empty/non-ready commit
+  sets; actual/potential conflicts; stack tip/base, PR, and CI drift; stale/partial/
+  denied coverage; and exact typed repository/worktree/ref/commit binding.
+- `tests/feedback_suite/stack_fanout.rs` covers canonical edge ordering, 1/8/64/256
+  recipients, batch overflow, in-flight preflight joins, bounded concurrency,
+  cancellation, restart watermarks, every legal transition, immediate versus
+  250/1000-ms debounce classes, five-minute dedupe expiry, and no suppression of
+  coverage/auth/privacy deterioration.
+- `tests/feedback_suite/stack_mechanical_handoff.rs` proves an eligible preview yields
+  only an inert suggestion; a delegated agent still needs an exact Plan 36 approval;
+  Plan 37 never calls apply; native or semantic conflict and incomplete coverage yield
+  only escalation; and receipt/recovery transitions fan out without duplicate action.
+- `tests/feedback_suite/stack_privacy.rs` covers denied sibling worktrees, partially
+  visible topology, hidden participants, same-path/label repositories, authorization loss
+  between enqueue/delivery/expansion, policy-safe coarse warnings, and zero hidden counts.
+- `tests/feedback_suite/stack_github_read_only.rs` schema-scans every signal, transition,
+  suggestion, acknowledgement, transport operation, dependency edge, and client
+  descriptor and proves zero REST write methods, GraphQL mutations, CI reruns, or GitHub
+  network calls.
+- `benches/stack_fanout.rs` measures event normalization, edge fanout, preflight
+  scheduling, dedupe lookup, debounce flush, recipient authorization, batching, restart
+  rebuild, and five-surface projection for 2/8/32/128 nodes, 1/8/64/256 recipients, and
+  bursts of 10/100/10,000 observations at 0/50/90% duplicate rates. It records
+  p50/p95/p99, allocations, queue depth, suppression ratio, authorization calls, and
+  dropped-event count, which must remain zero. The pinned-runner gate rejects unexplained
+  p95 regression above 10%.
+
+```sh
+cargo test --all-features --test feedback_suite stack_signals
+cargo test --all-features --test feedback_suite stack_fanout
+cargo test --all-features --test feedback_suite stack_mechanical_handoff
+cargo test --all-features --test feedback_suite stack_privacy
+cargo test --all-features --test feedback_suite stack_github_read_only
+cargo bench --bench stack_fanout --all-features
+cargo check --all-features
+```
+
+PR15 acceptance requires one coordinator per daemon node; exact Plan 16 authorization;
+deterministic Plan 36 edge/preflight fanout; dependency-ready, actual/potential conflict,
+stack/PR/CI drift, and integration terminal signals; central restart-stable
+dedupe/debounce; zero dropped state transitions; zero hidden-root/actor/count leakage;
+mechanical suggestions that remain inert until separately approved in Plan 36; semantic
+conflict escalation with no apply path; and zero GitHub writes or CI reruns.
 
 ### 4. Read-only GitHub PR review ingestion (never an LSP transport, never a write path)
 
@@ -864,7 +1254,8 @@ circuit breaker and cannot degrade to silent success.
   The GitHub ingress crate does not link a mutation client, and architecture
   tests scan its operation descriptors and compiled dependency boundary.
 - The typed ingest contract binds, per ingested item:
-  - repository, provider, and PR identity; base and head SHA; and merge base;
+  - typed repository identity, provider, and PR identity; provider-observed base/head
+    SHAs bound to canonical base/head `CommitId`; and merge-base `CommitId`;
   - review, thread, comment, and reply IDs;
   - author identity and author class (bot, maintainer, or other observed
     role) reported as-observed, never upgraded into an invented trust level;
@@ -911,7 +1302,7 @@ circuit breaker and cannot degrade to silent success.
   - `unavailable` — provider, endpoint, or daemon unavailable;
   - `denied` — authorization or permission denied for the requested scope;
   - `rate_limited` — GitHub rate limit or quota prevented complete fetch;
-  - `stale` — cached ETag, cursor, or head-SHA drift makes the retained
+  - `stale` — cached ETag, cursor, or head-`CommitId` drift makes the retained
     snapshot stale relative to the current repository state;
   - `failed` — fetch failed for a reason not covered above.
   `denied` here means denial of read-ingress authorization only. Coverage,
@@ -925,7 +1316,7 @@ circuit breaker and cannot degrade to silent success.
   `complete` fetch may return items in any lifecycle state, and an item in
   `current` lifecycle may be surfaced under a `partial`, `stale`, or
   `unavailable` ingress outcome when refresh or expansion fails.
-- TraceDecay never surfaces a finding from a dirty overlay, a stale head SHA,
+- TraceDecay never surfaces a finding from a dirty overlay, a stale head `CommitId`,
   an unmappable non-diff line, incomplete coverage presented as clean, or
   unauthorized/private evidence — because there is no comment path, these
   conditions instead produce the exact typed ingress provider outcome
@@ -942,8 +1333,8 @@ circuit breaker and cannot degrade to silent success.
   generation, callers, and targeted rerun hints; it never claims to have run,
   verified, or influenced CI.
 - The typed CI input contract binds: CI provider and repository identity;
-  workflow, job, check-suite, check-run, run, and attempt IDs; head SHA and
-  ref; an artifact/log URI or a retained
+  workflow, job, check-suite, check-run, run, and attempt IDs; provider-observed head SHA
+  bound to canonical `CommitId` and typed `BranchRef`; an artifact/log URI or a retained
   [Plan 13](13-research-provenance-and-context-anchors.md) retrieval anchor
   for the log; an excerpt digest; parser identity and version; event time;
   failure kind, file, line, and test; a confidence value; coverage; explicit
@@ -1024,7 +1415,7 @@ reporting total/returned/omitted counts, reasons, and authorized expansion.
     proximity note never exceeds an advisory severity) — this projection
     never fabricates a severity the underlying evidence does not support.
   - Clearing and removal are deterministic on thread resolution, comment
-    deletion, head-SHA or content/generation change that invalidates the
+    deletion, head-`CommitId` or content/generation change that invalidates the
     remap, or supersession. Publication is idempotent and version-monotone:
     duplicates converge, stale updates cannot overwrite newer state, and
     reconnect may redeliver current state, following the same rule
@@ -1047,8 +1438,9 @@ reporting total/returned/omitted counts, reasons, and authorized expansion.
   [Plan 26](26-observability-accounting-and-usage.md); PR14 is not first
   availability of any pillar.
 - PR15 extends every pillar's scope to multi-root/cross-project targets
-  through [Plan 16](16-cross-project-repository-worktree-scope.md); no
-  pillar's first availability depends on PR15.
+  through [Plan 16](16-cross-project-repository-worktree-scope.md) and adds
+  §3D's central daemon stack signal/preflight/fanout layer over Plans 16/36;
+  no pillar's first availability depends on PR15.
 - PR16 defines node-local overlay/proximity computation and remote-authority
   fencing for durable delivery through
   [Plan 28](28-remote-multi-machine-shared-brain.md); no pillar's first
@@ -1144,12 +1536,12 @@ PR6 boundary.
 
 | PR | This plan's contribution |
 |---|---|
-| PR9 | No new authority here. [Plan 36](36-git-aware-change-context-and-index-transactions.md) ships repository/commit-snapshot identity (base/head SHA, merge base, HEAD/ref) and read-only diff/hunk intelligence, and [Plan 05](05-query-crate.md) ships the composed revision-range diff/hunk query primitives, that this cycle's GitHub remap and CI localization later consume. Plan 32's workflow kernel is not required here or anywhere else in this milestone. |
+| PR9 | No new authority here. [Plan 36](36-git-aware-change-context-and-index-transactions.md) ships typed repository/commit-snapshot identity (base/head and merge-base `CommitId`, HEAD/`BranchRef`) and read-only diff/hunk intelligence, and [Plan 05](05-query-crate.md) ships the composed revision-range diff/hunk query primitives that this cycle's GitHub remap and CI localization later consume. Plan 32's workflow kernel is not required here or anywhere else in this milestone. |
 | PR11 | [Plan 09](09-application-crate.md) ships the concrete typed feedback-cycle request/result, orchestration, and the one-shot termination taxonomy (§2). First pillar (post-edit diagnostics+impact) begins shipping. |
 | PR12 | [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) gateway triggers and the explicit MCP/CLI/API diagnostics-call trigger bound once by [Plan 21](21-cli-mcp-tool-surface-and-output-unification.md) (§6). Completes the post-edit diagnostics-and-impact pillar for LSP/MCP/CLI. |
 | PR13 | **First coherent milestone (§7).** Hook and agent stop/pre-stop-gate triggers, host delivery-adapter parity through [Plan 27](27-cross-host-agent-plugin-bundles.md); first availability of CI-failure localization (§5), read-only GitHub review-comment/thread ingestion and surfacing (§4), and tiered concurrent-agent proximity (§3). All four pillars are simultaneously available across hook/MCP/CLI/LSP surfaces. `FeedbackEvidencePacketV1` and `ProximityContributionV1` ship reference-only behind the PR13 packet gate (§3C); TaskId linking, fusion rank influence, and expertise remain disabled. No GitHub write exists at PR13 or at any later PR. |
 | PR14 | Dashboard/Doctor/observability consumption of the same typed cycle, GitHub-ingested, CI-localization, and proximity state already shipped at PR13, through [Plan 11](11-dashboard-frontend.md) and [Plan 26](26-observability-accounting-and-usage.md). Not first availability. |
-| PR15 | Multi-root/cross-project cycle, GitHub-remap, CI-localization, and proximity scope through [Plan 16](16-cross-project-repository-worktree-scope.md); no pillar's first availability depends on PR15. |
+| PR15 | Multi-root/cross-project cycle, GitHub-remap, CI-localization, and proximity scope through [Plan 16](16-cross-project-repository-worktree-scope.md), plus §3D's one daemon-local stack coordinator for dependency-ready commits, actual/potential conflicts, upstream stack/PR/CI drift, restart-stable dedupe/debounce, and inert Plan 36 mechanical-integration handoff. No pillar's first availability depends on PR15; no GitHub write or automatic agent continuation exists. |
 | PR16 | Node-local overlay and remote-authority rules through [Plan 28](28-remote-multi-machine-shared-brain.md): unsaved overlays and proximity computation stay node-local; durable cycle state, GitHub-ingested evidence, and CI-localization evidence are fenced through shard authority. No pillar's first availability depends on PR16. |
 | PR17 | Plan 24 adds explicit `TaskFeedbackLinkRevisionV1`, TaskId-rooted retrieval through its canonical `TaskEvidenceRequest`/`TaskEvidencePacket`, exactly one proximity primitive, and provenance/diversity/feedback observations. Plan 37/09 add the default-off demonstrated-expertise producer and consent/decay/projection gates in §§3B–3C. Plan 32 may optionally compose the already-shipped read-only advisory operations through its existing `WorkflowStepV1`/`NormalizedEvidenceEnvelopeV1`/`EvidencePacketSetV1` runtime contracts; it does not own linking, retrieval, consent, decay, or rank policy. Not first availability of the four pillars; no GitHub write; no new authority. |
 
@@ -1195,11 +1587,11 @@ PR6 boundary.
   from §4:
   - **Item/thread lifecycle:** `current`, `outdated`, `resolved`, `edited`,
     and `deleted` — including GitHub-native resolved/edited/deleted states and
-    exact-match versus symbol-remapped-but-`outdated` binding after a head-SHA
+    exact-match versus symbol-remapped-but-`outdated` binding after a head-`CommitId`
     change.
   - **Ingress provider outcome:** `complete`, `partial`, `unavailable`,
     `denied`, `rate_limited`, `stale`, and `failed` — including rate-limit,
-    auth-failure, ETag-reuse, head-SHA drift, and daemon-restart recovery.
+    auth-failure, ETag-reuse, head-`CommitId` drift, and daemon-restart recovery.
   - A **lifecycle × provider-outcome matrix** exercises every lifecycle
     value under each relevant provider outcome (for example, `current` under
     `complete`, `outdated` under `stale`, `deleted` under `complete`, and
@@ -1232,6 +1624,18 @@ PR6 boundary.
   advisory-only semantics, `observed_at`/`expires_at` freshness, suppression/
   dedupe, and privacy scoping across sessions/agents without creating a lock
   or schedule.
+- **Stack coordinator/fanout fixtures (§3D)** prove dependency-ready commit fanout,
+  immediate actual-conflict delivery, debounced potential conflicts, upstream
+  stack-tip/base drift, PR base/head/merge-base drift, CI commit drift, canonical edge
+  order, bounded preflight concurrency, in-flight joins, restart-stable dedupe/watermarks,
+  64-recipient/128-signal batch draining with zero dropped transitions, and exact
+  authorization at enqueue/delivery/expansion.
+- **Mechanical handoff fixtures (§3D)** prove only a Plan 36
+  `MechanicalIntegrationEligible` preview creates an inert suggestion; a policy-delegated
+  agent still needs exact separate approval; Plan 37 never invokes apply; native or
+  semantic conflicts and incomplete coverage always escalate; and no acknowledgement,
+  transition, resolution, or dedupe state writes GitHub, reruns CI, or continues an
+  agent.
 - **TaskId retrieval/fusion fixtures** prove `TaskId` resolves the canonical
   Plan 24 `WorkItemId` and pins `WorkItemVersionId`; current/as-of/evolution/
   forensic modes expand exact anchors; the registry contains exactly one
@@ -1316,7 +1720,7 @@ PR6 boundary.
   messages and never pointer-only reply records or copied bodies; GitHub
   replies and full thread text expand only through authorized anchor /
   `feedback_expand`; severity never exceeds what the source evidence supports;
-  and resolution, deletion, head-SHA/content/generation change that
+  and resolution, deletion, head-`CommitId`/content/generation change that
   invalidates a remap, or supersession clears or republishes the diagnostic
   idempotently and version-monotonically, permitting reconnect redelivery while
   rejecting stale publication.
