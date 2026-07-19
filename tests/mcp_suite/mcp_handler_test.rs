@@ -36,6 +36,7 @@ use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::{McpServer, McpTransport, ToolResult, get_tool_definitions};
 use tracedecay::memory::store::MemoryStore;
 use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::lcm::types::LcmImmutableSummaryPublication;
 use tracedecay::sessions::lcm::{
     LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
 };
@@ -14930,26 +14931,89 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     let db = open_project_session_db(cg.project_root())
         .await
         .expect("project-local session db should open");
+    let active_session = db
+        .get_session("cursor", "lcm-active-session")
+        .await
+        .expect("canonical projection must create the active session");
+    assert_eq!(
+        active_session.project_key,
+        cg.store_layout()
+            .identity
+            .project_id
+            .as_deref()
+            .expect("test project id")
+    );
     activate_test_temporal_generation(&db, "lcm-origin-session", vec![origin_projection]).await;
     activate_test_temporal_generation(&db, "lcm-active-session", vec![active_projection]).await;
-    db.lcm_insert_summary_node(LcmSummaryNodeDraft {
-        provider: "cursor".to_string(),
-        conversation_id: "lcm-origin-session".to_string(),
-        session_id: "lcm-origin-session".to_string(),
-        depth: 0,
-        summary_text: "external payload attestation".to_string(),
-        source_refs: vec![LcmSourceRef::RawMessage {
-            store_id: origin_store_id,
-        }],
-        source_token_count: 1,
-        summary_token_count: 1,
-        source_time_start: Some(1),
-        source_time_end: Some(1),
-        expand_hint: Some("external payload fixture".to_string()),
-        metadata_json: None,
+    db.lcm_publish_immutable_summary(LcmImmutableSummaryPublication {
+        summary_id: "summary.lcm-origin-external".to_string(),
+        predecessor_summary_id: None,
+        draft: LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "lcm-origin-session".to_string(),
+            session_id: "lcm-origin-session".to_string(),
+            depth: 0,
+            summary_text: "external payload attestation".to_string(),
+            source_refs: vec![LcmSourceRef::RawMessage {
+                store_id: origin_store_id,
+            }],
+            source_token_count: 1,
+            summary_token_count: 1,
+            source_time_start: Some(1),
+            source_time_end: Some(1),
+            expand_hint: Some("external payload fixture".to_string()),
+            metadata_json: None,
+        },
     })
     .await
     .expect("external payload must receive a canonical summary attestation");
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("test project id");
+    let registry = GlobalDb::open().await.expect("test registry");
+    let project = registry
+        .upsert_code_project(&project_id, cg.project_root(), None, None, None)
+        .await
+        .expect("register test project");
+    let profile_root = registry
+        .db_path()
+        .parent()
+        .expect("test registry profile root");
+    let serving_db_relpath = cg
+        .db_path()
+        .strip_prefix(profile_root)
+        .expect("test graph database must be under the registry profile root")
+        .to_string_lossy()
+        .into_owned();
+    let store = registry
+        .upsert_store_instance(tracedecay::global_db::StoreInstanceUpsert {
+            store_id: format!("store_{project_id}"),
+            project_id: project.project_id.clone(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: serving_db_relpath.clone(),
+            manifest_relpath: None,
+            last_verified_at: Some(1),
+            last_write_at: Some(1),
+        })
+        .await
+        .expect("register test project store");
+    registry
+        .upsert_graph_scope(tracedecay::global_db::GraphScopeUpsert {
+            graph_scope_id: format!("scope_{project_id}"),
+            project_id: project.project_id,
+            store_id: store.store_id,
+            branch_name: "test".to_string(),
+            db_relpath: serving_db_relpath,
+            parent_scope_id: None,
+            last_synced_at: Some(1),
+            writable: true,
+        })
+        .await
+        .expect("register test graph scope");
     let server = real_mcp_server(cg).await;
 
     let raw_result = handle_real_server_tool_call(
