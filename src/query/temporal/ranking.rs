@@ -268,11 +268,11 @@ fn prepare_candidates(
     }
 
     for candidate in unique_by_id_and_channel.values_mut() {
-        // Candidates are built from validated metadata keys, so the entry exists.
-        #[allow(clippy::expect_used)]
-        let metadata = metadata_by_id
-            .get(&candidate.stable_id)
-            .expect("every candidate has validated metadata");
+        let Some(metadata) = metadata_by_id.get(&candidate.stable_id) else {
+            return Err(RankingError::ConflictingDuplicateMetadata {
+                stable_id: candidate.stable_id.clone(),
+            });
+        };
         copy_metadata(candidate, metadata);
     }
 

@@ -882,6 +882,58 @@ fn fixture_observation_for(
     receipt_id: &str,
     content: &str,
 ) -> DurableObservationV1 {
+    fixture_observation_with_facts(
+        ordinal,
+        session_id,
+        provider,
+        message_id,
+        record_id,
+        receipt_id,
+        vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::Assistant,
+            content: json!({"text": content}),
+            model: None,
+            timestamp: Some(ordinal as i64),
+        }],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fixture_observation_without_payload(
+    ordinal: u64,
+    session_id: &str,
+    provider: &str,
+    message_id: &str,
+    record_id: &str,
+    receipt_id: &str,
+) -> DurableObservationV1 {
+    fixture_observation_with_facts(
+        ordinal,
+        session_id,
+        provider,
+        message_id,
+        record_id,
+        receipt_id,
+        vec![CanonicalObservationFactV1::Usage {
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+        }],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fixture_observation_with_facts(
+    ordinal: u64,
+    session_id: &str,
+    provider: &str,
+    message_id: &str,
+    record_id: &str,
+    receipt_id: &str,
+    facts: Vec<CanonicalObservationFactV1>,
+) -> DurableObservationV1 {
     let session_id = SessionId::new(session_id).unwrap();
     let provider = ProviderId::new(provider).unwrap();
     let source =
@@ -895,12 +947,7 @@ fn fixture_observation_for(
         "message",
         record_id.clone(),
         relations,
-        vec![CanonicalObservationFactV1::Message {
-            role: CanonicalMessageRoleV1::Assistant,
-            content: json!({"text": content}),
-            model: None,
-            timestamp: Some(ordinal as i64),
-        }],
+        facts,
         CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
     )
     .unwrap();
@@ -2413,8 +2460,29 @@ async fn production_occurrence_hydration_is_nonempty_and_external_payload_is_imm
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_lcm_db_path(&tmp);
     let db = open_lcm_db(&tmp).await;
-    let (inline_observation, inline_anchor) = persist_fixture_anchor(&db, 1).await;
-    let (external_observation, external_anchor) = persist_fixture_anchor(&db, 2).await;
+    let inline_payload = "non-empty inline occurrence payload";
+    let inline_observation = fixture_observation_for(
+        1,
+        "session.temporal.application",
+        "provider.application",
+        "message-1",
+        "record-1",
+        "receipt-1",
+        inline_payload,
+    );
+    let (inline_observation, inline_anchor) =
+        persist_fixture_observation(&db, 1, inline_observation).await;
+    let external_payload = "non-empty external occurrence payload";
+    let external_observation = fixture_observation_without_payload(
+        2,
+        "session.temporal.application",
+        "provider.application",
+        "message-2",
+        "record-2",
+        "receipt-2",
+    );
+    let (external_observation, external_anchor) =
+        persist_fixture_observation(&db, 2, external_observation).await;
     let (_, authority_anchor) = persist_fixture_anchor(&db, 3).await;
     let policy_digest = policy_digest_bytes(&inline_anchor);
     assert_eq!(
@@ -2433,7 +2501,6 @@ async fn production_occurrence_hydration_is_nonempty_and_external_payload_is_imm
         )
         .await
         .unwrap();
-    let inline_payload = "non-empty inline occurrence payload";
     fixture
         .execute(
             "INSERT INTO lcm_raw_messages (
@@ -2449,7 +2516,6 @@ async fn production_occurrence_hydration_is_nonempty_and_external_payload_is_imm
         .await
         .unwrap();
 
-    let external_payload = "non-empty external occurrence payload";
     let external_hash = fixture_hash(external_payload.as_bytes());
     let payload_ref = "application-fixture.bin";
     let payload_dir = db_path.parent().unwrap().join("lcm-payloads");
