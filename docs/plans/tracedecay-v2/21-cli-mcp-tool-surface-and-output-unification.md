@@ -1,6 +1,7 @@
 # TraceDecay V2 CLI, MCP, LSP, and Output Unification
 
-**Delivery:** PR12 core; PR17 Plan 24/32 task/work extensions
+**Delivery:** PR12 core; PR17 Plan 24/32 task/work and internal cross-worktree
+extensions; PR18 public-name freeze
 
 **Status:** planned product work
 **Depends on:** [08 tool catalog](08-tool-catalog-crate.md), [09 application](09-application-crate.md), [18 privacy](18-secret-detection-redaction-and-private-data-safety.md), and [20 configuration](20-configuration-control-plane.md). PR12 ships Plan 35's explicitly resolved single-project LSP admission; [16 scope](16-cross-project-repository-worktree-scope.md) extends it to canonical multi-root admission in PR15 and is not a PR12 prerequisite.
@@ -257,6 +258,286 @@ a card status, selects an ambient board/profile, or treats a list rendering as
 readiness authority. Plain-text process exit, a terminal-protocol reminder, or
 a dragged card is never a successful application result.
 
+## PR17 internal cross-worktree operation family
+
+PR17 adds one paired CLI/MCP **internal profile** over Plan 07's daemon-admitted
+worktree events, Plan 24's task/readiness authority, Plan 36's Git identity,
+and Plan 37's advisory conflict/proximity findings. These bindings are
+developer/conformance names, not public compatibility promises. They remain
+absent from default public help, MCP discovery, HTTP routes, and SDKs until
+Plan 17 freezes the public names in PR18.
+
+The internal semantic operation IDs and temporary paired bindings are exact:
+
+- `worktree.task_placement.read.v1`: CLI `worktree task-placement`; MCP
+  `worktree_task_placement`; effect `Read`.
+- `worktree.stack_status.read.v1`: CLI `worktree stack-status`; MCP
+  `worktree_stack_status`; effect `Read`.
+- `worktree.dependency_ready.read.v1`: CLI `worktree dependency-ready`; MCP
+  `worktree_dependency_ready`; effect `Read`.
+- `worktree.cross_merge.preview.v1`: CLI
+  `worktree cross-merge dry-run`; MCP `worktree_cross_merge_dry_run`; effect
+  `Preview`.
+- `worktree.cross_merge.apply.v1`: CLI `worktree cross-merge apply`; MCP
+  `worktree_cross_merge_apply`; effect `Write`.
+- `worktree.cross_merge.status.v1`: CLI `worktree cross-merge status`; MCP
+  `worktree_cross_merge_status`; effect `Read`.
+- `worktree.cross_merge.cancel.v1`: CLI `worktree cross-merge cancel`; MCP
+  `worktree_cross_merge_cancel`; effect `Write` with control capability.
+- `worktree.conflict.list.v1`: CLI `worktree conflicts`; MCP
+  `worktree_conflicts`; effect `Read`.
+- `worktree.proximity.list.v1`: CLI `worktree proximity`; MCP
+  `worktree_proximity`; effect `Read`.
+- `worktree.receipt.get.v1`: CLI `worktree receipt`; MCP
+  `worktree_receipt`; effect `Read`.
+
+PR18 may change every CLI/MCP spelling above. It may not merge operations,
+change their effect classes, remove semantic states, weaken authorization, or
+reuse one operation ID for different behavior. No alias survives from the
+internal profile unless PR18 explicitly freezes it with a compatibility
+expiry.
+
+### Typed identity and request contract
+
+Every operation addresses canonical identity. A path, CWD, branch label,
+active checkout, first workspace folder, host session, or task title is never
+accepted as worktree identity.
+
+```rust
+pub struct WorktreeAddress {
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub worktree_id: WorktreeId,
+    pub worktree_epoch: WorktreeEpoch,
+    pub ref_id: Option<GitRefId>,
+    pub head_commit: CommitId,
+}
+
+pub struct TaskPlacementRequest {
+    pub task_id: TaskId,
+    pub work_item_version_id: WorkItemVersionId,
+    pub plan_version_id: WorkPlanVersionId,
+    pub selection: TaskPlacementSelection,
+    pub page: PageRequest,
+}
+
+pub struct StackStatusRequest {
+    pub source: WorktreeAddress,
+    pub task_id: Option<TaskId>,
+    pub base_commit: CommitId,
+    pub head_commit: CommitId,
+    pub page: PageRequest,
+}
+
+pub struct DependencyReadyRequest {
+    pub task_id: TaskId,
+    pub work_item_version_id: WorkItemVersionId,
+    pub plan_version_id: WorkPlanVersionId,
+    pub worktree: WorktreeAddress,
+    pub expected_readiness: Option<ReadinessDigest>,
+}
+
+pub struct CrossMergePreviewRequest {
+    pub task_id: Option<TaskId>,
+    pub source: WorktreeAddress,
+    pub source_stack: NonEmptyVec<CommitId>,
+    pub destination: WorktreeAddress,
+    pub expected_merge_base: CommitId,
+    pub expected_destination_generation: CodeGenerationId,
+    pub readiness_digest: Option<ReadinessDigest>,
+}
+
+pub struct CrossMergeApplyRequest {
+    pub preview_id: CrossMergePreviewId,
+    pub preview_digest: CrossMergePreviewDigest,
+    pub idempotency_key: IdempotencyKey,
+    pub authorization_grant_id: AuthorizationGrantId,
+}
+
+pub struct CrossMergeStatusRequest {
+    pub operation_id: CrossMergeOperationId,
+    pub cursor: Option<OperationEventCursor>,
+}
+
+pub struct CrossMergeCancelRequest {
+    pub operation_id: CrossMergeOperationId,
+    pub expected_operation_version: CrossMergeOperationVersion,
+    pub idempotency_key: IdempotencyKey,
+}
+```
+
+Task placement returns exact Plan 24 task/item/plan versions, every authorized
+`WorktreeId` and epoch, placement relation/revision, assignment versus
+advisory-claim provenance, source/ref/commit identity, freshness, coverage,
+and legal actions. It is many-to-many and never chooses a worktree by path or
+branch name.
+
+Stack status returns the exact ordered commit set between base and head,
+commit-parent topology, ahead/behind/diverged state, per-commit TaskId joins
+when independently authorized, changed symbol/file IDs, test and diagnostic
+receipt IDs, destination relationship, conflict projection, readiness
+projection, omissions, and coverage. It never treats a clean working tree,
+process exit, test command text, or commit existence as task completion.
+
+Dependency-ready is a Plan 24-derived view over the pinned plan/item version,
+gating dependencies, acceptance prerequisites, Plan 32 runtime compatibility,
+and the exact Plan 36 commit stack. It returns
+`Ready { readiness_digest }`, `Blocked { reasons }`,
+`Stale { expected, observed }`, or `NotExecutable { reason }`. CLI and MCP
+cannot compute readiness, suppress an unknown gate, or turn incomplete
+evidence into ready.
+
+Conflict and proximity reads consume Plan 37's canonical advisory findings.
+They preserve warning/finding identity, current/other authorized
+`WorktreeId`, epoch, affected file/symbol IDs, relation paths, risk tier,
+observed/expiry time, coverage, anchors, and suppression state. Hidden peers
+collapse to a coarse `restricted_overlap` without identity, count, task,
+branch, path, or timing disclosure.
+
+### Cross-merge authority and state machine
+
+Plan 21 owns only bindings and rendering. `cross_merge_apply` cannot enter any
+callable profile until a coordinated Plan 36 owner change defines and tests
+the daemon-owned `CrossMergeTransaction`; Plan 16 scope resolution and Plan 09
+authorization/effect receipts are also prerequisites. Until that owner
+contract exists, dry-run may return a read-only merge plan, but apply/status/
+cancel must be absent rather than advertised as unsupported.
+This family does not alias or widen the existing `git_preview`/`git_apply`
+index-and-hunk bindings.
+
+The owner contract is constrained here so adapter behavior is unambiguous:
+
+- Dry-run resolves one source commit stack and one destination worktree/ref,
+  constructs the merge through an isolated native-Git index, and returns
+  exact base/source/destination identities, candidate tree/commit identity,
+  conflicts, changed files/symbols, affected tests, required checks,
+  policy/hooks/signing requirements, expiry, and an immutable preview digest.
+  It mutates no ref, index, worktree, task, or runtime state.
+- Apply requires explicit `CrossMergeApply` capability, the same authorized
+  source/destination identities, an unexpired preview, exact source commit
+  stack, destination epoch/head/ref/generation CAS, readiness digest when
+  task-linked, and an idempotency key. The routed daemon serializes the
+  effect per repository and destination worktree. Hooks, clients, source
+  worktrees, and peer agents never write the destination.
+- A preview with conflicts, missing dependency readiness, dirty/untracked or
+  native in-progress destination state, stale epochs, incomplete required
+  tests, denied source, or unsupported Git capability is not applicable.
+  Apply performs no automatic conflict resolution, rebase, force, stash,
+  checkout substitution, push, remote write, or history rewrite.
+- Apply journals native-Git preparation, commit point, ref/worktree
+  reconciliation, and final receipt. A process failure cannot be retried as a
+  new mutation until reconciliation proves `Committed`, `NotCommitted`, or
+  `EffectUnknown`.
+
+```text
+Previewed -> Queued -> Applying -> Committed
+Previewed | Queued -> Cancelled
+Applying -> Committed | Conflict | Stale | Failed | EffectUnknown
+Applying + cancel -> CancelRequested -> Cancelled | TooLate | EffectUnknown
+Conflict | Stale | Failed | Cancelled -> terminal
+EffectUnknown -> ReconciledCommitted | ReconciledNotCommitted
+```
+
+Cancellation before the native commit point leaves destination state
+unchanged and returns `Cancelled`. After the commit point the committed or
+effect-unknown receipt wins; adapters cannot report cancellation as rollback.
+Conflict is a typed terminal result with conflict IDs and safe affected
+symbol/file IDs, not a partially successful merge or permission to edit
+another worktree.
+
+`CrossMergeReceiptV1` contains operation/preview/idempotency identities,
+actor/transport/effect class, source/destination WorktreeIds and epochs,
+ordered source commit IDs, base and before/after destination commit/tree/ref
+identities, task/readiness identities when present, native Git/hook/signing
+outcomes, conflict IDs, changed file/symbol IDs, test/diagnostic receipt IDs,
+reconciliation state, timestamps, policy/config/catalog/privacy revisions,
+coverage, warnings, and integrity digest. It contains no path, command, source,
+diff body, log, prompt, task narrative, or peer-session content.
+
+### Authorization, cursors, payloads, and latency
+
+- Every selection first resolves Plan 16 scope and independently authorizes
+  task, source worktree, destination worktree, ref/commit, finding, receipt,
+  and operation. Possessing any ID, preview, cursor, or receipt grants nothing.
+  Missing and denied resources are externally identical until the caller is
+  authorized for the addressed relation.
+- Placement, stack, dependency, conflict, proximity, status, and receipt are
+  read capabilities. Dry-run is `Preview`; apply is `Write`; cancel is
+  `Write` with a distinct `Control` capability. Neither `Read` nor `Preview`
+  can be upgraded by a transport flag. Apply and cancel require explicit
+  grants and fresh expected versions.
+- `PageRequest` remains exactly `{ limit, cursor }`; limit is at most 100. A
+  worktree cursor binds operation/capability, request digest, TaskId and
+  work-item/plan versions when present, source/destination WorktreeId and
+  epoch vector, ref/base/head/commit-stack digests, code generations,
+  readiness digest, finding/event watermark, scope/grant and authorization
+  epoch, catalog/schema/policy/config/privacy revisions, sort key, profile,
+  and 15-minute expiry. Resume reauthorizes before cursor validation.
+- Requests are at most 32 KiB. A normal page is at most 100 items and 256 KiB.
+  A dry-run result is at most 1 MiB; larger diff/evidence detail returns total/
+  preview/omitted counts plus a reversible response handle. Status streams
+  queue at most 128 events or 256 KiB per client and expose a signed resume
+  cursor; overflow produces an explicit gap and fresh-status action, never a
+  silent suffix.
+- On the checked-in warm fixture, placement/dependency/status/receipt reads
+  are p95 <= 100 ms and p99 <= 250 ms; stack/conflict/proximity reads are p95
+  <= 250 ms and p99 <= 750 ms; cross-merge dry-run is p95 <= 2 s and p99 <=
+  5 s for a 100-commit/10,000-changed-line stack. Apply admission and cancel
+  acknowledgement are p95 <= 100 ms and p99 <= 250 ms; mutation completion is
+  reported asynchronously and has no fabricated client deadline guarantee.
+- Daemon admission reserves control/receipt capacity so bulk stack or
+  proximity reads cannot starve apply reconciliation, status, cancellation,
+  diagnostics, or Doctor. Saturation is a typed problem with retry scope.
+
+### Files, tests, and milestones
+
+Owner types and handlers must exist before adapters bind:
+
+- Plan 07:
+  `crates/tracedecay-hooks/src/{event,binding,capabilities,transport,spool}.rs`
+  and `src/daemon/hook_events/{mod,admission,replay,projector}.rs`.
+- Plan 24/09:
+  `crates/tracedecay-domain/src/work/{graph,projection}.rs` and
+  `crates/tracedecay-application/src/work/{projection,commands}.rs` own
+  TaskId placement and dependency-ready semantics.
+- Plan 36/09:
+  `crates/tracedecay-domain/src/git/cross_merge.rs`,
+  `crates/tracedecay-application/src/git/cross_merge.rs`, and the native Git
+  adapter own preview, apply, journal, reconciliation, cancellation, and
+  receipts. Those owner files require the coordinated Plan 36 change above.
+- Plan 37/09:
+  `crates/tracedecay-domain/src/feedback/proximity.rs` and
+  `crates/tracedecay-application/src/feedback/cycle.rs` own conflict/proximity
+  findings.
+- Plan 21 adapters:
+  `src/cli/worktree.rs`,
+  `src/mcp/tools/definitions/worktree.rs`,
+  `src/mcp/tools/handlers/worktree.rs`, and the existing dispatch/render
+  modules contain transport syntax and presentation only.
+- Parity fixtures:
+  `tests/mcp_suite/worktree_parity.rs`,
+  `tests/core_cli_suite/worktree_output.rs`,
+  `tests/worktree_operations_suite/{placement,stack,dependency_ready,cross_merge,conflict_proximity,receipts}.rs`,
+  and `tests/fixtures/interface_output/human-v1/worktree/`.
+
+Milestones are:
+
+1. **M21.W1 — read model:** bind placement, stack, dependency-ready,
+   conflict, proximity, and receipt reads after owner handlers pass; exit
+   requires path-free identity, cursor/auth parity, and no adapter-local
+   readiness.
+2. **M21.W2 — preview:** bind cross-merge dry-run to the Plan 36 read-only
+   plan; exit requires deterministic preview digest, conflict/test coverage,
+   zero native mutation, and reversible truncation.
+3. **M21.W3 — effect:** after the coordinated Plan 36 owner contract lands,
+   bind apply/status/cancel; exit requires CAS, explicit grants, daemon-only
+   writes, effect-unknown reconciliation, and cancel/commit race fixtures.
+4. **M21.W4 — bounded rollout:** pass payload, cursor, saturation, latency,
+   restart, and hidden-peer canaries in the internal profile.
+5. **M21.W5 — PR18 freeze:** Plan 17 chooses public names and compatibility
+   policy, adds them to discovery/help/SDKs, and removes or explicitly expires
+   every internal spelling.
+
 ## Exact CLI/MCP primitive parity contract
 
 PR12 uses one compiled binding record per callable application operation:
@@ -328,11 +609,12 @@ admits and executes parallel branches. CLI and MCP only submit or inspect those
 typed operations and receipts.
 
 These family names and `BindingId`s are internal PR12/PR17 semantic identity.
-PR18 retains sole authority to choose and freeze official Rust, TypeScript, and
-Python SDK methods. PR12 does not derive SDK names from CLI commands or MCP
-tools. PR17 CLI/MCP names follow this plan's compatibility policy and neither
-constrain nor require approval from PR18; PR18 independently adds SDK
-BindingIds only with SDK conformance fixtures.
+PR18 retains sole authority to choose and freeze the public CLI command, MCP
+tool, HTTP route, and Rust/TypeScript/Python SDK names for the PR17
+cross-worktree family. PR12 does not derive SDK names from CLI commands or MCP
+tools. Core names already public before this family retain their compatibility
+policy; no temporary PR17 cross-worktree spelling becomes public merely
+because the internal conformance profile exercises it.
 
 ## Canonical invocation, output, and controls
 
@@ -441,6 +723,11 @@ PR12 changes only adapter and shared-client files:
   backpressure mechanics only;
 - `src/mcp/response_handles.rs` — reversible oversized-response handles with
   authorization recheck and no anchor/task identity substitution;
+- `src/cli/worktree.rs`,
+  `src/mcp/tools/definitions/worktree.rs`, and
+  `src/mcp/tools/handlers/worktree.rs` — PR17 internal cross-worktree transport
+  decoding/rendering only, with no path resolution, readiness, conflict,
+  merge, authorization, or receipt logic;
 - `src/mcp/tools/handlers/admin_cli.rs` — deleted after the final family
   migration; and
 - `tests/mcp_suite/main.rs` and
@@ -498,7 +785,10 @@ Dependency order is fixed:
 7. Feedback diagnostics and PR17 task/work/runtime families bind last, after
    their owning application handlers exist; no stub or advertised unavailable
    method is counted as shipped.
-8. Delete `admin_cli` and duplicate render/query/error helpers, then enforce
+8. Cross-worktree read and preview bindings follow M21.W1–W2. Apply, status,
+   and cancel remain absent until the coordinated Plan 36 transaction owner
+   passes M21.W3; internal rollout precedes the PR18 public-name freeze.
+9. Delete `admin_cli` and duplicate render/query/error helpers, then enforce
    architecture and facade budgets. PR18 SDK bindings remain a later,
    independently reviewed gate.
 
@@ -662,6 +952,17 @@ Parity is verified from public behavior, not from a generated inventory:
     action, cancellation stage, and terminal state across CLI Markdown, MCP
     content, HTTP JSON, and LSP JSON-RPC. Byte-identical envelopes and pixels
     are not required.
+20. in the PR17 internal profile, compare task placement, stack status,
+    dependency-ready, conflict/proximity, cross-merge dry-run/apply/status/
+    cancel, and receipt lookup across CLI and MCP. Exercise stale worktree
+    epochs, hidden peers, cursor theft/drift, dirty destinations, conflicting
+    stacks, missing tests, authorization revocation, daemon saturation/restart,
+    cancel-before-commit, cancel-after-commit, effect-unknown reconciliation,
+    and exact duplicate apply. Prove no request accepts path/CWD/active-root
+    identity and no client or source worktree writes the destination.
+21. hold the 100-commit/10,000-changed-line fixture to the request/result,
+    queue, p95/p99, resume-gap, and reversible-truncation budgets above; fail
+    if bulk reads starve receipt, cancellation, diagnostics, or Doctor traffic.
 
 ## PR12 core and PR17 extension deliverables
 
@@ -686,6 +987,11 @@ Parity is verified from public behavior, not from a generated inventory:
 - PR17 auxiliary request/provider capability and attempt lifecycle bindings
   with bounded streams/resources; no generic process-execution or raw
   provider-protocol proxy.
+- PR17 internal paired task-placement, stack, dependency-ready,
+  conflict/proximity, cross-merge preview/apply/status/cancel, and receipt
+  bindings with path-free identity, exact effect classes, cursors,
+  authorization, backpressure, and receipts; PR18 alone freezes their public
+  names.
 
 ## Done
 
@@ -702,5 +1008,9 @@ Parity is verified from public behavior, not from a generated inventory:
 - Feedback diagnostics CLI/MCP/HTTP bindings agree semantically with host
   adapter projections at PR13, preserve truncation/cursor/anchor semantics,
   and never treat response handles as durable finding IDs.
+- Cross-worktree CLI/MCP results agree semantically; readiness remains Plan 24
+  derived, conflict/proximity remains advisory, and cross-merge writes are
+  explicit daemon-authorized Plan 36 effects with preview/CAS/reconciliation.
+  Paths and direct peer writes are absent from every schema.
 - No generated surface inventory, developer-plan parser, independent task
   editor, or second executor is introduced.
