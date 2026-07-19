@@ -1,4 +1,5 @@
 mod compatibility;
+mod compatibility_cursor;
 mod cursor_keys;
 mod doctor_health;
 mod hydration;
@@ -32,9 +33,11 @@ use self::retrieval::GlobalDbTemporalReadPort;
 
 pub(crate) use compatibility::{
     AuthorizedSessionDescribeRequest, AuthorizedSessionDescribeResult,
-    AuthorizedSessionExpandCursorBinding, AuthorizedSessionExpandRequest,
-    AuthorizedSessionExpandResult, CompatibilityCursorError, CompatibilityReadError,
+    AuthorizedSessionExpandRequest, AuthorizedSessionExpandResult, CompatibilityReadError,
     CompatibilityTemporalMetadata,
+};
+pub(crate) use compatibility_cursor::{
+    AuthorizedSessionExpandCursorBinding, CompatibilityCursorError,
 };
 pub(crate) use doctor_health::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
@@ -78,7 +81,7 @@ impl<'db> GlobalDbSessionTemporalExecution<'db> {
             .read_snapshot()
             .await
             .map_err(|_| CompatibilityCursorError::Unavailable)?;
-        compatibility::encode_expand_cursor(&read, binding, source_offset).await
+        compatibility_cursor::encode_expand_cursor(&read, binding, source_offset).await
     }
 
     pub(crate) async fn decode_expand_cursor(
@@ -91,7 +94,7 @@ impl<'db> GlobalDbSessionTemporalExecution<'db> {
             .read_snapshot()
             .await
             .map_err(|_| CompatibilityCursorError::Unavailable)?;
-        compatibility::decode_expand_cursor(&read, binding, encoded).await
+        compatibility_cursor::decode_expand_cursor(&read, binding, encoded).await
     }
 
     pub(crate) async fn describe_compatible(
