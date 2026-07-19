@@ -15,10 +15,15 @@
 - PR17 also registers every auxiliary-provider setting here; no catalog, host
   bundle, application handler, runtime adapter, or dashboard keeps a parallel
   executable/provider configuration source.
+- PR17 registers one protected `work.topology_policy.v1` definition covering
+  placement, roots, branch naming, concurrency and stack depth, cross-merge
+  modes, clean/test/review gates, protected refs, escalation, retention/GC,
+  and notifications. It is policy input only; Plans 24/32/36 remain the
+  decision, runtime, and native Git authorities.
 - Ordinary scalar and provider configuration changes activate directly after validation.
-  Source-binding mutations, restrictive allow/deny policy mutations, and rollback operations
-  containing either are protected scope-control changes and use one bounded dry-run/apply
-  protocol. This is not a general configuration preview pipeline.
+  Source-binding mutations, restrictive allow/deny policy mutations, topology-policy
+  mutations, and rollback operations containing any of them are protected changes and use
+  one bounded dry-run/apply protocol. This is not a general configuration preview pipeline.
 
 ## Outcome
 
@@ -26,7 +31,8 @@ Every supported TraceDecay setting has one typed definition and one daemon-owned
 CLI, API, MCP, and UI read and mutate the same effective configuration, while credentials remain
 opaque and operators can see which revision the running system actually uses. Self-service source
 bindings and restrictive allow/deny rules use the same revision, audit, dry-run/apply, and forward
-rollback kernel without becoming project identity or authorization authority.
+rollback kernel without becoming project identity or authorization authority. Worktree topology
+policy uses that same kernel without becoming task, runtime, or Git mutation authority.
 
 ## Owns
 
@@ -41,6 +47,9 @@ rollback kernel without becoming project identity or authorization authority.
 - Typed `scope.source_bindings.v1`, `scope.access_rules.v1`, and optional
   `query.default_collection.v1` definitions; protected-change plans, apply receipts,
   append-only audit, and forward rollback for those definitions.
+- The sole typed `work.topology_policy.v1` definition, safe defaults,
+  validation, precedence, protected dry-run/apply/CAS/audit/forward rollback,
+  and effective snapshot/digest consumed by Plans 24, 27, 32, and 36.
 - Self-service binding of a source to an existing `ProjectId`, or to `UserProfileId` only
   for a resolver-verified projectless Hermes source. The binding stores a reference and
   never copies or creates the authority.
@@ -88,6 +97,7 @@ rollback kernel without becoming project identity or authorization authority.
 - Feature business logic beyond the settings contract each feature registers.
 - Secret detection and sink enforcement; Plan 18 consumes opaque references and protects outputs.
 - Task assignment, agent steering, work-graph mutation, model-route decisions,
+  topology selection, worktree/branch creation, cross-merge authorization,
   plan execution, or workflow scheduling. Plan 06/24/32 consume the typed
   settings and pinned revision; configuration never applies those decisions.
 - Executable discovery, installation, repair, host capability probes, stock-host
@@ -96,7 +106,8 @@ rollback kernel without becoming project identity or authorization authority.
   remediates against this plan's effective snapshot; Plan 32 executes against
   one pinned snapshot.
 - A preview/apply/rollback ceremony for normal configuration changes. Plan 20 does own the
-  mandatory two-phase protocol and forward rollback for protected scope-control changes.
+  mandatory two-phase protocol and forward rollback for protected scope-control and
+  topology-policy changes.
 - `QueryCollection` or `WorkspaceCollection` identity, membership, canonical ordering,
   scope resolution, authorization decisions, project registration, source discovery, or
   storage routing. Plan 16 owns those contracts; this plan stores only source-binding and
@@ -189,8 +200,9 @@ rollback kernel without becoming project identity or authorization authority.
      configuration immediately. Invalid input commits nothing; compare-and-set rejects a
      stale writer; a multi-setting update validates and commits atomically.
    - Protected mutations are source bind/rebind/unbind, allow/deny
-     add/change/remove, default-collection change bundled with either, and rollback
-     containing any protected entry. They require dry-run followed by apply.
+     add/change/remove, default-collection change bundled with either,
+     `work.topology_policy.v1` set/unset/replace, and rollback containing any
+     protected entry. They require dry-run followed by apply.
    - Dry-run changes no desired or effective configuration. It returns a redacted diff,
      safe affected-source coverage, required authorization, base revision, operation
      digest, Plan 16 `ResolvedScopeSet` digest, collection membership digest when
@@ -201,7 +213,8 @@ rollback kernel without becoming project identity or authorization authority.
      and reauthorizes every source, rechecks every frozen digest and policy epoch, and
      commits the complete configuration revision plus receipt atomically. Drift,
      revocation, ambiguity, expiry, widening beyond independently authorized capabilities,
-     or CAS conflict commits nothing.
+     invalid topology roots, changed repository/default-ref evidence, protected-ref
+     weakening, or CAS conflict commits nothing.
    - A protected operation cannot convert a path, remote, provider key, label, host
      profile, store name, collection membership, or mutable locator into authority.
 
@@ -313,6 +326,271 @@ rollback kernel without becoming project identity or authorization authority.
       `restricted_or_unavailable`; logs, diagnostics, metrics, Doctor evidence, and UI
       payloads use the same safe view and never receive the internal target reference.
 
+14. Worktree topology policy
+    - `work.topology_policy.v1` is one complete value; partial values and
+      adapter-local defaults are invalid. Its exact domain contract in
+      `crates/tracedecay-domain/src/configuration/topology.rs` is:
+
+```rust
+pub struct WorkTopologyPolicyV1 {
+    pub schema_version: u16,
+    pub placement: WorktreePlacementModeV1,
+    pub roots: Vec<WorktreeRootPolicyV1>,
+    pub branch_naming: BranchNamingPolicyV1,
+    pub concurrency: TopologyConcurrencyPolicyV1,
+    pub cross_merge: CrossMergePolicyV1,
+    pub gates: TopologyGatePolicyV1,
+    pub protected_refs: Vec<ProtectedRefRuleV1>,
+    pub history_rewrite: HistoryRewritePolicyV1,
+    pub escalation: TopologyEscalationPolicyV1,
+    pub retention: WorktreeRetentionPolicyV1,
+    pub notifications: TopologyNotificationLevelV1,
+}
+
+pub enum WorktreePlacementModeV1 {
+    ExistingWorktreeOnly,
+    SiblingOfPrimaryCheckout,
+    RepositoryLocalRoot,
+    ConfiguredRoot(WorktreePlacementRootId),
+}
+
+pub struct WorktreeRootPolicyV1 {
+    pub root_id: WorktreePlacementRootId,
+    pub locator: SensitiveFilesystemLocatorV1,
+    pub repository_scope: RepositoryPlacementScopeV1,
+    pub maximum_active_worktrees: NonZeroU16,
+}
+
+pub enum RepositoryPlacementScopeV1 {
+    AllAuthorized,
+    Allowlist(NonEmptyVec<RepositoryId>),
+}
+
+pub struct BranchNamingPolicyV1 {
+    pub prefix: CanonicalGitRefPrefix,
+    pub components: Vec<BranchNameComponentV1>,
+    pub separator: BranchNameSeparatorV1,
+    pub maximum_bytes: NonZeroU16,
+    pub collision: BranchCollisionPolicyV1,
+}
+
+pub enum BranchNameComponentV1 {
+    TaskIdDigestPrefix { bytes: NonZeroU8 },
+    RepositorySlug,
+    WorkClass,
+    MonotonicCollisionOrdinal,
+}
+
+pub enum BranchNameSeparatorV1 {
+    Hyphen,
+    Underscore,
+    Slash,
+}
+
+pub enum BranchCollisionPolicyV1 {
+    Reject,
+    AppendMonotonicOrdinal { maximum_attempts: NonZeroU16 },
+}
+
+pub struct TopologyConcurrencyPolicyV1 {
+    pub maximum_active_per_repository: NonZeroU16,
+    pub maximum_parallel_per_task: NonZeroU16,
+    pub maximum_global_active: NonZeroU16,
+    pub maximum_stack_depth: NonZeroU16,
+}
+
+pub enum CrossMergeModeV1 {
+    Disabled,
+    ManualReceiptOnly,
+    FastForwardOnly,
+    MergeCommit,
+}
+
+pub struct CrossMergePolicyV1 {
+    pub allowed_modes: Vec<CrossMergeModeV1>,
+    pub default_mode: CrossMergeModeV1,
+    pub allow_cross_repository: bool,
+}
+
+pub struct TopologyGatePolicyV1 {
+    pub cleanliness: WorktreeCleanlinessRequirementV1,
+    pub tests: Vec<RequiredCheckV1>,
+    pub review: ReviewRequirementV1,
+    pub require_fresh_preflight: bool,
+    pub maximum_preflight_age_seconds: NonZeroU32,
+}
+
+pub enum WorktreeCleanlinessRequirementV1 {
+    RequireClean,
+    AllowUntrackedOnlyForPreflight,
+    ReadOnlyPreflightOnly,
+}
+
+pub struct RequiredCheckV1 {
+    pub capability_id: CapabilityId,
+    pub expectation: RequiredCheckExpectationV1,
+    pub maximum_age_seconds: NonZeroU32,
+}
+
+pub enum RequiredCheckExpectationV1 {
+    SuccessfulTerminal,
+}
+
+pub enum ReviewRequirementV1 {
+    None,
+    IndependentReviewCount(NonZeroU16),
+    CodeOwnerAndIndependentReview,
+}
+
+pub struct ProtectedRefRuleV1 {
+    pub selector: ProtectedRefSelectorV1,
+    pub disposition: ProtectedRefDispositionV1,
+}
+
+pub enum ProtectedRefSelectorV1 {
+    NativeDefaultBranch,
+    Exact(CanonicalGitRefName),
+    Prefix(CanonicalGitRefPrefix),
+}
+
+pub enum ProtectedRefDispositionV1 {
+    Reject,
+    RequireHumanApprovalAndIndependentReview,
+}
+
+pub enum HistoryRewritePolicyV1 {
+    ForbidForceAndRebase,
+}
+
+pub enum TopologyEscalationPolicyV1 {
+    Reject,
+    RequireExplicitHumanApproval,
+    RequireHumanApprovalAndIndependentReview,
+}
+
+pub struct WorktreeRetentionPolicyV1 {
+    pub terminal_retention_seconds: Option<NonZeroU64>,
+    pub abandoned_retention_seconds: Option<NonZeroU64>,
+    pub maximum_retained_per_repository: Option<NonZeroU16>,
+    pub automatic_gc: AutomaticWorktreeGcV1,
+}
+
+pub enum AutomaticWorktreeGcV1 {
+    Disabled,
+    EligibleOnly {
+        minimum_idle_seconds: NonZeroU64,
+        maximum_per_run: NonZeroU16,
+    },
+}
+
+pub enum TopologyNotificationLevelV1 {
+    CriticalOnly,
+    Lifecycle,
+    Verbose,
+}
+```
+
+    - `BranchNameComponentV1` is closed to `TaskIdDigestPrefix`,
+      `RepositorySlug`, `WorkClass`, and `MonotonicCollisionOrdinal`; arbitrary
+      templates, shell fragments, paths, user prompts, task titles, and provider
+      text are forbidden. `BranchNameSeparatorV1` is one validated ASCII byte
+      from `-`, `_`, or `/`. The complete `refs/heads/...` result must pass
+      native Plan 36 ref validation before a policy dry-run can succeed.
+      Components must be nonempty, `MonotonicCollisionOrdinal` must be present
+      exactly when collision policy appends one, and the digest prefix is
+      lowercase hex with `8 <= bytes <= 20`.
+      `ConfiguredRoot(id)` requires exactly one matching root. `allowed_modes`
+      is nonempty, contains `default_mode`, and has no duplicates.
+      `maximum_parallel_per_task <= maximum_active_per_repository <=
+      maximum_global_active`; every bound is enforced before publication.
+    - `SensitiveFilesystemLocatorV1` is persisted sealed and returned only as a
+      privacy-domain-bound digest plus `WorktreePlacementRootId`. Plan 16
+      resolves it to an authorized canonical root. It rejects relative paths,
+      missing parents, filesystem roots, repository common directories, nested
+      Git administrative directories, case-fold collisions, `..`, NUL, and
+      symlink escape; no host adapter receives the raw locator.
+    - `ProtectedRefSelectorV1` is closed to `NativeDefaultBranch`,
+      `Exact(CanonicalGitRefName)`, and `Prefix(CanonicalGitRefPrefix)`.
+      `ProtectedRefDispositionV1` is `Reject` or
+      `RequireHumanApprovalAndIndependentReview`. Free-form regex, current
+      branch, display labels, and provider names are not selectors.
+    - `WorktreeCleanlinessRequirementV1` is `RequireClean`,
+      `AllowUntrackedOnlyForPreflight`, or `ReadOnlyPreflightOnly`. Integration
+      apply always requires a conflict-free destination and exact source and
+      destination Plan 36 snapshots; dirty allowance never authorizes apply.
+      `RequiredCheckV1` references a Plan 08 `CapabilityId`, the sole accepted
+      `SuccessfulTerminal` expectation, and maximum age. Evaluation pins the
+      exact check anchor and producer revision; config never stores a shell
+      command, provider status string, or copied outcome.
+      `ReviewRequirementV1` is `None`,
+      `IndependentReviewCount(NonZeroU16)`, or
+      `CodeOwnerAndIndependentReview`; reviews resolve through Plan 24/37
+      anchored evidence rather than host-local approval text.
+      Enabling `FastForwardOnly` or `MergeCommit` requires `RequireClean`, at
+      least one `RequiredCheckV1`, non-`None` review, fresh preflight, and a
+      protected-ref rule set no weaker than the safe default.
+      `allow_cross_repository = true` is valid only with
+      `ManualReceiptOnly`; it records external evidence and never authorizes
+      fetch, object import, or native apply across repositories.
+    - `TopologyEscalationPolicyV1` has only `Reject`,
+      `RequireExplicitHumanApproval`, and
+      `RequireHumanApprovalAndIndependentReview`. Escalation produces a Plan 24
+      decision requirement; it cannot make a prohibited or unsupported mode
+      legal. `HistoryRewritePolicyV1` has no permissive variant: force ref
+      updates, force push, rebase, amend, reset-based history replacement, and
+      equivalent host operations are unrepresentable in config, dry-run,
+      runtime admission, and rollback.
+    - The safe default is exact: `ExistingWorktreeOnly`; no configured roots;
+      branch prefix `tracedecay/` with
+      `[TaskIdDigestPrefix { bytes: 10 }, WorkClass,
+      MonotonicCollisionOrdinal]`, slash separator, maximum 200 bytes, and
+      `AppendMonotonicOrdinal { maximum_attempts: 32 }`; concurrency
+      `1/1/1` and stack depth `1`; cross-merge `Disabled` with
+      `allow_cross_repository = false`; `RequireClean`; no command-defined
+      tests; `IndependentReviewCount(1)`; fresh preflight with maximum age
+      300 seconds; native default branch plus `refs/heads/main`,
+      `refs/heads/master`, `refs/tags/`, and `refs/remotes/` protected as
+      `Reject`; `ForbidForceAndRebase`; escalation `Reject`; no automatic GC
+      and no finite retention expiry; notifications `CriticalOnly`.
+    - `CrossMergeModeV1::ManualReceiptOnly` records evidence of an independently
+      performed integration but never treats a host summary as proof.
+      `FastForwardOnly` and `MergeCommit` can become effective only when Plan 36
+      exposes the corresponding fixed native preflight/apply operation and Plan
+      27 reports a conforming route. Under Plan 36's current excluded-operation
+      contract they resolve as typed `unsupported`, not shell fallback.
+    - Every topology evaluation pins `ConfigurationSnapshotId`,
+      `effective_behavior_digest`, topology schema revision, Plan 16
+      `ResolvedScopeSet` digest, source/destination Plan 36 repository snapshot
+      IDs, Plan 24 work-item/version and decision IDs when task-linked, and Plan
+      27 capability-manifest digest. Plan 24 may propose or accept topology;
+      Plan 32 may admit and execute an accepted effect; Plan 36 alone supplies
+      native Git capture/preflight/apply; Plan 27 supplies host capability and
+      transport conformance; Plan 35 supplies LSP fanout; and Plan 37 supplies
+      advisory proximity/review evidence. Configuration performs none of them.
+    - A topology-policy dry-run is
+      `ProtectedChange::ReplaceWorkTopologyPolicy(WorkTopologyPolicyV1)`. It
+      validates the complete value, resolves every root/ref against Plan 16/36,
+      reports effective restrictions and unsupported modes, freezes all
+      digests/revisions, and returns the existing `ProtectedChangePlan`.
+      Apply uses the existing actor-bound `ProtectedApplyRequest`,
+      expected-base CAS, expiry, idempotency, re-resolution, atomic revision,
+      receipt, and audit transaction. It changes configuration only; creating a
+      worktree, branch, task edge, runtime run, preflight, merge, cleanup, or
+      notification requires its owning operation and receipt.
+    - Forward rollback revalidates the historical value against the current
+      schema, roots, repository/default-ref evidence, authority, and protected-
+      ref floor, then commits a new revision. It cannot restore a permissive
+      history-rewrite policy, missing root, unsupported merge mode, weaker
+      protected-ref floor, stale authority, or expired secret/locator binding.
+    - Retention marks only policy eligibility. Plan 16's cleanup inspection and
+      Plan 32's holder/runtime reconciliation must both succeed immediately
+      before removal; dirty/untracked data, active holders, unpushed/unmerged
+      commits, open or uncertain PRs, shared refs, missing anchors, ambiguity,
+      stale evidence, or authorization loss block GC. Path absence alone never
+      proves cleanup success. Notification level changes delivery volume only
+      and cannot suppress audit, critical safety findings, receipts, or typed
+      unsupported states.
+
 ## Implementation contract
 
 ### Domain, configuration, and application files
@@ -322,12 +600,24 @@ rollback kernel without becoming project identity or authorization authority.
   `RuleEffect`, `ProtectedChange`, `ProtectedChangePlan`, `ProtectedApplyRequest`,
   `ConfigurationAuditEvent`, and safe error/coverage enums;
   `crates/tracedecay-domain/src/lib.rs` exports them.
+- `crates/tracedecay-domain/src/configuration/topology.rs` defines every
+  `WorkTopologyPolicyV1` type above, `TopologyPolicyDigest`,
+  `WorktreePlacementRootId`, `SensitiveFilesystemLocatorV1`, and topology
+  validation errors. It imports Plan 08 `CapabilityId`, Plan 16
+  `RepositoryId`, and Plan 36 canonical ref types;
+  it defines no duplicate capability, repository, ref, task, or receipt ID.
+  `ProtectedChange` adds `ReplaceWorkTopologyPolicy(WorkTopologyPolicyV1)`.
 - `crates/tracedecay-domain/tests/configuration_contract.rs` proves strict typed IDs,
   projectless-Hermes constraints, deny precedence, allow intersection, redacted error
   equivalence, digest stability, and rollback receipt encoding.
+- `crates/tracedecay-domain/tests/topology_policy_contract.rs` proves complete
+  decoding, safe defaults, canonical ordering/digests, closed branch components,
+  root/ref validation, nonempty executable-mode gates, protected-ref floor,
+  unrepresentable force/rebase, and forward-rollback validation.
 - `src/config.rs` remains the module root. `src/config/registry.rs`,
-  `src/config/resolver.rs`, and `src/config/scope_control.rs` register the three typed
-  definitions and implement pure precedence/policy resolution without adapter defaults.
+  `src/config/resolver.rs`, `src/config/scope_control.rs`, and
+  `src/config/topology.rs` register the four typed definitions and implement
+  pure precedence/policy resolution without adapter defaults.
 - `src/application/configuration/mod.rs`, `src/application/configuration/types.rs`,
   `src/application/configuration/ports.rs`, and
   `src/application/configuration/operations.rs` implement ordinary direct mutations and
@@ -405,11 +695,41 @@ pub trait ConfigurationControlPlane {
   append-only audit, expiry, crash-recovery, and forward-rollback tests against each store.
 - `src/global_db/configuration/schema.rs`, `src/global_db/configuration/store.rs`, and
   `src/global_db/configuration/migration.rs` own the SQLite implementation.
+- The additive stage is `20260719_work_topology_policy_v1`;
+  `TOPOLOGY_POLICY_SCHEMA_VERSION` is `1` and its migration receipt name is
+  `"work-topology-policy"`.
 - `configuration_revisions(revision_id, parent_revision_id, snapshot_id,
   effective_behavior_digest, resolution_provenance_digest, actor_id, operation_kind,
   created_at)` is append-only.
 - `configuration_entries(revision_id, key, layer_kind, layer_id, schema_revision,
   typed_value)` stores ordinary typed settings.
+- `configuration_topology_policies(revision_id, schema_version,
+  topology_policy_digest, placement_kind, default_cross_merge_mode,
+  allow_cross_repository, cleanliness_kind, review_kind,
+  require_fresh_preflight, maximum_preflight_age_seconds,
+  history_rewrite_kind, escalation_kind, automatic_gc_kind,
+  notification_level, sealed_policy_value)` stores one complete canonical
+  `work.topology_policy.v1` value per revision. `history_rewrite_kind` is
+  constrained to `forbid_force_and_rebase`.
+- `configuration_topology_roots(revision_id, root_ordinal, root_id,
+  locator_digest, repository_scope_digest,
+  maximum_active_worktrees)` and
+  `configuration_topology_protected_refs(revision_id, rule_ordinal,
+  selector_kind, selector_digest, disposition)` are non-authoritative
+  digest/index projections of `sealed_policy_value`; the store verifies them
+  against the canonical value on every write and migration. They preserve
+  canonical policy order without copying root locators or ref selectors into
+  queryable columns. Their primary keys are
+  `(revision_id, root_ordinal)` and `(revision_id, rule_ordinal)`;
+  `(revision_id, root_id)` and `(revision_id, selector_digest)` are unique.
+- Foreign keys from all topology rows to `configuration_revisions(revision_id)`
+  use `ON UPDATE RESTRICT ON DELETE RESTRICT`. Required indexes are
+  `idx_configuration_topology_root_id(root_id)`,
+  `idx_configuration_topology_root_locator(locator_digest)`, and
+  `idx_configuration_topology_protected_ref(selector_digest)`. Exact
+  `configuration_topology_*_immutable_update` and
+  `configuration_topology_*_immutable_delete` triggers cover the policy, root,
+  and protected-ref tables.
 - `configuration_source_bindings(revision_id, binding_id, source_kind, locator_digest,
   authority_kind, project_id, user_profile_id, provenance_digest)` checks that exactly the
   authoritative ID required by `authority_kind` is non-null and has unique
@@ -465,6 +785,16 @@ layers. Re-execution matches `(source_kind, source_key_digest, redacted_value_di
 the initial snapshot digest, creates no duplicate revision, and never truncates revision,
 receipt, plan-event, audit, or quarantine history.
 
+The same migration registers the exact safe `work.topology_policy.v1` default
+above. It does not import branch prefixes, worktree roots, concurrency, merge,
+cleanup, review, test, or notification behavior from shell aliases, Git config,
+host files, CWD, current branches, prior worktree paths, environment variables,
+or observed habits. A legacy value is imported only when it decodes to the full
+V1 type and is no weaker than the protected-ref/history-rewrite floor; otherwise
+it enters `configuration_migration_quarantine` and the safe default remains
+effective. Re-execution verifies the same topology digest and creates no
+duplicate policy/root/ref rows.
+
 ### Surfaces and exact operations
 
 - `src/cli/configuration.rs` exposes
@@ -476,12 +806,20 @@ receipt, plan-event, audit, or quarantine history.
   `tracedecay config apply --plan-id --expected-revision --idempotency-key`,
   `tracedecay config rollback --dry-run --to-revision [--partial]`, and
   `tracedecay config audit --revision`.
+  Topology policy uses
+  `tracedecay config topology show`,
+  `tracedecay config topology replace --file <path> --dry-run`, and the same
+  `config apply`, `config rollback --dry-run`, and `config audit` commands.
+  There is no `--force`, `--rebase`, raw Git command, branch-template string,
+  or arbitrary test-command flag.
 - `src/mcp/tools/definitions/configuration.rs` and
   `src/mcp/tools/handlers/configuration.rs` expose
   `configuration_change_dry_run`, `configuration_change_apply`,
   `configuration_rollback_dry_run`, `configuration_rollback_apply`, and
   `configuration_audit` plus list/explain/get/set/unset/batch,
   write-only-credential, and observed-state definitions with the same application DTOs.
+  `configuration_topology_get` and `configuration_topology_replace_dry_run`
+  are thin bindings to those same DTOs; apply/rollback/audit are not duplicated.
 - `src/dashboard/configuration_api.rs` exposes
   `POST /v2/configuration/change-plans`,
   `POST /v2/configuration/change-plans/{plan_id}/apply`,
@@ -491,6 +829,9 @@ receipt, plan-event, audit, or quarantine history.
   `POST /v2/configuration/credential-references`, and
   `GET /v2/configuration/observed-state`; the UI displays the redacted diff, effective
   restriction, deny precedence, base revision, frozen digests, expiry, and rollback mode.
+  `GET /v2/configuration/work-topology-policy` and
+  `POST /v2/configuration/work-topology-policy/change-plans` use the same
+  protected plan/apply endpoints and return redacted root/ref selectors.
 - Public errors are exactly `target_unavailable`, `authorized_target_ambiguous`,
   `revision_conflict`, `plan_expired`, `plan_stale`, `policy_widening_forbidden`,
   `projectless_profile_required`, and `idempotency_conflict`. CLI, MCP, HTTP, UI, Doctor,
@@ -517,6 +858,14 @@ receipt, plan-event, audit, or quarantine history.
 - `tests/configuration_control_plane_suite/credentials_observed.rs` covers write-only
   credential references, plaintext non-disclosure, desired/observed drift, restart
   requirements, failed activation, and last-working-state preservation.
+- `tests/configuration_control_plane_suite/topology_policy.rs` covers safe
+  defaults; placement/root and branch-name validation; concurrency/stack bounds;
+  all cross-merge modes; clean/test/review gates; protected refs; force/rebase
+  rejection; escalation; retention/GC eligibility; notification levels;
+  dry-run purity; apply CAS/idempotency; audit redaction; and forward rollback.
+- `tests/configuration_control_plane_suite/topology_policy_surfaces.rs` runs the
+  same get/dry-run/apply/stale/rollback/error fixtures through CLI, MCP, HTTP,
+  and dashboard handlers and proves adapters add no defaults.
 
 ```sh
 cargo test -p tracedecay-domain --test configuration_contract --all-features
@@ -528,6 +877,8 @@ cargo test --all-features --test configuration_control_plane_suite surface_parit
 cargo test --all-features --test configuration_control_plane_suite migration
 cargo test --all-features --test configuration_control_plane_suite direct_operations
 cargo test --all-features --test configuration_control_plane_suite credentials_observed
+cargo test --all-features --test configuration_control_plane_suite topology_policy
+cargo test --all-features --test configuration_control_plane_suite topology_policy_surfaces
 cargo check --all-features
 ```
 
@@ -568,11 +919,19 @@ cargo check --all-features
   environment, fallback, deadline/kill, and resume settings; secret opacity;
   desired-versus-observed drift; Plan 27 read-only consumption; Plan 32
   admission pinning; and no adapter-local defaults or mid-attempt reread.
+- PR17 topology-policy fixtures prove the complete safe default, protected
+  dry-run/apply/CAS/audit/forward rollback, exact root/ref re-resolution,
+  branch-name determinism and collision bounds, concurrency/stack ceilings,
+  executable cross-merge gate requirements, protected-ref floor, and
+  unrepresentable force/rebase/history rewrite. They also prove retention is
+  eligibility only, automatic GC defaults off, notification levels cannot
+  suppress safety evidence, and unsupported Plan 36/27 capabilities remain
+  typed unsupported without shell fallback.
 - Protected scope-control fixtures prove self-service source bind/rebind/unbind,
   deny precedence, allow intersection, no authority widening, dry-run/apply drift
   rejection, append-only redacted audit, and forward rollback across CLI/API/MCP/UI.
 - Projectless Hermes fixtures prove `UserProfileId` remains authoritative and no source
   binding, collection default, CWD, or workspace manufactures `ProjectId`.
 - No task steering, developer-plan machinery, general preview/apply pipeline, or workflow
-  JavaScript is present. Only protected scope-control changes use the bounded two-phase
-  protocol.
+  JavaScript is present. Only protected scope-control and topology-policy
+  changes use the bounded two-phase protocol.
