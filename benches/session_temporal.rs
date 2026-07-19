@@ -1,4 +1,8 @@
-use std::{env, fs, path::{Path, PathBuf}, process::Command};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -39,7 +43,11 @@ fn validate_contract() -> BenchResult<()> {
     let root = repository_root();
     let workload_path = root.join(WORKLOAD_PATH);
     let workload = read_json(&workload_path)?;
-    require_json_value(&workload["schema_version"], json!(SCHEMA_VERSION), "workload schema")?;
+    require_json_value(
+        &workload["schema_version"],
+        json!(SCHEMA_VERSION),
+        "workload schema",
+    )?;
     require_json_value(&workload["workload_id"], json!(WORKLOAD_ID), "workload id")?;
     require_json_value(&workload["status"], json!("blocked"), "workload status")?;
     require_json_value(
@@ -66,8 +74,16 @@ fn validate_contract() -> BenchResult<()> {
     validate_bench_profile(&root)?;
 
     let index = read_json(&root.join(EVIDENCE_INDEX_PATH))?;
-    require_json_value(&index["schema_version"], json!(SCHEMA_VERSION), "index schema")?;
-    require_json_value(&index["current_acceptance"], Value::Null, "current acceptance")?;
+    require_json_value(
+        &index["schema_version"],
+        json!(SCHEMA_VERSION),
+        "index schema",
+    )?;
+    require_json_value(
+        &index["current_acceptance"],
+        Value::Null,
+        "current acceptance",
+    )?;
     require_json_value(
         &index["blocked"],
         json!("result-provisional.json"),
@@ -75,15 +91,31 @@ fn validate_contract() -> BenchResult<()> {
     )?;
 
     let result = read_json(&root.join(RESULT_PATH))?;
-    require_json_value(&result["schema_version"], json!(SCHEMA_VERSION), "result schema")?;
-    require_json_value(&result["workload_id"], json!(WORKLOAD_ID), "result workload id")?;
-    require_json_value(&result["capture_status"], json!("blocked"), "capture status")?;
+    require_json_value(
+        &result["schema_version"],
+        json!(SCHEMA_VERSION),
+        "result schema",
+    )?;
+    require_json_value(
+        &result["workload_id"],
+        json!(WORKLOAD_ID),
+        "result workload id",
+    )?;
+    require_json_value(
+        &result["capture_status"],
+        json!("blocked"),
+        "capture status",
+    )?;
     require_json_value(
         &result["acceptance_eligible"],
         json!(false),
         "acceptance eligibility",
     )?;
-    require_json_value(&result["blocked_reason"], json!(BLOCKED_REASON), "result reason")?;
+    require_json_value(
+        &result["blocked_reason"],
+        json!(BLOCKED_REASON),
+        "result reason",
+    )?;
     require_json_value(&result["measurement"], Value::Null, "blocked measurement")?;
     require_json_value(
         &result["workload_manifest_sha256"],
@@ -93,7 +125,12 @@ fn validate_contract() -> BenchResult<()> {
 
     let runner = fs::read_to_string(root.join(RUNNER_PATH))
         .map_err(|error| format!("read runner: {error}"))?;
-    for token in ["--dry-run", "--run", "BLOCKED", "PR8 temporal measurements require Linux"] {
+    for token in [
+        "--dry-run",
+        "--run",
+        "BLOCKED",
+        "PR8 temporal measurements require Linux",
+    ] {
         if !runner.contains(token) {
             return Err(format!("runner is missing required token {token:?}"));
         }
@@ -122,7 +159,9 @@ fn validate_file_inventory(root: &Path, inventory: &Value) -> BenchResult<()> {
                 .components()
                 .any(|component| component == std::path::Component::ParentDir)
         {
-            return Err(format!("inventory path must remain repository-relative: {path}"));
+            return Err(format!(
+                "inventory path must remain repository-relative: {path}"
+            ));
         }
         if !paths.insert(path) {
             return Err(format!("duplicate inventory path: {path}"));
@@ -166,7 +205,9 @@ fn read_json(path: &Path) -> BenchResult<Value> {
 
 fn require_json_value(actual: &Value, expected: Value, label: &str) -> BenchResult<()> {
     if actual != &expected {
-        return Err(format!("{label} mismatch: expected {expected}, got {actual}"));
+        return Err(format!(
+            "{label} mismatch: expected {expected}, got {actual}"
+        ));
     }
     Ok(())
 }

@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{TemporalCoverageCountsV1, UtcMicros};
@@ -1403,7 +1403,7 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use tempfile::TempDir;
     use tracedecay_domain::{
         CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
@@ -1416,11 +1416,11 @@ mod tests {
         SanitizerDispositionV1, SensitivityV1, SessionId, TemporalCoverageCountsV1, UtcMicros,
     };
     use tracedecay_store::{
-        build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
         AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
         SessionRefreshBeginOrJoinRequestV1, SessionRefreshCompletionRequestV1,
         SessionRefreshFrontierV1, SessionRefreshProgressV1, SessionRefreshReceiptRequestV1,
         SessionRefreshStore, SessionRefreshTerminalStateV1, SessionTemporalProjectionBatchV1,
+        build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
     };
 
     fn sanitization_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
@@ -2010,11 +2010,13 @@ mod tests {
         .await;
         assert_eq!(second.completed, 1);
         assert_eq!(second.projected_batches, 0);
-        assert!(crate::store::GlobalDbSessionTemporalStore::new(db.as_ref())
-            .running_session_refreshes()
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            crate::store::GlobalDbSessionTemporalStore::new(db.as_ref())
+                .running_session_refreshes()
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     struct PrematureFailureProjector {
@@ -2193,16 +2195,20 @@ mod tests {
         assert_eq!(cancelled.cancelled, 1);
 
         let store = crate::store::GlobalDbSessionTemporalStore::new(db.as_ref());
-        assert!(store
-            .session_refresh_recovery(&failed_session)
-            .await
-            .unwrap()
-            .is_none());
-        assert!(store
-            .session_refresh_recovery(&cancelled_session)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .session_refresh_recovery(&failed_session)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .session_refresh_recovery(&cancelled_session)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     struct BlockingProjector {

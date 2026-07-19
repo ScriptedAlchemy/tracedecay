@@ -873,16 +873,18 @@ mod tests {
         older_a.source = Some("src-a".to_string());
         newer_c.source = Some("src-c".to_string());
 
-        let ranked = rank(
-            &[newer_b, older_a, newer_c],
-            DiversityLimits::unbounded(),
-        );
+        let ranked = rank(&[newer_b, older_a, newer_c], DiversityLimits::unbounded());
         assert_eq!(ids(&ranked), vec!["b", "c", "a"]);
     }
 
     #[test]
     fn diversity_limits_enforce_every_dimension_independently() {
-        let mk = |stable_id: &str, logical: &str, turn: &str, session: &str, source: &str, role: &str| {
+        let mk = |stable_id: &str,
+                  logical: &str,
+                  turn: &str,
+                  session: &str,
+                  source: &str,
+                  role: &str| {
             let mut hit = candidate(stable_id, CandidateChannel::Lexical, 10, Some(logical));
             hit.turn = Some(turn.to_string());
             hit.session = Some(session.to_string());

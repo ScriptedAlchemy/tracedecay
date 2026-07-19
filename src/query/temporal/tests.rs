@@ -800,11 +800,7 @@ fn unauthorized_mixed_source_permutations_are_publicly_indistinguishable() {
             let port = FakeReadPort::new(
                 vec![candidate("private-summary", "summary-private", 10)],
                 vec![
-                    TemporalRecord::Summary(summary_with_sources(
-                        "private",
-                        &source_anchors,
-                        7,
-                    )),
+                    TemporalRecord::Summary(summary_with_sources("private", &source_anchors, 7)),
                     summary_source("redacted-source", SummarySourceState::Redacted),
                     summary_source("unauthorized-source", SummarySourceState::Unauthorized),
                 ],
