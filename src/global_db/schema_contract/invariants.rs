@@ -31,6 +31,12 @@ pub(in crate::global_db) use triggers::{
 
 const OPERATION: &str = "ensure global database authority invariants";
 
+pub(in crate::global_db) async fn authority_invariant_triggers_intact(
+    conn: &Connection,
+) -> crate::errors::Result<bool> {
+    trigger_contracts_intact(conn).await
+}
+
 async fn projection_checkpoint(conn: &Connection) -> crate::errors::Result<i64> {
     let mut rows = conn
         .query(
@@ -50,11 +56,25 @@ async fn projection_checkpoint(conn: &Connection) -> crate::errors::Result<i64> 
         .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
+pub(in crate::global_db) async fn ensure_authority_invariant_schema(
+    conn: &Connection,
+) -> crate::errors::Result<bool> {
+    ensure_audit_checkpoint_schema(conn).await?;
+    let trigger_contracts_were_intact = trigger_contracts_intact(conn).await?;
+    for invariant in INVARIANTS {
+        for trigger in invariant.triggers {
+            replace_trigger(conn, trigger).await?;
+        }
+    }
+    Ok(trigger_contracts_were_intact)
+}
+
 pub(in crate::global_db) async fn ensure_authority_invariants(
     conn: &Connection,
+    force_exhaustive: bool,
 ) -> crate::errors::Result<()> {
-    ensure_audit_checkpoint_schema(conn).await?;
-    let checkpoint = if trigger_contracts_intact(conn).await? {
+    let trigger_contracts_were_intact = ensure_authority_invariant_schema(conn).await?;
+    let checkpoint = if !force_exhaustive && trigger_contracts_were_intact {
         match read_audit_checkpoint(conn).await? {
             Some(checkpoint) if audit_checkpoint_is_plausible(conn, checkpoint).await? => {
                 Some(checkpoint)
@@ -64,11 +84,6 @@ pub(in crate::global_db) async fn ensure_authority_invariants(
     } else {
         None
     };
-    for invariant in INVARIANTS {
-        for trigger in invariant.triggers {
-            replace_trigger(conn, trigger).await?;
-        }
-    }
     let exhaustive = checkpoint.is_none();
     let checkpoint = checkpoint.unwrap_or_default();
     let (receipt_rowid, receipts_audited) =

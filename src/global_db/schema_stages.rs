@@ -1,4 +1,5 @@
 use super::schema_contract::{
+    authority_invariant_triggers_intact, ensure_authority_invariant_schema,
     ensure_authority_invariants, restore_immutability_after_canonical_repair,
     suspend_immutability_for_canonical_repair, suspend_session_invariants_for_schema_upgrade,
     validate_authority_rows_exhaustive, validate_authority_schema_contract,
@@ -247,6 +248,7 @@ pub(super) async fn ensure_transcript(db: &GlobalDb) -> crate::errors::Result<()
 }
 
 pub(super) async fn ensure_observation_authority(db: &GlobalDb) -> crate::errors::Result<()> {
+    let force_exhaustive = !authority_invariant_triggers_intact(&db.conn).await?;
     let transaction = db
         .begin_write_transaction()
         .await
@@ -259,7 +261,7 @@ pub(super) async fn ensure_observation_authority(db: &GlobalDb) -> crate::errors
         .map_err(|error| {
             global_db_operation_error("initialize observation projection schema", error)
         })?;
-    ensure_authority_invariants(&transaction).await?;
+    ensure_authority_invariant_schema(&transaction).await?;
     validate_authority_schema_contract(&transaction).await?;
     transaction.commit().await.map_err(|error| {
         global_db_operation_error("commit observation authority schema initialization", error)
@@ -274,7 +276,7 @@ pub(super) async fn ensure_observation_authority(db: &GlobalDb) -> crate::errors
     let transaction = db.begin_write_transaction().await.map_err(|error| {
         global_db_operation_error("begin observation authority validation", error)
     })?;
-    ensure_authority_invariants(&transaction).await?;
+    ensure_authority_invariants(&transaction, force_exhaustive).await?;
     validate_authority_schema_contract(&transaction).await?;
     transaction.commit().await.map_err(|error| {
         global_db_operation_error("commit observation authority validation", error)
