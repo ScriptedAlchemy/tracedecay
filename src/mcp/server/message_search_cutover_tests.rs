@@ -122,6 +122,24 @@ fn fixture_hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+#[test]
+fn mcp_session_adapters_have_no_local_lcm_storage_authority() {
+    let server = include_str!("../server.rs");
+    for forbidden in [
+        ".lcm_describe(",
+        ".lcm_expand(",
+        "get_session_message(",
+        "lcm_anchor_state",
+        "lcm_temporal_metadata",
+        "lcm_occurrence_anchor",
+    ] {
+        assert!(
+            !server.contains(forbidden),
+            "MCP server must delegate `{forbidden}` through typed session ports"
+        );
+    }
+}
+
 fn fixture_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
     SanitizationReceiptV1::new(
         SanitizationReceiptRefV1::new(

@@ -4806,6 +4806,7 @@ fn generated_skill_mirrors_session_context_retrieval_contract() {
         "`temporal_mode=current`",
         "`temporal_mode=forensic`",
         "`next_cursor`",
+        "same target, source limit, and content slice",
         "`coverage`",
         "`anchors`",
         "needs_synthesis=true",
