@@ -30,6 +30,557 @@ PR17 adds no JavaScript/TypeScript runtime, generated Claude workflow JavaScript
 Markdown parser, progress tracker, rewrite executor, taskgraph compiler, or shell command tape.
 Plan files remain prose and are never executable workflow input.
 
+## Optional placement and integration execution authority
+
+Plan 32 is the only authority that may materialize an accepted Plan 24
+execution placement or execute an accepted Plan 24 cross-merge proposal.
+Placement, branch, stack, commit, pull-request, lease, and integration
+identities are runtime/evidence relations layered onto `TaskId`; none is task
+identity. Plan 32 never derives a placement from CWD or task text, converts a
+branch-stack edge into a task dependency, or treats branch ancestry as task
+readiness.
+
+Physical placement and delivery order remain separate dimensions. Plan 32
+implements the Plan 24-owned `InPlace`, `LinkedWorktree`, and `IsolatedClone`
+placement intents. It executes `SingleBranch` or `StackedBranches` delivery
+only from the exact accepted topology revision. A stacked branch always runs
+in its node's accepted physical placement. Autonomous integration may consume
+commits produced in an explicitly opted-in in-place checkout, but it never
+uses a user's in-place checkout as an integration target or switches its
+branch.
+
+Plan 16 remains the canonical repository/checkout/worktree identity and scope
+resolver. Plan 36 remains native Git evidence authority and the public owner of
+`stage_hunks`, `unstage_hunks`, and `commit_index`. PR17 adds a narrow
+daemon-internal placement/integration effect adapter, not a general Git tool:
+it accepts only Plan 24's exact accepted types, exposes no raw arguments, and
+is unreachable from a provider or transport without Plan 09 admission. This
+later, narrower PR17 contract is the sole exception to Plan 16's general
+no-worktree-creation rule and Plan 36's general no-merge/ref/remote-mutation
+rule. Their public APIs remain unchanged.
+
+### Runtime-owned placement, lease, and receipt types
+
+`crates/tracedecay-domain/src/workflow/placement.rs` owns these exact types:
+
+```rust
+pub struct ExecutionPlacementV1 {
+    pub placement_id: ExecutionPlacementId,
+    pub generation: PlacementGeneration,
+    pub run_id: WorkflowRunId,
+    pub node_id: WorkflowNodeId,
+    pub attempt_id: WorkflowAttemptId,
+    pub topology_revision_id: TaskExecutionTopologyRevisionId,
+    pub intent: WorkspacePlacementIntentV1,
+    pub resolved_scope: AuthorizedResolvedScope,
+    pub expected_source_snapshot: RepositorySnapshotDigest,
+    pub state: PlacementStateV1,
+    pub lease: PlacementLeaseV1,
+    pub retention: PlacementRetentionPolicyV1,
+}
+
+pub struct PlacementLeaseV1 {
+    pub workflow_lease: WorkflowLeaseId,
+    pub scope: PlacementLeaseScopeV1,
+    pub fence: LeaseFence,
+    pub authority_epoch: AuthorityEpoch,
+    pub cancellation_generation: CancellationGeneration,
+    pub acquired_at: Timestamp,
+    pub expires_at: Timestamp,
+}
+
+pub enum PlacementLeaseScopeV1 {
+    InPlaceCheckout(CheckoutGenerationId),
+    LinkedWorktree(WorktreeGenerationId),
+    IsolatedClone(ExecutionPlacementId),
+    RepositoryMutation(RepositoryId),
+    LocalRef {
+        repository_id: RepositoryId,
+        name: ExactRefName,
+    },
+    RemoteRef {
+        repository_id: RepositoryId,
+        remote: CredentialFreeRemoteRef,
+        name: ExactRefName,
+    },
+    PullRequest(PullRequestIdentity),
+}
+
+pub enum PlacementLeaseStateV1 {
+    Pending,
+    Active,
+    Releasing,
+    Released,
+    Fenced,
+    Expired,
+    Lost,
+    ReconciliationRequired,
+}
+
+pub enum PlacementStateV1 {
+    Requested,
+    Preflighting,
+    Materializing,
+    Ready,
+    Leased,
+    Running,
+    Quiescing,
+    Produced,
+    Retained,
+    Releasing,
+    Released,
+    Cancelled,
+    Failed,
+    Dirty,
+    Conflicted,
+    Quarantined,
+    EffectUnknown,
+}
+
+pub struct PlacementReceiptV1 {
+    pub placement_id: ExecutionPlacementId,
+    pub generation: PlacementGeneration,
+    pub topology_revision_id: TaskExecutionTopologyRevisionId,
+    pub intent_digest: Digest,
+    pub resolved_repository: RepositoryId,
+    pub checkout_or_worktree: CheckoutOrWorktreeGenerationRef,
+    pub initial_snapshot: RepositorySnapshotDigest,
+    pub final_snapshot: RepositorySnapshotDigest,
+    pub lease_fence: LeaseFence,
+    pub produced_commits: Option<ProducedCommitSetV1>,
+    pub cleanliness: CleanTreeEvidenceV1,
+    pub retention: PlacementRetentionDispositionV1,
+    pub terminal: PlacementTerminalStateV1,
+    pub effect_receipts: Vec<EffectReceiptId>,
+    pub receipt_digest: Digest,
+}
+```
+
+These lease scopes are child scopes of the existing workflow lease record and
+fencing service. They are not a second lease family. Acquisition order is
+canonical and total: `(repository id, Git common-directory id, placement id,
+local ref bytes, credential-free remote id, remote ref bytes, provider kind,
+pull-request id)`. Cross-merge acquires a source read scope, repository
+mutation scope, target placement/ref write scopes, optional remote-ref scope,
+and optional pull-request scope in that order. Failure releases already
+acquired scopes in reverse order before any effect.
+
+Legal placement flow is:
+
+```text
+Requested -> Preflighting -> Materializing -> Ready -> Leased -> Running
+Running -> Quiescing -> Produced -> Retained -> Releasing -> Released
+Requested | Preflighting | Materializing | Ready | Leased -> Cancelled | Failed
+Running | Quiescing -> Dirty | Conflicted | EffectUnknown
+Dirty | Conflicted | EffectUnknown -> Quarantined
+Retained | Quarantined -> Releasing -> Released
+```
+
+`Quarantined -> Releasing` requires a separate authorized cleanup command and
+proof that no unique uncommitted bytes, commit objects, unresolved effect, or
+active holder would be lost. Terminal states never reopen; reuse creates a new
+`PlacementGeneration`.
+
+### Integration command, state, conflicts, and receipt
+
+`crates/tracedecay-domain/src/workflow/integration.rs` owns:
+
+```rust
+pub struct AdmitIntegrationV1 {
+    pub run_control: RunControlEnvelopeV1,
+    pub proposal: CrossMergeProposalV1,
+    pub expected_proposal_revision: CrossMergeProposalRevisionId,
+    pub expected_topology_revision: TaskExecutionTopologyRevisionId,
+    pub expected_stack_revision: Option<BranchStackRevisionId>,
+    pub expected_authorization_generation: AuthorizationGeneration,
+    pub source_placement_receipt: PlacementReceiptRefV1,
+    pub produced_commits: ProducedCommitSetV1,
+    pub idempotency_key: IdempotencyKey,
+    pub actor: ActorId,
+    pub reason: SafeReason,
+}
+
+pub enum IntegrationExecutionStateV1 {
+    Admitted,
+    Preflighting,
+    LeasesAcquired,
+    CandidatePreparing,
+    CandidatePrepared,
+    Verifying,
+    Verified,
+    LocalRefUpdating,
+    LocalRefUpdated,
+    Publishing,
+    Published,
+    PullRequestRetargeting,
+    Completed,
+    NoOp,
+    Conflicted,
+    RollingBack,
+    RolledBack,
+    Partial,
+    Cancelled,
+    TimedOut,
+    Failed,
+    EffectUnknown,
+}
+
+pub enum IntegrationConflictStateV1 {
+    None,
+    DirtySource,
+    DirtyTarget,
+    SourceHeadDrift,
+    TargetHeadDrift,
+    RemoteHeadDrift,
+    RequiredCommitMissing,
+    RequiredCommitNotAncestor,
+    MergeBaseUnavailable,
+    NativeContentConflict {
+        entries: NonEmptyVec<NativeConflictEntryV1>,
+    },
+    ProtectedRefDenied,
+    TargetCheckedOutByUnownedPlacement,
+    TestFailed {
+        receipts: NonEmptyVec<RuntimeEvidenceId>,
+    },
+    LocalRefCompareAndSwapFailed,
+    RemoteNonFastForwardRejected,
+    PullRequestVersionDrift,
+    PullRequestRetargetRejected,
+    LeaseLost,
+    AuthorizationRevoked,
+    DeadlineExpired,
+    EffectOutcomeUnknown,
+}
+
+pub enum RollbackDispositionV1 {
+    NotNeeded,
+    EphemeralCleanupPending,
+    EphemeralCleanupComplete,
+    ForwardRepairRequired,
+    ReconciliationRequired,
+    ManualInspectionRequired,
+}
+
+pub enum RefEffectObservationV1 {
+    NotApplied,
+    AppliedExact {
+        old: Option<CommitObjectId>,
+        new: CommitObjectId,
+    },
+    AppliedCompatibleFastForward {
+        observed: CommitObjectId,
+    },
+    Diverged {
+        observed: Option<CommitObjectId>,
+    },
+    Unavailable,
+    Unknown,
+}
+
+pub struct IntegrationReceiptV1 {
+    pub integration_id: IntegrationExecutionId,
+    pub proposal_revision_id: CrossMergeProposalRevisionId,
+    pub topology_revision_id: TaskExecutionTopologyRevisionId,
+    pub stack_revision_id: Option<BranchStackRevisionId>,
+    pub source_placement: PlacementReceiptRefV1,
+    pub lease_set: IntegrationLeaseSetRefV1,
+    pub expected_source_head: CommitObjectId,
+    pub observed_source_head: CommitObjectId,
+    pub expected_target_head: CommitObjectId,
+    pub observed_target_before: CommitObjectId,
+    pub candidate_tree: Option<GitTreeObjectId>,
+    pub candidate_commit: Option<CommitObjectId>,
+    pub required_commit_checks: Vec<RequiredCommitCheckV1>,
+    pub verification_receipts: Vec<RuntimeEvidenceId>,
+    pub local_ref_effect: RefEffectObservationV1,
+    pub remote_ref_effect: Option<RefEffectObservationV1>,
+    pub pull_request_effect: Option<PullRequestRetargetReceiptV1>,
+    pub conflict: IntegrationConflictStateV1,
+    pub rollback: RollbackDispositionV1,
+    pub terminal: IntegrationExecutionStateV1,
+    pub budget_usage: BudgetUsageV1,
+    pub started_at: Timestamp,
+    pub finished_at: Timestamp,
+    pub receipt_digest: Digest,
+}
+```
+
+`Completed` requires exact local-ref evidence, required verification, and every
+requested publication/retarget receipt. `NoOp` requires proof that the exact
+candidate is already the local and requested remote head and that the pull
+request already has the requested base. A local success plus remote or provider
+failure is `Partial`, never `Completed` or automatic rollback.
+
+### Safe autonomous cross-merge state machine
+
+Only `AdmitIntegrationV1` may enter this machine. Admission reauthorizes the
+actor, accepted proposal/topology/stack revisions, current autonomy grant or
+human decision, exact source placement receipt, produced/required commit set,
+repository scope, protected-ref policy, provider entity version, deadline,
+budget, and cancellation generation before reserving capacity.
+
+The legal path is exact:
+
+```text
+Admitted -> Preflighting -> LeasesAcquired -> CandidatePreparing
+CandidatePreparing -> CandidatePrepared | NoOp | Conflicted | Failed
+CandidatePrepared -> Verifying
+Verifying -> Verified | RollingBack | TimedOut | Cancelled | Failed
+Verified -> LocalRefUpdating
+LocalRefUpdating -> LocalRefUpdated | EffectUnknown
+LocalRefUpdated -> Publishing | PullRequestRetargeting | Completed | Partial
+Publishing -> Published | Partial | EffectUnknown
+Published -> PullRequestRetargeting | Completed
+PullRequestRetargeting -> Completed | Partial | EffectUnknown
+Preflighting | LeasesAcquired | CandidatePreparing | CandidatePrepared
+  -> RollingBack | Cancelled | TimedOut | Failed
+RollingBack -> RolledBack | EffectUnknown
+RolledBack -> Cancelled | TimedOut | Failed
+```
+
+`Conflicted`, `Partial`, `Completed`, `NoOp`, `Cancelled`, `TimedOut`,
+`Failed`, and `EffectUnknown` are terminal. No retry reopens an integration;
+a retry is a new `IntegrationExecutionId` against a newly revalidated proposal
+revision and retains the prior receipt.
+
+The target-ref commit point is the successful native compare-and-swap from
+`expected_target_head` to `candidate_commit`. Before it, rollback may remove
+only Plan 32's private candidate ref and clean ephemeral validation placement
+after proving their identities. At or after it, automatic rollback is
+forbidden. Cancellation, deadline, test failure, publication failure, provider
+failure, or revocation produces a truthful partial/unknown receipt and a
+forward-repair requirement; Plan 32 never resets the ref, creates an automatic
+revert, moves a remote backward, or retargets a pull request by inference.
+
+### Native Git preflight and fixed adapter
+
+`src/workflow_runtime/native_git.rs` is a closed, typed adapter over the
+configured native Git executable. It constructs fixed argument vectors
+internally and accepts no raw flags, command strings, environment fragments,
+shell, aliases, pager, editor, credential helper override, hooks bypass, or
+user-owned Git configuration mutation. It supports SHA-1 and SHA-256 object
+formats only after capability probing and pins executable identity/version,
+object format, repository format, common-directory identity, relevant
+configuration digest, and normalized operation revision in every receipt.
+
+```rust
+pub trait NativeGitExecutionPort {
+    async fn preflight_placement(
+        &self,
+        permit: EffectPermitV1,
+        request: PlacementPreflightV1,
+    ) -> Result<PlacementPreflightReceiptV1, NativeGitError>;
+
+    async fn materialize_placement(
+        &self,
+        permit: EffectPermitV1,
+        request: MaterializePlacementV1,
+    ) -> Result<PlacementMaterializationReceiptV1, NativeGitError>;
+
+    async fn preflight_integration(
+        &self,
+        permit: EffectPermitV1,
+        request: IntegrationPreflightV1,
+    ) -> Result<IntegrationPreflightReceiptV1, NativeGitError>;
+
+    async fn prepare_candidate(
+        &self,
+        permit: EffectPermitV1,
+        request: PrepareIntegrationCandidateV1,
+    ) -> Result<PreparedIntegrationCandidateV1, NativeGitError>;
+
+    async fn update_local_ref(
+        &self,
+        permit: EffectPermitV1,
+        request: CompareAndSwapLocalRefV1,
+    ) -> Result<LocalRefUpdateReceiptV1, NativeGitError>;
+
+    async fn publish_fast_forward(
+        &self,
+        permit: EffectPermitV1,
+        request: PublishFastForwardRefV1,
+    ) -> Result<RemoteRefUpdateReceiptV1, NativeGitError>;
+
+    async fn inspect_effect(
+        &self,
+        permit: EffectPermitV1,
+        request: InspectGitEffectV1,
+    ) -> Result<GitEffectObservationV1, NativeGitError>;
+
+    async fn release_ephemeral_placement(
+        &self,
+        permit: EffectPermitV1,
+        request: ReleaseEphemeralPlacementV1,
+    ) -> Result<PlacementReleaseReceiptV1, NativeGitError>;
+}
+```
+
+Preflight uses native plumbing/porcelain with machine formats to prove:
+
+- canonical repository, common directory, checkout/worktree generation, object
+  format, Git operation state, attached/detached/unborn state, exact local and
+  remote refs, source/target object existence, merge base, ancestry, required
+  commits, worktree holders, and protected-ref policy;
+- porcelain-v2 `-z` cleanliness covering index, tracked worktree, untracked,
+  unmerged, submodule, sparse-checkout, and in-progress operation state;
+- branch/ref names with `check-ref-format`, object identity with `cat-file`,
+  ancestry with `merge-base --is-ancestor`, worktree ownership with
+  `worktree list --porcelain -z`, and remote observations with bounded
+  `ls-remote`; and
+- a non-mutating native merge preview using the pinned `merge-tree`
+  capability. Any conflict or unsupported native result becomes typed evidence
+  before candidate mutation.
+
+A linked worktree is allocated under a daemon-configured root and materialized
+at the pinned commit with a daemon-owned branch/ref whose expected prior state
+is absent. An isolated clone is local-source, `--no-hardlinks`, no-checkout,
+network-disabled, then detached at the pinned commit before its daemon-owned
+branch is created. Symlink escape, path reuse, wrong common directory,
+alternates/hardlink leakage, unexpected remote, partial clone, submodule
+recursion, hooks path drift, or existing destination rejects. No placement
+operation fetches.
+
+Candidate preparation creates a private
+`refs/tracedecay/integration/<integration_id>` and a daemon-owned validation
+placement, never the target ref or user checkout. `FastForwardOnly` advances
+only that private ref. `CreateTwoParentMergeCommit` executes native merge on
+the private ref, requires exactly target/source parents in order, runs the
+configured commit hooks and signing policy, and records the resulting tree and
+commit. Native conflict aborts the private merge, preserves a bounded conflict
+packet, and never invokes a model or resolver. Every required cataloged
+verification operation then runs against the detached exact candidate
+generation. Only after all pass, the target is revalidated and updated by
+compare-and-swap.
+
+Remote publication uses only an ordinary fast-forward push of the exact local
+candidate to the exact accepted remote/ref. The adapter rejects every force,
+force-with-lease, force-if-includes, mirror, delete, prune, tag, wildcard,
+refspec expansion, or config-based rewrite form. It checks the expected remote
+head immediately before push, treats ordinary non-fast-forward rejection as
+terminal, then re-reads the remote and proves the candidate is its exact head.
+A compatible remote race is accepted only when native Git succeeded without a
+force mode and every required commit remains an ancestor; the actual
+observation is recorded as `AppliedCompatibleFastForward`.
+
+### Clean-tree, effects, tests, and retention
+
+- In-place execution is default-denied. Admission requires an exact
+  checkout-generation capability and explicit actor acknowledgement. The
+  checkout must be strictly clean before provider start. A dirty terminal
+  checkout is quarantined; Plan 32 never stashes, cleans, resets, restores,
+  checks out another branch, or deletes its bytes.
+- Linked worktrees and isolated clones are exclusive to one active placement
+  lease/generation. Providers receive the canonical path only inside their
+  execution envelope and cannot address siblings, the Git common directory,
+  another ref, or a remote credential.
+- Every materialization, branch/ref creation, commit-object creation, local-ref
+  update, remote publication, PR retarget, and cleanup is a separately
+  reserved/journaled/settled `EffectPermitV1`. A provider process never
+  receives these permits.
+- Verification uses only `IntegrationVerificationContractV1` cataloged typed
+  operations. All required operations share the run deadline/cancellation and
+  one budget ledger, run on the exact candidate generation, record stdout/
+  stderr/artifacts through existing bounded channels, and must return typed
+  successful receipts. Test absence, skip, stale generation, cancellation,
+  timeout, partial output, or unknown effect cannot pass.
+- A worker may publish `ProducedCommitSetV1` only when each intended commit and
+  parent/tree/signature is proven, every required commit state is `Satisfied`,
+  required worker tests passed on the exact head, and the placement is clean.
+  Uncommitted output remains partial evidence and blocks integration.
+- Ephemeral candidate data may be removed after pre-commit failure only when
+  Plan 32 proves its private ref, placement generation, no holders, no unique
+  unanchored bytes, and no unknown effect. Task placements follow their
+  accepted retention policy. Dirty, conflicted, unknown, unpublished, or
+  uniquely containing placements remain quarantined. PR17 never deletes a
+  remote branch.
+
+### Stacked upstream refresh, PR retarget, and order
+
+`src/workflow_runtime/stack.rs` consumes the accepted Plan 24 branch-stack DAG
+without adding task semantics. It schedules ready integration proposals in
+stable `(stack depth, parent node id, child node id, proposal id)` order and
+serializes every shared target ref. Independent nodes may prepare and verify
+concurrently, but a child cannot publish or retarget until the exact parent
+integration receipt and required commit frontier are committed.
+
+Upstream refresh merges the parent frontier into the child; it never rebases,
+squashes, cherry-picks, amends, or force-pushes. After parent integration,
+child candidate verification, and child fast-forward publication,
+`PullRequestMutationPort::retarget_base` may change only the exact PR base ref
+using expected provider version/base/head and an effect permit:
+
+```rust
+pub trait PullRequestMutationPort {
+    async fn retarget_base(
+        &self,
+        permit: EffectPermitV1,
+        request: RetargetPullRequestBaseV1,
+    ) -> Result<PullRequestRetargetReceiptV1, PullRequestMutationError>;
+
+    async fn inspect_retarget(
+        &self,
+        permit: EffectPermitV1,
+        request: InspectPullRequestRetargetV1,
+    ) -> Result<PullRequestRetargetObservationV1, PullRequestMutationError>;
+}
+```
+
+This port cannot create/merge/close/reopen a PR, edit title/body, request or
+dismiss review, or post/update/resolve/reply to comments. Plan 37 remains
+read-only ingress. Parent closure without exact integration, provider-version
+drift, review-state policy failure, or retarget denial blocks descendants and
+returns `Partial` or `Conflicted`; it never guesses a new base.
+
+Stack/runtime history, exact PR base/head observations, and integration
+receipts follow Plan 24/26 retention. Local materializations additionally
+follow the accepted placement retention deadline but remain while any receipt
+is unacknowledged or any effect is unresolved. Retention expiry enqueues a
+freshly authorized cleanup preflight; it is not authority to delete. Remote
+branches and provider entities are retained.
+
+### Authorization, deadline, and recovery
+
+Admission intersects the Plan 24 decision/grant, Plan 09 actor capabilities,
+Plan 20 protected-ref/remote/provider policy, Plan 16 resolved scope, Plan 36
+Git capability evidence, and the workflow control envelope. Capabilities are
+operation-specific:
+`UseInPlaceCheckout`, `CreateLinkedWorktree`, `CreateIsolatedClone`,
+`CreateLocalBranch`, `CreateMergeCommit`, `AdvanceLocalRef`,
+`PublishFastForwardRef`, `RetargetPullRequestBase`, and
+`ReleaseExecutionPlacement`. Each binds repository, placement/ref/PR, actor,
+effect count, deadline, policy revision, and revocation generation. No
+capability permits force push, backward ref movement, branch deletion, rebase,
+semantic conflict resolution, or arbitrary Git. Protected targets are denied
+unless both policy and the exact human decision allow direct integration;
+stack autonomy grants always exclude protected targets.
+
+Every stage uses `MonotonicRunDeadline`; a proposal/grant deadline may shorten
+but never extend it. Lease expiry, cancellation, revocation, or deadline fences
+new effects immediately. If no external effect has crossed its commit point,
+the runtime rolls back proven ephemeral state. If a local-ref, remote-ref, or
+provider effect may have committed, the runtime enters reconciliation and
+cannot report cancellation or retry until observation is exact.
+
+Recovery order is fixed: rebuild run/effect history and budget; increment
+authority epoch; fence old lease scopes; inspect native placement/common-dir/
+private-ref/target-ref state; classify each local effect as not applied,
+applied exact, diverged, or unknown; inspect remote ref; inspect PR base/head
+and provider version; seal the corresponding complete/partial/conflict/unknown
+receipt; then release only proven safe ephemeral resources. A private candidate
+may be recreated only when prior mutation is proved absent. A target/remote/PR
+effect is never replayed when its outcome is ambiguous.
+
+For crash recovery, exact candidate at exact target means local commit
+succeeded even if the database acknowledgement was lost; exact old target
+with no candidate ref movement means it did not. Any third value is diverged.
+Remote candidate head proves publication; expected old head proves not
+published; another head is compatible only after ancestry proof and otherwise
+diverged. Exact PR base/head/provider version proves or disproves retarget;
+missing or ambiguous provider evidence is `EffectUnknown`. PID, path
+existence, process exit, branch name, task state, and elapsed time prove
+nothing by themselves.
+
 ## Definition contract
 
 An immutable workflow definition version contains:
@@ -43,6 +594,9 @@ An immutable workflow definition version contains:
 - an optional exact Plan 24 auxiliary-attempt request reference whose provider
   recommendation, scope, context, grants, budgets, and fallback constraints
   must be revalidated before admission;
+- an optional exact accepted Plan 24 topology/stack revision and, for
+  integration nodes, an exact authorized cross-merge proposal plus produced
+  and required commit-set digests;
 - explicit runtime predecessor edges, bounded fan-out groups, concurrency and
   failure policy, route/capability requirements, budgets, and runtime result
   conditions; and
@@ -88,13 +642,25 @@ section are contract names, not examples:
 - `crates/tracedecay-domain/src/workflow/state.rs`:
   `WorkflowRunState`, `WorkflowAttemptState`, `EffectState`,
   `IdempotencyState`, `RetryDisposition`;
+- `crates/tracedecay-domain/src/workflow/placement.rs`:
+  `ExecutionPlacementV1`, `PlacementLeaseV1`, `PlacementLeaseScopeV1`,
+  `PlacementLeaseStateV1`, `PlacementStateV1`, `PlacementReceiptV1`;
+- `crates/tracedecay-domain/src/workflow/integration.rs`:
+  `AdmitIntegrationV1`, `IntegrationExecutionStateV1`,
+  `IntegrationConflictStateV1`, `RollbackDispositionV1`,
+  `RefEffectObservationV1`, `IntegrationReceiptV1`;
 - `crates/tracedecay-store/src/workflow/events.rs`,
-  `leases.rs`, `outbox.rs`, and `recovery.rs`: canonical append,
-  fencing, idempotency, delivery, and restart transactions;
+  `leases.rs`, `outbox.rs`, `recovery.rs`, `placements.rs`,
+  `git_effects.rs`, and `integration.rs`: canonical append, scoped fencing,
+  placement/integration heads, idempotency, delivery, and restart
+  transactions;
 - `src/application/workflow/ports.rs`, `admission.rs`, `runtime.rs`,
-  `recovery.rs`, and `queries.rs`: application commands, ports, and views;
+  `recovery.rs`, `queries.rs`, `placement.rs`, and `integration.rs`:
+  application commands, ports, and views;
 - `src/workflow_runtime/kernel.rs`, `planner.rs`, `fanout.rs`,
-  `synthesis.rs`, and `providers/{native_process,claude_code_cli,codex_app_server,codex_cli}.rs`:
+  `synthesis.rs`, `placement.rs`, `native_git.rs`, `integration.rs`,
+  `stack.rs`, `pull_requests.rs`, and
+  `providers/{native_process,claude_code_cli,codex_app_server,codex_cli}.rs`:
   daemon implementations;
 - `src/cli/workflow.rs`, `src/mcp/tools/handlers/workflow.rs`,
   `src/http/workflow.rs`, and `src/dashboard/workflow.rs`: thin surfaces over
@@ -104,12 +670,27 @@ section are contract names, not examples:
   `path = "tests/workflow_runtime_suite/main.rs"`;
 - `crates/tracedecay-domain/tests/workflow_runtime_contract.rs`,
   `crates/tracedecay-store/tests/workflow_runtime_contract.rs`, and
-  `tests/workflow_runtime_suite/{main,shared_budget,capability_manifest,deterministic_fallback,parallelism,evidence_handoff,model_routing,native_providers,no_recursive_dispatch,retry_recovery,runtime_metrics,backup_restore,remote_fencing,surface_parity}.rs`:
+  `tests/workflow_runtime_suite/{main,shared_budget,capability_manifest,deterministic_fallback,parallelism,evidence_handoff,model_routing,native_providers,no_recursive_dispatch,retry_recovery,placement,git_preflight,cross_merge,stacked_branches,stacked_prs,integration_recovery,runtime_metrics,backup_restore,remote_fencing,surface_parity}.rs`:
   the binding contract and integration suites.
 
 Plan 24 owns its planning request, proposal, query, accepted-attempt-set, and
-task-evidence-contract types. PR17 consumes those types by exact versioned
-reference and does not duplicate them under `workflow`.
+task-evidence-contract types plus topology/stack revisions, task-placement
+bindings, required/produced commit contracts, cross-merge proposals,
+autonomy-grant references, and semantic integration receipt links. PR17
+consumes those types by exact versioned reference and does not duplicate them
+under `workflow`.
+
+The store modules create `workflow_placement_events`,
+`workflow_placement_heads`, `workflow_lease_scopes`,
+`workflow_git_effects`, `workflow_integration_events`,
+`workflow_integration_heads`, `workflow_integration_receipts`, and
+`workflow_pull_request_effects`. Events, receipts, and effect observations are
+append-only. Head rows are expected-version projections rebuilt from events.
+Lease scopes, effect reservation, pre-effect journal record, and outbox
+publication commit atomically on the owner shard. Native Git, remote-ref, and
+provider effects remain external; their observed result settles the journal in
+a second atomic transaction. Recovery never infers external success from an
+unsettled row.
 
 ## Runtime clock, run, and effect authority
 
@@ -123,11 +704,13 @@ authority outside this shared kernel, and Plan 24 defines no competing task
 scheduler, clock, lease table, attempt runtime, effect journal, or worker
 authority.
 
-Canonical run history records admission, step readiness, attempt dispatch,
-delivery/effect observation, validated result, retry decision, cancellation,
-checkpoint, and terminal receipt. A step becomes ready only from committed
-history. Admission plus outbox, result plus transition, and terminal closure are
-atomic owner-shard transactions.
+Canonical run history records admission, step readiness, placement
+materialization, scoped lease acquisition, attempt dispatch, Git/provider/
+delivery effect observation, candidate and test receipts, local/remote ref and
+PR effects, validated result, retry decision, cancellation, checkpoint,
+retention, cleanup, and terminal receipt. A step becomes ready only from
+committed history. Admission plus outbox, result plus transition, and terminal
+closure are atomic owner-shard transactions.
 
 Every effect has stable run/step/attempt/idempotency identity. Idempotent effects
 may resume after restart; at-least-once and non-repeatable adapters follow their
@@ -197,6 +780,13 @@ pub enum WorkflowStageKind {
     Fanout,
     Provider,
     Synthesis,
+    Placement,
+    Integration,
+    Git,
+    Publication,
+    PullRequestRetarget,
+    Verification,
+    Cleanup,
     Retry,
     Recovery,
     Control,
@@ -238,6 +828,22 @@ pub trait WorkflowRuntimeKernel {
         &self,
         command: ApplyPlan24DecisionV1,
     ) -> Result<Plan24DecisionApplicationReceiptV1, TransitionError>;
+    async fn admit_placement(
+        &self,
+        command: AdmitExecutionPlacementV1,
+    ) -> Result<PlacementReceiptV1, PlacementAdmissionError>;
+    async fn admit_integration(
+        &self,
+        command: AdmitIntegrationV1,
+    ) -> Result<IntegrationAdmissionReceiptV1, IntegrationAdmissionError>;
+    async fn reconcile_integration(
+        &self,
+        command: ReconcileIntegrationV1,
+    ) -> Result<IntegrationReceiptV1, IntegrationRecoveryError>;
+    async fn release_placement(
+        &self,
+        command: ReleaseExecutionPlacementV1,
+    ) -> Result<PlacementReleaseReceiptV1, PlacementReleaseError>;
     async fn reserve_effect(
         &self,
         command: ReserveStageEffectV1,
@@ -284,7 +890,8 @@ pub trait WorkflowRuntimeKernel {
 Every mutating command carries run/node/attempt identity as applicable,
 expected authority epoch, expected cancellation generation, deadline identity,
 idempotency key, actor, and reason. No surface may call a provider adapter
-directly. Every adapter method capable of process, protocol, network, or OS I/O
+or native Git/PR mutation adapter directly. Every adapter method capable of
+process, protocol, filesystem, Git-object/ref, provider, network, or OS I/O
 requires an `EffectPermitV1`; only pure `prepare_launch` lowering may run
 without one.
 
@@ -957,7 +1564,19 @@ Plan 32 emits bounded typed source events sufficient to derive:
 - `tracedecay_workflow_retries_total{reason,route_change}`;
 - `tracedecay_workflow_recovery_total{action,outcome}`;
 - `tracedecay_workflow_route_decisions_total{resolution,reason,provider_kind}`;
-- `tracedecay_workflow_recursive_dispatch_rejections_total{role}`; and
+- `tracedecay_workflow_recursive_dispatch_rejections_total{role}`;
+- `tracedecay_workflow_placements_total{placement,outcome}`;
+- `tracedecay_workflow_placement_lease_wait_seconds{scope}`;
+- `tracedecay_workflow_placement_quarantine_total{reason}`;
+- `tracedecay_workflow_git_preflight_total{operation,outcome}`;
+- `tracedecay_workflow_integrations_total{purpose,outcome}`;
+- `tracedecay_workflow_integration_duration_seconds{stage}`;
+- `tracedecay_workflow_integration_conflicts_total{kind}`;
+- `tracedecay_workflow_integration_rollbacks_total{disposition}`;
+- `tracedecay_workflow_ref_updates_total{target,outcome}`;
+- `tracedecay_workflow_pr_retargets_total{outcome}`;
+- `tracedecay_workflow_force_push_rejections_total{surface}`;
+- `tracedecay_workflow_semantic_resolution_rejections_total{surface}`; and
 - `tracedecay_workflow_fanout_width`.
 
 Labels never contain run, step, attempt, project, user, executable path,
@@ -969,8 +1588,9 @@ details remain authorized history, not metric labels.
 An executable Plan 24 work item is admitted only through a typed application
 command that pins the active work-plan version, work-item version, readiness
 digest, resolved project/repository/worktree/branch scope, acceptance contract,
-route decision, grants, budgets, privacy/config/policy/catalog revisions, and
-idempotency identity. An auxiliary step additionally pins the exact Plan 24
+route decision, grants, budgets, privacy/config/policy/catalog revisions,
+accepted topology/stack revision when present, required commit-set digest,
+placement retention, and idempotency identity. An auxiliary step additionally pins the exact Plan 24
 auxiliary-attempt request and negotiated provider-adapter descriptor. Admission
 creates or references one workflow run/node;
 that node's lease, attempt, effect, cancellation, artifact, and receipt
@@ -989,9 +1609,12 @@ An admission may carry an accepted Plan 24 topology/partition revision. Plan
 the exact Plan 24 accepted set separately authorizes that node or its
 contingent release. It enforces useful concurrency and capacity classes,
 serializes or isolates shared-authority hubs, records requested versus actual
-topology/concurrency and defer reasons, and never invents a partition,
-recomputes Plan 24 readiness, or treats predecessor satisfaction as task
-acceptance.
+topology/concurrency/placement and defer reasons, and never invents a
+partition or placement, recomputes Plan 24 readiness, converts branch-stack
+ancestry into a task dependency, or treats predecessor/commit satisfaction as
+task acceptance. Integration admission additionally requires the exact
+authorized `CrossMergeProposalV1`; a produced commit receipt alone cannot move
+a ref or retarget a PR.
 
 Plan 24 task intelligence may use committed run/step/attempt/effect/artifact/
 receipt evidence to propose split, merge, resize, re-review, or re-route. A
@@ -1038,10 +1661,11 @@ already-shipped read-only advisory operations — feedback-cycle findings,
 GitHub-ingested review-thread surfacing, CI-failure localization, and
 proximity warnings — may appear as typed workflow steps composed through this
 same scheduler/history/lease/effect/artifact kernel with the same
-idempotent-effect and receipt guarantees. PR17 is not first availability of
-those capabilities, performs no GitHub writes, and defines no second workflow
-engine, retry loop, or effect authority. Workflow effects remain workflow
-authority only.
+idempotent-effect and receipt guarantees. Those Plan 37 capabilities perform no
+GitHub writes. PR17's sole provider write is the exact version-checked
+`PullRequestMutationPort::retarget_base` effect admitted from Plan 24; it
+cannot write review content or change any other PR field. PR17 defines no
+second workflow engine, retry loop, or effect authority.
 
 ## Pinned Hermes regression translations
 
@@ -1096,6 +1720,17 @@ authority.
 Topology fixtures compare admitted single, sequential, parallel, hierarchical
 and hybrid revisions; shared-authority serialization, requested-versus-actual
 concurrency, capacity deferral, and refusal to invent an unreviewed partition.
+Placement fixtures cover optional in-place, linked-worktree, isolated-clone,
+single-branch, and stacked-branch execution with `TaskId` unchanged across
+every placement revision. They prove strict clean-tree admission, one canonical
+placement generation/lease, exact produced/required commits, dirty/conflicted
+quarantine, retention, safe cleanup, and no ambient CWD/ref/path authority.
+Integration fixtures cover separate task and branch-stack DAGs, native Git
+preflight, candidate verification before target-ref movement, ordinary
+fast-forward publication, ordered upstream refresh and PR retarget, partial
+effects, and recovery at every state transition. They prove no rebase, squash,
+cherry-pick, reset, revert, branch deletion, backward ref movement, force push,
+or semantic conflict resolution.
 Minimal-repair and decision fixtures cover invalidation fencing, unaffected
 proof, unknown-effect reconciliation, stale proposals, new-attempt history,
 explicit human override, cancellation, and timeout without approval or
@@ -1133,15 +1768,53 @@ claim-lock, PID, tool, or environment contracts.
 Public SDK publication and Rust/TypeScript/Python parity are PR18 acceptance
 under Plan 17 and are not PR17 completion gates.
 
+### TDD placement and integration fixture corpus
+
+Implementation starts with failing contract/fixture tests, not adapter code.
+The checked-in manifests under `tests/fixtures/workflow_git/` are:
+
+- `clean_in_place.toml`, `dirty_in_place.toml`,
+  `untracked_in_place.toml`, and `in_progress_operation.toml`;
+- `linked_worktree.toml`, `worktree_holder_race.toml`,
+  `isolated_clone.toml`, `clone_hardlink_canary.toml`, and
+  `symlink_escape.toml`;
+- `sha1_repository.toml`, `sha256_repository.toml`,
+  `sparse_repository.toml`, `submodule_repository.toml`, and
+  `unsupported_repository.toml`;
+- `fast_forward.toml`, `two_parent_merge.toml`,
+  `native_conflict.toml`, `required_commit_missing.toml`,
+  `test_failure.toml`, and `target_ref_race.toml`;
+- `remote_fast_forward.toml`, `remote_non_fast_forward.toml`,
+  `remote_compatible_race.toml`, `force_push_canary.toml`, and
+  `remote_unknown.toml`;
+- `stack_linear.toml`, `stack_diamond.toml`, `stack_cycle.toml`,
+  `parent_closed.toml`, `upstream_refresh_conflict.toml`,
+  `pr_retarget.toml`, `pr_version_drift.toml`, and
+  `retention_quarantine.toml`; and
+- `crash_before_candidate.toml`, `crash_after_candidate.toml`,
+  `crash_during_tests.toml`, `crash_before_local_ref.toml`,
+  `crash_after_local_ref.toml`, `crash_during_push.toml`,
+  `crash_during_retarget.toml`, and `authority_epoch_failover.toml`.
+
+Fixture builders create disposable stock-Git repositories and a fake
+credential-free remote/provider endpoint from these declarative inputs. They
+never use the developer checkout as a target. Each milestone first adds the
+fixture and expected event/receipt golden, runs the named target to observe the
+expected assertion failure, then implements the minimum typed transition and
+runs the same target green. Tests reject any adapter argv containing force,
+history-rewrite, branch-delete, arbitrary config, hook-bypass, shell, or
+unrecognized operation tokens.
+
 ## PR17 implementation milestones and gates
 
 ### PR17A: Domain and authority contracts
 
 Implement `definition.rs`, `control.rs`, `budget.rs`, `evidence.rs`,
-`provider.rs`, and `state.rs`. Contract tests must compile the exact enums and
-ports above and prove that Plan 32 has no task graph mutation or task
-acceptance API and Plan 24 has no lease, attempt, provider-start, retry, or
-effect-settlement API.
+`provider.rs`, `state.rs`, `placement.rs`, and `integration.rs`. Contract tests
+must compile the exact enums and ports above and prove that Plan 32 has no task
+graph mutation, TaskId construction, task/stack edge coercion, semantic
+conflict resolution, or task acceptance API and Plan 24 has no lease, attempt,
+provider/Git start, retry, effect-settlement, ref-update, or PR-mutation API.
 
 Gate:
 
@@ -1152,9 +1825,11 @@ cargo test --all-features -p tracedecay-domain --test workflow_runtime_contract
 ### PR17B: Store kernel, budget, idempotency, and recovery
 
 Implement canonical events, lease fencing, budget reservations, effect
-settlement, outbox publication, evidence sealing, and the fixed restart order.
-Fault injection covers crashes after reservation, lease commit, provider
-start, terminal commit, evidence sealing, publication, and delivery
+settlement, placement/integration heads, scoped lease records, Git/PR effect
+journals, outbox publication, evidence sealing, and the fixed restart order.
+Fault injection covers crashes after reservation, lease commit, placement
+materialization, candidate creation, provider start, local/remote ref and PR
+effect dispatch, terminal commit, evidence sealing, publication, and delivery
 acknowledgement.
 
 Gate:
@@ -1164,7 +1839,31 @@ cargo test --all-features -p tracedecay-store --test workflow_runtime_contract
 cargo test --all-features --test workflow_runtime_suite retry_recovery
 ```
 
-### PR17C: Plan 24 bridge, bounded fan-out, and evidence handoff
+### PR17C: Placement, native Git integration, and stack execution
+
+Implement `placement.rs`, `native_git.rs`, `integration.rs`, `stack.rs`, and
+`pull_requests.rs` after the failing fixture corpus. Land strict preflight,
+physical placement materialization, child lease scopes, produced/required
+commit checks, candidate preparation, cataloged verification, local-ref CAS,
+ordinary fast-forward publication, exact PR-base retarget, retention, cleanup,
+and restart reconciliation. Exit requires byte-exact state/receipt goldens at
+every fault point and stock-Git differential parity for each supported native
+operation.
+
+Gate:
+
+```text
+cargo test --all-features -p tracedecay-domain --test workflow_runtime_contract placement
+cargo test --all-features -p tracedecay-store --test workflow_runtime_contract placement
+cargo test --all-features --test workflow_runtime_suite placement
+cargo test --all-features --test workflow_runtime_suite git_preflight
+cargo test --all-features --test workflow_runtime_suite cross_merge
+cargo test --all-features --test workflow_runtime_suite stacked_branches
+cargo test --all-features --test workflow_runtime_suite stacked_prs
+cargo test --all-features --test workflow_runtime_suite integration_recovery
+```
+
+### PR17D: Plan 24 bridge, bounded fan-out, and evidence handoff
 
 Implement planner-attempt admission, `AwaitingPlanDecision`, accepted-set
 revalidation, concurrency/backpressure, no-progress timeout, deterministic
@@ -1182,7 +1881,7 @@ cargo test --all-features --test workflow_runtime_suite evidence_handoff
 cargo test --all-features --test workflow_runtime_suite no_recursive_dispatch
 ```
 
-### PR17D: Native provider adapters and human controls
+### PR17E: Native provider adapters and human controls
 
 Implement native Claude Code CLI, Codex app-server, and policy-allowed Codex
 CLI adapters through `NativeProviderAdapter`. Fake protocol/process tests run
@@ -1197,7 +1896,7 @@ cargo test --all-features --test workflow_runtime_suite native_providers
 cargo test --all-features --test workflow_runtime_suite model_routing
 ```
 
-### PR17E: Surfaces, metrics, and aggregate acceptance
+### PR17F: Surfaces, metrics, and aggregate acceptance
 
 Implement CLI, MCP, HTTP, dashboard application-port parity and Plan 26 source
 events. Exercise Markdown and JSON rendering without local execution in any
@@ -1215,14 +1914,17 @@ cargo test --all-features
 
 The aggregate acceptance suite must prove:
 
-1. planner, fan-out, every provider call, retry, recovery, and synthesis share
-   one deadline, cancellation generation, and effect ledger;
+1. planner, fan-out, placement, verification, integration, Git, publication,
+   PR retarget, every provider call, cleanup, retry, recovery, and synthesis
+   share one deadline, cancellation generation, and effect ledger;
 2. pause, human wait, restart, reconnect, failover, and retry never increase
    remaining time or any consumed budget dimension;
 3. cancellation fences all new reservations and unknown effects block
    replacement and success;
-4. stale capability, readiness, route, configuration, privacy, or authority
-   evidence fails before lease acquisition or process startup;
+4. stale capability, readiness, route, configuration, privacy, topology,
+   stack, proposal, produced/required commit, grant, provider version, or
+   authority evidence fails before lease acquisition, materialization,
+   process startup, or Git/provider mutation;
 5. effective concurrency never exceeds the strictest declared limit, bounded
    queue overflow defers or rejects deterministically, and heartbeat without
    frontier progress reaches `NoProgress`;
@@ -1245,6 +1947,26 @@ The aggregate acceptance suite must prove:
     grants and budget;
 11. provider requests for child agents plus attempted HTTP, MCP, CLI, and local
     socket recursive ingress create no task, proposal, run, lease, attempt,
-    process, or graph mutation; and
+    process, placement, branch, ref update, PR mutation, or graph mutation;
 12. runtime `Completed` and synthesis output remain evidence until Plan 24
-    independently applies its task acceptance and query semantics.
+    independently applies its task acceptance and query semantics;
+13. topology changes never alter `TaskId`, stack edges never unlock task DAG
+    nodes, and task dependencies never order or move refs without an explicit
+    accepted stack/proposal relation;
+14. in-place begins strictly clean and is never an autonomous integration
+    target; linked worktree and isolated clone allocations are canonical,
+    exclusive, local-source/network-free as declared, and quarantined rather
+    than cleaned when unique or dirty;
+15. merge candidates and all required typed tests complete on the exact
+    candidate generation before target movement; test failure, conflict,
+    timeout, cancellation, or stale evidence leaves the target ref unchanged;
+16. every local update is exact compare-and-swap, every remote update is an
+    ordinary verified fast-forward, and every PR retarget is version checked;
+    force variants, history rewrite, branch deletion, arbitrary Git, hooks
+    bypass, and semantic auto-resolution are rejected at every ingress;
+17. stack refresh, publish, and retarget follow stable parent-before-child
+    order, preserve produced commit history, block on parent closure/drift, and
+    retain local/remote/PR evidence according to the accepted policy; and
+18. crash recovery at every pre/post commit point classifies native, remote,
+    and provider effects as absent, exact, compatible-fast-forward, diverged,
+    or unknown without replaying ambiguity or moving any ref backward.
