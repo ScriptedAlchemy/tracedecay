@@ -18,15 +18,20 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_domain::{
-    ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalModeV1, WorktreeId,
+    ActorId, ObservationScopeV1, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
+    TemporalModeV1, WorktreeId,
 };
-use tracedecay_store::{SessionRefreshCompletionRequestV1, SessionRefreshFrontierV1};
+use tracedecay_store::{
+    SessionRefreshCompletionRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
+};
 
 use crate::application::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
     PolicyDigest, ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedGitRoute,
     ResolvedSessionIdentity, SessionRootId, SessionStoreId,
 };
+use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use crate::application::observation::ObservationCancellation;
 use crate::application::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionRefreshConfiguration, SessionRefreshOutcome, SessionRefreshSchedulerError,
@@ -67,12 +72,6 @@ const NATIVE_CODEX_FIXTURES: &[(&str, &str)] = &[
     (
         "tests/fixtures/provider_normalization/codex/agent_message.input.json",
         include_str!("../../tests/fixtures/provider_normalization/codex/agent_message.input.json"),
-    ),
-    (
-        "tests/fixtures/provider_normalization/codex/thread_goal_updates.input.json",
-        include_str!(
-            "../../tests/fixtures/provider_normalization/codex/thread_goal_updates.input.json"
-        ),
     ),
 ];
 
@@ -212,6 +211,16 @@ impl VersionedTokenEstimator for Words {
     fn token_policy(&self) -> TokenPolicy {
         TokenPolicy::Whitespace
     }
+}
+
+struct PreparedRepetition {
+    db: GlobalDb,
+    session: SessionId,
+    context: RequestContext,
+    complete_request: SessionRefreshCompletionRequestV1,
+    rebuild_activate_ns: u64,
+    durable_progress: SessionRefreshProgressV1,
+    _env: IsolatedBenchmarkEnv,
 }
 
 /// Validate checked-in artifacts without Cargo mutation (also used by the bench).
@@ -426,7 +435,7 @@ pub async fn run_measurement() -> BenchResult<Value> {
     Ok(result)
 }
 
-async fn run_one_repetition(repetition: usize) -> BenchResult<Vec<(Phase, u64)>> {
+async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition> {
     let env = IsolatedBenchmarkEnv::enter("pr8-temporal-")?;
     let project = env.path().join("project");
     fs::create_dir_all(&project).map_err(|error| format!("create project: {error}"))?;
@@ -460,6 +469,26 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<Vec<(Phase, u64)>>
     let observation_count = count_observations(&db).await?;
     if observation_count == 0 {
         return Err("Codex admit produced zero observations".to_owned());
+    }
+    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+        &db,
+        project_id.clone(),
+    ));
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+    let projection = admission
+        .drain_projection_queue(
+            "codex",
+            &scope,
+            &ObservationCancellation::default(),
+            usize::try_from(observation_count)
+                .map_err(|error| format!("projection queue size: {error}"))?,
+        )
+        .await
+        .map_err(|outcome| format!("Codex canonical projection failed: {outcome:?}"))?;
+    if projection.projected_outputs == 0 {
+        return Err("Codex canonical projector produced zero outputs".to_owned());
     }
 
     let store = GlobalDbSessionTemporalStore::new(&db);
@@ -529,17 +558,35 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<Vec<(Phase, u64)>>
         .await
         .map_err(|error| format!("complete refresh: {error:?}"))?;
     let rebuild_activate_ns = elapsed_ns(started);
-
-    let replay_started = Instant::now();
-    db.complete_session_refresh_result(complete_request)
-        .await
-        .map_err(|error| format!("exact replay complete: {error:?}"))?;
-    let exact_replay_ns = elapsed_ns(replay_started);
     if projected == 0 {
         return Err("rebuild_activate projected zero temporal records".to_owned());
     }
 
-    let execution = GlobalDbSessionTemporalExecution::new(&db);
+    Ok(PreparedRepetition {
+        db,
+        session,
+        context,
+        complete_request,
+        rebuild_activate_ns,
+        durable_progress: progress,
+        _env: env,
+    })
+}
+
+async fn run_one_repetition(repetition: usize) -> BenchResult<Vec<(Phase, u64)>> {
+    let prepared = prepare_repetition(repetition).await?;
+    if prepared.durable_progress.committed_records() == 0 {
+        return Err("refresh must persist durable progress before measurement".to_owned());
+    }
+    let replay_started = Instant::now();
+    prepared
+        .db
+        .complete_session_refresh_result(prepared.complete_request.clone())
+        .await
+        .map_err(|error| format!("exact replay complete: {error:?}"))?;
+    let exact_replay_ns = elapsed_ns(replay_started);
+
+    let execution = GlobalDbSessionTemporalExecution::new(&prepared.db);
     let retrieval = SessionRetrievalService::new(
         AllowAuthorizer,
         &execution,
@@ -548,7 +595,7 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<Vec<(Phase, u64)>>
     );
     let query = |grain: RetrievalGrainV1, text: &str| {
         SessionTemporalQuery::new(
-            session.clone(),
+            prepared.session.clone(),
             Some("codex".to_owned()),
             text.to_owned(),
             None,
@@ -570,7 +617,7 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<Vec<(Phase, u64)>>
         "compact_rank",
         retrieval
             .retrieve(
-                &context,
+                &prepared.context,
                 query(RetrievalGrainV1::LogicalMessage, "pipeline"),
             )
             .await,
@@ -581,7 +628,10 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<Vec<(Phase, u64)>>
     require_retrieval_success(
         "late_hydrate",
         retrieval
-            .retrieve(&context, query(RetrievalGrainV1::Occurrence, "pipeline"))
+            .retrieve(
+                &prepared.context,
+                query(RetrievalGrainV1::Occurrence, "pipeline"),
+            )
             .await,
     )?;
     let late_hydrate_ns = elapsed_ns(hydrate_started);
@@ -590,13 +640,16 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<Vec<(Phase, u64)>>
     require_retrieval_success(
         "member_expand",
         retrieval
-            .retrieve(&context, query(RetrievalGrainV1::Summary, "pipeline"))
+            .retrieve(
+                &prepared.context,
+                query(RetrievalGrainV1::Summary, "pipeline"),
+            )
             .await,
     )?;
     let member_expand_ns = elapsed_ns(expand_started);
 
     Ok(vec![
-        (Phase::RebuildActivate, rebuild_activate_ns),
+        (Phase::RebuildActivate, prepared.rebuild_activate_ns),
         (Phase::ExactReplay, exact_replay_ns),
         (Phase::CompactRank, compact_rank_ns),
         (Phase::LateHydrate, late_hydrate_ns),
@@ -638,25 +691,9 @@ fn write_codex_rollout(home: &Path, project: &Path, session_id: &str) -> BenchRe
 
     let message: Value = serde_json::from_str(NATIVE_CODEX_FIXTURES[1].1)
         .map_err(|error| format!("parse agent_message fixture: {error}"))?;
-    let goals: Value = serde_json::from_str(NATIVE_CODEX_FIXTURES[2].1)
-        .map_err(|error| format!("parse thread_goal_updates fixture: {error}"))?;
-
-    let mut lines = vec![session, message];
-    if let Some(records) = goals.as_array() {
-        for record in records {
-            let mut cloned = record.clone();
-            if let Some(payload) = cloned.get_mut("payload") {
-                payload["threadId"] = json!(session_id);
-                if let Some(goal) = payload.get_mut("goal") {
-                    goal["threadId"] = json!(session_id);
-                }
-            }
-            lines.push(cloned);
-        }
-    }
 
     let mut body = String::new();
-    for line in lines {
+    for line in [session, message] {
         body.push_str(&serde_json::to_string(&line).unwrap());
         body.push('\n');
     }
@@ -956,6 +993,18 @@ mod tests {
         assert_eq!(nearest_rank(&samples, 50), 30);
         assert_eq!(nearest_rank(&samples, 95), 50);
         assert_eq!(nearest_rank(&samples, 99), 50);
+    }
+
+    #[tokio::test]
+    async fn fixture_refresh_persists_progress_before_measurement() {
+        let prepared = prepare_repetition(0)
+            .await
+            .expect("production fixture refresh must persist durable progress");
+        assert_eq!(
+            prepared.durable_progress.frontier().observed_through(),
+            prepared.durable_progress.frontier().committed_through()
+        );
+        assert!(prepared.durable_progress.committed_records() > 0);
     }
 
     #[test]

@@ -5,7 +5,7 @@
   "acceptance_eligible": false,
   "provisional_reason": "harness_ready_awaiting_valid_measurement",
   "workload_manifest": "benchmarks/pr8-temporal/workload-v1.json",
-  "workload_manifest_sha256": "c510a79252b4b07f8c88023a3cc1ff18000bba084692edb0110f7758a139a286",
+  "workload_manifest_sha256": "41452f87c90e921b6436818b499d6ba7c982ff8e1f42d2322bf40b80cd9ddba7",
   "source_attestation": null,
   "runtime": null,
   "measurement": null,

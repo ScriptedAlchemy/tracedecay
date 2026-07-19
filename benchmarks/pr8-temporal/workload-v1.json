@@ -4,7 +4,7 @@
   "status": "harness_ready",
   "implementation": {
     "path": "src/sessions/session_temporal_benchmark.rs",
-    "sha256": "3b12cd9e07a5a9ffe277b515a4ba179267b49feb645c0210ee3ac266de0d6a41"
+    "sha256": "4736dbeeca9681ad47932edab3bc8bb46ae78c2840df744995bd39fff2db23a4"
   },
   "runner": {
     "path": "scripts/run-pr8-temporal-benchmark.sh",
@@ -35,21 +35,18 @@
       {
         "path": "tests/fixtures/provider_normalization/codex/agent_message.input.json",
         "sha256": "98c62c375f7f1d9f6552ab0591007e0063165b44b767c472644ad4e66eace6cf"
-      },
-      {
-        "path": "tests/fixtures/provider_normalization/codex/thread_goal_updates.input.json",
-        "sha256": "dc956bb0a087f01a6c3f0b398c96131646e55c67921cddada461b9b4b113239c"
       }
     ]
   },
   "production_path": {
     "required": [
+      "HostAdmissionFacade::drain_projection_queue with the canonical GlobalDb observation projector",
       "CanonicalSessionTemporalProjector via GlobalDb::materialize_session_temporal_refresh_batch_result",
       "SessionRefreshService with GlobalDbSessionTemporalStore",
       "SessionRetrievalService with GlobalDbSessionTemporalExecution"
     ],
     "available_to_benchmark_target": true,
-    "reason": "harness calls the same GlobalDb materialize path used by CanonicalSessionTemporalProjector, plus public SessionRefreshService and SessionRetrievalService adapters"
+    "reason": "harness admits provider-native Codex inputs, drains the canonical GlobalDb observation projector, then uses the production refresh materialize path and public retrieval adapters"
   },
   "storage_isolation": {
     "required_environment": [
@@ -98,7 +95,7 @@
     },
     {
       "path": "src/sessions/session_temporal_benchmark.rs",
-      "sha256": "3b12cd9e07a5a9ffe277b515a4ba179267b49feb645c0210ee3ac266de0d6a41"
+      "sha256": "4736dbeeca9681ad47932edab3bc8bb46ae78c2840df744995bd39fff2db23a4"
     },
     {
       "path": "scripts/run-pr8-temporal-benchmark.sh",
@@ -114,7 +111,7 @@
     },
     {
       "path": "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json",
-      "sha256": "97842bafff807226c3a34d187f964f707388dffcf869694bd3ceba5bd564e8ac"
+      "sha256": "ff2d0c421a136c80ca8a9ab30932a1f2e0becda5534433cc7132b29471bd13b0"
     },
     {
       "path": "tests/fixtures/provider_normalization/codex/session_meta.input.json",
@@ -125,16 +122,12 @@
       "sha256": "98c62c375f7f1d9f6552ab0591007e0063165b44b767c472644ad4e66eace6cf"
     },
     {
-      "path": "tests/fixtures/provider_normalization/codex/thread_goal_updates.input.json",
-      "sha256": "dc956bb0a087f01a6c3f0b398c96131646e55c67921cddada461b9b4b113239c"
-    },
-    {
       "path": "tests/fixtures/provider_normalization/codex/README.md",
       "sha256": "3c161c364acdc482b46e7c3c1de14a8981bc7169d4d10e8501b644e93306f213"
     },
     {
       "path": "benchmarks/pr8-temporal/README.md",
-      "sha256": "5018ce1ab85ebbd6a5c37787d56d4a3091e200219c3d9a9e0e9440018bb82e09"
+      "sha256": "d07fe0ebd65bf861399b0ceb9c6686398a533ee6164d4a576ddc72a10142a36b"
     }
   ],
   "command": "scripts/run-pr8-temporal-benchmark.sh --run"

@@ -9,9 +9,8 @@ Provider-native Codex captures reused from
 
 - `session_meta.input.json` and `agent_message.input.json` (same inputs as the
   PR5/PR6 `codex_production_observation_pipeline_v1` baseline)
-- `thread_goal_updates.input.json` (redacted four-record production sequence)
 
-Provenance and redaction are recorded in
+Provenance is recorded in
 [`fixtures/codex-sanitization-receipt.json`](fixtures/codex-sanitization-receipt.json).
 Do not substitute golden lookalikes or invent protocol fields.
 
