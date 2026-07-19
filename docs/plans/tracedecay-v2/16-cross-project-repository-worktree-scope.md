@@ -284,6 +284,10 @@ AuthorizedScopeGrant {
   authorized_project_ids,
   authorized_repository_ids,
   authorized_worktree_ids,
+  authorized_branch_stack_ids,
+  authorized_stack_nodes: ordered {
+    stack_id: BranchStackId, node_ids: ordered StackNodeId[]
+  }[],
   policy_digest, policy_epoch, expires_at
 }
 
@@ -292,6 +296,9 @@ AuthorizedResolvedScopeSet {
   code_roots: ordered exact {
     project_id, repository_id, worktree_id, branch_ref,
     commit_id, code_snapshot_id, generation, relationship_proof_digest
+  }[],
+  stack_scopes: ordered exact {
+    stack_id, revision_id, node_ids, inventory_epoch, topology_digest
   }[],
   grant_digest, scope_digest, coverage, expires_at
 }
@@ -305,6 +312,10 @@ authorized worktree receives `worktree_selection_required`; it never expands to 
 known checkout, every worktree attached to a root, or the current worktree. A grant may
 contain multiple explicit worktrees, but that set is frozen into the scope digest before
 execution and is never derived from a collection or a path scan.
+Stack capabilities additionally require the exact `BranchStackId` and node set in
+`authorized_branch_stack_ids`/`authorized_stack_nodes`; repository or worktree authority
+alone cannot mint stack visibility. Stack IDs, node sets, and ordering are included in the
+grant and scope digests.
 
 The resolver lifecycle is:
 
@@ -526,7 +537,7 @@ receives the same filtered snapshot as any other caller; daemon locality is not 
 
 Stack requests never expand authorization. Resolution freezes the registry revision and
 inventory epoch, reauthorizes every candidate node, intersects with the request's exact
-worktree grant, and only then pins refs and commits:
+branch-stack, stack-node, and worktree grants, and only then pins refs and commits:
 
 ```text
 AuthorizedBranchStackRequest {
@@ -637,7 +648,9 @@ pub trait BranchStackRegistryStore {
   SHA-1/SHA-256, and process-restart fixtures without path identity.
 - `tests/scope_suite/authorized_stack_projection.rs` covers 1/2/8/32 nodes, denied
   siblings, partially visible topology, explicit PR-base observations, ref/tip drift,
-  inventory-epoch drift, authorization revocation, and hidden-node non-enumeration.
+  inventory-epoch drift, authorization revocation, project/repository/worktree/stack
+  capability non-implication, stack/node grant-digest replay, and hidden-node
+  non-enumeration.
 - `tests/scope_suite/stack_migration.rs` proves typed-only import, path/label quarantine,
   idempotency, all-or-nothing revision publication, and zero invented dependency edges.
 - `benches/worktree_stack_scope.rs` records cold/warm inventory reconciliation and stack
