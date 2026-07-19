@@ -405,6 +405,8 @@ const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_session_summary_successors_successor"),
     ("index", "idx_session_temporal_generations_one_active"),
     ("index", "idx_session_temporal_generations_session_state"),
+    ("index", "idx_session_temporal_migration_dispositions_kind"),
+    ("index", "idx_session_temporal_migration_dispositions_row"),
     ("index", "idx_session_temporal_migration_receipts_source"),
     ("index", "idx_session_temporal_observation_effects_session"),
     ("index", "idx_session_thread_hierarchy_edges_child"),
@@ -430,6 +432,7 @@ const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("table", "session_summary_sources"),
     ("table", "session_summary_successors"),
     ("table", "session_temporal_generations"),
+    ("table", "session_temporal_migration_dispositions"),
     ("table", "session_temporal_migration_receipts"),
     ("table", "session_temporal_observation_effects"),
     ("table", "session_temporal_projection_receipts"),
@@ -502,6 +505,14 @@ const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
         "session_temporal_generations_single_active_update_v1",
     ),
     ("trigger", "session_temporal_generations_state_guard_v1"),
+    (
+        "trigger",
+        "session_temporal_migration_dispositions_immutable_delete_v1",
+    ),
+    (
+        "trigger",
+        "session_temporal_migration_dispositions_immutable_update_v1",
+    ),
     (
         "trigger",
         "session_temporal_migration_receipts_immutable_delete_v1",

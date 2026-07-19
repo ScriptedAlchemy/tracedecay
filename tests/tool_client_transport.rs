@@ -251,6 +251,44 @@ fn generic_tool_rejects_truncated_frame_without_output() {
 }
 
 #[test]
+fn generic_tool_rejects_semantic_truncation_envelope_without_output() {
+    let (_home, _project, _socket_dir, home, project, socket) = fixture();
+    let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, request| {
+        let envelope = json!({
+            "truncated": true,
+            "original_chars": 16000,
+            "handle": "tool-trunc-1",
+        });
+        let mut bytes = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": request["id"].clone(),
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": envelope.to_string(),
+                }],
+            },
+        }))
+        .expect("encode truncation envelope");
+        bytes.push(b'\n');
+        stream.write_all(&bytes).expect("write truncation envelope");
+    });
+    let result = run_command_with_timeout(
+        tool_command(&home, &project, &socket, "envelope"),
+        CHILD_TIMEOUT,
+    );
+    server.join().expect("join fake daemon");
+    assert!(!result.killed_by_harness, "truncation envelope hung");
+    assert!(!result.output.status.success());
+    assert!(result.output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&result.output.stderr);
+    assert!(
+        stderr.contains("truncated JSON") && stderr.contains("tracedecay_retrieve"),
+        "unexpected truncation error: {stderr}"
+    );
+}
+
+#[test]
 fn generic_tool_never_reply_uses_typed_deadline() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
     let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, request| {

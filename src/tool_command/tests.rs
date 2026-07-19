@@ -664,3 +664,24 @@ fn join_content_text_empty_when_no_content() {
     assert_eq!(join_content_text(&json!({})), "");
     assert_eq!(join_content_text(&json!({ "content": [] })), "");
 }
+
+#[test]
+fn reject_tool_result_truncation_detects_content_envelope() {
+    let value = json!({
+        "content": [{
+            "type": "text",
+            "text": "{"truncated":true,"original_chars":16000,"handle":"h1"}"
+        }]
+    });
+    let err = reject_tool_result_truncation(&value, "tracedecay_search").unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("truncated JSON"), "{message}");
+    assert!(message.contains("tracedecay_retrieve"), "{message}");
+    assert!(
+        reject_tool_result_truncation(
+            &json!({ "content": [{ "type": "text", "text": "{"ok":true}" }] }),
+            "tracedecay_search"
+        )
+        .is_ok()
+    );
+}

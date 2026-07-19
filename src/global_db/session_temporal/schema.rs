@@ -4,7 +4,7 @@ use crate::global_db::{global_db_operation_error, global_db_operation_message};
 
 const OPERATION: &str = "initialize session temporal schema";
 const MIGRATION_NAME: &str = "session-temporal";
-const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 3;
+pub(super) const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 3;
 
 const TEMPORAL_FTS_CONTRACTS: &[(&str, &str)] = &[
     (
@@ -599,7 +599,7 @@ const TEMPORAL_SCHEMA_DDL: &str = r#"
     );
 "#;
 
-const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
+pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
     (
         "session_temporal_schema_migrations",
         &["name", "version", "applied_at"],

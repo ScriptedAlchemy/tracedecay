@@ -223,6 +223,7 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
             "tracedecay_status",
             json!({}),
             std::time::Duration::from_millis(10),
+            None,
         ),
     )
     .await
@@ -443,6 +444,7 @@ async fn one_shot_tool_call_aborts_when_daemon_liveness_fails_after_write() {
             "tracedecay_status",
             json!({}),
             std::time::Duration::from_millis(10),
+            None,
         ),
     )
     .await
@@ -484,6 +486,7 @@ async fn proxied_request_uses_shared_liveness_boundary_after_write() {
             &test_handshake_defaults(),
             &request,
             std::time::Duration::from_millis(10),
+            None,
         ),
     )
     .await
@@ -534,6 +537,7 @@ async fn post_write_disconnect_reports_ambiguous_outcome_without_retry() {
             &test_handshake_defaults(),
             &request,
             std::time::Duration::from_millis(10),
+            None,
         ),
     )
     .await
@@ -592,12 +596,76 @@ async fn one_shot_tool_call_allows_long_response_while_daemon_stays_live() {
             "tracedecay_status",
             json!({}),
             std::time::Duration::from_millis(10),
+            None,
         ),
     )
     .await
     .expect("healthy long-running request timed out")
     .expect("healthy long-running request must complete");
     assert_eq!(result["status"], json!("ok"));
+    server.await.expect("fake daemon task");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn one_shot_tool_call_preserves_response_split_across_liveness_poll() {
+    let temp = TempDir::new().expect("temp dir");
+    let socket = temp.path().join("daemon.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept tool call");
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read handshake")
+            .expect("handshake line");
+        let request_line = lines
+            .next_line()
+            .await
+            .expect("read request")
+            .expect("request line");
+        let request: Value = serde_json::from_str(&request_line).expect("request json");
+        let mut response = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {"status": "split-across-poll"},
+        }))
+        .expect("encode response");
+        response.push(b'\n');
+        let split = response.len() / 2;
+        writer
+            .write_all(&response[..split])
+            .await
+            .expect("write response prefix");
+        writer.flush().await.expect("flush response prefix");
+        let (probe, _) = tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
+            .await
+            .expect("liveness probe timed out")
+            .expect("accept liveness probe");
+        drop(probe);
+        writer
+            .write_all(&response[split..])
+            .await
+            .expect("write response suffix");
+    });
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::call_tool_with_liveness_poll(
+            &socket,
+            &test_handshake_defaults(),
+            "tracedecay_status",
+            json!({}),
+            std::time::Duration::from_millis(10),
+            None,
+        ),
+    )
+    .await
+    .expect("split-frame response timed out")
+    .expect("split-frame response must reassemble across liveness polls");
+    assert_eq!(result["status"], json!("split-across-poll"));
     server.await.expect("fake daemon task");
 }
 
