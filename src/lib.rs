@@ -27,6 +27,7 @@ pub mod branch;
 pub mod branch_meta;
 pub mod client_identity;
 pub mod cloud;
+pub mod code_index;
 pub mod config;
 pub mod context;
 pub mod daemon;
