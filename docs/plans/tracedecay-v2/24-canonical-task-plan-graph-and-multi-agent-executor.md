@@ -145,6 +145,500 @@ acquire a lease, start a process, dispatch bytes, supervise a provider, or
 create an attempt. Plan 32 alone revalidates the request, acquires the fenced
 lease, creates the attempt, and executes it through a typed provider adapter.
 
+## Optional execution placement, branch stacks, and integration semantics
+
+Execution topology is an optional, versioned relation attached to an exact
+`WorkItemVersionId`; it is never part of `TaskId`, `WorkItemId`, task equality,
+task deduplication, task cursors, or external aliases. Changing an in-place
+checkout to a linked worktree, moving a linked worktree to an isolated clone,
+adding a stack node, refreshing a stack, or replacing a branch name creates a
+new topology or integration revision and preserves the same canonical task
+identity. A task may have no executable placement, one current placement
+revision, or historical placement revisions. One placement or branch may serve
+several tasks, and one task may produce several branches, commits, or pull
+requests; neither direction creates or merges task identity.
+
+Physical placement and delivery topology are orthogonal:
+
+- `InPlace`, `LinkedWorktree`, and `IsolatedClone` say where a Plan 32 attempt
+  may execute.
+- `SingleBranch` and `StackedBranches` say how produced commits are ordered for
+  integration. `StackedBranches` is therefore not a fourth filesystem kind.
+  Every stack node independently chooses a linked-worktree or isolated-clone
+  placement; an accepted policy may additionally bind a pre-existing clean
+  in-place checkout, but an autonomous stack never switches branches in a
+  user's ambient checkout.
+
+Absence of a topology revision means no placement may be materialized and no
+Git mutation may run. Topology never derives from CWD, current branch, a task
+title, a provider workspace, an existing worktree name, or a pull-request base.
+
+### Task DAG and branch-stack DAG are different graphs
+
+The task DAG contains Plan 24 `WorkDependencyEdge` values. It alone contributes
+to task readiness, critical path, acceptance, blocker, and supersession
+semantics. The branch-stack DAG contains `BranchStackEdgeV1` values. An edge
+`parent -> child` means only that the child's delivery branch must contain the
+parent's required commit frontier before the child is published or retargeted.
+It does not mean the parent task is a semantic prerequisite, and satisfying it
+does not make either task ready or accepted.
+
+Plan 24 rejects cycles in each DAG independently. It never unions the edge sets
+for cycle detection or readiness. Cross-graph meaning exists only through an
+explicit `TaskPlacementBindingV1` or `RequiredCommitV1` with provenance. A
+branch-stack edge cannot be coerced into a task dependency, and a task
+dependency does not imply a branch order. If product semantics require both,
+the accepted work-plan version records both edges separately.
+
+### Plan 24-owned semantic types
+
+The following types are exact PR17 contract names in
+`crates/tracedecay-domain/src/work/topology.rs` and
+`crates/tracedecay-domain/src/work/integration.rs`:
+
+```rust
+pub struct TaskExecutionTopologyRevisionV1 {
+    pub topology_id: TaskExecutionTopologyId,
+    pub revision_id: TaskExecutionTopologyRevisionId,
+    pub work_plan_version_id: WorkPlanVersionId,
+    pub work_item_id: WorkItemId,
+    pub work_item_version_id: WorkItemVersionId,
+    pub placement: WorkspacePlacementIntentV1,
+    pub delivery: BranchDeliveryTopologyV1,
+    pub required_commits: RequiredCommitSetV1,
+    pub verification: IntegrationVerificationContractV1,
+    pub retention: PlacementRetentionPolicyV1,
+    pub policy_revision: PolicyRevision,
+    pub configuration_revision: ConfigurationRevision,
+    pub authorized_scope_digest: AuthorizedScopeDigest,
+    pub created_by: ActorId,
+    pub created_at: UtcMicros,
+}
+
+pub enum WorkspacePlacementIntentV1 {
+    InPlace {
+        checkout: CheckoutGenerationRef,
+        expected_head: CommitObjectId,
+        cleanliness: CleanTreeRequirementV1,
+    },
+    LinkedWorktree {
+        repository: RepositorySnapshotRef,
+        expected_source_head: CommitObjectId,
+        allocation: PlacementAllocationClass,
+    },
+    IsolatedClone {
+        source_repository: RepositorySnapshotRef,
+        expected_source_head: CommitObjectId,
+        object_isolation: CloneObjectIsolationV1,
+        allocation: PlacementAllocationClass,
+    },
+}
+
+pub enum CloneObjectIsolationV1 {
+    NoHardlinksLocalOnly,
+}
+
+pub enum BranchDeliveryTopologyV1 {
+    SingleBranch {
+        branch: PlannedBranchRefV1,
+    },
+    StackedBranches {
+        stack_revision_id: BranchStackRevisionId,
+    },
+}
+
+pub struct BranchStackRevisionV1 {
+    pub stack_id: BranchStackId,
+    pub revision_id: BranchStackRevisionId,
+    pub repository_id: RepositoryId,
+    pub root_target: ExactRefTargetV1,
+    pub nodes: NonEmptyVec<BranchStackNodeV1>,
+    pub edges: Vec<BranchStackEdgeV1>,
+    pub pull_requests: Vec<StackedPullRequestBindingV1>,
+    pub autonomy: Option<StackAutonomyGrantRefV1>,
+    pub retention: StackRetentionPolicyV1,
+    pub digest: Digest,
+}
+
+pub struct BranchStackNodeV1 {
+    pub node_id: BranchStackNodeId,
+    pub branch: PlannedBranchRefV1,
+    pub placement: WorkspacePlacementIntentV1,
+    pub task_bindings: NonEmptySet<TaskPlacementBindingV1>,
+    pub required_commits: RequiredCommitSetV1,
+}
+
+pub struct BranchStackEdgeV1 {
+    pub parent: BranchStackNodeId,
+    pub child: BranchStackNodeId,
+    pub required_parent_frontier: CommitFrontierSelectorV1,
+}
+
+pub struct TaskPlacementBindingV1 {
+    pub work_item_id: WorkItemId,
+    pub work_item_version_id: WorkItemVersionId,
+    pub topology_revision_id: TaskExecutionTopologyRevisionId,
+    pub stack_node_id: Option<BranchStackNodeId>,
+    pub relation: TaskPlacementRelationV1,
+}
+
+pub enum TaskPlacementRelationV1 {
+    ExecutesIn,
+    ProducesCommitsFor,
+    RequiresCommitsFrom,
+    IntegratesThrough,
+}
+
+pub struct RequiredCommitSetV1 {
+    pub requirements: NonEmptyVec<RequiredCommitV1>,
+    pub set_digest: Digest,
+}
+
+pub struct RequiredCommitV1 {
+    pub commit: CommitObjectId,
+    pub repository_id: RepositoryId,
+    pub role: RequiredCommitRoleV1,
+    pub ancestry: RequiredAncestryV1,
+    pub evidence: NonEmptyVec<RetrievalAnchorId>,
+}
+
+pub enum RequiredCommitRoleV1 {
+    PlacementBase,
+    StackParentFrontier,
+    ExplicitTaskDependencyOutput,
+    ReviewBase,
+}
+
+pub enum RequiredAncestryV1 {
+    ExactHead,
+    MustBeAncestorOfProducedHead,
+    MustBeParentOfMergeCommit,
+}
+
+pub enum RequiredCommitStateV1 {
+    Unchecked,
+    Satisfied,
+    Missing,
+    WrongRepository,
+    NotAncestor,
+    Stale,
+    Ambiguous,
+}
+
+pub struct ProducedCommitSetV1 {
+    pub repository_id: RepositoryId,
+    pub topology_revision_id: TaskExecutionTopologyRevisionId,
+    pub placement_receipt: PlacementReceiptRefV1,
+    pub ordered_commits: NonEmptyVec<ProducedCommitV1>,
+    pub produced_head: CommitObjectId,
+    pub required_commit_states: NonEmptyVec<RequiredCommitCheckV1>,
+    pub tree_digest: Digest,
+    pub verification_receipts: NonEmptyVec<RuntimeEvidenceId>,
+    pub runtime_receipt: RuntimeEvidenceId,
+    pub set_digest: Digest,
+}
+
+pub struct ProducedCommitV1 {
+    pub commit: CommitObjectId,
+    pub tree: GitTreeObjectId,
+    pub parents: Vec<CommitObjectId>,
+    pub author_policy_receipt: RuntimeEvidenceId,
+    pub signature_state: CommitSignatureStateV1,
+}
+
+pub enum ProducedCommitStateV1 {
+    Observed,
+    Verified,
+    LocallyIntegrated,
+    PublishedFastForward,
+    PullRequestRetargeted,
+    Rejected,
+    Stale,
+    EffectUnknown,
+}
+
+pub struct IntegrationVerificationContractV1 {
+    pub operations: NonEmptyVec<VersionedOperationRef>,
+    pub affected_test_policy: AffectedTestPolicyRevision,
+    pub require_clean_candidate: bool,
+    pub require_exact_generation: bool,
+    pub failure_policy: IntegrationTestFailurePolicyV1,
+}
+
+pub enum IntegrationTestFailurePolicyV1 {
+    StopBeforeRefMovement,
+}
+```
+
+`VersionedOperationRef` names a cataloged typed operation and canonical typed
+arguments; it never contains a command line, shell fragment, script body, or
+ambient package-manager lookup. `RequiredCommitV1` is the only way task
+semantics may require a commit. Branch ancestry discovered at runtime is
+evidence and cannot create that requirement retroactively.
+
+Topology and stack revisions use the same proposal lifecycle as other Plan 24
+artifacts:
+
+```text
+Proposed -> UnderReview -> Accepted | Rejected
+Proposed | UnderReview -> Superseded | Expired
+Accepted -> Superseded | Retired
+```
+
+`Accepted` makes the revision eligible for a separately authorized Plan 32
+admission. It does not create a directory, branch, ref, commit, pull request,
+lease, or runtime attempt.
+
+### Cross-merge proposal and semantic receipt projection
+
+Plan 24 owns the reason and semantic preconditions for integration; Plan 32
+owns every executing state and effect. "Cross-merge" means integrating a
+produced exact commit frontier from one accepted placement or stack node into a
+different accepted target ref. It does not mean combining task identities.
+
+```rust
+pub struct CrossMergeProposalV1 {
+    pub proposal_id: CrossMergeProposalId,
+    pub revision_id: CrossMergeProposalRevisionId,
+    pub purpose: CrossMergePurposeV1,
+    pub source: IntegrationSourceV1,
+    pub target: IntegrationTargetV1,
+    pub expected_source_head: CommitObjectId,
+    pub expected_target_head: CommitObjectId,
+    pub required_commits: RequiredCommitSetV1,
+    pub produced_commits: ProducedCommitSetRefV1,
+    pub strategy: CrossMergeStrategyV1,
+    pub verification: IntegrationVerificationContractV1,
+    pub publication: PublicationIntentV1,
+    pub pull_request_action: PullRequestStackActionV1,
+    pub authorization: IntegrationAuthorizationRefV1,
+    pub not_before: UtcMicros,
+    pub not_after: UtcMicros,
+    pub idempotency_key: IdempotencyKey,
+    pub evidence: NonEmptyVec<RetrievalAnchorId>,
+}
+
+pub enum CrossMergePurposeV1 {
+    TaskIntegration,
+    StackUpstreamRefresh,
+    StackCollapseAfterParentIntegration,
+}
+
+pub enum CrossMergeStrategyV1 {
+    FastForwardOnly,
+    CreateTwoParentMergeCommit {
+        message: ValidatedCommitMessage,
+        signing: CommitSigningPolicyV1,
+    },
+}
+
+pub enum PublicationIntentV1 {
+    LocalRefOnly,
+    FastForwardRemoteRef {
+        remote: CredentialFreeRemoteRef,
+        expected_remote_head: Option<CommitObjectId>,
+    },
+}
+
+pub enum PullRequestStackActionV1 {
+    Preserve,
+    RetargetAfterPublished {
+        pull_request: PullRequestIdentity,
+        expected_base: ExactRefName,
+        expected_head: ExactRefName,
+        new_base: ExactRefName,
+        expected_provider_version: ProviderEntityVersion,
+    },
+}
+
+pub enum CrossMergeProposalStateV1 {
+    Proposed,
+    UnderReview,
+    Authorized,
+    Rejected,
+    Superseded,
+    Expired,
+    RuntimeAdmitted,
+    EvidenceReviewable,
+    Conflict,
+    Partial,
+    Completed,
+}
+
+pub struct IntegrationReceiptLinkV1 {
+    pub proposal_revision_id: CrossMergeProposalRevisionId,
+    pub runtime_receipt: IntegrationReceiptRefV1,
+    pub produced_commits: ProducedCommitSetRefV1,
+    pub semantic_state: IntegrationSemanticStateV1,
+    pub evidence: NonEmptyVec<RetrievalAnchorId>,
+}
+
+pub enum IntegrationSemanticStateV1 {
+    RuntimeInProgress,
+    EvidenceReviewable,
+    Conflict,
+    Partial,
+    Accepted,
+    Rejected,
+    Superseded,
+    EffectUnknown,
+}
+```
+
+No accepted strategy performs rebase, squash, cherry-pick, octopus merge,
+amend, reset, revert, branch deletion, or any force variant. A merge conflict
+is evidence for `Conflict`; it is never a request for Plan 32, a provider, or a
+model to choose lines, regenerate files, accept one side, or synthesize a
+resolution. Semantic conflict resolution requires a new or successor Plan 24
+task/proposal with its own acceptance contract.
+
+`StackAutonomyGrantV1` is an optional, explicit Plan 09 authorization over one
+accepted stack revision. It pins actor, repositories, local and remote refs,
+pull-request identities, allowed operations, maximum merge/publication/
+retarget counts, required verification contract, protected-ref exclusions,
+deadline, policy/configuration/privacy revisions, and revocation generation.
+It always fixes `force_push = Denied`,
+`semantic_conflict_resolution = Denied`, and `remote_branch_delete = Denied`.
+Within those bounds Plan 24 may deterministically authorize an exact
+`CrossMergeProposalV1` after produced commit IDs are known; this is the only
+meaning of autonomous cross-merge. Agents and providers cannot create,
+broaden, approve, or renew the grant.
+
+### Stacked branch and pull-request rules
+
+For an accepted stack, Plan 24 derives this order and no other:
+
+1. A child may execute before its parent is accepted only when the task DAG
+   independently permits it, but publication remains blocked until its
+   `StackParentFrontier` requirement is satisfied.
+2. Upstream refresh merges the exact parent frontier into the child with
+   `FastForwardOnly` or `CreateTwoParentMergeCommit`; it never rebases or
+   rewrites the child's produced commits.
+3. Parent integration is evidenced before child refresh. Child verification
+   passes on the refreshed exact tree before any remote publication.
+4. A remote update is an ordinary fast-forward update only. Non-fast-forward
+   rejection, remote drift, or inability to prove the remote result stops the
+   state machine; `--force`, `--force-with-lease`, API `force=true`, and their
+   equivalents are forbidden even under a human grant.
+5. After the refreshed head is published, a pull request may be retargeted
+   from the exact parent head branch to the exact parent target branch using a
+   version-checked provider operation. Retargeting changes only the base ref;
+   it cannot edit title/body, post comments, resolve review threads, dismiss
+   reviews, merge, close, or reopen the pull request.
+6. Parent rejection, closure without integration, base drift, stale provider
+   version, or a failed retarget blocks descendants and requires a new Plan 24
+   proposal. No child is silently detached or reordered.
+7. Independent stack branches may prepare and test concurrently, but parent to
+   child publication and retarget effects follow a stable topological order
+   `(stack depth, parent node id, child node id, proposal id)`.
+
+Stack revisions, proposal decisions, produced/required commit checks, and
+integration receipt links are immutable history. Local placements are retained
+until every produced commit is anchored, every effect is reconciled, every
+required receipt is acknowledged, and the accepted retention deadline passes.
+Dirty, conflicted, unknown-effect, unpublished, or uniquely containing
+placements are never deleted automatically. Remote branches are not deleted by
+PR17. Cleanup is a separately authorized Plan 32 effect and never changes task,
+stack, commit, or pull-request history.
+
+### Clean-tree, authorization, deadline, and rollback semantics
+
+- In-place admission is default-denied and requires a topology-specific
+  capability plus explicit actor acknowledgement. Its initial snapshot must
+  have no staged, unstaged, untracked, unmerged, sparse-transition, submodule,
+  or in-progress Git-operation state. A configured ignore rule is not proof
+  that deletion is safe.
+- A linked worktree or isolated clone must be daemon-allocated, canonicalized,
+  inside an approved placement root, newly materialized from the pinned source
+  commit, and clean before a worker starts. Isolated clone in PR17 is
+  local-source, no-hardlink, and network-free; remote clone/fetch is not
+  inferred.
+- Every attempt receives one Plan 32 placement lease and cannot switch branch,
+  change another stack node, or operate through another path alias. A worker
+  terminal receipt is `Partial` unless intended changes are exact commits,
+  required tests are generation-matched, and the placement is clean.
+- Cancellation never runs stash, clean, reset, checkout, restore, or file
+  deletion. A dirty or conflicted placement is quarantined and retained with
+  bounded authorized inspection.
+- All Git and provider mutations are Plan 32 effects under the run's one
+  monotonic deadline, cancellation generation, budget ledger, authority epoch,
+  idempotency identity, and fenced lease. Heartbeats and lease renewal never
+  extend the run deadline or an autonomy grant.
+- Candidate merge trees are prepared and tested before target-ref movement.
+  Before that commit point Plan 32 may remove only its proven ephemeral
+  candidate state. After any local ref, remote ref, or provider entity changes,
+  automatic rollback is forbidden; recovery records the exact partial receipt
+  and Plan 24 may propose a forward repair. It never moves a published ref
+  backward, force-pushes, reverts, or retargets by guess.
+
+### Semantic persistence and application boundary
+
+Plan 24 persists only immutable semantic revisions and runtime receipt links.
+`src/global_db/work/schema.rs` creates append-only
+`work_topology_revisions`, `work_topology_bindings`,
+`work_branch_stack_revisions`, `work_branch_stack_nodes`,
+`work_branch_stack_edges`, `work_stack_pr_bindings`,
+`work_stack_autonomy_grants`, `work_cross_merge_proposals`,
+`work_cross_merge_decisions`, and `work_integration_receipt_links`. Current
+revision pointers use expected-version compare-and-swap in the existing work
+graph head transaction. No row contains a path allocation, process, PID,
+runtime lease, mutable ref cache, provider credential, or checkout-local lock.
+Plan 32 stores those operational facts.
+
+`crates/tracedecay-application/src/work/topology.rs` exposes exactly this
+semantic port:
+
+```rust
+pub trait TaskTopologyApplication {
+    async fn submit_topology(
+        &self,
+        actor: AuthorizedActor,
+        command: SubmitTaskExecutionTopologyV1,
+    ) -> Result<TaskExecutionTopologyRevisionV1, TaskMutationFailure>;
+
+    async fn review_topology(
+        &self,
+        actor: AuthorizedActor,
+        command: ReviewTaskExecutionTopologyV1,
+    ) -> Result<TaskExecutionTopologyRevisionV1, TaskMutationFailure>;
+
+    async fn submit_cross_merge(
+        &self,
+        actor: AuthorizedActor,
+        command: SubmitCrossMergeProposalV1,
+    ) -> Result<CrossMergeProposalV1, TaskMutationFailure>;
+
+    async fn authorize_cross_merge(
+        &self,
+        actor: AuthorizedActor,
+        command: AuthorizeCrossMergeProposalV1,
+    ) -> Result<CrossMergeProposalV1, TaskMutationFailure>;
+
+    async fn attach_integration_receipt(
+        &self,
+        actor: AuthorizedActor,
+        command: AttachIntegrationReceiptV1,
+    ) -> Result<IntegrationReceiptLinkV1, TaskMutationFailure>;
+}
+```
+
+Every command carries `TaskMutationEnvelope`, expected topology/stack/proposal
+revision, exact commit-set digests, actor, reason, idempotency key, evidence,
+authorization/revocation generation, and deadline. `authorize_cross_merge`
+either verifies a current human decision or evaluates the exact proposal
+against a current `StackAutonomyGrantV1`; it never calls Plan 32. Only the
+separate Plan 09 runtime bridge may lower an authorized proposal to Plan 32's
+`AdmitIntegrationV1`.
+
+Plan 16 remains authority for canonical repository/checkout/worktree identity,
+scope resolution, discovery, and general cleanup eligibility. Its broad
+prohibition on product-created worktrees is superseded only by a Plan 32
+placement admitted from the exact accepted types above; Plan 24 creates
+nothing. Plan 36 remains authority for native Git evidence and its public
+`stage_hunks`, `unstage_hunks`, and `commit_index` operations. Plan 32's fixed
+runtime-only placement/integration adapter does not add a general Git command
+surface or broaden Plan 36's public mutation API.
+
 ## Executable task retrieval and evidence contract
 
 This section fixes PR17's internal names and type boundaries. PR18 may map them
@@ -1925,13 +2419,16 @@ canonical tasks, scheduling, leases, policy, or storage.
   snapshot, host packaging/install/repair, probes, and conformance. Neither
   Plan 08 nor Plan 27 invokes or supervises an attempt.
 - Plan 09 owns typed task/work application commands, authorization,
-  idempotency, graph transactions, context assembly, and the Plan 32 bridge.
+  idempotency, graph transactions, context assembly, topology/integration
+  proposal decisions, stack-autonomy grants, and the Plan 32 bridge.
 - Plans 10, 21, and 17 own HTTP/SSE, CLI/MCP presentation, and official
   Rust/TypeScript/Python API/SDK bindings over those application contracts.
 - Plan 11 owns the Work UI and every visual projection.
 - Plans 13, 16, 18, 22, 23, 28, 35, 36, and 37 retain their existing
   provenance, scope, privacy, advisory delivery, temporal retrieval, host,
-  remote, diagnostics, Git, and feedback-cycle authority.
+  remote, diagnostics, Git-evidence/public-index-operation, and feedback-cycle
+  authority. Plan 16 scope identity and Plan 36 public operations do not become
+  placement or integration execution authorities.
 - Plan 26 owns observations, accounting, evaluation cohorts, coverage,
   model-capability profile/calibration read models, the canonical
   independent-review/task-outcome label vocabulary and measurement schema, and
@@ -1954,6 +2451,12 @@ Plan 24 owns and creates:
   immutable version identities, aliases, and validation;
 - `crates/tracedecay-domain/src/work/graph.rs`: graph events, edges,
   readiness inputs, legal transitions, and proposal revisions;
+- `crates/tracedecay-domain/src/work/topology.rs`: topology identities,
+  placement intents, task-placement bindings, branch-stack revisions and
+  edges, stack PR bindings, retention, and autonomy-grant references;
+- `crates/tracedecay-domain/src/work/integration.rs`: required and produced
+  commit contracts, cross-merge proposals, verification contracts, semantic
+  states, and Plan 32 receipt references;
 - `crates/tracedecay-domain/src/work/retrieval.rs`: request, manifest, plan,
   packet, task-link/span-reference, score, coverage, omission, task-retriever
   contribution, cursor, and failure
@@ -1967,12 +2470,16 @@ Plan 24 owns and creates:
 - `crates/tracedecay-domain/src/work/projection.rs`: application view,
   readiness reason, lane, action, timeline, and causal-edge types;
 - `crates/tracedecay-store/src/work/mod.rs` and
-  `crates/tracedecay-store/src/work/traits.rs`: task graph event/head,
-  task-evidence-link, relation-selection, and projection store ports;
+  `crates/tracedecay-store/src/work/traits.rs`,
+  `crates/tracedecay-store/src/work/topology.rs`, and
+  `crates/tracedecay-store/src/work/integration.rs`: task graph event/head,
+  task-evidence-link, topology/stack/proposal/decision/receipt-link,
+  relation-selection, and projection store ports;
 - `src/global_db/work/mod.rs`, `src/global_db/work/schema.rs`,
-  `src/global_db/work/projection.rs`, and `src/global_db/work/query.rs`:
-  owner-shard tables, transactional heads, deterministic projection, and
-  bounded relation reads;
+  `src/global_db/work/projection.rs`, `src/global_db/work/query.rs`,
+  `src/global_db/work/topology.rs`, and `src/global_db/work/integration.rs`:
+  owner-shard tables, transactional heads, immutable topology/stack/proposal
+  revisions, deterministic projection, and bounded relation reads;
 - `src/query/task_retrieval/mod.rs`,
   `src/query/task_retrieval/planner.rs`,
   `src/query/task_retrieval/executor.rs`, and
@@ -1986,6 +2493,8 @@ Plan 24 owns and creates:
   `crates/tracedecay-application/src/work/routing.rs`,
   `crates/tracedecay-application/src/work/outcome.rs`,
   `crates/tracedecay-application/src/work/handoff.rs`,
+  `crates/tracedecay-application/src/work/topology.rs`,
+  `crates/tracedecay-application/src/work/integration.rs`,
   `crates/tracedecay-application/src/work/projection.rs`, and
   `crates/tracedecay-application/src/work/commands.rs`: Plan 09-owned
   authorization, idempotency, use cases, graph transactions, and Plan 32
@@ -1995,7 +2504,8 @@ Plan 24 owns and creates:
   `tests/work_suite/retrieval.rs`, `tests/work_suite/expertise.rs`,
   `tests/work_suite/intelligence.rs`, `tests/work_suite/routing.rs`,
   `tests/work_suite/outcomes.rs`, `tests/work_suite/handoff.rs`,
-  `tests/work_suite/projection.rs`, and
+  `tests/work_suite/projection.rs`, `tests/work_suite/topology.rs`,
+  `tests/work_suite/integration_semantics.rs`, and
   `tests/work_suite/runtime_bridge.rs`: PR17 cross-layer acceptance.
 
 Plan 13 retains exclusive ownership of
@@ -2025,13 +2535,15 @@ returned page; it adds no temporal mode, session ranker, summary store,
 hydrator, or pagination kernel.
 
 Plan 32 retains exclusive ownership of
-`crates/tracedecay-domain/src/workflow/{definition,control,budget,provider,evidence,state}.rs`,
-`crates/tracedecay-store/src/workflow/{events,leases,outbox,recovery}.rs`,
-`src/application/workflow/{ports,admission,runtime,recovery,queries}.rs`, and
-`src/workflow_runtime/{kernel,planner,fanout,synthesis}.rs` plus
-`src/workflow_runtime/providers/`. Its PR17 task imports
+`crates/tracedecay-domain/src/workflow/{definition,control,budget,provider,evidence,state,placement,integration}.rs`,
+`crates/tracedecay-store/src/workflow/{events,leases,outbox,recovery,placements,integration}.rs`,
+`src/application/workflow/{ports,admission,runtime,recovery,queries,placement,integration}.rs`,
+and
+`src/workflow_runtime/{kernel,planner,fanout,synthesis,placement,native_git,integration,stack}.rs`
+plus `src/workflow_runtime/providers/`. Its PR17 task imports
 `FrozenTaskEvidencePacketRef` from Plan 24, rechecks packet digest/scope/
-watermarks before lease acquisition, and publishes read-only receipt
+watermarks plus accepted topology/integration revisions before lease
+acquisition, and publishes read-only placement/commit/integration receipt
 projections. Plan 24 creates none of those runtime files.
 
 Plan 37 retains exclusive ownership of
@@ -2075,10 +2587,17 @@ routing, or make advisory feedback executable.
    fixed lane precedence, typed drag previews, timeline, causal, workload, and
    repository lenses. Exit requires identical entity/version sets and legal
    actions across every lens.
-6. **M24.5 — Plan 32 bridge:** freeze a packet reference, revalidate admission,
-   acquire lease before provider start, disclose requested/actual route, and
-   reject recursive dispatch. Exit requires stale packet/readiness rejection,
-   zero pre-lease starts, and runtime completion without graph acceptance.
+6. **M24.5 — topology semantics and Plan 32 bridge:** land identity-neutral
+   in-place/linked-worktree/isolated-clone intents, separate task and
+   branch-stack DAGs, required/produced commit contracts, stack-autonomy grants,
+   cross-merge proposal decisions, and integration receipt links; then freeze a
+   packet reference, revalidate admission, acquire placement/runtime leases
+   before provider or Git effects, disclose requested/actual route, and reject
+   recursive dispatch. Exit requires unchanged `TaskId` across topology
+   revisions, independent cycle/readiness tests for both DAGs, stale
+   packet/readiness/topology/commit/grant rejection, zero pre-lease effects,
+   zero force push or semantic conflict resolution, and runtime completion
+   without graph acceptance.
 7. **M24.6 — task intelligence and outcomes:** land task shape, topology,
    decomposition, repair, escalation, routing, experience, handoff, outcome,
    and recalibration contracts. Exit requires deterministic replay, Plan
@@ -2146,6 +2665,20 @@ The following tests are named deliverables, not examples:
   effect-unknown retry blocking, new attempt on retry, no recursive dispatch,
   requested/actual route evidence, and Plan 32 completion without Plan 24
   acceptance.
+- `tests/work_suite/topology.rs` loads
+  `tests/fixtures/work_topology/{identity_invariance,task_dag,branch_stack_dag,many_to_many,stack_order,stack_retention}.json`.
+  It proves all physical/delivery topology changes preserve `TaskId`, task and
+  stack cycles are rejected independently, stack edges never unlock tasks,
+  task dependencies never order refs, one task/branch many-to-many bindings
+  remain explicit, topology absence performs no placement, and stale topology
+  or autonomy-grant revisions cannot be admitted.
+- `tests/work_suite/integration_semantics.rs` loads
+  `tests/fixtures/work_topology/{required_commits,produced_commits,cross_merge,upstream_refresh,pr_retarget,conflict}.json`.
+  It proves exact commit requirements and ancestry states, proposal lifecycle
+  and expiry, stable stack ordering, parent-close blocking, version-checked PR
+  retarget semantics, immutable receipt links, forward-repair-only partial
+  outcomes, and rejection of rebase, squash, cherry-pick, revert, reset,
+  branch deletion, force push, and semantic auto-resolution.
 - `tests/session_suite/task_rooted_retrieval.rs` remains Plan 23-owned and proves
   TaskId-derived exact selectors match direct Plan 23 queries without changing
   the kernel.
@@ -2175,7 +2708,15 @@ Plan 26 records these metric series with scope/cohort suppression:
 - `work_projection_entity_mismatch_total{lens}`;
 - `work_runtime_prelease_start_total`;
 - `work_runtime_hidden_fallback_total`;
-- `work_runtime_recursive_dispatch_total`; and
+- `work_runtime_recursive_dispatch_total`;
+- `work_topology_identity_violation_total`;
+- `work_topology_dag_conflation_total`;
+- `work_topology_proposals_total{placement,decision}`;
+- `work_branch_stack_proposals_total{decision}`;
+- `work_cross_merge_proposals_total{purpose,decision}`;
+- `work_integration_receipts_total{semantic_state}`;
+- `work_integration_force_push_attempt_total`;
+- `work_integration_semantic_resolution_attempt_total`; and
 - `work_evidence_original_span_mutation_total`.
 
 Metrics never contain principal identity, query text, task title, prompt,
@@ -2205,10 +2746,11 @@ Rollout gates are exact:
    publicly indistinguishable; schema scans find no actor-listing/ordering/
    export/metric surface; revocation/source disposition excludes immediately
    and purge completes within five minutes.
-6. **Runtime gate:** zero provider starts before a fenced Plan 32 lease; zero
-   hidden route substitutions, recursive dispatches, automatic retries under
-   unknown effect, duplicate observable effects, or runtime-terminal graph
-   acceptance.
+6. **Runtime gate:** zero provider or Git effects before fenced Plan 32 leases;
+   zero hidden route substitutions, recursive dispatches, automatic retries
+   under unknown effect, duplicate observable effects, task/stack DAG
+   conflation, `TaskId` changes from placement, force pushes, semantic conflict
+   resolutions, or runtime-terminal graph acceptance.
 7. **Shadow gate:** direct owner-plan queries and TaskId-rooted composition
    return the same exact evidence identities and typed source states for the
    fixture corpus; any mismatch blocks canary enablement.
@@ -2228,15 +2770,23 @@ Rollout gates are exact:
     `work_runtime_prelease_start_total`,
     `work_runtime_hidden_fallback_total`,
     `work_runtime_recursive_dispatch_total`, or
+    `work_topology_identity_violation_total`,
+    `work_topology_dag_conflation_total`,
+    `work_integration_force_push_attempt_total`,
+    `work_integration_semantic_resolution_attempt_total`, or
     `work_evidence_original_span_mutation_total` disables new admissions and
     expertise projection while preserving read-only history and explicit
     recovery.
 
 ## Safety and privacy invariants
 
-- TraceDecay never autonomously creates, stashes, cleans, resets, rebases,
-  merges, deletes, pushes, force-pushes, or rewrites Git state. Existing typed
-  Git preview/apply operations remain explicit user-authorized effects.
+- TraceDecay never performs ambient or unbounded Git mutation. The sole PR17
+  autonomy is Plan 32 execution of an exact Plan 24-authorized placement or
+  cross-merge proposal under a current scoped grant, fenced leases, native Git
+  preflight, required verification, and the state machine in Plan 32. No path
+  ever stashes, cleans, resets, rebases, squashes, cherry-picks, reverts,
+  deletes a branch, moves a ref backward, force-pushes, or resolves a semantic
+  conflict automatically.
 - GitHub review data is read-only ingress. No task, workflow, board action,
   route policy, or model may post, update, resolve, dismiss, or reply to a
   GitHub comment.
@@ -2298,6 +2848,12 @@ Acceptance requires direct tests proving:
   as-of history, and deterministic projector rebuild;
 - exact project/repository/worktree/branch/snapshot scope and many-to-many
   relations across sessions, agents, tools, code, commits, PRs, and checks;
+- optional in-place, linked-worktree, isolated-clone, single-branch, and
+  stacked-branch topology revisions preserve `TaskId`; task and stack DAG
+  cycles/readiness remain independent; exact required/produced commits,
+  accepted cross-merge proposals, stack refresh/retarget order, retention, and
+  immutable integration receipt links remain graph evidence rather than
+  identity or runtime authority;
 - one Plan 32 runtime authority, fenced stale attempts, idempotent receipts,
   cancellation/recovery, no duplicate effects, and no second runtime clock,
   task scheduler, lease, attempt, or effect authority;
@@ -2366,3 +2922,15 @@ Acceptance requires direct tests proving:
   or runtime terminal state as accepted completion; and
 - no source, test, tool, or runtime path parses or executes these V2 roadmap
   Markdown files, completion state, PR sequence, or developer plan.
+
+The exact Plan 24 topology acceptance commands are:
+
+```text
+cargo test --all-features -p tracedecay-domain --test work_contract topology
+cargo test --all-features -p tracedecay-store --test work_contract topology
+cargo test --all-features --test work_suite topology
+cargo test --all-features --test work_suite integration_semantics
+cargo test --all-features --test work_suite runtime_bridge
+cargo test --all-features --test work_suite
+cargo test --all-features
+```
