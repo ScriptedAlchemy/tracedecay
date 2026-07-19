@@ -51,8 +51,9 @@ use tracedecay_domain::{
     DurableObservationV1, MessageOccurrenceIdV1, MessageOccurrenceRecordV1, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadReferenceV1, ProjectId, ProjectionGenerationId,
-    ProjectionOutputOrdinalV1, ProviderId, RetentionClass, SanitizationReceiptId,
+    ObservationSourceRangeV1, PayloadAccessState, PayloadReferenceV1, ProjectId,
+    ProjectionGenerationId, ProjectionOutputOrdinalV1, ProviderId, RetentionClass,
+    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SessionProjectionGenerationV1,
     SignedCursorKeyRefV1, UtcMicros, derive_exact_observation_anchor_id,
@@ -9027,6 +9028,29 @@ async fn seed_temporal_lcm_session_message(
     .await
 }
 
+async fn seed_temporal_lcm_session_message_with_access(
+    cg: &TraceDecay,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+    payload_access: PayloadAccessState,
+) -> TemporalLcmProjectionInput {
+    persist_temporal_lcm_observation_with_access(
+        cg,
+        "cursor",
+        session_id,
+        message_id,
+        text.into(),
+        CanonicalMessageRoleV1::Assistant,
+        ordinal,
+        ordinal + 1,
+        UtcMicros(ordinal + 1),
+        payload_access,
+    )
+    .await
+}
+
 async fn seed_temporal_lcm_session_message_for_provider(
     cg: &TraceDecay,
     provider: &str,
@@ -9137,6 +9161,33 @@ async fn persist_temporal_lcm_observation(
     message_timestamp: i64,
     ingested_at: UtcMicros,
 ) -> TemporalLcmProjectionInput {
+    persist_temporal_lcm_observation_with_access(
+        cg,
+        provider,
+        session_id,
+        message_id,
+        text,
+        role,
+        ordinal,
+        message_timestamp,
+        ingested_at,
+        PayloadAccessState::Eligible,
+    )
+    .await
+}
+
+async fn persist_temporal_lcm_observation_with_access(
+    cg: &TraceDecay,
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    text: String,
+    role: CanonicalMessageRoleV1,
+    ordinal: i64,
+    message_timestamp: i64,
+    ingested_at: UtcMicros,
+    payload_access: PayloadAccessState,
+) -> TemporalLcmProjectionInput {
     let provider = ProviderId::new(provider).unwrap();
     let session_id = SessionId::new(session_id).unwrap();
     let scope = ObservationScopeV1::Project {
@@ -9225,12 +9276,31 @@ async fn persist_temporal_lcm_observation(
     let authorization =
         build_observation_resolution_authorization_v1(&observation, "observation-capture.v1")
             .unwrap();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let base_anchor = build_observation_retrieval_anchor_v2(
         &observation,
         projection_generation.clone(),
         ingested_at,
         authorization,
     )
+    .unwrap();
+    let anchor = RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+        target: base_anchor.target().clone(),
+        owner: base_anchor.owner().clone(),
+        aliases: base_anchor.aliases().to_vec(),
+        occurred_at: base_anchor.occurred_at(),
+        ingested_at: base_anchor.ingested_at(),
+        evidence_class: base_anchor.evidence_class(),
+        source_generation: base_anchor.source_generation().clone(),
+        projection_generation: projection_generation.clone(),
+        projection_watermark: base_anchor.projection_watermark().clone(),
+        coverage: base_anchor.coverage().clone(),
+        source_observations: base_anchor.source_observations().to_vec(),
+        source_anchors: base_anchor.source_anchors().to_vec(),
+        authorization: base_anchor.authorization().clone(),
+        payload_access,
+        retention_class: base_anchor.retention_class().clone(),
+        durability: base_anchor.durability().clone(),
+    })
     .unwrap();
     observation_store
         .persist_observation(
@@ -14674,22 +14744,108 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
 }
 
 #[tokio::test]
-async fn lcm_expand_real_service_preserves_immutable_anchor_state() {
+async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    let projection = seed_temporal_lcm_session_message(
+    let available_projection = seed_temporal_lcm_session_message(
         &cg,
         "lcm-state-session",
-        "state-message",
+        "available-state-message",
         "stateful expansion body",
         1,
     )
     .await;
-    let store_id = lcm_raw_store_id(&cg, "state-message").await;
+    let redacted_projection = seed_temporal_lcm_session_message_with_access(
+        &cg,
+        "lcm-state-session",
+        "redacted-state-message",
+        "redacted expansion body",
+        2,
+        PayloadAccessState::Redacted,
+    )
+    .await;
+    let locked_projection = seed_temporal_lcm_session_message_with_access(
+        &cg,
+        "lcm-state-session",
+        "locked-state-message",
+        "locked expansion body",
+        3,
+        PayloadAccessState::Quarantined,
+    )
+    .await;
+    let deleted_projection = seed_temporal_lcm_session_message_with_access(
+        &cg,
+        "lcm-state-session",
+        "deleted-state-message",
+        "deleted expansion body",
+        4,
+        PayloadAccessState::Deleted,
+    )
+    .await;
+    let available_store_id = lcm_raw_store_id(&cg, "available-state-message").await;
+    let redacted_store_id = lcm_raw_store_id(&cg, "redacted-state-message").await;
+    let locked_store_id = lcm_raw_store_id(&cg, "locked-state-message").await;
+    let deleted_store_id = lcm_raw_store_id(&cg, "deleted-state-message").await;
     let db = open_project_session_db(cg.project_root())
         .await
         .expect("project-local session db should open");
-    activate_test_temporal_generation(&db, "lcm-state-session", vec![projection]).await;
-    let conn = open_test_db_connection(&project_session_db_path(&cg)).await;
+    activate_test_temporal_generation(
+        &db,
+        "lcm-state-session",
+        vec![
+            available_projection,
+            redacted_projection,
+            locked_projection,
+            deleted_projection,
+        ],
+    )
+    .await;
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("test project id");
+    let registry = GlobalDb::open().await.expect("test registry");
+    let project = registry
+        .upsert_code_project(&project_id, cg.project_root(), None, None, None)
+        .await
+        .expect("register test project");
+    let profile_root = registry
+        .db_path()
+        .parent()
+        .expect("test registry profile root");
+    let serving_db_relpath = cg
+        .db_path()
+        .strip_prefix(profile_root)
+        .expect("test graph database must be under the registry profile root")
+        .to_string_lossy()
+        .into_owned();
+    let store = registry
+        .upsert_store_instance(tracedecay::global_db::StoreInstanceUpsert {
+            store_id: format!("store_{project_id}"),
+            project_id: project.project_id.clone(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: serving_db_relpath.clone(),
+            manifest_relpath: None,
+            last_verified_at: Some(1),
+            last_write_at: Some(1),
+        })
+        .await
+        .expect("register test project store");
+    registry
+        .upsert_graph_scope(tracedecay::global_db::GraphScopeUpsert {
+            graph_scope_id: format!("scope_{project_id}"),
+            project_id: project.project_id,
+            store_id: store.store_id,
+            branch_name: "test".to_string(),
+            db_relpath: serving_db_relpath,
+            parent_scope_id: None,
+            last_synced_at: Some(1),
+            writable: true,
+        })
+        .await
+        .expect("register test graph scope");
     let server = real_mcp_server(cg).await;
     let initial = handle_real_server_tool_call(
         &server,
@@ -14697,29 +14853,19 @@ async fn lcm_expand_real_service_preserves_immutable_anchor_state() {
         json!({
             "provider": "cursor",
             "session_id": "lcm-state-session",
-            "target": {"kind": "raw_message", "store_id": store_id}
+            "target": {"kind": "raw_message", "store_id": available_store_id}
         }),
     )
     .await;
     let initial: Value = serde_json::from_str(extract_real_server_text(&initial)).unwrap();
     assert_eq!(initial["status"], "ok", "{initial}");
-    let anchor = initial["anchors"][0].as_str().unwrap().to_string();
+    assert_eq!(initial["expansion"]["content"], "stateful expansion body");
 
-    for payload_access in ["redacted", "quarantined", "deleted", "unavailable"] {
-        let error = conn
-            .execute(
-                "UPDATE retrieval_anchors
-                 SET anchor_json = json_set(anchor_json, '$.payload_access', ?1)
-                 WHERE anchor_id = ?2",
-                libsql::params![payload_access, anchor.as_str()],
-            )
-            .await
-            .expect_err("retained anchor authority must be immutable");
-        assert!(
-            error
-                .to_string()
-                .contains("retrieval anchors are immutable")
-        );
+    for (store_id, expected_status) in [
+        (redacted_store_id, "redacted"),
+        (locked_store_id, "locked"),
+        (deleted_store_id, "deleted"),
+    ] {
         let result = handle_real_server_tool_call(
             &server,
             "tracedecay_lcm_expand",
@@ -14731,9 +14877,32 @@ async fn lcm_expand_real_service_preserves_immutable_anchor_state() {
         )
         .await;
         let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
-        assert_eq!(payload["status"], "ok", "{payload}");
-        assert_eq!(payload["anchors"][0], anchor);
+        assert_eq!(payload["status"], expected_status, "{payload}");
+        assert!(
+            payload["expansion"].as_array().unwrap().is_empty(),
+            "{payload}"
+        );
     }
+
+    let denied = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-state-session",
+            "target": {"kind": "summary_node", "node_id": "summary.forged"},
+            "source_limit": 1,
+            "cursor": "forged"
+        }),
+    )
+    .await;
+    let denied: Value = serde_json::from_str(extract_real_server_text(&denied)).unwrap();
+    assert_eq!(denied["status"], "denied", "{denied}");
+    assert!(
+        denied["expansion"].as_array().unwrap().is_empty(),
+        "{denied}"
+    );
+
     server.shutdown().await;
 }
 

@@ -1311,13 +1311,18 @@ impl DaemonSessionRetrievalRoot {
         let (store_id, graph_scope_id) = selected?;
 
         let project_key = ProjectId::new(context.project.canonical_root.clone()).ok()?;
+        let repository_id = context
+            .project
+            .git_common_dir
+            .clone()
+            .unwrap_or_else(|| format!("repository.project.{}", context.project.project_id));
         let identity = ResolvedSessionIdentity::for_project(
             ProfileId::new(MESSAGE_SEARCH_PROFILE_ID).ok()?,
             project_key,
             SessionStoreId::new(store_id).ok()?,
             SessionRootId::new(graph_scope_id.clone()).ok()?,
             ResolvedGitRoute::new(
-                RepositoryId::new(context.project.git_common_dir.clone()?).ok()?,
+                RepositoryId::new(repository_id).ok()?,
                 WorktreeId::new(context.project.canonical_root.clone()).ok()?,
                 BranchId::new(graph_scope_id).ok()?,
             ),
