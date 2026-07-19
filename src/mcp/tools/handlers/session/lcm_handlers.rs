@@ -29,7 +29,7 @@ async fn missing_lcm_read_store(
     context: LcmHandlerContext<'_>,
     args: &Value,
 ) -> Option<ToolResult> {
-    if context.retrieval_service.is_some() {
+    if context.project_root.is_none() || context.retrieval_service.is_some() {
         return None;
     }
     match open_lcm_storage(context, args, LcmOpenMode::ReadOnlyOrMissing).await {
@@ -1432,6 +1432,7 @@ mod compatibility_tests {
     use std::path::Path;
     use std::sync::Mutex;
 
+    use tempfile::TempDir;
     use tracedecay_domain::{
         HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
         TemporalModeV1,
@@ -1891,6 +1892,28 @@ mod compatibility_tests {
             .unwrap(),
         );
         assert_eq!(missing["status"], "unavailable");
+        assert!(!missing_path.exists());
+    }
+
+    #[tokio::test]
+    async fn grep_missing_profile_store_is_unavailable_without_db_fallback() {
+        let temp = TempDir::new().unwrap();
+        let missing_path = temp.path().join("sessions.db");
+        let response = payload(
+            handle_lcm_grep(
+                LcmHandlerContext::user(&missing_path, None, None),
+                json!({"query": "anything", "format": "json"}),
+            )
+            .await
+            .unwrap(),
+        );
+
+        assert_eq!(response["status"], "unavailable");
+        assert_eq!(
+            response["error"]["code"],
+            "lcm_retrieval_service_unavailable"
+        );
+        assert_eq!(response["hits"], json!([]));
         assert!(!missing_path.exists());
     }
 
