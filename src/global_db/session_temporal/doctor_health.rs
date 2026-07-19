@@ -777,6 +777,9 @@ impl GlobalDb {
             ));
         }
         transaction.commit().await?;
+        self.checkpoint_result()
+            .await
+            .map_err(|_| repair_refused("temporal FTS repair checkpoint did not complete"))?;
         Ok((planned, planned))
     }
 }
