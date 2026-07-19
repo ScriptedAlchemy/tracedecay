@@ -12,8 +12,9 @@ canonical Doctor kernel/UI. PR15 replaces the
 bounded single-project admission with canonical multi-root project/worktree
 scope, and PR16 defines remote-node placement without exporting unsaved
 workspace authority accidentally. PR17 may add opaque TaskId join keys to
-advisory editor projection; it does not add task authority or make LSP a task
-retrieval transport. PR18, through
+advisory editor projection plus concise ready-commit/cross-worktree cues; it
+does not add task authority or make LSP a task retrieval transport. PR18,
+through
 [Plan 17](17-official-public-api-and-sdks.md), freezes any public command,
 route, MCP-tool, or SDK spelling used to open an investigation or task. Internal
 Rust action/type identifiers in this plan are non-serialized implementation
@@ -51,6 +52,10 @@ for [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)
 findings: hooks, read-only ingested GitHub review threads, CI-localization
 input, and concurrent-agent proximity use their own native transports over the
 same daemon/application contracts described there.
+The gateway subscribes to the daemon's authorized Plan 07 worktree-event
+projection for its admitted roots and may publish concise affected-symbol,
+conflict, stale-epoch, and ready-commit cues. It never receives those events
+directly from peer hooks and never carries their bulk task/evidence history.
 [Plan 09](09-application-crate.md) owns the one typed, transport-neutral
 semantic-evidence/provider contract and canonical provider-result
 identity/compatibility semantics; this plan implements analyzer-backed
@@ -78,6 +83,10 @@ architecture.
   [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md) `TaskId`
   and Plan 13 anchor IDs only as authorized join keys; LSP never stores task
   evidence or becomes a task-retrieval transport.
+- Session-bound subscriptions to the daemon's authorized cross-worktree event
+  projection for exactly the admitted root set, including cursor/gap handling,
+  root/epoch invalidation, concise diagnostic/notification routing, and
+  handoff-only code-action projection.
 - Exact clean-snapshot diagnostic reuse and isolated unsaved-document overlays.
 - Typed gateway requirements, projection-only `LspFindingProjectionV1`/`V2`,
   and engine-state schema consumed by
@@ -111,6 +120,10 @@ architecture.
 - A private project/worktree resolver or remote-authority topology; Plans
   [16](16-cross-project-repository-worktree-scope.md) and
   [28](28-remote-multi-machine-shared-brain.md) own those contracts.
+- Hook decoding, host capability detection, event replay spooling, task
+  placement/readiness, conflict/proximity calculation, Git/ref/commit truth,
+  cross-merge preview/application/status/cancellation, or their receipts.
+  Plans 07, 24, 36, 37, 09, and 21 own those contracts and effects.
 - Completion, formatting, or arbitrary vendor-specific LSP methods until a
   separate product requirement and conformance gate justify them.
 - Applying `rename` or any other edit-shaped LSP result. Both rename methods
@@ -128,6 +141,10 @@ architecture.
   evidence anchors, Plan 24 owns task identity/navigation/planning, Plan 32 owns
   runtime execution, Plan 37 owns feedback finding architecture/lifecycle, and
   Plan 21 owns CLI/MCP/HTTP/LSP bindings and rendering.
+- Bulk worktree event history, task lists/graphs, commit stacks, diffs, test
+  logs, merge plans, conflict bodies, operation streams, or receipt storage.
+  LSP retains only the ephemeral subscription cursor and projection keys
+  needed to publish, clear, deduplicate, and hand off a bounded cue.
 - Facts, memory, Git history, proof that a test executed or a change was
   delivered, authorization or privacy policy authority, workflow scheduling, or
   durable temporal truth. Those remain owned by their existing product plans
@@ -230,6 +247,216 @@ architecture.
   generation publication, and client shutdown invalidate only the state whose
   identity changed.
 
+### Cross-worktree subscription and projection
+
+The gateway subscribes to a daemon-owned projection of Plan 07
+`HookEventEnvelopeV2` plus daemon-derived Plan 24/36/37 state. It never reads a
+hook spool, connects to a peer hook/agent/worktree, or accepts a hook event over
+LSP. The daemon authorizes, deduplicates, replays, resolves, and projects events
+before the gateway sees them.
+
+```rust
+pub struct LspWorktreeSubscriptionV1 {
+    pub lsp_session_id: LspSessionId,
+    pub workspace_set_revision: WorkspaceSetRevision,
+    pub roots: NonEmptyVec<LspWorktreeRootSubscription>,
+    pub event_cursor: Option<WorktreeProjectionCursor>,
+    pub authorization_epoch: AuthorizationEpoch,
+    pub capability_revision: GatewayCapabilityRevision,
+}
+
+pub struct LspWorktreeRootSubscription {
+    pub workspace_folder_id: WorkspaceFolderId,
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub worktree_id: WorktreeId,
+    pub worktree_epoch: WorktreeEpoch,
+    pub ref_id: Option<GitRefId>,
+    pub head_commit: CommitId,
+    pub code_generation: CodeGenerationId,
+}
+
+pub struct LspCrossWorktreeProjectionV1 {
+    pub projection_id: LspProjectionId,
+    pub projection_revision: LspProjectionRevision,
+    pub kind: LspCrossWorktreeKind,
+    pub root: LspWorktreeRootIdentity,
+    pub peer: Option<AuthorizedPeerWorktreeSummary>,
+    pub current_location: Option<LspCurrentLocation>,
+    pub task_id: Option<TaskId>,
+    pub finding_id: Option<FindingId>,
+    pub commit_ids: BoundedVec<CommitId, 16>,
+    pub readiness_digest: Option<ReadinessDigest>,
+    pub receipt_ids: BoundedVec<ReceiptId, 8>,
+    pub observed_at: UtcMicros,
+    pub expires_at: UtcMicros,
+    pub freshness: ProjectionFreshness,
+    pub coverage: ProjectionCoverage,
+    pub legal_handoffs: BoundedVec<LspHandoffKind, 2>,
+}
+
+pub enum LspCrossWorktreeKind {
+    AffectedSymbol {
+        relation: CrossWorktreeImpactRelation,
+    },
+    Conflict {
+        conflict_id: ConflictId,
+        class: CrossWorktreeConflictClass,
+    },
+    StaleEpoch {
+        expected: WorktreeEpoch,
+        observed: WorktreeEpoch,
+    },
+    ReadyCommit {
+        stack_id: CommitStackId,
+    },
+}
+```
+
+`ReadyCommit` is schema-reserved but unconstructable before PR17 lands Plan
+24 task/readiness and Plan 36 stack joins. PR13/PR15 capability snapshots omit
+it; receiving it under an earlier snapshot is a typed protocol-skew failure,
+not a cue to infer readiness from commit or test existence.
+
+The DTO contains no path, URI, branch label, source, diff, task narrative,
+tool payload, test log, conflict body, merge preview, cursor page, or receipt
+body. `LspCurrentLocation` holds canonical `FileId`, `SymbolId`, content
+digest, UTF-16 range, and generation. The gateway derives an LSP URI
+transiently from the currently authorized workspace-folder mapping at
+publication time; a URI/path is presentation routing, never cross-worktree
+identity or durable DTO state.
+
+`TaskId` is independently authorized and remains a join key only. `peer` is
+present only when the caller can see the exact relation and other
+`WorktreeId`; otherwise the projection either uses a policy-safe
+`restricted_overlap` shape with no peer identity/count or is omitted. A commit
+ID, receipt ID, finding ID, projection ID, or handoff token grants no expansion
+authority.
+
+#### Exact routing
+
+1. PR12 creates one subscription from its explicitly admitted root. PR15
+   creates one root entry for each admitted workspace folder, up to the eight
+   root hard limit. Added, removed, moved, denied, or ambiguous roots update
+   the revisioned subscription before any later event is projected.
+2. The daemon selects events by exact
+   `(project_id, repository_id, worktree_id, worktree_epoch)` and reauthorizes
+   the root, task, peer, ref/commit, finding, and receipt relation. A stale
+   epoch never rebinds to the worktree currently occupying the same path.
+3. Plan 24 supplies task placement and dependency-ready state; Plan 36 supplies
+   ref/commit/stack identity and read-only merge evidence; Plan 37 supplies
+   conflict/proximity findings. The gateway calculates none of them.
+4. A current exact `FileId`/`SymbolId`/content/generation join routes an
+   affected-symbol, conflict, or ready-commit cue to the owning document.
+   Cross-root related locations are included only when every location is
+   independently admitted and authorized. Missing or stale mapping is partial
+   or stale, never a nearest-path or same-name match.
+5. A source-ranged current cue publishes through
+   `textDocument/publishDiagnostics` or `textDocument/diagnostic`. A state
+   change triggers `workspace/diagnostic/refresh` for capable pull clients.
+   Root-level stale-epoch or ready-commit state without a truthful current
+   range uses one bounded `window/showMessage` notification; it is never forced
+   onto line zero or another file. A client/host that cannot provide the
+   required status channel receives the same cue through Plan 21/27, not a
+   fake diagnostic.
+
+`Diagnostic.source` is `tracedecay-worktree`.
+`Diagnostic.code` is exactly one of
+`affected-symbol`, `cross-worktree-conflict`, `stale-worktree-epoch`, or
+`ready-commit`. The message contains only the kind, coarse relation, freshness,
+coverage, and one legal next action in at most 512 UTF-8 bytes.
+`Diagnostic.data` is a versioned allowlist containing projection ID/revision,
+kind, current root WorktreeId/epoch, optional independently authorized peer
+WorktreeId, optional TaskId, finding ID, at most 16 commit IDs, readiness
+digest, freshness, coverage, and handoff availability. It never embeds a
+`WorktreeProjectionCursor`, event history, evidence packet, task record, merge
+preview, or receipt.
+
+Affected-symbol cues are Information unless an owning diagnostic supplies a
+stronger current severity. Conflict cues are Warning unless Plan 37's owning
+finding proves an Error. Stale epochs are Warning and immediately clear every
+older epoch projection. Ready commits are Information and mean only that the
+pinned Plan 24/36 readiness predicates currently pass; they do not mean
+merged, delivered, accepted, or safe to auto-apply.
+
+#### Notification and code-action contract
+
+The gateway uses standard LSP only. PR13 adds bounded server-to-client
+`window/showMessage` use for non-ranged cross-worktree state and
+`workspace/diagnostic/refresh` for ranged-state changes; it adds no custom
+worktree notification or task/evidence method. One message summarizes one
+root/kind window and carries no buttons, IDs, paths, branch names, peer count,
+or hidden-root clue. Detailed state remains in Plan 21 CLI/MCP/dashboard
+operations.
+
+Before PR18, cross-worktree diagnostics have no code actions. After Plan 17
+freezes Plan 21's two public handoff command names, a conformant client may
+receive command-only `quickfix` actions:
+
+- affected-symbol and conflict cues may offer the internal
+  `OpenInvestigation` handoff;
+- a task-linked cue may offer the internal `OpenTask` handoff;
+- stale-epoch may offer `OpenInvestigation` scoped to refresh/rebind guidance;
+- ready-commit may offer `OpenInvestigation` scoped to Plan 21's
+  cross-merge dry-run surface.
+
+Those are internal Rust variants, not serialized command names. Every action
+contains no `edit`, no disabled-reason oracle, and only one 60-second,
+single-use, session/root/projection/authorization-bound `HandoffToken`.
+Execution reauthorizes all IDs and opens or returns the owning Plan 21/11
+surface. It does not run cross-merge dry-run itself, apply a merge, resolve a
+conflict, refresh Git, mutate a task, invoke a tool, schedule an agent, or
+return bulk evidence. `workspace/applyEdit` is never used.
+
+#### Debounce, replay gaps, and backpressure
+
+- Worktree epoch changes and conflict observed/cleared bypass debounce.
+  Affected-symbol changes coalesce by
+  `(root, epoch, file_id, symbol_id, content_digest)` for 100 ms with a 500 ms
+  maximum wait. Ready-commit changes coalesce by
+  `(root, epoch, stack_id, readiness_digest)` for 250 ms with a 1-second
+  maximum wait. A newer not-ready/stale event supersedes a queued ready cue.
+- The existing 50 ms publication coalescer with 200 ms maximum wait runs after
+  worktree projection. It preserves clears, newest epoch, highest current
+  severity, and one terminal state for every projection identity.
+- Each root subscription queues at most 128 worktree projection events or
+  256 KiB; a session queues at most 512 such events or 1 MiB. Up to four roots
+  project concurrently. Conflict/epoch/clear events use a reserved class that
+  affected-symbol and ready-commit churn cannot starve.
+- Low-priority superseded events may coalesce by their exact key before queue
+  admission. If the queue still overflows or the signed cursor cannot resume,
+  the gateway marks a typed gap, clears projections whose currentness is no
+  longer provable, requests one fresh daemon snapshot, and emits at most one
+  bounded unavailable notification. It never continues after a gap as if no
+  events were lost.
+- The projection cursor binds LSP session, workspace-set revision, ordered
+  root/epoch/ref/head/generation vector, authorization epoch, capability,
+  catalog/schema/policy/config/privacy revisions, daemon event watermark, last
+  per-root sequence, and 15-minute expiry. Resume reauthorizes all roots before
+  cursor validation and reveals no hidden-root count.
+
+#### Payload and latency budgets
+
+- Plan 07 input is at most 16 KiB per event. The gateway receives only the
+  bounded daemon projection: at most 64 projections or 64 KiB per batch.
+  Existing document limits remain 200 diagnostics/256 KiB; cross-worktree
+  diagnostics consume that same budget rather than adding another channel.
+- One `window/showMessage` payload is at most 1 KiB. One projection has at most
+  eight related locations, 16 commit IDs, eight receipt IDs, 1 KiB
+  `Diagnostic.data`, and two handoff kinds. A document returns at most four
+  cross-worktree code actions, each with one token of at most 512 bytes.
+- On the checked-in warm multi-worktree benchmark, daemon-accepted conflict or
+  stale-epoch state reaches the gateway queue at p95 <= 100 ms and p99 <=
+  250 ms. Affected-symbol and ready-commit state reaches it at p95 <= 500 ms
+  and p99 <= 1.5 s after their debounce window. Queue-to-bridge notification
+  is p95 <= 100 ms and p99 <= 250 ms; end-to-end diagnostic publication still
+  satisfies the existing p95 <= 500 ms and p99 <= 1.5 s budget, measured
+  separately from cold graph/analyzer indexing.
+- Authorization, stale-epoch clearing, reserved-class admission, and gap
+  detection run before message rendering. A budget miss returns partial/stale/
+  unavailable state and clears unsafe projections; it never extends the
+  deadline, emits stale detail, or falls back to a path-based lookup.
+
 ### Upstream analyzer broker
 
 - The existing diagnostics LSP client and broker evolve into a daemon-owned
@@ -330,8 +557,9 @@ architecture.
   candidate/preview operation and each host proves raw edits cannot bypass
   `EditTransaction`.
 - PR18 may add one diagnostic-scoped `textDocument/codeAction` quick-fix and
-  `workspace/executeCommand` pair solely after Plans 21 and 17 add and freeze
-  the binding. Its exact client prerequisites are
+  `workspace/executeCommand` pair for Plan 37 and cross-worktree cues solely
+  after Plans 21 and 17 add and freeze the binding. Its exact client
+  prerequisites are
   `textDocument.codeAction.codeActionLiteralSupport` for `quickfix`,
   diagnostic `dataSupport`, and `window.showDocument.support`; its server
   capabilities are exactly
@@ -343,7 +571,9 @@ architecture.
   as command names. The action returns no edit, executes no analyzer/server
   command, and accepts only an opaque, session-bound `HandoffToken`, never IDs,
   paths, URLs, query text, or executable arguments. General code actions and
-  commands remain unavailable.
+  commands remain unavailable. The same two commands cover affected-symbol,
+  conflict, stale-epoch, and ready-commit handoffs; no third worktree command
+  or LSP-side cross-merge operation is added.
 - A method outside this set, or a request the active analyzer declares
   unsupported, returns an explicit typed capability-unavailable outcome. The
   gateway never guesses a fallback result or synthesizes a plausible-looking
@@ -670,8 +900,10 @@ not forced into fake editor positions.
 - Stable metrics cover session count, active languages, request method and
   outcome, latency, cancellation, queueing, analyzer startup, restarts, cache
   reuse, diagnostic additions/clears, partial coverage, dropped updates,
-  provider conflicts, host delivery path, and bridge reconnects without
-  recording source text, symbols, paths, or messages.
+  provider conflicts, host delivery path, bridge reconnects, worktree
+  subscription count, event lag, coalescing, cursor gaps, stale-epoch clears,
+  ready-commit projections, and handoff outcomes without recording TaskId,
+  WorktreeId, commit ID, source text, symbols, paths, or messages.
 - Trace identifiers connect bridge, gateway, upstream analyzer, diagnostic
   projection, and host publication events while preserving client isolation.
 - Plan 35 defines the gateway-specific finding and engine-state schema for
@@ -761,6 +993,10 @@ not forced into fake editor positions.
   conformance checks. Add real Claude Code protocol fixtures.
 - Ship `LspFindingProjectionV1` for concise feedback cues and prove all full
   evidence expands through Plan 21/Plan 13 operations rather than LSP.
+- Subscribe the explicitly admitted PR12 root to Plan 07's daemon-owned
+  worktree projection and ship bounded affected-symbol, conflict, and
+  stale-epoch diagnostics/notifications without TaskId, peer transport, bulk
+  evidence, ready-commit inference, or code actions.
 - Add conformant LSP capability projections for additional LSP-capable hosts
   only where their native LSP extension mechanism passes the same conformance
   contract.
@@ -772,6 +1008,9 @@ not forced into fake editor positions.
 - Bind documents, analyzer sessions, graph generations, diagnostics, and
   coverage to the resolved owning folder without CWD, first-folder, or
   active-checkout fallback.
+- Replace the one-root worktree subscription with the revisioned per-folder
+  subscription vector. Preserve independent root epochs/cursors/coverage,
+  clear removed roots, and reject hidden/ambiguous cross-root relations.
 - Prove same-name repositories, nested roots, linked worktrees, symlinks,
   ambiguous folders, denied neighbors, and partial multi-root coverage remain
   explicit and isolated.
@@ -795,13 +1034,39 @@ not forced into fake editor positions.
   authorized opaque `TaskId` join key and separate typed Plan 24 task
   navigation. LSP cannot resolve task context, inspect task history, mutate a
   plan, or invoke Plan 32 admission/control.
+- Add authorized TaskId placement and dependency-ready joins to
+  `LspCrossWorktreeProjectionV1`; project ready commits only after the exact
+  work-item/plan/readiness/worktree epoch remains current. Full stack,
+  conflict/proximity, merge preview/status, and receipt reads remain Plan 21
+  operations.
 
 ### PR18: public handoff binding stabilization
 
 - Plan 17 freezes any public command/route/tool/SDK spellings. Only then may
   conformant hosts advertise the Plan-21-bound handoff-only diagnostic code
-  action and execute-command binding. PR18 adds no task/evidence storage,
-  planner authority, general command channel, or bulk LSP retrieval.
+  action and execute-command binding for feedback and cross-worktree cues.
+  Ready-commit actions open the owning dry-run surface; they do not run or
+  apply a merge through LSP. PR18 adds no task/evidence storage, planner
+  authority, general command channel, or bulk LSP retrieval.
+
+The cross-worktree milestone gates are:
+
+1. **M35.W1 — one-root subscription (PR13):** consume the daemon projection,
+   route affected-symbol/conflict/stale-epoch cues, reject pre-PR17
+   ready-commit input, implement debounce/reserved queues/gap recovery, and
+   pass path-free schema plus no-peer-transport tests.
+2. **M35.W2 — multi-root subscription (PR15):** bind the revisioned root
+   vector, independent epochs/cursors/coverage, exact related locations, and
+   hidden-root non-enumeration.
+3. **M35.W3 — TaskId/ready join (PR17):** add independently authorized
+   TaskId, placement, dependency-ready, stack, and receipt join IDs without
+   adding bulk retrieval or any task/runtime authority.
+4. **M35.W4 — handoff-only actions (PR18):** advertise exactly the two frozen
+   commands for conformant clients and prove affected/conflict/stale/ready
+   actions cannot edit or execute work.
+5. **M35.W5 — performance promotion:** pass 1/4/8-root payload, debounce,
+   saturation, restart, cursor-gap, p95/p99, and privacy canaries on the same
+   build before enabling the subscription by default.
 
 ## Exact implementation and evidence map
 
@@ -824,12 +1089,16 @@ not forced into fake editor positions.
   `src/daemon/lsp_gateway/mod.rs`,
   `src/daemon/lsp_gateway/capabilities.rs`,
   `src/daemon/lsp_gateway/session.rs`,
+  `src/daemon/lsp_gateway/subscriptions.rs`,
   `src/daemon/lsp_gateway/projection.rs`,
+  `src/daemon/lsp_gateway/worktree_projection.rs`,
+  `src/daemon/lsp_gateway/worktree_actions.rs`,
   `src/daemon/lsp_gateway/handoff.rs`, and
   `src/daemon/lsp_gateway/limits.rs` define `GatewayCapabilitySet`,
   `LspFindingProjectionV1`, `LspFindingProjectionV2`,
-  `LspInvestigationCue`, `LspProjectionAvailability`, `LspDeliveryState`, and
-  `HandoffToken`.
+  `LspInvestigationCue`, `LspWorktreeSubscriptionV1`,
+  `LspCrossWorktreeProjectionV1`, `LspProjectionAvailability`,
+  `LspDeliveryState`, and `HandoffToken`.
 - Transport-only bridge: `src/lsp_bridge.rs`. It owns framing, authentication,
   request correlation, and forwarding only.
 - Owning non-LSP surfaces:
@@ -852,10 +1121,13 @@ not forced into fake editor positions.
 - Contract target: `tests/lsp_gateway_suite/main.rs` with
   `protocol.rs`, `limits.rs`, `backpressure.rs`, `diagnostics.rs`,
   `investigation_handoff.rs`, `authorization.rs`, `host_conformance.rs`,
-  `multi_root.rs`, `remote_authority.rs`, and `performance.rs`.
+  `multi_root.rs`, `worktree_events.rs`, `worktree_actions.rs`,
+  `remote_authority.rs`, and `performance.rs`.
   Protocol bytes live under `tests/lsp_gateway_suite/fixtures/claude-code/`;
   deterministic Rust/Python/TypeScript workspaces live under
-  `tests/lsp_gateway_suite/fixtures/workspaces/`.
+  `tests/lsp_gateway_suite/fixtures/workspaces/`; the same-name/linked/
+  detached/conflicting/ready stack corpus lives under
+  `tests/lsp_gateway_suite/fixtures/worktrees/`.
   `benches/lsp_gateway.rs`, `benchmarks/pr12-lsp-gateway/workload-v1.json`, and
   `scripts/check-lsp-gateway-benchmark.sh` own benchmark generation and
   threshold enforcement; reviewed results live at
@@ -901,6 +1173,28 @@ not forced into fake editor positions.
 - PR15 multi-root fixtures preserve exact per-folder project/worktree/generation
   scope and reject CWD, first-folder, active-checkout, symlink, or ambiguous
   fallback.
+- Cross-worktree fixtures prove the gateway subscribes only through the
+  daemon projection, routes by exact root/epoch, publishes affected-symbol and
+  conflict diagnostics only at current exact ranges, uses bounded
+  `window/showMessage` for truthful non-ranged stale/ready state, and never
+  connects to a hook, peer agent, or worktree.
+- Debounce/backpressure fixtures cover immediate conflict/epoch clearing,
+  superseded ready state, 100/500 ms affected-symbol coalescing, 250 ms/1 s
+  ready-commit coalescing, per-root/session queue saturation, reserved-class
+  fairness, cursor gaps, snapshot recovery, restart redelivery, and every
+  payload/latency bound without stale publication.
+- Authorization fixtures cover hidden peers, revoked TaskId, removed roots,
+  stale epochs, same paths after worktree replacement, cross-root related
+  locations, and cursor theft. Hidden roots expose no identity, count, path,
+  branch, task, commit, timing, or existence distinction.
+- PR18 code-action fixtures prove all four cue kinds use only the two frozen
+  handoff commands, carry one bounded token and no edit/IDs/paths/URLs/query/
+  executable arguments, and cannot run dry-run/apply, resolve a conflict,
+  mutate a task, refresh Git, schedule work, or call `workspace/applyEdit`.
+- Schema and restart scans prove the bridge/gateway retains no event history,
+  task graph/list, commit stack, diff, merge preview/status, test log,
+  conflict body, receipt body, cursor page, or expansion result. All bulk
+  reads remain Plan 21 operations.
 - PR16 remote fixtures keep dirty overlays and analyzer processes node-local,
   fence durable clean-diagnostic publication through the shard authority, and
   never spool or cache unsaved source.
@@ -926,6 +1220,14 @@ not forced into fake editor positions.
   `lock_after_version_change_clears_old_publication`,
   `push_and_pull_zero_partial_have_distinct_truthful_outcomes`,
   `oversized_notification_closes_without_desynchronizing`,
+  `worktree_events_arrive_only_from_daemon_projection`,
+  `stale_worktree_epoch_clears_before_republish`,
+  `ready_commit_is_advisory_and_version_bound`,
+  `cross_worktree_gap_clears_and_resnapshots`,
+  `hidden_peer_projection_is_non_enumerating`,
+  `non_ranged_worktree_state_never_uses_fake_location`,
+  `worktree_queue_reserves_conflict_and_clear_capacity`,
+  `pr18_ready_commit_action_opens_only_handoff`,
   `pr18_handoff_token_tampering_fails_without_edit`,
   `multi_root_denial_never_falls_back`, and
   `task_id_visibility_is_independent_of_finding_visibility`.
@@ -933,8 +1235,10 @@ not forced into fake editor positions.
   every client-capability permutation, PR15 `changeNotifications`,
   method-specific dynamic-registration permission and reconnect behavior,
   strict `Diagnostic.data` key/version allowlists, unauthorized `TaskId`
-  omission, rejected bulk/task/custom methods, no gateway/bridge persistence
-  after disconnect or restart, and authorization recheck at every handoff.
+  omission, standard-only worktree notifications, the four cue codes and two
+  frozen handoff commands, rejected bulk/task/custom/merge methods, no
+  gateway/bridge persistence after disconnect or restart, and authorization
+  recheck at every handoff.
 - Linux, macOS, and Windows fixtures cover URI normalization, UTF-16 positions,
   process lifecycle, command discovery, socket/stdio behavior, path safety, and
   shutdown.
@@ -944,10 +1248,12 @@ not forced into fake editor positions.
   `scripts/check-lsp-gateway-benchmark.sh
   benchmarks/pr12-lsp-gateway/baseline.json`,
   `cargo check --all-features`, and `cargo test --all-features`.
-  `workload-v1.json` fixes content hashes, operation mix, 5 warm-up rounds, 200
-  measured operations per method, 5 independent processes, concurrency 1 and
-  8, cache/analyzer warm-state boundaries, and bridge-receive through
-  bridge-write clock boundaries. The threshold script gates only on the
+  `workload-v1.json` fixes content hashes, semantic and worktree-event
+  operation mix, 1/4/8 admitted roots, conflict/stale/affected/ready ratios,
+  queue-gap cases, 5 warm-up rounds, 200 measured operations per method, 5
+  independent processes, concurrency 1 and 8, cache/analyzer warm-state
+  boundaries, and daemon-event-accept through bridge-write clock boundaries.
+  The threshold script gates only on the
   designated Linux x86_64 benchmark runner class recorded in the baseline;
   other CI hosts report without comparing. Percentiles are computed per
   independent process and the worst process must satisfy every absolute p95/
