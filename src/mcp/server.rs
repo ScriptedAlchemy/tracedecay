@@ -2512,6 +2512,7 @@ impl McpServer {
         let profile_root = allow_default_registry_fallback
             .then(crate::storage::default_profile_root)
             .and_then(std::result::Result::ok);
+        let session_db_path = cg.store_layout().sessions_db_path.clone();
         let mut context = Self::direct_context_with_dbs(
             cg,
             scope_prefix,
@@ -2521,6 +2522,9 @@ impl McpServer {
             allow_default_registry_fallback,
         )
         .await;
+        if context.session_db.is_none() {
+            context.session_db = GlobalDb::open_at(&session_db_path).await.map(Arc::new);
+        }
         let Some(session_db) = context.session_db.as_ref() else {
             panic!("test server project sessions database should open");
         };
@@ -2552,15 +2556,22 @@ impl McpServer {
         allow_default_registry_fallback: bool,
     ) -> McpServerConstructionContext {
         let user_session_db = if let Some(profile_root) = profile_root.as_ref() {
-            GlobalDb::open_at(&crate::sessions::user_sessions_db_path(profile_root))
+            let path = crate::sessions::user_sessions_db_path(profile_root);
+            if path.is_file() {
+                GlobalDb::open_at(&path).await.map(Arc::new)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let session_db = if cg.store_layout().sessions_db_path.is_file() {
+            GlobalDb::open_at(&cg.store_layout().sessions_db_path)
                 .await
                 .map(Arc::new)
         } else {
             None
         };
-        let session_db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-            .await
-            .map(Arc::new);
         let mut context = McpServerConstructionContext::direct(cg, scope_prefix)
             .with_direct_databases(
                 global_db,

@@ -9015,6 +9015,29 @@ async fn seed_temporal_lcm_session_message(
 ) -> TemporalLcmProjectionInput {
     persist_temporal_lcm_observation(
         cg,
+        "cursor",
+        session_id,
+        message_id,
+        text.into(),
+        CanonicalMessageRoleV1::Assistant,
+        ordinal,
+        ordinal + 1,
+        UtcMicros(ordinal + 1),
+    )
+    .await
+}
+
+async fn seed_temporal_lcm_session_message_for_provider(
+    cg: &TraceDecay,
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    text: impl Into<String>,
+    ordinal: i64,
+) -> TemporalLcmProjectionInput {
+    persist_temporal_lcm_observation(
+        cg,
+        provider,
         session_id,
         message_id,
         text.into(),
@@ -9037,6 +9060,7 @@ async fn seed_temporal_lcm_session_message_at(
 ) -> TemporalLcmProjectionInput {
     persist_temporal_lcm_observation(
         cg,
+        "cursor",
         session_id,
         message_id,
         text.into(),
@@ -9059,6 +9083,7 @@ async fn seed_temporal_lcm_session_message_at_micros(
 ) -> TemporalLcmProjectionInput {
     persist_temporal_lcm_observation(
         cg,
+        "cursor",
         session_id,
         message_id,
         text.into(),
@@ -9079,6 +9104,7 @@ async fn seed_temporal_lcm_tool_result_message(
 ) -> TemporalLcmProjectionInput {
     let projection = persist_temporal_lcm_observation(
         cg,
+        "cursor",
         session_id,
         message_id,
         text.into(),
@@ -9102,6 +9128,7 @@ async fn seed_temporal_lcm_tool_result_message(
 
 async fn persist_temporal_lcm_observation(
     cg: &TraceDecay,
+    provider: &str,
     session_id: &str,
     message_id: &str,
     text: String,
@@ -9110,7 +9137,7 @@ async fn persist_temporal_lcm_observation(
     message_timestamp: i64,
     ingested_at: UtcMicros,
 ) -> TemporalLcmProjectionInput {
-    let provider = ProviderId::new("cursor").unwrap();
+    let provider = ProviderId::new(provider).unwrap();
     let session_id = SessionId::new(session_id).unwrap();
     let scope = ObservationScopeV1::Project {
         project_id: ProjectId::new(
@@ -9249,59 +9276,6 @@ async fn persist_temporal_lcm_observation(
         occurrence,
         source_frontier,
     }
-}
-
-struct LcmMessageContext<'a> {
-    role: &'a str,
-    source: &'a str,
-    timestamp: i64,
-}
-
-async fn seed_lcm_session_message_with_role_source_timestamp(
-    cg: &TraceDecay,
-    session_id: &str,
-    message_id: &str,
-    text: impl Into<String>,
-    ordinal: i64,
-    context: LcmMessageContext<'_>,
-) {
-    let db = open_active_project_session_db(cg).await;
-    assert!(
-        db.upsert_session(&SessionRecord {
-            provider: "cursor".to_string(),
-            session_id: session_id.to_string(),
-            project_key: cg.project_root().to_string_lossy().to_string(),
-            project_path: cg.project_root().to_string_lossy().to_string(),
-            title: Some(format!("LCM session {session_id}")),
-            started_at: Some(ordinal),
-            ended_at: None,
-            transcript_path: Some(format!("{session_id}.jsonl")),
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        })
-        .await
-    );
-    assert!(
-        db.upsert_session_message(&SessionMessageRecord {
-            provider: "cursor".to_string(),
-            message_id: message_id.to_string(),
-            session_id: session_id.to_string(),
-            role: context.role.to_string(),
-            timestamp: Some(context.timestamp),
-            ordinal,
-            text: text.into(),
-            kind: Some("message".to_string()),
-            model: Some("test-model".to_string()),
-            tool_names: None,
-            source_path: Some(format!("{session_id}.jsonl")),
-            source_offset: Some(0),
-            metadata_json: Some(serde_json::json!({"source": context.source}).to_string()),
-        })
-        .await
-    );
 }
 
 async fn seed_lcm_session_message_in_db(
@@ -10588,7 +10562,9 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     .await
     .unwrap();
     let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
-    assert_eq!(loaded_payload["status"], "ok");
+    assert_eq!(loaded_payload["status"], "partial");
+    assert_eq!(loaded_payload["omitted"], 1);
+    assert_eq!(loaded_payload["coverage"]["unknown"], 1);
     assert_eq!(loaded_payload["messages"].as_array().unwrap().len(), 1);
     assert!(
         loaded_payload["messages"][0]["content_range"]["truncated"]
@@ -10614,7 +10590,9 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     .await
     .unwrap();
     let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
-    assert_eq!(grep_payload["status"], "ok");
+    assert_eq!(grep_payload["status"], "partial");
+    assert_eq!(grep_payload["omitted"], 1);
+    assert_eq!(grep_payload["coverage"]["unknown"], 1);
     assert_eq!(grep_payload["hits"].as_array().unwrap().len(), 1);
     assert!(
         grep_payload["hits"][0]["snippet"]
@@ -10637,7 +10615,9 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     .unwrap();
     let default_provider_grep_payload: Value =
         serde_json::from_str(extract_text(&default_provider_grep.value)).unwrap();
-    assert_eq!(default_provider_grep_payload["status"], "ok");
+    assert_eq!(default_provider_grep_payload["status"], "partial");
+    assert_eq!(default_provider_grep_payload["omitted"], 1);
+    assert_eq!(default_provider_grep_payload["coverage"]["unknown"], 1);
     assert_eq!(default_provider_grep_payload["provider"], "all");
     assert_eq!(
         default_provider_grep_payload["hits"]
@@ -10647,7 +10627,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         1
     );
 
-    seed_lcm_session_message_for_provider(
+    let cursor_projection = seed_temporal_lcm_session_message_for_provider(
         &cg,
         "cursor",
         "provider-local-session",
@@ -10656,13 +10636,19 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         2,
     )
     .await;
-    seed_lcm_session_message_for_provider(
+    let codex_projection = seed_temporal_lcm_session_message_for_provider(
         &cg,
         "codex",
         "provider-local-session",
         "codex-provider-local-message",
         "provider local collision belongs to codex",
         3,
+    )
+    .await;
+    activate_test_temporal_generation(
+        &temporal_db,
+        "provider-local-session",
+        vec![cursor_projection, codex_projection],
     )
     .await;
 
@@ -10682,7 +10668,12 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     .unwrap();
     let scoped_default_provider_grep_payload: Value =
         serde_json::from_str(extract_text(&scoped_default_provider_grep.value)).unwrap();
-    assert_eq!(scoped_default_provider_grep_payload["status"], "ok");
+    assert_eq!(scoped_default_provider_grep_payload["status"], "partial");
+    assert_eq!(scoped_default_provider_grep_payload["omitted"], 2);
+    assert_eq!(
+        scoped_default_provider_grep_payload["coverage"]["unknown"],
+        2
+    );
     assert_eq!(scoped_default_provider_grep_payload["provider"], "all");
     assert_eq!(scoped_default_provider_grep_payload["count"], 2);
     assert_eq!(
@@ -10708,7 +10699,9 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     .unwrap();
     let provider_local_load_payload: Value =
         serde_json::from_str(extract_text(&provider_local_load.value)).unwrap();
-    assert_eq!(provider_local_load_payload["status"], "ok");
+    assert_eq!(provider_local_load_payload["status"], "partial");
+    assert_eq!(provider_local_load_payload["omitted"], 2);
+    assert_eq!(provider_local_load_payload["coverage"]["unknown"], 2);
     assert_eq!(provider_local_load_payload["provider"], "all");
     let loaded_providers = provider_local_load_payload["messages"]
         .as_array()
@@ -10716,7 +10709,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         .iter()
         .map(|message| message["provider"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(loaded_providers, vec!["cursor", "codex"]);
+    assert_eq!(loaded_providers, vec!["codex", "cursor"]);
 
     let described = handle_tool_call(
         &cg,
@@ -10791,7 +10784,9 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     .await
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["status"], "partial");
+    assert_eq!(payload["omitted"], 1);
+    assert_eq!(payload["coverage"]["unknown"], 1);
     assert_eq!(payload["needs_synthesis"], true);
     assert_eq!(payload["prompt"], "Summarize orchard dispatch");
     assert!(
@@ -11637,7 +11632,12 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
     .await
     .unwrap();
     let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
-    assert_eq!(loaded_payload["status"], "ok", "payload: {loaded_payload}");
+    assert_eq!(
+        loaded_payload["status"], "partial",
+        "payload: {loaded_payload}"
+    );
+    assert_eq!(loaded_payload["omitted"], 3);
+    assert_eq!(loaded_payload["coverage"]["unknown"], 3);
     assert_eq!(loaded_payload["content_limit"], 20_000);
     assert_eq!(loaded_payload["content_limit_clamped_from"], 25_000);
     assert_eq!(
@@ -11647,7 +11647,7 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
             .iter()
             .map(|message| message["message_id"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["lcm-native-old-cli-assistant", "lcm-native-new-cli-user"]
+        vec!["lcm-native-new-cli-user", "lcm-native-old-cli-assistant"]
     );
 }
 
@@ -11868,7 +11868,9 @@ async fn lcm_load_session_accepts_valid_integer_args() {
     .await
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["status"], "partial");
+    assert_eq!(payload["omitted"], 1);
+    assert_eq!(payload["coverage"]["unknown"], 1);
     assert_eq!(
         payload["messages"].as_array().unwrap().len(),
         1,

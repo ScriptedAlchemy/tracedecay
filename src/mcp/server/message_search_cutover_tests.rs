@@ -418,12 +418,14 @@ async fn retained_project_and_profile_handles_construct_retrieval_services() {
 }
 
 #[tokio::test]
-async fn fresh_direct_root_constructs_the_project_retrieval_service() {
+async fn fresh_direct_root_does_not_create_session_storage() {
     let (cg, _dir, _pin) = indexed_project().await;
+    let sessions_db_path = cg.store_layout().sessions_db_path.clone();
     let server = McpServer::new(cg, None).await;
 
-    assert!(server.session_db.is_some());
-    assert!(server.project_session_retrieval_service.is_some());
+    assert!(server.session_db.is_none());
+    assert!(server.project_session_retrieval_service.is_none());
+    assert!(!sessions_db_path.exists());
     server.shutdown().await;
 }
 

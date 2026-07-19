@@ -439,8 +439,17 @@ pub(in super::super) async fn handle_lcm_load_session(
         }
     };
     let page = page.expect("page exists for non-terminal LCM outcome");
-    let messages = page
-        .results
+    let mut results = page.results;
+    results.sort_by(|left, right| {
+        right
+            .message
+            .timestamp
+            .cmp(&left.message.timestamp)
+            .then_with(|| right.message.ordinal.cmp(&left.message.ordinal))
+            .then_with(|| left.message.provider.cmp(&right.message.provider))
+            .then_with(|| left.message.message_id.cmp(&right.message.message_id))
+    });
+    let messages = results
         .into_iter()
         .map(|result| sliced_message(result, content_slice))
         .collect::<Vec<_>>();
@@ -584,6 +593,7 @@ pub(in super::super) async fn handle_lcm_grep(
         .results
         .into_iter()
         .map(|result| {
+            let (snippet, _) = truncate_chars(&result.message.text, DEFAULT_LCM_CONTENT_LIMIT);
             json!({
                 "kind": "raw_message",
                 "provider": result.message.provider,
@@ -592,7 +602,7 @@ pub(in super::super) async fn handle_lcm_grep(
                 "node_id": Value::Null,
                 "store_id": Value::Null,
                 "role": result.message.role,
-                "snippet": result.message.text,
+                "snippet": snippet,
                 "score": result.score,
             })
         })
