@@ -1,15 +1,20 @@
 use std::fmt;
 
+use libsql::{Transaction, params};
 use thiserror::Error;
 use tracedecay_domain::{SessionCursorKeyIdV1, SessionCursorVersionV1, SignedCursorKeyRefV1};
+use tracedecay_store::{SessionStoreError, SessionStoreResult};
 
-use crate::global_db::GlobalDbReadSnapshot;
+use crate::global_db::{GlobalDb, GlobalDbReadSnapshot};
 use crate::query::temporal::ports::{
     CursorKeyError, CursorSignature, InMemoryCursorAuthenticator, SessionCursorAuthenticator,
     TemporalExecutionSnapshot,
 };
 
 const LOAD_OPERATION: &str = "load snapshot cursor authentication key";
+const PROVISION_OPERATION: &str = "provision active session cursor authentication key";
+const CURSOR_KEY_ID_RANDOM_BYTES: usize = 16;
+const CURSOR_KEY_MATERIAL_BYTES: usize = 32;
 
 #[derive(Debug, Error)]
 pub(crate) enum GlobalDbCursorKeyProviderError {
@@ -41,6 +46,158 @@ pub(crate) enum GlobalDbCursorKeyProviderError {
 pub(crate) struct GlobalDbCursorKeyProvider {
     key: SignedCursorKeyRefV1,
     authenticator: InMemoryCursorAuthenticator,
+}
+
+impl GlobalDb {
+    pub(crate) async fn ensure_active_session_cursor_key_result(
+        &self,
+    ) -> SessionStoreResult<SignedCursorKeyRefV1> {
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?;
+        let key = ensure_active_session_cursor_key_in_transaction(&transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?;
+        Ok(key)
+    }
+}
+
+pub(super) async fn ensure_active_session_cursor_key_in_transaction(
+    transaction: &Transaction,
+) -> SessionStoreResult<SignedCursorKeyRefV1> {
+    let mut active_rows = transaction
+        .query(
+            "SELECT key_id, key_version, key_material, COUNT(*) OVER ()
+             FROM session_query_cursor_keys
+             WHERE retired_at IS NULL
+             ORDER BY key_version DESC
+             LIMIT 1",
+            (),
+        )
+        .await
+        .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?;
+    if let Some(row) = active_rows
+        .next()
+        .await
+        .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?
+    {
+        let count = row
+            .get::<i64>(3)
+            .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?;
+        if count != 1 {
+            return Err(SessionStoreError::InvalidStateTransition {
+                context: "active session cursor key count",
+            });
+        }
+        let key_id = SessionCursorKeyIdV1::new(
+            row.get::<String>(0)
+                .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?,
+        )
+        .map_err(SessionStoreError::from)?;
+        let version_value = row
+            .get::<i64>(1)
+            .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?;
+        let version = u16::try_from(version_value)
+            .ok()
+            .and_then(|value| SessionCursorVersionV1::new(value).ok())
+            .ok_or(SessionStoreError::InvalidStateTransition {
+                context: "active session cursor key version",
+            })?;
+        let key = SignedCursorKeyRefV1 { key_id, version };
+        let material = row
+            .get::<Vec<u8>>(2)
+            .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?;
+        InMemoryCursorAuthenticator::new(key.clone(), material).map_err(|_| {
+            SessionStoreError::InvalidStateTransition {
+                context: "active session cursor key material",
+            }
+        })?;
+        drop(active_rows);
+        return Ok(key);
+    }
+    drop(active_rows);
+
+    let mut history_rows = transaction
+        .query(
+            "SELECT COALESCE(MAX(key_version), 0), COALESCE(MAX(created_at), 0)
+             FROM session_query_cursor_keys",
+            (),
+        )
+        .await
+        .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?;
+    let history = history_rows
+        .next()
+        .await
+        .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?
+        .ok_or(SessionStoreError::InvalidStateTransition {
+            context: "session cursor key history",
+        })?;
+    let highest_version = history
+        .get::<i64>(0)
+        .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?;
+    let highest_created_at = history
+        .get::<i64>(1)
+        .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?;
+    drop(history_rows);
+
+    let next_version = highest_version
+        .checked_add(1)
+        .and_then(|value| u16::try_from(value).ok())
+        .and_then(|value| SessionCursorVersionV1::new(value).ok())
+        .ok_or(SessionStoreError::InvalidStateTransition {
+            context: "session cursor key version exhausted",
+        })?;
+    let mut key_id_random = [0_u8; CURSOR_KEY_ID_RANDOM_BYTES];
+    getrandom::getrandom(&mut key_id_random).map_err(|error| {
+        super::query::storage(
+            PROVISION_OPERATION,
+            std::io::Error::other(format!("generate session cursor key id: {error}")),
+        )
+    })?;
+    let key_id = SessionCursorKeyIdV1::new(format!(
+        "cursor-key-{}-{}",
+        next_version.value(),
+        hex::encode(key_id_random)
+    ))
+    .map_err(SessionStoreError::from)?;
+    let key = SignedCursorKeyRefV1 {
+        key_id,
+        version: next_version,
+    };
+    let mut material = [0_u8; CURSOR_KEY_MATERIAL_BYTES];
+    getrandom::getrandom(&mut material).map_err(|error| {
+        super::query::storage(
+            PROVISION_OPERATION,
+            std::io::Error::other(format!("generate session cursor key material: {error}")),
+        )
+    })?;
+    let minimum_created_at =
+        highest_created_at
+            .checked_add(1)
+            .ok_or(SessionStoreError::InvalidStateTransition {
+                context: "session cursor key timestamp exhausted",
+            })?;
+    let created_at = super::query::now_micros(PROVISION_OPERATION)?
+        .0
+        .max(minimum_created_at);
+    transaction
+        .execute(
+            "INSERT INTO session_query_cursor_keys (
+                key_id, key_version, key_material, created_at, retired_at
+             ) VALUES (?1, ?2, ?3, ?4, NULL)",
+            params![
+                key.key_id.as_str(),
+                i64::from(key.version.value()),
+                material.to_vec(),
+                created_at,
+            ],
+        )
+        .await
+        .map_err(|error| super::query::storage(PROVISION_OPERATION, error))?;
+    Ok(key)
 }
 
 impl GlobalDbCursorKeyProvider {

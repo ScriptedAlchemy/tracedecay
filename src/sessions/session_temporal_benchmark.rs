@@ -453,6 +453,9 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
     let db = GlobalDb::open_at(&db_path)
         .await
         .ok_or_else(|| format!("open GlobalDb at {}", db_path.display()))?;
+    db.ensure_active_session_cursor_key_result()
+        .await
+        .map_err(|error| format!("provision active session cursor key: {error:?}"))?;
 
     let session_id = format!("benchmark-codex-session-{repetition}");
     let rollout = write_codex_rollout(env.home(), &project, &session_id)?;
@@ -963,6 +966,8 @@ fn current_commit(root: &Path) -> BenchResult<String> {
 mod tests {
     use super::*;
 
+    static ISOLATED_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[test]
     fn contract_matches_checked_in_artifacts() {
         validate_contract().expect("PR8 temporal contract");
@@ -997,6 +1002,7 @@ mod tests {
 
     #[tokio::test]
     async fn fixture_refresh_persists_progress_before_measurement() {
+        let _env_guard = ISOLATED_ENV_LOCK.lock().await;
         let prepared = prepare_repetition(0)
             .await
             .expect("production fixture refresh must persist durable progress");
@@ -1007,8 +1013,21 @@ mod tests {
         assert!(prepared.durable_progress.committed_records() > 0);
     }
 
-    #[test]
-    fn isolated_env_sets_and_restores_home_and_data_dir() {
+    #[tokio::test]
+    async fn fresh_benchmark_db_provisions_key_for_rank_and_hydration() {
+        let _env_guard = ISOLATED_ENV_LOCK.lock().await;
+        let samples = run_one_repetition(0)
+            .await
+            .expect("fresh benchmark database must provision an authenticated cursor key");
+        let phases = samples.iter().map(|(phase, _)| *phase).collect::<Vec<_>>();
+
+        assert!(phases.contains(&Phase::CompactRank));
+        assert!(phases.contains(&Phase::LateHydrate));
+    }
+
+    #[tokio::test]
+    async fn isolated_env_sets_and_restores_home_and_data_dir() {
+        let _env_guard = ISOLATED_ENV_LOCK.lock().await;
         let prior_home = env::var_os("HOME");
         let prior_data = env::var_os("TRACEDECAY_DATA_DIR");
         {

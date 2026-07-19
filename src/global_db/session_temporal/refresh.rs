@@ -16,6 +16,7 @@ use tracedecay_store::{
 };
 
 use super::super::GlobalDb;
+use super::cursor_keys::ensure_active_session_cursor_key_in_transaction;
 use super::projection::{
     persist_session_temporal_projection_batch_in_transaction,
     seed_active_projection_in_transaction, session_temporal_projection_record_count,
@@ -142,6 +143,8 @@ impl GlobalDb {
             });
         }
 
+        let provisioned_cursor_key =
+            ensure_active_session_cursor_key_in_transaction(&transaction).await?;
         let (active_generation, active_watermarks) =
             ensure_active_generation(&transaction, &request).await?;
         if request.target_frontier().committed_through() != active_watermarks.projection_frontier()
@@ -159,6 +162,8 @@ impl GlobalDb {
         );
         if let Some(cursor_key) = active_watermarks.cursor_key() {
             frozen_watermarks = frozen_watermarks.with_cursor_key(cursor_key.clone());
+        } else {
+            frozen_watermarks = frozen_watermarks.with_cursor_key(provisioned_cursor_key);
         }
         let frozen_watermarks_json = encode_watermarks(&frozen_watermarks, BEGIN_REFRESH)?;
         let accepted_at = now_micros(BEGIN_REFRESH)?;
