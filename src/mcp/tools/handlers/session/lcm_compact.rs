@@ -1,7 +1,8 @@
 use super::*;
 
-const MAX_LCM_EXPAND_QUERY_PROMPT_CHARS: usize = 2_048;
-const MAX_LCM_EXPAND_QUERY_QUERY_CHARS: usize = 1_024;
+pub(super) const MAX_LCM_EXPAND_QUERY_PROMPT_CHARS: usize = 2_048;
+pub(super) const MAX_LCM_EXPAND_QUERY_QUERY_CHARS: usize = 1_024;
+const MAX_LCM_EXPAND_QUERY_STATUS_CHARS: usize = 512;
 const MAX_LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_CHARS: usize = 1_024;
 const MAX_LCM_EXPAND_QUERY_SYNTHESIS_PROMPT_CHARS: usize = 2_048;
 
@@ -268,7 +269,8 @@ fn bounded_lcm_expand_query_floor_text(
     };
 
     let mut object = Map::new();
-    for key in ["status", "provider", "session_id", "answer"] {
+    insert_lcm_expand_query_status(&mut object, value, FLOOR_SCALAR_CHARS);
+    for key in ["provider", "session_id", "answer"] {
         insert_bounded_scalar_field(&mut object, value, key, FLOOR_SCALAR_CHARS);
     }
     for key in [
@@ -351,7 +353,12 @@ fn bounded_lcm_expand_query_floor_text(
     // effectively unreachable, but never emit an unbounded body.
     (
         serde_json::to_string(&json!({
-            "status": value.get("status").cloned().unwrap_or_else(|| json!("ok")),
+            "status": value
+                .get("status")
+                .and_then(Value::as_str)
+                .filter(|status| !status.is_empty())
+                .map(|status| Value::String(truncate_chars(status, FLOOR_SCALAR_CHARS).0))
+                .unwrap_or_else(|| json!("partial")),
             "needs_synthesis": value
                 .get("needs_synthesis")
                 .cloned()
@@ -416,7 +423,7 @@ pub(super) fn compact_lcm_expand_query_payload(
 
     let mut object = Map::new();
     if let Some(max_scalar_chars) = limits.max_scalar_chars {
-        for key in ["status", "provider", "session_id", "answer"] {
+        for key in ["provider", "session_id", "answer"] {
             insert_bounded_scalar_field(&mut object, value, key, max_scalar_chars);
         }
         for key in [
@@ -434,7 +441,6 @@ pub(super) fn compact_lcm_expand_query_payload(
         insert_bounded_text_field(&mut object, value, "query", limits.max_query_chars);
     } else {
         for key in [
-            "status",
             "provider",
             "session_id",
             "answer",
@@ -461,6 +467,13 @@ pub(super) fn compact_lcm_expand_query_payload(
             json!(limits.truncation_reason),
         );
     }
+    insert_lcm_expand_query_status(
+        &mut object,
+        value,
+        limits
+            .max_scalar_chars
+            .unwrap_or(MAX_LCM_EXPAND_QUERY_STATUS_CHARS),
+    );
 
     let (context_blocks, context_blocks_truncated) = compact_context_blocks(
         value.get("context_blocks"),
@@ -706,6 +719,20 @@ fn insert_bounded_text_field(
         }
         None => {}
     }
+}
+
+fn insert_lcm_expand_query_status(
+    object: &mut Map<String, Value>,
+    value: &Value,
+    max_chars: usize,
+) {
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|status| !status.is_empty())
+        .map(|status| truncate_chars(status, max_chars).0)
+        .unwrap_or_else(|| "partial".to_string());
+    object.insert("status".to_string(), json!(status));
 }
 
 fn insert_bounded_scalar_field(

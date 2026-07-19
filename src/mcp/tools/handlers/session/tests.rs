@@ -326,6 +326,24 @@ fn lcm_expand_query_needs_synthesis_floor_is_bounded_without_project_root() {
 }
 
 #[test]
+fn lcm_expand_query_fallback_defaults_to_partial_without_status() {
+    let mut payload = oversized_needs_synthesis_expand_query_payload();
+    payload
+        .as_object_mut()
+        .expect("fixture must be an object")
+        .remove("status");
+
+    let result = lcm_expand_query_tool_json(None, &json!({"format": "json"}), &payload);
+    let text = result.value["content"][0]["text"].as_str().unwrap();
+    let parsed: Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(parsed["status"], "partial");
+    assert_ne!(parsed["status"], "ok");
+    assert_eq!(parsed["needs_synthesis"], true);
+    assert_eq!(parsed["contract_truncated"], true);
+}
+
+#[test]
 fn lcm_expand_query_in_budget_and_synthesis_compaction_paths_unchanged() {
     // In-budget payloads pass through verbatim.
     let small = json!({

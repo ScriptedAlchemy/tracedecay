@@ -4,6 +4,7 @@ use tracedecay_domain::{RetrievalGrainV1, SessionId, TemporalCoverageCountsV1, T
 
 use super::lcm_args::*;
 use super::lcm_compact::{
+    MAX_LCM_EXPAND_QUERY_PROMPT_CHARS, MAX_LCM_EXPAND_QUERY_QUERY_CHARS,
     lcm_expand_query_tool_json, lcm_preflight_tool_json, lcm_response_handle_root, truncate_chars,
 };
 use super::lcm_storage::{LcmHandlerContext, LcmOpenMode, LcmStorageResolution, open_lcm_storage};
@@ -243,6 +244,42 @@ fn apply_lcm_temporal_fields(payload: &mut Value, temporal: &SessionTemporalMeta
         "next_cursor",
     ] {
         payload.insert(key.to_string(), fields[key].clone());
+    }
+}
+
+fn apply_lcm_expand_query_input_truncation(
+    payload: &mut Value,
+    prompt_truncated: bool,
+    query_truncated: bool,
+) {
+    if !prompt_truncated && !query_truncated {
+        return;
+    }
+    let Some(payload) = payload.as_object_mut() else {
+        return;
+    };
+    payload.insert("mcp_response_truncated".to_string(), json!(true));
+    payload.insert("contract_truncated".to_string(), json!(true));
+    payload.insert(
+        "mcp_truncation_reason".to_string(),
+        json!("expand-query prompt or query exceeded the MCP input bound"),
+    );
+    payload.insert(
+        "prompt_truncated_for_mcp".to_string(),
+        json!(prompt_truncated),
+    );
+    payload.insert(
+        "query_truncated_for_mcp".to_string(),
+        json!(query_truncated),
+    );
+    if let Some(synthesis_prompt) = payload
+        .get_mut("synthesis_prompt")
+        .and_then(Value::as_object_mut)
+    {
+        synthesis_prompt.insert(
+            "user_prompt_truncated_for_mcp".to_string(),
+            json!(prompt_truncated),
+        );
     }
 }
 
@@ -843,6 +880,11 @@ fn expand_query_response_from_sources(
     context_max_tokens: usize,
     sources: Vec<(&'static str, Option<String>, String)>,
 ) -> (LcmExpandQueryResponse, usize) {
+    let (prompt, _) = truncate_chars(prompt, MAX_LCM_EXPAND_QUERY_PROMPT_CHARS);
+    let query = query.map(|query| {
+        let (query, _) = truncate_chars(query, MAX_LCM_EXPAND_QUERY_QUERY_CHARS);
+        query
+    });
     let source_count = sources.len();
     let mut used_chars = 0;
     let mut context_truncated = false;
@@ -899,8 +941,8 @@ fn expand_query_response_from_sources(
             answer: (!needs_synthesis)
                 .then(|| "No matching LCM context found in the current session.".to_string()),
             needs_synthesis,
-            prompt: prompt.to_string(),
-            query: query.map(str::to_string),
+            prompt,
+            query,
             synthesis_prompt,
             max_tokens,
             context_max_tokens,
@@ -982,7 +1024,16 @@ pub(in super::super) async fn handle_lcm_expand_query(
 ) -> Result<ToolResult> {
     let provider = required_specific_provider_arg(&args)?;
     let session_id = required_string_arg(&args, "session_id")?;
-    let prompt = required_string_arg(&args, "prompt")?;
+    let (prompt, prompt_truncated) = truncate_chars(
+        required_string_arg(&args, "prompt")?,
+        MAX_LCM_EXPAND_QUERY_PROMPT_CHARS,
+    );
+    let (query, query_truncated) = optional_non_empty_string_arg(&args, "query")?
+        .map(|query| {
+            let (query, truncated) = truncate_chars(query, MAX_LCM_EXPAND_QUERY_QUERY_CHARS);
+            (Some(query), truncated)
+        })
+        .unwrap_or((None, false));
     let max_results =
         bounded_usize_arg(&args, "max_results", 1, MAX_LCM_RESULT_LIMIT)?.unwrap_or(5);
     let max_tokens =
@@ -1005,8 +1056,8 @@ pub(in super::super) async fn handle_lcm_expand_query(
     let request = LcmExpandQueryRequest {
         provider: provider.to_string(),
         session_id: session_id.to_string(),
-        prompt: prompt.to_string(),
-        query: optional_non_empty_string_arg(&args, "query")?.map(str::to_string),
+        prompt,
+        query,
         node_ids: string_only_array_arg(&args, "node_ids")?,
         max_results,
         max_tokens,
@@ -1112,6 +1163,7 @@ pub(in super::super) async fn handle_lcm_expand_query(
             object.insert("provider".to_string(), json!(provider));
             object.insert("session_id".to_string(), json!(session_id));
         }
+        apply_lcm_expand_query_input_truncation(&mut payload, prompt_truncated, query_truncated);
         apply_lcm_temporal_fields(&mut payload, &temporal);
         return Ok(lcm_expand_query_tool_json(
             context.project_root,
@@ -1203,6 +1255,7 @@ pub(in super::super) async fn handle_lcm_expand_query(
         object.insert("provider".to_string(), json!(provider));
         object.insert("session_id".to_string(), json!(session_id));
     }
+    apply_lcm_expand_query_input_truncation(&mut payload, prompt_truncated, query_truncated);
     apply_lcm_temporal_fields(&mut payload, &temporal);
     Ok(lcm_expand_query_tool_json(
         context.project_root,
@@ -2100,5 +2153,24 @@ mod compatibility_tests {
             response["context_blocks"][0]["content"],
             "canonical summary context"
         );
+    }
+
+    #[test]
+    fn expand_query_response_bounds_oversized_prompt_and_query_before_synthesis() {
+        let prompt = "p".repeat(3_000);
+        let query = "q".repeat(2_000);
+        let (response, _) = expand_query_response_from_sources(
+            &prompt,
+            Some(&query),
+            128,
+            128,
+            vec![("raw_message", None, "bounded context".to_string())],
+        );
+
+        assert_eq!(response.prompt.chars().count(), 2_048);
+        assert_eq!(response.query.as_deref().unwrap().chars().count(), 1_024);
+        let synthesis = response.synthesis_prompt.expect("response needs synthesis");
+        assert!(synthesis.user.contains(&response.prompt));
+        assert!(!synthesis.user.contains(&prompt));
     }
 }
