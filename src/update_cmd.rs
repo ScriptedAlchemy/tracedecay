@@ -434,13 +434,14 @@ async fn run_forward_only_post_update_command(
     )
     .map_err(|error| forward_only_failure(&spec, error))?;
     let previous_daemon_state = guard.previous_state();
+    let target_daemon_state = dogfood_forward_only_target_state(previous_daemon_state);
     let operation_result = match guard.lifecycle_lease() {
         Ok(lifecycle_lease) => {
             run_forward_only_post_update_tasks(
                 no_heal,
                 no_reinstall,
                 lifecycle_lease,
-                previous_daemon_state,
+                target_daemon_state,
                 &spec,
             )
             .await
@@ -452,8 +453,7 @@ async fn run_forward_only_post_update_command(
     if let Err(error) = operation_result {
         return Err(forward_only_failure(&spec, error));
     }
-    if let Err(error) = tracedecay::daemon::wait_for_installed_service_state(previous_daemon_state)
-    {
+    if let Err(error) = tracedecay::daemon::wait_for_installed_service_state(target_daemon_state) {
         return Err(forward_only_failure(&spec, error));
     }
     if let Err(error) = verify_forward_only_binary_version(&spec.tracedecay_bin) {
@@ -464,18 +464,24 @@ async fn run_forward_only_post_update_command(
         .map_err(|error| forward_only_failure(&spec, error))
 }
 
+fn dogfood_forward_only_target_state(
+    _previous_state: tracedecay::daemon::DaemonServiceState,
+) -> tracedecay::daemon::DaemonServiceState {
+    tracedecay::daemon::DaemonServiceState::RunningEnabled
+}
+
 async fn run_forward_only_post_update_tasks(
     no_heal: bool,
     no_reinstall: bool,
     lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
-    previous_daemon_state: tracedecay::daemon::DaemonServiceState,
+    target_daemon_state: tracedecay::daemon::DaemonServiceState,
     spec: &tracedecay::daemon::DaemonServiceSpec,
 ) -> tracedecay::errors::Result<()> {
     eprintln!("\nPreparing forward-only dogfood maintenance.");
     tracedecay::daemon::verify_installed_service_quiesced_under_lease()?;
 
     run_post_update_mutations(no_heal, no_reinstall, true, lifecycle_lease).await?;
-    refresh_forward_only_daemon_service_after_update(previous_daemon_state, spec)
+    refresh_forward_only_daemon_service_after_update(target_daemon_state, spec)
 }
 
 fn verify_forward_only_binary_version(binary: &Path) -> tracedecay::errors::Result<()> {
@@ -864,10 +870,11 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from, health_pass_failure_result,
-        normalize_bin_path, partition_reinstall_results, post_update_binary,
-        post_update_binary_from, prepare_post_update_lease, reinstall_failure_result,
-        run_install_then_refresh, verify_forward_only_binary_version,
+        RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from,
+        dogfood_forward_only_target_state, health_pass_failure_result, normalize_bin_path,
+        partition_reinstall_results, post_update_binary, post_update_binary_from,
+        prepare_post_update_lease, reinstall_failure_result, run_install_then_refresh,
+        verify_forward_only_binary_version,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
@@ -890,6 +897,22 @@ mod tests {
         #[cfg(not(windows))]
         assert!(reacquired.is_err());
         drop(held);
+    }
+
+    #[test]
+    fn dogfood_forward_only_always_validates_a_running_enabled_daemon() {
+        for previous in [
+            tracedecay::daemon::DaemonServiceState::Missing,
+            tracedecay::daemon::DaemonServiceState::StoppedDisabled,
+            tracedecay::daemon::DaemonServiceState::StoppedEnabled,
+            tracedecay::daemon::DaemonServiceState::RunningDisabled,
+            tracedecay::daemon::DaemonServiceState::RunningEnabled,
+        ] {
+            assert_eq!(
+                dogfood_forward_only_target_state(previous),
+                tracedecay::daemon::DaemonServiceState::RunningEnabled
+            );
+        }
     }
 
     #[cfg(unix)]

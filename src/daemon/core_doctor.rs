@@ -145,16 +145,23 @@ fn doctor_runtime_store_paths_for_branch(
                 .map_err(|_| "project_store_schema_unsupported")?
         }
         Ok(None) => {
-            let data_root = crate::config::get_tracedecay_dir(project_path);
-            let legacy_paths = (
-                data_root.join(crate::config::db_filename(&data_root)),
-                data_root.join("sessions.db"),
-            );
-            if legacy_paths.0.is_file() {
-                return Ok(legacy_paths);
+            if let Some(layout) =
+                crate::storage::resolve_persisted_layout(project_path, profile_root)
+                    .map_err(|_| "project_store_schema_unsupported")?
+            {
+                layout
+            } else {
+                let data_root = crate::config::get_tracedecay_dir(project_path);
+                let legacy_paths = (
+                    data_root.join(crate::config::db_filename(&data_root)),
+                    data_root.join("sessions.db"),
+                );
+                if legacy_paths.0.is_file() {
+                    return Ok(legacy_paths);
+                }
+                crate::storage::default_profile_sharded_layout(project_path, profile_root)
+                    .map_err(|_| "project_store_schema_unsupported")?
             }
-            crate::storage::default_profile_sharded_layout(project_path, profile_root)
-                .map_err(|_| "project_store_schema_unsupported")?
         }
         Err(_) => return Err("project_store_schema_unsupported"),
     };
@@ -882,6 +889,14 @@ mod doctor_runtime_route_tests {
         let profile = root.path().join("profile");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&profile).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(&project)
+                .status()
+                .unwrap()
+                .success()
+        );
         let options = TraceDecayOpenOptions {
             profile_root: Some(profile.clone()),
             global_db_path: Some(profile.join("registry.db")),
