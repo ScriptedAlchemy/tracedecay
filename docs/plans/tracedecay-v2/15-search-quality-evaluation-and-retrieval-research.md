@@ -70,7 +70,8 @@ The following paths are delivery paths; each is created by the dependency-sequen
 that names its owning PR.
 
 - `crates/tracedecay-domain/src/retrieval.rs` owns pure typed contracts:
-  `RetrievalRequest`, `RetrieverKind`, `CompactCandidate`, `RetrieverOutcome`,
+  `RetrievalRequest`, `RetrieverKind`, `CompactCandidate`, `RetrieverBatch`,
+  `RetrieverOutcome`,
   `SourceFreshness`, `CandidateContribution`, `FusionProfile`, `DiversityPolicy`,
   `RerankPolicy`, `FusedCandidate`, `RankedCandidate`, `RetrievalResult`,
   `AuthorizedRerankView`, `HydrationReceipt`, and evaluation decision IDs.
@@ -79,7 +80,8 @@ that names its owning PR.
   rank-before-hydrate boundary when PR11 delivers the application layer. It depends on
   PR9/PR10 ports, not storage implementations.
 - `src/query/retrieval/{exact.rs,lexical.rs,semantic.rs,graph.rs,temporal.rs,task_session.rs,diagnostic.rs}`
-  owns independent adapters. `fusion.rs`, `dedupe.rs`, `diversity.rs`, `rerank.rs`, and
+  owns independent adapters; `src/query/retrieval/ports.rs` owns the single
+  generic `Retriever<R, E>` port. `fusion.rs`, `dedupe.rs`, `diversity.rs`, `rerank.rs`, and
   `hydrate.rs` own deterministic composition stages.
 - `src/query/temporal/` remains the only current/as-of/evolution/forensic temporal
   eligibility and pagination kernel. Plan 23 owns
@@ -157,7 +159,15 @@ pub struct CompactCandidate {
     pub raw_score: FixedPointScore,
     pub ordinal_rank: u32,
     pub exact_admission_proof: Option<ExactAdmissionProof>,
+    pub retriever_evidence_anchor: RetrievalAnchorId,
     pub freshness: SourceFreshness,
+}
+
+pub struct RetrieverBatch<E> {
+    pub candidates: Vec<CompactCandidate>,
+    pub evidence_by_occurrence: BTreeMap<SourceOccurrenceId, E>,
+    pub coverage: RetrieverCoverage,
+    pub continuation: Option<RetrieverContinuation>,
 }
 
 pub enum RetrieverOutcome<T> {
@@ -168,6 +178,13 @@ pub enum RetrieverOutcome<T> {
     Stale(SourceFreshness),
     BudgetExceeded(RetrievalBudgetUsage),
     Cancelled,
+}
+
+pub trait Retriever<R, E> {
+    fn retrieve(
+        &self,
+        request: &R,
+    ) -> Result<RetrieverOutcome<RetrieverBatch<E>>, RetrievalError>;
 }
 
 pub struct CandidateContribution {
@@ -185,6 +202,7 @@ pub struct CandidateContribution {
 
 pub struct OccurrenceProvenance {
     pub source_occurrence_id: SourceOccurrenceId,
+    pub retriever_evidence_anchor: RetrievalAnchorId,
     pub source_namespace: SourceNamespace,
     pub repository_id: Option<RepositoryId>,
     pub session_or_thread_id: Option<SessionOrThreadId>,
@@ -219,14 +237,38 @@ pub struct FusionProfile {
     pub retrieval_budget: RetrievalBudget,
 }
 
+pub struct Pr9FallbackSubpayload {
+    pub profile_id: FusionProfileId,
+    pub ordered_candidates: Vec<RankedCandidate>,
+    pub public_pr9_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
+    pub freshness: Vec<SourceFreshness>,
+    pub cursor: Option<RetrievalCursor>,
+    pub digest: FallbackSubpayloadDigest,
+}
+
+pub enum OptionalStagePublicStatus {
+    NotRequested,
+    Complete,
+    Unavailable(SanitizedStageFailure),
+    Rejected(SanitizedStageFailure),
+    Cancelled,
+    BudgetExceeded(SanitizedBudgetUsage),
+}
+
+pub struct SemanticRerankOutcome {
+    pub semantic: OptionalStagePublicStatus,
+    pub rerank: OptionalStagePublicStatus,
+}
+
 pub struct RetrievalResult {
     pub snapshot: RetrievalSnapshot,
     pub profile_id: FusionProfileId,
+    pub pr9_fallback: Pr9FallbackSubpayload,
     pub ordered_candidates: Vec<RankedCandidate>,
     pub internal_lane_outcomes: BTreeMap<RetrieverKind, RetrieverOutcome<()>>,
     pub public_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
     pub freshness: Vec<SourceFreshness>,
-    pub rerank_outcome: RerankOutcome,
+    pub semantic_rerank_outcome: SemanticRerankOutcome,
     pub hydration_receipts: Vec<HydrationReceipt>,
     pub cursor: Option<RetrievalCursor>,
 }
@@ -241,6 +283,23 @@ statuses, and checkpoint IDs for admitted authorized lanes only. Sealed denial o
 never affect cursor or cache-key bytes. Resume uses the bound candidate set or rejects
 the cursor; it never recomputes a differently completed set.
 
+`Pr9FallbackSubpayload` is canonical-encoded and hashed independently with the
+schema/domain separator `tracedecay.pr9-fallback.v1`; the digest field itself
+is excluded from those hashed bytes. Its
+ranked candidates contain the PR9 contributions/decisions/explanations; its
+maps contain only `ExactLiteral`, `Lexical`, and `Graph`. Semantic/rerank
+execution may change the enclosing final candidates and
+`semantic_rerank_outcome`, but cannot change the subpayload, its digest, or
+cursor identity. "Byte-identical fallback" means this typed PR9 subpayload is
+identical; it does not forbid the enclosing response from truthfully reporting
+semantic unavailability.
+
+Sealed `internal_lane_outcomes` remains only in the enclosing audit result and
+is excluded from fallback bytes/digest, cursors, public coverage, and cache
+keys. `OptionalStagePublicStatus` deliberately has no denied variant: denied
+and absent evidence coalesce through the same sanitized unavailable shape and
+cannot differ in counts, timing class, cache effects, or public bytes.
+
 `RankingDecision` records exact-tier admission, same-source duplicate collapse,
 logical-copy representative selection, contradiction preservation, each diversity-cap
 decision, rerank admission, and fallback. Explanations are rendered from this provenance;
@@ -254,6 +313,17 @@ snapshot. Fusion derives `ExactClass` only from a validated proof.
 Every contribution and hydration receipt keys back to one `OccurrenceProvenance`.
 Parallel unassociated provenance vectors are forbidden because they cannot reproduce
 dedupe, diversity, freshness, or hydration decisions.
+Fusion preserves each exact
+`(source_occurrence_id, retriever_evidence_anchor)` pair from the source batch
+in `OccurrenceProvenance`; it cannot substitute the candidate's content anchor
+or reconstruct evidence after ranking.
+
+Every `RetrieverBatch` contains exactly one typed evidence value for each
+returned `source_occurrence_id`; missing, extra, or duplicate evidence rejects
+the batch. `retriever_evidence_anchor` addresses that same evidence in the
+owning source when it is durably retained. Ephemeral evidence is request-local
+but must have the same canonical identity and cannot be reconstructed from the
+final fused score.
 
 `internal_lane_outcomes` is sealed server-side audit data. `PublicRetrieverStatus`
 coalesces denied and nonexistent evidence and omits unauthorized source freshness,
@@ -530,7 +600,8 @@ The harness returns exactly one typed outcome:
   the frozen executable decision expression evaluates true.
 
 Only `accepted` creates `promotion-v1.json`. Zero authorization leakage, exact-tier
-precedence, temporal eligibility, source-scope correctness, and byte-identical fallback
+precedence, temporal eligibility, source-scope correctness, and byte-identical
+PR9 fallback subpayload
 are hard invariants. Quality, latency, RSS, tokens, cost, completion, learned weights,
 and learned thresholds use frozen evidence-backed margins; this plan deliberately does
 not invent universal numeric cutoffs.
@@ -558,8 +629,8 @@ not invent universal numeric cutoffs.
    batching, incremental reuse, exact flat-scan oracle, model lifecycle, offline reuse,
    privacy-domain isolation, and shadow-only semantic evaluation.
 6. **PR10 optional ANN and reranker:** evaluate ANN only against exact scan, then evaluate
-   bounded reranking over saved candidate lists. Land cancellation and byte-identical
-   fallback before either feature can activate.
+   bounded reranking over saved candidate lists. Land cancellation and the
+   byte-identical PR9 fallback subpayload before either feature can activate.
 7. **PR10 promotion and configuration:** publish the accepted report and evidence index,
    add versioned configuration controls, run shadow and staged exposure, and make the
    accepted profile eligible for default activation.

@@ -1,6 +1,10 @@
 # PR10: Native FastEmbed semantic code search
 
-**Status:** implementation authority for PR10. PR10 delivers configurable native semantic code search end to end; it is not a future experiment bucket.
+**Status:** implementation authority for PR10. PR10 starts only from the exact
+accepted PR9 checkpoint and delivers configurable native semantic code search
+end to end. Early artifact/runtime/vector packets may be prepared in parallel,
+but they are quarantined until replayed onto `PR10_BASE`; this is not a future
+experiment bucket.
 
 ## Outcome
 
@@ -12,16 +16,25 @@ Exact results remain authoritative without a model; similarity alone never prove
 - Plan 25 builds deterministic, storage-neutral `CodeSearchDocumentV1`,
   `CodeSearchChunkV1`, `ChangedCodeChunkSetV1`, and
   `CodeIndexCapabilityManifestV1` values from an exact code snapshot.
-- Plan 04 schedules only changed eligible documents and resumable generation
-  work.
+- Plan 04 defines deterministic changed-input projection, checkpoint, retry,
+  and publication semantics. Daemon/service orchestration decides when that
+  resumable work is scheduled.
 - Plan 02 stores immutable vector generations, manifests, checkpoints, the
   atomic active-generation pointer, and chunk projection receipts through
   daemon-owned writer authority.
-- Plan 05 owns retrieval, deterministic fusion, explanations, and redundancy
-  classification.
-- Plan 09 owns model artifacts, runtime sessions, model/profile authorization,
-  budgets, activation, rebuild, and status. Owning source stores authorize code
-  scope and payload reads; the application composes both receipts.
+- Plans 05/15 own the common `CompactCandidate`, independent lane, deterministic
+  fusion, contribution, diversity, rerank, hydration, cursor, fallback,
+  explanation, and redundancy contracts shipped in PR9. PR10 adds one semantic
+  adapter; it does not create a parallel code-search kernel.
+- Plan 20 owns signed model/reranker profile definitions, trust roots,
+  configuration precedence, and atomic active/rollback profile pointers. This
+  plan owns the root-private artifact verifier, FastEmbed runtime adapter,
+  bounded sessions, semantic generation service, and their typed ports. PR11's
+  Plan 09 application layer later composes those accepted ports; it does not
+  retroactively own PR10's model implementation.
+- Daemon/application orchestration schedules changed eligible chunks and
+  rebuilds. Plan 04 owns deterministic projection, checkpoint, retry, and
+  publication semantics, not scheduling policy.
 - Plan 15 exclusively owns retrieval-research design, frozen corpora and
   labels, metrics and strata, candidate profile comparison, thresholds, and
   promotion decisions. PR10 implements measured profiles and emits evidence;
@@ -39,10 +52,16 @@ PR10 adds these files; ownership follows the plan list above even when the
 files land in the current root crate:
 
 - `crates/tracedecay-domain/src/code_intelligence/search.rs`:
-  `EmbeddingProjectionKeyV1`, `SemanticCapabilityManifestV1`,
-  `RankedChannelListV1`, `RankedCodeCandidateV1`,
-  `ChannelContributionV1`, `FusionProfileV1`, `FusedCodeCandidateV1`, and
-  `HydratedCodeSearchHitV1`.
+  `EmbeddingProjectionKeyV1`, `SemanticSearchIndexKeyV1`,
+  `SemanticCapabilityManifestV1` and
+  code-specific semantic evidence values. Generic ranked-list, compact-
+  candidate, contribution, fusion, rerank, hydration, and cursor values remain
+  in PR9's `crates/tracedecay-domain/src/retrieval.rs`.
+  Semantic projection uses Plan 25's `CodeChunkProjectionReceiptV1` and
+  `ProjectionBatchReceiptV1`; no semantic-specific receipt authority exists.
+- `src/semantic_code/artifacts.rs`: canonical manifest parsing, signature/trust
+  verification, import staging, atomic install, inventory, retention, and
+  quarantine.
 - `src/semantic_code/manifest.rs`: model/runtime/projection and capability
   manifest validation.
 - `src/semantic_code/projector.rs`: changed-chunk batching, receipt production,
@@ -51,125 +70,64 @@ files land in the current root crate:
   only model inference implementation.
 - `src/semantic_code/session_pool.rs`: bounded sessions keyed by the complete
   projection/privacy identity.
-- `src/query/code_search/lexical.rs`,
-  `src/query/code_search/semantic.rs`, and
-  `src/query/code_search/graph.rs`: independent implementations of
-  `LexicalCodeRetriever`, `SemanticCodeRetriever`, and `GraphCodeRetriever`.
-- `src/query/code_search/fusion.rs`: `DeterministicCodeFusion` implementing the
-  frozen `FusionProfileV1`.
-- `src/query/code_search/hydrate.rs`: `LateCodeHydrator` for final-page symbol,
-  file, and bounded-neighbor evidence.
-- `src/application/code_search.rs`: scope/generation resolution,
-  authorization, capability admission, fallback, cancellation, and hydration
-  reauthorization.
+- `src/query/retrieval/semantic.rs`: the code-semantic implementation of the
+  PR9 `Retriever` port. It emits generic `CompactCandidate` values carrying a
+  typed code anchor and semantic evidence; it consumes neither lexical nor
+  graph candidates.
+- `src/semantic_code/service.rs`: temporary root-private PR10 orchestration for
+  artifact/runtime admission, projection generation, shadow execution, and
+  activation/rollback. It exposes typed ports consumed by the PR11 application
+  layer and contains no transport binding.
+- `src/config/retrieval.rs`: Plan-20-owned signed profile definitions and atomic
+  active/rollback profile pointers.
 - `src/store/vector_generations.rs`: Plan-02-owned implementation of the
   semantic projection read/write ports. Query and semantic modules do not
   depend on its physical schema.
 
-The retrieval contract is:
+The semantic adapter extends the PR9 retrieval contract rather than replacing
+it:
 
 ```rust
-pub enum RetrievalChannelV1 {
-    Lexical,
-    Semantic,
-    Graph,
-}
-
-pub struct RankedCodeCandidateV1 {
-    pub candidate: CodeSearchCandidateRefV1,
-    pub channel: RetrievalChannelV1,
-    pub channel_rank: u32,
-    pub raw_score: ChannelScoreV1,
-    pub evidence: ChannelEvidenceV1,
-}
-
-pub struct RankedChannelListV1 {
-    pub channel: RetrievalChannelV1,
+pub struct SemanticRetrievalRequestV1 {
+    pub query_digest: QueryDigest,
+    pub query_view: EphemeralSanitizedQueryViewV1,
+    pub authorized_scope: AuthorizedScopeReceiptV1,
+    pub authorization_epoch: AuthorizationEpoch,
     pub scope_digest: ScopeDigest,
     pub code_generation: CodeGenerationId,
-    pub projection_key: Option<EmbeddingProjectionKeyV1>,
-    pub candidates: Vec<RankedCodeCandidateV1>,
-    pub coverage: RetrievalCoverageV1,
-    pub exhausted: bool,
-}
-
-pub struct ChannelContributionV1 {
-    pub channel: RetrievalChannelV1,
-    pub channel_rank: u32,
-    pub raw_score: ChannelScoreV1,
-    pub fusion_input: FusionInputV1,
-    pub fusion_contribution: FusionContributionV1,
-    pub profile_revision: ProfileRevision,
-    pub evidence: ChannelEvidenceV1,
-}
-
-pub trait LexicalCodeRetriever {
-    fn retrieve(&self, request: &AuthorizedCodeSearchRequest)
-        -> Result<RankedChannelListV1, RetrievalError>;
-}
-pub trait SemanticCodeRetriever {
-    fn retrieve(&self, request: &AuthorizedCodeSearchRequest)
-        -> Result<RankedChannelListV1, RetrievalError>;
-}
-pub trait GraphCodeRetriever {
-    fn retrieve(&self, request: &AuthorizedCodeSearchRequest)
-        -> Result<RankedChannelListV1, RetrievalError>;
-}
-
-pub struct CodeSearchCandidateRefV1 {
-    pub chunk_id: CodeSearchChunkId,
-    pub authorization_receipt_id: AuthorizationReceiptId,
-    pub authorization_epoch: AuthorizationEpoch,
-    pub source_id: CodeSearchSourceIdV1,
-    pub file_occurrence_id: FileOccurrenceId,
-    pub symbol_occurrence_id: Option<SymbolOccurrenceId>,
-    pub source_span: SourceSpan,
-    pub chunk_grain: CodeSearchChunkGrainV1,
-}
-
-pub struct AuthorizedCodeSearchRequest {
-    pub query_digest: QueryDigest,
-    pub authorized_scope: AuthorizedScopeReceiptV1,
-    pub code_generation: CodeGenerationId,
+    pub projection_key: EmbeddingProjectionKeyV1,
     pub capability_manifest_digest: ManifestDigest,
-    pub fusion_profile: FusionProfileV1,
-    pub page: PageRequestV1,
+    pub budget: RetrievalBudget,
+    pub continuation: Option<RetrieverContinuation>,
 }
 
-pub struct FusionProfileV1 {
-    pub revision: ProfileRevision,
-    pub channel_weights: ChannelWeightsV1,
-    pub rrf_k: u32,
-    pub candidate_caps: ChannelCandidateCapsV1,
-    pub max_non_exact_per_source: u32,
-    pub max_non_exact_per_file: u32,
-    pub protected_exact_classes: Vec<ExactTechnicalKindV1>,
-    pub rerank_budget: u32,
-    pub hydration_budget: HydrationBudgetV1,
+pub struct SemanticCodeRetriever {
+    // Root-private FastEmbed session and semantic projection read ports.
 }
 
-pub struct HydratedCodeSearchHitV1 {
-    pub candidate: FusedCodeCandidateV1,
-    pub authorization_receipt: AuthorizedScopeReceiptV1,
-    pub symbol: Option<SanitizedSymbolViewV1>,
-    pub file_context: Option<SanitizedFileContextV1>,
-    pub graph_neighbors: Vec<AuthorizedGraphNeighborV1>,
+// SemanticCodeRetriever implements
+// Retriever<SemanticRetrievalRequestV1, CodeSemanticEvidenceV1>.
+
+pub struct CodeSemanticEvidenceV1 {
+    pub projection_key: EmbeddingProjectionKeyV1,
+    pub vector_generation: VectorGenerationId,
+    pub chunk_id: CodeSearchChunkId,
+    pub distance: CanonicalSemanticDistanceV1,
+    pub search_kind: SemanticSearchKindV1,
 }
 ```
 
-Each trait consumes the same frozen authorized scope and code generation, but
-none consumes another channel's candidates or scores. Store adapters implement
-`LexicalCandidateReadPort`, `SemanticProjectionReadPort`,
-`GraphCandidateReadPort`, and `CodeHydrationReadPort` separately. Conformance
-tests must pass when all four ports use different in-memory representations;
-no single table, vector index, or materialized join is required authority.
-`CodeSearchSourceIdV1` is the tuple of project, repository, worktree, selected
-ref/snapshot, and privacy domain. `ChannelEvidenceV1` carries channel-local
-reason codes and generation provenance; graph evidence additionally carries
-the selected ordered edge/path IDs, deterministic equal-path comparator,
-coverage, and weakest edge authority. `RetrievalCoverageV1` records examined,
-eligible, excluded, capped, and unknown counts. All of these values live in the
-domain file named above; ports live in their corresponding query modules.
+The adapter implements the one PR9 `Retriever<R, E>` port and receives one
+frozen authorized scope, code generation, semantic
+projection, and bounded ephemeral sanitized query view. It returns the generic
+Plan 15 batch with one `CompactCandidate` and one occurrence-keyed
+`CodeSemanticEvidenceV1` per result. It cannot mint exact
+admission, read another lane's candidates, fuse, diversify, rerank, hydrate, or
+retain raw query text/query vectors. Store conformance uses separate lexical,
+graph, vector, receipt, and hydration representations; no table, vector index,
+or materialized join becomes authority.
+Deadline and cancellation limits are fields of the shared `RetrievalBudget`;
+PR10 does not introduce semantic-only budget or continuation types.
 
 ## Deterministic documents and generations
 
@@ -231,28 +189,60 @@ or model-version pin.
 
 Install/import verifies artifacts before activation. Queries never download a
 model or open an ambient cache. Offline startup remains healthy and
-lexical-complete. Compatible warmed sessions are pooled under bounded memory,
+PR9-baseline-complete. Compatible warmed sessions are pooled under bounded memory,
 concurrency, idle, and cancellation policy. Load failure, OOM, corruption,
 revocation, or incompatible pins disables the affected semantic stage without
 silently selecting another model.
 
+Artifact handling is explicit:
+
+- A canonical manifest lists profile kind, model/tokenizer/config file digests,
+  byte lengths, licenses, upstream source metadata, runtime compatibility,
+  projection inputs, and the complete resource ceiling. The detached signature
+  covers the canonical manifest bytes; Plan 20 configuration identifies the
+  admitted trust-root ID and rotation epoch. Trust roots are never fetched from
+  the artifact being verified.
+- Import accepts an explicit local path or an explicitly configured HTTPS
+  source in a separate user action. It stages bytes under a random local
+  directory, streams length and SHA-256 verification, verifies the manifest
+  signature and every member before rename, fsyncs files/directories, and then
+  atomically publishes an inventory record. Query/runtime paths perform no
+  download, import, extraction, or trust decision.
+- Interrupted imports are resumable only when the source supplies immutable
+  length, digest, and range identity; otherwise staging is discarded. Archive
+  traversal, symlink/hardlink entries, absolute paths, duplicate members,
+  undeclared members, size expansion beyond the manifest, and digest mismatch
+  quarantine the import without exposing it to runtime discovery.
+- Installed artifacts live in one Plan-02-owned user store keyed by signed
+  artifact digest, never an ambient Hugging Face/ORT/FastEmbed cache. Inventory
+  records distinguish `staged | verified | installed | revoked | quarantined |
+  retained_for_rollback`. Garbage collection may remove only unreferenced
+  non-active/non-rollback artifacts after a daemon lease and append-only
+  receipt.
+- Activation is an authenticated Plan 20 compare-and-swap from the expected
+  active/rollback profile digests. It verifies artifact inventory, accepted
+  Plan 15 report, runtime/platform compatibility, complete projection
+  generation, resource ceiling, and executable rollback before publishing.
+  Rollback uses the same checks and must pass a cold-start/offline drill.
+
 The mandatory Plan 25 `CodeIndexCapabilityManifestV1` admits lexical/graph
 retrieval. Optional `SemanticCapabilityManifestV1` pins the authorized scope
 digest, code and vector generations, projection and search-index keys,
-supported chunk grains/languages, fusion profile revision, candidate/source/
-file caps, reranker and hydration support, coverage, partial states, privacy
-domain/key epoch, and manifest digest. The application validates the base
+supported chunk grains/languages, coverage, partial states, privacy domain/key
+epoch, and manifest digest. Fusion, candidate budgets, diversity, reranking,
+and hydration are validated separately from the active Plan 15/20 profile. The PR10 service validates the base
 manifest before any channel and validates the semantic augmentation only before
 semantic/rerank work. Missing semantic capability yields lexical/graph mode; an
 explicit strict-semantic request yields the typed unavailable result.
 
 ## Query and redundancy
 
-Search resolves exact scope and frozen generation first, runs lexical/graph
-channels first, then adds compatible semantic candidates. Fusion is stable and
-explainable; exact lexical identifiers, paths, quoted phrases, errors, tool
-names, and configuration keys keep a non-demotable tier. The first production
-semantic baseline is deterministic exact flat-vector search unless measured
+Search resolves exact scope and frozen generation first, reproduces the
+accepted PR9 exact+lexical+graph baseline, then adds a compatible semantic
+candidate list. Fusion is stable and explainable; Plan 15's exact-admission
+authority keeps exact identifiers, paths, quoted phrases, errors, tool names,
+and configuration keys in a non-demotable tier. The first production semantic
+baseline is deterministic exact flat-vector search unless measured
 current/10x evidence shows it violates a reviewed resource budget. Optional
 reranking is bounded to a configured top-N candidate set, is admitted only
 after candidate-controlled gain with no protected-stratum regression, and
@@ -271,69 +261,59 @@ violations. Disabled semantics preserves the structural baseline and ordering.
 The Plan-05 query pipeline executes these phases without combining them:
 
 1. Resolve and authorize project/repository/worktree/ref scope; freeze code,
-   lexical, graph, and compatible semantic generations; validate the capability
-   manifest and cost budget.
-2. Produce separate `RankedChannelListV1` values for lexical, semantic, and
-   graph channels. Exact symbols and qualified names, compiler/runtime error
-   codes and text, CLI flags, paths, quoted phrases, tool names, and
-   configuration keys are classified as protected lexical hits. Each channel
-   rejects non-finite scores, canonicalizes negative zero, deduplicates by
-   candidate reference, then assigns dense one-based ranks by channel score
-   descending and the candidate identity tuple from step 4 ascending.
-3. Fuse lightweight `CodeSearchCandidateRefV1` identities. Protected lexical
-   hits form the first tier and cannot be demoted by graph/semantic scores,
-   diversity, or reranking. For the remaining tier, the initial implementation
-   uses weighted reciprocal-rank fusion:
-   `sum(channel_weight / (rrf_k + channel_rank))`. Weights and `rrf_k` are
-   unsigned integers; `src/query/code_search/fusion.rs` compares exact rational
-   sums by cross multiplication in lexical, graph, semantic enum order, without
-   floating-point accumulation.
-4. Break equal fused scores by the complete tuple `(protected_tier,
-   best_lexical_rank, best_graph_rank, best_semantic_rank, repository_id,
-   normalized_path, source_span_start, chunk_grain, chunk_id)`. Missing ranks
-   sort after present ranks. Protected tier sorts first; ranks and identity
-   fields sort ascending; paths use repository-normalized UTF-8 bytes; chunk
-   grain uses declaration order. Input insertion order, hash iteration order,
-   task completion order, and raw cross-channel score magnitude cannot affect
-   the result.
-5. Apply `FusionProfileV1.max_non_exact_per_source` and
-   `max_non_exact_per_file` to the non-protected tier before pagination.
-   `source` means the complete `CodeSearchSourceIdV1` tuple defined above. Caps
-   apply independently to each requested page. Overflow candidates from a
-   source/file saturated on the current page are postponed in fused order and
-   become eligible on the next page. The cursor binds all emitted identities,
-   the ordered overflow queue, channel continuations, and profile/generation
-   digests; page-local counters reset only after the cursor seals a page, so
-   resume cannot duplicate, omit, or drift. Protected exact hits remain visible
-   and are counted separately in diversity explanations.
-6. Attach every `ChannelContributionV1`, including channel rank, raw
-   channel-local score, RRF input/contribution, profile revision, generation/
-   projection identity, evidence class, graph path coverage, and weakest graph
-   edge authority. A fused score is not probability or confidence.
+   exact, lexical, graph, and compatible semantic generations; validate the
+   base and semantic capability manifests, authorization epochs, and budgets.
+2. Reuse PR9's separately inspectable `RetrieverOutcome` values for
+   `ExactLiteral`, `Lexical`, and `Graph`; produce one independent
+   `Semantic` outcome. No semantic code calls, wraps, filters, or mutates
+   another lane.
+3. Validate/canonicalize the semantic outcome under the generic Plan 15 lane
+   contract: finite canonical scores, candidate identity dedupe, generation and
+   authorization equality, stable lane-local ordering, complete coverage, and
+   a bounded continuation.
+4. Pass all compact candidates to the one PR9 fusion implementation. The
+   existing exact tier remains lexicographically first and cannot be demoted by
+   graph/semantic scores, diversity, or reranking. PR10 evaluates semantic
+   weighting/fusion candidates—including exact rational RRF if proposed—on
+   saved candidate lists; no algorithm, constant, or weight activates without
+   Plan 15 acceptance.
+5. Use the complete comparator and diversity policy from the accepted generic
+   profile. The cursor binds emitted identities, ordered overflow, every lane
+   continuation, profile/generation/projection digests, and authorization
+   epoch. Input insertion order, hash order, and completion order cannot affect
+   IDs, order, contributions, explanations, coverage, or cursor bytes.
+6. Retain every generic `CandidateContribution`, including lane-local raw score
+   domain/rank, calibrated fixed-point feature when valid, weighted
+   contribution, profile/projection identity, evidence class, and exclusion
+   reason. Graph path coverage/authority and semantic projection/distance
+   provenance remain typed lane evidence. A fused score is not probability or
+   confidence.
 7. Optionally rerank only the profile-bounded non-protected candidate set while
    preserving the pre-rerank list and contributions. Absence/failure returns
    those bytes unchanged.
-8. After fusion, caps, reranking, and page selection, reauthorize and hydrate
-   only selected hits through `LateCodeHydrator`. Hydration may add bounded
+8. After fusion, diversity, reranking, and page selection, reauthorize and
+   hydrate only selected hits through the PR9 hydration port. Hydration may add bounded
    symbol text, file context, declarations, and graph neighbors from the same
    generation; it cannot add candidates or change rank.
 
-`FusionProfileV1` pins algorithm revision, channel weights, `rrf_k`, per-
-channel candidate budgets, source/file caps, protected exact classes, rerank
-budget, hydration budget, and the total tie-break comparator. Plan 15 selects
-and promotes this profile from locked evidence; Plan 05 implements it, and
-Plan 31 supplies the semantic channel and measurements.
+Plan 15's generic `FusionProfile` pins the selected algorithm, lane features/
+weights, candidate budgets, diversity caps, protected exact classes, rerank
+budget, hydration budget, and total comparator. Plan 15 selects and promotes
+that profile from locked evidence; Plan 05 implements it, and Plan 31 supplies
+only the semantic lane, artifact/runtime/projection implementation, and
+measurements.
 
 ## Authorization and local/private boundary
 
 - Owning source stores authorize exact scope, operation, privacy domain, key
-  epoch, and code generation. Plan 09 separately authorizes semantic projection
-  generation and model profile. The application composes the required receipts
-  before invoking each channel; source denial invokes zero channels, while
+  epoch, and code generation. Plan 20's accepted profile and the PR10 service
+  separately authorize semantic projection generation and runtime profile. The
+  PR10 query composition validates both receipts before invoking the semantic
+  lane; source denial invokes zero channels, while
   semantic denial invokes no semantic/rerank port and preserves authorized
   lexical/graph execution.
 - Candidate references carry authorization receipt ID and epoch without private
-  payload. Immediately before hydration, the application rechecks current
+  payload. Immediately before hydration, the shared query pipeline rechecks current
   authorization, scope, privacy domain/key epoch, and frozen generation.
   The owning store performs atomic receipt validation plus bounded payload/
   neighbor read; every neighbor must be inside the authorized scope. Revocation
@@ -351,13 +331,26 @@ Plan 31 supplies the semantic channel and measurements.
   cache is permitted.
 - Raw queries, source text, vectors, private paths/symbols, and hydrated
   explanations never enter telemetry or checked-in benchmark artifacts.
+  A raw query is sanitized into a bounded ephemeral query view before model
+  inference. `EphemeralSanitizedQueryViewV1` contains bounded sanitized bytes
+  plus sanitizer and normalization revisions; it is non-serializable,
+  non-cacheable, and valid only for the authorized request. `QueryDigest` is a
+  privacy-domain/key-epoch keyed MAC over that view, never an unkeyed content
+  hash. `QueryDigest` is owned by
+  `crates/tracedecay-domain/src/retrieval.rs` and may appear only in in-process
+  request state, authenticated cursor identity, and privacy-separated local
+  cache keys. `EphemeralSanitizedQueryViewV1` is owned by
+  `code_intelligence/search.rs`. Neither value may enter receipts, telemetry,
+  durable stores, or checked-in artifacts. Query text and vectors remain in
+  memory only for that request.
   Operational receipts contain opaque identities, revisions, outcomes, counts,
   and digests only. Only sanitized fixtures and aggregate Plan 15 reports may
   enter Git.
 - Semantic errors, timeout, cancellation, OOM, corruption, or revocation cannot
   broaden scope. When the selected profile permits fallback, the lexical/graph
-  ranked lists and pre-semantic fused order are byte-identical and the response
-  carries a typed visible reason; strict mode fails closed.
+  lane outcomes and Plan 15's named PR9 fallback subpayload are byte-identical.
+  The enclosing response may add only a typed semantic/rerank outcome outside
+  that subpayload, its digest, and cursor identity; strict mode fails closed.
 
 ## Plan 15 evaluation handoff and migration
 
@@ -393,36 +386,60 @@ and proves every active generation was rebuilt from canonical documents.
 `tests/semantic_search_suite/main.rs` is the Cargo integration-test entrypoint
 and declares every `tests/semantic_search_suite/*.rs` module named below.
 
-1. **Contracts and capability admission:** add domain values, semantic ports,
-   manifest validators, and split in-memory adapters. Tests:
+1. **Freeze `PR10_BASE`:** PR9 must have an accepted Plan 15 lexical report,
+   frozen exact-tier rules and candidate lists, byte-stable fallback fixture,
+   green aggregate gates, and an exact pushed
+   `pr9/49-aggregate-acceptance` commit. Create
+   `PR10_BASE` from that commit; do not begin semantic comparison or activation
+   against a moving PR9 baseline.
+2. **Contracts and capability admission:** add semantic-only domain values,
+   ports, manifest validators, ephemeral query-view rules, and split in-memory
+   adapters. Reuse PR9's generic retrieval/fusion/hydration types. Tests:
    `tests/semantic_search_suite/contracts.rs`,
    `capabilities.rs`, and `storage_independence.rs`.
-2. **Incremental projection:** add the root-private FastEmbed adapter and
-   projector against Plan 04 scheduling, Plan 02 checkpoint/receipt/publication,
-   and Plan 09 runtime-session ports; do not duplicate those authorities.
+3. **Artifact and runtime foundation:** add
+   `src/semantic_code/{artifacts.rs,manifest.rs,fastembed_adapter.rs,session_pool.rs}`.
+   Test signature/trust-root verification, local and explicit HTTPS import,
+   traversal/expansion rejection, interrupted staging, atomic install,
+   revocation/quarantine/GC, cold and warm sessions, OOM, cancellation,
+   offline startup, no ambient cache, and Linux/Windows native-runtime
+   compatibility.
+4. **Incremental vector projection:** add the projector and vector-generation
+   store against Plan 04 projection/checkpoint semantics, Plan 02
+   receipt/publication authority, and PR10 runtime ports. Daemon/service
+   orchestration owns scheduling; do not assign it to Plan 04.
    Tests: `tests/semantic_search_suite/projection.rs`,
    `model_replay.rs`, `atomic_publication.rs`, and `offline_lifecycle.rs`.
-3. **Independent retrieval and fusion:** add three channel retrievers,
-   deterministic fusion, protected exact tier, contribution provenance,
-   diversity spillback, fallback, and cursor binding. Tests:
+5. **Exact-flat semantic retrieval and shadow composition:** add only
+   `src/query/retrieval/semantic.rs`, emit
+   `RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>`, and compose it
+   with the frozen PR9 lane outputs through the existing
+   fusion/diversity/cursor implementation. Tests:
    `tests/semantic_search_suite/channel_isolation.rs`,
    `fusion_provenance.rs`, `protected_exact.rs`,
    `diversity_pagination.rs`, and `fallback.rs`.
-4. **Late hydration and privacy:** add hydration budgets, generation checks,
-   authorization recheck, revocation handling, domain-keyed caches, and
-   payload-safe receipts. Tests:
+6. **Late hydration, privacy, and rollback:** reuse PR9 hydration with semantic
+   profile admission, generation checks, authorization recheck, revocation,
+   domain-keyed caches, payload-safe receipts, active/rollback pointer CAS, and
+   cold offline rollback. Tests:
    `tests/semantic_search_suite/hydration.rs`,
-   `authorization.rs`, and `privacy_domains.rs`.
-5. **Evaluation handoff and surfaces:** add
+   `authorization.rs`, `privacy_domains.rs`, and `activation_rollback.rs`.
+7. **Locked evaluation:** add
    `benchmarks/pr10-semantic/{workload-v1.json,expected-v1.json,README.md}`,
-   rebuild-only migration, and immutable Plan 15 report inputs. Add typed
-   application conformance in
-   `tests/semantic_search_suite/application_conformance.rs`, status/Doctor
-   conformance in `tests/semantic_search_suite/status_doctor.rs`, and shared
-   API/CLI/MCP/dashboard fixture expectations in
-   `tests/semantic_search_suite/surface_contract.rs` for Plans 10/11/20/21 to
-   consume. Those plans own their adapters; Plan 15 alone interprets and
-   promotes the profile.
+   rebuild-only migration, saved PR9 and semantic candidate lists, immutable
+   Plan 15 report inputs, exact-flat oracle comparisons, channel/fusion/
+   calibration/rerank ablations, privacy/non-interference checks, and current/
+   10x resource evidence. Optional ANN and reranker branches begin only after
+   the exact-flat shadow checkpoint and cannot enter the critical path without
+   an accepted locked comparison.
+8. **Activation and aggregate acceptance:** only an `accepted` Plan 15 outcome
+   may create promotion evidence or activate semantics. Run staged shadow/
+   cohort eligibility, rollback, migration, privacy, native-platform,
+   architecture, all-feature, and aggregate gates. Add conformance-only
+   `tests/semantic_search_suite/status_doctor.rs` and
+   `tests/semantic_search_suite/future_surface_contract.rs` for later owning
+   plans. They contain no application, transport, or dashboard adapter; PR10
+   does not create a temporary public semantic endpoint.
 
 `benches/semantic_code_projection.rs` measures clean, warm one-symbol,
 deletion, no-op, model-key replay, cancellation, and incompatible rebuild.
@@ -443,12 +460,98 @@ quality labels across partitions. Query benchmarks run 10 untimed warmups then
 concurrency; projection cases run 5 warmups and 30 measured repetitions.
 Reports retain all samples needed to recompute percentiles.
 
+## Combined PR9 to PR10 multi-agent/worktree topology
+
+PR9 and PR10 are sequential delivery checkpoints in one local DAG. GitHub
+stacked PRs are an optional review mirror, not an execution requirement.
+
+### Quarantined early PR10 preparation
+
+These packets may start after the named PR9 checkpoint, but cannot activate
+semantics or become ancestors of PR9:
+
+1. `pr10/prep-artifact-runtime` from `pr9/00-contract-spine`: artifact/profile
+   manifests, verifier, fake runtime ports, session-pool limits, and failure
+   fixtures. It defines no production default and performs no query wiring.
+2. `pr10/prep-evaluation-schema` from `pr9/i1-authorities`: workload/result/
+   evidence schemas and validators only. It cannot invent fixtures, access
+   locked labels, tune, or promote.
+3. `pr10/prep-vector-generation` from `pr9/i2-generations`: semantic projection
+   keys, receipts, checkpoints, atomic publication, and fake-vector tests. It
+   runs no inference against unstable chunks.
+
+After `pr9/49-aggregate-acceptance`, the Sol integrator creates `PR10_BASE` from
+that exact commit and cherry-picks only reviewed preparation commits onto
+`pr10/00-contract-replay`. Preparation branches are never merged wholesale and
+are deleted after replay and verification.
+
+### PR10 checkpoints
+
+1. `pr10/i1-foundation`: replayed contracts, artifacts/runtime, vector store,
+   projection admission, and platform compile proof.
+2. `pr10/i2-semantic-ready`: incremental projection, exact-flat semantic
+   retriever, offline lifecycle, and atomic publication.
+3. `pr10/i3-shadow-ready`: generic hybrid composition, protected exact tier,
+   byte-identical PR9 fallback subpayload, hydration, authorization, and
+   privacy caches.
+4. `pr10/i4-evidence-ready`: signed frozen run manifest plus locked shadow
+   measurements over saved accepted PR9 and semantic candidate lists.
+5. `pr10/49-aggregate-acceptance`: accepted profile, activation/rollback drill,
+   rebuild-only migration, semantic benchmarks, native-platform evidence, and
+   aggregate gates.
+
+### Roles, ownership, and integration
+
+- One Sol integrator owns shared spines, Cargo manifests/lockfile, dependency
+  selection, platform policy, migration registration, suite entrypoints,
+  checkpoint construction, conflicts, aggregate gates, rewrite-branch
+  integration, and cleanup.
+- Sol leads own semantic architecture/runtime and retrieval/evaluation
+  convergence. Bounded workers own exactly one leaf family: artifact/runtime,
+  projection/store, semantic adapter, privacy/activation, test module, or
+  benchmark packet.
+- Only the integrator edits `Cargo.toml`, `Cargo.lock`, crate/root `lib.rs`/
+  `mod.rs`, integration-suite `main.rs`, migrations, and repository-wide
+  architecture tests. PR9 exact/lexical/graph files are frozen inputs; PR10
+  workers do not modify them to make semantic tests pass.
+- Workers make two to four conventional green commits and never merge or
+  cherry-pick siblings. The integrator reviews and cherry-picks single-parent
+  commits in dependency order. A needed dependency first enters a new
+  checkpoint; consumers then restart or merge that checkpoint. Semantic
+  conflicts return to the producer.
+- Run focused checks in worker worktrees with ordinary Cargo. Let the local
+  shim allocate targets; never set target/data directories or stop Rust
+  Analyzer. The integrator serializes broad all-feature/platform gates in the
+  checkpoint worktree.
+- PR9 fast-forwards first, then PR10 fast-forwards only
+  `codex/tracedecay-total-redesign-plan`; neither targets `master`. Keep
+  `pr9/49-aggregate-acceptance` until PR10 lands. Remove a worker worktree only
+  after accepted commits are in
+  a checkpoint and the worktree is clean.
+
+### Hard activation barrier
+
+No locked semantic comparison starts until PR9's accepted profile, exact-tier
+contract, saved candidate lists, fallback-subpayload bytes, fixture validation, and
+baseline evidence are frozen. No activation occurs unless Plan 15 returns
+`accepted`, authorization/scope leakage is zero, protected exact results are
+unchanged, the PR9 fallback subpayload is byte-identical, generation
+compatibility holds, all
+resource ceilings pass, and cold offline rollback succeeds.
+
+Preparation or shadow commits may be retained after a `blocked`,
+`inconclusive`, `rejected`, `invalid_run`, or
+`runtime_fallback_observed` result, but PR10 is not complete and no semantic
+profile becomes eligible.
+
 ## Acceptance
 
-PR10 is complete when indexing, atomic publication, lexical-preserving search, bounded
-fusion/reranking/redundancy, artifact/offline lifecycle, configuration,
-status/Doctor, API/CLI/MCP/dashboard parity, corpus/resource/privacy gates,
-fault recovery, and rebuild-only migration pass direct tests. No separate
+PR10 is complete when semantic projection, atomic publication, PR9-preserving
+search, bounded generic fusion/reranking/redundancy, artifact/offline lifecycle,
+configuration, status/Doctor and future-surface conformance, locked
+corpus/resource/privacy gates, fault recovery, rollback, and rebuild-only
+migration pass direct tests. PR11/PR12/PR14 still own application, public
+transport, and dashboard adapters. No separate
 semantic endpoint, vector database, browser inference runtime, or model-specific
 transport is introduced. Queries never silently substitute a model/revision,
 download at query time, cascade to an unmeasured representation, or treat
@@ -463,10 +566,12 @@ semantic similarity as identity, impact, lineage, or equivalence.
 - Receipt fixtures reject missing, duplicate, extra, wrong-generation, wrong-
   digest, and wrong-key entries; crash/cancellation leaves the previous active
   pointer unchanged and no partial projection queryable.
-- Each retriever emits a separately inspectable ranked list. Disabling or
-  failing semantic retrieval leaves lexical and graph list bytes unchanged.
-  Fused explanations reproduce the declared RRF score and complete comparator
-  for every result.
+- The semantic adapter emits a separately inspectable generic
+  `RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>`; PR9 exact,
+  lexical, and graph outcomes are unchanged. Disabling or failing semantic
+  retrieval preserves Plan 15's named PR9 fallback subpayload bytes. Fused
+  explanations reproduce every declared generic profile
+  contribution and the complete comparator for every result.
 - Exact-hit retention and first-relevant-protected-hit Recall@10 are 100% over
   Plan 15's versioned protected-query set, with numerator, denominator, and
   support reported separately for symbols, qualified names, compiler/runtime
@@ -492,6 +597,11 @@ semantic similarity as identity, impact, lineage, or equivalence.
 - Split-adapter conformance produces identical results when lexical postings,
   graph evidence, vectors, receipts, and hydration payloads use separate stores,
   proving embeddings and no single physical table are authority.
+- Artifact fixtures reject unknown trust roots, bad/revoked signatures,
+  undeclared or duplicate members, path traversal, links, size expansion,
+  digest/length mismatch, incompatible runtime/platform pins, interrupted
+  publication, and deletion of active/rollback artifacts. Query execution
+  performs zero network/import/cache-discovery operations.
 - The checked-in benchmark corpus contains only sanitized fixtures and expected
   opaque anchors; raw private queries/source are absent. Promotion requires the
   Plan 15 locked report and cannot be inferred from public rank or aggregate
