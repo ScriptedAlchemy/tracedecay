@@ -670,7 +670,7 @@ fn reject_tool_result_truncation_detects_content_envelope() {
     let value = json!({
         "content": [{
             "type": "text",
-            "text": "{"truncated":true,"original_chars":16000,"handle":"h1"}"
+            "text": "{\"truncated\":true,\"original_chars\":16000,\"handle\":\"h1\"}"
         }]
     });
     let err = reject_tool_result_truncation(&value, "tracedecay_search").unwrap_err();
@@ -679,7 +679,7 @@ fn reject_tool_result_truncation_detects_content_envelope() {
     assert!(message.contains("tracedecay_retrieve"), "{message}");
     assert!(
         reject_tool_result_truncation(
-            &json!({ "content": [{ "type": "text", "text": "{"ok":true}" }] }),
+            &json!({ "content": [{ "type": "text", "text": "{\"ok\":true}" }] }),
             "tracedecay_search"
         )
         .is_ok()

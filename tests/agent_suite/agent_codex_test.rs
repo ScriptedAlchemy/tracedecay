@@ -5,9 +5,7 @@ use crate::agent_test_support::*;
 use crate::common::{EnvVarGuard, PROCESS_ENV_LOCK as AGENT_ENV_LOCK};
 use tempfile::TempDir;
 use tracedecay::agents::*;
-use tracedecay::automation::managed_skills::{
-    SkillInstallTarget, approve_managed_skill, create_managed_skill_draft,
-};
+use tracedecay::automation::managed_skills::{approve_managed_skill, create_managed_skill_draft};
 use tracedecay::config::USER_DATA_DIR_ENV;
 
 #[test]

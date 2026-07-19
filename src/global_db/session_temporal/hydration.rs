@@ -1685,11 +1685,14 @@ mod tests {
         let authorization = different_root_adapter
             .authorize(&snapshot, anchor.anchor_id())
             .await;
-        assert!(matches!(
-            authorization,
-            Ok(HydrationAuthorization::Denied(ref denial))
-                if denial.state() == HydrationStateV1::UnverifiableLegacy
-        ), "{authorization:?}");
+        assert!(
+            matches!(
+                authorization,
+                Ok(HydrationAuthorization::Denied(ref denial))
+                    if denial.state() == HydrationStateV1::UnverifiableLegacy
+            ),
+            "{authorization:?}"
+        );
     }
 
     #[tokio::test]
