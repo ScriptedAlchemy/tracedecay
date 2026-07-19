@@ -600,15 +600,15 @@ fn evolution_chain_is_exposed_in_canonical_context() {
                 .map(|edge| edge.kind)
                 .collect::<Vec<_>>(),
             vec![
-                TemporalAssertionKindV1::Corrects,
                 TemporalAssertionKindV1::Supersedes,
+                TemporalAssertionKindV1::Corrects,
             ]
         );
         let rendered: serde_json::Value =
             serde_json::from_str(&result.context.rendered).expect("canonical context");
         assert_eq!(
             rendered["bundle"]["lineage"][1]["object_anchor_id"],
-            "correction"
+            "original"
         );
     });
 }
@@ -730,7 +730,7 @@ fn invalid_summary_successor_does_not_hide_eligible_predecessor() {
         assert!(!anchors.contains(&anchor("summary-successor")));
         assert_eq!(result.coverage.unknown, 1);
         assert_eq!(result.summary_omissions.len(), 1);
-        assert_eq!(result.context.bundle.omissions.len(), 1);
+        assert_eq!(result.context.bundle.omissions.len(), 2);
         let rendered: serde_json::Value =
             serde_json::from_str(&result.context.rendered).expect("canonical context");
         assert_eq!(

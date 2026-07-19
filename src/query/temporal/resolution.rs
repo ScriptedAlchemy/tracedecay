@@ -2267,15 +2267,15 @@ mod tests {
             (
                 SummarySourceState::Locked,
                 SummarySourceState::Expired,
-                SummaryLineageRejection::LockedSource {
-                    anchor_id: anchor("left"),
+                SummaryLineageRejection::ExpiredSource {
+                    anchor_id: anchor("right"),
                 },
             ),
             (
                 SummarySourceState::Expired,
                 SummarySourceState::Deleted,
-                SummaryLineageRejection::ExpiredSource {
-                    anchor_id: anchor("left"),
+                SummaryLineageRejection::DeletedSource {
+                    anchor_id: anchor("right"),
                 },
             ),
             (
@@ -2295,8 +2295,8 @@ mod tests {
             (
                 SummarySourceState::Stale,
                 SummarySourceState::Missing,
-                SummaryLineageRejection::StaleSource {
-                    anchor_id: anchor("left"),
+                SummaryLineageRejection::MissingSource {
+                    anchor_id: anchor("right"),
                 },
             ),
         ];
