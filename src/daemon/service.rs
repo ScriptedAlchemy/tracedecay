@@ -12,6 +12,9 @@ use super::SOCKET_ENV;
 
 const LAUNCHD_LABEL: &str = "com.tracedecay.daemon";
 const LAUNCHD_PLIST_NAME: &str = "com.tracedecay.daemon.plist";
+// Cached project owners retain SQLite families and coordination locks. The
+// platform default of 256 descriptors is too small for multi-worktree use.
+const DAEMON_OPEN_FILE_LIMIT: u32 = 8_192;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonServiceSpec {
@@ -54,12 +57,14 @@ impl DaemonServiceSpec {
              ExecStart={} daemon run --socket {}\n\
              Restart=on-failure\n\
              RestartSec=2\n\
+             LimitNOFILE={}\n\
              \n\
              [Install]\n\
              WantedBy=default.target\n",
             systemd_escape_env_value(&service_path),
             self.tracedecay_bin.display(),
-            self.socket_path.display()
+            self.socket_path.display(),
+            DAEMON_OPEN_FILE_LIMIT,
         )
     }
 
@@ -137,6 +142,12 @@ impl DaemonServiceSpec {
                <key>ThrottleInterval</key>\n\
                <integer>2</integer>\n\
              \n\
+               <key>SoftResourceLimits</key>\n\
+               <dict>\n\
+                 <key>NumberOfFiles</key>\n\
+                 <integer>{open_file_limit}</integer>\n\
+               </dict>\n\
+             \n\
                <key>StandardOutPath</key>\n\
                <string>{stdout}</string>\n\
              \n\
@@ -147,6 +158,7 @@ impl DaemonServiceSpec {
             label = plist_xml_escape(LAUNCHD_LABEL),
             bin = plist_xml_escape(&self.tracedecay_bin.display().to_string()),
             socket = plist_xml_escape(&self.socket_path.display().to_string()),
+            open_file_limit = DAEMON_OPEN_FILE_LIMIT,
             stdout = plist_xml_escape(&data_dir.join("daemon.out.log").display().to_string()),
             stderr = plist_xml_escape(&data_dir.join("daemon.err.log").display().to_string()),
         ))
@@ -1284,6 +1296,7 @@ mod tests {
         ));
         assert!(unit.contains("Environment=\"PATH="));
         assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains("LimitNOFILE=8192"));
     }
 
     // The launchd render tests use Unix-style absolute binary paths, which
@@ -1325,6 +1338,9 @@ mod tests {
         assert!(plist.contains("<key>TRACEDECAY_DATA_DIR</key>"));
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<key>KeepAlive</key>"));
+        assert!(plist.contains("<key>SoftResourceLimits</key>"));
+        assert!(plist.contains("<key>NumberOfFiles</key>"));
+        assert!(plist.contains("<integer>8192</integer>"));
     }
 
     #[cfg(unix)]
