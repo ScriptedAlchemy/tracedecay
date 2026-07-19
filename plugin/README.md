@@ -1,9 +1,10 @@
 # TraceDecay Plugin Bundle
 
 This source tree builds the TraceDecay integrations for Claude Code, Codex,
-and Cursor. The installed bundles expose a host-specific MCP server key
-(`graph` for Claude/Codex, `tracedecay` for Cursor), shared workflow skills,
-and host-specific lifecycle hooks.
+Cursor, and Kimi Code. The installed bundles expose a host-specific MCP server
+key (`graph` for Claude/Codex, `tracedecay` for Cursor and Kimi Code), shared
+workflow skills, and host-specific lifecycle hooks (Kimi Code ships none in
+v1).
 
 ## Naming convention
 
@@ -13,9 +14,11 @@ key as `graph` (see `.mcp.json`) so those hosts render `plugin tracedecay graph`
 / `graph:…` instead of the redundant `tracedecay tracedecay`. Cursor uses the
 server key `tracedecay` in `mcp-cursor.json` because Cursor Settings surfaces
 that key literally (`plugin-tracedecay-graph` looked like a bare "graph"
-entry). The individual tool names keep their `tracedecay_` prefix (they are
-stable identifiers referenced by skills, docs, and analytics), and
-non-plugin/direct installs still register the server under the `tracedecay`
+entry). Kimi Code also uses `tracedecay`, embedded inline in
+`.kimi-plugin/plugin.json`. The individual tool names keep their
+`tracedecay_` prefix (they are stable identifiers referenced by skills, docs,
+and analytics), and non-plugin/direct installs still register the server under
+the `tracedecay`
 key (the `mcp__tracedecay__*` namespace). Skills announce themselves as
 `Using tracedecay:<skill-slug>` — the host prefix plus the skill slug, never a
 doubled `tracedecay` — and that single convention is applied to every
@@ -34,8 +37,10 @@ doubled `tracedecay` — and that single convention is applied to every
 - `.mcp.json`: shared Claude/Codex MCP config. Codex rewrites args/env by
   install scope; Claude rewrites the command to the resolved binary path.
 - `mcp-cursor.json`: Cursor MCP config, deployed as `mcp.json`.
-- `README-claude.md`, `README-codex.md`, `README-cursor.md`: host README
-  files, deployed as `README.md`.
+- `.kimi-plugin/plugin.json`: Kimi Code manifest. It embeds
+  `mcpServers.tracedecay` inline, so there is no separate Kimi MCP config file.
+- `README-claude.md`, `README-codex.md`, `README-cursor.md`, `README-kimi.md`:
+  host README files, deployed as `README.md`.
 
 ## Search Routing
 

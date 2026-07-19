@@ -1073,6 +1073,79 @@ fn kiro_update_plugin_leaves_user_managed_agent_files_alone() {
 }
 
 // ---------------------------------------------------------------------------
+// Kimi
+// ---------------------------------------------------------------------------
+
+#[test]
+fn kimi_update_plugin_refreshes_bundle_and_preserves_user_config() {
+    let home = TempDir::new().unwrap();
+    let _agent_env = AgentEnvLock::pin(&home);
+    let kimi_code_home = home.path().join("kimi-code-home");
+    let _kimi_home = EnvVarGuard::set(
+        tracedecay::agents::kimi::KIMI_CODE_HOME_ENV,
+        &kimi_code_home,
+    );
+    let kimi = get_integration("kimi").unwrap();
+    kimi.install(&ctx(home.path(), OLD_BIN)).unwrap();
+
+    let managed_dir = kimi_code_home.join("plugins/managed/tracedecay");
+    let installed_path = kimi_code_home.join("plugins/installed.json");
+    // Legacy user config that update-plugin must never write.
+    let legacy_mcp = home.path().join(".kimi/mcp.json");
+    let legacy_mcp_before = bytes(&legacy_mcp);
+
+    // A user-disabled registry entry keeps its flag through the refresh.
+    let mut installed = read_json(&installed_path);
+    installed["plugins"][0]["enabled"] = json!(false);
+    std::fs::write(
+        &installed_path,
+        serde_json::to_string_pretty(&installed).unwrap(),
+    )
+    .unwrap();
+    let entry_before = read_json(&installed_path)["plugins"][0].clone();
+
+    let outcome = kimi.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
+    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
+        panic!("expected kimi update_plugin to refresh the deployed bundle");
+    };
+    assert_eq!(paths, vec![managed_dir.clone()]);
+
+    // Legacy config byte-identical; bundle re-baked with the new bin + version.
+    assert_eq!(bytes(&legacy_mcp), legacy_mcp_before);
+    let manifest = text(&managed_dir.join(".kimi-plugin/plugin.json"));
+    assert!(manifest.contains(NEW_BIN));
+    assert!(manifest.contains(env!("CARGO_PKG_VERSION")));
+
+    // Registry entry refreshed: enabled/installedAt preserved, updatedAt moved.
+    let entry_after = read_json(&installed_path)["plugins"][0].clone();
+    assert_eq!(entry_after["enabled"], json!(false));
+    assert_eq!(entry_after["installedAt"], entry_before["installedAt"]);
+    assert!(
+        entry_after["updatedAt"].as_str().unwrap() >= entry_before["updatedAt"].as_str().unwrap(),
+        "update_plugin must not move updatedAt backwards: {entry_after}"
+    );
+}
+
+#[test]
+fn kimi_update_plugin_reports_not_installed_without_a_plugin() {
+    let home = TempDir::new().unwrap();
+    let _agent_env = AgentEnvLock::pin(&home);
+    let _kimi_home = EnvVarGuard::set(
+        tracedecay::agents::kimi::KIMI_CODE_HOME_ENV,
+        home.path().join("kimi-code-home"),
+    );
+    let kimi = get_integration("kimi").unwrap();
+    let outcome = kimi.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
+    assert!(matches!(outcome, UpdatePluginOutcome::NotInstalled));
+    assert!(
+        !home
+            .path()
+            .join("kimi-code-home/plugins/managed/tracedecay")
+            .exists()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Config-only integrations
 // ---------------------------------------------------------------------------
 
@@ -1090,7 +1163,6 @@ fn config_only_integrations_report_config_only_and_write_nothing() {
         "roo-code",
         "antigravity",
         "kilo",
-        "kimi",
         "vibe",
     ];
     for id in config_only {

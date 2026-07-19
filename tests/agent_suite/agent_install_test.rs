@@ -333,6 +333,10 @@ fn test_kimi_install_creates_config() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let _agent_env = crate::common::AgentEnvLock::pin(home);
+    let _kimi_code_home = EnvVarGuard::set(
+        tracedecay::agents::kimi::KIMI_CODE_HOME_ENV,
+        home.join(".kimi-code"),
+    );
     let ctx = make_install_ctx(home);
     KimiIntegration.install(&ctx).unwrap();
 
@@ -360,6 +364,10 @@ fn test_kimi_install_then_uninstall() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let _agent_env = crate::common::AgentEnvLock::pin(home);
+    let _kimi_code_home = EnvVarGuard::set(
+        tracedecay::agents::kimi::KIMI_CODE_HOME_ENV,
+        home.join(".kimi-code"),
+    );
     let ctx = make_install_ctx(home);
 
     KimiIntegration.install(&ctx).unwrap();
@@ -388,6 +396,10 @@ fn test_kimi_is_detected_and_has_tracedecay() {
     let dir = TempDir::new().unwrap();
     let home = dir.path();
     let _agent_env = crate::common::AgentEnvLock::pin(home);
+    let _kimi_code_home = EnvVarGuard::set(
+        tracedecay::agents::kimi::KIMI_CODE_HOME_ENV,
+        home.join(".kimi-code"),
+    );
 
     assert!(!KimiIntegration.is_detected(home));
     assert!(!KimiIntegration.has_tracedecay(home));
@@ -396,6 +408,261 @@ fn test_kimi_is_detected_and_has_tracedecay() {
     KimiIntegration.install(&ctx).unwrap();
 
     assert!(KimiIntegration.is_detected(home));
+    assert!(KimiIntegration.has_tracedecay(home));
+}
+
+// ---------------------------------------------------------------------------
+// Kimi Code CLI native plugin
+// ---------------------------------------------------------------------------
+
+/// Reads `<kimi-code-home>/plugins/installed.json` and returns the tracedecay
+/// entry (tests fail loudly when the registry or entry is missing).
+fn kimi_installed_entry(kimi_code_home: &std::path::Path) -> serde_json::Value {
+    let installed_path = kimi_code_home.join("plugins/installed.json");
+    let installed: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&installed_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", installed_path.display())),
+    )
+    .unwrap_or_else(|e| panic!("parse {}: {e}", installed_path.display()));
+    assert_eq!(installed["version"], serde_json::json!(1));
+    installed["plugins"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{}: plugins should be an array", installed_path.display()))
+        .iter()
+        .find(|entry| entry["id"] == "tracedecay")
+        .cloned()
+        .unwrap_or_else(|| panic!("{}: missing tracedecay entry", installed_path.display()))
+}
+
+#[test]
+fn test_kimi_install_deploys_native_plugin() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
+    let kimi_code_home = home.join("kimi-code-home");
+    let _kimi_home = EnvVarGuard::set(
+        tracedecay::agents::kimi::KIMI_CODE_HOME_ENV,
+        &kimi_code_home,
+    );
+    let ctx = make_install_ctx(home);
+    KimiIntegration.install(&ctx).unwrap();
+
+    // Managed bundle: manifest, README, at least one skill and one command.
+    let managed_dir = kimi_code_home.join("plugins/managed/tracedecay");
+    let manifest_path = managed_dir.join(".kimi-plugin/plugin.json");
+    assert!(manifest_path.exists(), "plugin manifest should be deployed");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["name"], "tracedecay");
+    assert_eq!(
+        manifest["version"],
+        env!("CARGO_PKG_VERSION"),
+        "manifest should be stamped with the crate version"
+    );
+    assert_eq!(
+        manifest["mcpServers"]["tracedecay"]["command"],
+        ctx.tracedecay_bin,
+        "manifest MCP command should bake in the resolved tracedecay binary"
+    );
+
+    let mut deployed = Vec::new();
+    collect_files_recursive(&managed_dir, &managed_dir, &mut deployed);
+    let relatives: Vec<String> = deployed
+        .iter()
+        .map(|(relative, _)| relative.to_string_lossy().replace('\\', "/"))
+        .collect();
+    assert!(
+        relatives.iter().any(|path| path == "README.md"),
+        "bundle should ship README.md, got {relatives:?}"
+    );
+    assert!(
+        relatives
+            .iter()
+            .any(|path| path.starts_with("skills/") && path.ends_with("SKILL.md")),
+        "bundle should ship skills/<name>/SKILL.md entries, got {relatives:?}"
+    );
+    assert!(
+        relatives
+            .iter()
+            .any(|path| path.starts_with("commands/") && path.ends_with(".md")),
+        "bundle should ship commands/*.md entries, got {relatives:?}"
+    );
+
+    // Registry entry.
+    let entry = kimi_installed_entry(&kimi_code_home);
+    assert_eq!(entry["source"], "local-path");
+    assert_eq!(entry["enabled"], serde_json::json!(true));
+    assert!(
+        entry["installedAt"].as_str().is_some_and(|ts| ts.ends_with('Z')),
+        "installedAt should be an ISO-8601 UTC timestamp: {entry}"
+    );
+    assert_eq!(
+        entry["installedAt"], entry["updatedAt"],
+        "fresh install should set updatedAt to installedAt"
+    );
+    let root = entry["root"].as_str().expect("root should be a string");
+    assert_eq!(
+        std::path::Path::new(root),
+        managed_dir.canonicalize().unwrap().as_path(),
+        "root should be the canonical managed plugin dir"
+    );
+}
+
+#[test]
+fn test_kimi_reinstall_preserves_enabled_and_installed_at() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
+    let kimi_code_home = home.join("kimi-code-home");
+    let _kimi_home = EnvVarGuard::set(
+        tracedecay::agents::kimi::KIMI_CODE_HOME_ENV,
+        &kimi_code_home,
+    );
+    let ctx = make_install_ctx(home);
+    KimiIntegration.install(&ctx).unwrap();
+
+    // Simulate a user-disabled, long-installed entry.
+    let installed_path = kimi_code_home.join("plugins/installed.json");
+    let mut installed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&installed_path).unwrap()).unwrap();
+    let entry = installed["plugins"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|entry| entry["id"] == "tracedecay")
+        .unwrap();
+    entry["enabled"] = serde_json::json!(false);
+    entry["installedAt"] = serde_json::json!("2020-01-01T00:00:00Z");
+    std::fs::write(
+        &installed_path,
+        format!("{}\n", serde_json::to_string_pretty(&installed).unwrap()),
+    )
+    .unwrap();
+
+    KimiIntegration.install(&ctx).unwrap();
+
+    let entry = kimi_installed_entry(&kimi_code_home);
+    assert_eq!(
+        entry["enabled"],
+        serde_json::json!(false),
+        "reinstall must preserve a user-set enabled:false"
+    );
+    assert_eq!(
+        entry["installedAt"],
+        serde_json::json!("2020-01-01T00:00:00Z"),
+        "reinstall must preserve the original installedAt"
+    );
+    let updated_at = entry["updatedAt"].as_str().unwrap();
+    assert!(
+        updated_at > "2020-01-01T00:00:00Z",
+        "reinstall must bump updatedAt, got {updated_at}"
+    );
+}
+
+#[test]
+fn test_kimi_install_migrates_kimi_code_mcp_json() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
+    let kimi_code_home = home.join("kimi-code-home");
+    let _kimi_home = EnvVarGuard::set(
+        tracedecay::agents::kimi::KIMI_CODE_HOME_ENV,
+        &kimi_code_home,
+    );
+    let mcp_path = kimi_code_home.join("mcp.json");
+    std::fs::create_dir_all(&kimi_code_home).unwrap();
+    std::fs::write(
+        &mcp_path,
+        "{\n  \"mcpServers\": {\n    \"tracedecay\": { \"command\": \"/old/tracedecay\", \"args\": [\"serve\"] },\n    \"other\": { \"command\": \"other-bin\" }\n  }\n}\n",
+    )
+    .unwrap();
+
+    let ctx = make_install_ctx(home);
+    KimiIntegration.install(&ctx).unwrap();
+
+    // The plugin now owns the MCP server: the direct registration is stripped,
+    // foreign servers are kept, and a backup was taken first.
+    let migrated: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
+    assert!(
+        migrated["mcpServers"].get("tracedecay").is_none(),
+        "install should strip mcpServers.tracedecay from <kimi-code-home>/mcp.json"
+    );
+    assert_eq!(migrated["mcpServers"]["other"]["command"], "other-bin");
+    assert!(
+        kimi_code_home.join("mcp.json.bak").exists(),
+        "migration should leave a .bak backup"
+    );
+
+    // When tracedecay was the only entry, the file is deleted outright.
+    std::fs::write(
+        &mcp_path,
+        "{\n  \"mcpServers\": {\n    \"tracedecay\": { \"command\": \"/old/tracedecay\", \"args\": [\"serve\"] }\n  }\n}\n",
+    )
+    .unwrap();
+    KimiIntegration.install(&ctx).unwrap();
+    assert!(
+        !mcp_path.exists(),
+        "mcp.json left empty by the migration should be deleted"
+    );
+}
+
+#[test]
+fn test_kimi_uninstall_removes_native_plugin() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
+    let kimi_code_home = home.join("kimi-code-home");
+    let _kimi_home = EnvVarGuard::set(
+        tracedecay::agents::kimi::KIMI_CODE_HOME_ENV,
+        &kimi_code_home,
+    );
+    let ctx = make_install_ctx(home);
+    KimiIntegration.install(&ctx).unwrap();
+
+    let managed_dir = kimi_code_home.join("plugins/managed/tracedecay");
+    assert!(managed_dir.exists());
+    assert_eq!(
+        kimi_installed_entry(&kimi_code_home)["id"],
+        "tracedecay"
+    );
+
+    KimiIntegration.uninstall(&ctx).unwrap();
+
+    assert!(
+        !managed_dir.exists(),
+        "uninstall should remove the managed plugin dir"
+    );
+    let installed_path = kimi_code_home.join("plugins/installed.json");
+    let installed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&installed_path).unwrap()).unwrap();
+    assert!(
+        installed["plugins"].as_array().unwrap().is_empty(),
+        "uninstall should leave installed.json with an empty plugins array"
+    );
+    assert!(
+        !KimiIntegration.has_tracedecay(home),
+        "has_tracedecay should be false after uninstall"
+    );
+}
+
+#[test]
+fn test_kimi_has_tracedecay_via_plugin_entry_alone() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
+    let kimi_code_home = home.join("kimi-code-home");
+    let _kimi_home = EnvVarGuard::set(
+        tracedecay::agents::kimi::KIMI_CODE_HOME_ENV,
+        &kimi_code_home,
+    );
+    let ctx = make_install_ctx(home);
+    KimiIntegration.install(&ctx).unwrap();
+
+    // Drop the entire legacy ~/.kimi tree: the installed.json plugin entry
+    // alone must still count as an installation.
+    std::fs::remove_dir_all(home.join(".kimi")).unwrap();
+    assert!(!home.join(".kimi/mcp.json").exists());
     assert!(KimiIntegration.has_tracedecay(home));
 }
 

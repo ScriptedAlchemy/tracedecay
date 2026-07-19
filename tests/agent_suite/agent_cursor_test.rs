@@ -517,6 +517,12 @@ async fn test_prompt_integrations_export_active_managed_skill_indexes() {
         .unwrap();
 
     let ctx = make_install_ctx(home);
+    // Pin the Kimi Code CLI home so a developer-set KIMI_CODE_HOME cannot leak
+    // this test's plugin deploy into the real home.
+    let _kimi_code_home = EnvVarGuard::set(
+        tracedecay::agents::kimi::KIMI_CODE_HOME_ENV,
+        home.join(".kimi-code"),
+    );
     ClaudeIntegration.install(&ctx).unwrap();
     KimiIntegration.install(&ctx).unwrap();
     OpenCodeIntegration.install(&ctx).unwrap();

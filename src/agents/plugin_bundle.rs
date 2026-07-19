@@ -6,7 +6,7 @@
 //!
 //! Layout of `plugin/`:
 //! - `plugin/skills/*/SKILL.md` — the 15 shared model-invocable skills. All
-//!   three hosts deploy the full set; the workflow dispatcher skills were
+//!   four hosts deploy the full set; the workflow dispatcher skills were
 //!   removed (their behavior lives in the native slash commands below), so no
 //!   host filters the skill set today. The `cursor_skill_files` filter is kept
 //!   as a guard against a dispatcher skill being reintroduced.
@@ -20,8 +20,10 @@
 //! - `plugin/hooks/hooks-<host>.json` — per-host hook wiring; each deploys to
 //!   `hooks/hooks.json`.
 //! - `plugin/.claude-plugin/{plugin,marketplace}.json`,
-//!   `plugin/.cursor-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json` —
-//!   host manifests (deploy to the same dot-dir path).
+//!   `plugin/.cursor-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json`,
+//!   `plugin/.kimi-plugin/plugin.json` — host manifests (deploy to the same
+//!   dot-dir path). Kimi's manifest also carries its MCP server inline
+//!   (`mcpServers.tracedecay`), so there is no separate Kimi MCP config file.
 //! - `plugin/.mcp.json` — shared Claude/Codex MCP config (byte-identical);
 //!   `plugin/mcp-cursor.json` — Cursor MCP config (deploys to `mcp.json`).
 //! - `plugin/README-<host>.md` — per-host README (deploys to `README.md`).
@@ -61,6 +63,8 @@ pub(crate) fn stamp_manifest_version_with(
 ///   rather than the redundant `tracedecay tracedecay`.
 /// - Cursor uses `tracedecay` because Settings surfaces the MCP server key
 ///   literally (`plugin-tracedecay-graph` looked like a bare "graph" entry).
+/// - Kimi uses `tracedecay` and embeds `mcpServers` inline in its manifest,
+///   so the installer rewrites the command on the manifest itself.
 pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
     let mut mcp: serde_json::Value = serde_json::from_str(raw)?;
     let servers = mcp
@@ -243,6 +247,13 @@ pub const CODEX_MANIFEST_FILES: &[PluginFile] = &[
     plugin_file!("hooks/hooks.json", "hooks/hooks-codex.json"),
 ];
 
+/// Kimi manifest + README. The manifest embeds `mcpServers.tracedecay`
+/// inline, so Kimi needs no separate MCP config file.
+pub const KIMI_MANIFEST_FILES: &[PluginFile] = &[
+    plugin_file!(".kimi-plugin/plugin.json", ".kimi-plugin/plugin.json"),
+    plugin_file!("README.md", "README-kimi.md"),
+];
+
 /// Compose a host's deploy set as deterministic `(relative, contents)` tuples.
 fn compose(
     sections: &[&'static [PluginFile]],
@@ -288,6 +299,14 @@ pub fn cursor_files() -> Vec<(&'static str, &'static str)> {
 /// dispatchers, plus any support files). Codex ships no agents/commands/rules.
 pub fn codex_files() -> Vec<(&'static str, &'static str)> {
     compose(&[CODEX_MANIFEST_FILES], all_skill_files())
+}
+
+/// Files Kimi deploys: manifest + README + the shared Claude command Markdown
+/// (Kimi plugin commands use the same frontmatter/`$ARGUMENTS` format, so the
+/// shared sources ship verbatim) + every skill file. Kimi ships no
+/// agents/rules/hooks in v1.
+pub fn kimi_files() -> Vec<(&'static str, &'static str)> {
+    compose(&[KIMI_MANIFEST_FILES, CLAUDE_COMMAND_FILES], all_skill_files())
 }
 
 #[cfg(test)]
@@ -361,6 +380,7 @@ mod tests {
         assert_unique_relatives(&claude_files(), "claude");
         assert_unique_relatives(&cursor_files(), "cursor");
         assert_unique_relatives(&codex_files(), "codex");
+        assert_unique_relatives(&kimi_files(), "kimi");
     }
 
     #[test]
@@ -386,7 +406,7 @@ mod tests {
         // The macro embeds at compile time, so a missing source fails the build.
         // Every file we ship (skills, manifests, mcp, hooks, README) is
         // non-empty, so an empty embed signals a truncated or wrong source.
-        for host in [claude_files(), cursor_files(), codex_files()] {
+        for host in [claude_files(), cursor_files(), codex_files(), kimi_files()] {
             for (relative, contents) in host {
                 assert!(!contents.is_empty(), "{relative} embedded empty");
             }
@@ -417,6 +437,95 @@ mod tests {
         );
         // Codex: skills + 4 manifest (dot + mcp + hooks + README).
         assert_eq!(codex_files().len(), all_skills + 4);
+        // Kimi: skills + 2 manifest (dot + README) + 13 shared commands.
+        assert_eq!(kimi_files().len(), all_skills + 2 + 13);
+    }
+
+    #[test]
+    fn kimi_manifest_declares_identity_and_inline_mcp_server() {
+        let manifest = kimi_files()
+            .into_iter()
+            .find(|(relative, _)| *relative == ".kimi-plugin/plugin.json")
+            .map(|(_, contents)| contents)
+            .expect("kimi deploy set must include .kimi-plugin/plugin.json");
+        let parsed: serde_json::Value = serde_json::from_str(manifest).unwrap();
+        assert_eq!(parsed["name"], "tracedecay");
+        assert_eq!(parsed["version"], "0.0.0");
+        let server = &parsed["mcpServers"]["tracedecay"];
+        assert!(
+            server.is_object(),
+            "kimi manifest must declare mcpServers.tracedecay"
+        );
+        assert_eq!(server["command"], "tracedecay");
+        assert_eq!(server["args"], serde_json::json!(["serve"]));
+        assert!(
+            parsed["mcpServers"].get("graph").is_none(),
+            "kimi manifest must not declare mcpServers.graph"
+        );
+    }
+
+    #[test]
+    fn kimi_files_ship_every_skill_command_and_the_readme() {
+        let files = kimi_files();
+
+        // Every embedded skill file deploys under its shared skills/ path.
+        for skill in GENERATED_SKILL_FILES {
+            assert!(
+                files.iter().any(|(relative, _)| *relative == skill.relative),
+                "kimi deploy set is missing {}",
+                skill.relative
+            );
+        }
+
+        // The shared Claude commands deploy verbatim under commands/.
+        for command in CLAUDE_COMMAND_FILES {
+            let deployed = files
+                .iter()
+                .find(|(relative, _)| *relative == command.relative)
+                .map_or_else(
+                    || panic!("kimi deploy set is missing {}", command.relative),
+                    |(_, contents)| *contents,
+                );
+            assert_eq!(
+                deployed, command.contents,
+                "kimi must ship {} verbatim",
+                command.relative
+            );
+        }
+
+        // The Kimi README deploys as README.md.
+        let readme = files
+            .iter()
+            .find(|(relative, _)| *relative == "README.md")
+            .map(|(_, contents)| *contents)
+            .expect("kimi deploy set must include README.md");
+        assert!(
+            readme.contains("# TraceDecay Kimi Code Plugin"),
+            "kimi README.md must come from README-kimi.md"
+        );
+    }
+
+    /// The installer helpers operate on the manifest directly: the version
+    /// stamp rewrites `version`, and `set_mcp_command` rewrites the inline
+    /// `mcpServers.tracedecay.command`.
+    #[test]
+    fn kimi_manifest_round_trips_through_installer_rewrites() {
+        let raw = KIMI_MANIFEST_FILES
+            .iter()
+            .find(|file| file.relative == ".kimi-plugin/plugin.json")
+            .map(|file| file.contents)
+            .expect("kimi manifest must be embedded");
+
+        let stamped = stamp_manifest_version(raw).unwrap();
+        let stamped: serde_json::Value = serde_json::from_str(&stamped).unwrap();
+        assert_eq!(stamped["version"], env!("CARGO_PKG_VERSION"));
+
+        let rewired = set_mcp_command(raw, "/abs/tracedecay").unwrap();
+        let rewired: serde_json::Value = serde_json::from_str(&rewired).unwrap();
+        assert_eq!(
+            rewired["mcpServers"]["tracedecay"]["command"],
+            "/abs/tracedecay"
+        );
     }
 
     #[test]
