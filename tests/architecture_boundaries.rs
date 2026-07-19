@@ -50,7 +50,7 @@ const QUERY_ALLOWED_MACROS: &[&str] = &[
 ];
 const QUERY_ALLOWED_PRELUDE_PATH_ROOTS: &[&str] = &[
     "Box", "Option", "Result", "String", "Vec", "bool", "char", "f32", "f64", "i8", "i16", "i32",
-    "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64", "u128", "usize", "clippy",
+    "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64", "u128", "usize",
 ];
 const QUERY_ALLOWED_DERIVES: &[&str] = &[
     "Clone",
@@ -862,18 +862,35 @@ fn scan_use_tree(
 fn scan_qualified_paths(tokens: &[Token]) -> Vec<(usize, Vec<String>)> {
     let mut paths = Vec::new();
     let use_tokens = use_token_mask(tokens);
+    let mut index = 0usize;
 
-    for index in 0..tokens.len() {
+    while index < tokens.len() {
+        if tokens.get(index) == Some(&Token::Punct('#')) {
+            let bracket = if tokens.get(index + 1) == Some(&Token::Punct('!')) {
+                index + 2
+            } else {
+                index + 1
+            };
+            if tokens.get(bracket) == Some(&Token::Punct('['))
+                && let Some(end) = matching_delimiter(tokens, bracket, '[', ']')
+            {
+                index = end + 1;
+                continue;
+            }
+        }
         if use_tokens[index] {
+            index += 1;
             continue;
         }
         let Some(Token::Ident(segment)) = tokens.get(index) else {
+            index += 1;
             continue;
         };
         if index >= 2
             && is_path_separator(tokens, index - 2)
             && matches!(tokens.get(index - 3), Some(Token::Ident(_)))
         {
+            index += 1;
             continue;
         }
         let mut path = vec![segment.clone()];
@@ -888,6 +905,7 @@ fn scan_qualified_paths(tokens: &[Token]) -> Vec<(usize, Vec<String>)> {
         if path.len() > 1 {
             paths.push((index, path));
         }
+        index += 1;
     }
 
     paths
@@ -2780,6 +2798,28 @@ fn query_source_guard_rejects_import_path_and_macro_bypasses() {
             "query source guard missed database crate {database_crate}: {violations:?}"
         );
     }
+}
+
+#[test]
+fn query_source_guard_scopes_clippy_lint_to_allowlisted_attribute() {
+    let accepted = query_source_violations(
+        r#"
+        #[allow(clippy::too_many_arguments)]
+        fn construct() {}
+        "#,
+    );
+    assert!(
+        accepted.is_empty(),
+        "allowlisted clippy lint attribute produced violations: {accepted:?}"
+    );
+
+    let violations = query_source_violations("clippy::undeclared_lint_path();");
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("clippy")),
+        "query source guard accepted an unresolved clippy path: {violations:?}"
+    );
 }
 
 #[test]
