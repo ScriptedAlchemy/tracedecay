@@ -400,6 +400,16 @@ async fn retained_project_and_profile_handles_construct_retrieval_services() {
 }
 
 #[tokio::test]
+async fn fresh_direct_root_constructs_the_project_retrieval_service() {
+    let (cg, _dir, _pin) = indexed_project().await;
+    let server = McpServer::new(cg, None).await;
+
+    assert!(server.session_db.is_some());
+    assert!(server.project_session_retrieval_service.is_some());
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn transport_selects_one_service_and_all_registered_never_invokes() {
     let (server, _dir, _pin, _project, _profile) = server_with_authorities().await;
 

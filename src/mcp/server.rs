@@ -5,7 +5,7 @@
 //! The server exposes code graph tools via the Model Context Protocol,
 //! allowing AI assistants to query the code graph interactively.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -16,9 +16,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    ActorId, CompactContextLineageEdgeV1, HydrationStateV1, PayloadReferenceV1, ProjectId,
-    RepositoryId, RetrievalAnchorId, RetrievalGrainV1, SessionAuthorityClassV1,
-    TemporalAssertionKindV1, TemporalCoverageCountsV1, TemporalModeV1, UtcMicros, WorktreeId,
+    ActorId, PayloadReferenceV1, ProjectId, RepositoryId, RetrievalGrainV1,
+    TemporalCoverageCountsV1, TemporalModeV1, WorktreeId,
 };
 
 use crate::application::context::{
@@ -38,8 +37,9 @@ use crate::application::session::{
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{
-    AuthorizedSessionExpandCursorBinding, GlobalDb, GlobalDbSessionTemporalExecution,
-    ProjectRegistryContext,
+    AuthorizedSessionDescribeRequest, AuthorizedSessionExpandCursorBinding,
+    AuthorizedSessionExpandRequest, CompatibilityReadError, CompatibilityTemporalMetadata,
+    GlobalDb, GlobalDbSessionTemporalExecution, ProjectRegistryContext,
 };
 use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
@@ -58,9 +58,7 @@ use crate::sessions::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
 };
-use crate::sessions::lcm::{
-    LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmExpandRequest, LcmExpandTarget,
-};
+use crate::sessions::lcm::LcmExpandTarget;
 use crate::sessions::{SessionMessageSearchResult, SessionMessageType, SessionSearchScope};
 use crate::store::GlobalDbSessionTemporalStore;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
@@ -1685,316 +1683,35 @@ impl DaemonSessionRetrievalService {
         })
     }
 
-    async fn lcm_temporal_metadata(
+    fn lcm_authorization_digest(&self, provider: &str) -> String {
+        format!(
+            "sha256:{}",
+            hex::encode(message_search_digest(
+                b"tracedecay.mcp.lcm.authorization.v1\0",
+                &self.root.identity,
+                Some(provider),
+            ))
+        )
+    }
+
+    fn lcm_temporal_view(
         &self,
-        session_id: &str,
-        anchors: Vec<RetrievalAnchorId>,
-        state: HydrationStateV1,
-    ) -> Option<SessionTemporalMetadataView> {
-        let snapshot = self.database.read_snapshot().await.ok()?;
-        let mut rows = snapshot
-            .query(
-                "SELECT generation, frozen_watermarks_json
-                 FROM session_temporal_generations
-                 WHERE session_id = ?1 AND state = 'active'
-                 ORDER BY generation DESC
-                 LIMIT 2",
-                [session_id],
-            )
-            .await
-            .ok()?;
-        let row = rows.next().await.ok()??;
-        let generation = u64::try_from(row.get::<i64>(0).ok()?).ok()?;
-        let encoded = row.get::<String>(1).ok()?;
-        if rows.next().await.ok()?.is_some() {
-            return None;
-        }
-        let frozen: Value = serde_json::from_str(&encoded).ok()?;
-        if frozen["active_generation"].as_u64()? != generation {
-            return None;
-        }
-        let visible = if state == HydrationStateV1::Available {
-            anchors.len() as u64
-        } else {
-            0
-        };
-        let redacted = if state == HydrationStateV1::Redacted {
-            anchors.len() as u64
-        } else {
-            0
-        };
-        let hidden = if matches!(
-            state,
-            HydrationStateV1::Unauthorized
-                | HydrationStateV1::Locked
-                | HydrationStateV1::RetentionExpired
-        ) {
-            anchors.len() as u64
-        } else {
-            0
-        };
-        let unknown = if matches!(
-            state,
-            HydrationStateV1::RetainedButUnavailable
-                | HydrationStateV1::Deleted
-                | HydrationStateV1::UnverifiableLegacy
-        ) {
-            anchors.len() as u64
-        } else {
-            0
-        };
-        Some(SessionTemporalMetadataView {
-            anchors,
+        temporal: CompatibilityTemporalMetadata,
+    ) -> SessionTemporalMetadataView {
+        SessionTemporalMetadataView {
+            anchors: temporal.anchors,
             watermarks: SessionTemporalWatermarksView {
-                generation,
-                source: frozen["source_frontier"].as_u64()?,
-                projection: frozen["projection_frontier"].as_u64()?,
-                index: frozen["projection_frontier"].as_u64()?,
-                summary: frozen["summary_frontier"].as_u64()?,
+                generation: temporal.watermarks.generation,
+                source: temporal.watermarks.source,
+                projection: temporal.watermarks.projection,
+                index: temporal.watermarks.index,
+                summary: temporal.watermarks.summary,
             },
-            coverage: TemporalCoverageCountsV1 {
-                visible,
-                hidden,
-                unknown,
-                redacted,
-            },
+            coverage: temporal.coverage,
             cursor: None,
             explanations: Vec::new(),
             authorized_root: self.root.authorized_root.clone(),
-        })
-    }
-
-    async fn lcm_anchor_state(&self, anchor: &RetrievalAnchorId) -> Option<HydrationStateV1> {
-        let snapshot = self.database.read_snapshot().await.ok()?;
-        let mut rows = snapshot
-            .query(
-                "SELECT anchor_json, owner_json
-                 FROM retrieval_anchors
-                 WHERE anchor_id = ?1
-                 LIMIT 2",
-                [anchor.as_str()],
-            )
-            .await
-            .ok()?;
-        let row = rows.next().await.ok()??;
-        let anchor_json = row.get::<String>(0).ok()?;
-        let owner_json = row.get::<String>(1).ok()?;
-        if rows.next().await.ok()?.is_some() {
-            return Some(HydrationStateV1::RetainedButUnavailable);
         }
-        let anchor_value: Value = serde_json::from_str(&anchor_json).ok()?;
-        let owner_value: Value = serde_json::from_str(&owner_json).ok()?;
-        if anchor_value["anchor_id"].as_str() != Some(anchor.as_str())
-            || anchor_value["owner"] != owner_value
-        {
-            return Some(HydrationStateV1::UnverifiableLegacy);
-        }
-        Some(match anchor_value["payload_access"].as_str()? {
-            "eligible" => HydrationStateV1::Available,
-            "redacted" => HydrationStateV1::Redacted,
-            "quarantined" => HydrationStateV1::Locked,
-            "retention_expired" => HydrationStateV1::RetentionExpired,
-            "deleted" => HydrationStateV1::Deleted,
-            "unavailable" | "ambiguous" => HydrationStateV1::RetainedButUnavailable,
-            _ => HydrationStateV1::UnverifiableLegacy,
-        })
-    }
-
-    async fn lcm_session_anchors(
-        &self,
-        provider: &str,
-        session_id: &str,
-    ) -> Option<Vec<RetrievalAnchorId>> {
-        let snapshot = self.database.read_snapshot().await.ok()?;
-        let mut rows = snapshot
-            .query(
-                "SELECT anchor_id FROM (
-                    SELECT occurrence.retrieval_anchor_id AS anchor_id
-                    FROM session_temporal_generations generation
-                    JOIN session_occurrences occurrence
-                      ON occurrence.session_id = generation.session_id
-                     AND occurrence.generation = generation.generation
-                    JOIN observations observation
-                      ON observation.observation_id = occurrence.source_observation_id
-                    WHERE generation.session_id = ?1
-                      AND generation.state = 'active'
-                      AND json_extract(
-                          observation.observation_json,
-                          '$.identity.source.provider'
-                      ) = ?2
-                    UNION
-                    SELECT summary.summary_anchor_id AS anchor_id
-                    FROM session_summary_nodes summary
-                    WHERE summary.session_id = ?1
-                      AND json_extract(summary.publication_json, '$.provider') = ?2
-                 )
-                 ORDER BY anchor_id
-                 LIMIT 257",
-                libsql::params![session_id, provider],
-            )
-            .await
-            .ok()?;
-        let mut anchors = Vec::new();
-        while let Some(row) = rows.next().await.ok()? {
-            anchors.push(RetrievalAnchorId::new(row.get::<String>(0).ok()?).ok()?);
-        }
-        (anchors.len() <= 256).then_some(anchors)
-    }
-
-    async fn lcm_summary_anchor(
-        &self,
-        provider: &str,
-        session_id: &str,
-        summary_id: &str,
-    ) -> Option<RetrievalAnchorId> {
-        let snapshot = self.database.read_snapshot().await.ok()?;
-        let mut rows = snapshot
-            .query(
-                "SELECT summary_anchor_id
-                 FROM session_summary_nodes
-                 WHERE session_id = ?1
-                   AND summary_id = ?2
-                   AND json_extract(publication_json, '$.provider') = ?3
-                 LIMIT 2",
-                libsql::params![session_id, summary_id, provider],
-            )
-            .await
-            .ok()?;
-        let anchor =
-            RetrievalAnchorId::new(rows.next().await.ok()??.get::<String>(0).ok()?).ok()?;
-        if rows.next().await.ok()?.is_some() {
-            return None;
-        }
-        Some(anchor)
-    }
-
-    async fn lcm_summary_lineage(
-        &self,
-        session_id: &str,
-        summary_id: &str,
-        summary_anchor: &RetrievalAnchorId,
-    ) -> Option<Vec<CompactContextLineageEdgeV1>> {
-        let snapshot = self.database.read_snapshot().await.ok()?;
-        let mut rows = snapshot
-            .query(
-                "SELECT COALESCE(source.source_anchor_id, nested.summary_anchor_id),
-                        summary.created_at
-                 FROM session_summary_sources source
-                 JOIN session_summary_nodes summary
-                   ON summary.summary_id = source.summary_id
-                  AND summary.session_id = ?1
-                 LEFT JOIN session_summary_nodes nested
-                   ON nested.summary_id = source.source_summary_id
-                  AND nested.session_id = summary.session_id
-                 WHERE source.summary_id = ?2
-                 ORDER BY source.source_ordinal
-                 LIMIT 257",
-                libsql::params![session_id, summary_id],
-            )
-            .await
-            .ok()?;
-        let mut lineage = Vec::new();
-        while let Some(row) = rows.next().await.ok()? {
-            let object_anchor_id = RetrievalAnchorId::new(row.get::<String>(0).ok()?).ok()?;
-            lineage.push(CompactContextLineageEdgeV1 {
-                kind: TemporalAssertionKindV1::Supports,
-                subject_anchor_id: summary_anchor.clone(),
-                object_anchor_id,
-                knowledge_at: UtcMicros(row.get::<i64>(1).ok()?),
-                authority: SessionAuthorityClassV1::ImmutableSummary,
-                authorized: true,
-                supporting_anchor_ids: BTreeSet::new(),
-            });
-        }
-        (lineage.len() <= 256).then_some(lineage)
-    }
-
-    async fn lcm_occurrence_anchor(
-        &self,
-        provider: &str,
-        _requested_session_id: &str,
-        target: &LcmExpandTarget,
-    ) -> Option<(String, RetrievalAnchorId)> {
-        let snapshot = self.database.read_snapshot().await.ok()?;
-        let (predicate, value) = match target {
-            LcmExpandTarget::RawMessage { store_id } => ("raw.store_id = ?2", *store_id),
-            LcmExpandTarget::ExternalPayload { .. } | LcmExpandTarget::SummaryNode { .. } => {
-                return None;
-            }
-        };
-        let sql = format!(
-            "SELECT raw.session_id, occurrence.retrieval_anchor_id
-             FROM lcm_raw_messages raw
-             JOIN session_temporal_generations generation
-               ON generation.session_id = raw.session_id
-              AND generation.state = 'active'
-             JOIN session_occurrences occurrence
-               ON occurrence.session_id = raw.session_id
-              AND occurrence.generation = generation.generation
-              AND occurrence.message_id = raw.message_id
-             JOIN observations observation
-               ON observation.observation_id = occurrence.source_observation_id
-             WHERE raw.provider = ?1
-               AND json_extract(
-                   observation.observation_json,
-                   '$.identity.source.provider'
-               ) = ?1
-               AND {predicate}
-             ORDER BY occurrence.occurrence_id
-             LIMIT 2"
-        );
-        let mut rows = snapshot
-            .query(&sql, libsql::params![provider, value])
-            .await
-            .ok()?;
-        let row = rows.next().await.ok()??;
-        let owner_session = row.get::<String>(0).ok()?;
-        let anchor = RetrievalAnchorId::new(row.get::<String>(1).ok()?).ok()?;
-        if rows.next().await.ok()?.is_some() {
-            return None;
-        }
-        Some((owner_session, anchor))
-    }
-
-    async fn lcm_external_anchor(
-        &self,
-        provider: &str,
-        session_id: &str,
-        payload_ref: &str,
-    ) -> Option<RetrievalAnchorId> {
-        let snapshot = self.database.read_snapshot().await.ok()?;
-        let mut rows = snapshot
-            .query(
-                "SELECT occurrence.retrieval_anchor_id
-                 FROM lcm_raw_messages raw
-                 JOIN session_temporal_generations generation
-                   ON generation.session_id = raw.session_id
-                  AND generation.state = 'active'
-                 JOIN session_occurrences occurrence
-                   ON occurrence.session_id = raw.session_id
-                  AND occurrence.generation = generation.generation
-                  AND occurrence.message_id = raw.message_id
-                 JOIN observations observation
-                   ON observation.observation_id = occurrence.source_observation_id
-                 WHERE raw.provider = ?1
-                   AND raw.session_id = ?2
-                   AND raw.payload_ref = ?3
-                   AND json_extract(
-                       observation.observation_json,
-                       '$.identity.source.provider'
-                   ) = ?1
-                 ORDER BY occurrence.occurrence_id
-                 LIMIT 2",
-                libsql::params![provider, session_id, payload_ref],
-            )
-            .await
-            .ok()?;
-        let anchor =
-            RetrievalAnchorId::new(rows.next().await.ok()??.get::<String>(0).ok()?).ok()?;
-        if rows.next().await.ok()?.is_some() {
-            return None;
-        }
-        Some(anchor)
     }
 
     async fn execute_lcm_describe(
@@ -2005,83 +1722,29 @@ impl DaemonSessionRetrievalService {
         if command.store_scope() != self.root.store_scope {
             return LcmDescribeServiceOutcome::WrongScope;
         }
-        let anchors = match command.target() {
-            LcmDescribeTarget::Session => {
-                self.lcm_session_anchors(command.provider(), command.session_id().as_str())
-                    .await
-            }
-            LcmDescribeTarget::SummaryNode { node_id } => self
-                .lcm_summary_anchor(command.provider(), command.session_id().as_str(), node_id)
-                .await
-                .map(|anchor| vec![anchor]),
-            LcmDescribeTarget::ExternalPayload { payload_ref } => self
-                .lcm_external_anchor(
-                    command.provider(),
-                    command.session_id().as_str(),
-                    payload_ref,
-                )
-                .await
-                .map(|anchor| vec![anchor]),
+        let request = match AuthorizedSessionDescribeRequest::new(
+            command.provider(),
+            command.session_id().as_str(),
+            command.target().clone(),
+            command.grain(),
+            self.lcm_authorization_digest(command.provider()),
+        ) {
+            Ok(request) => request,
+            Err(error) => return describe_compatibility_error(error),
         };
-        let Some(anchors) = anchors else {
-            return LcmDescribeServiceOutcome::Deleted;
-        };
-        let state = if let Some(anchor) = anchors.first() {
-            self.lcm_anchor_state(anchor)
-                .await
-                .unwrap_or(HydrationStateV1::RetainedButUnavailable)
-        } else {
-            HydrationStateV1::Available
-        };
-        let Some(temporal) = self
-            .lcm_temporal_metadata(command.session_id().as_str(), anchors, state)
-            .await
-        else {
-            return LcmDescribeServiceOutcome::Unavailable;
-        };
-        let lineage = match command.target() {
-            LcmDescribeTarget::SummaryNode { node_id } => {
-                let Some(summary_anchor) = temporal.anchors.first() else {
-                    return LcmDescribeServiceOutcome::Deleted;
-                };
-                let Some(lineage) = self
-                    .lcm_summary_lineage(command.session_id().as_str(), node_id, summary_anchor)
-                    .await
-                else {
-                    return LcmDescribeServiceOutcome::Unavailable;
-                };
-                lineage
-            }
-            LcmDescribeTarget::Session | LcmDescribeTarget::ExternalPayload { .. } => Vec::new(),
-        };
-        let mut description = match self
-            .database
-            .lcm_describe(LcmDescribeRequest {
-                provider: command.provider().to_string(),
-                session_id: command.session_id().as_str().to_string(),
-                target: command.target().clone(),
-            })
+        let result = match GlobalDbSessionTemporalExecution::new(self.database.as_ref())
+            .describe_compatible(request)
             .await
         {
-            Ok(description) => description,
-            Err(error) => return describe_lcm_error(error),
+            Ok(result) => result,
+            Err(error) => return describe_compatibility_error(error),
         };
-        for raw in &mut description.raw_messages {
-            raw.content_preview.clear();
-            raw.content_range.returned_chars = 0;
-        }
-        for summary in &mut description.summary_nodes {
-            summary.summary_preview.clear();
-        }
-        if let Some(external) = description.external_payload.as_mut() {
-            external.content_preview.clear();
-        }
         LcmDescribeServiceOutcome::Complete {
-            description,
-            temporal,
-            grain: command.grain(),
-            state,
-            lineage,
+            description: result.description,
+            temporal: self.lcm_temporal_view(result.temporal),
+            grain: result.grain,
+            state: result.state,
+            lineage: result.lineage,
         }
     }
 
@@ -2099,14 +1762,6 @@ impl DaemonSessionRetrievalService {
         &self,
         command: &LcmExpandServiceCommand,
     ) -> Option<AuthorizedSessionExpandCursorBinding> {
-        let authorization_digest = format!(
-            "sha256:{}",
-            hex::encode(message_search_digest(
-                b"tracedecay.mcp.lcm-expand.authorization.v1\0",
-                &self.root.identity,
-                Some(command.provider()),
-            ))
-        );
         AuthorizedSessionExpandCursorBinding::new(
             command.provider(),
             command.session_id().as_str(),
@@ -2115,7 +1770,7 @@ impl DaemonSessionRetrievalService {
             command.content_slice().offset,
             command.content_slice().limit,
             command.source_limit(),
-            authorization_digest,
+            self.lcm_authorization_digest(command.provider()),
         )
         .ok()
     }
@@ -2156,62 +1811,29 @@ impl DaemonSessionRetrievalService {
         } else {
             command.source_offset()
         };
-        let authority = match command.target() {
-            LcmExpandTarget::RawMessage { .. } => {
-                self.lcm_occurrence_anchor(
-                    command.provider(),
-                    command.session_id().as_str(),
-                    command.target(),
-                )
-                .await
-            }
-            LcmExpandTarget::SummaryNode { node_id } => self
-                .lcm_summary_anchor(command.provider(), command.session_id().as_str(), node_id)
-                .await
-                .map(|anchor| (command.session_id().as_str().to_string(), anchor)),
-            LcmExpandTarget::ExternalPayload { payload_ref } => self
-                .lcm_external_anchor(
-                    command.provider(),
-                    command.session_id().as_str(),
-                    payload_ref,
-                )
-                .await
-                .map(|anchor| (command.session_id().as_str().to_string(), anchor)),
+        let request = match AuthorizedSessionExpandRequest::new(
+            command.provider(),
+            command.session_id().as_str(),
+            command.target().clone(),
+            command.grain(),
+            command.content_slice(),
+            source_offset,
+            command.source_limit(),
+            self.lcm_authorization_digest(command.provider()),
+        ) {
+            Ok(request) => request,
+            Err(error) => return expand_compatibility_error(error),
         };
-        let Some((owner_session, anchor)) = authority else {
-            return LcmExpandServiceOutcome::Deleted;
-        };
-        let Some(state) = self.lcm_anchor_state(&anchor).await else {
-            return LcmExpandServiceOutcome::Unavailable;
-        };
-        if state != HydrationStateV1::Available {
-            return hydration_state_to_expand_outcome(state);
-        }
-        let expansion = match self
-            .database
-            .lcm_expand(LcmExpandRequest {
-                provider: command.provider().to_string(),
-                session_id: command.session_id().as_str().to_string(),
-                target: command.target().clone(),
-                content_slice: Some(command.content_slice()),
-                source_offset,
-                source_limit: command.source_limit(),
-            })
+        let result = match GlobalDbSessionTemporalExecution::new(self.database.as_ref())
+            .expand_compatible(request)
             .await
         {
-            Ok(expansion) => expansion,
-            Err(error) => return expand_lcm_error(error),
+            Ok(result) => result,
+            Err(error) => return expand_compatibility_error(error),
         };
-        if self.lcm_anchor_state(&anchor).await != Some(HydrationStateV1::Available) {
-            return LcmExpandServiceOutcome::Denied;
-        }
-        let Some(mut temporal) = self
-            .lcm_temporal_metadata(&owner_session, vec![anchor], HydrationStateV1::Available)
-            .await
-        else {
-            return LcmExpandServiceOutcome::Unavailable;
-        };
-        if let Some(offset) = expansion
+        let mut temporal = self.lcm_temporal_view(result.temporal);
+        if let Some(offset) = result
+            .expansion
             .source_pagination
             .as_ref()
             .and_then(|pagination| pagination.next_source_offset)
@@ -2222,10 +1844,10 @@ impl DaemonSessionRetrievalService {
             temporal.cursor = Some(cursor);
         }
         LcmExpandServiceOutcome::Complete {
-            expansion,
+            expansion: result.expansion,
             temporal,
-            grain: command.grain(),
-            state: HydrationStateV1::Available,
+            grain: result.grain,
+            state: result.state,
         }
     }
 }
@@ -2250,44 +1872,23 @@ impl SessionRetrievalServicePort for DaemonSessionRetrievalService {
     }
 }
 
-fn hydration_state_to_expand_outcome(state: HydrationStateV1) -> LcmExpandServiceOutcome {
-    match state {
-        HydrationStateV1::Redacted => LcmExpandServiceOutcome::Redacted,
-        HydrationStateV1::Deleted | HydrationStateV1::RetentionExpired => {
-            LcmExpandServiceOutcome::Deleted
-        }
-        HydrationStateV1::Locked => LcmExpandServiceOutcome::Locked,
-        HydrationStateV1::Unauthorized => LcmExpandServiceOutcome::Denied,
-        HydrationStateV1::Available => LcmExpandServiceOutcome::Unavailable,
-        HydrationStateV1::RetainedButUnavailable | HydrationStateV1::UnverifiableLegacy => {
-            LcmExpandServiceOutcome::Unavailable
-        }
+fn describe_compatibility_error(error: CompatibilityReadError) -> LcmDescribeServiceOutcome {
+    match error {
+        CompatibilityReadError::Locked => LcmDescribeServiceOutcome::Locked,
+        CompatibilityReadError::Redacted => LcmDescribeServiceOutcome::Redacted,
+        CompatibilityReadError::Deleted => LcmDescribeServiceOutcome::Deleted,
+        CompatibilityReadError::Denied => LcmDescribeServiceOutcome::Denied,
+        CompatibilityReadError::Unavailable => LcmDescribeServiceOutcome::Unavailable,
     }
 }
 
-fn describe_lcm_error(error: LcmError) -> LcmDescribeServiceOutcome {
+fn expand_compatibility_error(error: CompatibilityReadError) -> LcmExpandServiceOutcome {
     match error {
-        LcmError::SummaryNodeNotFound
-        | LcmError::PayloadNotFound
-        | LcmError::PayloadMissing
-        | LcmError::PayloadGcd => LcmDescribeServiceOutcome::Deleted,
-        LcmError::PayloadNotOwnedBySession | LcmError::SummarySourceNotOwnedBySession => {
-            LcmDescribeServiceOutcome::Denied
-        }
-        _ => LcmDescribeServiceOutcome::Unavailable,
-    }
-}
-
-fn expand_lcm_error(error: LcmError) -> LcmExpandServiceOutcome {
-    match error {
-        LcmError::SummaryNodeNotFound
-        | LcmError::PayloadNotFound
-        | LcmError::PayloadMissing
-        | LcmError::PayloadGcd => LcmExpandServiceOutcome::Deleted,
-        LcmError::PayloadNotOwnedBySession | LcmError::SummarySourceNotOwnedBySession => {
-            LcmExpandServiceOutcome::Denied
-        }
-        _ => LcmExpandServiceOutcome::Unavailable,
+        CompatibilityReadError::Locked => LcmExpandServiceOutcome::Locked,
+        CompatibilityReadError::Redacted => LcmExpandServiceOutcome::Redacted,
+        CompatibilityReadError::Deleted => LcmExpandServiceOutcome::Deleted,
+        CompatibilityReadError::Denied => LcmExpandServiceOutcome::Denied,
+        CompatibilityReadError::Unavailable => LcmExpandServiceOutcome::Unavailable,
     }
 }
 

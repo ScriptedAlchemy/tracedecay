@@ -14204,6 +14204,25 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     let rebound: Value = serde_json::from_str(extract_real_server_text(&rebound)).unwrap();
     assert_eq!(rebound["status"], "denied", "{rebound}");
 
+    let private_terminal = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "target": {"kind": "summary_node", "node_id": "summary.missing"},
+            "source_limit": 2,
+            "cursor": cursor
+        }),
+    )
+    .await;
+    let private_terminal: Value =
+        serde_json::from_str(extract_real_server_text(&private_terminal)).unwrap();
+    assert_eq!(
+        private_terminal["status"], "denied",
+        "cursor authentication must precede target-state disclosure: {private_terminal}"
+    );
+
     let continued = handle_real_server_tool_call(
         &server,
         "tracedecay_lcm_expand",
@@ -14250,6 +14269,17 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
     .await;
     let origin_store_id = lcm_raw_store_id(&cg, "origin-message").await;
     let temporal = open_test_db_connection(&project_session_db_path(&cg)).await;
+    temporal
+        .execute(
+            "UPDATE lcm_raw_messages
+             SET content = 'legacy projection poison',
+                 snippet_text = 'legacy projection poison',
+                 index_text = 'legacy projection poison'
+             WHERE store_id = ?1",
+            [origin_store_id],
+        )
+        .await
+        .unwrap();
     activate_test_temporal_generation(&temporal, "lcm-origin-session").await;
     activate_test_temporal_generation(&temporal, "lcm-active-session").await;
     let server = real_mcp_server(cg).await;
