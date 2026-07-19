@@ -721,7 +721,7 @@ mod tests {
         assert_eq!(grant.validate(&context, &other_anchor), Ok(()));
         assert_eq!(
             grant.scope().authorized_root(),
-            AuthorizedSessionRoot::from_identity(other_anchor.identity())
+            &AuthorizedSessionRoot::from_identity(other_anchor.identity())
         );
 
         let exact = exact_authorization_request(context.identity().clone());

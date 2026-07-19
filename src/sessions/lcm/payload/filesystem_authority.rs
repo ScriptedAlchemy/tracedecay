@@ -1529,10 +1529,10 @@ mod authority_tests {
         let file = fs::File::create(&path).unwrap();
         file.set_len(MAX_VERIFIED_PAYLOAD_FILE_BYTES + 1).unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             read_payload_file_for_verify(&path),
             Err(LcmError::PayloadIntegrityMismatch)
-        );
+        ));
     }
 
     #[test]

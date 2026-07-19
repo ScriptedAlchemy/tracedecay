@@ -26,7 +26,7 @@ use tracedecay::application::session::{
 };
 use tracedecay::global_db::GlobalDbSessionTemporalExecution;
 use tracedecay::query::temporal::context::{
-    CompactContext, ContextBudget, VersionedTokenEstimator,
+    CompactContext, ContextBudget, TokenPolicy, VersionedTokenEstimator,
 };
 use tracedecay::query::temporal::cursor::CursorError;
 use tracedecay::query::temporal::ports::{
@@ -229,8 +229,8 @@ impl VersionedTokenEstimator for Words {
         self.0
     }
 
-    fn estimate(&self, text: &str) -> u64 {
-        text.split_whitespace().count() as u64
+    fn token_policy(&self) -> TokenPolicy {
+        TokenPolicy::Whitespace
     }
 }
 
