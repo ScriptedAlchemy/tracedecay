@@ -1260,6 +1260,8 @@ fn refresh_receipt_view(
 }
 
 const MESSAGE_SEARCH_ACTOR_ID: &str = "mcp.message-search";
+#[cfg(test)]
+const MESSAGE_SEARCH_ROOT_SESSION_ID: &str = "session.message-search.root";
 const MESSAGE_SEARCH_PROFILE_ID: &str = "profile.primary";
 const MESSAGE_SEARCH_SCHEMA_VERSION: u32 = 1;
 const MESSAGE_SEARCH_RANKING_VERSION: u32 = 1;

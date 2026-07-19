@@ -1,0 +1,987 @@
+//! PR8 session-temporal benchmark harness.
+//!
+//! Drives production Codex admission, CanonicalSessionTemporalProjector
+//! materialization (via [`GlobalDb::materialize_session_temporal_refresh_batch_result`]),
+//! [`SessionRefreshService`], and [`SessionRetrievalService`]. Evidence remains
+//! provisional until a clean attested measurement run succeeds.
+
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
+use std::env;
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use tempfile::TempDir;
+use tracedecay_domain::{
+    ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalModeV1, WorktreeId,
+};
+use tracedecay_store::{SessionRefreshCompletionRequestV1, SessionRefreshFrontierV1};
+
+use crate::application::context::{
+    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
+    PolicyDigest, ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedGitRoute,
+    ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+};
+use crate::application::session::{
+    AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
+    SessionRefreshConfiguration, SessionRefreshOutcome, SessionRefreshSchedulerError,
+    SessionRefreshSchedulerPort, SessionRefreshService, SessionRefreshTarget,
+    SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalService,
+    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalQuery,
+};
+use crate::global_db::{GlobalDb, GlobalDbSessionTemporalExecution};
+use crate::query::temporal::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
+use crate::query::temporal::ranking::DiversityLimits;
+use crate::sessions::codex;
+use crate::storage::{read_repository_identity_marker, write_repository_identity_marker};
+use crate::store::GlobalDbSessionTemporalStore;
+
+const SCHEMA_VERSION: u64 = 2;
+const WORKLOAD_ID: &str = "pr8-session-temporal-v1";
+const WORKLOAD_PATH: &str = "benchmarks/pr8-temporal/workload-v1.json";
+const EVIDENCE_INDEX_PATH: &str = "benchmarks/pr8-temporal/evidence-index.json";
+const RESULT_PATH: &str = "benchmarks/pr8-temporal/result-provisional.json";
+const RUNNER_PATH: &str = "scripts/run-pr8-temporal-benchmark.sh";
+const HARNESS_PATH: &str = "src/sessions/session_temporal_benchmark.rs";
+const SANITIZATION_RECEIPT_PATH: &str =
+    "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json";
+const P95_LABEL: &str = "descriptive nearest-rank sample p95";
+const P99_LABEL: &str = "descriptive nearest-rank sample p99 (sample maximum when n=30)";
+const WARMUP_REPETITIONS: usize = 3;
+const MEASURED_REPETITIONS: usize = 30;
+const PROJECTOR_VERSION: &str = "session-temporal-projector.v1";
+const CONFIG_VERSION: &str = "session-refresh-config.v1";
+const BENCHMARK_PROJECT_ID: &str = "proj_pr8_temporal_benchmark";
+const DIGEST: [u8; 32] = [0x8b; 32];
+
+const NATIVE_CODEX_FIXTURES: &[(&str, &str)] = &[
+    (
+        "tests/fixtures/provider_normalization/codex/session_meta.input.json",
+        include_str!("../../tests/fixtures/provider_normalization/codex/session_meta.input.json"),
+    ),
+    (
+        "tests/fixtures/provider_normalization/codex/agent_message.input.json",
+        include_str!("../../tests/fixtures/provider_normalization/codex/agent_message.input.json"),
+    ),
+    (
+        "tests/fixtures/provider_normalization/codex/thread_goal_updates.input.json",
+        include_str!(
+            "../../tests/fixtures/provider_normalization/codex/thread_goal_updates.input.json"
+        ),
+    ),
+];
+
+type BenchResult<T> = Result<T, String>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    RebuildActivate,
+    ExactReplay,
+    CompactRank,
+    LateHydrate,
+    MemberExpand,
+}
+
+impl Phase {
+    pub const ALL: [Phase; 5] = [
+        Phase::RebuildActivate,
+        Phase::ExactReplay,
+        Phase::CompactRank,
+        Phase::LateHydrate,
+        Phase::MemberExpand,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Phase::RebuildActivate => "rebuild_activate",
+            Phase::ExactReplay => "exact_replay",
+            Phase::CompactRank => "compact_rank",
+            Phase::LateHydrate => "late_hydrate",
+            Phase::MemberExpand => "member_expand",
+        }
+    }
+}
+
+/// RAII isolation for `HOME` and `TRACEDECAY_DATA_DIR`.
+pub struct IsolatedBenchmarkEnv {
+    temp: TempDir,
+    home: PathBuf,
+    data_dir: PathBuf,
+    previous_home: Option<OsString>,
+    previous_data_dir: Option<OsString>,
+}
+
+impl IsolatedBenchmarkEnv {
+    pub fn enter(prefix: &str) -> BenchResult<Self> {
+        let temp = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .map_err(|error| format!("create tempdir: {error}"))?;
+        let home = temp.path().join("home");
+        let data_dir = temp.path().join("tracedecay-data");
+        fs::create_dir_all(&home).map_err(|error| format!("create HOME: {error}"))?;
+        fs::create_dir_all(&data_dir)
+            .map_err(|error| format!("create TRACEDECAY_DATA_DIR: {error}"))?;
+
+        let previous_home = env::var_os("HOME");
+        let previous_data_dir = env::var_os("TRACEDECAY_DATA_DIR");
+        // SAFETY: benchmark process owns these variables for the RAII lifetime.
+        unsafe {
+            env::set_var("HOME", &home);
+            env::set_var("TRACEDECAY_DATA_DIR", &data_dir);
+        }
+
+        Ok(Self {
+            temp,
+            home,
+            data_dir,
+            previous_home,
+            previous_data_dir,
+        })
+    }
+
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    pub fn path(&self) -> &Path {
+        self.temp.path()
+    }
+}
+
+impl Drop for IsolatedBenchmarkEnv {
+    fn drop(&mut self) {
+        restore_env("HOME", self.previous_home.take());
+        restore_env("TRACEDECAY_DATA_DIR", self.previous_data_dir.take());
+    }
+}
+
+fn restore_env(key: &str, previous: Option<OsString>) {
+    // SAFETY: restores process environment captured by IsolatedBenchmarkEnv.
+    unsafe {
+        match previous {
+            Some(value) => env::set_var(key, value),
+            None => env::remove_var(key),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AllowAuthorizer;
+
+impl SessionScopeAuthorizer for AllowAuthorizer {
+    fn authorize(
+        &self,
+        context: &RequestContext,
+        request: &SessionScopeAuthorizationRequest,
+    ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
+        SessionAuthorizationGrant::issue(
+            AuthorizationGrantId::new("grant.pr8.benchmark").unwrap(),
+            1,
+            context,
+            request,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct NoopWake;
+
+impl SessionRefreshSchedulerPort for NoopWake {
+    fn wake(&self) -> Result<(), SessionRefreshSchedulerError> {
+        Ok(())
+    }
+}
+
+struct Words(&'static str);
+
+impl VersionedTokenEstimator for Words {
+    fn version(&self) -> &str {
+        self.0
+    }
+
+    fn token_policy(&self) -> TokenPolicy {
+        TokenPolicy::Whitespace
+    }
+}
+
+/// Validate checked-in artifacts without Cargo mutation (also used by the bench).
+pub fn validate_contract() -> BenchResult<()> {
+    let root = repository_root();
+    let workload_path = root.join(WORKLOAD_PATH);
+    let workload = read_json(&workload_path)?;
+    require_json_value(
+        &workload["schema_version"],
+        json!(SCHEMA_VERSION),
+        "workload schema",
+    )?;
+    require_json_value(&workload["workload_id"], json!(WORKLOAD_ID), "workload id")?;
+    require_json_value(
+        &workload["status"],
+        json!("harness_ready"),
+        "workload status",
+    )?;
+    require_json_value(
+        &workload["fixture_evidence"]["independently_sourced"],
+        json!(true),
+        "fixture source status",
+    )?;
+    require_json_value(
+        &workload["fixture_evidence"]["sanitization_receipt"],
+        json!(SANITIZATION_RECEIPT_PATH),
+        "fixture sanitization receipt",
+    )?;
+    if workload["measurement_contract"].is_null() {
+        return Err("measurement_contract must be defined once fixtures are authentic".to_owned());
+    }
+    let phases = workload["measurement_contract"]["phases"]
+        .as_array()
+        .ok_or_else(|| "measurement phases must be an array".to_owned())?;
+    let expected: Vec<&str> = Phase::ALL.iter().map(|phase| phase.as_str()).collect();
+    let actual: Vec<&str> = phases
+        .iter()
+        .filter_map(|phase| phase["phase"].as_str())
+        .collect();
+    if actual != expected {
+        return Err(format!(
+            "measurement phases mismatch: expected {expected:?}, got {actual:?}"
+        ));
+    }
+    require_json_value(
+        &workload["statistics"]["p95_label"],
+        json!(P95_LABEL),
+        "p95 label",
+    )?;
+    require_json_value(
+        &workload["statistics"]["p99_label"],
+        json!(P99_LABEL),
+        "p99 label",
+    )?;
+    require_json_value(
+        &workload["production_path"]["available_to_benchmark_target"],
+        json!(true),
+        "production path availability",
+    )?;
+    validate_file_inventory(&root, &workload["file_inventory"])?;
+    validate_bench_profile(&root)?;
+    validate_sanitization_receipt(&root)?;
+
+    let index = read_json(&root.join(EVIDENCE_INDEX_PATH))?;
+    require_json_value(
+        &index["schema_version"],
+        json!(SCHEMA_VERSION),
+        "index schema",
+    )?;
+    require_json_value(
+        &index["current_acceptance"],
+        Value::Null,
+        "current acceptance",
+    )?;
+    require_json_value(&index["blocked"], Value::Null, "blocked result pointer")?;
+    require_json_value(
+        &index["provisional"],
+        json!("result-provisional.json"),
+        "provisional result",
+    )?;
+
+    let result = read_json(&root.join(RESULT_PATH))?;
+    require_json_value(
+        &result["schema_version"],
+        json!(SCHEMA_VERSION),
+        "result schema",
+    )?;
+    require_json_value(
+        &result["workload_id"],
+        json!(WORKLOAD_ID),
+        "result workload id",
+    )?;
+    require_json_value(
+        &result["capture_status"],
+        json!("provisional"),
+        "capture status",
+    )?;
+    require_json_value(
+        &result["acceptance_eligible"],
+        json!(false),
+        "acceptance eligibility",
+    )?;
+    require_json_value(
+        &result["workload_manifest_sha256"],
+        json!(sha256_file(&workload_path)?),
+        "workload manifest hash",
+    )?;
+
+    let runner = fs::read_to_string(root.join(RUNNER_PATH))
+        .map_err(|error| format!("read runner: {error}"))?;
+    for token in [
+        "--dry-run",
+        "--run",
+        "unsupported platform rejected",
+        "PR8 temporal measurements require Linux",
+        "HOME",
+        "TRACEDECAY_DATA_DIR",
+    ] {
+        if !runner.contains(token) {
+            return Err(format!("runner is missing required token {token:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// Run the production measurement loop. Samples are informational; evidence stays provisional.
+pub async fn run_measurement() -> BenchResult<Value> {
+    if !cfg!(target_os = "linux") {
+        return Err(
+            "PR8 temporal measurements require Linux; unsupported platform rejected".into(),
+        );
+    }
+    validate_contract()?;
+    validate_bench_profile_enforced()?;
+
+    let root = repository_root();
+    let mut phase_latencies: Vec<(Phase, Vec<u64>)> = Phase::ALL
+        .iter()
+        .copied()
+        .map(|phase| (phase, Vec::new()))
+        .collect();
+
+    for repetition in 0..(WARMUP_REPETITIONS + MEASURED_REPETITIONS) {
+        let samples = run_one_repetition(repetition).await?;
+        if repetition < WARMUP_REPETITIONS {
+            continue;
+        }
+        for (phase, latency_ns) in samples {
+            let slot = phase_latencies
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == phase)
+                .unwrap();
+            slot.1.push(latency_ns);
+        }
+    }
+
+    let mut phases = Vec::new();
+    for (phase, mut samples) in phase_latencies {
+        if samples.is_empty() {
+            return Err(format!("phase {} produced no samples", phase.as_str()));
+        }
+        samples.sort_unstable();
+        phases.push(json!({
+            "phase": phase.as_str(),
+            "sample_count": samples.len(),
+            "p50_ns": nearest_rank(&samples, 50),
+            "p95_ns": nearest_rank(&samples, 95),
+            "p99_ns": nearest_rank(&samples, 99),
+            "maximum_ns": *samples.last().unwrap(),
+            "p95_label": P95_LABEL,
+            "p99_label": P99_LABEL,
+            "raw_latency_ns": samples,
+        }));
+    }
+
+    let attestation = current_state_attestation(&root)?;
+    let measurement = json!({
+        "warmup_repetitions": WARMUP_REPETITIONS,
+        "measured_repetitions": MEASURED_REPETITIONS,
+        "inferential_claim": false,
+        "phases": phases,
+    });
+
+    let workload_path = root.join(WORKLOAD_PATH);
+    let result = json!({
+        "schema_version": SCHEMA_VERSION,
+        "workload_id": WORKLOAD_ID,
+        "capture_status": "provisional",
+        "acceptance_eligible": false,
+        "provisional_reason": "valid_measurement_pending_clean_commit_attestation",
+        "workload_manifest": WORKLOAD_PATH,
+        "workload_manifest_sha256": sha256_file(&workload_path)?,
+        "source_attestation": attestation,
+        "runtime": {
+            "operating_system": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+        },
+        "measurement": measurement,
+        "claims": {
+            "performance_acceptance": {
+                "status": "provisional",
+                "reason": "samples recorded; acceptance requires clean-commit attestation and evidence-index promotion"
+            },
+            "database_query_latency": {
+                "status": "provisional",
+                "reason": "descriptive nearest-rank sample quantiles only; not inferential"
+            }
+        }
+    });
+
+    write_json_atomic(&root.join(RESULT_PATH), &result)?;
+    Ok(result)
+}
+
+async fn run_one_repetition(repetition: usize) -> BenchResult<Vec<(Phase, u64)>> {
+    let env = IsolatedBenchmarkEnv::enter("pr8-temporal-")?;
+    let project = env.path().join("project");
+    fs::create_dir_all(&project).map_err(|error| format!("create project: {error}"))?;
+    let project_id = enroll_benchmark_project(&project)?;
+
+    let profile = env.data_dir().join("profile");
+    fs::create_dir_all(&profile).map_err(|error| format!("create profile: {error}"))?;
+    let db_path = profile.join("sessions.db");
+    let _daemon_scope = crate::db::enter_daemon_database_scope(
+        &profile,
+        u64::try_from(repetition).unwrap() + 1,
+        &format!("pr8-bench-{repetition}"),
+    )
+    .map_err(|error| format!("enter daemon scope: {error}"))?;
+    let db = GlobalDb::open_at(&db_path)
+        .await
+        .ok_or_else(|| format!("open GlobalDb at {}", db_path.display()))?;
+
+    let session_id = format!("benchmark-codex-session-{repetition}");
+    let rollout = write_codex_rollout(env.home(), &project, &session_id)?;
+    codex::try_admit_codex_jsonl_observations_for_project(
+        &rollout,
+        &db,
+        &project,
+        project_id.clone(),
+        None,
+    )
+    .await
+    .map_err(|error| format!("Codex production admit failed: {error}"))?;
+
+    let observation_count = count_observations(&db).await?;
+    if observation_count == 0 {
+        return Err("Codex admit produced zero observations".to_owned());
+    }
+
+    let store = GlobalDbSessionTemporalStore::new(&db);
+    let refresh = SessionRefreshService::new(
+        AllowAuthorizer,
+        store,
+        NoopWake,
+        SessionRefreshConfiguration::new(PROJECTOR_VERSION, CONFIG_VERSION).unwrap(),
+    );
+    let context = request_context(&format!("request.pr8.{repetition}"), &project_id);
+    let target = SessionRefreshTarget::new(
+        SessionId::new(&session_id).unwrap(),
+        Some("codex".to_owned()),
+        TemporalModeV1::Current,
+        RetrievalGrainV1::LogicalMessage,
+        SessionRefreshFrontierV1::new(observation_count, 0).unwrap(),
+    )
+    .unwrap();
+
+    let started = Instant::now();
+    let handle = match refresh.begin_or_join(&context, target).await {
+        SessionRefreshOutcome::Started(handle) | SessionRefreshOutcome::Joined(handle) => handle,
+        other => return Err(format!("unexpected refresh outcome: {other:?}")),
+    };
+    let session = handle.target().session_id().clone();
+
+    let mut projected = 0u64;
+    loop {
+        let recovery = db
+            .session_refresh_recovery_result(&session)
+            .await
+            .map_err(|error| format!("refresh recovery: {error:?}"))?
+            .ok_or_else(|| "missing refresh recovery after begin_or_join".to_owned())?;
+        match db
+            .materialize_session_temporal_refresh_batch_result(&recovery)
+            .await
+            .map_err(|error| format!("CanonicalSessionTemporalProjector materialize: {error:?}"))?
+        {
+            Some((progress, batch)) => {
+                projected = projected.saturating_add(batch.item_count() as u64);
+                GlobalDbSessionTemporalStore::new(&db)
+                    .persist_session_refresh_projection_batch(progress, batch)
+                    .await
+                    .map_err(|error| format!("persist projection batch: {error:?}"))?;
+            }
+            None => break,
+        }
+    }
+
+    let recovery = db
+        .session_refresh_recovery_result(&session)
+        .await
+        .map_err(|error| format!("refresh recovery before complete: {error:?}"))?
+        .ok_or_else(|| "missing recovery before complete".to_owned())?;
+    let progress = recovery
+        .progress()
+        .cloned()
+        .ok_or_else(|| "refresh progress missing before complete".to_owned())?;
+    let complete_request = SessionRefreshCompletionRequestV1::new(
+        handle.operation_id().clone(),
+        session.clone(),
+        progress.frontier(),
+        *progress.coverage(),
+    )
+    .map_err(|error| format!("complete request: {error}"))?;
+    db.complete_session_refresh_result(complete_request.clone())
+        .await
+        .map_err(|error| format!("complete refresh: {error:?}"))?;
+    let rebuild_activate_ns = elapsed_ns(started);
+
+    let replay_started = Instant::now();
+    db.complete_session_refresh_result(complete_request)
+        .await
+        .map_err(|error| format!("exact replay complete: {error:?}"))?;
+    let exact_replay_ns = elapsed_ns(replay_started);
+    if projected == 0 {
+        return Err("rebuild_activate projected zero temporal records".to_owned());
+    }
+
+    let execution = GlobalDbSessionTemporalExecution::new(&db);
+    let retrieval = SessionRetrievalService::new(
+        AllowAuthorizer,
+        &execution,
+        Words("words-v1"),
+        SessionRetrievalConfiguration::new(3, 5).unwrap(),
+    );
+    let query = |grain: RetrievalGrainV1, text: &str| {
+        SessionTemporalQuery::new(
+            session.clone(),
+            Some("codex".to_owned()),
+            text.to_owned(),
+            None,
+            TemporalModeV1::Current,
+            grain,
+            8,
+            DiversityLimits::default(),
+            ContextBudget {
+                max_bytes: 64_000,
+                max_tokens: 16_000,
+                estimator_version: "words-v1".to_owned(),
+            },
+        )
+        .unwrap()
+    };
+
+    let compact_started = Instant::now();
+    require_retrieval_success(
+        "compact_rank",
+        retrieval
+            .retrieve(
+                &context,
+                query(RetrievalGrainV1::LogicalMessage, "pipeline"),
+            )
+            .await,
+    )?;
+    let compact_rank_ns = elapsed_ns(compact_started);
+
+    let hydrate_started = Instant::now();
+    require_retrieval_success(
+        "late_hydrate",
+        retrieval
+            .retrieve(&context, query(RetrievalGrainV1::Occurrence, "pipeline"))
+            .await,
+    )?;
+    let late_hydrate_ns = elapsed_ns(hydrate_started);
+
+    let expand_started = Instant::now();
+    require_retrieval_success(
+        "member_expand",
+        retrieval
+            .retrieve(&context, query(RetrievalGrainV1::Summary, "pipeline"))
+            .await,
+    )?;
+    let member_expand_ns = elapsed_ns(expand_started);
+
+    Ok(vec![
+        (Phase::RebuildActivate, rebuild_activate_ns),
+        (Phase::ExactReplay, exact_replay_ns),
+        (Phase::CompactRank, compact_rank_ns),
+        (Phase::LateHydrate, late_hydrate_ns),
+        (Phase::MemberExpand, member_expand_ns),
+    ])
+}
+
+fn enroll_benchmark_project(project: &Path) -> BenchResult<ProjectId> {
+    let status = Command::new("git")
+        .args(["-C"])
+        .arg(project)
+        .arg("init")
+        .status()
+        .map_err(|error| format!("git init: {error}"))?;
+    if !status.success() {
+        return Err("git init failed for benchmark project".to_owned());
+    }
+    if !write_repository_identity_marker(project, BENCHMARK_PROJECT_ID)
+        .map_err(|error| format!("write identity marker: {error}"))?
+    {
+        return Err("repository identity marker was not written".to_owned());
+    }
+    let marker = read_repository_identity_marker(project)
+        .map_err(|error| format!("read identity marker: {error}"))?
+        .ok_or_else(|| "repository identity marker missing after write".to_owned())?;
+    ProjectId::new(marker.project_id).map_err(|error| error.to_string())
+}
+
+fn write_codex_rollout(home: &Path, project: &Path, session_id: &str) -> BenchResult<PathBuf> {
+    let directory = home.join(".codex/sessions/2026/07/15");
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("create Codex sessions dir: {error}"))?;
+    let path = directory.join(format!("rollout-{session_id}.jsonl"));
+
+    let mut session: Value = serde_json::from_str(NATIVE_CODEX_FIXTURES[0].1)
+        .map_err(|error| format!("parse session_meta fixture: {error}"))?;
+    session["payload"]["id"] = json!(session_id);
+    session["payload"]["cwd"] = json!(project);
+
+    let message: Value = serde_json::from_str(NATIVE_CODEX_FIXTURES[1].1)
+        .map_err(|error| format!("parse agent_message fixture: {error}"))?;
+    let goals: Value = serde_json::from_str(NATIVE_CODEX_FIXTURES[2].1)
+        .map_err(|error| format!("parse thread_goal_updates fixture: {error}"))?;
+
+    let mut lines = vec![session, message];
+    if let Some(records) = goals.as_array() {
+        for record in records {
+            let mut cloned = record.clone();
+            if let Some(payload) = cloned.get_mut("payload") {
+                payload["threadId"] = json!(session_id);
+                if let Some(goal) = payload.get_mut("goal") {
+                    goal["threadId"] = json!(session_id);
+                }
+            }
+            lines.push(cloned);
+        }
+    }
+
+    let mut body = String::new();
+    for line in lines {
+        body.push_str(&serde_json::to_string(&line).unwrap());
+        body.push('\n');
+    }
+    fs::write(&path, body).map_err(|error| format!("write Codex rollout: {error}"))?;
+    Ok(path)
+}
+
+async fn count_observations(db: &GlobalDb) -> BenchResult<u64> {
+    let mut rows = db
+        .read_connection()
+        .query("SELECT COUNT(*) FROM observations", ())
+        .await
+        .map_err(|error| format!("count observations: {error}"))?;
+    let value: i64 = rows
+        .next()
+        .await
+        .map_err(|error| format!("count observations row: {error}"))?
+        .ok_or_else(|| "count observations returned no row".to_owned())?
+        .get(0)
+        .map_err(|error| format!("count observations value: {error}"))?;
+    u64::try_from(value).map_err(|error| format!("observation count: {error}"))
+}
+
+fn require_retrieval_success<T: std::fmt::Debug>(
+    phase: &str,
+    outcome: SessionRetrievalOutcome<T>,
+) -> BenchResult<()> {
+    match outcome {
+        SessionRetrievalOutcome::Complete { .. }
+        | SessionRetrievalOutcome::CompleteZero { .. }
+        | SessionRetrievalOutcome::Partial { .. } => Ok(()),
+        other => Err(format!("{phase} retrieve failed: {other:?}")),
+    }
+}
+
+fn request_context(request: &str, project_id: &ProjectId) -> RequestContext {
+    RequestContext::new(
+        ActorId::new("actor.pr8.benchmark").unwrap(),
+        RequestId::new(request).unwrap(),
+        ResolvedSessionIdentity::for_project(
+            ProfileId::new("profile.pr8.benchmark").unwrap(),
+            project_id.clone(),
+            SessionStoreId::new(format!("store.{}", project_id.as_str())).unwrap(),
+            SessionRootId::new("root.pr8.benchmark").unwrap(),
+            ResolvedGitRoute::new(
+                RepositoryId::new("repository.pr8.benchmark").unwrap(),
+                WorktreeId::new("worktree.pr8.benchmark").unwrap(),
+                BranchId::new("branch.pr8.benchmark").unwrap(),
+            ),
+        ),
+        CapabilityDigest::new(DIGEST),
+        PolicyDigest::new(DIGEST),
+        ConfigurationDigest::new(DIGEST),
+        MonotonicDeadline::at(Instant::now() + Duration::from_secs(30)),
+        CancellationToken::new(),
+        RequestBudgets::new(64, 64 * 1024 * 1024, 10_000).unwrap(),
+    )
+}
+
+fn current_state_attestation(root: &Path) -> BenchResult<Value> {
+    let commit = current_commit(root)?;
+    Ok(json!({
+        "commit": commit,
+        "workload_manifest": WORKLOAD_PATH,
+        "workload_manifest_sha256": sha256_file(&root.join(WORKLOAD_PATH))?,
+        "harness": HARNESS_PATH,
+        "harness_sha256": sha256_file(&root.join(HARNESS_PATH))?,
+        "runner": RUNNER_PATH,
+        "runner_sha256": sha256_file(&root.join(RUNNER_PATH))?,
+        "sanitization_receipt": SANITIZATION_RECEIPT_PATH,
+        "sanitization_receipt_sha256": sha256_file(&root.join(SANITIZATION_RECEIPT_PATH))?,
+        "binary": std::env::current_exe()
+            .ok()
+            .and_then(|path| path.to_str().map(str::to_owned)),
+        "native_fixtures": NATIVE_CODEX_FIXTURES
+            .iter()
+            .map(|(path, _)| {
+                json!({
+                    "path": path,
+                    "sha256": sha256_file(&root.join(path)).unwrap_or_default(),
+                })
+            })
+            .collect::<Vec<_>>(),
+        "profile": {
+            "cargo_profile": "bench",
+            "opt_level": 3,
+            "debug": false,
+            "debug_assertions": false,
+            "overflow_checks": false,
+            "incremental": false,
+        }
+    }))
+}
+
+fn validate_sanitization_receipt(root: &Path) -> BenchResult<()> {
+    let receipt = read_json(&root.join(SANITIZATION_RECEIPT_PATH))?;
+    require_json_value(
+        &receipt["schema"],
+        json!("pr8-fixture-sanitization-receipt-v1"),
+        "receipt schema",
+    )?;
+    require_json_value(
+        &receipt["independently_sourced"],
+        json!(true),
+        "receipt source",
+    )?;
+    require_json_value(&receipt["provider"], json!("codex"), "receipt provider")?;
+    let files = receipt["files"]
+        .as_array()
+        .ok_or_else(|| "receipt files missing".to_owned())?;
+    for entry in files {
+        let path = entry["path"]
+            .as_str()
+            .ok_or_else(|| "receipt file path missing".to_owned())?;
+        let expected = entry["sha256"]
+            .as_str()
+            .ok_or_else(|| format!("receipt hash missing for {path}"))?;
+        let actual = sha256_file(&root.join(path))?;
+        if actual != expected {
+            return Err(format!(
+                "receipt hash mismatch for {path}: expected {expected}, got {actual}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_file_inventory(root: &Path, inventory: &Value) -> BenchResult<()> {
+    let entries = inventory
+        .as_array()
+        .ok_or_else(|| "file_inventory must be an array".to_owned())?;
+    if entries.is_empty() {
+        return Err("file_inventory must not be empty".to_owned());
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    for entry in entries {
+        let path = entry["path"]
+            .as_str()
+            .ok_or_else(|| "inventory path must be a string".to_owned())?;
+        let expected = entry["sha256"]
+            .as_str()
+            .ok_or_else(|| format!("inventory hash missing for {path}"))?;
+        let relative = Path::new(path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| component == std::path::Component::ParentDir)
+        {
+            return Err(format!(
+                "inventory path must remain repository-relative: {path}"
+            ));
+        }
+        if !paths.insert(path) {
+            return Err(format!("duplicate inventory path: {path}"));
+        }
+        let actual = sha256_file(&root.join(relative))?;
+        if actual != expected {
+            return Err(format!(
+                "inventory hash mismatch for {path}: expected {expected}, got {actual}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_bench_profile(root: &Path) -> BenchResult<()> {
+    let manifest = fs::read_to_string(root.join("Cargo.toml"))
+        .map_err(|error| format!("read Cargo.toml: {error}"))?;
+    let profile = manifest
+        .split_once("[profile.bench]")
+        .map(|(_, profile)| profile.split("\n[").next().unwrap_or(profile))
+        .ok_or_else(|| "Cargo.toml is missing [profile.bench]".to_owned())?;
+    for line in [
+        "opt-level = 3",
+        "debug = false",
+        "debug-assertions = false",
+        "overflow-checks = false",
+        "incremental = false",
+    ] {
+        if !profile.lines().any(|candidate| candidate.trim() == line) {
+            return Err(format!("bench profile is missing {line:?}"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_bench_profile_enforced() -> BenchResult<()> {
+    if cfg!(debug_assertions) {
+        return Err(
+            "optimized bench profile required: debug_assertions are enabled (use cargo bench)"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn nearest_rank(sorted: &[u64], percentile: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = ((percentile * sorted.len()).div_ceil(100)).max(1);
+    sorted[rank - 1]
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
+}
+
+fn read_json(path: &Path) -> BenchResult<Value> {
+    let contents =
+        fs::read_to_string(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    serde_json::from_str(&contents).map_err(|error| format!("parse {}: {error}", path.display()))
+}
+
+fn write_json_atomic(path: &Path, value: &Value) -> BenchResult<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("result path has no parent: {}", path.display()))?;
+    let temporary = parent.join(format!(
+        ".{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("result")
+    ));
+    let encoded =
+        serde_json::to_vec_pretty(value).map_err(|error| format!("encode result: {error}"))?;
+    fs::write(&temporary, encoded).map_err(|error| format!("write temp result: {error}"))?;
+    fs::rename(&temporary, path).map_err(|error| format!("rename result: {error}"))?;
+    Ok(())
+}
+
+fn require_json_value(actual: &Value, expected: Value, label: &str) -> BenchResult<()> {
+    if actual != &expected {
+        return Err(format!(
+            "{label} mismatch: expected {expected}, got {actual}"
+        ));
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> BenchResult<String> {
+    let bytes =
+        fs::read(path).map_err(|error| format!("read {} for SHA-256: {error}", path.display()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn repository_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn current_commit(root: &Path) -> BenchResult<String> {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|error| format!("read current commit: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git rev-parse HEAD failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contract_matches_checked_in_artifacts() {
+        validate_contract().expect("PR8 temporal contract");
+    }
+
+    #[test]
+    fn phases_are_descriptive_and_ordered() {
+        assert_eq!(
+            Phase::ALL.map(Phase::as_str),
+            [
+                "rebuild_activate",
+                "exact_replay",
+                "compact_rank",
+                "late_hydrate",
+                "member_expand",
+            ]
+        );
+        assert_eq!(P95_LABEL, "descriptive nearest-rank sample p95");
+        assert_eq!(
+            P99_LABEL,
+            "descriptive nearest-rank sample p99 (sample maximum when n=30)"
+        );
+    }
+
+    #[test]
+    fn nearest_rank_uses_descriptive_sample_labels() {
+        let samples = [10_u64, 20, 30, 40, 50];
+        assert_eq!(nearest_rank(&samples, 50), 30);
+        assert_eq!(nearest_rank(&samples, 95), 50);
+        assert_eq!(nearest_rank(&samples, 99), 50);
+    }
+
+    #[test]
+    fn isolated_env_sets_and_restores_home_and_data_dir() {
+        let prior_home = env::var_os("HOME");
+        let prior_data = env::var_os("TRACEDECAY_DATA_DIR");
+        {
+            let isolated = IsolatedBenchmarkEnv::enter("pr8-env-").unwrap();
+            assert_eq!(
+                env::var_os("HOME").as_deref(),
+                Some(isolated.home().as_os_str())
+            );
+            assert_eq!(
+                env::var_os("TRACEDECAY_DATA_DIR").as_deref(),
+                Some(isolated.data_dir().as_os_str())
+            );
+        }
+        assert_eq!(env::var_os("HOME"), prior_home);
+        assert_eq!(env::var_os("TRACEDECAY_DATA_DIR"), prior_data);
+    }
+
+    #[test]
+    fn runner_rejects_unsupported_platforms_with_exit_64_contract() {
+        let runner = fs::read_to_string(repository_root().join(RUNNER_PATH)).unwrap();
+        assert!(runner.contains("exit 64"));
+        assert!(runner.contains("unsupported platform rejected"));
+        assert!(runner.contains("PR8 temporal measurements require Linux"));
+    }
+}

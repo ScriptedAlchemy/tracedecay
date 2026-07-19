@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly blocked_reason="authentic_provider_capture_and_public_production_path_unavailable"
-
 usage() {
   cat <<'EOF'
 Usage: scripts/run-pr8-temporal-benchmark.sh --dry-run|--run
 
-  --dry-run  Read-only, Cargo-free validation of the fail-closed evidence.
-  --run      Reject measurement. The benchmark remains BLOCKED until authentic
-             provider captures and public production adapters are available.
+  --dry-run  Read-only, Cargo-free validation of harness artifacts and
+             Codex fixture provenance. Does not mutate the checkout.
+  --run      Linux-only measurement through the optimized bench profile.
+             Isolates HOME and TRACEDECAY_DATA_DIR for the child process.
+             Non-Linux hosts exit 64 (unsupported platform rejected).
 EOF
 }
 
@@ -25,10 +25,10 @@ find_python() {
   return 1
 }
 
-validate_blocked_evidence() {
+validate_harness_evidence() {
   local python_bin
   python_bin="$(find_python)"
-  "$python_bin" - "$repo_root" "$blocked_reason" <<'PY'
+  "$python_bin" - "$repo_root" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -36,8 +36,17 @@ import sys
 import tomllib
 
 root = pathlib.Path(sys.argv[1])
-blocked_reason = sys.argv[2]
 benchmark_root = root / "benchmarks/pr8-temporal"
+phases = [
+    "rebuild_activate",
+    "exact_replay",
+    "compact_rank",
+    "late_hydrate",
+    "member_expand",
+]
+p95_label = "descriptive nearest-rank sample p95"
+p99_label = "descriptive nearest-rank sample p99 (sample maximum when n=30)"
+receipt_path = "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json"
 
 def load(path):
     with path.open(encoding="utf-8") as handle:
@@ -54,18 +63,31 @@ workload_path = benchmark_root / "workload-v1.json"
 workload = load(workload_path)
 index = load(benchmark_root / "evidence-index.json")
 result = load(benchmark_root / "result-provisional.json")
+receipt = load(root / receipt_path)
 
 require(workload.get("schema_version") == 2, "unexpected workload schema")
 require(workload.get("workload_id") == "pr8-session-temporal-v1", "workload id mismatch")
-require(workload.get("status") == "blocked", "workload must fail closed")
-require(workload.get("blocked_reason") == blocked_reason, "workload reason mismatch")
+require(workload.get("status") == "harness_ready", "workload must be harness_ready")
 fixture = workload.get("fixture_evidence", {})
-require(fixture.get("independently_sourced") is False,
-        "fixture must not claim independent provenance")
-require(fixture.get("sanitization_receipt") is None,
-        "fixture must not fabricate a sanitization receipt")
-require(workload.get("measurement_contract") is None,
-        "blocked workload must not define measurements")
+require(fixture.get("independently_sourced") is True, "fixture must claim independent provenance")
+require(fixture.get("sanitization_receipt") == receipt_path, "sanitization receipt path mismatch")
+require(receipt.get("independently_sourced") is True, "receipt must be independently sourced")
+require(receipt.get("provider") == "codex", "receipt provider must be codex")
+for entry in receipt.get("files", []):
+    path = root / entry["path"]
+    require(path.is_file(), f"missing receipt file: {entry['path']}")
+    require(sha256(path) == entry["sha256"], f"receipt hash mismatch: {entry['path']}")
+
+contract = workload.get("measurement_contract") or {}
+actual_phases = [item.get("phase") for item in contract.get("phases", [])]
+require(actual_phases == phases, f"dry-run phases mismatch: {actual_phases}")
+print("phases:", ", ".join(phases))
+
+stats = workload.get("statistics") or {}
+require(stats.get("p95_label") == p95_label, "p95 label mismatch")
+require(stats.get("p99_label") == p99_label, "p99 label mismatch")
+require(workload.get("production_path", {}).get("available_to_benchmark_target") is True,
+        "production path must be available")
 
 inventory = workload.get("file_inventory")
 require(isinstance(inventory, list) and inventory, "file inventory is empty")
@@ -83,17 +105,14 @@ for entry in inventory:
 require(index == {
     "schema_version": 2,
     "current_acceptance": None,
-    "blocked": "result-provisional.json",
+    "blocked": None,
+    "provisional": "result-provisional.json",
     "historical_stale": [],
-}, "evidence index must expose only blocked evidence")
+}, "evidence index must expose provisional evidence only")
 require(result.get("schema_version") == 2, "unexpected result schema")
 require(result.get("workload_id") == workload["workload_id"], "result workload mismatch")
-require(result.get("capture_status") == "blocked", "result must be blocked")
+require(result.get("capture_status") == "provisional", "result must be provisional")
 require(result.get("acceptance_eligible") is False, "result must be ineligible")
-require(result.get("blocked_reason") == blocked_reason, "result reason mismatch")
-require(result.get("measurement") is None, "blocked result must not contain samples")
-require(result.get("source_attestation") is None,
-        "blocked result must not fabricate source attestation")
 require(result.get("workload_manifest_sha256") == sha256(workload_path),
         "result workload hash mismatch")
 
@@ -107,6 +126,11 @@ require(profile == {
     "overflow-checks": False,
     "incremental": False,
 }, "optimized bench profile mismatch")
+
+storage = workload.get("storage_isolation") or {}
+require("HOME" in storage.get("required_environment", []), "HOME isolation required")
+require("TRACEDECAY_DATA_DIR" in storage.get("required_environment", []),
+        "TRACEDECAY_DATA_DIR isolation required")
 PY
 }
 
@@ -120,16 +144,23 @@ cd "$repo_root"
 
 case "$1" in
   --dry-run)
-    validate_blocked_evidence
-    printf 'BLOCKED: %s\n' "$blocked_reason"
+    validate_harness_evidence
+    printf 'OK: PR8 temporal dry-run validated harness_ready evidence (Cargo-free, no mutation)\n'
     ;;
   --run)
     if [[ "$(uname -s)" != "Linux" ]]; then
       printf '%s\n' "PR8 temporal measurements require Linux; unsupported platform rejected" >&2
       exit 64
     fi
-    printf 'BLOCKED: %s\n' "$blocked_reason" >&2
-    exit 3
+    isolation_root="$(mktemp -d "${TMPDIR:-/tmp}/pr8-temporal-bench.XXXXXX")"
+    cleanup() {
+      rm -rf "$isolation_root"
+    }
+    trap cleanup EXIT
+    export HOME="$isolation_root/home"
+    export TRACEDECAY_DATA_DIR="$isolation_root/tracedecay-data"
+    mkdir -p "$HOME" "$TRACEDECAY_DATA_DIR"
+    cargo bench --bench session_temporal --all-features -- --run
     ;;
   -h|--help)
     usage

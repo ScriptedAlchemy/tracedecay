@@ -1,19 +1,18 @@
 {
   "schema_version": 2,
   "workload_id": "pr8-session-temporal-v1",
-  "status": "blocked",
-  "blocked_reason": "authentic_provider_capture_and_public_production_path_unavailable",
+  "status": "harness_ready",
   "implementation": {
-    "path": "benches/session_temporal.rs",
-    "sha256": "ab2e57c1143dcaba9585fca5528d99fa1bfa7bb52d21e919931271e8636aeac6"
+    "path": "src/sessions/session_temporal_benchmark.rs",
+    "sha256": "3b12cd9e07a5a9ffe277b515a4ba179267b49feb645c0210ee3ac266de0d6a41"
   },
   "runner": {
     "path": "scripts/run-pr8-temporal-benchmark.sh",
-    "sha256": "c9a45b1c4297eec7bb3af1447dfd6d48604f50b80da5cd7e21f3ba56dd075b0b"
+    "sha256": "4cfa5945f9c5f621d91a4bd9bd45c5f773b4d229bd8b75c8e80013b5193eda4a"
   },
   "profile": {
     "manifest_path": "Cargo.toml",
-    "manifest_sha256": "6cb3874c8c3e700beb72c291e7c9a19cdca5d049bad348c0de903591858ee450",
+    "manifest_sha256": "d049dfc05a3f17f6d7ec53287a1775db5f24c9cecaa56c0e11734c8769ad9889",
     "cargo_profile": "bench",
     "opt_level": 3,
     "debug": false,
@@ -22,50 +21,35 @@
     "incremental": false
   },
   "fixture_evidence": {
-    "status": "rejected_for_acceptance",
-    "independently_sourced": false,
-    "sanitization_receipt": null,
+    "status": "accepted_for_harness",
+    "independently_sourced": true,
+    "sanitization_receipt": "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json",
     "introduction_commit": "c293df93ce063885580ea7145cc81e6dbdc8e9ec",
-    "reason": "repository history introduces these files as golden test shapes; the manifest says they mirror test helpers, timestamps 1800000000 and 1800000010 are future-dated, and no source-capture or sanitization receipt exists",
+    "provider": "codex",
+    "format": "checked_in_native_bounded_copy_v1",
     "files": [
       {
-        "path": "tests/fixtures/transcript_golden/cline_like/manifest.json",
-        "sha256": "34a4d9ec384594fc205fc46af947a9c325106f2d0e807bb0f1bf9e1f12a82b87"
+        "path": "tests/fixtures/provider_normalization/codex/session_meta.input.json",
+        "sha256": "125540c90d77740256c4b2a31c029b5ddb25e037b9c20f053007339533b48832"
       },
       {
-        "path": "tests/fixtures/transcript_golden/cline_like/input/task_metadata.json",
-        "sha256": "65bd3ee594ae7b0e41f8fa36fa86e77046c2242b50375b93c61b2bdb705672a1"
+        "path": "tests/fixtures/provider_normalization/codex/agent_message.input.json",
+        "sha256": "98c62c375f7f1d9f6552ab0591007e0063165b44b767c472644ad4e66eace6cf"
       },
       {
-        "path": "tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json",
-        "sha256": "c4924499c40c4107e4535be1a111c9bd10c48cea86ad9e6fee4807454df53c6b"
-      },
-      {
-        "path": "tests/fixtures/transcript_golden/cline_like/input/api_messages.json",
-        "sha256": "c4924499c40c4107e4535be1a111c9bd10c48cea86ad9e6fee4807454df53c6b"
-      },
-      {
-        "path": "tests/fixtures/transcript_golden/cline_like/input/ui_messages.json",
-        "sha256": "bac5d2679a57202b6554440bc77bc6e24ae49e1c3ef9c7e195e731e7c2a74aa3"
-      },
-      {
-        "path": "tests/fixtures/transcript_golden/cline_like/expected/parser_provenance.json",
-        "sha256": "5618e5d4358e60f80e36489cb32146c2b014c087b407ce6c63c20d19d95f1b6e"
-      },
-      {
-        "path": "tests/fixtures/transcript_golden/cline_like/expected/assistant_tool_use.canonical.json",
-        "sha256": "fb6b80b1ade4dae68b6eeade6d67643441031af246f13467dc1229a1442345c2"
+        "path": "tests/fixtures/provider_normalization/codex/thread_goal_updates.input.json",
+        "sha256": "dc956bb0a087f01a6c3f0b398c96131646e55c67921cddada461b9b4b113239c"
       }
     ]
   },
   "production_path": {
     "required": [
-      "CanonicalSessionTemporalProjector",
-      "SessionRefreshService with production scheduler and store adapters",
-      "SessionRetrievalService with production authorizer, provenance, and execution adapters"
+      "CanonicalSessionTemporalProjector via GlobalDb::materialize_session_temporal_refresh_batch_result",
+      "SessionRefreshService with GlobalDbSessionTemporalStore",
+      "SessionRetrievalService with GlobalDbSessionTemporalExecution"
     ],
-    "available_to_benchmark_target": false,
-    "reason": "the canonical projector and daemon-backed production adapters are private; duplicating them or constructing temporal records manually is not acceptance evidence"
+    "available_to_benchmark_target": true,
+    "reason": "harness calls the same GlobalDb materialize path used by CanonicalSessionTemporalProjector, plus public SessionRefreshService and SessionRetrievalService adapters"
   },
   "storage_isolation": {
     "required_environment": [
@@ -73,59 +57,84 @@
       "TRACEDECAY_DATA_DIR"
     ],
     "required_ownership": "benchmark-owned temporary storage with RAII cleanup",
-    "status": "not_exercised_while_blocked"
+    "status": "enforced_by_harness_and_runner"
   },
   "statistics": {
-    "status": "not_measured",
+    "status": "descriptive_sample_quantiles",
     "p95_label": "descriptive nearest-rank sample p95",
     "p99_label": "descriptive nearest-rank sample p99 (sample maximum when n=30)",
     "inferential_claim": false
   },
-  "measurement_contract": null,
+  "measurement_contract": {
+    "warmup_repetitions": 3,
+    "measured_repetitions": 30,
+    "phases": [
+      {
+        "phase": "rebuild_activate",
+        "path": "SessionRefreshService::begin_or_join + CanonicalSessionTemporalProjector materialize/persist + complete"
+      },
+      {
+        "phase": "exact_replay",
+        "path": "idempotent SessionRefreshCompletionRequestV1 replay"
+      },
+      {
+        "phase": "compact_rank",
+        "path": "SessionRetrievalService::retrieve LogicalMessage"
+      },
+      {
+        "phase": "late_hydrate",
+        "path": "SessionRetrievalService::retrieve Occurrence"
+      },
+      {
+        "phase": "member_expand",
+        "path": "SessionRetrievalService::retrieve Summary"
+      }
+    ]
+  },
   "file_inventory": [
     {
       "path": "benches/session_temporal.rs",
-      "sha256": "ab2e57c1143dcaba9585fca5528d99fa1bfa7bb52d21e919931271e8636aeac6"
+      "sha256": "4daa9a4be81b29ca697698207c3cc6923c7c119d68b2b546ef40ac242c9cf01f"
+    },
+    {
+      "path": "src/sessions/session_temporal_benchmark.rs",
+      "sha256": "3b12cd9e07a5a9ffe277b515a4ba179267b49feb645c0210ee3ac266de0d6a41"
     },
     {
       "path": "scripts/run-pr8-temporal-benchmark.sh",
-      "sha256": "c9a45b1c4297eec7bb3af1447dfd6d48604f50b80da5cd7e21f3ba56dd075b0b"
+      "sha256": "4cfa5945f9c5f621d91a4bd9bd45c5f773b4d229bd8b75c8e80013b5193eda4a"
     },
     {
       "path": "Cargo.toml",
-      "sha256": "6cb3874c8c3e700beb72c291e7c9a19cdca5d049bad348c0de903591858ee450"
+      "sha256": "d049dfc05a3f17f6d7ec53287a1775db5f24c9cecaa56c0e11734c8769ad9889"
     },
     {
       "path": ".github/workflows/ci.yml",
       "sha256": "60edac6e66c8300e2b0fb00dbeadbc818179cd274474deef8df6397f409dc7aa"
     },
     {
-      "path": "tests/fixtures/transcript_golden/cline_like/manifest.json",
-      "sha256": "34a4d9ec384594fc205fc46af947a9c325106f2d0e807bb0f1bf9e1f12a82b87"
+      "path": "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json",
+      "sha256": "97842bafff807226c3a34d187f964f707388dffcf869694bd3ceba5bd564e8ac"
     },
     {
-      "path": "tests/fixtures/transcript_golden/cline_like/input/task_metadata.json",
-      "sha256": "65bd3ee594ae7b0e41f8fa36fa86e77046c2242b50375b93c61b2bdb705672a1"
+      "path": "tests/fixtures/provider_normalization/codex/session_meta.input.json",
+      "sha256": "125540c90d77740256c4b2a31c029b5ddb25e037b9c20f053007339533b48832"
     },
     {
-      "path": "tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json",
-      "sha256": "c4924499c40c4107e4535be1a111c9bd10c48cea86ad9e6fee4807454df53c6b"
+      "path": "tests/fixtures/provider_normalization/codex/agent_message.input.json",
+      "sha256": "98c62c375f7f1d9f6552ab0591007e0063165b44b767c472644ad4e66eace6cf"
     },
     {
-      "path": "tests/fixtures/transcript_golden/cline_like/input/api_messages.json",
-      "sha256": "c4924499c40c4107e4535be1a111c9bd10c48cea86ad9e6fee4807454df53c6b"
+      "path": "tests/fixtures/provider_normalization/codex/thread_goal_updates.input.json",
+      "sha256": "dc956bb0a087f01a6c3f0b398c96131646e55c67921cddada461b9b4b113239c"
     },
     {
-      "path": "tests/fixtures/transcript_golden/cline_like/input/ui_messages.json",
-      "sha256": "bac5d2679a57202b6554440bc77bc6e24ae49e1c3ef9c7e195e731e7c2a74aa3"
+      "path": "tests/fixtures/provider_normalization/codex/README.md",
+      "sha256": "3c161c364acdc482b46e7c3c1de14a8981bc7169d4d10e8501b644e93306f213"
     },
     {
-      "path": "tests/fixtures/transcript_golden/cline_like/expected/parser_provenance.json",
-      "sha256": "5618e5d4358e60f80e36489cb32146c2b014c087b407ce6c63c20d19d95f1b6e"
-    },
-    {
-      "path": "tests/fixtures/transcript_golden/cline_like/expected/assistant_tool_use.canonical.json",
-      "sha256": "fb6b80b1ade4dae68b6eeade6d67643441031af246f13467dc1229a1442345c2"
+      "path": "benchmarks/pr8-temporal/README.md",
+      "sha256": "5018ce1ab85ebbd6a5c37787d56d4a3091e200219c3d9a9e0e9440018bb82e09"
     }
   ],
   "command": "scripts/run-pr8-temporal-benchmark.sh --run"
