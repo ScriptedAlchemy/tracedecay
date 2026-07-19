@@ -70,7 +70,7 @@ depth/compression ratio, and GC state before making a lifecycle decision.
 
 On Hermes, the context engine exposes native aliases `lcm_grep`,
 `lcm_load_session`, `lcm_describe`, `lcm_expand`, `lcm_expand_query`,
-`lcm_status`, and `lcm_doctor` for the matching `tracedecay_lcm_*` commands.
+`lcm_status`, and `lcm_doctor` for their matching TraceDecay LCM commands.
 Use the native alias's schema when it is offered: for example,
 `lcm_grep` uses `session_scope` and `time_from`/`time_to`, while
 `lcm_load_session` uses `max_content_chars`. Do not mix those host aliases with
