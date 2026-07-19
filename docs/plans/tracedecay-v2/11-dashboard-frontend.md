@@ -3,6 +3,10 @@
 ## Status / Role
 
 Normative product plan. Every product PR ships its usable UI slice with its backend behavior. PR14 completes the shared shell and the full Brain, Explorer, Loom, Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory, Costs, and Settings experience. PR17 adds the first-class Work workspace and task-graph projections owned semantically by [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md).
+PR17 also adds the execution-topology lens specified below: optional worktree
+and stacked-branch lanes, dependency-commit and merge-order rails,
+conflict/proximity evidence, integration proposals and receipts, test/CI state,
+and temporal replay over the same canonical Work selection.
 
 ## Outcome
 
@@ -41,6 +45,12 @@ authority scope. Visual quality serves comprehension rather than novelty.
   task scheduler, generic orchestration lab, or edit-bundle editor. PR17's
   Kanban/DAG/timeline/causal/workload views are projections over Plan 24
   application state and Plan 32 runtime receipts.
+- Git status, worktree, branch-stack, merge, rebase, cherry-pick, ref, index,
+  commit, lease, test, or CI authority. Components may submit only an
+  application-supplied typed `dry_run`, `apply`, or `cancel` action reference
+  and render the resulting receipt. They never construct Git arguments,
+  relocate a hunk, infer a merge result, move a ref, acquire/reclaim a lease,
+  launch a test, rerun CI, or treat a card move as repository mutation.
 - Arbitrary JavaScript workflow authoring or execution.
 - Generated compatibility views, route inventories, or a second model of backend behavior.
 - Graph/query/storage authority, renderer-local ranking, health, readiness,
@@ -92,11 +102,23 @@ surfaces rather than another dashboard package or route-local contract:
   workspaces. Their route contract/DOM cases live in
   `dashboard/test/workspace-route-contracts.vitest.tsx`; no workspace may ship
   as a navigation stub or fixture-only page.
-- PR17 adds `dashboard/work/src/WorkWorkspace.tsx`,
-  `projections/{WorkKanban,WorkDag,WorkTimeline,WorkCausal,WorkloadProjection}.tsx`,
-  `WorkItemInspector.tsx`, `TaskProposalPreview.tsx`, and
-  `AuxiliaryAttemptInspector.tsx`. All projections consume one Plan 24
-  selection and graph version.
+- PR17 adds `dashboard/lib/contracts/executionTopology.ts`,
+  `dashboard/work/src/WorkWorkspace.tsx`,
+  `projections/{WorkKanban,WorkDag,WorkTimeline,WorkCausal,WorkloadProjection,ExecutionTopologyProjection}.tsx`,
+  `WorkItemInspector.tsx`, `TaskProposalPreview.tsx`,
+  `AuxiliaryAttemptInspector.tsx`, and the exact topology components under
+  `dashboard/work/src/topology/`: `ExecutionTopologyToolbar.tsx`,
+  `TopologyLaneBoard.tsx`, `WorktreeLane.tsx`, `BranchStackLane.tsx`,
+  `DependencyCommitRail.tsx`, `MergeOrderRail.tsx`,
+  `ConflictProximityHeatmap.tsx`, `ExecutionTruthStrip.tsx`,
+  `ExecutionTopologyInspector.tsx`, `IntegrationProposalPanel.tsx`,
+  `IntegrationOperationDialog.tsx`, and `IntegrationReceiptPanel.tsx`.
+  `dashboard/work/src/topology/topologyManifest.ts` normalizes the visual,
+  table, and playback representations; `topologyEventReducer.ts` applies the
+  generated event union monotonically. All projections consume one Plan 24
+  selection and graph version. None of these files imports a Git adapter,
+  process/runtime provider, Plan 24 evaluator, Plan 32 scheduler, CI client, or
+  persistence API.
 
 The route manifest is `/brain`, `/explorer`, `/loom`, `/sessions`,
 `/agents`, `/code`, `/knowledge`, `/delivery`, `/automations`,
@@ -110,6 +132,15 @@ evidence-anchor IDs. It never carries source/prompt/output bytes, card indexes,
 screen coordinates, PID, CWD, mutable labels, or renderer serialization.
 Expired, revoked, ambiguous, denied, and stale links render typed states and
 never fall back to the active checkout or current version.
+The execution-topology lens uses the existing `/work/items/:workItemId` route
+with `lens=execution-topology`; operation receipts use
+`/work/operations/:operationId`. A topology deep link additionally pins the
+work-item version, work-plan/graph version, topology revision,
+repository-snapshot digest, worktree generation, branch/ref plus
+base/head/merge-base object IDs when available, valid/observation time,
+source-watermark digest, and evidence-anchor IDs. Missing or unauthorized
+identity renders a typed state; it never resolves by title, branch label,
+filesystem path, stack position, card order, or current checkout.
 
 ## Typed presentation contracts
 
@@ -200,6 +231,98 @@ modules may emit selection, brush, expansion, viewport, and playback intents;
 they cannot import command construction, policy/Doctor evaluators, task
 evaluators, provider/runtime adapters, or persistence.
 
+## Execution-topology presentation contract
+
+`dashboard/lib/contracts/executionTopology.ts` exhaustively decodes the
+application-owned `ExecutionTopologyViewV1` and
+`ExecutionTopologyEventV1` generated DTOs. It does not redefine Plan 24,
+Plan 32, Plan 36, or Plan 37 enums. The view pins one
+`WorkProjectionSelection`, graph version, topology revision,
+`RepositorySnapshot` digest, valid time, observation time, watermarks,
+coverage, freshness, authorization, and canonical ordering policy. Its
+payload contains:
+
+- canonical work-item references and optional `worktree_lanes` and
+  `branch_stack_lanes`; unsupported, unavailable, denied, partial, stale, or
+  omitted lane families remain explicit and never disappear into the base
+  Kanban;
+- separate repository dirty state, native worktree lifecycle/lock state, Plan
+  32 lease/authority state, task readiness, runtime state, and evidence health.
+  `dirty`, `locked`, `leased`, `blocked`, and `conflicting` are never aliases;
+- dependency-commit edges with exact object identity and coverage, and
+  application-provided proposed/observed merge-order edges. Commit subjects,
+  branch display names, and lane positions are labels only;
+- mechanical conflict evidence from native Git intelligence and semantic
+  conflict/proximity evidence from Plan 05/37 as independent dimensions with
+  their own producer, score kind, calibration revision, coverage, freshness,
+  omissions, and anchors. The heatmap never averages them or treats unknown as
+  zero;
+- integration proposal revisions, exact source/target repository snapshots,
+  required dependency commits, predicted impact, required tests/checks,
+  alternatives, expiry, evidence, and Plan 24 disposition; plus observed
+  native-Git, Plan 32, test, and CI receipts with authority and coverage;
+- immutable topology frames and cursors for valid-time/observation-time
+  playback. Frames reference events and entities by stable ID and never
+  interpolate repository history, invent causality, or replay an effect; and
+- application-supplied `TopologyLegalActionV1` values. The action union is
+  `RequestDryRun | RequestApply | RequestCancel | Inspect | ExpandEvidence |
+  Refresh`; each mutating request carries operation/action ID, expected graph,
+  work-item, repository-snapshot, runtime, lease-authority and policy versions
+  as applicable, idempotency key, expiry, confirmation requirement, and safe
+  reason schema.
+
+The generated event union is exactly `SnapshotReplaced |
+WorktreeStateChanged | BranchStackChanged | DependencyCommitChanged |
+MergeOrderChanged | ConflictProximityChanged | IntegrationProposalChanged |
+IntegrationOperationChanged | TestCheckChanged | TopologyFrameAppended`.
+Every event carries stream/run identity, event and entity revision, scope,
+observation time, source watermark, and coverage. `topologyEventReducer.ts`
+deduplicates by stream/event/revision, rejects stale generations, retains
+receipts already observed, and triggers one canonical refetch on a revision
+gap. It never derives a branch stack, merge order, conflict result, readiness,
+or legal action.
+
+`TopologyLaneBoard` is a synchronized grouping of the canonical selection,
+not another board. A work item has one stable selection identity even when
+referenced by task, worktree, and stack lanes. Worktree and stack grouping can
+be independently enabled only when their lane-family state is `available`;
+their off state does not remove entities or change canonical totals.
+`DependencyCommitRail` distinguishes required, present, missing, stale,
+denied, and unknown commits. `MergeOrderRail` distinguishes proposed,
+accepted-graph, observed-native, superseded, and unknown order; spatial order
+never becomes an instruction.
+
+`ConflictProximityHeatmap` exposes a synchronized accessible matrix with
+separate mechanical and semantic columns, relationship paths, freshness,
+coverage, omitted counts, and exact evidence expansion. Exact same-range or
+symbol overlap remains distinct from configured-threshold proximity.
+Denied/private cells expose neither hidden actor, root, address, count, nor
+content. Partial or unknown mechanical coverage cannot render “clean merge”;
+partial or unknown semantic coverage cannot render “no overlap.”
+
+`ExecutionTopologyInspector` is rooted in the opaque Plan 24 `TaskId`
+(`WorkItemId`) and exact `WorkItemVersionId`. Every lane, rail, heat cell,
+proposal, event, receipt, test, and check pivots through that root while
+preserving graph/topology/scope/time/watermark/anchor identity. Expansion
+rechecks authorization and returns the normal available/redacted/locked/
+unauthorized/denied/stale/revoked/expired/missing/corrupt/partial/error
+states. A compact card, summary, truncated event tail, or stack alias never
+substitutes for the lossless TaskId drill-down.
+
+`IntegrationOperationDialog` renders only legal actions returned for the
+selected exact version. `RequestDryRun` is always effect-free and returns a
+new immutable preview or a typed stale/denied/locked/unsupported result.
+`RequestApply` is present only where an owning application operation has
+mutation authority: current V2 Plan 36 native-Git merge/rebase/cherry-pick
+plans remain read-only and therefore never expose apply, while Plan 24 graph
+proposal application and Plan 36's three allowed index/commit operations may
+do so through their own contracts. `RequestCancel` requests cancellation from
+the owning operation/runtime and does not predict whether the native commit
+point was crossed. The dialog never optimistically changes a lane, dirty
+state, ref, proposal, run, test, or CI result. Reload by operation ID resumes
+preview, queued, applying, cancelling, committed, cancelled, partial,
+effect-unknown, failed, or recovered receipt state without redispatch.
+
 ## Required behavior
 
 - Brain: whole-system and scoped summaries, health, activity, relationships, freshness, and coverage.
@@ -241,6 +364,21 @@ evaluators, provider/runtime adapters, or persistence.
   card and inspector preserves exact scope/version/evidence, links Plan 32
   lease/attempt/effect history, and renders only application-provided legal
   actions. A lane move never sets readiness directly.
+- Work execution topology (PR17): optionally groups that same selection into
+  worktree and stacked-branch lanes while preserving task lanes; shows exact
+  dependency commits, proposed versus observed merge order, dirty/worktree/
+  lease truth, mechanical conflict and semantic proximity side by side,
+  integration proposals and receipts, required/observed tests and CI, and
+  dual-time playback. The canonical accessible table exposes every entity,
+  edge, state, omission, and action available in the visual lane/rail/heatmap
+  composition.
+- Cross-worktree or cross-branch integration remains a proposal/observation
+  journey: exact source/target snapshots → impact/conflict/test evidence →
+  application-supplied dry run → explicit legal apply when an owner supports
+  it → receipt → independent native/test/CI observation. Unsupported apply,
+  stale preview, changed head/base/merge base, dirty target, conflicting
+  lease, denied scope, unknown effect, partial checks, and cancelled operation
+  are first-class outcomes. The browser never calls Git or CI directly.
 - Work task-intelligence views (PR17): task-shape dimensions and calibrated
   ranges; parent/child decomposition comparison and review; ranked eligible
   routes with exclusions, confidence/coverage, requested/actual identity, and
@@ -343,6 +481,12 @@ and return-to-live. The browser does not interpolate events into canonical
 history or infer causality from proximity. Search, filter, linked selection,
 cluster expansion, playback, evidence expansion, and lens changes preserve
 scope and deep-link identity.
+Execution-topology playback reuses this controller and
+`topologyEventReducer.ts`. It can replay graph versions, worktree/stack
+observations, dependency-commit and merge-order changes, conflict/proximity
+evidence, leases/attempts, proposals, operation receipts, tests, and CI
+observations. Playback controls are presentation-only: pausing or seeking does
+not pause a run, cancel an operation, checkout a ref, or rerun a test.
 
 Cosmograph may be evaluated only as an optional lazy-loaded adapter after
 license and transitive-license review. It is never on the default critical
@@ -401,6 +545,15 @@ threshold:
 - LCP and keyboard-ready ≤2.5 s, CLS ≤0.1, pending acknowledgement ≤100 ms,
   loaded selection/filter/brush ≤150 ms, linked selection ≤200 ms, and cached
   evidence inspector ≤200 ms;
+- the representative execution-topology tier is exactly 500 visible work
+  items, 64 worktree/stack lanes, 2,000 dependency/merge-order edges, and
+  4,096 conflict cells. Its initial payload is ≤512 KiB compressed and ≤2 MiB
+  decoded; larger selections use server grouping/paging. Lane/rail selection,
+  keyboard movement, and one playback step are ≤150 ms p95; cross-lens linked
+  selection and TaskId inspector open are ≤200 ms p95; return-to-live after a
+  settled refetch is ≤500 ms p95. At most 250 row-like DOM elements, 64 lane
+  headers, 512 edge hit targets, and 256 heat cells are mounted at once;
+  accessible pagination exposes all remaining rows without canvas-only data;
 - representative graph frame ≤33 ms p95, large frame ≤50 ms p95, no long task
   >200 ms, and tasks >50 ms total ≤500 ms during a ten-second journey;
 - first planner progress ≤500 ms, stage/elapsed/cancel/coverage visible after
@@ -423,8 +576,11 @@ the tested slice. Tasks cover scope identification,
 complete-zero versus partial/stale/unknown, exact evidence, graph/table parity,
 keyboard query/filter/brush/expansion, truthful query delay and cancellation,
 supplied remediation through verified recovery, handoff resume, uncertainty,
-and unavailable actions. There are zero wrong-scope, hidden-state, illegal-
-action, or dispatch-as-recovery outcomes; at least 11/12 complete scope,
+unavailable actions, topology lane/table/TaskId parity, mechanical versus
+semantic conflict disagreement, stale integration preview, operation-receipt
+resume, and valid-time versus observation-time playback. There are zero
+wrong-scope, hidden-state, illegal-action, browser-owned Git/CI, or
+dispatch-as-recovery outcomes; at least 11/12 complete scope,
 evidence, parity, recovery, and action-authority tasks unassisted and 10/12
 complete every other task; every screen-reader participant completes the
 graph-equivalent task; median Single Ease Question is ≥6/7 and SUS is ≥80.
@@ -447,6 +603,13 @@ graph-equivalent task; median Single Ease Question is ≥6/7 and SUS is ≥80.
    timeline, causal, workload, repository, delegation, and attempt lenses.
 8. **PR17 Gate B — Work intelligence/runtime:** proposal diffs, route/exclusion
    evidence, requested/actual identity, attempts, receipts, and recovery.
+9. **PR17 Gate C — execution topology:** worktree/stack lane-family states,
+   dependency commits, merge order, dirty/lease truth, conflict/proximity,
+   tests/CI, TaskId drill-down, and dual-time playback over the same selection.
+10. **PR17 Gate D — governed integration controls:** dry-run/apply/cancel
+    request rendering, stale/denied/locked/unsupported/effect-unknown outcomes,
+    crash-safe receipt resume, authority-negative tests, topology performance,
+    and Plan 26 metric parity.
 
 Fixtures live under `dashboard/test/fixtures/` and include
 `dashboard-state-taxonomy.json`, `planner-parallel-source-progress.json`,
@@ -454,6 +617,8 @@ Fixtures live under `dashboard/test/fixtures/` and include
 `late-context.ndjson`, `deep-link-state-matrix.json`,
 `projection-parity.json`, `renderer-fallback.json`,
 `work-projection-matrix.json`, `auxiliary-attempt-matrix.json`,
+`execution-topology-matrix.json`, `execution-topology-events.ndjson`,
+`integration-operation-matrix.json`,
 `doctor-source-disagreements.json`, `github-feedback-matrix.json`,
 `dashboard/test/fixtures/generators/graphScale.mjs`, and
 `dashboard/test/fixtures/generators/sseChurn.mjs`. Plan 14 defines their exact
@@ -482,11 +647,19 @@ adds exact dev dependencies `msw`, `@playwright/test`,
 `dashboard/test/manual/results/voiceover-safari-pr14.json`,
 `dashboard/test/usability/protocol.md`,
 `dashboard/test/usability/result.schema.json`, and
-`dashboard/test/usability/results/pr14.json`. `test:acceptance` executes, in
+`dashboard/test/usability/results/pr14.json`. PR17 adds
+`dashboard/test/execution-topology-matrix.vitest.tsx`,
+`dashboard/test/execution-topology-actions.vitest.tsx`,
+`dashboard/test/execution-topology-playback.vitest.tsx`, and
+`dashboard/test/e2e/execution-topology.spec.ts`.
+`test:acceptance` executes, in
 order, build, test:node, the narrowed legacy test:dom suite, contracts, a11y,
-responsive, renderer parity, authority-negative, performance, Lighthouse,
-SSE, e2e, smoke, and smoke:mobile, then validates both manual records and the
-usability results against their schemas and thresholds. Test and measurement
+responsive, renderer parity, authority-negative, work-topology, performance,
+Lighthouse, SSE, e2e, smoke, and smoke:mobile, then validates both manual
+records and the usability results against their schemas and thresholds. The
+Playwright configuration includes an exact `work-topology` project on
+Chromium, Firefox, and WebKit with the responsive and keyboard matrices above.
+Test and measurement
 scripts fail when zero cases or samples execute and print fixture/state/sample
 counts; build and Cargo check fail on compile or validation error.
 
@@ -501,6 +674,7 @@ The implementation adds these exact script bodies to
   "test:responsive": "playwright test --config=playwright.config.ts --project=responsive",
   "test:renderer-parity": "vitest run test/projection-parity.vitest.tsx && playwright test --config=playwright.config.ts --project=renderer",
   "test:authority-negative": "vitest run test/authority-negative.vitest.ts",
+  "test:work-topology": "vitest run test/execution-topology-matrix.vitest.tsx test/execution-topology-actions.vitest.tsx test/execution-topology-playback.vitest.tsx && playwright test --config=playwright.config.ts --project=work-topology",
   "test:perf": "node test/perf/runner.mjs",
   "test:lighthouse": "lhci autorun --config=lighthouserc.cjs",
   "test:sse": "vitest run test/monotone-events.vitest.ts test/late-context.vitest.tsx && node test/perf/runner.mjs --suite=sse",
@@ -548,6 +722,24 @@ cargo check --all-features
   cancellation escalation, restart/resume, artifacts, and all terminal states
   without browser-local process execution, output parsing, provider selection,
   or graph/runtime mutation.
+- PR17 execution-topology fixtures cover optional/unsupported worktree and
+  stack lanes, exact dependency commits, proposed versus observed merge order,
+  every dirty/worktree/lease state, mechanical versus semantic conflict
+  disagreement, required/observed tests and CI, drift/retarget, concurrent
+  edit proximity, crash/restart receipt recovery, branch retention, and
+  dual-time playback without browser-local Git, scheduler, test, or CI logic.
+- Every visual topology reference round-trips through the same TaskId,
+  work-item/plan/graph/topology versions, exact repository/worktree/branch
+  snapshot, valid/observation time, watermarks, and anchors as its accessible
+  row and inspector. Missing, stale, partial, denied, locked, redacted, and
+  unsupported data remains visible and cannot fall back to path, lane, branch
+  label, current checkout, or latest graph version.
+- Authority-negative tests prove `RequestDryRun`, `RequestApply`, and
+  `RequestCancel` are submitted only from application-supplied action
+  references with exact expected versions and idempotency identity; duplicate
+  clicks return one receipt, stale previews cannot apply, cancellation never
+  rewrites a committed receipt, and an unsupported Git merge/rebase/
+  cherry-pick operation never gains an apply control.
 - PR17 dashboard fixtures render each canonical auxiliary-provider finding and
   cross-owner disagreement from Plan 14, preserve Plan 20 desired/observed
   revisions and Plan 27/32/26 provenance, and invoke only the supplied typed

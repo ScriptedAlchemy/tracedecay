@@ -29,6 +29,12 @@ Every operational and product metric states what was measured, over which popula
   profiles, independent-review grades, first-pass and parent-normalized
   outcomes, calibration error, censoring, selection/override/exploration
   exposure, and drift/change-point evidence.
+- Privacy-safe execution-topology observations and bounded read models for
+  requested/accepted/admitted/active/useful concurrency, duplicate work and
+  duplicate effects, conflict-prediction precision/recall, ready-to-integrated
+  latency, observed native-merge success, stale-stack age, blocked time,
+  runtime/test/CI reruns, operational/privacy leaks, and runtime/delivery
+  fanout.
 - The canonical versioned independent-review and task-outcome label vocabulary,
   evidence requirements, transition-validity inputs, and measurement schema
   consumed by Plan 24 graph state, Plan 06 policy, Plan 11 UI, and public
@@ -45,6 +51,10 @@ Every operational and product metric states what was measured, over which popula
 - Work-plan/item proposal or graph-transition authority. Plan 24 consumes
   canonical labels and decides legal graph transitions; this plan never accepts
   a proposal, changes readiness, or marks graph work complete.
+- Worktree, branch-stack, integration, Git, lease, test, CI, or conflict
+  authority. Metrics observe typed owner events and receipts; they never infer
+  a merge from branch labels, call Git/CI, request a rerun, release a blocker,
+  cancel an attempt, or turn a correlation into a graph/runtime action.
 - Raw provider payloads or unsanitized content.
 - A source parser, Markdown parser, compatibility inventory, plan ledger, generated execution graph, or meta compiler.
 - UI-local metric formulas or transport-specific metric meanings.
@@ -132,19 +142,260 @@ Every operational and product metric states what was measured, over which popula
   precision, verifier exploit success, false accept/reject, legitimate-solver
   retention, and reviewer independence/conflict.
 
+### Execution-topology observations and bounded metrics
+
+Plans 24, 32, 36, and 37 emit source facts through the one observability
+application boundary; this plan owns only the schemas, joins, descriptors, and
+read models. The exact event payloads in
+`crates/tracedecay-domain/src/observability/execution_topology.rs` are:
+
+- `ExecutionTopologySampledV1`
+  (`work.execution_topology.sampled.v1`);
+- `WorkConflictPredictionObservedV1`
+  (`work.conflict_prediction.observed.v1`);
+- `WorkConflictOutcomeLinkedV1`
+  (`work.conflict_outcome.linked.v1`);
+- `WorkIntegrationTransitionObservedV1`
+  (`work.integration.transition.observed.v1`);
+- `WorkStackDriftObservedV1`
+  (`work.stack_drift.observed.v1`);
+- `WorkDuplicateEffortObservedV1`
+  (`work.duplicate_effort.observed.v1`);
+- `WorkBlockedIntervalObservedV1`
+  (`work.blocked_interval.observed.v1`);
+- `WorkRerunObservedV1` (`work.rerun.observed.v1`);
+- `WorkExecutionLeakObservedV1`
+  (`work.execution_leak.observed.v1`); and
+- `WorkDeliveryFanoutObservedV1`
+  (`work.delivery_fanout.observed.v1`).
+
+Every event uses `ObservabilityEnvelopeV1`, carries event/observation time and
+valid-time interval where applicable, pins schema/producer/config/policy/
+privacy revisions, coverage, watermark, idempotency identity, and an opaque
+authorized local join reference, and distinguishes attempt from terminal
+outcome. Events contain no task title or TaskId, actor/user/session, project or
+repository identity, path, worktree locator, branch/ref, commit/object ID,
+commit message, author, patch/conflict/source/test/CI/log content, prompt,
+provider output, model version, host name, argv/stdin/environment, secret, URL,
+or reversible digest. Exact identities remain in authorized owning history and
+are reached only through local non-exportable anchors after authorization.
+
+`ExecutionTopologySampledV1` records the selected topology kind
+`Single | Sequential | Parallel | Hierarchical | Hybrid`, requested, Plan
+24-accepted, Plan 32-admitted, active, and useful width; runnable and blocked
+counts; capacity saturation class; critical-path and serial-fraction buckets;
+fan-in/fan-out buckets; shared-authority serialization count; and coverage.
+“Useful” requires distinct admitted attempts that each advanced a committed
+Plan 32 `ProgressFrontier` during the interval and are not linked by an
+adjudicated duplicate-work relation. Heartbeats, queued work, card presence,
+provider child processes, and transport fanout never count as useful
+concurrency.
+
+`WorkConflictPredictionObservedV1` records prediction identity, prediction
+time before integration, `Mechanical | Semantic | Combined`, predicted
+`Conflict | NoConflict | Abstained | Unknown`, score kind and descriptor/
+calibration revision, eligible relation classes, evidence coverage, expiry,
+and at most eight authorized local anchors. `WorkConflictOutcomeLinkedV1`
+links an independently observed native conflict/no-conflict or adjudicated
+semantic conflict/no-conflict outcome to that prediction and records
+`Observed | Censored | Unknown`, adjudicator class, horizon, coverage, and
+late/corrected revision. A clean Git operation cannot adjudicate semantic
+conflict; a test/review finding cannot adjudicate native mechanical conflict.
+Unlinked, stale, partial, denied, and unresolved cases remain explicit and do
+not enter a confusion-matrix denominator.
+
+`WorkIntegrationTransitionObservedV1` uses the exhaustive phase set
+`Ready | ProposalCreated | DryRunRequested | DryRunTerminal |
+ApplyRequested | ApplyTerminal | NativeIntegratedObserved |
+RequiredChecksTerminal | AcceptedOutcomeObserved | Cancelled | Censored |
+Unknown` and result set `Succeeded | Conflicted | Rejected | Denied | Stale |
+Locked | Cancelled | TimedOut | Failed | Partial | EffectUnknown |
+Unsupported | Unknown`. It records operation kind
+`FastForward | MergeCommit | Rebase | CherryPick | StackRetarget |
+GraphOnly | ExternalObserved | Unknown`, source/target scope classes,
+dependency-commit coverage, required-test/check coverage, and owner-receipt
+class. `ApplyRequested` can exist only for an owning typed operation that
+actually supports apply; current Plan 36 read-only merge/rebase/cherry-pick
+plans therefore emit preview or external-observation phases, not a fictional
+TraceDecay apply. `NativeIntegratedObserved` requires native Git evidence that
+the exact target snapshot contains the declared integration result; a Plan 24
+proposal decision, card move, process exit, or CI result cannot synthesize it.
+
+`WorkStackDriftObservedV1` records
+`HeadAdvanced | BaseAdvanced | MergeBaseChanged | DependencyMissing |
+RefDeleted | WorktreeGenerationChanged | Retargeted | Superseded | Unknown`,
+first-observed and terminal times, open/closed state, current coverage, and a
+fixed age bucket. `WorkDuplicateEffortObservedV1` records only an independently
+adjudicated `ExactDuplicate | SupersededOverlap | RepeatedInvestigation |
+DuplicateEffect | NotDuplicate | Censored | Unknown` relation plus bounded
+wall, token, cost, test, and effect quantities with their evidence class.
+Similarity, proximity, same path, or concurrent execution alone never labels
+duplicate work.
+
+`WorkBlockedIntervalObservedV1` records one exact valid-time interval and
+`Dependency | NeedsInput | Capability | Policy | Scope | Conflict | Lease |
+Backpressure | Test | CI | Review | EffectUnknown | Other | Unknown`.
+Intervals are versioned and may overlap; the projection computes unioned wall
+time separately from per-cause attributed time. `WorkRerunObservedV1` requires
+a new Plan 32 attempt ID or an observed test/CI rerun ID linked to one prior
+attempt and uses `RuntimeRetry | RuntimeFallback | TestRerun | CiRerun |
+Recovery | HumanRequested | Unknown` plus a typed cause. Repeated logs,
+redelivery, or the same attempt ID never count as a rerun.
+
+`WorkExecutionLeakObservedV1` records only independently proved
+`LeaseAfterTerminal | AttemptWithoutLiveOwner | EffectUnknownPastDeadline |
+MissingWorktreeBinding | UnboundedDelivery | PrivacyCanary | None | Unknown`,
+the detection horizon, recovery state, coverage, and safe owner class.
+`PrivacyCanary` is a hard adverse outcome and carries no canary bytes.
+`WorkDeliveryFanoutObservedV1` records one canonical event class, eligible
+surface count, attempted/delivered/deduplicated/dropped/unknown counts, and
+surface family `Hook | MCP | LSP | Dashboard | CLI | Other`; it never records
+addresses, payloads, principals, or recipient identity.
+
+The canonical read model is `ExecutionTopologyMetricsV1` with these exact
+descriptor names and semantics:
+
+- `work_execution_concurrency_width{phase=requested|accepted|admitted|active|useful}`
+  is a duration-weighted distribution, not a point-in-time maximum;
+- `work_execution_useful_concurrency_ratio` is useful attempt-time divided by
+  admitted attempt-time over intervals with known coverage;
+- `work_execution_fanout_width{phase=requested|accepted|admitted|peak_active|useful}`
+  reports the width distribution and preserves serialized/blocked work;
+- `work_duplicate_effort_total{kind,unit}` and
+  `work_duplicate_effort_ratio{unit}` use only adjudicated duplicate relations
+  and report wall time, tokens, cost, tests, and effects separately;
+- `work_duplicate_effects_total{outcome=prevented|committed|unknown}` keeps a
+  prevented duplicate distinct from a duplicate observable effect;
+- `work_conflict_prediction_total{kind,outcome}` plus
+  `work_conflict_prediction_precision{kind}` and
+  `work_conflict_prediction_recall{kind}` use linked pre-integration
+  predictions and independent outcomes only;
+- `work_ready_to_integrated_seconds{integration_kind}` starts at the first
+  Plan 24 `Ready` valid time for the pinned work-item version and ends at the
+  first exact `NativeIntegratedObserved`; supersession, cancellation, target
+  drift, or incomplete horizon is censored, not success or zero;
+- `work_merge_attempts_total{integration_kind,outcome}` and
+  `work_merge_success_ratio{integration_kind}` count observed native
+  integrations only. Mechanical success, required checks, accepted task
+  outcome, and escaped defects remain separate dimensions;
+- `work_stale_stack_age_seconds{drift_kind,state=open|closed}` starts at the
+  first proved invalidating observation and stops only on exact retarget,
+  supersession, or restored-current evidence;
+- `work_blocked_wall_seconds` is the union of blocked intervals, while
+  `work_blocked_cause_seconds{cause}` is attributed per cause and may sum above
+  wall time when causes overlap;
+- `work_reruns_total{source=runtime|test|ci,cause}` and
+  `work_rerun_rate{source}` use eligible original attempts/runs as the
+  denominator and never count transport replay;
+- `work_execution_leaks_total{kind,outcome}` and
+  `work_execution_privacy_canary_leaks_total` retain unknown coverage; the
+  latter promotion threshold is exactly zero; and
+- `work_delivery_fanout_total{surface,outcome}` and
+  `work_delivery_duplicate_ratio{surface}` count delivery and dedupe without
+  treating multi-surface delivery as duplicate product work.
+
+Width uses fixed buckets `0`, `1`, `2`, `3..4`, `5..8`, `9..16`, `17..32`,
+`33..64`, and `over_64`. Ready/integration, stale age, blocked time, and rerun
+latency use `under_1m`, `1m..5m`, `5m..15m`, `15m..1h`, `1h..4h`,
+`4h..24h`, `1d..7d`, and `over_7d`. Raw timestamps and exact durations remain
+authorized local detail; shared packets contain only bucket counts.
+
+Conflict precision/recall requires at least 50 independently adjudicated
+eligible cases per kind, at least 90% outcome coverage, at most 10% censoring,
+and no unresolved descriptor/cohort shift. Merge-success and rerun rates, and
+ready-to-integrated percentiles, require at least 20 eligible cases and 90%
+coverage. Useful-concurrency and blocked/stale distributions require at least
+90% interval coverage. When a floor fails, the metric is unavailable with
+eligible/observed/censored/unknown counts; it never renders zero, 100%, or a
+trend arrow.
+
+Allowed local grouping dimensions are only topology kind, work class,
+fixture-size bucket, integration kind, conflict kind, blocker class, rerun
+source/cause, leak kind, surface family, host family, OS family, product
+major/minor version, and coverage class. The existing maximum of eight
+dimensions, 4,096 local cells per daily bucket, 256 returned cells, and
+minimum-five local-cell suppression applies. Shared aggregation remains
+limited to the existing share allowlist; topology, conflict, blocker, rerun,
+leak, and integration dimensions are local-only until a separate privacy
+review adds a cataloged coarse dimension. No metric groups, filters, sorts, or
+exports by person, agent, TaskId, initiative, project, repository, worktree,
+branch, ref, commit, model version, or exact route.
+
+Each event contains only counts plus at most eight authorized local anchor
+references and 16 cause buckets; overflow sets coverage `Capped` and folds to
+`other`. `OptionalLocalDetail30d` retains joinable event detail for at most 30
+days; `LocalRollup395d` retains bounded cells; owning task/runtime/Git receipts
+keep their separate owner retention and are not copied. Projection rebuild,
+late linkage, correction, deletion, and retention expiry are idempotent and
+version-monotone. A branch/worktree deletion may close or censor a metric
+interval but cannot erase a retained aggregate or rewrite a historical
+denominator.
+
+Exact implementation and test ownership is:
+
+- `crates/tracedecay-domain/src/observability/execution_topology.rs` owns the
+  event payloads, closed enums, descriptor values, and validation;
+- `crates/tracedecay-store/src/observation/execution_topology_projection.rs`
+  owns interval coalescing, prediction/outcome linkage, bounded cells,
+  idempotent late correction, and rebuild;
+- `src/application/observability/execution_topology.rs` owns authorized local
+  record/query use cases and delegates persistence to the existing telemetry
+  store;
+- `dashboard/observatory/src/ExecutionTopologyPanel.tsx` and
+  `dashboard/costs/src/ExecutionEfficiencyPanel.tsx` render the application
+  read model without formulas;
+- `crates/tracedecay-domain/tests/observability_execution_topology_contract.rs`,
+  `crates/tracedecay-store/tests/observability_execution_topology_projection.rs`,
+  `tests/observability_suite/execution_topology.rs`,
+  `tests/dashboard_api_test/execution_topology.rs`, and
+  `dashboard/test/observatory-execution-topology.vitest.tsx` are the binding
+  contract, rebuild, privacy, parity, and DOM suites.
+- `tests/fixtures/observability/execution-topology/events-v1.jsonl` is the
+  canonical serialized event corpus;
+  `tests/fixtures/observability/execution-topology/expected-rollups-v1.json`
+  contains exact numerator/denominator/coverage/bucket outputs; and
+  `tests/fixtures/observability/execution-topology/privacy-canaries-v1.json`
+  contains synthetic forbidden-field and canary cases. The corpus imports
+  every fixture ID from Plan 14's `execution-topology-matrix.json`,
+  `execution-topology-events.ndjson`, and
+  `integration-operation-matrix.json`; missing or zero imported cases fails
+  the suite.
+
+Delivery milestones are exact:
+
+1. **M26.T1 — event contract:** land the domain file, canonical
+   serialization/digest fixtures, exhaustive enum matches, prohibited-field
+   schema scan, and idempotency tests.
+2. **M26.T2 — projector:** land deterministic joins, interval union,
+   censoring, fixed buckets, support/coverage floors, late correction,
+   retention, and rebuild equality over every Plan 14 topology fixture.
+3. **M26.T3 — owner emission and parity:** Plans 24/32/36/37 emit through the
+   existing application boundary; CLI/MCP/HTTP/Observatory/Costs return the
+   same descriptors, values, denominators, coverage, and unavailable reasons.
+4. **M26.T4 — promotion gate:** execute concurrency, duplicate-work,
+   conflict confusion-matrix, integration, stale-stack, blocked, rerun, leak,
+   fanout, replay/drop, privacy-canary, and cardinality fault fixtures on one
+   pinned build. Any duplicate committed effect, privacy canary leak,
+   identity-bearing metric label, formula drift, or cross-transport mismatch
+   blocks promotion.
+
 ### Concrete event and type contract
 
 The canonical domain contract lives in
 `crates/tracedecay-domain/src/observability/mod.rs`,
 `crates/tracedecay-domain/src/observability/retrieval.rs`,
 `crates/tracedecay-domain/src/observability/adoption.rs`,
-`crates/tracedecay-domain/src/observability/performance.rs`, and
-`crates/tracedecay-domain/src/observability/attestation.rs`.
+`crates/tracedecay-domain/src/observability/performance.rs`,
+`crates/tracedecay-domain/src/observability/attestation.rs`, and
+`crates/tracedecay-domain/src/observability/execution_topology.rs`.
 `crates/tracedecay-store/src/observation/telemetry.rs` persists the common
 envelope, `crates/tracedecay-store/src/observation/telemetry_projection.rs`
-builds denominator-safe read models, and
+builds shared denominator-safe read models,
+`crates/tracedecay-store/src/observation/execution_topology_projection.rs`
+builds the bounded execution-topology read model, and
 `crates/tracedecay-store/src/observation/telemetry_retention.rs` applies the
-retention policy. `src/application/observability/{mod,record,query,privacy}.rs`
+retention policy.
+`src/application/observability/{mod,record,query,privacy,execution_topology}.rs`
 is the only application write/query boundary. Product owners instrument their
 own paths and emit these types; they do not add another counter store.
 
@@ -177,6 +428,13 @@ The minimum cross-cutting V1 event payloads added by this plan are:
 - `AnalyticsConsentChangedV1` (`analytics.consent.changed.v1`);
 - `OperationResourceObservedV1` (`operation.resource.completed.v1`);
 - `NoProgressObservedV1` (`operation.no_progress.terminal.v1`);
+- `ExecutionTopologySampledV1`,
+  `WorkConflictPredictionObservedV1`, `WorkConflictOutcomeLinkedV1`,
+  `WorkIntegrationTransitionObservedV1`, `WorkStackDriftObservedV1`,
+  `WorkDuplicateEffortObservedV1`, `WorkBlockedIntervalObservedV1`,
+  `WorkRerunObservedV1`, `WorkExecutionLeakObservedV1`, and
+  `WorkDeliveryFanoutObservedV1`, with event-kind strings fixed in the
+  execution-topology section above;
 - `WorkflowRunSourceEventV1`, `WorkflowStageSourceEventV1`,
   `WorkflowEffectSourceEventV1`, `WorkflowRouteSourceEventV1`, and
   `WorkflowRecoverySourceEventV1`, emitted by Plan 32 for run terminal,
@@ -560,6 +818,15 @@ queryable.
   first-pass completion, correctness, tests/review, rework, latency,
   tokens/cost, autonomy, overrides, cancellations, unknown outcomes, and
   evidence coverage as separate dimensions.
+- `execution-topology` shows requested/accepted/admitted/active/useful
+  concurrency and fanout, independently adjudicated duplicate work,
+  mechanical/semantic conflict confusion matrices, ready-to-integrated
+  latency, observed native-merge outcomes, stale-stack age, unioned and
+  cause-attributed blocked time, runtime/test/CI reruns, duplicate effects,
+  operational/privacy leaks, and delivery fanout. Every card exposes support,
+  eligible denominator, censoring/unknowns, interval coverage, horizon,
+  descriptor revision, and safe anchors; unsupported or under-floor metrics
+  render unavailable rather than zero.
 - Task-intelligence calibration and drift views: estimate versus outcome
   intervals, decomposition and live resize/re-route proposal disposition,
   independent-review coverage, exact model-version boundaries, current versus
@@ -626,15 +893,20 @@ decision with collision, ambiguity, maintenance, and privacy review.
 - PR14 exposes shared typed read models through application queries and the
   then-shipped CLI, MCP, HTTP, and dashboard adapters. PR18 adds SDK adapters
   and parity when the official SDKs ship.
+- PR17 extends those same adapters with `ExecutionTopologyMetricsV1`,
+  `ExecutionTopologyPanel.tsx`, and `ExecutionEfficiencyPanel.tsx`; it does
+  not add a telemetry store, formula, or transport-local projection.
 - Backend adapters are `src/dashboard/observatory_api.rs` and
   `src/dashboard/costs_api.rs`. The UI implementations are
   `dashboard/observatory/src/{entry,api,types,ObservatoryPage}.tsx`,
-  `dashboard/observatory/src/{Retrieval,Adoption,Performance,Attestation}Panel.tsx`,
-  and `dashboard/costs/src/{entry,api,types,CostsPage}.tsx`. Dashboard formulas
-  are prohibited; these files render application read models.
+  `dashboard/observatory/src/{Retrieval,Adoption,Performance,Attestation,ExecutionTopology}Panel.tsx`,
+  `dashboard/costs/src/{entry,api,types,CostsPage}.tsx`, and
+  `dashboard/costs/src/ExecutionEfficiencyPanel.tsx`. Dashboard formulas are
+  prohibited; these files render application read models.
 - Dashboard/API parity fixtures are
-  `tests/dashboard_api_test/{observatory,costs}.rs` and
-  `dashboard/test/{observatory,costs}.vitest.tsx`.
+  `tests/dashboard_api_test/{observatory,costs,execution_topology}.rs`,
+  `dashboard/test/{observatory,costs}.vitest.tsx`, and
+  `dashboard/test/observatory-execution-topology.vitest.tsx`.
 - Every card, chart, and export shows scope, horizon, freshness, coverage, unit, and denominator.
 - Users can drill from an aggregate to safe trace or retrieval anchors and see why data is partial or unknown.
 - UI and transports consume the same values; none recompute business metrics locally.
@@ -649,6 +921,55 @@ decision with collision, ambiguity, maintenance, and privacy review.
   in PR14; PR18 SDK conformance adds the same parity fixtures for each shipped
   SDK.
 - Privacy fixtures prove events and drill-down anchors contain no prohibited raw content.
+- Execution-topology contract fixtures serialize and round-trip every exact
+  event kind and enum above; schema scans reject every prohibited identity/
+  content field and every free-form metric label. Each Plan 14 topology,
+  operation, event, platform, privacy, and retention case contributes at
+  least one source-event assertion and one expected-rollup assertion.
+- Concurrency/fanout fixtures reconcile requested, Plan 24-accepted, Plan
+  32-admitted, active, useful, serialized, blocked, and capacity-deferred
+  widths over event-time intervals. Heartbeats, queue presence, duplicate
+  work, provider-native children, and hook/LSP/dashboard delivery do not
+  inflate useful concurrency; duplicate delivery is measured only in the
+  delivery-fanout projection.
+- Duplicate-work fixtures distinguish independently adjudicated exact/
+  superseded/repeated effort from similarity and proximity; preserve
+  not-duplicate/censored/unknown outcomes; report wall/tokens/cost/tests/
+  effects separately; and prove task splitting, retries, redelivery, or
+  duplicate-effect prevention cannot improve the denominator. Duplicate
+  committed effects and privacy-canary leaks are hard non-zero promotion
+  failures.
+- Conflict fixtures build separate mechanical, semantic, and combined
+  confusion matrices from predictions made before integration and
+  independent outcomes. They include true/false positive and negative,
+  abstained, unknown, stale, partial, denied, corrected, late, and censored
+  cases; precision/recall is unavailable below 50 cases, 90% coverage, or
+  above 10% censoring and never reclassifies a clean mechanical result as a
+  clean semantic outcome.
+- Integration fixtures prove ready-to-integrated starts at the first exact
+  Plan 24 Ready transition and ends only at exact native target containment;
+  supersession, target drift, cancellation, missing receipt, and incomplete
+  horizon censor. Observed merge success remains separate from required test/
+  CI completion, Plan 24 acceptance, escaped defects, and TraceDecay operation
+  support; read-only Plan 36 merge previews never emit fictional apply events.
+- Stale-stack and blocked-time fixtures coalesce duplicate/overlapping
+  intervals deterministically, keep open intervals visible at the watermark,
+  preserve per-cause overlap separately from unioned wall time, and handle
+  head/base/merge-base/worktree-generation drift, retarget, ref deletion,
+  branch retention, late events, and projector rebuild without rewriting
+  history.
+- Rerun fixtures require a new linked runtime/test/CI identity, preserve cause
+  and original denominator, and reject log replay, SSE redelivery, the same
+  attempt, or a renamed branch as a rerun. Leak fixtures cover lease-after-
+  terminal, ownerless attempt, effect-unknown past deadline, missing worktree
+  binding, unbounded delivery, privacy canary, none, and unknown with exact
+  recovery/coverage semantics.
+- Cardinality, retention, and parity fixtures enforce fixed width/time
+  buckets, eight grouping dimensions, 4,096 local cells/day, 256 returned
+  cells, minimum-five suppression, 30-day detail and 395-day rollup retention,
+  source-event anchor cap, and the stated rate/support floors. CLI, MCP, HTTP,
+  Observatory, Costs, and exports return identical values, denominators,
+  horizons, coverage, and unavailable reasons without a UI-local formula.
 - Retrieval fixtures prove per-retriever counts reconcile to planner and
   synthesis totals; ranks and contribution cap deterministically; equal-budget
   ablations cannot transfer unused budget; source state, authorization, and
