@@ -290,11 +290,17 @@ async fn combined_review_falls_back_when_evidence_is_unavailable() {
     // skips).
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(combined_output_fixture());
+    let retrieval = EmptyAutomationSessionRetrieval::new();
 
-    let dispatch =
-        run_combined_review_with_backend(&cg, &config, &backend, combined_options(&profile_root))
-            .await
-            .unwrap();
+    let dispatch = tracedecay::automation::runner::run_combined_review_with_backend_and_retrieval(
+        &cg,
+        &config,
+        &backend,
+        &retrieval,
+        combined_options(&profile_root),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(backend.calls(), 0);
     let CombinedReviewDispatch::NotCombined { reason } = dispatch else {
