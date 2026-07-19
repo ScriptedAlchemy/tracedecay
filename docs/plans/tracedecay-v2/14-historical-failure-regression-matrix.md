@@ -226,6 +226,193 @@ epoch, and terminal receipt visible.
 `doctor.resume-receipt-stale`. Each yields the one canonical finding family,
 source-attributed evidence/coverage, and owner-supplied legal actions.
 
+### Execution-topology exhaustive matrix
+
+The PR17 Work execution-topology contract has three checked-in sanitized
+assets:
+
+- `dashboard/test/fixtures/execution-topology-matrix.json` contains static
+  topology snapshots and expected visual/table manifests;
+- `dashboard/test/fixtures/execution-topology-events.ndjson` contains ordered,
+  duplicated, delayed, stale, gap, restart, and dual-time event sequences; and
+- `dashboard/test/fixtures/integration-operation-matrix.json` contains
+  application-supplied dry-run/apply/cancel action references and receipts.
+
+Every static record contains `id`, opaque TaskId/WorkItemVersionId and graph/
+topology versions, exact fixture-local repository/worktree/branch/ref/base/
+head/merge-base aliases, repository-snapshot digest, dirty/worktree/lease
+state, lane-family support, dependency commits, proposed and observed merge
+order, mechanical-conflict and semantic-proximity evidence, required/
+observed tests and CI, valid and observation time, watermarks, coverage,
+omissions, evidence anchors, legal-action IDs, and the expected normalized
+`topologyManifest`. Fixture aliases are random and non-joinable; no real path,
+branch name, commit subject, actor, prompt, source, patch, conflict body, test
+log, or private session content is present.
+
+Every row below is mandatory. “No apply” means the application payload
+contains no `RequestApply`; the test does not merely hide a client-created
+button. “Preserve” means the same TaskId, work-item/plan/graph/topology
+versions, repository snapshot, valid/observation time, watermarks, coverage,
+and anchors survive visual, table, inspector, playback, and deep-link
+round-trip.
+
+#### Worktree lifecycle and stack topology
+
+| Fixture ID | Required assertion |
+|---|---|
+| `topology.worktree.unsupported` | Worktree lanes remain visibly unsupported; task lanes and totals remain available; no empty/clean inference. |
+| `topology.worktree.absent` | Cataloged repository with no observed worktree renders absent with source coverage, not zero work. |
+| `topology.worktree.unborn` | Unborn HEAD has no invented commit/ref/merge base and offers no integration apply. |
+| `topology.worktree.attached-clean` | Exact attached ref, HEAD, generation, clean state, and complete coverage render independently of readiness and lease. |
+| `topology.worktree.dirty-unstaged` | Unstaged dirty state is visible in lane, truth strip, table, inspector, and dry-run preconditions. |
+| `topology.worktree.dirty-staged` | Staged dirty state is distinct from unstaged and does not imply a Plan 36 commit receipt. |
+| `topology.worktree.dirty-mixed` | Staged plus unstaged state remains mixed; neither layer is dropped or collapsed to generic dirty. |
+| `topology.worktree.dirty-untracked` | Untracked presence is explicit without persisting or previewing untracked content. |
+| `topology.worktree.ignored-only` | Ignored-only state remains separate from tracked dirtiness and does not expose ignored names/content. |
+| `topology.worktree.dirty-renamed-mode` | Rename and file-mode evidence remains typed and cannot be reconstructed from display paths. |
+| `topology.worktree.dirty-submodule` | Submodule dirtiness/availability is explicit and cannot be flattened into parent clean state. |
+| `topology.worktree.dirty-sparse` | Sparse-checkout coverage and excluded paths remain visible; unknown coverage is not clean. |
+| `topology.worktree.detached` | Detached HEAD preserves object identity and disables attached-ref assumptions. |
+| `topology.worktree.conflicted` | Native unmerged/conflicted state remains separate from semantic proximity and blocks unsupported mutation. |
+| `topology.worktree.locked` | Native worktree lock and reason are separate from Plan 32 lease state and expose only supplied legal actions. |
+| `topology.worktree.prunable` | Prunable is an observed lifecycle state, never permission for browser cleanup or branch deletion. |
+| `topology.worktree.removed-active-attempt` | Removed/missing worktree plus active attempt renders conflicting/stale evidence and never rebinds to another checkout. |
+| `topology.lease.none` | No runtime lease is distinct from queued, unavailable, or lost lease and cannot imply readiness. |
+| `topology.lease.current` | Current lease displays opaque lease identity, authority epoch, freshness, and attempt relation without PID authority. |
+| `topology.lease.stale-fenced` | Stale fenced lease remains historical and cannot expose current cancel/reclaim controls. |
+| `topology.lease.authority-epoch-changed` | New authority epoch invalidates old actions/receipts while preserving old evidence. |
+| `topology.lease.released-terminal` | Released terminal lease remains linked to its receipt and does not appear active. |
+| `topology.lease.effect-unknown` | Lease/effect uncertainty blocks replacement and success until owner reconciliation. |
+| `topology.stack.unsupported` | Stack lanes remain visibly unsupported while worktree/task projections retain identical entities. |
+| `topology.stack.single` | A one-branch stack renders one canonical item reference, not a copied task or inferred dependency. |
+| `topology.stack.linear-current` | Linear stack preserves exact dependency commits and application-supplied merge order. |
+| `topology.stack.branched-current` | Branched stack preserves fan-out/fan-in and does not flatten to a misleading line. |
+| `topology.stack.missing-dependency-commit` | Missing required commit is explicit, blocks clean/integrated copy, and links exact evidence. |
+| `topology.stack.order-partial` | Known order plus omitted/unknown segments remains partial and never receives a complete ordinal. |
+| `topology.stack.cycle-rejected` | Invalid cycle returns the typed owner error; UI does not repair, linearize, or render it as a valid stack. |
+| `topology.stack.base-deleted` | Deleted base ref retains object/history evidence, marks current stack stale, and does not choose another base. |
+| `topology.stack.protected-target` | Protected target exposes denial/policy provenance and no client-synthesized apply. |
+| `topology.stack.branch-deleted-commit-retained` | Deleted branch label disappears from current refs while retained commit/task/receipt history remains addressable by immutable identity. |
+
+#### Test and CI authority states
+
+| Fixture ID | Required assertion |
+|---|---|
+| `topology.check.required-missing` | Missing required test/check is a blocker with owner evidence, never an inferred failure or pass. |
+| `topology.check.queued` | Queued is distinct from running and exposes no invented progress percentage. |
+| `topology.check.running` | Running preserves provider/run/head identity and cannot prove work acceptance. |
+| `topology.check.passed` | Passed is an observed provider outcome for the exact head and does not prove semantic correctness or task acceptance. |
+| `topology.check.failed` | Failed retains safe localization/provenance and an inert rerun hint; browser never reruns CI. |
+| `topology.check.cancelled` | Cancelled remains terminal for that run/attempt and is not failure, pass, or zero evidence. |
+| `topology.check.timed-out` | Timed out is distinct from cancelled/failed and retains partial coverage. |
+| `topology.check.partial` | Partial jobs/pages/log coverage cannot satisfy a required-check gate. |
+| `topology.check.stale-head` | Result for an old head remains historical and cannot satisfy the current proposal. |
+| `topology.check.unavailable` | Provider/log unavailable renders unavailable with unknown outcome, not missing/clean. |
+| `topology.check.denied` | Denied expansion exposes no private run/log existence or content. |
+| `topology.check.rerun-observed` | New CI attempt is linked to the prior run and remains an observed external effect, not a dashboard action. |
+
+#### Drift, retarget, concurrent edits, and conflict truth
+
+| Fixture ID | Required assertion |
+|---|---|
+| `topology.drift.head-advanced` | Changed source HEAD marks prior proposal/dry-run stale; no silent refresh or apply. |
+| `topology.drift.base-advanced` | Changed base object preserves old preview, exposes successor evidence, and requires a new dry run. |
+| `topology.drift.merge-base-changed` | Changed merge base invalidates conflict and order evidence even when branch labels are unchanged. |
+| `topology.drift.worktree-generation-changed` | Same path/label with a new worktree generation never reuses old lease, dirty, action, or receipt identity. |
+| `topology.retarget.preview-current` | Retarget preview displays old/new target snapshots, affected dependency commits/tests, expiry, and effect-free status. |
+| `topology.retarget.stale-cas` | Apply against a changed graph/ref/snapshot fails stale with zero mutation and one refresh action. |
+| `topology.retarget.denied` | Known denied target exposes no hidden branch/worktree content, counts, conflicts, or apply. |
+| `topology.retarget.partial` | Partial destination graph/Git coverage cannot claim safe, clean, or no semantic conflict. |
+| `topology.integration.cross-merge-proposal` | Proposal preserves exact source/target snapshots, dependency commits, merge order, alternatives, conflict/test evidence, expiry, and Plan 24 disposition without mutating Git. |
+| `topology.integration.cross-merge-dry-run` | Read-only native dry run remains a preview with mechanical/semantic coverage and no apply when the owner does not support merge mutation. |
+| `topology.integration.cross-merge-external-receipt` | Externally observed native integration receipt links exact resulting snapshot and remains distinct from any TraceDecay request. |
+| `topology.integration.receipt-partial-checks` | Native success plus partial required tests/CI remains mechanically integrated but not verified or accepted. |
+| `topology.integration.proposal-superseded` | Superseded proposal retains history and loses every apply/cancel action tied to the old revision. |
+| `topology.concurrent.disjoint` | Disjoint exact addresses render independently; absence of a warning is backed by complete eligible coverage. |
+| `topology.concurrent.same-file` | Same-file overlap renders the immediate proximity class without inventing a lock or assignment. |
+| `topology.concurrent.same-range` | Same-range overlap preserves both authorized contribution IDs and exact expiry. |
+| `topology.concurrent.same-symbol` | Same-symbol overlap links graph evidence and remains advisory. |
+| `topology.concurrent.shared-callers-tests` | Threshold-tier relation paths, pinned threshold revision/digest, score kind, and coverage are visible. |
+| `topology.concurrent.below-threshold` | Below-threshold result is a covered no-warning outcome, not missing telemetry or zero risk. |
+| `topology.concurrent.private-other-session` | Only coarse overlap class is visible; actor/session/root/address/content and hidden count are absent. |
+| `topology.conflict.none-complete` | “No predicted conflict” appears only when both mechanical and semantic required sources are complete/current. |
+| `topology.conflict.mechanical-only` | Native mechanical conflict can be present with complete semantic no-overlap; dimensions remain separate. |
+| `topology.conflict.semantic-only` | Clean mechanical dry run can coexist with semantic overlap/impact risk and cannot be labeled safe integration. |
+| `topology.conflict.both` | Mechanical and semantic findings retain independent severity, evidence, coverage, and actions. |
+| `topology.conflict.mechanical-unknown` | Unknown native conflict denominator never renders clean, 0%, green, or apply-ready. |
+| `topology.conflict.semantic-partial` | Partial graph/proximity evidence remains partial despite a clean native dry run. |
+| `topology.conflict.semantic-denied` | Denial exposes no candidate or address cardinality and does not downgrade mechanical evidence. |
+| `topology.conflict.false-positive` | Adjudicated clean outcome links to the prior prediction for precision accounting without rewriting history. |
+| `topology.conflict.false-negative` | Observed conflict without a prior positive prediction links as a false negative for recall accounting; UI does not conceal it. |
+
+#### Action, crash, restart, and duplicate-effect behavior
+
+| Fixture ID | Required assertion |
+|---|---|
+| `operation.dry-run-effect-free` | Dry run returns immutable preview/digest and records zero Git/ref/index/runtime/test/CI effect. |
+| `operation.apply-owner-supported` | Apply appears only from an owner-supplied action ref and carries every expected version, authorization, confirmation, and idempotency field. |
+| `operation.apply-unsupported-merge-absent` | Plan 36 merge/rebase/cherry-pick plans expose dry run only; no DOM, keyboard, deep-link, or crafted-client apply path exists. |
+| `operation.cancel-before-commit` | Accepted cancellation before the native commit point returns cancelled and proves unchanged authoritative state. |
+| `operation.cancel-after-commit` | Cancellation racing after commit point returns the committed receipt, never a false unchanged/cancelled state. |
+| `operation.duplicate-same-digest` | Repeated same-key/same-digest request returns the original operation/receipt and one observable effect. |
+| `operation.duplicate-different-digest` | Same key with a different command digest returns idempotency conflict and no second effect. |
+| `operation.stale-preview` | Any graph/item/repository/ref/lease/policy drift rejects the complete operation; no partial best-effort apply. |
+| `operation.lease-locked` | Conflicting live lease/authority returns locked with exact safe current evidence and no reclaim inference. |
+| `operation.effect-unknown` | Sent-without-receipt remains effect-unknown, blocks replacement/success, and offers only owner-supplied reconciliation/cancel controls. |
+| `operation.crash-before-dispatch` | Crash before dispatch resumes as not-dispatched/cancelled or safely retryable with no effect receipt. |
+| `operation.crash-after-admission-before-effect` | Durable admission resumes without duplicate dispatch and keeps the original deadline/idempotency identity. |
+| `operation.crash-after-effect-before-receipt` | Unproved effect becomes effect-unknown and cannot be replayed or called success. |
+| `operation.crash-after-commit-before-response` | Restart compares native state and replays the one committed receipt without a second mutation. |
+| `operation.stale-late-receipt` | Receipt from an old authority epoch remains historical stale evidence and cannot settle current state. |
+| `operation.duplicate-provider-effect-prevented` | Duplicate outbox/provider delivery settles once; prevented duplicate and committed effect counts remain separate. |
+
+#### Delivery fanout, privacy, platform identity, and retention
+
+| Fixture ID | Required assertion |
+|---|---|
+| `topology.delivery.hook-only` | Hook delivery remains complete with no LSP connection and binds exact root/branch/generation. |
+| `topology.delivery.lsp-only-trigger` | LSP save trigger projects the same canonical event identity and cannot create topology authority. |
+| `topology.delivery.hook-lsp-dedupe` | Hook and LSP copies converge by event/revision without duplicate card, warning, receipt, or metric effect. |
+| `topology.delivery.five-surface-redelivery` | Hook/MCP/LSP/dashboard/CLI redelivery preserves one result and permits duplicate transport delivery only. |
+| `topology.delivery.multi-root-scoped` | Per-root events never fall back to the first workspace; ambiguous roots return partial/unavailable. |
+| `topology.delivery.stale-lsp-ignored` | Late old-generation LSP event cannot overwrite current Work/dashboard state. |
+| `topology.delivery.lsp-disconnected` | Disconnect marks only LSP delivery coverage; hook/MCP/dashboard/CLI and canonical history remain truthful. |
+| `topology.privacy.overlay-session-only` | Dirty overlay topology/proximity is visible only to its owning session and enters no durable event, packet, metric, cache, or playback frame. |
+| `topology.privacy.cross-session-coarse` | Cross-session proximity reveals only approved coarse class/freshness and no actor, task, root, path, range, symbol, or content. |
+| `topology.privacy.denied-no-existence` | Denied task/root/anchor is externally non-enumerating with no hidden counts or lane placeholders. |
+| `topology.privacy.redacted-anchor` | Redacted evidence retains only the approved metadata allowlist and safe typed reason. |
+| `topology.privacy.secret-canary` | Canary is absent from DOM, accessibility tree, events, URL, storage, analytics, fixtures, and request history. |
+| `topology.privacy.metric-no-identity` | Metrics contain no TaskId, run/attempt, actor, project/repository, path, branch/ref, commit, model version, or reversible digest label. |
+| `topology.privacy.no-url-or-storage-payload` | Patch/conflict/test/CI/source bytes never enter URL, query key, local storage, IndexedDB, service worker, or durable browser cache. |
+| `topology.privacy.expansion-auth-revoked` | Authorization loss replaces expanded content immediately with denied/revoked and preserves only legal safe metadata. |
+| `topology.platform.repo-moved-same-identity` | A moved repository with proved canonical identity preserves task/history and updates only observed locator metadata. |
+| `topology.platform.repo-moved-ambiguous` | Ambiguous move returns unavailable/ambiguous and never picks by basename, CWD, or recent use. |
+| `topology.platform.symlink-alias-same-identity` | Symlink alias and real root resolve one canonical repository/worktree identity without duplicate lanes. |
+| `topology.platform.symlink-escape` | Escaping symlink is denied/unsupported before content or action disclosure. |
+| `topology.platform.windows-drive-case` | Drive-letter and case normalization preserve canonical identity without changing display evidence. |
+| `topology.platform.windows-case-collision` | Case-colliding paths/refs are conflicting/unsupported and never merged into one cell. |
+| `topology.platform.windows-unc-root` | UNC repository/worktree identity survives deep link, restart, and event replay without URI/path confusion. |
+| `topology.platform.windows-long-path` | Long-path capability is explicit; unsupported access remains partial/unavailable, never absent. |
+| `topology.platform.windows-cross-volume-worktree` | Cross-volume linked worktree either retains exact native identity or reports typed unsupported with no path fallback. |
+| `topology.platform.windows-separator-normalization` | Slash differences do not create duplicate identities or leak raw paths into events/metrics. |
+| `topology.retention.ref-force-moved` | Ref movement preserves old object/proposal/receipt history, marks current projection stale, and never rewrites past frames. |
+| `topology.retention.stack-archived` | Archived stack remains historical and non-executable; current lane totals do not silently include it. |
+| `topology.retention.worktree-pruned` | Pruned worktree retains immutable task/commit/receipt references while current lifecycle becomes missing/pruned. |
+| `topology.retention.expired-detail` | Expired optional detail returns an expired tombstone and aggregate coverage, not an empty successful inspector. |
+| `topology.retention.receipt-retained` | Owning-entity receipt remains queryable after branch/worktree deletion according to its retention class. |
+| `topology.retention.redacted-tombstone` | Privacy deletion retains only the permitted non-reversible tombstone; branch/path/actor/task details are absent. |
+| `topology.retention.historical-ref-missing` | Playback of a deleted ref uses retained object/event evidence and explicitly marks current ref unavailable. |
+
+`dashboard/test/fixtures/execution-topology-events.ndjson` contains exactly
+`event.snapshot-monotone`, `event.duplicate-redelivery`,
+`event.stale-generation-ignored`, `event.revision-gap-refetch`,
+`event.dual-time-late-observation`, `event.follow-live-pause-step-seek`,
+`event.operation-receipt-replay`, `event.ref-deleted-history-retained`, and
+`event.queue-overflow-stale-refetch`. Each sequence starts from a named static
+fixture, identifies stream/event/entity revisions and watermarks, and ends in
+one expected manifest digest. Completion order and duplicate transport
+delivery cannot change that digest.
+
 Scale and stream assets are deterministic checked-in generators plus hashes:
 `dashboard/test/fixtures/generators/graphScale.mjs` emits 1,000/2,000,
 10,000/25,000, 50,000/150,000, and 100,000/300,000 node/edge tiers;
@@ -289,6 +476,31 @@ coverage, anchors, state, route identity, terminal outcome, and legal actions.
 An omitted projection member remains counted and typed, never silently
 dropped.
 
+`dashboard/test/execution-topology-matrix.vitest.tsx` table-renders every
+`topology.*` fixture through lane/rail/heatmap, semantic table, TaskId
+inspector, and truth strip. It asserts identical entity and edge IDs, exact
+scope/version/time/watermark/anchor round-trip, separate dirty/worktree/lease/
+readiness/runtime/conflict dimensions, optional lane-family states, visible
+omissions, and no path/label/card-order/current-checkout fallback.
+
+`dashboard/test/execution-topology-actions.vitest.tsx` renders every
+`operation.*` fixture and inspects MSW history. It proves that each request is
+copied from one supplied legal-action reference, includes exact expected
+versions and idempotency identity, and makes at most one typed application
+call. It asserts zero Git/CI/provider calls from the browser; dry run is
+effect-free; unsupported operations have no apply action; stale/denied/
+locked/effect-unknown remain terminal or owner-recoverable; duplicate same-
+digest requests return one receipt; and cancellation after commit preserves
+the committed receipt.
+
+`dashboard/test/execution-topology-playback.vitest.tsx` replays every
+`event.*` sequence in original, reversed-delivery, duplicated, and
+restart-redelivered order. It asserts the expected manifest digest,
+valid-time/observation-time separation, one refetch per revision gap/overflow,
+stale-generation rejection, focus/selection retention, and effect-free
+pause/step/seek/follow-live controls. Historical branch/worktree deletion
+never erases retained commit, TaskId, proposal, or receipt evidence.
+
 `dashboard/test/authority-negative.vitest.ts` uses AST/import-boundary checks
 to reject renderer/Kanban imports of policy, Doctor evaluation, command
 construction, task evaluators, provider/runtime adapters, persistence, or
@@ -306,12 +518,15 @@ Playwright files
 `dashboard/test/e2e/dashboard-keyboard.spec.ts`,
 `dashboard/test/e2e/renderer-fallback.spec.ts`,
 `dashboard/test/e2e/work-projection-parity.spec.ts`, and
-`dashboard/test/e2e/recovery-resume.spec.ts` cover Brain → finding → evidence
+`dashboard/test/e2e/recovery-resume.spec.ts`, and
+`dashboard/test/e2e/execution-topology.spec.ts` cover Brain → finding → evidence
 → Doctor → supplied action → preview → confirmation → dispatch → receipt →
 verified recovery; planner query → partial results → Loom; diagnostic → exact
 generation/anchor/affected tests; graph/table selection parity; Work
-cross-lens identity; stale proposal CAS; and reload without duplicate
-dispatch. `@axe-core/playwright` runs every universal state and critical
+cross-lens identity; stale proposal CAS; topology lane/table/TaskId parity;
+dry-run/apply/cancel authority; crash receipt recovery; dual-time playback;
+and reload without duplicate dispatch. `@axe-core/playwright` runs every
+universal state and critical
 journey. Screenshots are supplemental and cannot satisfy authority,
 provenance, coverage, redaction, network, or semantic parity assertions.
 
@@ -345,18 +560,26 @@ All direct tests enforce:
 8. Graphical quality, animation, clustering, card lanes, renderer choice, and
    friendly empty artwork can never hide missing authority, partial coverage,
    omissions, stale scope, inaccessible evidence, or illegal actions.
+9. Native Git, Plan 24, Plan 32, test, and CI authority remain separate. The
+   browser may request only an owner-supplied typed action; it never constructs
+   a mutation, infers an effect, or turns dry-run/proposal/dispatch into a
+   native/test/CI receipt.
 
 ### Milestone and command gates
 
-PR14 Gates A through F and PR17 Gates A through B from Plan 11 each land the
+PR14 Gates A through F and PR17 Gates A through D from Plan 11 each land the
 fixtures and direct tests for their owned slice before the milestone closes.
 PR14 Gate C cannot close without planner/evidence/late-context/projection
 tests; PR14 Gate D cannot close without Doctor/recovery authority tests; PR14
 Gate F cannot close without accessibility, fallback, budgets, SSE, and
 usability records;
-PR17 cannot close without Work/attempt/proposal parity and all provider-state
-fixtures. PR20 may optimize implementations but may not relax or average away
-these gates.
+PR17 Gate C cannot close without every `topology.*` and `event.*` case, exact
+TaskId drill-down, platform identity cases, and the topology performance
+budget. PR17 Gate D cannot close without every `operation.*` case, duplicate-
+effect/crash recovery, authority-negative checks, Plan 26 metric parity, and
+zero privacy canary leaks. PR17 cannot close without Work/attempt/proposal
+parity and all provider-state fixtures. PR20 may optimize implementations but
+may not relax or average away these gates.
 
 The implementation retains/updates the existing dashboard scripts and adds
 the exact dependencies, configuration/harness files, script bodies, execution
@@ -477,6 +700,19 @@ failure class.
   review, screenshots, or a renderer benchmark alone cannot close a semantic,
   authority, provenance, coverage, redaction, accessibility, or legal-action
   regression.
+- PR17 execution-topology acceptance executes every
+  `execution-topology-matrix.json`, `execution-topology-events.ndjson`, and
+  `integration-operation-matrix.json` record on the visual and accessible
+  representations. It covers the complete worktree lifecycle; linear and
+  branched stacks; dependency commits and merge order; head/base/merge-base/
+  generation drift and retarget; disjoint and overlapping concurrent edits;
+  mechanical-only, semantic-only, combined, unknown, false-positive, and
+  false-negative conflicts; process/daemon crashes at every operation
+  boundary; hook/LSP/five-surface fanout; privacy and authorization loss;
+  moved and symlinked repositories; Windows drive/UNC/case/long-path/
+  cross-volume behavior; duplicate requests/effects; and branch/ref/worktree/
+  receipt retention. Every case preserves lossless TaskId drill-down and
+  truthful stale/partial/denied/locked/unsupported/effect-unknown state.
 - Scout suites must include a **positive** saved-content/clean-generation
   fixture proving committed semantic evidence remains bound to exact
   saved-content/clean-generation identity through envelope, checkpoint, feedback
