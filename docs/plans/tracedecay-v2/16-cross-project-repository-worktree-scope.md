@@ -4,12 +4,17 @@
 
 Status: active product plan.
 
-Role: PR15 makes repository, project, checkout, worktree, ref, and global activity scope
-consistent across query, CLI, MCP, HTTP, LSP, and UI consumers.
+Role: PR15 makes repository, project, checkout, worktree, ref, commit, and global
+activity scope consistent across query, CLI, MCP, HTTP, LSP, and UI consumers. It
+introduces the one typed identity and authorization boundary that later Git-stack,
+worktree, and agent-proximity features must consume.
 
 ## Outcome
 
 An explicit target always reaches the intended authorized project or code snapshot.
+`RepositoryId`, `ProjectId`, `WorktreeId`, `BranchRef`, and `CommitId` are typed,
+relationship-checked values; a path, display name, host label, provider key, or branch
+label is a locator or observation only and can never become identity.
 Project facts and sessions remain project-wide across branches and worktrees; only code
 graphs select branch/worktree snapshots. Cross-project results load exactly without CWD
 choreography or storage knowledge. `QueryCollection` and `WorkspaceCollection` provide
@@ -21,7 +26,10 @@ authorization authorities.
 
 - Shared scope resolution and the authorized, revisioned scope-set contract
   consumed by federated query execution.
-- Canonical repository, checkout, worktree, ref, snapshot, and project relationships.
+- Canonical typed repository, project, worktree, ref, commit, snapshot, and project
+  relationships, including relationship proof and stale/ambiguous outcomes.
+- The intersection of independently granted project-data, code-snapshot, and exact
+  worktree scope. A scope set is a capability result, never a discovery result.
 - Typed `QueryCollectionId`, `WorkspaceCollectionId`, immutable collection revisions,
   canonical member ordering, membership snapshots, and policy-bound collection resolution.
 - Explicit-target, ambiguity, partial-coverage, freshness, and distributed-cursor rules.
@@ -38,6 +46,9 @@ authorization authorities.
   resolved repository/worktree identity.
 - Provider `project_key`, process CWD, host profile, path hash, branch database, or store
   filename as public identity.
+- A path, resolved symlink, display label, branch display name, remote URL, Git common-dir
+  location, or collection title as an identity, authorization grant, cursor key, or
+  cross-worktree equivalence proof.
 - Collection membership as a grant, principal, owner, project registration, repository
   relationship, source-of-truth copy, storage route, or substitute for `ProjectId`.
 - Mutation, audit, or rollback of collection source bindings and allow/deny policy. Plan 20
@@ -46,8 +57,9 @@ authorization authorities.
 
 ## Required behavior
 
-1. One application resolver accepts canonical IDs and bounded locators for repository,
-   project, path, checkout, worktree, ref, commit, pull request, session,
+1. One application resolver accepts typed `RepositoryId`, `ProjectId`, `WorktreeId`,
+   `BranchRef`, and `CommitId`, plus bounded locators for repository, project, path,
+   checkout, worktree, ref, commit, pull request, session,
    `QueryCollectionId`, and `WorkspaceCollectionId`. Every surface consumes the same
    resolved result and typed errors.
    Resolution returns an authorized `ResolvedScopeSet` with a stable digest,
@@ -189,6 +201,234 @@ authorization authorities.
     closed on ambiguity, expiry, revocation, or drift. Missing, unregistered, and denied
     explicit targets use the same public `target_unavailable` shape; disambiguation
     candidates are returned only when the caller is authorized to see every candidate.
+
+## Canonical identity and authorized query scope
+
+### Typed identity contract
+
+The domain crate defines these values as non-interchangeable newtypes. Their serialized
+form is versioned and opaque outside the domain boundary; no API accepts an untyped string
+where one of these values is required.
+
+```text
+RepositoryId = opaque stable product identifier
+ProjectId    = opaque stable project identifier
+WorktreeId   = opaque stable worktree identifier
+
+BranchRef {
+  repository_id: RepositoryId,
+  full_refname: validated native Git refname
+}
+
+CommitId {
+  repository_id: RepositoryId,
+  object_format: Sha1 | Sha256,
+  object_id: validated native Git object ID
+}
+```
+
+`RepositoryId` is assigned only after a native Git repository proof is verified and is
+never computed from a pathname, remote URL, repository label, host account, branch name,
+or current commit. The proof records native Git object-format capability, a bounded
+common-directory/admin-record observation, and object/ref evidence sufficient to reject
+a mismatched repository; the proof itself is provenance, not a second object database.
+Two clones remain distinct `RepositoryId` values unless a separately authorized,
+explicit repository-linking operation proves and records their relationship. Automatic
+cross-clone collapse is excluded from PR15 and requires Sol approval before it can be
+designed.
+
+`WorktreeId` is assigned to one verified `(RepositoryId, native worktree administrative
+record)` relationship. A worktree move, symlink change, mount change, or label change
+retains the ID after a successful relationship recheck; deletion followed by recreation
+creates a new ID even if it reuses a path. A path and Git administrative directory are
+time-qualified locator observations. They may help find a candidate, but are never a
+primary key, uniqueness key, foreign key, cursor component, authorization subject, or
+equality predicate.
+
+`BranchRef` is a typed native ref locator, not a durable branch-owner identity. Its
+full refname is validated by the fixed Git adapter, never inferred from a display label,
+and every use pins the observed `CommitId` plus ref-generation evidence. `CommitId`
+combines the repository and native object format with the object ID, so an object ID
+cannot be replayed across repositories or SHA formats. A commit, ref, project, and
+worktree relationship is valid only after the resolver proves it from the currently
+pinned native snapshot.
+
+### Scope request, authorization, and lifecycle
+
+Every code-bearing request uses the following input and output boundary:
+
+```text
+AuthorizedScopeRequest {
+  principal, operation, privacy_class,
+  target: Project(ProjectId)
+        | Repository(RepositoryId)
+        | Worktree(WorktreeId)
+        | Branch(BranchRef)
+        | Commit(CommitId)
+        | Collection(CollectionSelector)
+        | Current,
+  requested_capability: ProjectDataRead | CodeSnapshotRead | WorktreeRead,
+  continuation: optional prior scope/cursor binding
+}
+
+AuthorizedScopeGrant {
+  grant_id, principal, operation, requested_capability,
+  authorized_project_ids,
+  authorized_repository_ids,
+  authorized_worktree_ids,
+  policy_digest, policy_epoch, expires_at
+}
+
+AuthorizedResolvedScopeSet {
+  project_lanes,
+  code_roots: ordered exact {
+    project_id, repository_id, worktree_id, branch_ref,
+    commit_id, code_snapshot_id, generation, relationship_proof_digest
+  }[],
+  grant_digest, scope_digest, coverage, expires_at
+}
+```
+
+`ProjectDataRead` may resolve project-wide facts, sessions, and messages after its
+independent project authorization. It does **not** imply `CodeSnapshotRead` or
+`WorktreeRead`. Code-bearing operations require an exact, independently authorized
+`WorktreeId` and a pinned branch/ref/commit snapshot. A caller that has a project but no
+authorized worktree receives `worktree_selection_required`; it never expands to every
+known checkout, every worktree attached to a root, or the current worktree. A grant may
+contain multiple explicit worktrees, but that set is frozen into the scope digest before
+execution and is never derived from a collection or a path scan.
+
+The resolver lifecycle is:
+
+```text
+Received
+  -> TargetParsed
+  -> CandidateLocated                 (locator input only)
+  -> IdentityResolved
+  -> RelationshipProven
+  -> AuthorizationPinned
+  -> SnapshotPinned
+  -> ScopeFrozen
+  -> Resolved
+
+TargetParsed -> InvalidTarget
+CandidateLocated | IdentityResolved -> TargetUnavailable | AmbiguousTarget
+RelationshipProven -> RelationshipMismatch | SnapshotUnavailable
+AuthorizationPinned -> ScopeDenied | WorktreeSelectionRequired
+SnapshotPinned | ScopeFrozen -> ScopeStale | CapabilityUnsupported
+```
+
+Every terminal state carries policy-safe coverage. `AmbiguousTarget` may show candidates
+only when the caller can view all of them. `ScopeStale` is required when a ref, commit,
+worktree relationship, policy epoch, grant, collection membership, or root generation
+changes after pinning; the client must resolve again and cannot retry against “latest.”
+
+### Collections are selectors, never cross-worktree grants
+
+`QueryCollection` and `WorkspaceCollection` remain reference-only candidate selectors.
+Freezing a collection revision can produce `ProjectId` and `RepositoryRootId` candidates;
+it cannot produce, infer, mint, or authorize a `WorktreeId`, `BranchRef`, `CommitId`, or
+code snapshot. Resolution is intentionally ordered:
+
+```text
+CollectionSelected
+  -> MembershipRevisionFrozen
+  -> CandidateReferencesCanonicalized
+  -> PerCandidateAuthorization
+  -> ExplicitWorktreeIntersection
+  -> CodeSnapshotsPinned
+  -> AuthorizedResolvedScopeSet | PartialCoverage | ScopeDenied | ScopeStale
+```
+
+The `ExplicitWorktreeIntersection` step intersects collection candidates with the
+caller’s pre-existing `AuthorizedScopeGrant.authorized_worktree_ids`. An empty
+intersection is a safe no-code-scope result, not permission to enumerate or use adjacent
+worktrees. A root member may narrow an already-authorized worktree to that root; it
+cannot widen project access to another root or another worktree. A collection revision,
+default collection, prior cursor, or previously visible member cannot transfer
+cross-worktree authority. This rule applies equally to CLI, MCP, HTTP, LSP, dashboard,
+agent hooks, daemon workers, and Plan 37 proximity consumers.
+
+### Files, schemas, APIs, and migration
+
+- `crates/tracedecay-domain/src/identity.rs` defines `RepositoryId`, `WorktreeId`,
+  `BranchRef`, `CommitId`, native object-format/ref validation, relationship-proof
+  descriptors, and non-path/non-label equality invariants. `scope.rs` consumes those
+  types; `lib.rs` re-exports them.
+- `crates/tracedecay-domain/tests/identity_scope_contract.rs` proves serialization,
+  cross-repository replay rejection, worktree recreation, ref drift, and path/label
+  non-identity.
+- `src/application/scope/identity.rs`, `grant.rs`, and `resolver.rs` implement the
+  lifecycle above. `ports.rs` exposes `RepositoryIdentityStore`,
+  `NativeRepositoryInspector`, and `ScopeAuthorizer`; no query transport or collection
+  store may bypass them.
+- `crates/tracedecay-store/src/scope_identity.rs` and
+  `src/global_db/scope_identity/{schema,store,migration}.rs` persist only the typed
+  identity/proof records and redacted, time-qualified locator observations.
+- `repository_identities(repository_id, object_format, identity_state,
+  current_proof_digest, first_verified_at, last_verified_at)` is keyed only by
+  `repository_id`.
+- `repository_identity_proofs(proof_digest, repository_id, native_admin_record_digest,
+  object_format, observed_object_evidence_digest, observed_at, coverage)` is append-only.
+  It contains no copied Git objects, paths, credentials, or mutable refs.
+- `worktree_identities(worktree_id, repository_id, identity_state,
+  current_proof_digest, created_at, retired_at)` is keyed by `worktree_id`; a unique
+  `(repository_id, current_proof_digest)` constraint prevents duplicate live identities.
+- `worktree_locator_observations(observation_id, worktree_id, locator_kind,
+  redacted_locator_digest, observed_at, valid_until)` is append-only and has no
+  uniqueness or lookup authority. Raw paths are retained only when the applicable privacy
+  policy permits them.
+- `scope_resolution_cache(scope_digest, grant_digest, policy_epoch,
+  root_vector_digest, expires_at)` caches only typed IDs and digests. It has no path,
+  label, collection-title, or CWD column and is invalidated rather than migrated on any
+  identity or policy mismatch.
+
+The application API is:
+
+```rust
+pub trait ScopeResolver {
+    fn resolve(
+        &self,
+        request: AuthorizedScopeRequest,
+    ) -> Result<AuthorizedResolvedScopeSet, ScopeResolutionError>;
+}
+
+pub trait NativeRepositoryInspector {
+    fn prove_relationship(
+        &self,
+        repository_id: RepositoryId,
+        worktree_id: Option<WorktreeId>,
+        branch: Option<BranchRef>,
+        commit: Option<CommitId>,
+    ) -> Result<RelationshipProof, RepositoryIdentityError>;
+}
+```
+
+Legacy path-, alias-, provider-key-, and store-name-based routes enter only the migration
+quarantine table. They may yield a human-visible locator hint after authorization, but
+cannot create an identity record, collection member, grant, or scope cache entry. Migration
+is idempotent and leaves all legacy records unresolved when a typed proof is absent.
+
+### Tests, benchmarks, and release gates
+
+- `tests/scope_suite/identity_resolution.rs` covers same-name repositories, identical
+  clones, moved roots, symlinks, path reuse after deletion, detached heads, SHA-1/SHA-256
+  object IDs, ref rename/deletion, worktree administrative-record reuse, and stale proof
+  recovery.
+- `tests/scope_suite/authorized_worktree_scope.rs` covers project-data versus code-snapshot
+  grants, one/2/8/32 explicitly authorized worktrees, denied neighbors, `current`,
+  continuation replay, authorization revocation, and every resolver lifecycle edge.
+- `tests/scope_suite/collection_worktree_non_escalation.rs` proves every collection kind,
+  default selector, cursor, and partially denied membership cannot grant, enumerate, or
+  infer another worktree; its negative fixtures include same-root sibling worktrees and
+  an authorized project with zero authorized worktrees.
+- `benches/scope_resolution.rs` records cold and warm resolution latency and allocations
+  for 1/8/32 projects × 1/8/32 candidate worktrees, plus collection intersection and
+  stale-grant rejection. It reports per-phase timing and never substitutes a cache hit for
+  an authorization recheck.
+- PR15 cannot enable Plan 36 stack projection or Plan 37 cross-worktree proximity until
+  the identity, authorization, and non-escalation suites pass with deterministic
+  scope-digest replay across process restart.
 
 ## Collection implementation contract
 
