@@ -1286,46 +1286,6 @@ impl DaemonSessionRetrievalRoot {
         Self::from_project_context(cg, registry, context)
     }
 
-    fn active_project(cg: &TraceDecay) -> Option<Self> {
-        let project_id = ProjectId::new(
-            cg.store_layout()
-                .identity
-                .project_id
-                .as_deref()?
-                .to_string(),
-        )
-        .ok()?;
-        let identity_suffix = project_id.as_str();
-        let identity = ResolvedSessionIdentity::for_project(
-            ProfileId::new(MESSAGE_SEARCH_PROFILE_ID).ok()?,
-            project_id.clone(),
-            SessionStoreId::new(format!("store.active.{identity_suffix}")).ok()?,
-            SessionRootId::new(format!("root.active.{identity_suffix}")).ok()?,
-            ResolvedGitRoute::new(
-                RepositoryId::new(format!("repository.active.{identity_suffix}")).ok()?,
-                WorktreeId::new(format!("worktree.active.{identity_suffix}")).ok()?,
-                BranchId::new(format!("branch.active.{identity_suffix}")).ok()?,
-            ),
-        );
-        let mut project_paths = HashSet::new();
-        project_paths.insert(cg.project_root().to_path_buf());
-        project_paths.insert(cg.store_layout().identity.display_root.clone());
-        project_paths.insert(cg.store_layout().identity.primary_alias.clone());
-        Some(Self {
-            store_scope: SessionRetrievalStoreScope::Project,
-            identity,
-            project_id: Some(project_id.as_str().to_string()),
-            project_paths,
-            authorized_root: Some(
-                cg.store_layout()
-                    .identity
-                    .display_root
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-        })
-    }
-
     fn from_project_context(
         cg: &TraceDecay,
         registry: &GlobalDb,
@@ -1350,10 +1310,10 @@ impl DaemonSessionRetrievalRoot {
         }
         let (store_id, graph_scope_id) = selected?;
 
-        let project_id = ProjectId::new(context.project.project_id.clone()).ok()?;
+        let project_key = ProjectId::new(context.project.canonical_root.clone()).ok()?;
         let identity = ResolvedSessionIdentity::for_project(
             ProfileId::new(MESSAGE_SEARCH_PROFILE_ID).ok()?,
-            project_id,
+            project_key,
             SessionStoreId::new(store_id).ok()?,
             SessionRootId::new(graph_scope_id.clone()).ok()?,
             ResolvedGitRoute::new(
@@ -2643,8 +2603,7 @@ impl McpServer {
         let project_session_retrieval_root = match registry_db.as_deref() {
             Some(registry) => DaemonSessionRetrievalRoot::project(&cg, registry).await,
             None => None,
-        }
-        .or_else(|| DaemonSessionRetrievalRoot::active_project(&cg));
+        };
         let profile_session_retrieval_root = DaemonSessionRetrievalRoot::profile();
         let project_session_refresh_service = session_db
             .as_ref()

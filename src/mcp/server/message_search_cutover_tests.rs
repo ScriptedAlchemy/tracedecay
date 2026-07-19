@@ -10,7 +10,7 @@ use tracedecay_domain::{
     MessageOccurrenceIdV1, ObservationId, ObservationIdentityMaterialV1,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    PayloadReferenceV1, ProjectionGenerationId, ProjectionOutputOrdinalV1, ProviderId,
+    PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProjectionOutputOrdinalV1, ProviderId,
     RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
     SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
@@ -156,6 +156,7 @@ fn fixture_receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
 }
 
 fn fixture_observation(
+    scope: ObservationScopeV1,
     ordinal: u64,
     session_id: &str,
     provider: &str,
@@ -187,7 +188,7 @@ fn fixture_observation(
     let payload = serde_json::to_value(envelope).expect("observation payload");
     let identity = ObservationIdentityMaterialV1::for_native_record(
         source,
-        ObservationScopeV1::Profile,
+        scope,
         ObservationSourceGenerationV1::new(1).expect("source generation"),
         range,
         ObservationOrderingDomainV1::SnapshotOrder,
@@ -243,20 +244,23 @@ async fn persist_fixture_observation(
 
 async fn seed_temporal_message(
     db: &GlobalDb,
+    project_key: &str,
+    scope: ObservationScopeV1,
     ordinal: u64,
     session_id: &str,
     provider: &str,
     message_id: &str,
     content: &str,
 ) {
-    let observation = fixture_observation(ordinal, session_id, provider, message_id, content);
+    let observation =
+        fixture_observation(scope, ordinal, session_id, provider, message_id, content);
     let observation_id = observation.observation_id().clone();
     let anchor = persist_fixture_observation(db, observation).await;
     let legacy_projection_content = format!("legacy projection poison {ordinal}");
     let session = SessionRecord {
         provider: provider.to_string(),
         session_id: session_id.to_string(),
-        project_key: "fixture-project".to_string(),
+        project_key: project_key.to_string(),
         project_path: "/fixture".to_string(),
         title: None,
         started_at: Some(ordinal as i64),
@@ -519,9 +523,18 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
             .wait_for_startup_catch_up(std::time::Duration::from_secs(5))
             .await
     );
-    for (database, suffix) in [(&project_db, "project"), (&profile_db, "profile")] {
+    let project_key = GlobalDb::canonical_project_key(dir.path());
+    let project_scope = ObservationScopeV1::Project {
+        project_id: ProjectId::new(project_key.clone()).expect("project id"),
+    };
+    for (database, suffix, project_key, scope) in [
+        (&project_db, "project", project_key.as_str(), project_scope),
+        (&profile_db, "profile", "user", ObservationScopeV1::Profile),
+    ] {
         seed_temporal_message(
             database,
+            project_key,
+            scope.clone(),
             1,
             MESSAGE_SEARCH_ROOT_SESSION_ID,
             "cursor",
@@ -531,6 +544,8 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
         .await;
         seed_temporal_message(
             database,
+            project_key,
+            scope,
             2,
             &format!("session.{suffix}.two"),
             "cursor",
@@ -611,7 +626,7 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
         }),
     )
     .await;
-    assert_eq!(fresh["outcome"], "partial", "{fresh}");
+    assert_eq!(fresh["outcome"], "complete", "{fresh}");
     assert_eq!(fresh["temporal"]["freshness"]["state"], "fresh");
     assert_eq!(fresh["refresh_required"], false);
 
@@ -640,7 +655,7 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
         }),
     )
     .await;
-    assert_eq!(profile["outcome"], "partial", "{profile}");
+    assert_eq!(profile["outcome"], "complete", "{profile}");
     assert_eq!(profile["count"], 2);
 
     server.shutdown().await;
@@ -682,6 +697,11 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
     );
     context.profile_root = Some(profile_root);
     let restarted = McpServer::new_with_context(context).await;
+    assert!(
+        restarted
+            .wait_for_startup_catch_up(std::time::Duration::from_secs(5))
+            .await
+    );
     project.checkpoint().await;
     profile.checkpoint().await;
     let restarted_project_before =
@@ -699,7 +719,7 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
         }),
     )
     .await;
-    assert_eq!(resumed["outcome"], "partial", "{resumed}");
+    assert_eq!(resumed["outcome"], "complete", "{resumed}");
     assert_eq!(resumed["count"], 1);
     restarted.shutdown().await;
     project.checkpoint().await;
