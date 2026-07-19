@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use libsql::{Builder, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
@@ -927,6 +927,11 @@ impl SessionTemporalHealthFinding {
 pub(crate) struct SessionTemporalHealthReport {
     status: SessionTemporalHealthStatus,
     findings: Vec<SessionTemporalHealthFinding>,
+    /// Fixed machine reason for path-API unavailability (for example
+    /// `uncheckpointed_wal`). Omitted when diagnosis ran against a
+    /// checkpointed immutable snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 impl SessionTemporalHealthReport {
@@ -936,6 +941,10 @@ impl SessionTemporalHealthReport {
 
     pub(crate) fn findings(&self) -> &[SessionTemporalHealthFinding] {
         &self.findings
+    }
+
+    pub(crate) fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
     }
 
     #[cfg(test)]
@@ -966,15 +975,39 @@ struct HealthCheck {
 /// It never acquires `DatabaseAuthority` / lock / owner files, never creates
 /// WAL/SHM sidecars, never installs schema, and never starts workers. The
 /// report contains only fixed finding identities and bounded counts.
+///
+/// `immutable=1` intentionally ignores an existing WAL. A non-empty `-wal`
+/// sidecar therefore prevents a complete immutable snapshot: this API returns
+/// [`SessionTemporalHealthStatus::Unavailable`] with reason
+/// `uncheckpointed_wal` instead of opening `mode=ro` (which creates `-shm`)
+/// or copying the family. Empty / non-SQLite placeholders return
+/// `session_store_uninitialized`.
 pub(crate) async fn session_temporal_doctor_health_at(
     db_path: &Path,
 ) -> SessionTemporalHealthReport {
     if !db_path.is_file() {
         return unavailable_report(SessionTemporalHealthStatus::Unavailable);
     }
+    if !crate::storage::has_sqlite_database_header(db_path).unwrap_or(false) {
+        return unavailable_report_with_reason(
+            SessionTemporalHealthStatus::Unavailable,
+            Some("session_store_uninitialized"),
+        );
+    }
+    if non_empty_wal_sidecar(db_path) {
+        return unavailable_report_with_reason(
+            SessionTemporalHealthStatus::Unavailable,
+            Some("uncheckpointed_wal"),
+        );
+    }
     let read = match open_immutable_doctor_read(db_path).await {
         Ok(read) => read,
-        Err(error) => return unavailable_report(classify_error(&error)),
+        Err(error) => {
+            return unavailable_report_with_reason(
+                classify_error(&error),
+                Some("session_store_unavailable"),
+            );
+        }
     };
     diagnose_connection(&read.conn).await
 }
@@ -1115,6 +1148,7 @@ async fn diagnose_connection(conn: &Connection) -> SessionTemporalHealthReport {
                 SessionTemporalHealthFindingKind::MigrationGap,
                 REQUIRED_TABLES.len() as u64,
             )],
+            reason: None,
         };
     }
 
@@ -1205,13 +1239,18 @@ async fn diagnose_connection(conn: &Connection) -> SessionTemporalHealthReport {
                 return SessionTemporalHealthReport {
                     status: SessionTemporalHealthStatus::Locked,
                     findings,
+                    reason: None,
                 };
             }
             Err(_) => return unavailable_report(SessionTemporalHealthStatus::Unavailable),
         }
     }
     findings.sort_by_key(SessionTemporalHealthFinding::kind);
-    SessionTemporalHealthReport { status, findings }
+    SessionTemporalHealthReport {
+        status,
+        findings,
+        reason: None,
+    }
 }
 
 struct SchemaInventory {
@@ -1438,8 +1477,24 @@ fn is_locked(error: &libsql::Error) -> bool {
 }
 
 fn unavailable_report(status: SessionTemporalHealthStatus) -> SessionTemporalHealthReport {
+    unavailable_report_with_reason(status, None)
+}
+
+fn unavailable_report_with_reason(
+    status: SessionTemporalHealthStatus,
+    reason: Option<&'static str>,
+) -> SessionTemporalHealthReport {
     SessionTemporalHealthReport {
         status,
         findings: Vec::new(),
+        reason: reason.map(str::to_string),
     }
+}
+
+fn non_empty_wal_sidecar(db_path: &Path) -> bool {
+    let mut wal = db_path.as_os_str().to_os_string();
+    wal.push("-wal");
+    std::fs::metadata(PathBuf::from(wal))
+        .map(|metadata| metadata.len() > 0)
+        .unwrap_or(false)
 }

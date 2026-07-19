@@ -1096,21 +1096,25 @@ fn temporal_health_diagnosis_is_bounded_and_redacts_payload_keys_and_text() {
 #[tokio::test]
 async fn temporal_health_adapter_is_read_only_and_clean_on_canonical_schema() {
     let dir = tempfile::TempDir::new().unwrap();
-    let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .unwrap();
-    let before = std::fs::read(dir.path().join("global.db")).unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = crate::global_db::GlobalDb::open_at(&db_path).await.unwrap();
+    // Immutable path diagnosis cannot observe an open WAL; checkpoint first.
+    db.checkpoint_result().await.unwrap();
+    let before = std::fs::read(&db_path).unwrap();
+    let before_family = temporal_family_manifest(&db_path);
 
     let report = db.session_temporal_doctor_health().await;
 
     let encoded = serde_json::to_value(report).unwrap();
     assert_eq!(encoded["status"], "complete");
     assert_eq!(encoded["findings"], serde_json::json!([]));
+    assert!(encoded.get("reason").is_none());
     assert_eq!(
-        std::fs::read(dir.path().join("global.db")).unwrap(),
+        std::fs::read(&db_path).unwrap(),
         before,
         "temporal health diagnosis must not mutate the authoritative database"
     );
+    assert_eq!(temporal_family_manifest(&db_path), before_family);
 }
 
 fn temporal_family_manifest(db_path: &Path) -> BTreeMap<String, (u64, Option<SystemTime>)> {
@@ -1166,12 +1170,23 @@ async fn temporal_health_path_api_creates_no_authority_wal_shm_or_schema_artifac
     let db_path = dir.path().join("global.db");
     {
         let db = crate::global_db::GlobalDb::open_at(&db_path).await.unwrap();
-        let report = db.session_temporal_doctor_health().await;
-        assert_eq!(
-            report.status(),
-            crate::global_db::SessionTemporalHealthStatus::Complete
+        let before_open = temporal_family_manifest(&db_path);
+        assert!(
+            before_open.keys().any(|name| name.ends_with("-wal")),
+            "open GlobalDb should leave a WAL sidecar for this contract probe"
         );
-        assert!(report.findings().is_empty());
+        let live = db.session_temporal_doctor_health().await;
+        assert_eq!(
+            live.status(),
+            crate::global_db::SessionTemporalHealthStatus::Unavailable
+        );
+        assert_eq!(live.reason(), Some("uncheckpointed_wal"));
+        assert_eq!(
+            temporal_family_manifest(&db_path),
+            before_open,
+            "uncheckpointed_wal refusal must not mutate the live family"
+        );
+        db.checkpoint_result().await.unwrap();
     }
     // Drop the authority-held handle, then diagnose solely through the
     // immutable path API — the cold Doctor/transport surface.
@@ -1195,6 +1210,7 @@ async fn temporal_health_path_api_creates_no_authority_wal_shm_or_schema_artifac
         crate::global_db::SessionTemporalHealthStatus::Complete
     );
     assert!(report.findings().is_empty());
+    assert!(report.reason().is_none());
     assert_eq!(std::fs::read(&db_path).unwrap(), before_bytes);
     assert_eq!(temporal_family_manifest(&db_path), before_family);
 
@@ -1238,6 +1254,7 @@ async fn temporal_health_missing_store_is_unavailable_without_artifacts() {
         crate::global_db::SessionTemporalHealthStatus::Unavailable
     );
     assert!(report.findings().is_empty());
+    assert!(report.reason().is_none());
     assert!(!missing.exists());
     assert_eq!(temporal_family_manifest(&missing), before);
     assert!(!dir.path().join(".tracedecay-database-locks").exists());
@@ -1309,6 +1326,7 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
         .await
         .unwrap();
     drop(writer);
+    db.checkpoint_result().await.unwrap();
 
     let before = std::fs::read(&db_path).unwrap();
     let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();
@@ -1406,6 +1424,7 @@ async fn temporal_fts_repair_accepts_only_exact_malformed_index_damage() {
         .await
         .unwrap();
     drop(writer);
+    db.checkpoint_result().await.unwrap();
 
     let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();
     assert_eq!(
@@ -1415,6 +1434,7 @@ async fn temporal_fts_repair_accepts_only_exact_malformed_index_damage() {
         ])
     );
     assert_eq!(db.repair_session_temporal_fts(true).await.unwrap(), (1, 1));
+    db.checkpoint_result().await.unwrap();
     assert_eq!(
         serde_json::to_value(db.session_temporal_doctor_health().await).unwrap()["findings"],
         serde_json::json!([])
@@ -1424,9 +1444,8 @@ async fn temporal_fts_repair_accepts_only_exact_malformed_index_damage() {
 #[tokio::test]
 async fn temporal_health_detects_cross_session_ownership() {
     let dir = tempfile::TempDir::new().unwrap();
-    let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
-        .await
-        .unwrap();
+    let db_path = dir.path().join("global.db");
+    let db = crate::global_db::GlobalDb::open_at(&db_path).await.unwrap();
     let writer = db.writer_connection().await.unwrap();
     writer
         .execute("PRAGMA foreign_keys = OFF", ())
@@ -1458,6 +1477,7 @@ async fn temporal_health_detects_cross_session_ownership() {
         .await
         .unwrap();
     drop(writer);
+    db.checkpoint_result().await.unwrap();
 
     let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();
     assert!(
