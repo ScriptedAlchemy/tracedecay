@@ -26,6 +26,7 @@ pub(super) use triggers::{INVARIANTS, Trigger};
 use triggers::{replace_trigger, trigger_contracts_intact};
 pub(in crate::global_db) use triggers::{
     restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
+    suspend_session_invariants_for_schema_upgrade,
 };
 
 const OPERATION: &str = "ensure global database authority invariants";

@@ -6,6 +6,10 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCoverageV1};
 
+use crate::global_db::session_temporal_operations::{
+    FrozenPublicationReceipt, SANITIZER_VERSION as SUMMARY_PUBLICATION_SANITIZER_VERSION,
+    receipt_id as summary_receipt_id,
+};
 use crate::global_db::{global_db_operation_error, global_db_operation_message};
 
 use super::OPERATION;
@@ -131,6 +135,32 @@ pub(super) async fn validate_receipt_authority_rows(
         let receipt_json = row
             .get::<String>(4)
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        if sanitizer_version == SUMMARY_PUBLICATION_SANITIZER_VERSION {
+            let receipt: FrozenPublicationReceipt =
+                decode_authority_json(&receipt_json, "summary publication receipt authority JSON")?;
+            let is_digest = |value: &str| {
+                value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            };
+            if receipt_id != summary_receipt_id(&receipt.summary_id, &payload_digest)
+                || receipt.disposition != "accepted"
+                || receipt.generation <= 0
+                || receipt.published_at <= 0
+                || !is_digest(&payload_digest)
+                || !is_digest(&receipt.publication_manifest_digest)
+                || serde_json::from_str::<serde_json::Value>(&receipt.frozen_watermarks_json)
+                    .is_err()
+                || serde_json::from_str::<serde_json::Value>(&receipt.source_horizon_json).is_err()
+            {
+                return Err(authority_violation(
+                    "summary publication receipt authority columns disagree with receipt JSON",
+                ));
+            }
+            audited += 1;
+            continue;
+        }
         let receipt: SanitizationReceiptV1 =
             decode_authority_json(&receipt_json, "sanitization receipt authority JSON")?;
         let receipt_ref = receipt.receipt();

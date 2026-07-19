@@ -12,7 +12,7 @@ use thiserror::Error;
 use tracedecay_domain::{
     CompactContextConflictV1, CompactContextLineageEdgeV1, CompactContextOmissionV1,
     ContextOmissionReasonV1, HydrationStateV1, RetrievalAnchorId, SessionSummaryRecordV1,
-    TemporalAssertionKindV1, TemporalCoverageCountsV1,
+    TemporalAssertionKindV1, TemporalCoverageCountsV1, TemporalModeV1,
 };
 
 use self::context::{
@@ -101,7 +101,16 @@ pub async fn execute_temporal_kernel(
         .map(|cursor| verify_cursor(cursor, snapshot, authenticator))
         .transpose()?;
     check_control(snapshot)?;
-    let plan = candidates::plan_candidates(&request.query);
+    let plan = if request.query.trim().is_empty()
+        && snapshot.temporal_mode() == TemporalModeV1::Forensic
+        && matches!(
+            snapshot.request().retrieval_scope(),
+            TemporalRetrievalScope::Session(_)
+        ) {
+        candidates::plan_scope_candidates()
+    } else {
+        candidates::plan_candidates(&request.query)
+    };
     let candidate_page_items = limits.candidate_limit.min(64);
     let candidate_limits = PageLimits::new(
         limits.candidate_limit,
@@ -199,6 +208,8 @@ pub async fn execute_temporal_kernel(
     if let Some(after) = &after {
         ranked.retain(|candidate| is_after(candidate, after));
     }
+    let mut ranked_anchors = BTreeSet::new();
+    ranked.retain(|candidate| ranked_anchors.insert(candidate.anchor_id.clone()));
 
     let has_more = ranked.len() > request.limit;
     ranked.truncate(request.limit);
@@ -318,8 +329,14 @@ fn map_port_error(error: TemporalPortError) -> TemporalKernelError {
     match error {
         TemporalPortError::Cancelled => TemporalKernelError::Cancelled,
         TemporalPortError::DeadlineExceeded => TemporalKernelError::DeadlineExceeded,
-        TemporalPortError::BudgetExceeded { .. } => TemporalKernelError::BudgetExceeded,
+        TemporalPortError::BudgetExceeded { .. }
+        | TemporalPortError::ParticipantLimitExceeded { .. }
+        | TemporalPortError::ParticipantManifestBytesExceeded { .. } => {
+            TemporalKernelError::BudgetExceeded
+        }
         TemporalPortError::InvalidBinding { .. }
+        | TemporalPortError::EmptyParticipantManifest
+        | TemporalPortError::DuplicateParticipant
         | TemporalPortError::ZeroGeneration
         | TemporalPortError::UnauthorizedSnapshot
         | TemporalPortError::ZeroVersion { .. }
@@ -728,7 +745,7 @@ mod scope_tests {
             summary_id: predecessor_id.clone(),
             anchor_id: anchor("summary-hidden-predecessor"),
             rejection: SummaryLineageRejection::UnauthorizedSource {
-                anchor_id: anchor("source-predecessor"),
+                anchor_id: anchor("source-hidden-predecessor"),
             },
         };
         let first_id = SessionSummaryIdV1::new("first-dependent").expect("valid summary id");

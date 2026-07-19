@@ -315,8 +315,14 @@ pub(crate) async fn preflight(
         &request.session_id,
     )
     .await?;
-    let raw_messages =
+    let mut raw_messages =
         load_raw_messages_for_session(conn, &request.provider, &request.session_id).await?;
+    if raw_messages.is_empty()
+        && let Some(bound_session_id) = existing_frontier.last_finalized_session_id.as_deref()
+    {
+        raw_messages =
+            load_raw_messages_for_session(conn, &request.provider, bound_session_id).await?;
+    }
     let window = compression_window(
         &raw_messages,
         existing_frontier.current_frontier_store_id,

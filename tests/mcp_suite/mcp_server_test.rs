@@ -45,7 +45,10 @@ async fn setup_server() -> (Arc<McpServer>, TempDir) {
 
 /// Sends a sequence of JSON-RPC messages to a server, runs it to completion,
 /// and returns all non-empty response lines.
-async fn run_server_with_messages(server: Arc<McpServer>, messages: Vec<String>) -> Vec<String> {
+pub(crate) async fn run_server_with_messages(
+    server: Arc<McpServer>,
+    messages: Vec<String>,
+) -> Vec<String> {
     let (mut transport, sender, mut receiver) = ChannelTransport::new();
 
     for msg in messages {

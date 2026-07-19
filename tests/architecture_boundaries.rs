@@ -50,7 +50,7 @@ const QUERY_ALLOWED_MACROS: &[&str] = &[
 ];
 const QUERY_ALLOWED_PRELUDE_PATH_ROOTS: &[&str] = &[
     "Box", "Option", "Result", "String", "Vec", "bool", "char", "f32", "f64", "i8", "i16", "i32",
-    "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64", "u128", "usize",
+    "i64", "i128", "isize", "str", "u8", "u16", "u32", "u64", "u128", "usize", "clippy",
 ];
 const QUERY_ALLOWED_DERIVES: &[&str] = &[
     "Clone",
@@ -96,6 +96,7 @@ const PR8_TARGET_SNAPSHOT: &[&str] = &[
     "tracedecay|memory_suite|test|tests/memory_suite/main.rs",
     "tracedecay|session_suite|test|tests/session_suite/main.rs",
     "tracedecay|storage_suite|test|tests/storage_suite/main.rs",
+    "tracedecay|tool_client_transport|test|tests/tool_client_transport.rs",
     "tracedecay|transcript_ingest_suite|test|tests/transcript_ingest_suite/main.rs",
     "tracedecay|update_health_pass_test|test|tests/update_health_pass_test.rs",
     "tracedecay|v2_corpus_suite|test|tests/v2_corpus_suite.rs",
@@ -1206,7 +1207,16 @@ fn validate_query_attributes(
                         Token::Punct('('),
                         Token::Ident("deprecated".to_string()),
                         Token::Punct(')'),
-                    ]
+                    ] || body
+                        == [
+                            Token::Ident("allow".to_string()),
+                            Token::Punct('('),
+                            Token::Ident("clippy".to_string()),
+                            Token::Punct(':'),
+                            Token::Punct(':'),
+                            Token::Ident("too_many_arguments".to_string()),
+                            Token::Punct(')'),
+                        ]
                 }
                 "cfg" => {
                     body == [
@@ -1223,7 +1233,29 @@ fn validate_query_attributes(
                         Token::Punct('('),
                         Token::Ident("deny_unknown_fields".to_string()),
                         Token::Punct(')'),
-                    ]
+                    ] || matches!(
+                        body,
+                        [
+                            Token::Ident(_),
+                            Token::Punct('('),
+                            Token::Ident(key),
+                            Token::Punct('='),
+                            Token::StringLiteral(_),
+                            Token::Punct(')')
+                        ] if key == "rename"
+                    ) || matches!(
+                        body,
+                        [
+                            Token::Ident(_),
+                            Token::Punct('('),
+                            Token::Ident(default),
+                            Token::Punct(','),
+                            Token::Ident(skip),
+                            Token::Punct('='),
+                            Token::StringLiteral(_),
+                            Token::Punct(')')
+                        ] if default == "default" && skip == "skip_serializing_if"
+                    )
                 }
                 "error" => match body {
                     [

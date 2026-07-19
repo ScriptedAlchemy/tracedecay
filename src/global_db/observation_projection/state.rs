@@ -577,11 +577,15 @@ async fn verify_rows(
         });
     }
     let message = projection.message();
-    if !read_message(conn, &message.provider, &message.message_id)
-        .await?
-        .as_ref()
-        .is_some_and(|actual| message_rows_compatible(actual, message))
-    {
+    let actual = read_message(conn, &message.provider, &message.message_id).await?;
+    let compatible = match actual.as_ref() {
+        Some(actual) => {
+            message_rows_compatible(actual, message)
+                || protected_message_rows_compatible(conn, actual, message).await?
+        }
+        None => false,
+    };
+    if !compatible {
         return Err(ProjectionStoreError::OutputCollision {
             provider: message.provider.clone(),
             message_id: message.message_id.clone(),
@@ -916,6 +920,96 @@ pub(super) fn message_rows_compatible(
     expected: &crate::sessions::SessionMessageRecord,
 ) -> bool {
     actual == expected
+}
+
+pub(super) async fn protected_message_rows_compatible(
+    conn: &Connection,
+    actual: &crate::sessions::SessionMessageRecord,
+    expected: &crate::sessions::SessionMessageRecord,
+) -> ProjectionStoreResult<bool> {
+    if actual.provider != expected.provider
+        || actual.message_id != expected.message_id
+        || actual.session_id != expected.session_id
+        || actual.role != expected.role
+        || actual.timestamp != expected.timestamp
+        || actual.ordinal != expected.ordinal
+        || actual.kind != expected.kind
+        || actual.model != expected.model
+        || actual.tool_names != expected.tool_names
+        || actual.source_path != expected.source_path
+        || actual.source_offset != expected.source_offset
+    {
+        return Ok(false);
+    }
+    let Some(metadata) = actual
+        .metadata_json
+        .as_deref()
+        .and_then(|encoded| serde_json::from_str::<serde_json::Value>(encoded).ok())
+    else {
+        return Ok(false);
+    };
+    let Some(payload_ref) = metadata
+        .get("payload_ref")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(false);
+    };
+    let expected_hash = crate::sessions::lcm::raw::sha256_hex(&expected.text);
+    if metadata
+        .get("external_payload")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+        || metadata.get("sha256").and_then(serde_json::Value::as_str)
+            != Some(expected_hash.as_str())
+        || !actual.text.contains(payload_ref)
+    {
+        return Ok(false);
+    }
+    let mut rows = conn
+        .query(
+            "SELECT CAST(COALESCE(content, '') AS TEXT),
+                    CAST(COALESCE(content_hash, '') AS TEXT),
+                    CAST(COALESCE(storage_kind, '') AS TEXT),
+                    CAST(COALESCE(payload_ref, '') AS TEXT)
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND message_id = ?2
+             LIMIT 2",
+            params![actual.provider.as_str(), actual.message_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage("read protected projection output", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read protected projection output", error))?
+    else {
+        return Ok(false);
+    };
+    let compatible = row
+        .get::<String>(0)
+        .map_err(|error| storage("read protected projection output", error))?
+        .is_empty()
+        && row
+            .get::<String>(1)
+            .map_err(|error| storage("read protected projection output", error))?
+            == expected_hash
+        && row
+            .get::<String>(2)
+            .map_err(|error| storage("read protected projection output", error))?
+            == "external"
+        && row
+            .get::<String>(3)
+            .map_err(|error| storage("read protected projection output", error))?
+            == payload_ref;
+    if rows
+        .next()
+        .await
+        .map_err(|error| storage("read protected projection output", error))?
+        .is_some()
+    {
+        return Ok(false);
+    }
+    Ok(compatible)
 }
 
 #[cfg(test)]

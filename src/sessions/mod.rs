@@ -21,6 +21,7 @@ pub mod kiro;
 pub mod lcm;
 pub(crate) mod message_noise;
 pub mod providers;
+pub mod session_temporal_benchmark;
 pub mod shared;
 pub(crate) mod snapshot_observation;
 pub mod source;

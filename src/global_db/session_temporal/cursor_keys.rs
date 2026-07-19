@@ -52,6 +52,13 @@ impl GlobalDbCursorKeyProvider {
             .cursor_key()
             .cloned()
             .ok_or(GlobalDbCursorKeyProviderError::SnapshotKeyUnavailable)?;
+        Self::from_key_ref(read, expected).await
+    }
+
+    pub(crate) async fn from_key_ref(
+        read: &GlobalDbReadSnapshot,
+        expected: SignedCursorKeyRefV1,
+    ) -> Result<Self, GlobalDbCursorKeyProviderError> {
         let mut rows = read
             .query(
                 "SELECT key_id, key_version, key_material, COUNT(*) OVER ()

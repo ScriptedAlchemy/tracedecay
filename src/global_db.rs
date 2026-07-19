@@ -51,6 +51,8 @@ use project_registry::{
 };
 pub use session_temporal::GlobalDbSessionTemporalExecution;
 pub(crate) use session_temporal::{
+    AuthorizedSessionDescribeRequest, AuthorizedSessionExpandCursorBinding,
+    AuthorizedSessionExpandRequest, CompatibilityReadError, CompatibilityTemporalMetadata,
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
 pub(crate) use transcript::TranscriptPersistenceError;
@@ -4228,9 +4230,14 @@ impl GlobalDb {
         limit: usize,
     ) -> Result<Vec<PendingCodexCompactionSummary>, crate::sessions::lcm::LcmError> {
         let limit = limit.clamp(1, 100) as i64;
-        let mut sql = String::from(
+        let index = if session_id.is_some() {
+            "idx_lcm_summary_nodes_codex_pending_session_order"
+        } else {
+            "idx_lcm_summary_nodes_codex_pending_root_order"
+        };
+        let mut sql = format!(
             "SELECT candidate.node_id, candidate.session_id
-             FROM lcm_summary_nodes AS candidate
+             FROM lcm_summary_nodes AS candidate INDEXED BY {index}
              JOIN session_summary_nodes AS authority
                ON authority.summary_id = candidate.node_id
               AND authority.session_id = candidate.session_id
@@ -4262,7 +4269,7 @@ impl GlobalDb {
                       AND raw.provider = candidate.provider
                       AND raw.session_id = candidate.session_id
                      WHERE source.node_id = candidate.node_id
-                   )",
+                   )"
         );
         let mut query_params = vec![Value::Integer(limit)];
         if let Some(session_id) = session_id {

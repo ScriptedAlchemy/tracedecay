@@ -30,8 +30,10 @@ fn skill_writer_evidence_uses_fresh_authorized_forensic_retrieval() {
     assert!(!builder.contains(".lcm_session_replay_slice("));
     assert!(!builder.contains(".session_tool_usage_rows("));
     assert!(builder.contains("retrieve_automation_session_evidence("));
+    assert!(builder.contains("validate_complete_evidence("));
     assert!(source.contains("SessionFreshnessPolicy::RequireFresh"));
     assert!(source.contains("TemporalModeV1::Forensic"));
+    assert!(source.contains("RequireFresh.accepts(freshness)"));
 }
 
 #[tokio::test]
@@ -216,31 +218,16 @@ async fn skill_writer_skips_when_replay_disabled_and_no_grep_hits() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .expect("session db open");
-    seed_session_message_in_db(
-        &db,
-        cg.project_root(),
-        SeedSessionMessage {
-            provider: "cursor",
-            session_id: "skill-writer-replay-2",
-            message_id: "skill-writer-replay-2-message-001",
-            role: "assistant",
-            timestamp: 1_715_000_080,
-            text: "Ran the dashboard build twice before every release cut.",
-            source: None,
-        },
-    )
-    .await;
     let _global_db = isolate_global_db(&cg);
     let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let retrieval = EmptyAutomationSessionRetrieval::new();
     let config = enabled_skill_writer_config();
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer_with_backend_and_retrieval(
         &cg,
         &config,
         &backend,
+        &retrieval,
         SkillWriterAutomationOptions {
             include_recent_sessions: false,
             profile_root: Some(profile_root),
@@ -568,10 +555,11 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     let backend = InspectSkillWriterUsageBackend;
     let config = enabled_skill_writer_config();
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer_with_backend_and_retrieval(
         &cg,
         &config,
         &backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
         manual_skill_writer_options(&profile_root),
     )
     .await
@@ -601,10 +589,11 @@ async fn skill_writer_evidence_includes_underused_tool_family_summary() {
     let backend = InspectSkillWriterUnderusedBackend;
     let config = enabled_skill_writer_config();
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer_with_backend_and_retrieval(
         &cg,
         &config,
         &backend,
+        &FixtureAutomationSessionRetrieval::new(&cg),
         SkillWriterAutomationOptions {
             trigger: AutomationTrigger::ManualCli,
             provider: "cursor".to_string(),

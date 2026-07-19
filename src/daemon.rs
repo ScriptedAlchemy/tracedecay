@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
+use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -14,7 +15,7 @@ use tokio::net::UnixStream;
 #[cfg(unix)]
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
@@ -49,6 +50,48 @@ const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_CONCURRENT_DAEMON_CLIENTS: usize = 64;
 const DAEMON_SATURATION_RESPONSE_DEADLINE: Duration = Duration::from_millis(250);
+
+/// One monotonic wall-clock budget shared across daemon client connect, write,
+/// read, and decode stages. Outer CLI wrappers pass their Instant so a timeout
+/// cancels the in-flight stage rather than starting a fresh Duration clock.
+#[derive(Clone, Copy, Debug)]
+struct DaemonClientDeadline {
+    deadline: Instant,
+}
+
+impl DaemonClientDeadline {
+    fn until(deadline: Instant) -> Result<Self> {
+        if Instant::now() >= deadline {
+            return Err(TraceDecayError::Config {
+                message: "daemon client deadline already elapsed".to_string(),
+            });
+        }
+        Ok(Self { deadline })
+    }
+
+    fn remaining(&self) -> Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "daemon client deadline already elapsed".to_string(),
+            })
+    }
+
+    async fn run<F, T>(&self, stage: &'static str, request_label: &str, fut: F) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        match timeout_at(self.deadline, fut).await {
+            Ok(result) => result,
+            Err(_) => Err(TraceDecayError::Config {
+                message: format!(
+                    "daemon {request_label} timed out during {stage} before deadline; request outcome may be unknown"
+                ),
+            }),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct DaemonClientAdmission {
@@ -929,19 +972,31 @@ where
     R: tokio::io::AsyncBufRead + Unpin,
 {
     use crate::application::host_admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
+
+    // Pin one frame-read future for the whole wait. Liveness polls must not
+    // recreate `read_bounded_mcp_line`: that future owns the partial-frame
+    // accumulator after bytes have already been consumed from `reader`.
+    let read = read_bounded_mcp_line(reader);
+    tokio::pin!(read);
     loop {
-        match timeout(liveness_poll_interval, read_bounded_mcp_line(reader)).await {
-            Ok(Ok(line)) => return Ok(line),
-            Ok(Err(error)) if is_wire_oversized_io_error(&error) => {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "daemon {request_label} response exceeded wire message bound ({})",
-                        crate::application::host_admission::WIRE_RECORD_TOO_LARGE
-                    ),
-                });
+        tokio::select! {
+            result = &mut read => {
+                return match result {
+                    Ok(line) => Ok(line),
+                    Err(error) if is_wire_oversized_io_error(&error) => {
+                        Err(TraceDecayError::Config {
+                            message: format!(
+                                "daemon {request_label} response exceeded wire message bound ({})",
+                                crate::application::host_admission::WIRE_RECORD_TOO_LARGE
+                            ),
+                        })
+                    }
+                    Err(error) => Err(error.into()),
+                };
             }
-            Ok(Err(error)) => return Err(error.into()),
-            Err(_) => ensure_daemon_connection_live(connection, request_label).await?,
+            () = tokio::time::sleep(liveness_poll_interval) => {
+                ensure_daemon_connection_live(connection, request_label).await?;
+            }
         }
     }
 }
@@ -1013,12 +1068,18 @@ fn is_transient_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
 }
 
 async fn connect_to_daemon_connection(connection: &DaemonConnection) -> Result<BrokerStream> {
-    connect_with_restart_grace(
-        connection,
-        DAEMON_RESTART_GRACE,
-        DAEMON_RESTART_POLL_INTERVAL,
-    )
-    .await
+    connect_to_daemon_connection_within(connection, None).await
+}
+
+async fn connect_to_daemon_connection_within(
+    connection: &DaemonConnection,
+    client_deadline: Option<DaemonClientDeadline>,
+) -> Result<BrokerStream> {
+    let grace = match client_deadline {
+        Some(deadline) => deadline.remaining()?.min(DAEMON_RESTART_GRACE),
+        None => DAEMON_RESTART_GRACE,
+    };
+    connect_with_restart_grace(connection, grace, DAEMON_RESTART_POLL_INTERVAL).await
 }
 
 /// Connects to the daemon socket, tolerating a short restart outage.
@@ -1030,14 +1091,12 @@ async fn connect_with_restart_grace(
     grace: Duration,
     poll_interval: Duration,
 ) -> Result<BrokerStream> {
-    let deadline = tokio::time::Instant::now() + grace;
+    let deadline = Instant::now() + grace;
     loop {
         match BrokerStream::connect(&connection.endpoint).await {
             Ok(stream) => return Ok(stream),
             Err(TraceDecayError::Io(err)) => {
-                if !is_transient_daemon_connect_error(err.kind())
-                    || tokio::time::Instant::now() >= deadline
-                {
+                if !is_transient_daemon_connect_error(err.kind()) || Instant::now() >= deadline {
                     return Err(TraceDecayError::Config {
                         message: format!(
                             "could not connect to TraceDecay daemon endpoint '{}': {err}. The daemon may be restarting (e.g. after `tracedecay update`) — retry shortly, or check `tracedecay daemon status`.",
@@ -1387,6 +1446,7 @@ async fn send_daemon_request_line(
         handshake,
         line,
         DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+        None,
     )
     .await
 }
@@ -1396,45 +1456,84 @@ async fn send_daemon_request_line_with_liveness_poll(
     handshake: &DaemonHandshake,
     line: &str,
     liveness_poll_interval: Duration,
+    client_deadline: Option<DaemonClientDeadline>,
 ) -> Result<Vec<String>> {
     let connection = client_connection(socket_path)?;
-    let stream = connect_to_daemon_connection(&connection).await?;
-    let (reader, mut writer) = stream.into_split();
-
-    write_daemon_preamble(&mut writer, &connection, handshake).await?;
-    writer.write_all(line.as_bytes()).await?;
-    if !line.ends_with('\n') {
-        writer.write_all(b"\n").await?;
-    }
-    writer.flush().await?;
-    writer.shutdown().await?;
-
-    let mut reader = tokio::io::BufReader::new(reader);
     let request = serde_json::from_str::<JsonRpcRequest>(line).ok();
     let request_id = request.as_ref().and_then(|request| request.id.clone());
     let request_label = request
         .as_ref()
-        .map_or("daemon request", |request| request.method.as_str());
+        .map_or("daemon request", |request| request.method.as_str())
+        .to_string();
+    let stream = match client_deadline {
+        Some(deadline) => {
+            deadline
+                .run("connect", &request_label, async {
+                    connect_to_daemon_connection_within(&connection, Some(deadline)).await
+                })
+                .await?
+        }
+        None => connect_to_daemon_connection(&connection).await?,
+    };
+    let (reader, mut writer) = stream.into_split();
+
+    let write = async {
+        write_daemon_preamble(&mut writer, &connection, handshake).await?;
+        writer.write_all(line.as_bytes()).await?;
+        if !line.ends_with('\n') {
+            writer.write_all(b"\n").await?;
+        }
+        writer.flush().await?;
+        writer.shutdown().await?;
+        Ok(())
+    };
+    match client_deadline {
+        Some(deadline) => deadline.run("write", &request_label, write).await?,
+        None => write.await?,
+    }
+
+    let mut reader = tokio::io::BufReader::new(reader);
     let mut responses = Vec::new();
     let mut matched_response = request_id.is_none();
-    while let Some(response_line) = next_daemon_response_line(
-        &mut reader,
-        &connection,
-        request_label,
-        liveness_poll_interval,
-    )
-    .await?
-    {
+    loop {
+        let read = next_daemon_response_line(
+            &mut reader,
+            &connection,
+            &request_label,
+            liveness_poll_interval,
+        );
+        let response_line = match client_deadline {
+            Some(deadline) => deadline.run("read", &request_label, read).await?,
+            None => read.await?,
+        };
+        let Some(response_line) = response_line else {
+            break;
+        };
         if response_line.trim().is_empty() {
             continue;
         }
-        let is_matching_response = request_id.as_ref().is_some_and(|id| {
-            serde_json::from_str::<serde_json::Value>(&response_line)
-                .ok()
-                .and_then(|value| value.get("id").cloned())
-                .as_ref()
-                == Some(id)
-        });
+        let is_matching_response = match client_deadline {
+            Some(deadline) => {
+                deadline
+                    .run("decode", &request_label, async {
+                        Ok(request_id.as_ref().is_some_and(|id| {
+                            serde_json::from_str::<serde_json::Value>(&response_line)
+                                .ok()
+                                .and_then(|value| value.get("id").cloned())
+                                .as_ref()
+                                == Some(id)
+                        }))
+                    })
+                    .await?
+            }
+            None => request_id.as_ref().is_some_and(|id| {
+                serde_json::from_str::<serde_json::Value>(&response_line)
+                    .ok()
+                    .and_then(|value| value.get("id").cloned())
+                    .as_ref()
+                    == Some(id)
+            }),
+        };
         responses.push(format!("{response_line}\n"));
         if is_matching_response {
             matched_response = true;
@@ -1584,6 +1683,25 @@ pub async fn call_tool(
         tool_name,
         arguments,
         DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+        None,
+    )
+    .await
+}
+
+pub async fn call_tool_within(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    tool_name: &str,
+    arguments: serde_json::Value,
+    deadline: Instant,
+) -> Result<serde_json::Value> {
+    call_tool_with_liveness_poll(
+        socket_path,
+        handshake,
+        tool_name,
+        arguments,
+        DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+        Some(DaemonClientDeadline::until(deadline)?),
     )
     .await
 }
@@ -1594,9 +1712,19 @@ async fn call_tool_with_liveness_poll(
     tool_name: &str,
     arguments: serde_json::Value,
     liveness_poll_interval: Duration,
+    client_deadline: Option<DaemonClientDeadline>,
 ) -> Result<serde_json::Value> {
     let connection = client_connection(socket_path)?;
-    let stream = connect_to_daemon_connection(&connection).await?;
+    let stream = match client_deadline {
+        Some(deadline) => {
+            deadline
+                .run("connect", tool_name, async {
+                    connect_to_daemon_connection_within(&connection, Some(deadline)).await
+                })
+                .await?
+        }
+        None => connect_to_daemon_connection(&connection).await?,
+    };
     let (reader, mut writer) = stream.into_split();
     let id = json!(1);
     let request = JsonRpcRequest {
@@ -1609,30 +1737,60 @@ async fn call_tool_with_liveness_poll(
         })),
     };
 
-    write_daemon_preamble(&mut writer, &connection, handshake).await?;
-    writer
-        .write_all(serde_json::to_string(&request)?.as_bytes())
-        .await?;
-    writer.write_all(b"\n").await?;
-    writer.flush().await?;
-    writer.shutdown().await?;
+    let write = async {
+        write_daemon_preamble(&mut writer, &connection, handshake).await?;
+        writer
+            .write_all(serde_json::to_string(&request)?.as_bytes())
+            .await?;
+        writer.write_all(b"\n").await?;
+        writer.flush().await?;
+        writer.shutdown().await?;
+        Ok(())
+    };
+    match client_deadline {
+        Some(deadline) => deadline.run("write", tool_name, write).await?,
+        None => write.await?,
+    }
 
     let mut reader = tokio::io::BufReader::new(reader);
     loop {
-        let line =
-            next_daemon_response_line(&mut reader, &connection, tool_name, liveness_poll_interval)
-                .await?;
+        let read =
+            next_daemon_response_line(&mut reader, &connection, tool_name, liveness_poll_interval);
+        let line = match client_deadline {
+            Some(deadline) => deadline.run("read", tool_name, read).await?,
+            None => read.await?,
+        };
         let Some(line) = line else {
             return Err(TraceDecayError::Config {
                 message: "daemon closed the connection after the tool request was sent but before returning a result; the outcome is unknown and the request was not retried"
                     .to_string(),
             });
         };
-        let value: serde_json::Value = serde_json::from_str(&line)?;
-        if value.get("id") != Some(&id) {
+        let response = match client_deadline {
+            Some(deadline) => {
+                deadline
+                    .run("decode", tool_name, async {
+                        let value: serde_json::Value = serde_json::from_str(&line)?;
+                        if value.get("id") != Some(&id) {
+                            return Ok(None);
+                        }
+                        let response: JsonRpcResponse = serde_json::from_value(value)?;
+                        Ok(Some(response))
+                    })
+                    .await?
+            }
+            None => {
+                let value: serde_json::Value = serde_json::from_str(&line)?;
+                if value.get("id") != Some(&id) {
+                    None
+                } else {
+                    Some(serde_json::from_value(value)?)
+                }
+            }
+        };
+        let Some(response) = response else {
             continue;
-        }
-        let response: JsonRpcResponse = serde_json::from_value(value)?;
+        };
         if let Some(error) = response.error {
             return Err(TraceDecayError::Config {
                 message: format!("daemon tool call failed: {}", error.message),
@@ -1651,6 +1809,16 @@ pub async fn call_default_tool(
 ) -> Result<serde_json::Value> {
     let socket_path = default_available_socket_path()?;
     call_tool(&socket_path, handshake, tool_name, arguments).await
+}
+
+pub async fn call_default_tool_within(
+    handshake: &DaemonHandshake,
+    tool_name: &str,
+    arguments: serde_json::Value,
+    deadline: Instant,
+) -> Result<serde_json::Value> {
+    let socket_path = default_available_socket_path()?;
+    call_tool_within(&socket_path, handshake, tool_name, arguments, deadline).await
 }
 
 pub async fn call_default_doctor_runtime(
@@ -3013,6 +3181,7 @@ fn doctor_runtime_temporal_unavailable(reason: &str) -> serde_json::Value {
     };
     json!({
         "status": if reason.ends_with("_locked") { "locked" } else { "unavailable" },
+        "reason": reason,
         "findings": [{
             "kind": finding,
             "count": 1,
@@ -3026,13 +3195,19 @@ fn doctor_runtime_temporal_report(
     let mut value = serde_json::to_value(report).unwrap_or_else(|_| {
         doctor_runtime_temporal_unavailable("session_health_serialization_failed")
     });
+    let has_reason = value
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|reason| !reason.is_empty());
     let unavailable_without_findings = value.get("status").and_then(serde_json::Value::as_str)
         == Some("unavailable")
         && value
             .get("findings")
             .and_then(serde_json::Value::as_array)
             .is_some_and(Vec::is_empty);
-    if unavailable_without_findings {
+    // Preserve fixed path-API reasons (for example uncheckpointed_wal). Only
+    // synthesize a compatibility finding when the report is reason-less.
+    if unavailable_without_findings && !has_reason {
         value["findings"] = json!([{
             "kind": "compatibility_drift",
             "count": 1,
@@ -3082,6 +3257,8 @@ fn doctor_runtime_tool_result(value: serde_json::Value) -> serde_json::Value {
 }
 
 const DOCTOR_GRAPH_SCHEMA_VERSION: i64 = 23;
+/// `SQLITE_OPEN_URI`, which libsql does not expose through [`libsql::OpenFlags`].
+const SQLITE_OPEN_URI: i32 = 0x0000_0040;
 
 fn doctor_runtime_store_paths(
     project_path: &Path,
@@ -3096,10 +3273,16 @@ fn doctor_runtime_store_paths(
         }
         Ok(None) => {
             let data_root = crate::config::get_tracedecay_dir(project_path);
-            Ok((
+            let legacy_paths = (
                 data_root.join(crate::config::db_filename(&data_root)),
                 data_root.join("sessions.db"),
-            ))
+            );
+            if legacy_paths.0.is_file() {
+                return Ok(legacy_paths);
+            }
+            let layout = crate::storage::default_profile_sharded_layout(project_path, profile_root)
+                .map_err(|_| "project_store_schema_unsupported")?;
+            Ok((layout.graph_db_path, layout.sessions_db_path))
         }
         Err(_) => Err("project_store_schema_unsupported"),
     }
@@ -3130,20 +3313,57 @@ async fn doctor_read_only_database(
         })
 }
 
+async fn doctor_connection_i64_result(
+    conn: &libsql::Connection,
+    query: &str,
+) -> std::result::Result<Option<i64>, libsql::Error> {
+    let mut rows = conn.query(query, ()).await?;
+    match rows.next().await? {
+        Some(row) => row.get(0).map(Some),
+        None => Ok(None),
+    }
+}
+
+async fn doctor_connection_i64(conn: &libsql::Connection, query: &str) -> Option<i64> {
+    doctor_connection_i64_result(conn, query)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn doctor_connection_text(conn: &libsql::Connection, query: &str) -> Option<String> {
+    let mut rows = conn.query(query, ()).await.ok()?;
+    rows.next().await.ok().flatten()?.get::<String>(0).ok()
+}
+
 async fn doctor_database_i64(database: &crate::db::Database, query: &str) -> Option<i64> {
-    let mut rows = database.conn().query(query, ()).await.ok()?;
-    rows.next().await.ok().flatten()?.get::<i64>(0).ok()
+    doctor_connection_i64(database.conn(), query).await
 }
 
 async fn doctor_database_text(database: &crate::db::Database, query: &str) -> Option<String> {
-    let mut rows = database.conn().query(query, ()).await.ok()?;
-    rows.next().await.ok().flatten()?.get::<String>(0).ok()
+    doctor_connection_text(database.conn(), query).await
 }
 
 fn doctor_sidecar_size(db_path: &Path, suffix: &str) -> u64 {
     let mut path = db_path.as_os_str().to_os_string();
     path.push(suffix);
     std::fs::metadata(PathBuf::from(path)).map_or(0, |metadata| metadata.len())
+}
+
+fn doctor_graph_error_reason(error: &libsql::Error) -> &'static str {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("locked") || message.contains("busy") {
+        "project_store_locked"
+    } else {
+        "project_store_unavailable"
+    }
+}
+
+fn doctor_uses_rollback_journal(db_path: &Path) -> bool {
+    let mut header = [0_u8; 20];
+    std::fs::File::open(db_path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .is_ok_and(|()| header[18] == 1 && header[19] == 1)
 }
 
 async fn doctor_global_db_read_only(
@@ -3156,7 +3376,123 @@ async fn doctor_global_db_read_only(
     database
 }
 
+async fn cold_doctor_graph_value(
+    project_path: &Path,
+    graph_path: &Path,
+) -> std::result::Result<serde_json::Value, &'static str> {
+    if !graph_path.is_file() {
+        return Err("project_store_missing");
+    }
+    if !crate::storage::has_sqlite_database_header(graph_path).unwrap_or(false) {
+        return Err("project_store_unavailable");
+    }
+    // `immutable=1` deliberately ignores a WAL. Refuse an incomplete
+    // snapshot rather than quietly reporting stale graph metadata.
+    if doctor_sidecar_size(graph_path, "-wal") > 0 {
+        return Err("project_store_uncheckpointed_wal");
+    }
+    let database = if doctor_uses_rollback_journal(graph_path) {
+        // A rollback-journal store can be checked with SQLite's ordinary
+        // read-only lock protocol without creating WAL/SHM sidecars. This
+        // preserves the typed locked result that immutable mode would hide.
+        libsql::Builder::new_local(graph_path)
+            .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .build()
+            .await
+            .map_err(|error| doctor_graph_error_reason(&error))?
+    } else {
+        let uri = crate::sqlite_read_snapshot::immutable_uri(graph_path)
+            .map_err(|_| "project_store_unavailable")?;
+        let flags = libsql::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | libsql::OpenFlags::from_bits_retain(SQLITE_OPEN_URI);
+        libsql::Builder::new_local(uri)
+            .flags(flags)
+            .build()
+            .await
+            .map_err(|error| doctor_graph_error_reason(&error))?
+    };
+    let conn = database
+        .connect()
+        .map_err(|error| doctor_graph_error_reason(&error))?;
+    conn.execute_batch("PRAGMA query_only = ON; PRAGMA busy_timeout = 0;")
+        .await
+        .map_err(|error| doctor_graph_error_reason(&error))?;
+    let schema_version = match doctor_connection_i64_result(&conn, "PRAGMA user_version").await {
+        Ok(Some(version)) => version,
+        Ok(None) => return Err("project_store_unavailable"),
+        Err(error) => return Err(doctor_graph_error_reason(&error)),
+    };
+    if schema_version != DOCTOR_GRAPH_SCHEMA_VERSION {
+        return Err("project_store_schema_unsupported");
+    }
+    let canonical_graph_path = graph_path
+        .canonicalize()
+        .unwrap_or_else(|_| graph_path.to_path_buf());
+    Ok(json!({
+        "tracedecay_version": env!("CARGO_PKG_VERSION"),
+        "process": {
+            "pid": std::process::id(),
+        },
+        "database": {
+            "project_root": project_path,
+            "db_path": graph_path,
+            "canonical_db_path": canonical_graph_path,
+            "db_size_bytes": std::fs::metadata(graph_path).map_or(0, |metadata| metadata.len()),
+            "wal_size_bytes": doctor_sidecar_size(graph_path, "-wal"),
+            "shm_size_bytes": doctor_sidecar_size(graph_path, "-shm"),
+            "journal_mode": doctor_connection_text(&conn, "PRAGMA journal_mode").await,
+            "synchronous": doctor_connection_i64(&conn, "PRAGMA synchronous").await,
+            "page_size": doctor_connection_i64(&conn, "PRAGMA page_size").await,
+            "quick_check_ok": true,
+            "quick_check_error": null,
+            "schema_version": schema_version,
+        },
+        "doctor_runtime": {
+            "status": "complete",
+            "reason": null,
+            "read_only": true,
+        },
+    }))
+}
+
+async fn cold_doctor_runtime_value_for_paths(
+    project_path: &Path,
+    graph_path: &Path,
+    session_path: &Path,
+) -> serde_json::Value {
+    let mut value = match cold_doctor_graph_value(project_path, graph_path).await {
+        Ok(value) => value,
+        Err(reason) => return doctor_runtime_unavailable(Some(project_path), reason),
+    };
+    value["database"]["authority_audit_ok"] = json!(null);
+    value["database"]["authority_audit_reason"] = json!("authority_audit_not_run");
+    value["database"]["authority_audit_error"] = json!("authority_audit_not_run");
+    value["session_temporal_health"] = if !session_path.is_file() {
+        doctor_runtime_temporal_unavailable("session_store_missing")
+    } else {
+        match timeout(
+            Duration::from_secs(8),
+            crate::global_db::session_temporal::session_temporal_doctor_health_at(session_path),
+        )
+        .await
+        {
+            Ok(report) => doctor_runtime_temporal_report(report),
+            Err(_) => doctor_runtime_temporal_unavailable("session_health_timed_out"),
+        }
+    };
+    value["cursor_session_ingest"] = json!({
+        "status": "unavailable",
+        "reason": "session_store_unavailable",
+    });
+    value["cursor_session_placeholder_paths"] = json!([]);
+    value
+}
+
 async fn doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
+    doctor_runtime_value_inner(handshake, false).await
+}
+
+async fn doctor_runtime_value_inner(handshake: &DaemonHandshake, cold: bool) -> serde_json::Value {
     let Some(project_path) = handshake.project_path.as_deref() else {
         return doctor_runtime_unavailable(None, "project_path_missing");
     };
@@ -3165,6 +3501,9 @@ async fn doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value 
             Ok(paths) => paths,
             Err(reason) => return doctor_runtime_unavailable(Some(project_path), reason),
         };
+    if cold {
+        return cold_doctor_runtime_value_for_paths(project_path, &graph_path, &session_path).await;
+    }
     let graph = match doctor_read_only_database(&graph_path, "doctor graph read-only").await {
         Ok(graph) => graph,
         Err("store_missing") => {
@@ -3271,23 +3610,9 @@ async fn doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value 
 }
 
 async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
-    // Database access scopes are process-local capabilities. A cold Doctor has
-    // no daemon process from which to inherit one, so install a bounded scope
-    // only while the explicitly read-only handles below are alive.
-    let _read_only_scope = match crate::db::enter_daemon_database_scope(
-        &handshake.client_identity.profile_root,
-        0,
-        "doctor-read-only",
-    ) {
-        Ok(scope) => scope,
-        Err(_) => {
-            return doctor_runtime_unavailable(
-                handshake.project_path.as_deref(),
-                "doctor_read_scope_unavailable",
-            );
-        }
-    };
-    doctor_runtime_value(handshake).await
+    // Both stores use immutable `mode=ro` reads, so this route does not acquire
+    // database authority, create locks or sidecars, apply schema, or start workers.
+    doctor_runtime_value_inner(handshake, true).await
 }
 
 async fn write_doctor_runtime_response(
@@ -4107,6 +4432,7 @@ mod doctor_runtime_route_tests {
 
     use super::{
         DaemonClientIdentity, DaemonHandshake, cold_doctor_runtime_value, doctor_runtime_request,
+        doctor_runtime_store_paths,
     };
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
@@ -4153,6 +4479,38 @@ mod doctor_runtime_route_tests {
         let mut entries = Vec::new();
         visit(root, root, &mut entries);
         entries
+    }
+
+    async fn checkpoint_sqlite_wal(path: &Path) {
+        let database = libsql::Builder::new_local(path).build().await.unwrap();
+        let connection = database.connect().unwrap();
+        let mut rows = connection
+            .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 0, "checkpoint must not be busy");
+        assert_eq!(
+            row.get::<i64>(1).unwrap(),
+            row.get::<i64>(2).unwrap(),
+            "checkpoint must flush every WAL frame"
+        );
+    }
+
+    fn remove_sqlite_sidecars(path: &Path) {
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(sidecar));
+        }
+    }
+
+    fn has_non_empty_wal(path: &Path) -> bool {
+        let mut wal_path = path.as_os_str().to_os_string();
+        wal_path.push("-wal");
+        std::fs::metadata(PathBuf::from(wal_path))
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
     }
 
     #[test]
@@ -4362,6 +4720,240 @@ mod doctor_runtime_route_tests {
         );
         assert!(!value.to_string().contains(&db_path.display().to_string()));
         connection.execute("ROLLBACK", ()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cold_complete_route_uses_immutable_session_health_without_authority_wal_shm() {
+        let root = tempfile::TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        let registry_path = profile.join("registry.db");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile.clone()),
+            global_db_path: Some(registry_path.clone()),
+        };
+        let initialized = TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize test project");
+        let graph_path = initialized.db_path().clone();
+        let session_path = initialized.store_layout().sessions_db_path.clone();
+        assert_eq!(
+            doctor_runtime_store_paths(&project, &profile)
+                .expect("resolve initialized cold Doctor store paths"),
+            (graph_path.clone(), session_path.clone()),
+            "cold Doctor must resolve the initialized profile-sharded store"
+        );
+        drop(initialized);
+        checkpoint_sqlite_wal(&graph_path).await;
+        // Init leaves a zero-byte sessions placeholder; install + checkpoint a
+        // real temporal store so immutable=1 can observe a complete snapshot.
+        {
+            let session_db = crate::global_db::GlobalDb::open_at(&session_path)
+                .await
+                .expect("seed sessions store");
+            session_db
+                .checkpoint_result()
+                .await
+                .expect("checkpoint sessions store");
+            drop(session_db);
+        }
+        for path in [&graph_path, &session_path, &registry_path] {
+            remove_sqlite_sidecars(path);
+        }
+        let handshake = handshake(project, profile.clone(), registry_path.clone());
+        let before = filesystem_manifest(root.path());
+
+        let value = cold_doctor_runtime_value(&handshake).await;
+
+        assert_eq!(filesystem_manifest(root.path()), before);
+        assert_eq!(
+            value.pointer("/doctor_runtime/status"),
+            Some(&serde_json::json!("complete")),
+            "{value}"
+        );
+        assert_eq!(
+            value.pointer("/session_temporal_health/status"),
+            Some(&serde_json::json!("complete"))
+        );
+        assert_eq!(value.pointer("/session_temporal_health/reason"), None);
+        assert_eq!(
+            value.pointer("/database/authority_audit_reason"),
+            Some(&serde_json::json!("authority_audit_not_run"))
+        );
+        for path in [
+            graph_path.as_path(),
+            session_path.as_path(),
+            registry_path.as_path(),
+        ] {
+            for suffix in ["-wal", "-shm"] {
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                assert!(
+                    !PathBuf::from(sidecar).exists(),
+                    "cold doctor must not create {suffix} for {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cold_uncheckpointed_session_wal_is_unavailable_without_artifacts() {
+        let root = tempfile::TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        let registry_path = profile.join("registry.db");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile.clone()),
+            global_db_path: Some(registry_path.clone()),
+        };
+        let initialized = TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize test project");
+        let graph_path = initialized.db_path().clone();
+        let session_path = initialized.store_layout().sessions_db_path.clone();
+        drop(initialized);
+        checkpoint_sqlite_wal(&graph_path).await;
+        for path in [&graph_path, &registry_path] {
+            remove_sqlite_sidecars(path);
+        }
+        let session_db = crate::global_db::GlobalDb::open_at(&session_path)
+            .await
+            .expect("create an uncheckpointed temporal store");
+        assert!(
+            has_non_empty_wal(&session_path),
+            "fixture must retain a non-empty temporal WAL"
+        );
+        let handshake = handshake(project, profile.clone(), registry_path);
+        let before = filesystem_manifest(root.path());
+
+        let value = cold_doctor_runtime_value(&handshake).await;
+
+        assert_eq!(filesystem_manifest(root.path()), before);
+        assert_eq!(
+            value.pointer("/doctor_runtime/status"),
+            Some(&serde_json::json!("complete"))
+        );
+        assert_eq!(
+            value.pointer("/session_temporal_health/status"),
+            Some(&serde_json::json!("unavailable"))
+        );
+        assert_eq!(
+            value.pointer("/session_temporal_health/reason"),
+            Some(&serde_json::json!("uncheckpointed_wal"))
+        );
+        assert_eq!(
+            value.pointer("/session_temporal_health/findings"),
+            Some(&serde_json::json!([]))
+        );
+        drop(session_db);
+    }
+
+    #[tokio::test]
+    async fn cold_uncheckpointed_graph_wal_is_unavailable_without_artifacts() {
+        let root = tempfile::TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        let registry_path = profile.join("registry.db");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile.clone()),
+            global_db_path: Some(registry_path.clone()),
+        };
+        let initialized = TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize test project");
+        let graph_path = initialized.db_path().clone();
+        drop(initialized);
+        let graph_db = libsql::Builder::new_local(&graph_path)
+            .build()
+            .await
+            .unwrap();
+        let graph_conn = graph_db.connect().unwrap();
+        graph_conn
+            .execute(
+                "CREATE TABLE cold_doctor_wal_probe(id INTEGER PRIMARY KEY)",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(
+            has_non_empty_wal(&graph_path),
+            "fixture must retain a non-empty graph WAL"
+        );
+        let handshake = handshake(project, profile.clone(), registry_path);
+        let before = filesystem_manifest(root.path());
+
+        let value = cold_doctor_runtime_value(&handshake).await;
+
+        assert_eq!(filesystem_manifest(root.path()), before);
+        assert_eq!(
+            value.pointer("/doctor_runtime/status"),
+            Some(&serde_json::json!("unavailable"))
+        );
+        assert_eq!(
+            value.pointer("/doctor_runtime/reason"),
+            Some(&serde_json::json!("project_store_uncheckpointed_wal"))
+        );
+        drop(graph_conn);
+        drop(graph_db);
+    }
+
+    #[tokio::test]
+    async fn cold_uninitialized_sessions_store_reports_fixed_reason_without_artifacts() {
+        let root = tempfile::TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        let registry_path = profile.join("registry.db");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile.clone()),
+            global_db_path: Some(registry_path.clone()),
+        };
+        let initialized = TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize test project");
+        let graph_path = initialized.db_path().clone();
+        let session_path = initialized.store_layout().sessions_db_path.clone();
+        drop(initialized);
+        checkpoint_sqlite_wal(&graph_path).await;
+        for path in [&graph_path, &registry_path] {
+            remove_sqlite_sidecars(path);
+        }
+        std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+        std::fs::write(&session_path, []).unwrap();
+        assert!(
+            session_path.is_file(),
+            "fixture must provide an uninitialized sessions placeholder"
+        );
+        assert!(
+            !crate::storage::has_sqlite_database_header(&session_path).unwrap_or(true),
+            "sessions placeholder must not be a SQLite database yet"
+        );
+        let handshake = handshake(project, profile.clone(), registry_path);
+        let before = filesystem_manifest(root.path());
+
+        let value = cold_doctor_runtime_value(&handshake).await;
+
+        assert_eq!(filesystem_manifest(root.path()), before);
+        assert_eq!(
+            value.pointer("/doctor_runtime/status"),
+            Some(&serde_json::json!("complete"))
+        );
+        assert_eq!(
+            value.pointer("/session_temporal_health/status"),
+            Some(&serde_json::json!("unavailable"))
+        );
+        assert_eq!(
+            value.pointer("/session_temporal_health/reason"),
+            Some(&serde_json::json!("session_store_uninitialized"))
+        );
     }
 }
 

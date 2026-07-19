@@ -405,6 +405,8 @@ const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_session_summary_successors_successor"),
     ("index", "idx_session_temporal_generations_one_active"),
     ("index", "idx_session_temporal_generations_session_state"),
+    ("index", "idx_session_temporal_migration_dispositions_kind"),
+    ("index", "idx_session_temporal_migration_dispositions_row"),
     ("index", "idx_session_temporal_migration_receipts_source"),
     ("index", "idx_session_temporal_observation_effects_session"),
     ("index", "idx_session_thread_hierarchy_edges_child"),
@@ -430,6 +432,7 @@ const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("table", "session_summary_sources"),
     ("table", "session_summary_successors"),
     ("table", "session_temporal_generations"),
+    ("table", "session_temporal_migration_dispositions"),
     ("table", "session_temporal_migration_receipts"),
     ("table", "session_temporal_observation_effects"),
     ("table", "session_temporal_projection_receipts"),
@@ -502,6 +505,14 @@ const TEMPORAL_SCHEMA_OBJECTS: &[(&str, &str)] = &[
         "session_temporal_generations_single_active_update_v1",
     ),
     ("trigger", "session_temporal_generations_state_guard_v1"),
+    (
+        "trigger",
+        "session_temporal_migration_dispositions_immutable_delete_v1",
+    ),
+    (
+        "trigger",
+        "session_temporal_migration_dispositions_immutable_update_v1",
+    ),
     (
         "trigger",
         "session_temporal_migration_receipts_immutable_delete_v1",
@@ -1956,7 +1967,6 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             0, 'sha256:1500000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:1600000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:1700000000000000000000000000000000000000000000000000000000000000',
-            0, 'sha256:1800000000000000000000000000000000000000000000000000000000000000',
             101
          )",
         (),
@@ -2006,7 +2016,7 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
         (),
     )
     .await
-    .unwrap();
+    .expect("first progress may commit at the binding source frontier (noop endpoint)");
     conn.execute(
         "INSERT INTO session_refresh_batch_bindings (
             session_id, operation_id, progress_ordinal, generation, batch_ordinal
@@ -2034,7 +2044,6 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             0, 'sha256:2500000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:2600000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:2700000000000000000000000000000000000000000000000000000000000000',
-            0, 'sha256:2800000000000000000000000000000000000000000000000000000000000000',
             102
          );
          INSERT INTO session_temporal_projection_receipts (
@@ -2055,7 +2064,6 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             0, 'sha256:2950000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:2960000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:2970000000000000000000000000000000000000000000000000000000000000',
-            0, 'sha256:2980000000000000000000000000000000000000000000000000000000000000',
             103
          );",
     )
@@ -2113,7 +2121,9 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
         (),
     )
     .await
-    .unwrap();
+    .expect(
+        "subsequent progress may keep receipt.source_through at the prior committed endpoint while projection_through advances",
+    );
     conn.execute_batch(
         "INSERT INTO session_refresh_batch_bindings (
             session_id, operation_id, progress_ordinal, generation, batch_ordinal
@@ -2296,7 +2306,6 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             0, 'sha256:4500000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:4600000000000000000000000000000000000000000000000000000000000000',
             0, 'sha256:4700000000000000000000000000000000000000000000000000000000000000',
-            0, 'sha256:4800000000000000000000000000000000000000000000000000000000000000',
             200
          )",
         (),
@@ -2396,6 +2405,135 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
     .await
     .unwrap();
 
+    conn.execute_batch(
+        "INSERT INTO session_temporal_generations (
+            session_id, generation, state, frozen_watermarks_json, created_at
+         ) VALUES ('refresh-zero', 1, 'building', '{}', 240);
+         INSERT INTO session_refresh_operations (
+            session_id, operation_id, request_digest, target_frontier_json,
+            state, created_at, updated_at
+         ) VALUES (
+            'refresh-zero', 'zero-noop',
+            'sha256:3200000000000000000000000000000000000000000000000000000000000000',
+            '{\"observed_through\":0,\"committed_through\":0}',
+            'running', 240, 240
+         );
+         INSERT INTO session_refresh_bindings (
+            session_id, operation_id, scope_kind, source_frontier, target_frontier,
+            projector_version, config_digest, generation, frozen_watermarks_json,
+            binding_digest, created_at
+         ) VALUES (
+            'refresh-zero', 'zero-noop', 'session_store', 0, 0,
+            'session-temporal-projector.v1',
+            'sha256:3200000000000000000000000000000000000000000000000000000000000000',
+            1, '{}',
+            'sha256:3200000000000000000000000000000000000000000000000000000000000000',
+            240
+         );
+         INSERT INTO session_temporal_projection_receipts (
+            session_id, generation, batch_ordinal, batch_digest, frozen_watermarks_json,
+            source_through, projection_through,
+            occurrence_count, occurrence_digest, dimension_count, dimension_digest,
+            copy_count, copy_digest, assertion_count, assertion_digest,
+            supersession_count, supersession_digest, current_count, current_digest,
+            fts_count, fts_digest, committed_at
+         ) VALUES (
+            'refresh-zero', 1, 0,
+            'sha256:3300000000000000000000000000000000000000000000000000000000000000',
+            '{}', 0, 0,
+            0, 'sha256:3310000000000000000000000000000000000000000000000000000000000000',
+            0, 'sha256:3320000000000000000000000000000000000000000000000000000000000000',
+            0, 'sha256:3330000000000000000000000000000000000000000000000000000000000000',
+            0, 'sha256:3340000000000000000000000000000000000000000000000000000000000000',
+            0, 'sha256:3350000000000000000000000000000000000000000000000000000000000000',
+            0, 'sha256:3360000000000000000000000000000000000000000000000000000000000000',
+            0, 'sha256:3370000000000000000000000000000000000000000000000000000000000000',
+            240
+         );",
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO session_refresh_progress (
+            session_id, operation_id, progress_ordinal, frontier_json, coverage_json,
+            committed_batches, committed_records, recorded_at
+         ) VALUES (
+            'refresh-zero', 'zero-noop', 0,
+            '{\"observed_through\":0,\"committed_through\":0}',
+            '{\"visible\":0,\"hidden\":0,\"unknown\":0,\"redacted\":0}',
+            1, 0, 240
+         )",
+        (),
+    )
+    .await
+    .expect("zero-frontier empty first progress is a legal noop endpoint");
+
+    conn.execute_batch(
+        "INSERT INTO session_temporal_generations (
+            session_id, generation, state, frozen_watermarks_json, created_at
+         ) VALUES ('refresh-over-source', 1, 'building', '{}', 245);
+         INSERT INTO session_refresh_operations (
+            session_id, operation_id, request_digest, target_frontier_json,
+            state, created_at, updated_at
+         ) VALUES (
+            'refresh-over-source', 'over-source',
+            'sha256:3400000000000000000000000000000000000000000000000000000000000000',
+            '{\"observed_through\":2,\"committed_through\":0}',
+            'running', 245, 245
+         );
+         INSERT INTO session_refresh_bindings (
+            session_id, operation_id, scope_kind, source_frontier, target_frontier,
+            projector_version, config_digest, generation, frozen_watermarks_json,
+            binding_digest, created_at
+         ) VALUES (
+            'refresh-over-source', 'over-source', 'session_store', 0, 2,
+            'session-temporal-projector.v1',
+            'sha256:3400000000000000000000000000000000000000000000000000000000000000',
+            1, '{}',
+            'sha256:3400000000000000000000000000000000000000000000000000000000000000',
+            245
+         );
+         INSERT INTO session_temporal_projection_receipts (
+            session_id, generation, batch_ordinal, batch_digest, frozen_watermarks_json,
+            source_through, projection_through,
+            occurrence_count, occurrence_digest, dimension_count, dimension_digest,
+            copy_count, copy_digest, assertion_count, assertion_digest,
+            supersession_count, supersession_digest, current_count, current_digest,
+            fts_count, fts_digest, committed_at
+         ) VALUES (
+            'refresh-over-source', 1, 0,
+            'sha256:3500000000000000000000000000000000000000000000000000000000000000',
+            '{}', 1, 0,
+            0, 'sha256:3510000000000000000000000000000000000000000000000000000000000000',
+            0, 'sha256:3520000000000000000000000000000000000000000000000000000000000000',
+            0, 'sha256:3530000000000000000000000000000000000000000000000000000000000000',
+            0, 'sha256:3540000000000000000000000000000000000000000000000000000000000000',
+            0, 'sha256:3550000000000000000000000000000000000000000000000000000000000000',
+            0, 'sha256:3560000000000000000000000000000000000000000000000000000000000000',
+            0, 'sha256:3570000000000000000000000000000000000000000000000000000000000000',
+            245
+         );",
+    )
+    .await
+    .unwrap();
+    assert!(
+        conn.execute(
+            "INSERT INTO session_refresh_progress (
+                session_id, operation_id, progress_ordinal, frontier_json, coverage_json,
+                committed_batches, committed_records, recorded_at
+             ) VALUES (
+                'refresh-over-source', 'over-source', 0,
+                '{\"observed_through\":2,\"committed_through\":0}',
+                '{\"visible\":0,\"hidden\":0,\"unknown\":0,\"redacted\":0}',
+                1, 0, 245
+             )",
+            (),
+        )
+        .await
+        .is_err(),
+        "first progress must reject receipt.source_through past the committed endpoint"
+    );
+
     conn.execute(
         "INSERT INTO session_refresh_operations (
             session_id, operation_id, request_digest, target_frontier_json,
@@ -2455,35 +2593,30 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             '{\"observed_through\":5,\"committed_through\":5}',
             '{\"visible\":0,\"hidden\":0,\"unknown\":0,\"redacted\":0}',
             0, 0, 300
-         );
-         UPDATE session_temporal_generations
+         );",
+    )
+    .await
+    .unwrap();
+    conn.execute_batch(
+        "UPDATE session_temporal_generations
          SET state = 'ready', ready_at = 301
          WHERE session_id = 'refresh-forged-zero' AND generation = 1;
          UPDATE session_temporal_generations
          SET state = 'active', activated_at = 302
-         WHERE session_id = 'refresh-forged-zero' AND generation = 1;
-         UPDATE session_refresh_operations
-         SET state = 'complete', updated_at = 302, terminal_at = 302
-         WHERE session_id = 'refresh-forged-zero' AND operation_id = 'forged-complete';",
+         WHERE session_id = 'refresh-forged-zero' AND generation = 1;",
     )
     .await
     .unwrap();
     assert!(
         conn.execute(
-            "INSERT INTO session_refresh_receipts (
-                session_id, operation_id, terminal_state, frontier_json,
-                coverage_json, failure_code, terminal_at
-             ) VALUES (
-                'refresh-forged-zero', 'forged-complete', 'complete',
-                '{\"observed_through\":5,\"committed_through\":5}',
-                '{\"visible\":0,\"hidden\":0,\"unknown\":0,\"redacted\":0}',
-                NULL, 302
-             )",
+            "UPDATE session_refresh_operations
+             SET state = 'complete', updated_at = 302, terminal_at = 302
+             WHERE session_id = 'refresh-forged-zero' AND operation_id = 'forged-complete'",
             (),
         )
         .await
         .is_err(),
-        "completion cannot be forged from the failure/cancellation zero-progress seed"
+        "completion cannot be forged from the failure/cancellation zero-progress seed",
     );
 }
 
@@ -3213,6 +3346,7 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
     const SESSION_QUERY: &str = "
         SELECT candidate.node_id, candidate.session_id
         FROM lcm_summary_nodes AS candidate
+             INDEXED BY idx_lcm_summary_nodes_codex_pending_session_order
         JOIN session_summary_nodes AS authority
           ON authority.summary_id = candidate.node_id
          AND authority.session_id = candidate.session_id
@@ -3251,6 +3385,7 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
     const ROOT_QUERY: &str = "
         SELECT candidate.node_id, candidate.session_id
         FROM lcm_summary_nodes AS candidate
+             INDEXED BY idx_lcm_summary_nodes_codex_pending_root_order
         JOIN session_summary_nodes AS authority
           ON authority.summary_id = candidate.node_id
          AND authority.session_id = candidate.session_id

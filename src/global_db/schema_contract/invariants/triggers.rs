@@ -645,6 +645,22 @@ const SESSION_RECEIPT_IMMUTABILITY: &[Trigger] = &[
                 SELECT RAISE(ABORT, 'session temporal migration receipts are immutable');
             END",
     },
+    Trigger {
+        name: "session_temporal_migration_dispositions_immutable_update_v1",
+        table: "session_temporal_migration_dispositions",
+        create_sql: "CREATE TRIGGER session_temporal_migration_dispositions_immutable_update_v1
+            BEFORE UPDATE ON session_temporal_migration_dispositions BEGIN
+                SELECT RAISE(ABORT, 'session temporal migration dispositions are immutable');
+            END",
+    },
+    Trigger {
+        name: "session_temporal_migration_dispositions_immutable_delete_v1",
+        table: "session_temporal_migration_dispositions",
+        create_sql: "CREATE TRIGGER session_temporal_migration_dispositions_immutable_delete_v1
+            BEFORE DELETE ON session_temporal_migration_dispositions BEGIN
+                SELECT RAISE(ABORT, 'session temporal migration dispositions are immutable');
+            END",
+    },
 ];
 
 const SESSION_REFRESH_STATE_GUARDS: &[Trigger] = &[
@@ -872,9 +888,9 @@ const SESSION_REFRESH_STATE_GUARDS: &[Trigger] = &[
                             AND (
                               (
                                 NEW.progress_ordinal = 0
-                                AND receipt.source_through =
+                                AND receipt.source_through >= binding.source_frontier
+                                AND receipt.source_through <=
                                     json_extract(NEW.frontier_json, '$.committed_through')
-                                AND receipt.source_through > binding.source_frontier
                                 AND NOT EXISTS (
                                     SELECT 1
                                     FROM session_refresh_progress AS first_previous
@@ -904,7 +920,10 @@ const SESSION_REFRESH_STATE_GUARDS: &[Trigger] = &[
                                     ) > json_extract(
                                         previous.frontier_json, '$.committed_through'
                                     )
-                                    AND receipt.source_through = json_extract(
+                                    AND receipt.source_through >= json_extract(
+                                        previous.frontier_json, '$.committed_through'
+                                    )
+                                    AND receipt.source_through <= json_extract(
                                         NEW.frontier_json, '$.committed_through'
                                     )
                                     AND json_extract(NEW.coverage_json, '$.visible')
@@ -1776,6 +1795,23 @@ pub(in crate::global_db) async fn restore_immutability_after_canonical_repair(
                 "canonical authority trigger '{}' was not restored",
                 trigger.name
             )));
+        }
+    }
+    Ok(())
+}
+
+pub(in crate::global_db) async fn suspend_session_invariants_for_schema_upgrade(
+    conn: &Connection,
+) -> crate::errors::Result<()> {
+    for invariant in INVARIANTS {
+        for trigger in invariant
+            .triggers
+            .iter()
+            .filter(|trigger| trigger.table.starts_with("session_"))
+        {
+            conn.execute(&format!("DROP TRIGGER IF EXISTS \"{}\"", trigger.name), ())
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
         }
     }
     Ok(())

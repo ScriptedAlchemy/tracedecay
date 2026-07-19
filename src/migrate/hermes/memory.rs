@@ -574,7 +574,10 @@ async fn copy_memory_tables(source: &Connection, target: &Connection) -> Result<
     Ok(fact_rows + entity_rows + association_rows + feedback_rows)
 }
 
-pub(crate) async fn merge_memory_snapshot(source: &Connection, target_path: &Path) -> Result<u64, String> {
+pub(crate) async fn merge_memory_snapshot(
+    source: &Connection,
+    target_path: &Path,
+) -> Result<u64, String> {
     if table_columns(source, "memory_facts").await?.is_empty() {
         return Ok(0);
     }

@@ -9,6 +9,7 @@ use super::candidates::CandidateChannel;
 pub struct RankingCandidate {
     pub stable_id: String,
     pub anchor_id: RetrievalAnchorId,
+    pub retriever_record_id: String,
     pub channel: CandidateChannel,
     pub raw_score: i64,
     pub knowledge_at_micros: i64,
@@ -63,6 +64,17 @@ pub struct RankedCandidate {
     pub session: Option<String>,
     pub source: Option<String>,
     pub evidence_role: Option<String>,
+    pub contributions: Vec<RetrieverContribution>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetrieverContribution {
+    pub channel: CandidateChannel,
+    pub source: Option<String>,
+    pub retriever_record_id: String,
+    pub retriever_ordinal: u64,
+    pub raw_score: i64,
+    pub calibrated_score_micros: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -149,9 +161,17 @@ fn rank_validated_candidates(
             let within_channel =
                 (u128::from(ordinal) * u128::from(TIER_SPAN - 1) / u128::from(count)) as u64;
             let contribution = encode_score(tier, within_channel);
+            let provenance = RetrieverContribution {
+                channel,
+                source: candidate.source.clone(),
+                retriever_record_id: candidate.retriever_record_id.clone(),
+                retriever_ordinal: u64::try_from(index).unwrap_or(u64::MAX),
+                raw_score: candidate.raw_score,
+                calibrated_score_micros: contribution,
+            };
             match best_by_id.get_mut(&candidate.stable_id) {
                 Some(existing) => {
-                    merge_contribution(existing, tier, contribution);
+                    merge_contribution(existing, tier, contribution, provenance);
                 }
                 None => {
                     best_by_id.insert(
@@ -169,6 +189,7 @@ fn rank_validated_candidates(
                                 session: candidate.session.clone(),
                                 source: candidate.source.clone(),
                                 evidence_role: candidate.evidence_role.clone(),
+                                contributions: vec![provenance],
                             },
                         },
                     );
@@ -182,6 +203,13 @@ fn rank_validated_candidates(
         .map(|fusion| {
             let mut ranked = fusion.ranked;
             ranked.normalized_score_micros = fusion.within_tier_score;
+            ranked.contributions.sort_by(|left, right| {
+                rank_tier(right.channel)
+                    .cmp(&rank_tier(left.channel))
+                    .then_with(|| left.channel.cmp(&right.channel))
+                    .then_with(|| left.source.cmp(&right.source))
+                    .then_with(|| left.retriever_ordinal.cmp(&right.retriever_ordinal))
+            });
             ranked
         })
         .collect::<Vec<_>>();
@@ -267,7 +295,13 @@ struct ScoredFusion {
     ranked: RankedCandidate,
 }
 
-fn merge_contribution(existing: &mut ScoredFusion, tier: RankTier, contribution: u64) {
+fn merge_contribution(
+    existing: &mut ScoredFusion,
+    tier: RankTier,
+    contribution: u64,
+    provenance: RetrieverContribution,
+) {
+    existing.ranked.contributions.push(provenance);
     if tier > existing.tier {
         existing.tier = tier;
         existing.within_tier_score = contribution;
@@ -317,7 +351,8 @@ const fn rank_tier(channel: CandidateChannel) -> RankTier {
     match channel {
         CandidateChannel::ExactMessage => RankTier::ExactMessage,
         CandidateChannel::Phrase => RankTier::ExactPhrase,
-        CandidateChannel::Entity
+        CandidateChannel::Scope
+        | CandidateChannel::Entity
         | CandidateChannel::Time
         | CandidateChannel::Lexical
         | CandidateChannel::Summary => RankTier::Approximate,
@@ -401,6 +436,7 @@ mod tests {
         RankingCandidate {
             stable_id: stable_id.to_string(),
             anchor_id,
+            retriever_record_id: stable_id.to_string(),
             channel,
             raw_score,
             knowledge_at_micros: 1,
@@ -705,6 +741,22 @@ mod tests {
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].stable_id, "same");
         assert_eq!(ranked[0].evidence_role.as_deref(), Some("producer"));
+        assert_eq!(
+            ranked[0]
+                .contributions
+                .iter()
+                .map(|contribution| contribution.channel)
+                .collect::<Vec<_>>(),
+            [CandidateChannel::Phrase, CandidateChannel::Lexical]
+        );
+        assert_eq!(
+            ranked[0]
+                .contributions
+                .iter()
+                .map(|contribution| contribution.raw_score)
+                .collect::<Vec<_>>(),
+            [1, 100]
+        );
         assert!(
             ranked[0].normalized_score_micros >= encode_score(RankTier::ExactPhrase, 0),
             "the strongest distinct channel must survive fusion"
@@ -875,16 +927,18 @@ mod tests {
         older_a.source = Some("src-a".to_string());
         newer_c.source = Some("src-c".to_string());
 
-        let ranked = rank(
-            &[newer_b, older_a, newer_c],
-            DiversityLimits::unbounded(),
-        );
+        let ranked = rank(&[newer_b, older_a, newer_c], DiversityLimits::unbounded());
         assert_eq!(ids(&ranked), vec!["b", "c", "a"]);
     }
 
     #[test]
     fn diversity_limits_enforce_every_dimension_independently() {
-        let mk = |stable_id: &str, logical: &str, turn: &str, session: &str, source: &str, role: &str| {
+        let mk = |stable_id: &str,
+                  logical: &str,
+                  turn: &str,
+                  session: &str,
+                  source: &str,
+                  role: &str| {
             let mut hit = candidate(stable_id, CandidateChannel::Lexical, 10, Some(logical));
             hit.turn = Some(turn.to_string());
             hit.session = Some(session.to_string());

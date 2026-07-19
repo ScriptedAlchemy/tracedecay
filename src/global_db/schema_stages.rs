@@ -1,7 +1,8 @@
 use super::schema_contract::{
     ensure_authority_invariants, restore_immutability_after_canonical_repair,
-    suspend_immutability_for_canonical_repair, validate_authority_rows_exhaustive,
-    validate_authority_schema_contract, validate_registry_schema_contract,
+    suspend_immutability_for_canonical_repair, suspend_session_invariants_for_schema_upgrade,
+    validate_authority_rows_exhaustive, validate_authority_schema_contract,
+    validate_registry_schema_contract,
 };
 use super::{
     GlobalDb, ensure_code_project_native_root_columns, ensure_parse_offset_columns,
@@ -250,6 +251,7 @@ pub(super) async fn ensure_observation_authority(db: &GlobalDb) -> crate::errors
         .begin_write_transaction()
         .await
         .map_err(|error| global_db_operation_error("begin observation authority schema", error))?;
+    suspend_session_invariants_for_schema_upgrade(&transaction).await?;
     session_temporal::ensure_session_temporal_schema(&transaction).await?;
     observation::ensure_observation_schema(&transaction).await?;
     observation_projection::ensure_observation_projection_schema(&transaction)

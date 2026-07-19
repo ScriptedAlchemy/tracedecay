@@ -96,6 +96,8 @@ pub(super) fn copy_record(source_ordinal: u32, target_ordinal: u32) -> LogicalCo
             source_occurrence_id: source,
             provider_record_id: ObservationId::new("provider.copy.fixture").unwrap(),
         },
+        knowledge_at: UtcMicros(50),
+        valid_time: TemporalValidityV1::Unknown,
     }
 }
 

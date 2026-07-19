@@ -13,13 +13,14 @@ pub(super) async fn project_canonical_summary(
     conn: &Connection,
     summary_id: &str,
     manifest: &CanonicalPublicationManifest,
+    created_at: i64,
 ) -> Result<(), LcmError> {
     conn.execute(
         "INSERT INTO lcm_summary_nodes (
             node_id, provider, conversation_id, session_id, depth, summary_text,
             summary_hash, summary_token_count, source_token_count, source_time_start,
-            source_time_end, expand_hint, metadata_json
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            source_time_end, expand_hint, metadata_json, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             summary_id,
             manifest.provider.as_str(),
@@ -34,6 +35,7 @@ pub(super) async fn project_canonical_summary(
             manifest.source_time_end,
             manifest.expand_hint.as_deref(),
             manifest.metadata_json.as_deref(),
+            created_at,
         ],
     )
     .await?;

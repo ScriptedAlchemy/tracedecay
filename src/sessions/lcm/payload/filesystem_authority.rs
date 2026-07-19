@@ -61,6 +61,8 @@ pub(super) struct PayloadFileWrite {
 
 #[cfg(target_os = "linux")]
 const O_NOFOLLOW: i32 = 0o40_0000;
+const MAX_VERIFIED_PAYLOAD_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PAYLOAD_READ_PREALLOC_BYTES: usize = 64 * 1024;
 
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
@@ -129,7 +131,13 @@ where
     };
     same_payload_file_identity(&identity, &authority.identity)?;
     before_verify()?;
-    let content = read_stable_payload_bytes_with(&mut file, path, &authority.identity, || Ok(()))?;
+    let content = read_stable_payload_bytes_bounded_with(
+        &mut file,
+        path,
+        &authority.identity,
+        authority.byte_count,
+        || Ok(()),
+    )?;
     verify_authority_content(authority, path, &identity, &content)?;
 
     #[cfg(windows)]
@@ -155,10 +163,18 @@ pub(super) fn inspect_payload_file_for_delete(path: &Path) -> Result<(bool, u64)
 pub(super) fn read_payload_file_for_verify(
     path: &Path,
 ) -> Result<Option<(Vec<u8>, VerifiedPayloadAuthority)>, LcmError> {
+    read_payload_file_for_verify_bounded(path, MAX_VERIFIED_PAYLOAD_FILE_BYTES)
+}
+
+fn read_payload_file_for_verify_bounded(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<Option<(Vec<u8>, VerifiedPayloadAuthority)>, LcmError> {
     let Some((mut file, _opened, _lstat, identity)) = open_verified_payload_file(path)? else {
         return Ok(None);
     };
-    let content = read_stable_payload_bytes_with(&mut file, path, &identity, || Ok(()))?;
+    let content =
+        read_stable_payload_bytes_bounded_with(&mut file, path, &identity, max_bytes, || Ok(()))?;
     let authority = authority_for_content(path, identity, &content)?;
     Ok(Some((content, authority)))
 }
@@ -181,7 +197,11 @@ pub(super) fn read_verified_payload_file(
     expected_bytes: u64,
     expected_chars: u64,
 ) -> Result<Option<(Vec<u8>, VerifiedPayloadAuthority)>, LcmError> {
-    let Some((content, authority)) = read_payload_file_for_verify(path)? else {
+    if expected_bytes > MAX_VERIFIED_PAYLOAD_FILE_BYTES {
+        return Err(LcmError::PayloadIntegrityMismatch);
+    }
+    let Some((content, authority)) = read_payload_file_for_verify_bounded(path, expected_bytes)?
+    else {
         return Ok(None);
     };
     if authority.content_hash != expected_hash
@@ -241,18 +261,51 @@ fn read_stable_payload_bytes_with<F>(
 where
     F: FnOnce() -> Result<(), LcmError>,
 {
+    read_stable_payload_bytes_bounded_with(
+        file,
+        path,
+        expected_identity,
+        MAX_VERIFIED_PAYLOAD_FILE_BYTES,
+        after_read,
+    )
+}
+
+fn read_stable_payload_bytes_bounded_with<F>(
+    file: &mut fs::File,
+    path: &Path,
+    expected_identity: &PayloadFileIdentity,
+    max_bytes: u64,
+    after_read: F,
+) -> Result<Vec<u8>, LcmError>
+where
+    F: FnOnce() -> Result<(), LcmError>,
+{
+    let max_bytes = max_bytes.min(MAX_VERIFIED_PAYLOAD_FILE_BYTES);
     let before = file
         .metadata()
         .map_err(|error| LcmError::Io(error.to_string()))?;
     ensure_regular_non_reparse_file(&before)?;
     let before_identity = payload_file_identity(file, &before)?;
     same_payload_file_identity(&before_identity, expected_identity)?;
+    if before.len() > max_bytes {
+        return Err(LcmError::PayloadIntegrityMismatch);
+    }
 
-    let mut content = Vec::with_capacity(before.len().try_into().unwrap_or(0));
+    let initial_capacity = usize::try_from(before.len())
+        .unwrap_or(MAX_PAYLOAD_READ_PREALLOC_BYTES)
+        .min(MAX_PAYLOAD_READ_PREALLOC_BYTES);
+    let mut content = Vec::with_capacity(initial_capacity);
     file.seek(SeekFrom::Start(0))
         .map_err(|error| LcmError::Io(error.to_string()))?;
-    file.read_to_end(&mut content)
-        .map_err(|error| LcmError::Io(error.to_string()))?;
+    {
+        let mut bounded = file.take(max_bytes.saturating_add(1));
+        bounded
+            .read_to_end(&mut content)
+            .map_err(|error| LcmError::Io(error.to_string()))?;
+    }
+    if u64::try_from(content.len()).map_or(true, |length| length > max_bytes) {
+        return Err(LcmError::PayloadIntegrityMismatch);
+    }
     after_read()?;
 
     let (after, _lstat, after_identity) = verify_opened_payload_file(file, path)?;
@@ -1467,6 +1520,19 @@ mod authority_tests {
             Err(LcmError::PayloadIntegrityMismatch)
         ));
         assert!(path.exists());
+    }
+
+    #[test]
+    fn oversized_payload_is_rejected_before_allocation_or_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("oversized.payload");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_VERIFIED_PAYLOAD_FILE_BYTES + 1).unwrap();
+
+        assert!(matches!(
+            read_payload_file_for_verify(&path),
+            Err(LcmError::PayloadIntegrityMismatch)
+        ));
     }
 
     #[test]

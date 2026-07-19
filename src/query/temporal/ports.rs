@@ -12,8 +12,8 @@ use std::task::Poll;
 use std::time::Instant;
 
 use hmac::{Hmac, KeyInit, Mac};
-use serde::Serialize;
-use sha2::Sha256;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
     LogicalCopyRecordV1, RetrievalGrainV1, SessionId, SessionSummaryRecordV1, SignedCursorKeyRefV1,
@@ -37,6 +37,9 @@ const MAX_PAGE_ITEMS_CAP: usize = 1_024;
 const MAX_CONTINUATION_KEY_BYTES: usize = 4_096;
 const MAX_BOUNDED_PAGE_PREALLOC: usize = 64;
 const MAX_CURSOR_SECRET_BYTES: usize = 256;
+const PROFILE_ROOT_PROJECT_KEY: &str = "user";
+pub const MAX_TEMPORAL_PARTICIPANTS: usize = 256;
+pub const MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES: usize = 65_536;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum TemporalPortError {
@@ -46,6 +49,16 @@ pub enum TemporalPortError {
     ZeroGeneration,
     #[error("temporal execution snapshot was not authorized")]
     UnauthorizedSnapshot,
+    #[error("temporal execution participant manifest must not be empty")]
+    EmptyParticipantManifest,
+    #[error("temporal execution participant manifest contains a duplicate source")]
+    DuplicateParticipant,
+    #[error("temporal execution participant manifest has {observed} entries; maximum is {maximum}")]
+    ParticipantLimitExceeded { observed: usize, maximum: usize },
+    #[error(
+        "temporal execution participant manifest has {observed} canonical bytes; maximum is {maximum}"
+    )]
+    ParticipantManifestBytesExceeded { observed: usize, maximum: usize },
     #[error("temporal kernel {field} version must be non-zero")]
     ZeroVersion { field: &'static str },
     #[error("temporal execution was cancelled")]
@@ -369,12 +382,105 @@ impl TemporalRetrievalScope {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemporalAuthorizedRoot {
+    profile_id: String,
+    project_id: Option<String>,
+    store_id: String,
+    root_id: String,
+}
+
+impl TemporalAuthorizedRoot {
+    pub fn profile(
+        profile_id: impl Into<String>,
+        store_id: impl Into<String>,
+        root_id: impl Into<String>,
+    ) -> Result<Self, TemporalPortError> {
+        Self::new(profile_id.into(), None, store_id.into(), root_id.into())
+    }
+
+    pub fn project(
+        profile_id: impl Into<String>,
+        project_id: impl Into<String>,
+        store_id: impl Into<String>,
+        root_id: impl Into<String>,
+    ) -> Result<Self, TemporalPortError> {
+        let project_id = project_id.into();
+        if project_id == PROFILE_ROOT_PROJECT_KEY {
+            return Err(TemporalPortError::InvalidBinding {
+                field: "project_id",
+            });
+        }
+        Self::new(
+            profile_id.into(),
+            Some(project_id),
+            store_id.into(),
+            root_id.into(),
+        )
+    }
+
+    fn new(
+        profile_id: String,
+        project_id: Option<String>,
+        store_id: String,
+        root_id: String,
+    ) -> Result<Self, TemporalPortError> {
+        validate_label("profile_id", &profile_id)?;
+        if let Some(project_id) = &project_id {
+            validate_label("project_id", project_id)?;
+        }
+        validate_label("store_id", &store_id)?;
+        validate_label("root_id", &root_id)?;
+        Ok(Self {
+            profile_id,
+            project_id,
+            store_id,
+            root_id,
+        })
+    }
+
+    pub fn profile_id(&self) -> &str {
+        &self.profile_id
+    }
+
+    pub fn project_id(&self) -> Option<&str> {
+        self.project_id.as_deref()
+    }
+
+    pub fn store_id(&self) -> &str {
+        &self.store_id
+    }
+
+    pub fn root_id(&self) -> &str {
+        &self.root_id
+    }
+
+    pub fn project_key(&self) -> &str {
+        self.project_id
+            .as_deref()
+            .unwrap_or(PROFILE_ROOT_PROJECT_KEY)
+    }
+}
+
+fn validate_label(field: &'static str, value: &str) -> Result<(), TemporalPortError> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > 512
+        || value.chars().any(char::is_control)
+    {
+        return Err(TemporalPortError::InvalidBinding { field });
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TemporalSnapshotRequest {
     session_id: SessionId,
     retrieval_scope: TemporalRetrievalScope,
+    authorized_root: Option<TemporalAuthorizedRoot>,
     provider_scope: Option<String>,
     root_digest: BindingDigest,
     request_digest: BindingDigest,
+    filter_digest: BindingDigest,
     access_digest: BindingDigest,
     temporal_mode: TemporalModeV1,
     grain: RetrievalGrainV1,
@@ -391,12 +497,15 @@ impl TemporalSnapshotRequest {
         temporal_mode: TemporalModeV1,
         grain: RetrievalGrainV1,
     ) -> Result<Self, TemporalPortError> {
+        let request_digest = BindingDigest::new("request_digest", request_digest)?;
         Ok(Self {
             retrieval_scope: TemporalRetrievalScope::Session(session_id.clone()),
             session_id,
+            authorized_root: None,
             provider_scope: None,
             root_digest: BindingDigest::new("root_digest", root_digest)?,
-            request_digest: BindingDigest::new("request_digest", request_digest)?,
+            filter_digest: request_digest.clone(),
+            request_digest,
             access_digest: BindingDigest::new("access_digest", access_digest)?,
             temporal_mode,
             grain,
@@ -416,6 +525,25 @@ impl TemporalSnapshotRequest {
         }
         self.retrieval_scope = retrieval_scope;
         self
+    }
+
+    pub fn with_authorized_root(
+        mut self,
+        authorized_root: TemporalAuthorizedRoot,
+    ) -> Result<Self, TemporalPortError> {
+        validate_label("profile_id", authorized_root.profile_id())?;
+        validate_label("store_id", authorized_root.store_id())?;
+        validate_label("root_id", authorized_root.root_id())?;
+        self.authorized_root = Some(authorized_root);
+        Ok(self)
+    }
+
+    pub fn with_filter_digest(
+        mut self,
+        filter_digest: impl Into<String>,
+    ) -> Result<Self, TemporalPortError> {
+        self.filter_digest = BindingDigest::new("filter_digest", filter_digest)?;
+        Ok(self)
     }
 
     pub fn with_provider_scope(
@@ -456,6 +584,10 @@ impl TemporalSnapshotRequest {
         &self.retrieval_scope
     }
 
+    pub fn authorized_root(&self) -> Option<&TemporalAuthorizedRoot> {
+        self.authorized_root.as_ref()
+    }
+
     pub fn provider_scope(&self) -> Option<&str> {
         self.provider_scope.as_deref()
     }
@@ -466,6 +598,10 @@ impl TemporalSnapshotRequest {
 
     pub fn request_digest(&self) -> &BindingDigest {
         &self.request_digest
+    }
+
+    pub fn filter_digest(&self) -> &BindingDigest {
+        &self.filter_digest
     }
 
     pub fn access_digest(&self) -> &BindingDigest {
@@ -509,6 +645,177 @@ pub struct KernelVersions {
     pub configuration_digest: BindingDigest,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TemporalSourceAccess {
+    #[serde(rename = "a")]
+    Authorized,
+    #[serde(rename = "u")]
+    Unavailable,
+    #[serde(rename = "l")]
+    Locked,
+    #[serde(rename = "r")]
+    RetentionWithheld,
+    #[serde(rename = "d")]
+    Deleted,
+    #[serde(rename = "x")]
+    Redacted,
+    #[serde(rename = "n")]
+    Unauthorized,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TemporalParticipantGeneration {
+    #[serde(rename = "s")]
+    session_id: SessionId,
+    #[serde(rename = "i")]
+    source_id: String,
+    #[serde(rename = "g")]
+    generation: u64,
+    #[serde(rename = "w")]
+    source_watermark: u64,
+    #[serde(rename = "p")]
+    projection_watermark: u64,
+    #[serde(rename = "r")]
+    graph_watermark: u64,
+    #[serde(rename = "x")]
+    index_watermark: u64,
+    #[serde(rename = "m")]
+    summary_watermark: u64,
+    #[serde(rename = "c")]
+    configuration_digest: String,
+    #[serde(rename = "a")]
+    authorization_digest: String,
+    #[serde(rename = "z")]
+    access: TemporalSourceAccess,
+}
+
+impl TemporalParticipantGeneration {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        session_id: SessionId,
+        source_id: impl Into<String>,
+        watermarks: TemporalWatermarks,
+        graph_watermark: u64,
+        configuration_digest: &BindingDigest,
+        authorization_digest: &BindingDigest,
+        access: TemporalSourceAccess,
+    ) -> Result<Self, TemporalPortError> {
+        let source_id = source_id.into();
+        validate_label("source_id", &source_id)?;
+        if watermarks.generation == 0 {
+            return Err(TemporalPortError::ZeroGeneration);
+        }
+        Ok(Self {
+            session_id,
+            source_id,
+            generation: watermarks.generation,
+            source_watermark: watermarks.source,
+            projection_watermark: watermarks.projection,
+            graph_watermark,
+            index_watermark: watermarks.index,
+            summary_watermark: watermarks.summary,
+            configuration_digest: configuration_digest.as_str().to_string(),
+            authorization_digest: authorization_digest.as_str().to_string(),
+            access,
+        })
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    pub fn source_id(&self) -> &str {
+        &self.source_id
+    }
+
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub const fn watermarks(&self) -> TemporalWatermarks {
+        TemporalWatermarks {
+            generation: self.generation,
+            source: self.source_watermark,
+            projection: self.projection_watermark,
+            index: self.index_watermark,
+            summary: self.summary_watermark,
+        }
+    }
+
+    pub const fn graph_watermark(&self) -> u64 {
+        self.graph_watermark
+    }
+
+    pub fn configuration_digest(&self) -> &str {
+        &self.configuration_digest
+    }
+
+    pub fn authorization_digest(&self) -> &str {
+        &self.authorization_digest
+    }
+
+    pub const fn access(&self) -> TemporalSourceAccess {
+        self.access
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TemporalParticipantManifest {
+    #[serde(rename = "p")]
+    entries: Vec<TemporalParticipantGeneration>,
+    #[serde(rename = "e")]
+    epoch_digest: String,
+}
+
+impl TemporalParticipantManifest {
+    pub fn new(mut entries: Vec<TemporalParticipantGeneration>) -> Result<Self, TemporalPortError> {
+        if entries.is_empty() {
+            return Err(TemporalPortError::EmptyParticipantManifest);
+        }
+        if entries.len() > MAX_TEMPORAL_PARTICIPANTS {
+            return Err(TemporalPortError::ParticipantLimitExceeded {
+                observed: entries.len(),
+                maximum: MAX_TEMPORAL_PARTICIPANTS,
+            });
+        }
+        entries.sort_by(|left, right| {
+            left.session_id
+                .cmp(&right.session_id)
+                .then_with(|| left.source_id.cmp(&right.source_id))
+        });
+        if entries.windows(2).any(|pair| {
+            pair[0].session_id == pair[1].session_id && pair[0].source_id == pair[1].source_id
+        }) {
+            return Err(TemporalPortError::DuplicateParticipant);
+        }
+        let canonical = serde_json::to_vec(&entries).map_err(|error| TemporalPortError::Read {
+            operation: "encode participant manifest",
+            message: error.to_string(),
+        })?;
+        if canonical.len() > MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES {
+            return Err(TemporalPortError::ParticipantManifestBytesExceeded {
+                observed: canonical.len(),
+                maximum: MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES,
+            });
+        }
+        let epoch_digest = format!("sha256:{}", hex::encode(Sha256::digest(&canonical)));
+        Ok(Self {
+            entries,
+            epoch_digest,
+        })
+    }
+
+    pub fn entries(&self) -> &[TemporalParticipantGeneration] {
+        &self.entries
+    }
+
+    pub fn epoch_digest(&self) -> &str {
+        &self.epoch_digest
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TemporalExecutionSnapshot {
     request: TemporalSnapshotRequest,
@@ -516,6 +823,8 @@ pub struct TemporalExecutionSnapshot {
     versions: KernelVersions,
     cursor_key: Option<SignedCursorKeyRefV1>,
     authorization: ValidatedAuthorization,
+    participants: TemporalParticipantManifest,
+    participant_manifest_authoritative: bool,
 }
 
 impl TemporalExecutionSnapshot {
@@ -539,12 +848,24 @@ impl TemporalExecutionSnapshot {
         if versions.ranking == 0 {
             return Err(TemporalPortError::ZeroVersion { field: "ranking" });
         }
+        let participants =
+            TemporalParticipantManifest::new(vec![TemporalParticipantGeneration::new(
+                request.session_id().clone(),
+                request.provider_scope().unwrap_or("all"),
+                watermarks,
+                watermarks.projection,
+                &versions.configuration_digest,
+                request.access_digest(),
+                TemporalSourceAccess::Authorized,
+            )?])?;
         Ok(Self {
             request,
             watermarks,
             versions,
             cursor_key,
             authorization,
+            participants,
+            participant_manifest_authoritative: false,
         })
     }
 
@@ -681,12 +1002,40 @@ impl TemporalExecutionSnapshot {
         self.authorization
     }
 
+    pub fn with_participant_manifest(
+        mut self,
+        participants: TemporalParticipantManifest,
+    ) -> Result<Self, TemporalPortError> {
+        if matches!(
+            self.request.retrieval_scope(),
+            TemporalRetrievalScope::Session(session_id)
+                if participants.entries().iter().any(|entry| entry.session_id() != session_id)
+        ) {
+            return Err(TemporalPortError::UnauthorizedSnapshot);
+        }
+        self.participants = participants;
+        self.participant_manifest_authoritative = true;
+        Ok(self)
+    }
+
+    pub fn participant_manifest(&self) -> &TemporalParticipantManifest {
+        &self.participants
+    }
+
+    pub const fn has_authoritative_participant_manifest(&self) -> bool {
+        self.participant_manifest_authoritative
+    }
+
     pub fn root_digest(&self) -> &BindingDigest {
         self.request.root_digest()
     }
 
     pub fn request_digest(&self) -> &BindingDigest {
         self.request.request_digest()
+    }
+
+    pub fn filter_digest(&self) -> &BindingDigest {
+        self.request.filter_digest()
     }
 
     pub fn provider_scope(&self) -> Option<&str> {
@@ -1352,6 +1701,7 @@ pub trait MeasuredTemporalValue {
 struct CandidateWire<'a> {
     stable_id: &'a str,
     anchor_id: &'a tracedecay_domain::RetrievalAnchorId,
+    retriever_record_id: &'a str,
     channel: &'static str,
     raw_score: i64,
     knowledge_at_micros: i64,
@@ -1365,6 +1715,7 @@ struct CandidateWire<'a> {
 impl MeasuredTemporalValue for RankingCandidate {
     fn measured_encoded_bytes(&self) -> Result<usize, TemporalPortError> {
         let channel = match self.channel {
+            super::candidates::CandidateChannel::Scope => "scope",
             super::candidates::CandidateChannel::ExactMessage => "exact_message",
             super::candidates::CandidateChannel::Phrase => "phrase",
             super::candidates::CandidateChannel::Entity => "entity",
@@ -1377,6 +1728,7 @@ impl MeasuredTemporalValue for RankingCandidate {
             &CandidateWire {
                 stable_id: &self.stable_id,
                 anchor_id: &self.anchor_id,
+                retriever_record_id: &self.retriever_record_id,
                 channel,
                 raw_score: self.raw_score,
                 knowledge_at_micros: self.knowledge_at_micros,
@@ -1404,6 +1756,11 @@ impl MeasuredTemporalValue for RankingCandidate {
         if self.anchor_id.to_string().len() > caps.anchor_id_bytes {
             return Err(TemporalPortError::BudgetExceeded {
                 resource: "candidate anchor id bytes",
+            });
+        }
+        if self.retriever_record_id.len() > caps.metadata_field_bytes {
+            return Err(TemporalPortError::BudgetExceeded {
+                resource: "candidate retriever record id bytes",
             });
         }
         for field in [
@@ -1668,6 +2025,25 @@ mod tests {
         format!("sha256:{}", byte.to_string().repeat(64))
     }
 
+    fn participant(session: &str, source: &str, generation: u64) -> TemporalParticipantGeneration {
+        TemporalParticipantGeneration::new(
+            SessionId::new(session).expect("session"),
+            source,
+            TemporalWatermarks {
+                generation,
+                source: 2,
+                projection: 3,
+                index: 4,
+                summary: 5,
+            },
+            6,
+            &BindingDigest::new("configuration", digest('7')).expect("configuration"),
+            &BindingDigest::new("authorization", digest('8')).expect("authorization"),
+            TemporalSourceAccess::Authorized,
+        )
+        .expect("participant")
+    }
+
     #[test]
     fn execution_control_deadlines_have_no_scheduler_state() {
         let source = fs::read_to_string("src/query/temporal/ports.rs")
@@ -1768,6 +2144,9 @@ mod tests {
     #[test]
     fn snapshot_request_freezes_typed_retrieval_scope_additively() {
         let session = session_id();
+        let authorized_root =
+            TemporalAuthorizedRoot::project("profile-1", "project-1", "store-1", "root-1")
+                .expect("typed root");
         let session_request = TemporalSnapshotRequest::new(
             session.clone(),
             digest('0'),
@@ -1783,12 +2162,69 @@ mod tests {
         );
 
         let root_request = session_request
+            .with_authorized_root(authorized_root.clone())
+            .expect("authorized root")
             .with_retrieval_scope(TemporalRetrievalScope::AllSessionsInAuthorizedRoot);
         assert_eq!(
             root_request.retrieval_scope(),
             &TemporalRetrievalScope::AllSessionsInAuthorizedRoot
         );
         assert_eq!(root_request.retrieval_scope().session_id(), None);
+        assert_eq!(root_request.authorized_root(), Some(&authorized_root));
+        assert_eq!(
+            root_request
+                .authorized_root()
+                .expect("root authority")
+                .project_key(),
+            "project-1"
+        );
+    }
+
+    #[test]
+    fn participant_manifest_is_sorted_unique_bounded_and_epoch_bound() {
+        let manifest = TemporalParticipantManifest::new(vec![
+            participant("session-2", "source-b", 2),
+            participant("session-1", "source-a", 1),
+        ])
+        .expect("manifest");
+        assert_eq!(
+            manifest
+                .entries()
+                .iter()
+                .map(|entry| (entry.session_id().as_str(), entry.source_id()))
+                .collect::<Vec<_>>(),
+            [("session-1", "source-a"), ("session-2", "source-b")]
+        );
+
+        let changed = TemporalParticipantManifest::new(vec![
+            participant("session-1", "source-a", 1),
+            participant("session-2", "source-b", 3),
+        ])
+        .expect("changed manifest");
+        assert_ne!(manifest.epoch_digest(), changed.epoch_digest());
+
+        assert_eq!(
+            TemporalParticipantManifest::new(vec![
+                participant("session-1", "source-a", 1),
+                participant("session-1", "source-a", 1),
+            ]),
+            Err(TemporalPortError::DuplicateParticipant)
+        );
+
+        let accepted = (0..MAX_TEMPORAL_PARTICIPANTS)
+            .map(|index| participant("session-1", &format!("s{index:03}"), 1))
+            .collect();
+        assert!(TemporalParticipantManifest::new(accepted).is_ok());
+        let rejected = (0..=MAX_TEMPORAL_PARTICIPANTS)
+            .map(|index| participant("session-1", &format!("s{index:03}"), 1))
+            .collect();
+        assert!(matches!(
+            TemporalParticipantManifest::new(rejected),
+            Err(TemporalPortError::ParticipantLimitExceeded {
+                observed,
+                maximum: MAX_TEMPORAL_PARTICIPANTS,
+            }) if observed == MAX_TEMPORAL_PARTICIPANTS + 1
+        ));
     }
 
     struct ScopeObservingPort {
@@ -2047,6 +2483,7 @@ mod tests {
         RankingCandidate {
             stable_id: stable_id.into(),
             anchor_id: anchor("anchor-1"),
+            retriever_record_id: "record-1".to_string(),
             channel: CandidateChannel::Phrase,
             raw_score: 10,
             knowledge_at_micros: 7,

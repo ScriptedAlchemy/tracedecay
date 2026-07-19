@@ -63,11 +63,33 @@ impl SessionRetrievalScope {
     }
 }
 
+/// Typed authority for the already-resolved session store/root.
+///
+/// Root-wide authorization binds this value, never the compatibility anchor
+/// session used by legacy callers to construct a request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizedSessionRoot {
+    identity: ResolvedSessionIdentity,
+}
+
+impl AuthorizedSessionRoot {
+    pub fn from_identity(identity: &ResolvedSessionIdentity) -> Self {
+        Self {
+            identity: identity.clone(),
+        }
+    }
+
+    pub fn identity(&self) -> &ResolvedSessionIdentity {
+        &self.identity
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionScopeAuthorizationRequest {
     actor_id: ActorId,
     identity: ResolvedSessionIdentity,
     session_id: SessionId,
+    authorized_root: AuthorizedSessionRoot,
     retrieval_scope: SessionRetrievalScope,
     provider_scope: Option<String>,
     temporal_mode: TemporalModeV1,
@@ -94,10 +116,12 @@ impl SessionScopeAuthorizationRequest {
             return Err(SessionAuthorizationError::InvalidProviderScope);
         }
         let retrieval_scope = SessionRetrievalScope::Session(session_id.clone());
+        let authorized_root = AuthorizedSessionRoot::from_identity(&identity);
         Ok(Self {
             actor_id,
             identity,
             session_id,
+            authorized_root,
             retrieval_scope,
             provider_scope,
             temporal_mode,
@@ -127,6 +151,10 @@ impl SessionScopeAuthorizationRequest {
         &self.session_id
     }
 
+    pub fn authorized_root(&self) -> &AuthorizedSessionRoot {
+        &self.authorized_root
+    }
+
     pub fn retrieval_scope(&self) -> &SessionRetrievalScope {
         &self.retrieval_scope
     }
@@ -152,7 +180,8 @@ impl SessionScopeAuthorizationRequest {
 pub struct AuthorizedSessionScope {
     actor_id: ActorId,
     identity: ResolvedSessionIdentity,
-    session_id: SessionId,
+    session_id: Option<SessionId>,
+    authorized_root: AuthorizedSessionRoot,
     retrieval_scope: SessionRetrievalScope,
     provider_scope: Option<String>,
     temporal_mode: TemporalModeV1,
@@ -165,7 +194,8 @@ impl AuthorizedSessionScope {
         Self {
             actor_id: request.actor_id.clone(),
             identity: request.identity.clone(),
-            session_id: request.session_id.clone(),
+            session_id: request.retrieval_scope.session_id().cloned(),
+            authorized_root: request.authorized_root.clone(),
             retrieval_scope: request.retrieval_scope.clone(),
             provider_scope: request.provider_scope.clone(),
             temporal_mode: request.temporal_mode,
@@ -182,8 +212,12 @@ impl AuthorizedSessionScope {
         &self.identity
     }
 
-    pub fn session_id(&self) -> &SessionId {
-        &self.session_id
+    pub fn session_id(&self) -> Option<&SessionId> {
+        self.session_id.as_ref()
+    }
+
+    pub fn authorized_root(&self) -> &AuthorizedSessionRoot {
+        &self.authorized_root
     }
 
     pub fn retrieval_scope(&self) -> &SessionRetrievalScope {
@@ -237,6 +271,9 @@ impl SessionAuthorizationGrant {
         if request.identity() != context.identity() {
             return Err(SessionAuthorizationError::WrongScope);
         }
+        if request.authorized_root().identity() != context.identity() {
+            return Err(SessionAuthorizationError::WrongScope);
+        }
         if matches!(request.identity().owner(), SessionOwner::Project { .. })
             && request.identity().git_route().is_none()
         {
@@ -264,7 +301,11 @@ impl SessionAuthorizationGrant {
         if self.scope.actor_id() != context.actor_id() || request.actor_id() != context.actor_id() {
             return Err(SessionAuthorizationError::WrongContext);
         }
-        if self.scope.identity() != context.identity() || request.identity() != context.identity() {
+        if self.scope.identity() != context.identity()
+            || request.identity() != context.identity()
+            || self.scope.authorized_root() != request.authorized_root()
+            || request.authorized_root().identity() != context.identity()
+        {
             return Err(SessionAuthorizationError::WrongScope);
         }
         if self.capability_digest != context.capability_digest()
@@ -630,7 +671,7 @@ mod tests {
         assert_eq!(grant.scope().actor_id(), context.actor_id());
         assert_eq!(grant.scope().identity(), context.identity());
         assert_eq!(
-            grant.scope().session_id().as_str(),
+            grant.scope().session_id().unwrap().as_str(),
             "session.application-slice-1"
         );
         assert_eq!(grant.scope().provider_scope(), Some("cursor"));
@@ -655,6 +696,11 @@ mod tests {
             .with_retrieval_scope(SessionRetrievalScope::AllSessionsInAuthorizedRoot);
         let grant = AllowAuthorizer.authorize(&context, &request).unwrap();
 
+        assert_eq!(grant.scope().session_id(), None);
+        assert_eq!(
+            grant.scope().authorized_root().identity(),
+            context.identity()
+        );
         assert_eq!(
             grant.scope().retrieval_scope(),
             &SessionRetrievalScope::AllSessionsInAuthorizedRoot
@@ -673,6 +719,10 @@ mod tests {
         .unwrap()
         .with_retrieval_scope(SessionRetrievalScope::AllSessionsInAuthorizedRoot);
         assert_eq!(grant.validate(&context, &other_anchor), Ok(()));
+        assert_eq!(
+            grant.scope().authorized_root(),
+            &AuthorizedSessionRoot::from_identity(other_anchor.identity())
+        );
 
         let exact = exact_authorization_request(context.identity().clone());
         assert_eq!(

@@ -7,7 +7,7 @@ use thiserror::Error;
 use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId};
 use zeroize::Zeroizing;
 
-use super::ports::{await_controlled, TemporalExecutionSnapshot, TemporalPortError};
+use super::ports::{TemporalExecutionSnapshot, TemporalPortError, await_controlled};
 
 /// Fallible pre-allocation ceiling for a single authorized payload buffer.
 const MAX_HYDRATION_PREALLOC_BYTES: usize = 1024 * 1024;
@@ -284,8 +284,8 @@ pub(super) async fn hydrate_selected(
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Mutex,
+        atomic::{AtomicUsize, Ordering},
     };
 
     use tracedecay_domain::{
@@ -294,8 +294,8 @@ mod tests {
 
     use super::*;
     use crate::query::temporal::ports::{
-        BindingDigest, ExecutionLimits, KernelVersions, TemporalExecutionSnapshot,
-        TemporalPortError, TemporalSnapshotRequest, TemporalWatermarks,
+        BindingDigest, ExecutionControl, ExecutionLimits, KernelVersions,
+        TemporalExecutionSnapshot, TemporalPortError, TemporalSnapshotRequest, TemporalWatermarks,
     };
     use crate::query::temporal::resolution::ValidatedAuthorization;
     use crate::query::temporal::test_support::block_on;
@@ -715,8 +715,6 @@ mod tests {
     #[test]
     fn hydration_checkpoints_between_anchors() {
         block_on(async {
-            use crate::query::temporal::ports::ExecutionControl;
-
             struct CancelAfterFirstRead {
                 control: ExecutionControl,
                 reads: AtomicUsize,

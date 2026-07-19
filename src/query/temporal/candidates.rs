@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CandidateChannel {
+    Scope,
     ExactMessage,
     Phrase,
     Entity,
@@ -35,6 +36,16 @@ impl CandidatePlan {
 
     pub const fn has_semantic_channel(&self) -> bool {
         false
+    }
+}
+
+pub fn plan_scope_candidates() -> CandidatePlan {
+    CandidatePlan {
+        clauses: vec![CandidateClause {
+            channel: CandidateChannel::Scope,
+            value: String::new(),
+            exact: false,
+        }],
     }
 }
 

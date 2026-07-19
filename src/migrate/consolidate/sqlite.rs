@@ -83,6 +83,11 @@ pub(super) fn set_forward_migrate_fault_after_import(enabled: bool) {
 }
 
 #[cfg(test)]
+pub(super) fn set_temporal_merge_fault_phase(phase: &str) {
+    temporal::set_temporal_merge_fault_phase(phase);
+}
+
+#[cfg(test)]
 pub(super) async fn merge_temporal_for_test(target_path: &Path, source: &Path) -> Result<()> {
     normalize_sessions(target_path).await?;
     normalize_sessions(source).await?;

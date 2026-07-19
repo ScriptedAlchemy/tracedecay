@@ -6,7 +6,8 @@ use tracedecay_store::{
 };
 
 use super::state::{
-    has_other_projector_output_owner, message_rows_compatible, same_projection_lineage, storage,
+    has_other_projector_output_owner, message_rows_compatible, protected_message_rows_compatible,
+    same_projection_lineage, storage,
 };
 
 const LIVE_WORKFLOW_FACT_INSERT: &str = "WITH ignored_generation(generation) AS (VALUES (?2))
@@ -207,14 +208,26 @@ pub(super) async fn message_transition(
     projection: &SessionMessageProjection,
     existing: Option<&SessionMessageRecord>,
     state: Option<MessageTransitionState>,
-) -> ProjectionStoreResult<MessageTransition> {
-    let transition = classify_message_transition(sequence, projection.message(), existing, state)?;
+) -> ProjectionStoreResult<(MessageTransition, bool)> {
+    let protected_compatibility = match existing {
+        Some(actual) => {
+            protected_message_rows_compatible(conn, actual, projection.message()).await?
+        }
+        None => false,
+    };
+    let classified_existing = if protected_compatibility {
+        Some(projection.message())
+    } else {
+        existing
+    };
+    let transition =
+        classify_message_transition(sequence, projection.message(), classified_existing, state)?;
     if transition == MessageTransition::Supersede
         && has_other_projector_output_owner(conn, projection).await?
     {
         return Err(output_collision(projection.message()));
     }
-    Ok(transition)
+    Ok((transition, protected_compatibility))
 }
 
 fn classify_message_transition(

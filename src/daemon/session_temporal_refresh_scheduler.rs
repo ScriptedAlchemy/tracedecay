@@ -3,12 +3,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use tracedecay_domain::{TemporalCoverageCountsV1, UtcMicros};
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancellationRequestV1,
-    SessionRefreshCompletionRequestV1, SessionRefreshFailureRequestV1, SessionRefreshFrontierV1,
-    SessionRefreshProgressV1, SessionRefreshStore, SessionStoreError,
+    SessionRefreshCompletionRequestV1, SessionRefreshFailureCodeV1, SessionRefreshFailureRequestV1,
+    SessionRefreshFrontierV1, SessionRefreshProgressV1, SessionRefreshStore, SessionStoreError,
     SessionTemporalProjectionBatchV1,
 };
 
@@ -218,13 +219,11 @@ impl<'a> RecoverySelectionGuard<'a> {
     }
 
     fn complete(&mut self, operation: &str) {
-        // complete() is only called for the operation at the front of the queue.
-        #[allow(clippy::expect_used)]
-        let selected = self
-            .pending
-            .pop_front()
-            .expect("completed recovery was not selected");
-        debug_assert_eq!(selected, operation);
+        // Resolve by identity so skipped/missing recoveries cannot desync the
+        // local queue from the operations actually projected this pass.
+        if let Some(index) = self.pending.iter().position(|item| item == operation) {
+            self.pending.remove(index);
+        }
     }
 }
 
@@ -448,15 +447,90 @@ impl SessionTemporalRefreshProjector for CanonicalSessionTemporalProjector {
                 Ok(Some((progress, batch))) => {
                     Ok(SessionTemporalRefreshEffect::Projection { progress, batch })
                 }
-                Ok(None) => Ok(SessionTemporalRefreshEffect::Deferred),
+                // Empty remaining range is a durable no-op: terminalize with an
+                // empty complete progress batch instead of deferring forever.
+                Ok(None) => canonical_noop_complete_effect(&recovery),
                 Err(error) if error.is_storage() => Err(
-                    SessionTemporalRefreshProjectorError::retryable(format!("{error:?}")),
+                    SessionTemporalRefreshProjectorError::retryable("source_busy"),
                 ),
-                Err(error) => Err(SessionTemporalRefreshProjectorError::terminal(format!(
-                    "{error:?}"
-                ))),
+                Err(_) => Err(SessionTemporalRefreshProjectorError::terminal(
+                    "projector_failed",
+                )),
             }
         })
+    }
+}
+
+fn refresh_clock_micros() -> UtcMicros {
+    UtcMicros(
+        i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros(),
+        )
+        .unwrap_or(i64::MAX),
+    )
+}
+
+fn zero_refresh_coverage() -> TemporalCoverageCountsV1 {
+    TemporalCoverageCountsV1 {
+        visible: 0,
+        hidden: 0,
+        unknown: 0,
+        redacted: 0,
+    }
+}
+
+fn canonical_noop_complete_effect(
+    recovery: &SessionRefreshRecoveryV1,
+) -> std::result::Result<SessionTemporalRefreshEffect, SessionTemporalRefreshProjectorError> {
+    let next_batch = match recovery.restart_state() {
+        SessionRefreshRestartStateV1::BeginProjection => 0,
+        SessionRefreshRestartStateV1::ResumeProjection { next_batch_ordinal } => next_batch_ordinal,
+        // Ready-to-complete recoveries are finalized by the pass loop; keep
+        // them deferred if a projector is invoked defensively.
+        SessionRefreshRestartStateV1::ReadyToComplete => {
+            return Ok(SessionTemporalRefreshEffect::Deferred);
+        }
+    };
+    let committed = recovery.target_frontier().observed_through();
+    let frontier = SessionRefreshFrontierV1::new(committed, committed)
+        .map_err(|_| SessionTemporalRefreshProjectorError::terminal("projector_failed"))?;
+    let coverage = recovery
+        .progress()
+        .map(|progress| *progress.coverage())
+        .unwrap_or_else(zero_refresh_coverage);
+    let committed_records = recovery
+        .progress()
+        .map(SessionRefreshProgressV1::committed_records)
+        .unwrap_or(0);
+    let progress = SessionRefreshProgressV1::new(
+        recovery.operation_id().clone(),
+        recovery.session_id().clone(),
+        frontier,
+        coverage,
+        next_batch.saturating_add(1),
+        committed_records,
+        refresh_clock_micros(),
+    );
+    let batch = SessionTemporalProjectionBatchV1::new(
+        recovery.session_id().clone(),
+        recovery.candidate_generation(),
+        recovery.frozen_watermarks().clone(),
+        vec![],
+        vec![],
+        vec![],
+    )
+    .and_then(|batch| batch.with_checkpoint(next_batch, committed, committed))
+    .map_err(|_| SessionTemporalRefreshProjectorError::terminal("projector_failed"))?;
+    Ok(SessionTemporalRefreshEffect::Projection { progress, batch })
+}
+
+fn durable_projector_failure_code(code: &str) -> String {
+    match SessionRefreshFailureCodeV1::new(code) {
+        Ok(code) => code.as_str().to_string(),
+        Err(_) => "projector_failed".to_string(),
     }
 }
 
@@ -1168,7 +1242,8 @@ async fn project_running_refresh(
             return;
         }
         Err(error) => {
-            report.last_error = Some(error.code.clone());
+            let failure_code = durable_projector_failure_code(&error.code);
+            report.last_error = Some(failure_code.clone());
             let (frontier, coverage) = if let Some(progress) = recovery.progress() {
                 (progress.frontier(), *progress.coverage())
             } else {
@@ -1179,22 +1254,14 @@ async fn project_running_refresh(
                     report.terminal_errors += 1;
                     return;
                 };
-                (
-                    frontier,
-                    tracedecay_domain::TemporalCoverageCountsV1 {
-                        visible: 0,
-                        hidden: 0,
-                        unknown: 0,
-                        redacted: 0,
-                    },
-                )
+                (frontier, zero_refresh_coverage())
             };
             let request = match SessionRefreshFailureRequestV1::new(
                 recovery.operation_id().clone(),
                 recovery.session_id().clone(),
                 frontier,
                 coverage,
-                error.code,
+                failure_code,
             ) {
                 Ok(request) => request,
                 Err(_) => {
@@ -2439,6 +2506,127 @@ mod tests {
             .unwrap();
         assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Failed);
         assert_eq!(receipt.failure_code().unwrap().as_str(), "source_invalid");
+    }
+
+    struct NonCanonicalTerminalProjector;
+
+    impl SessionTemporalRefreshProjector for NonCanonicalTerminalProjector {
+        fn project<'a>(
+            &'a self,
+            _database: &'a Arc<GlobalDb>,
+            _recovery: SessionRefreshRecoveryV1,
+        ) -> SessionTemporalRefreshProjectionFuture<'a> {
+            Box::pin(async {
+                Err(SessionTemporalRefreshProjectorError::terminal(
+                    "Debug { error: \"not a failure code\" }",
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn noncanonical_terminal_projector_errors_persist_projector_failed() {
+        let temp = TempDir::new().unwrap();
+        let db = Arc::new(
+            crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
+                .await
+                .unwrap(),
+        );
+        let store = crate::store::GlobalDbSessionTemporalStore::new(db.as_ref());
+        let started = store
+            .begin_or_join_session_refresh(request("session.terminal.noncanonical", 0))
+            .await
+            .unwrap();
+
+        let report = run_session_temporal_refresh_pass(
+            &db,
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &NonCanonicalTerminalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
+
+        assert_eq!(report.failed, 1);
+        let receipt = store
+            .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+                started.operation_id().clone(),
+                started.session_id().clone(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Failed);
+        assert_eq!(receipt.failure_code().unwrap().as_str(), "projector_failed");
+        assert!(store.running_session_refreshes().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn canonical_noop_materialize_terminalizes_with_complete_receipt() {
+        let temp = TempDir::new().unwrap();
+        let db = Arc::new(
+            crate::global_db::GlobalDb::open_at(&temp.path().join("sessions.db"))
+                .await
+                .unwrap(),
+        );
+        let store = crate::store::GlobalDbSessionTemporalStore::new(db.as_ref());
+        let started = store
+            .begin_or_join_session_refresh(request("session.canonical.noop", 0))
+            .await
+            .unwrap();
+
+        let first = run_session_temporal_refresh_pass(
+            &db,
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &CanonicalSessionTemporalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
+        let second = run_session_temporal_refresh_pass(
+            &db,
+            &Arc::new(SessionTemporalRefreshWakeState::default()),
+            &CanonicalSessionTemporalProjector,
+            SessionTemporalRefreshPolicy::default(),
+        )
+        .await;
+
+        assert_eq!(first.projected_batches, 1);
+        assert_eq!(first.deferred, 0);
+        assert_eq!(second.completed, 1);
+        let receipt = store
+            .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+                started.operation_id().clone(),
+                started.session_id().clone(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
+        assert!(store.running_session_refreshes().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn recovery_selection_completes_by_identity_when_keys_are_skipped() {
+        let state = Arc::new(SessionTemporalRefreshWakeState::default());
+        let mut selection = RecoverySelectionGuard::new(
+            &state,
+            vec![
+                "session.a\0op.a".to_string(),
+                "session.b\0op.b".to_string(),
+                "session.c\0op.c".to_string(),
+            ],
+        );
+        selection.complete("session.a\0op.a");
+        selection.complete("session.c\0op.c");
+        drop(selection);
+
+        let pending = state
+            .recovery_cycle_pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(
+            pending.iter().cloned().collect::<Vec<_>>(),
+            vec!["session.b\0op.b".to_string()]
+        );
     }
 
     #[tokio::test]

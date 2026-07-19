@@ -14,15 +14,65 @@ use crate::errors::Result;
 use super::{db_error, db_message, query_i64, quote_identifier};
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TemporalMergeFaultPhase {
+    None,
+    AfterImport,
+    AfterSupersessionMerge,
+    AfterFtsParity,
+}
+
+#[cfg(test)]
 thread_local! {
-    static FORWARD_MIGRATE_FAULT_AFTER_IMPORT: Cell<bool> = const { Cell::new(false) };
+    static TEMPORAL_MERGE_FAULT_PHASE: Cell<TemporalMergeFaultPhase> =
+        const { Cell::new(TemporalMergeFaultPhase::None) };
 }
 
 /// Test-only fault injection: abort after the first successful temporal import
 /// inside forward-migrate so the outer write TX must roll back.
 #[cfg(test)]
 pub(super) fn set_forward_migrate_fault_after_import(enabled: bool) {
-    FORWARD_MIGRATE_FAULT_AFTER_IMPORT.with(|flag| flag.set(enabled));
+    TEMPORAL_MERGE_FAULT_PHASE.with(|flag| {
+        flag.set(if enabled {
+            TemporalMergeFaultPhase::AfterImport
+        } else {
+            TemporalMergeFaultPhase::None
+        });
+    });
+}
+
+/// Test-only fault injection across consolidate temporal merge phases.
+#[cfg(test)]
+pub(super) fn set_temporal_merge_fault_phase(phase: &str) {
+    let mapped = match phase {
+        "after_import" => TemporalMergeFaultPhase::AfterImport,
+        "after_supersession_merge" => TemporalMergeFaultPhase::AfterSupersessionMerge,
+        "after_fts_parity" => TemporalMergeFaultPhase::AfterFtsParity,
+        _ => TemporalMergeFaultPhase::None,
+    };
+    TEMPORAL_MERGE_FAULT_PHASE.with(|flag| flag.set(mapped));
+}
+
+#[cfg(test)]
+fn inject_temporal_merge_fault(phase: TemporalMergeFaultPhase) -> Result<()> {
+    if TEMPORAL_MERGE_FAULT_PHASE.with(|flag| flag.get()) == phase {
+        return Err(db_message(
+            "merge_temporal_authority",
+            match phase {
+                TemporalMergeFaultPhase::None => "injected temporal merge fault",
+                TemporalMergeFaultPhase::AfterImport => {
+                    "injected forward-migrate fault after import"
+                }
+                TemporalMergeFaultPhase::AfterSupersessionMerge => {
+                    "injected temporal merge fault after supersession"
+                }
+                TemporalMergeFaultPhase::AfterFtsParity => {
+                    "injected temporal merge fault after fts parity"
+                }
+            },
+        ));
+    }
+    Ok(())
 }
 
 /// Deterministic domain tag for consolidate legacy→temporal source digests.
@@ -144,6 +194,16 @@ const IMMUTABLE_UNIONS: &[UnionSpec] = &[
         label: "temporal assertion",
     },
     UnionSpec {
+        table: "session_assertion_supersession",
+        identities: &["session_id,generation,superseded_assertion_id,superseding_assertion_id"],
+        label: "assertion supersession",
+    },
+    UnionSpec {
+        table: "session_current_entities",
+        identities: &["session_id,generation,entity_kind,entity_id"],
+        label: "current entity",
+    },
+    UnionSpec {
         table: "session_summary_availability",
         identities: &["session_id,generation,summary_id"],
         label: "summary availability",
@@ -152,6 +212,11 @@ const IMMUTABLE_UNIONS: &[UnionSpec] = &[
         table: "session_temporal_migration_receipts",
         identities: &["session_id,generation,batch_ordinal"],
         label: "migration receipt",
+    },
+    UnionSpec {
+        table: "session_temporal_migration_dispositions",
+        identities: &["session_id,generation,batch_ordinal,disposition_ordinal"],
+        label: "migration disposition",
     },
 ];
 
@@ -290,6 +355,20 @@ pub(super) async fn merge(conn: &Connection) -> Result<()> {
     .await?;
     merge_plain(
         conn,
+        "session_assertion_supersession",
+        "session_id, generation, superseded_assertion_id, superseding_assertion_id",
+    )
+    .await?;
+    merge_plain(
+        conn,
+        "session_current_entities",
+        "session_id, generation, entity_kind, entity_id",
+    )
+    .await?;
+    #[cfg(test)]
+    inject_temporal_merge_fault(TemporalMergeFaultPhase::AfterSupersessionMerge)?;
+    merge_plain(
+        conn,
         "session_summary_availability",
         "session_id, generation, summary_id",
     )
@@ -298,6 +377,12 @@ pub(super) async fn merge(conn: &Connection) -> Result<()> {
         conn,
         "session_temporal_migration_receipts",
         "session_id, generation, batch_ordinal",
+    )
+    .await?;
+    merge_plain(
+        conn,
+        "session_temporal_migration_dispositions",
+        "session_id, generation, batch_ordinal, disposition_ordinal",
     )
     .await?;
 
@@ -320,7 +405,12 @@ pub(super) async fn merge(conn: &Connection) -> Result<()> {
     merge_plain(conn, "session_refresh_receipts", "session_id, operation_id").await?;
     merge_observation_effects(conn).await?;
     replay_keys(conn, &keys).await?;
-    forward_migrate_legacy_sources(conn).await
+    forward_migrate_legacy_sources(conn).await?;
+    rebuild_migrated_current_entities(conn).await?;
+    parity_check_temporal_fts_derivatives(conn).await?;
+    #[cfg(test)]
+    inject_temporal_merge_fault(TemporalMergeFaultPhase::AfterFtsParity)?;
+    assert_zero_legacy_temporal_authority(conn).await
 }
 
 async fn preflight_summary_graph(conn: &Connection) -> Result<()> {
@@ -1145,8 +1235,28 @@ async fn replay_keys(conn: &Connection, keys: &[KeyRow]) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Debug)]
-struct LegacyImportItem {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LegacyRowDisposition {
+    Eligible,
+    Quarantined,
+    PolicyExcluded,
+    Unbound,
+    Ineligible,
+}
+
+impl LegacyRowDisposition {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Eligible => "eligible",
+            Self::Quarantined => "quarantined",
+            Self::PolicyExcluded => "policy_excluded",
+            Self::Unbound => "unbound",
+            Self::Ineligible => "ineligible",
+        }
+    }
+}
+
+struct LegacyCandidateRow {
     provider: String,
     message_id: String,
     content_hash: String,
@@ -1154,28 +1264,28 @@ struct LegacyImportItem {
     knowledge_at: i64,
     snippet_text: String,
     index_text: String,
-    observation_id: String,
-    retrieval_anchor_id: String,
+    output_ordinal: i64,
+    observation_id: Option<String>,
+    retrieval_anchor_id: Option<String>,
+    disposition: LegacyRowDisposition,
+    reason: &'static str,
 }
 
 /// Forward-migrate eligible legacy LCM/session rows into canonical temporal
-/// generations with immutable migration receipts.
+/// generations with immutable migration receipts and typed skip dispositions.
 ///
 /// Binding authority is projected provenance + retrieval-anchor (not raw LCM
 /// rows and not consolidate-only `observation_projection_aliases`). Replay is
-/// idempotent via `source_digest` receipts; quarantined / `legacy_source` /
-/// `legacy_truncated` rows never enter temporal sinks. Recovery is whole-TX
-/// rematch (no mid-batch resume). Receipt rows are PR19 deletion-gate evidence
-/// that eligible legacy sources have a canonical temporal generation covering
-/// the migrated digest.
+/// idempotent via `source_digest` receipts; quarantined / policy-excluded /
+/// unbound / ineligible rows emit disposition receipts and never enter temporal
+/// sinks. Multi-output observations keep their projection output ordinals.
+/// Recovery is whole-TX rematch (no mid-batch resume). Receipt rows are PR19
+/// deletion-gate evidence that every legacy row has an explicit disposition.
 async fn forward_migrate_legacy_sources(conn: &Connection) -> Result<()> {
     if !main_table_exists(conn, "lcm_raw_messages").await? {
         return Ok(());
     }
-    if !main_table_exists(conn, "observations").await?
-        || !main_table_exists(conn, "observation_projection_provenance").await?
-        || !main_table_exists(conn, "observation_retrieval_anchors").await?
-    {
+    if !main_table_exists(conn, "session_temporal_migration_dispositions").await? {
         return Ok(());
     }
 
@@ -1206,10 +1316,6 @@ async fn legacy_migration_sessions(conn: &Connection) -> Result<Vec<String>> {
         .query(
             "SELECT DISTINCT session_id
              FROM lcm_raw_messages
-             WHERE COALESCE(legacy_source, 0) = 0
-               AND COALESCE(legacy_truncated, 0) = 0
-               AND COALESCE(json_extract(metadata_json, '$.payload_access'), '')
-                   NOT IN ('quarantined', 'redacted', 'deleted')
              ORDER BY session_id",
             (),
         )
@@ -1227,12 +1333,12 @@ async fn legacy_migration_sessions(conn: &Connection) -> Result<Vec<String>> {
 }
 
 async fn migrate_session_legacy_sources(conn: &Connection, session_id: &str) -> Result<()> {
-    let items = load_importable_legacy_items(conn, session_id).await?;
-    if items.is_empty() {
+    let candidates = load_legacy_candidate_rows(conn, session_id).await?;
+    if candidates.is_empty() {
         return Ok(());
     }
 
-    let source_digest = legacy_source_digest(session_id, &items);
+    let source_digest = legacy_source_digest(session_id, &candidates);
     if migration_receipt_covers(conn, session_id, &source_digest).await? {
         return Ok(());
     }
@@ -1243,22 +1349,25 @@ async fn migrate_session_legacy_sources(conn: &Connection, session_id: &str) -> 
         conn,
         "SELECT CAST(strftime('%s','now') AS INTEGER) * 1000000",
     )
-    .await
-    .unwrap_or(0);
+    .await?;
+
+    write_migration_dispositions(conn, session_id, generation, batch_ordinal, &candidates).await?;
 
     let mut imported = 0_i64;
-    for chunk in items.chunks(MAX_MIGRATION_BATCH_ITEMS) {
+    for chunk in candidates.chunks(MAX_MIGRATION_BATCH_ITEMS) {
         for item in chunk {
+            if item.disposition != LegacyRowDisposition::Eligible {
+                continue;
+            }
             imported += import_legacy_item(conn, session_id, generation, item).await?;
             #[cfg(test)]
-            if FORWARD_MIGRATE_FAULT_AFTER_IMPORT.with(|flag| flag.get()) && imported > 0 {
-                return Err(db_message(
-                    "merge_temporal_authority",
-                    "injected forward-migrate fault after import",
-                ));
+            if imported > 0 {
+                inject_temporal_merge_fault(TemporalMergeFaultPhase::AfterImport)?;
             }
         }
     }
+
+    let watermarks_json = migration_watermarks_json(&candidates);
     conn.execute(
         "INSERT INTO session_temporal_migration_receipts(
              session_id, generation, batch_ordinal, source_digest,
@@ -1269,7 +1378,7 @@ async fn migrate_session_legacy_sources(conn: &Connection, session_id: &str) -> 
             generation,
             batch_ordinal,
             source_digest,
-            MIGRATION_WATERMARKS_JSON,
+            watermarks_json,
             imported,
             committed_at
         ],
@@ -1279,65 +1388,155 @@ async fn migrate_session_legacy_sources(conn: &Connection, session_id: &str) -> 
     Ok(())
 }
 
-async fn load_importable_legacy_items(
+async fn load_legacy_candidate_rows(
     conn: &Connection,
     session_id: &str,
-) -> Result<Vec<LegacyImportItem>> {
+) -> Result<Vec<LegacyCandidateRow>> {
+    let has_observation_binding = main_table_exists(conn, "observations").await?
+        && main_table_exists(conn, "observation_projection_provenance").await?
+        && main_table_exists(conn, "observation_retrieval_anchors").await?;
+
+    let sql = if has_observation_binding {
+        "SELECT raw.provider, raw.message_id, raw.content_hash, raw.role,
+                COALESCE(raw.timestamp, raw.ordinal, 0),
+                COALESCE(raw.snippet_text, raw.content, ''),
+                COALESCE(raw.index_text, raw.snippet_text, raw.content, ''),
+                COALESCE(raw.legacy_source, 0),
+                COALESCE(raw.legacy_truncated, 0),
+                COALESCE(json_extract(raw.metadata_json, '$.payload_access'), ''),
+                CASE
+                  WHEN json_extract(raw.metadata_json, '$.migration_origin') IS NOT NULL
+                    THEN 1 ELSE 0
+                END,
+                provenance.output_ordinal,
+                provenance.observation_id,
+                anchor.anchor_id
+         FROM lcm_raw_messages AS raw
+         LEFT JOIN observation_projection_provenance AS provenance
+           ON provenance.output_provider = raw.provider
+          AND provenance.output_message_id = raw.message_id
+         LEFT JOIN observations AS observation
+           ON observation.observation_id = provenance.observation_id
+         LEFT JOIN observation_retrieval_anchors AS anchor
+           ON anchor.observation_id = observation.observation_id
+         WHERE raw.session_id = ?1
+         ORDER BY raw.provider, raw.message_id,
+                  COALESCE(provenance.output_ordinal, -1),
+                  COALESCE(provenance.observation_id, '')"
+    } else {
+        "SELECT raw.provider, raw.message_id, raw.content_hash, raw.role,
+                COALESCE(raw.timestamp, raw.ordinal, 0),
+                COALESCE(raw.snippet_text, raw.content, ''),
+                COALESCE(raw.index_text, raw.snippet_text, raw.content, ''),
+                COALESCE(raw.legacy_source, 0),
+                COALESCE(raw.legacy_truncated, 0),
+                COALESCE(json_extract(raw.metadata_json, '$.payload_access'), ''),
+                CASE
+                  WHEN json_extract(raw.metadata_json, '$.migration_origin') IS NOT NULL
+                    THEN 1 ELSE 0
+                END,
+                CAST(NULL AS INTEGER),
+                CAST(NULL AS TEXT),
+                CAST(NULL AS TEXT)
+         FROM lcm_raw_messages AS raw
+         WHERE raw.session_id = ?1
+         ORDER BY raw.provider, raw.message_id"
+    };
+
     let mut rows = conn
-        .query(
-            "SELECT raw.provider, raw.message_id, raw.content_hash, raw.role,
-                    COALESCE(raw.timestamp, raw.ordinal, 0),
-                    COALESCE(raw.snippet_text, raw.content, ''),
-                    COALESCE(raw.index_text, raw.snippet_text, raw.content, ''),
-                    provenance.observation_id, anchor.anchor_id
-             FROM lcm_raw_messages AS raw
-             JOIN observation_projection_provenance AS provenance
-               ON provenance.output_provider = raw.provider
-              AND provenance.output_message_id = raw.message_id
-             JOIN observations AS observation
-               ON observation.observation_id = provenance.observation_id
-             JOIN observation_retrieval_anchors AS anchor
-               ON anchor.observation_id = observation.observation_id
-             WHERE raw.session_id = ?1
-               AND COALESCE(raw.legacy_source, 0) = 0
-               AND COALESCE(raw.legacy_truncated, 0) = 0
-               AND COALESCE(json_extract(raw.metadata_json, '$.payload_access'), '')
-                   NOT IN ('quarantined', 'redacted', 'deleted')
-             ORDER BY raw.provider, raw.message_id, provenance.observation_id",
-            params![session_id],
-        )
+        .query(sql, params![session_id])
         .await
-        .map_err(|error| db_error("load importable legacy temporal sources", error))?;
+        .map_err(|error| db_error("load legacy temporal candidate rows", error))?;
 
     let mut items = Vec::new();
     let mut seen = BTreeSet::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| db_error("load importable legacy temporal sources", error))?
+        .map_err(|error| db_error("load legacy temporal candidate rows", error))?
     {
-        let provider: String = row_value!(row, 0, "load importable legacy temporal sources");
-        let message_id: String = row_value!(row, 1, "load importable legacy temporal sources");
-        let key = (provider.clone(), message_id.clone());
-        if !seen.insert(key) {
+        let provider: String = row_value!(row, 0, "load legacy temporal candidate rows");
+        let message_id: String = row_value!(row, 1, "load legacy temporal candidate rows");
+        let content_hash: String = row_value!(row, 2, "load legacy temporal candidate rows");
+        let role: String = row_value!(row, 3, "load legacy temporal candidate rows");
+        let knowledge_at: i64 = row_value!(row, 4, "load legacy temporal candidate rows");
+        let snippet_text: String = row_value!(row, 5, "load legacy temporal candidate rows");
+        let index_text: String = row_value!(row, 6, "load legacy temporal candidate rows");
+        let legacy_source: i64 = row_value!(row, 7, "load legacy temporal candidate rows");
+        let legacy_truncated: i64 = row_value!(row, 8, "load legacy temporal candidate rows");
+        let payload_access: String = row_value!(row, 9, "load legacy temporal candidate rows");
+        let migration_origin: i64 = row_value!(row, 10, "load legacy temporal candidate rows");
+        let output_ordinal: Option<i64> =
+            row_value!(row, 11, "load legacy temporal candidate rows");
+        let observation_id: Option<String> =
+            row_value!(row, 12, "load legacy temporal candidate rows");
+        let retrieval_anchor_id: Option<String> =
+            row_value!(row, 13, "load legacy temporal candidate rows");
+
+        let ordinal = output_ordinal.unwrap_or(0);
+        let dedupe_key = (
+            provider.clone(),
+            message_id.clone(),
+            ordinal,
+            observation_id.clone().unwrap_or_default(),
+        );
+        if !seen.insert(dedupe_key) {
             continue;
         }
-        items.push(LegacyImportItem {
+
+        let (disposition, reason) = classify_legacy_row(
+            legacy_source != 0,
+            legacy_truncated != 0,
+            &payload_access,
+            migration_origin != 0,
+            observation_id.as_deref(),
+            retrieval_anchor_id.as_deref(),
+            output_ordinal,
+        );
+
+        items.push(LegacyCandidateRow {
             provider,
             message_id,
-            content_hash: row_value!(row, 2, "load importable legacy temporal sources"),
-            role: row_value!(row, 3, "load importable legacy temporal sources"),
-            knowledge_at: row_value!(row, 4, "load importable legacy temporal sources"),
-            snippet_text: row_value!(row, 5, "load importable legacy temporal sources"),
-            index_text: row_value!(row, 6, "load importable legacy temporal sources"),
-            observation_id: row_value!(row, 7, "load importable legacy temporal sources"),
-            retrieval_anchor_id: row_value!(row, 8, "load importable legacy temporal sources"),
+            content_hash,
+            role,
+            knowledge_at,
+            snippet_text,
+            index_text,
+            output_ordinal: ordinal,
+            observation_id,
+            retrieval_anchor_id,
+            disposition,
+            reason,
         });
     }
     Ok(items)
 }
 
-fn legacy_source_digest(session_id: &str, items: &[LegacyImportItem]) -> String {
+fn classify_legacy_row(
+    legacy_source: bool,
+    legacy_truncated: bool,
+    payload_access: &str,
+    migration_origin: bool,
+    observation_id: Option<&str>,
+    retrieval_anchor_id: Option<&str>,
+    output_ordinal: Option<i64>,
+) -> (LegacyRowDisposition, &'static str) {
+    if matches!(payload_access, "quarantined" | "redacted" | "deleted") {
+        return (LegacyRowDisposition::Quarantined, "payload_access");
+    }
+    if migration_origin {
+        return (LegacyRowDisposition::Ineligible, "migration_origin");
+    }
+    if legacy_source || legacy_truncated {
+        return (LegacyRowDisposition::PolicyExcluded, "legacy_policy_flag");
+    }
+    if observation_id.is_none() || retrieval_anchor_id.is_none() || output_ordinal.is_none() {
+        return (LegacyRowDisposition::Unbound, "missing_projection_binding");
+    }
+    (LegacyRowDisposition::Eligible, "importable")
+}
+
+fn legacy_source_digest(session_id: &str, items: &[LegacyCandidateRow]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(LEGACY_SOURCE_DIGEST_DOMAIN);
     hasher.update(session_id.as_bytes());
@@ -1347,11 +1546,137 @@ fn legacy_source_digest(session_id: &str, items: &[LegacyImportItem]) -> String 
         hasher.update([0]);
         hasher.update(item.message_id.as_bytes());
         hasher.update([0]);
+        hasher.update(item.output_ordinal.to_be_bytes());
+        hasher.update([0]);
         hasher.update(item.content_hash.as_bytes());
         hasher.update([0]);
-        hasher.update(item.observation_id.as_bytes());
+        hasher.update(item.role.as_bytes());
+        hasher.update([0]);
+        hasher.update(item.knowledge_at.to_be_bytes());
+        hasher.update([0]);
+        hasher.update(item.snippet_text.as_bytes());
+        hasher.update([0]);
+        hasher.update(item.index_text.as_bytes());
+        hasher.update([0]);
+        if let Some(observation_id) = &item.observation_id {
+            hasher.update(observation_id.as_bytes());
+        }
+        hasher.update([0]);
+        if let Some(anchor_id) = &item.retrieval_anchor_id {
+            hasher.update(anchor_id.as_bytes());
+        }
+        hasher.update([0]);
+        hasher.update(item.disposition.as_str().as_bytes());
+        hasher.update([0]);
+        hasher.update(item.reason.as_bytes());
         hasher.update([0]);
     }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn migration_watermarks_json(items: &[LegacyCandidateRow]) -> String {
+    let mut counts = BTreeMap::new();
+    for disposition in [
+        LegacyRowDisposition::Eligible,
+        LegacyRowDisposition::Quarantined,
+        LegacyRowDisposition::PolicyExcluded,
+        LegacyRowDisposition::Unbound,
+        LegacyRowDisposition::Ineligible,
+    ] {
+        counts.insert(disposition.as_str(), 0_i64);
+    }
+    for item in items {
+        *counts.entry(item.disposition.as_str()).or_insert(0) += 1;
+    }
+    format!(
+        concat!(
+            r#"{{"active_generation":1,"cursor_key":null,"#,
+            r#""projection_frontier":0,"source_frontier":0,"summary_frontier":0,"#,
+            r#""dispositions":{{"eligible":{eligible},"quarantined":{quarantined},"#,
+            r#""policy_excluded":{policy_excluded},"unbound":{unbound},"#,
+            r#""ineligible":{ineligible}}}}}"#
+        ),
+        eligible = counts["eligible"],
+        quarantined = counts["quarantined"],
+        policy_excluded = counts["policy_excluded"],
+        unbound = counts["unbound"],
+        ineligible = counts["ineligible"],
+    )
+}
+
+async fn write_migration_dispositions(
+    conn: &Connection,
+    session_id: &str,
+    generation: i64,
+    batch_ordinal: i64,
+    items: &[LegacyCandidateRow],
+) -> Result<()> {
+    for (disposition_ordinal, item) in items.iter().enumerate() {
+        let row_digest = legacy_row_digest(session_id, item);
+        let ordinal = i64::try_from(disposition_ordinal).map_err(|error| {
+            db_message(
+                "write temporal migration disposition",
+                &format!("disposition ordinal overflow: {error}"),
+            )
+        })?;
+        conn.execute(
+            "INSERT INTO session_temporal_migration_dispositions(
+                 session_id, generation, batch_ordinal, disposition_ordinal,
+                 provider, message_id, output_ordinal, observation_id,
+                 retrieval_anchor_id, disposition, reason, row_digest
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                session_id,
+                generation,
+                batch_ordinal,
+                ordinal,
+                item.provider.clone(),
+                item.message_id.clone(),
+                item.output_ordinal,
+                item.observation_id.clone(),
+                item.retrieval_anchor_id.clone(),
+                item.disposition.as_str(),
+                item.reason,
+                row_digest
+            ],
+        )
+        .await
+        .map_err(|error| db_error("write temporal migration disposition", error))?;
+    }
+    Ok(())
+}
+
+fn legacy_row_digest(session_id: &str, item: &LegacyCandidateRow) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(LEGACY_SOURCE_DIGEST_DOMAIN);
+    hasher.update(b"row\0");
+    hasher.update(session_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(item.provider.as_bytes());
+    hasher.update([0]);
+    hasher.update(item.message_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(item.output_ordinal.to_be_bytes());
+    hasher.update([0]);
+    hasher.update(item.content_hash.as_bytes());
+    hasher.update([0]);
+    hasher.update(item.role.as_bytes());
+    hasher.update([0]);
+    hasher.update(item.knowledge_at.to_be_bytes());
+    hasher.update([0]);
+    hasher.update(item.snippet_text.as_bytes());
+    hasher.update([0]);
+    hasher.update(item.index_text.as_bytes());
+    hasher.update([0]);
+    if let Some(observation_id) = &item.observation_id {
+        hasher.update(observation_id.as_bytes());
+    }
+    hasher.update([0]);
+    if let Some(anchor_id) = &item.retrieval_anchor_id {
+        hasher.update(anchor_id.as_bytes());
+    }
+    hasher.update([0]);
+    hasher.update(item.disposition.as_str().as_bytes());
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
@@ -1386,8 +1711,7 @@ async fn ensure_migration_generation(conn: &Connection, session_id: &str) -> Res
         conn,
         "SELECT CAST(strftime('%s','now') AS INTEGER) * 1000000",
     )
-    .await
-    .unwrap_or(1);
+    .await?;
     conn.execute(
         "INSERT INTO session_temporal_generations(
              session_id, generation, state, frozen_watermarks_json, created_at,
@@ -1508,17 +1832,37 @@ async fn import_legacy_item(
     conn: &Connection,
     session_id: &str,
     generation: i64,
-    item: &LegacyImportItem,
+    item: &LegacyCandidateRow,
 ) -> Result<i64> {
+    let observation_id_text = item.observation_id.as_deref().ok_or_else(|| {
+        db_message(
+            "import legacy temporal occurrence",
+            "eligible row missing observation identity",
+        )
+    })?;
+    let retrieval_anchor_id = item.retrieval_anchor_id.as_deref().ok_or_else(|| {
+        db_message(
+            "import legacy temporal occurrence",
+            "eligible row missing retrieval anchor",
+        )
+    })?;
     let observation_id =
-        CanonicalObservationIdV1::new(item.observation_id.clone()).map_err(|error| {
+        CanonicalObservationIdV1::new(observation_id_text.to_string()).map_err(|error| {
             db_message(
                 "import legacy temporal occurrence",
                 format!("invalid observation identity: {error}"),
             )
         })?;
-    let occurrence_id =
-        MessageOccurrenceIdV1::derive(&observation_id, ProjectionOutputOrdinalV1::new(0));
+    let output_ordinal = u32::try_from(item.output_ordinal).map_err(|error| {
+        db_message(
+            "import legacy temporal occurrence",
+            &format!("invalid projection output ordinal: {error}"),
+        )
+    })?;
+    let occurrence_id = MessageOccurrenceIdV1::derive(
+        &observation_id,
+        ProjectionOutputOrdinalV1::new(output_ordinal),
+    );
 
     let mut existing = conn
         .query(
@@ -1542,9 +1886,10 @@ async fn import_legacy_item(
     let evidence_json = format!(
         concat!(
             r#"{{"authority":"legacy_migration","evidence_class":"provider_declared","#,
-            r#""source_anchor_id":"{}","provider":"{}","message_id":"{}"}}"#
+            r#""source_anchor_id":"{}","provider":"{}","message_id":"{}","#,
+            r#""output_ordinal":{}}}"#
         ),
-        item.retrieval_anchor_id, item.provider, item.message_id
+        retrieval_anchor_id, item.provider, item.message_id, item.output_ordinal
     );
 
     conn.execute(
@@ -1554,15 +1899,16 @@ async fn import_legacy_item(
              role, knowledge_at, valid_time_json, evidence_json,
              snippet_text, index_text
          ) VALUES (
-             ?1, ?2, ?3, ?4, 0, ?5, ?6,
-             ?7, ?8, ?9, ?10, ?11, ?12
+             ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+             ?8, ?9, ?10, ?11, ?12, ?13
          )",
         params![
             session_id,
             generation,
             occurrence_id.as_str(),
-            item.observation_id.clone(),
-            item.retrieval_anchor_id.clone(),
+            observation_id_text,
+            item.output_ordinal,
+            retrieval_anchor_id,
             item.message_id.clone(),
             item.role.clone(),
             item.knowledge_at,
@@ -1575,23 +1921,281 @@ async fn import_legacy_item(
     .await
     .map_err(|error| db_error("import legacy temporal occurrence", error))?;
 
-    conn.execute(
-        "INSERT OR IGNORE INTO session_current_entities(
-             session_id, generation, entity_kind, entity_id,
-             current_assertion_id, current_occurrence_id, coverage_json
-         ) VALUES (
-             ?1, ?2, 'occurrence_anchor', ?3, NULL, ?4,
-             '{\"occurrence_count\":1,\"source\":\"legacy_migration\"}'
-         )",
-        params![
-            session_id,
-            generation,
-            item.retrieval_anchor_id.clone(),
-            occurrence_id.as_str()
-        ],
-    )
-    .await
-    .map_err(|error| db_error("import legacy temporal current entity", error))?;
-
     Ok(1)
+}
+
+async fn rebuild_migrated_current_entities(conn: &Connection) -> Result<()> {
+    if !main_table_exists(conn, "session_occurrences").await?
+        || !main_table_exists(conn, "session_current_entities").await?
+    {
+        return Ok(());
+    }
+
+    let mut rows = conn
+        .query(
+            "SELECT DISTINCT session_id, generation
+             FROM session_occurrences
+             ORDER BY session_id, generation",
+            (),
+        )
+        .await
+        .map_err(|error| db_error("list temporal generations for current rebuild", error))?;
+    let mut scopes: Vec<(String, i64)> = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| db_error("list temporal generations for current rebuild", error))?
+    {
+        scopes.push((
+            row_value!(row, 0, "list temporal generations for current rebuild"),
+            row_value!(row, 1, "list temporal generations for current rebuild"),
+        ));
+    }
+
+    for (session_id, generation) in scopes {
+        conn.execute(
+            "DELETE FROM session_current_entities
+             WHERE session_id = ?1 AND generation = ?2 AND entity_kind = 'occurrence_anchor'",
+            params![session_id.clone(), generation],
+        )
+        .await
+        .map_err(|error| db_error("rebuild temporal current occurrence entities", error))?;
+        conn.execute(
+            "WITH ranked AS (
+                SELECT retrieval_anchor_id, occurrence_id,
+                       COUNT(*) OVER (PARTITION BY retrieval_anchor_id) AS occurrence_count,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY retrieval_anchor_id
+                           ORDER BY
+                               CASE json_extract(valid_time_json, '$.kind')
+                                   WHEN 'known' THEN 1 ELSE 0
+                               END DESC,
+                               json_extract(valid_time_json, '$.valid_at') DESC,
+                               knowledge_at DESC,
+                               projection_output_ordinal DESC,
+                               occurrence_id DESC
+                       ) AS precedence
+                FROM session_occurrences
+                WHERE session_id = ?1 AND generation = ?2
+             )
+             INSERT INTO session_current_entities (
+                session_id, generation, entity_kind, entity_id,
+                current_assertion_id, current_occurrence_id, coverage_json
+             )
+             SELECT ?1, ?2, 'occurrence_anchor', retrieval_anchor_id,
+                    NULL, occurrence_id,
+                    json_object(
+                        'occurrence_count', occurrence_count,
+                        'source', 'legacy_migration_rebuild'
+                    )
+             FROM ranked WHERE precedence = 1",
+            params![session_id.clone(), generation],
+        )
+        .await
+        .map_err(|error| db_error("rebuild temporal current occurrence entities", error))?;
+
+        if main_table_exists(conn, "session_assertions").await?
+            && main_table_exists(conn, "session_assertion_supersession").await?
+        {
+            conn.execute(
+                "DELETE FROM session_current_entities
+                 WHERE session_id = ?1 AND generation = ?2 AND entity_kind = 'assertion_anchor'",
+                params![session_id.clone(), generation],
+            )
+            .await
+            .map_err(|error| db_error("rebuild temporal current assertion entities", error))?;
+            conn.execute(
+                "WITH superseded AS (
+                    SELECT DISTINCT superseded_assertion_id AS assertion_id
+                    FROM session_assertion_supersession
+                    WHERE session_id = ?1 AND generation = ?2
+                 ),
+                 tips AS (
+                    SELECT assertion.assertion_id, assertion.subject_anchor_id AS entity_id,
+                           COUNT(*) OVER (PARTITION BY assertion.subject_anchor_id)
+                             AS assertion_count,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY assertion.subject_anchor_id
+                               ORDER BY assertion.knowledge_at DESC, assertion.assertion_id DESC
+                           ) AS precedence
+                    FROM session_assertions AS assertion
+                    LEFT JOIN superseded
+                      ON superseded.assertion_id = assertion.assertion_id
+                    WHERE assertion.session_id = ?1
+                      AND assertion.generation = ?2
+                      AND superseded.assertion_id IS NULL
+                 )
+                 INSERT INTO session_current_entities (
+                    session_id, generation, entity_kind, entity_id,
+                    current_assertion_id, current_occurrence_id, coverage_json
+                 )
+                 SELECT ?1, ?2, 'assertion_anchor', entity_id,
+                        assertion_id, NULL,
+                        json_object(
+                            'assertion_count', assertion_count,
+                            'source', 'legacy_migration_rebuild'
+                        )
+                 FROM tips WHERE precedence = 1",
+                params![session_id, generation],
+            )
+            .await
+            .map_err(|error| db_error("rebuild temporal current assertion entities", error))?;
+        }
+    }
+    Ok(())
+}
+
+async fn parity_check_temporal_fts_derivatives(conn: &Connection) -> Result<()> {
+    if !main_table_exists(conn, "session_occurrences").await?
+        || !main_table_exists(conn, "session_occurrences_fts").await?
+    {
+        return Ok(());
+    }
+
+    let missing = query_i64(
+        conn,
+        "SELECT COUNT(*)
+         FROM session_occurrences AS occurrence
+         WHERE NOT EXISTS (
+             SELECT 1
+             FROM session_occurrences_fts AS fts
+             WHERE fts.rowid = occurrence.rowid
+         )",
+    )
+    .await?;
+    if missing != 0 {
+        conn.execute(
+            "INSERT INTO session_occurrences_fts(session_occurrences_fts)
+             VALUES('rebuild')",
+            (),
+        )
+        .await
+        .map_err(|error| db_error("rebuild temporal occurrence FTS", error))?;
+    }
+
+    let mismatched = query_i64(
+        conn,
+        "SELECT COUNT(*)
+         FROM session_occurrences AS occurrence
+         JOIN session_occurrences_fts AS fts ON fts.rowid = occurrence.rowid
+         WHERE fts.index_text IS NOT occurrence.index_text
+            OR fts.snippet_text IS NOT occurrence.snippet_text",
+    )
+    .await?;
+    if mismatched != 0 {
+        return Err(db_message(
+            "merge_temporal_authority",
+            "temporal occurrence FTS parity mismatch after rebuild",
+        ));
+    }
+
+    if main_table_exists(conn, "session_temporal_generations").await?
+        && main_table_exists(conn, "session_temporal_migration_receipts").await?
+    {
+        // Migration receipts must bind a generation that completed the legal
+        // lifecycle into active/ready/completed — never a stranded building row.
+        let stranded = query_i64(
+            conn,
+            "SELECT COUNT(*)
+             FROM session_temporal_migration_receipts AS receipt
+             JOIN session_temporal_generations AS generation
+               ON generation.session_id = receipt.session_id
+              AND generation.generation = receipt.generation
+             WHERE generation.state IN ('failed', 'cancelled')",
+        )
+        .await?;
+        if stranded != 0 {
+            return Err(db_message(
+                "merge_temporal_authority",
+                "migration receipt bound to terminal-failed generation lifecycle",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Executable PR19 deletion gate: every legacy raw row has an explicit
+/// disposition receipt, and no eligible legacy row remains without a covering
+/// temporal occurrence + migration receipt.
+pub(super) async fn assert_zero_legacy_temporal_authority(conn: &Connection) -> Result<()> {
+    if !main_table_exists(conn, "lcm_raw_messages").await? {
+        return Ok(());
+    }
+    if !main_table_exists(conn, "session_temporal_migration_dispositions").await? {
+        return Err(db_message(
+            "pr19_zero_legacy_temporal_authority",
+            "migration disposition receipts table is missing",
+        ));
+    }
+
+    let undisposed = query_i64(
+        conn,
+        "SELECT COUNT(*)
+         FROM lcm_raw_messages AS raw
+         WHERE NOT EXISTS (
+             SELECT 1
+             FROM session_temporal_migration_dispositions AS disposition
+             WHERE disposition.provider = raw.provider
+               AND disposition.message_id = raw.message_id
+               AND disposition.session_id = raw.session_id
+         )",
+    )
+    .await?;
+    if undisposed != 0 {
+        return Err(db_message(
+            "pr19_zero_legacy_temporal_authority",
+            "legacy rows lack explicit migration dispositions",
+        ));
+    }
+
+    let uncovered_eligible = query_i64(
+        conn,
+        "SELECT COUNT(*)
+         FROM session_temporal_migration_dispositions AS disposition
+         WHERE disposition.disposition = 'eligible'
+           AND (
+               NOT EXISTS (
+                   SELECT 1
+                   FROM session_occurrences AS occurrence
+                   WHERE occurrence.session_id = disposition.session_id
+                     AND occurrence.source_observation_id = disposition.observation_id
+                     AND occurrence.projection_output_ordinal = disposition.output_ordinal
+               )
+               OR NOT EXISTS (
+                   SELECT 1
+                   FROM session_temporal_migration_receipts AS receipt
+                   WHERE receipt.session_id = disposition.session_id
+                     AND receipt.generation = disposition.generation
+                     AND receipt.batch_ordinal = disposition.batch_ordinal
+               )
+           )",
+    )
+    .await?;
+    if uncovered_eligible != 0 {
+        return Err(db_message(
+            "pr19_zero_legacy_temporal_authority",
+            "eligible legacy rows lack temporal coverage receipts",
+        ));
+    }
+
+    let skipped_imported = query_i64(
+        conn,
+        "SELECT COUNT(*)
+         FROM session_temporal_migration_dispositions AS disposition
+         JOIN session_occurrences AS occurrence
+           ON occurrence.session_id = disposition.session_id
+          AND occurrence.source_observation_id = disposition.observation_id
+          AND occurrence.projection_output_ordinal = disposition.output_ordinal
+         WHERE disposition.disposition IN (
+             'quarantined', 'policy_excluded', 'unbound', 'ineligible'
+         )",
+    )
+    .await?;
+    if skipped_imported != 0 {
+        return Err(db_message(
+            "pr19_zero_legacy_temporal_authority",
+            "non-eligible legacy dispositions were imported into temporal sinks",
+        ));
+    }
+    Ok(())
 }

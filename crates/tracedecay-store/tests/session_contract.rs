@@ -9,7 +9,7 @@ use tracedecay_domain::{
     RetrievalGrainV1, SessionContractError, SessionId, SessionProjectionGenerationV1,
     SessionRefreshOperationIdV1, SessionSummaryIdV1, SessionSummaryRecordV1,
     SummarySourceHorizonV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1, TemporalModeV1,
-    UtcMicros,
+    TemporalValidityV1, UtcMicros,
 };
 use tracedecay_store::{
     MAX_SESSION_SUMMARY_SOURCE_ANCHORS, MAX_SESSION_TEMPORAL_MIGRATION_BATCH_ITEMS,

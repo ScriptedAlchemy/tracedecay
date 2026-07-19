@@ -1,0 +1,39 @@
+{
+  "schema": "pr8-fixture-sanitization-receipt-v1",
+  "provider": "codex",
+  "independently_sourced": true,
+  "introduction_commit": "c293df93ce063885580ea7145cc81e6dbdc8e9ec",
+  "source_kind": "provider_native_checked_in_capture",
+  "format": "checked_in_native_bounded_copy_v1",
+  "documentation": "tests/fixtures/provider_normalization/codex/README.md",
+  "production_acceptance_reuse": {
+    "workload": "benchmarks/pr5-observation/workload-v1.json",
+    "harness_path": "codex_production_observation_pipeline_v1",
+    "notes": "session_meta and agent_message inputs are the same provider-native captures already exercised by the PR5/PR6 production observation pipeline baseline"
+  },
+  "redaction": {
+    "thread_goal_updates.input.json": "Redacted four-record production sequence: provider keys, nesting, statuses, and counter transitions preserved; session/objective payload values replaced with stable fixture-safe values per the Codex provider-normalization README"
+  },
+  "files": [
+    {
+      "path": "tests/fixtures/provider_normalization/codex/session_meta.input.json",
+      "role": "rollout_session_meta",
+      "sha256": "125540c90d77740256c4b2a31c029b5ddb25e037b9c20f053007339533b48832"
+    },
+    {
+      "path": "tests/fixtures/provider_normalization/codex/agent_message.input.json",
+      "role": "rollout_agent_message",
+      "sha256": "98c62c375f7f1d9f6552ab0591007e0063165b44b767c472644ad4e66eace6cf"
+    },
+    {
+      "path": "tests/fixtures/provider_normalization/codex/thread_goal_updates.input.json",
+      "role": "rollout_thread_goal_sequence",
+      "sha256": "dc956bb0a087f01a6c3f0b398c96131646e55c67921cddada461b9b4b113239c"
+    },
+    {
+      "path": "tests/fixtures/provider_normalization/codex/README.md",
+      "role": "provenance_documentation",
+      "sha256": "3c161c364acdc482b46e7c3c1de14a8981bc7169d4d10e8501b644e93306f213"
+    }
+  ]
+}

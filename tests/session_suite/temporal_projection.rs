@@ -1,4 +1,7 @@
+use std::fmt::Write as _;
+
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::store::{GlobalDbObservationStore, GlobalDbSessionTemporalStore};
@@ -321,24 +324,6 @@ fn occurrence_with_message_id(
     occurrence
 }
 
-fn copy(
-    target: &MessageOccurrenceRecordV1,
-    source: &MessageOccurrenceRecordV1,
-) -> tracedecay_domain::LogicalCopyRecordV1 {
-    tracedecay_domain::LogicalCopyRecordV1 {
-        occurrence_id: target.occurrence_id.clone(),
-        copied_from_occurrence_id: source.occurrence_id.clone(),
-        proof: CopyProofV1::ProviderLinkage {
-            source_occurrence_id: source.occurrence_id.clone(),
-            provider_record_id: ObservationId::new(format!(
-                "record.temporal.{}",
-                source.projection_output_ordinal.value()
-            ))
-            .unwrap(),
-        },
-    }
-}
-
 fn parent_message_copy(
     target: &MessageOccurrenceRecordV1,
     source: &MessageOccurrenceRecordV1,
@@ -350,6 +335,8 @@ fn parent_message_copy(
             source_occurrence_id: source.occurrence_id.clone(),
             parent_message_id: source.message_id.clone().expect("source message id"),
         },
+        knowledge_at: target.knowledge_at,
+        valid_time: target.valid_time,
     }
 }
 
@@ -364,6 +351,8 @@ fn explicit_anchor_copy(
             source_occurrence_id: source.occurrence_id.clone(),
             assertion_anchor_id: source.retrieval_anchor_id.clone(),
         },
+        knowledge_at: target.knowledge_at,
+        valid_time: target.valid_time,
     }
 }
 
@@ -379,8 +368,23 @@ fn assertion_with_kind(
     subject: &MessageOccurrenceRecordV1,
     object: &MessageOccurrenceRecordV1,
 ) -> TemporalAssertionRecordV1 {
+    let mut hasher = Sha256::new();
+    hasher.update(
+        format!(
+            "session-temporal-assertion-v1\0{}\0{}\0{}",
+            subject.occurrence_id.as_str(),
+            kind.as_str(),
+            object.retrieval_anchor_id.as_str()
+        )
+        .as_bytes(),
+    );
+    let mut assertion_id = String::with_capacity(71);
+    assertion_id.push_str("sha256:");
+    for byte in hasher.finalize() {
+        write!(&mut assertion_id, "{byte:02x}").expect("writing to a String cannot fail");
+    }
     serde_json::from_value(json!({
-        "assertion_id": format!("assertion.{}", subject.occurrence_id),
+        "assertion_id": assertion_id,
         "kind": kind.as_str(),
         "subject_anchor_id": subject.retrieval_anchor_id,
         "object_anchor_id": object.retrieval_anchor_id,
@@ -635,7 +639,7 @@ async fn incremental_batch_commit_is_atomic_and_rolls_back_on_late_failure() {
             2,
             1,
             vec![persisted_occurrence.clone()],
-            vec![copy(&persisted_occurrence, &missing)],
+            vec![parent_message_copy(&persisted_occurrence, &missing)],
             vec![],
         ))
         .await;
@@ -717,7 +721,7 @@ async fn only_explicit_typed_copy_proof_persists_copy_edges() {
         2
     );
 
-    let mut forged = copy(&second, &first);
+    let mut forged = parent_message_copy(&second, &first);
     forged.proof = CopyProofV1::ProviderLinkage {
         source_occurrence_id: first.occurrence_id.clone(),
         provider_record_id: ObservationId::new("provider.copy.nonexistent").unwrap(),
@@ -744,7 +748,7 @@ async fn only_explicit_typed_copy_proof_persists_copy_edges() {
                 2,
                 2,
                 vec![],
-                vec![copy(&second, &first)],
+                vec![parent_message_copy(&second, &first)],
                 vec![],
             )
             .with_checkpoint(1, 2, 2)
@@ -1075,7 +1079,7 @@ async fn incremental_and_one_shot_rebuilds_have_identical_bytes_and_order() {
         )
         .await,
     );
-    let edge = copy(&second, &first);
+    let edge = parent_message_copy(&second, &first);
     let assertion = assertion(&second, &first);
     let store = GlobalDbSessionTemporalStore::new(&db);
     begin_candidate(&store, &session_id, 2, 2).await;
@@ -1226,7 +1230,7 @@ async fn activation_rejects_omitted_canonical_assertion_lineage() {
             2,
             2,
             vec![first.clone(), second.clone()],
-            vec![copy(&second, &first)],
+            vec![parent_message_copy(&second, &first)],
             vec![],
         ))
         .await
@@ -1278,7 +1282,7 @@ async fn activation_accepts_complete_canonical_graph_and_receipt_coverage() {
             2,
             2,
             vec![first.clone(), second.clone()],
-            vec![copy(&second, &first)],
+            vec![parent_message_copy(&second, &first)],
             vec![assertion(&second, &first)],
         ))
         .await

@@ -232,6 +232,7 @@ fn candidate(stable_id: &str, anchor_id: &str, raw_score: i64) -> RankingCandida
     RankingCandidate {
         stable_id: stable_id.to_string(),
         anchor_id: anchor(anchor_id),
+        retriever_record_id: stable_id.to_string(),
         channel: CandidateChannel::Phrase,
         raw_score,
         knowledge_at_micros: raw_score,
@@ -599,15 +600,15 @@ fn evolution_chain_is_exposed_in_canonical_context() {
                 .map(|edge| edge.kind)
                 .collect::<Vec<_>>(),
             vec![
-                TemporalAssertionKindV1::Corrects,
                 TemporalAssertionKindV1::Supersedes,
+                TemporalAssertionKindV1::Corrects,
             ]
         );
         let rendered: serde_json::Value =
             serde_json::from_str(&result.context.rendered).expect("canonical context");
         assert_eq!(
             rendered["bundle"]["lineage"][1]["object_anchor_id"],
-            "correction"
+            "original"
         );
     });
 }
@@ -729,7 +730,7 @@ fn invalid_summary_successor_does_not_hide_eligible_predecessor() {
         assert!(!anchors.contains(&anchor("summary-successor")));
         assert_eq!(result.coverage.unknown, 1);
         assert_eq!(result.summary_omissions.len(), 1);
-        assert_eq!(result.context.bundle.omissions.len(), 1);
+        assert_eq!(result.context.bundle.omissions.len(), 2);
         let rendered: serde_json::Value =
             serde_json::from_str(&result.context.rendered).expect("canonical context");
         assert_eq!(
@@ -800,11 +801,7 @@ fn unauthorized_mixed_source_permutations_are_publicly_indistinguishable() {
             let port = FakeReadPort::new(
                 vec![candidate("private-summary", "summary-private", 10)],
                 vec![
-                    TemporalRecord::Summary(summary_with_sources(
-                        "private",
-                        &source_anchors,
-                        7,
-                    )),
+                    TemporalRecord::Summary(summary_with_sources("private", &source_anchors, 7)),
                     summary_source("redacted-source", SummarySourceState::Redacted),
                     summary_source("unauthorized-source", SummarySourceState::Unauthorized),
                 ],

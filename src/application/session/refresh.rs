@@ -12,7 +12,9 @@ use tracedecay_store::{
     SessionRefreshStore, SessionRefreshTerminalStateV1, SessionStoreError,
 };
 
-use crate::application::context::{RequestContext, ResolvedSessionIdentity, SessionOwner};
+use crate::application::context::{
+    RequestContext, RequestInterruption, ResolvedSessionIdentity, SessionOwner,
+};
 use crate::application::session::types::{
     SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
@@ -501,18 +503,13 @@ async fn await_with_request_controls<T>(
     if let Some(outcome) = request_interruption(context) {
         return Err(outcome);
     }
-    tokio::pin!(future);
-    let cancellation = context.cancellation().cancelled();
-    tokio::pin!(cancellation);
-    let deadline =
-        tokio::time::sleep_until(tokio::time::Instant::from_std(context.deadline().instant()));
-    tokio::pin!(deadline);
-    tokio::select! {
-        biased;
-        result = &mut future => Ok(result),
-        _ = &mut cancellation => Err(SessionRefreshOutcome::Aborted),
-        _ = &mut deadline => Err(SessionRefreshOutcome::DeadlineExceeded),
-    }
+    context
+        .run_interruptible(future, || {})
+        .await
+        .map_err(|interruption| match interruption {
+            RequestInterruption::Cancelled => SessionRefreshOutcome::Aborted,
+            RequestInterruption::DeadlineExceeded => SessionRefreshOutcome::DeadlineExceeded,
+        })
 }
 
 const fn empty_coverage() -> TemporalCoverageCountsV1 {

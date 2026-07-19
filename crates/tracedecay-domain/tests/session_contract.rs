@@ -203,6 +203,8 @@ fn copy_proofs_and_copy_records_round_trip_and_reject_invalid_links() {
             occurrence_id: target.clone(),
             copied_from_occurrence_id: source.clone(),
             proof,
+            knowledge_at: UtcMicros(50),
+            valid_time: TemporalValidityV1::Unknown,
         };
         copy.validate().unwrap();
         assert_json_round_trip!(copy);
@@ -223,6 +225,8 @@ fn copy_proofs_and_copy_records_round_trip_and_reject_invalid_links() {
             source_occurrence_id: source.clone(),
             provider_record_id: ObservationId::new("provider.message.1").unwrap(),
         },
+        knowledge_at: UtcMicros(50),
+        valid_time: TemporalValidityV1::Unknown,
     };
     copy.validate().unwrap();
     assert_json_round_trip!(copy.clone());
@@ -234,6 +238,8 @@ fn copy_proofs_and_copy_records_round_trip_and_reject_invalid_links() {
             source_occurrence_id: target.clone(),
             provider_record_id: ObservationId::new("provider.message.1").unwrap(),
         },
+        knowledge_at: UtcMicros(50),
+        valid_time: TemporalValidityV1::Unknown,
     };
     assert_eq!(
         self_copy.validate(),
@@ -250,6 +256,8 @@ fn copy_proofs_and_copy_records_round_trip_and_reject_invalid_links() {
             source_occurrence_id: occurrence(2),
             provider_record_id: ObservationId::new("provider.message.1").unwrap(),
         },
+        knowledge_at: UtcMicros(50),
+        valid_time: TemporalValidityV1::Unknown,
     };
     assert_eq!(
         mismatched_copy.validate(),
@@ -258,6 +266,19 @@ fn copy_proofs_and_copy_records_round_trip_and_reject_invalid_links() {
     let mut mismatched_proof = serde_json::to_value(copy).unwrap();
     mismatched_proof["proof"]["source_occurrence_id"] = json!(occurrence(2));
     assert!(serde_json::from_value::<LogicalCopyRecordV1>(mismatched_proof).is_err());
+
+    let legacy = serde_json::from_value::<LogicalCopyRecordV1>(json!({
+        "occurrence_id": occurrence(1),
+        "copied_from_occurrence_id": occurrence(0),
+        "proof": {
+            "kind": "provider_linkage",
+            "source_occurrence_id": occurrence(0),
+            "provider_record_id": "provider.message.1"
+        }
+    }))
+    .unwrap();
+    assert_eq!(legacy.knowledge_at, UtcMicros(0));
+    assert_eq!(legacy.valid_time, TemporalValidityV1::Unknown);
 }
 
 #[test]
