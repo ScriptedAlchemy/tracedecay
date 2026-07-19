@@ -441,8 +441,13 @@ pub(in super::super) async fn handle_lcm_load_session(
             end_time: non_negative_i64_arg_alias(&args, "end_time", "time_to")?,
         },
     )?;
-    if let Some(result) = missing_lcm_read_store(context, &args).await {
-        return Ok(result);
+    if missing_lcm_read_store(context, &args).await.is_some() {
+        return Ok(lcm_typed_outcome(
+            context.project_root,
+            &args,
+            "messages",
+            SessionRetrievalServiceOutcome::Unavailable,
+        ));
     }
     let outcome = match context.retrieval_service {
         Some(service) => service.execute(command).await,

@@ -15261,14 +15261,10 @@ async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() 
         "sessions.db must not exist before any ingest"
     );
 
-    // Exercise all six pure-read LCM tools.
+    // Exercise the five generic pure-read LCM tools.
     for (tool, args) in [
         ("tracedecay_lcm_status", json!({})),
         ("tracedecay_lcm_grep", json!({"query": "anything"})),
-        (
-            "tracedecay_lcm_load_session",
-            json!({"session_id": "ghost-session"}),
-        ),
         (
             "tracedecay_lcm_describe",
             json!({"provider": "cursor", "session_id": "ghost-session"}),
@@ -15305,6 +15301,48 @@ async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() 
             db_path.display()
         );
     }
+}
+
+#[tokio::test]
+async fn lcm_load_session_missing_store_uses_typed_empty_messages_without_creating_sessions_db() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let db_path = tracedecay::sessions::cursor::project_session_db_path(project);
+    assert!(
+        !db_path.exists(),
+        "sessions.db must not exist before any ingest"
+    );
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_load_session",
+        json!({"session_id": "ghost-session"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("tracedecay_lcm_load_session returned error: {error}"));
+
+    let text = extract_text(&result.value);
+    let payload: Value = serde_json::from_str(text)
+        .unwrap_or_else(|error| panic!("load-session response is not valid JSON: {error}\n{text}"));
+
+    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(
+        payload["error"]["code"],
+        "lcm_retrieval_service_unavailable"
+    );
+    assert_eq!(payload["messages"], json!([]));
+    assert_eq!(payload["next_cursor"], Value::Null);
+    assert!(
+        !db_path.exists(),
+        "tracedecay_lcm_load_session ghost-created sessions.db at {}",
+        db_path.display()
+    );
 }
 
 // ---------------------------------------------------------------------------

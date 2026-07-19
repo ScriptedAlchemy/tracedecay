@@ -4,7 +4,7 @@ use super::{LcmError, LcmRawMessage, LcmStorageKind, raw};
 
 use super::util;
 
-pub const LCM_SCHEMA_VERSION: i64 = 6;
+pub const LCM_SCHEMA_VERSION: i64 = 7;
 
 const MIGRATION_NAME: &str = "lcm";
 const TRUNCATION_MARKER: &str = "\n[truncated by tracedecay]";
@@ -203,30 +203,45 @@ async fn ensure_lcm_schema_with_transaction(
             ON lcm_summary_nodes(
                 provider, session_id, depth, source_time_start, source_time_end, created_at
             );
-        CREATE INDEX IF NOT EXISTS idx_lcm_summary_nodes_codex_pending_session_order
-            ON lcm_summary_nodes(session_id, depth DESC, created_at DESC, node_id)
-            WHERE provider = 'codex'
-              AND CASE
+        -- Schema v7: eligibility is an indexed expression rather than a
+        -- partial-index predicate, allowing the pending queue to constrain
+        -- it without forcing an index or scanning JSON at query time.
+        DROP INDEX IF EXISTS idx_lcm_summary_nodes_codex_pending_session_order;
+        DROP INDEX IF EXISTS idx_lcm_summary_nodes_codex_pending_root_order;
+        CREATE INDEX idx_lcm_summary_nodes_codex_pending_session_order
+            ON lcm_summary_nodes(
+                session_id,
+                (CASE
                     WHEN json_valid(metadata_json) THEN
-                      json_extract(metadata_json, '$.source') = 'codex_context_compacted'
-                      AND COALESCE(
-                            json_extract(metadata_json, '$.tracedecay_summary_source'),
-                            ''
-                          ) <> 'codex_app_server'
+                        json_extract(metadata_json, '$.source') = 'codex_context_compacted'
+                        AND COALESCE(
+                              json_extract(metadata_json, '$.tracedecay_summary_source'),
+                              ''
+                            ) <> 'codex_app_server'
                     ELSE 0
-                  END;
-        CREATE INDEX IF NOT EXISTS idx_lcm_summary_nodes_codex_pending_root_order
-            ON lcm_summary_nodes(created_at DESC, depth DESC, node_id, session_id)
-            WHERE provider = 'codex'
-              AND CASE
+                 END),
+                depth DESC,
+                created_at DESC,
+                node_id
+            )
+            WHERE provider = 'codex';
+        CREATE INDEX idx_lcm_summary_nodes_codex_pending_root_order
+            ON lcm_summary_nodes(
+                (CASE
                     WHEN json_valid(metadata_json) THEN
-                      json_extract(metadata_json, '$.source') = 'codex_context_compacted'
-                      AND COALESCE(
-                            json_extract(metadata_json, '$.tracedecay_summary_source'),
-                            ''
-                          ) <> 'codex_app_server'
+                        json_extract(metadata_json, '$.source') = 'codex_context_compacted'
+                        AND COALESCE(
+                              json_extract(metadata_json, '$.tracedecay_summary_source'),
+                              ''
+                            ) <> 'codex_app_server'
                     ELSE 0
-                  END;
+                 END),
+                created_at DESC,
+                depth DESC,
+                node_id,
+                session_id
+            )
+            WHERE provider = 'codex';
         CREATE INDEX IF NOT EXISTS idx_lcm_summary_sources_source
             ON lcm_summary_sources(source_kind, source_id);
         CREATE TABLE IF NOT EXISTS lcm_lifecycle_state (

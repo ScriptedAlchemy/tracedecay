@@ -611,7 +611,9 @@ async fn index_key_columns(conn: &libsql::Connection, index: &str) -> Vec<(Strin
         if is_key != 0 {
             columns.push((
                 row.get::<i64>(0).unwrap(),
-                row.get::<String>(2).unwrap(),
+                row.get::<Option<String>>(2)
+                    .unwrap()
+                    .unwrap_or_else(|| "<expression>".to_string()),
                 row.get::<i64>(3).unwrap(),
             ));
         }
@@ -3346,7 +3348,6 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
     const SESSION_QUERY: &str = "
         SELECT candidate.node_id, candidate.session_id
         FROM lcm_summary_nodes AS candidate
-             INDEXED BY idx_lcm_summary_nodes_codex_pending_session_order
         JOIN session_summary_nodes AS authority
           ON authority.summary_id = candidate.node_id
          AND authority.session_id = candidate.session_id
@@ -3363,7 +3364,7 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
                         ''
                       ) <> 'codex_app_server'
                 ELSE 0
-              END
+              END = 1
           AND NOT EXISTS (
                 SELECT 1
                 FROM session_summary_successors AS lineage
@@ -3385,7 +3386,6 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
     const ROOT_QUERY: &str = "
         SELECT candidate.node_id, candidate.session_id
         FROM lcm_summary_nodes AS candidate
-             INDEXED BY idx_lcm_summary_nodes_codex_pending_root_order
         JOIN session_summary_nodes AS authority
           ON authority.summary_id = candidate.node_id
          AND authority.session_id = candidate.session_id
@@ -3402,7 +3402,7 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
                         ''
                       ) <> 'codex_app_server'
                 ELSE 0
-              END
+              END = 1
           AND NOT EXISTS (
                 SELECT 1
                 FROM session_summary_successors AS lineage
@@ -3431,17 +3431,41 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
     conn.execute_batch(
         "DROP INDEX IF EXISTS idx_lcm_summary_nodes_codex_pending_session_order;
          DROP INDEX IF EXISTS idx_lcm_summary_nodes_codex_pending_root_order;
-         UPDATE session_schema_migrations SET version = 5 WHERE name = 'lcm';",
+         CREATE INDEX idx_lcm_summary_nodes_codex_pending_session_order
+             ON lcm_summary_nodes(session_id, depth DESC, created_at DESC, node_id)
+             WHERE provider = 'codex'
+               AND CASE
+                     WHEN json_valid(metadata_json) THEN
+                       json_extract(metadata_json, '$.source') = 'codex_context_compacted'
+                       AND COALESCE(
+                             json_extract(metadata_json, '$.tracedecay_summary_source'),
+                             ''
+                           ) <> 'codex_app_server'
+                     ELSE 0
+                   END;
+         CREATE INDEX idx_lcm_summary_nodes_codex_pending_root_order
+             ON lcm_summary_nodes(created_at DESC, depth DESC, node_id, session_id)
+             WHERE provider = 'codex'
+               AND CASE
+                     WHEN json_valid(metadata_json) THEN
+                       json_extract(metadata_json, '$.source') = 'codex_context_compacted'
+                       AND COALESCE(
+                             json_extract(metadata_json, '$.tracedecay_summary_source'),
+                             ''
+                           ) <> 'codex_app_server'
+                     ELSE 0
+                   END;
+         UPDATE session_schema_migrations SET version = 6 WHERE name = 'lcm';",
     )
     .await
     .unwrap();
     drop(conn);
     drop(raw_db);
 
-    assert!(tracedecay::sessions::lcm::LCM_SCHEMA_VERSION > 5);
+    assert!(tracedecay::sessions::lcm::LCM_SCHEMA_VERSION > 6);
     let migrated = GlobalDb::open_at(&db_path)
         .await
-        .expect("v5 database should migrate");
+        .expect("v6 database should migrate");
     assert_eq!(
         migrated.lcm_schema_version().await.unwrap(),
         tracedecay::sessions::lcm::LCM_SCHEMA_VERSION
@@ -3454,6 +3478,7 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
         index_key_columns(&conn, "idx_lcm_summary_nodes_codex_pending_session_order").await,
         vec![
             ("session_id".to_string(), 0),
+            ("<expression>".to_string(), 0),
             ("depth".to_string(), 1),
             ("created_at".to_string(), 1),
             ("node_id".to_string(), 0),
@@ -3462,6 +3487,7 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
     assert_eq!(
         index_key_columns(&conn, "idx_lcm_summary_nodes_codex_pending_root_order").await,
         vec![
+            ("<expression>".to_string(), 0),
             ("created_at".to_string(), 1),
             ("depth".to_string(), 1),
             ("node_id".to_string(), 0),
