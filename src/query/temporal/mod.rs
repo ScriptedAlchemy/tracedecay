@@ -15,9 +15,9 @@ use tracedecay_domain::{
     TemporalAssertionKindV1, TemporalCoverageCountsV1, TemporalModeV1,
 };
 
+use self::context::assembly::assemble_context_with_frames_controlled;
 use self::context::{
     CompactContext, ContextBudget, ContextError, TemporalContextFrames, VersionedTokenEstimator,
-    assemble_context_with_frames_controlled,
 };
 use self::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
 use self::hydration::{HydrationBatch, HydrationError, TemporalHydrationPort, hydrate_selected};
@@ -28,10 +28,13 @@ use self::ports::{
     pull_temporal_record_page,
 };
 use self::ranking::{DiversityLimits, RankedCandidate, RankingError, rank_candidates};
-use self::resolution::{
-    ResolutionLineageEdge, ResolutionLineageEdgeKind, ResolvedOccurrence,
+use self::resolution::resolver::resolve_temporal_controlled;
+use self::resolution::summary::{
     SummaryLineageEligibility, SummaryLineageRejection, SummaryOmission, SummarySourceState,
-    evaluate_summary_lineage_eligibility_controlled, resolve_temporal_controlled,
+    evaluate_summary_lineage_eligibility_controlled,
+};
+use self::resolution::types::{
+    ResolutionLineageEdge, ResolutionLineageEdgeKind, ResolvedOccurrence,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -616,7 +619,7 @@ mod scope_tests {
 
     use super::hydration::HydrationBatch;
     use super::ports::{ExecutionControl, TemporalRetrievalScope};
-    use super::resolution::{
+    use super::resolution::summary::{
         SummaryLineageEligibility, SummaryLineageRejection, SummaryOmission, SummarySourceState,
     };
     use super::{evaluate_summaries_for_scope, public_summary_omissions, temporal_context_frames};

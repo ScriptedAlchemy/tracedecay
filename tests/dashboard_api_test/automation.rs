@@ -404,7 +404,8 @@ fn dashboard_session_and_skill_runs_emit_activity_when_evidence_is_unavailable()
                 terminal.error.as_deref().is_some_and(|reason| reason
                     == "lcm_not_ingested"
                     || reason == "no_session_evidence"
-                    || reason == "no_skill_writer_evidence"),
+                    || reason == "no_skill_writer_evidence"
+                    || reason == "session_evidence_retrieval_unavailable"),
                 "unexpected evidence skip reason: {terminal:#?}"
             );
         }

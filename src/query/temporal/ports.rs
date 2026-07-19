@@ -23,8 +23,8 @@ use zeroize::Zeroizing;
 
 use super::candidates::CandidatePlan;
 use super::ranking::RankingCandidate;
-use super::resolution::ValidatedAuthorization;
-use super::resolution::{ResolutionAssertion, ResolutionOccurrence, SummarySourceState};
+use super::resolution::summary::SummarySourceState;
+use super::resolution::types::{ResolutionAssertion, ResolutionOccurrence, ValidatedAuthorization};
 
 const SHA256_PREFIX: &str = "sha256:";
 const SHA256_HEX_LEN: usize = 64;

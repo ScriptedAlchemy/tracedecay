@@ -15,7 +15,11 @@ fn session_reflector_options_have_no_storage_selector() {
 
 #[test]
 fn session_reflector_evidence_uses_fresh_authorized_forensic_retrieval() {
-    let source = include_str!("../../src/automation/runner.rs");
+    let source = concat!(
+        include_str!("../../src/automation/runner/evidence.rs"),
+        include_str!("../../src/automation/runner/retrieval.rs"),
+        include_str!("../../src/automation/runner/session_reflector.rs")
+    );
     let start = source
         .find("async fn build_session_reflector_evidence")
         .expect("session reflector evidence builder");

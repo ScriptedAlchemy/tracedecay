@@ -1,0 +1,970 @@
+//! Request routing and handlers: per-method JSON-RPC dispatch,
+//! handshake handling, resources, and `tools/call` execution.
+
+use super::*;
+
+/// Hand-maintained schema documentation for the `tracedecay://schema` resource.
+/// Mirrors `src/db/migrations.rs::create_schema`. Update both together.
+const SCHEMA_MARKDOWN: &str = r"# tracedecay SQLite schema
+
+The active project database lives in the user-level TraceDecay profile store
+(`~/.tracedecay/projects/<project_id>/tracedecay.db` by default), scoped to the
+current project. Per-branch variants live beside it under the same store. All
+tables are plain SQLite; safe to query with any client. WAL mode is used, so
+readers do not block writers.
+
+## Tables
+
+### `nodes` — every indexed symbol
+- `id` TEXT PRIMARY KEY — content-hashed identifier (changes when symbol moves or renames)
+- `kind` TEXT — e.g. `function`, `struct`, `trait`, `impl`, `method`, `module`, `file`
+- `name` TEXT — local identifier
+- `qualified_name` TEXT — language-style path (e.g. `crate::module::Type::method`)
+- `file_path` TEXT — relative to the project root
+- `start_line`, `end_line` INTEGER — 1-based inclusive line range of the symbol
+- `start_column`, `end_column` INTEGER — 0-based column range
+- `attrs_start_line` INTEGER — first line of leading doc-comments / attributes (or `start_line` if none)
+- `signature` TEXT NULL — extracted source-level signature
+- `docstring` TEXT NULL — leading doc-comment
+- `visibility` TEXT — one of `public`, `pub_crate`, `pub_super`, `private`
+- `is_async` INTEGER (0/1)
+- `branches`, `loops`, `returns`, `max_nesting`, `unsafe_blocks`, `unchecked_calls`, `assertions` INTEGER — complexity metrics
+- `updated_at` INTEGER — UNIX epoch seconds
+
+Indexes: `kind`, `name`, `qualified_name`, `file_path`, `(file_path,start_line)`, `lower(name)`.
+
+### `edges` — directed relationships between nodes
+- `id` INTEGER PRIMARY KEY AUTOINCREMENT
+- `source` TEXT — FK → `nodes.id` (CASCADE DELETE)
+- `target` TEXT — FK → `nodes.id` (CASCADE DELETE)
+- `kind` TEXT — one of `contains`, `calls`, `returns`, `type_of`, `uses`, `implements`, `extends`, `annotates`, `derives_macro`, `receives`
+- `line` INTEGER NULL — source line of the relationship
+
+Unique constraint: `(source, target, kind, COALESCE(line, -1))`. Indexes on `source`, `target`, `kind`, `(source,kind)`, `(target,kind)`.
+
+### `files` — index bookkeeping
+- `path` TEXT PRIMARY KEY
+- `content_hash` TEXT — sha256 of file contents at index time
+- `size` INTEGER — file size in bytes
+- `modified_at`, `indexed_at` INTEGER — UNIX epoch seconds
+- `node_count` INTEGER — number of nodes extracted from this file
+
+### `unresolved_refs` — references the resolver could not bind
+- `from_node_id` FK → `nodes.id`
+- `reference_name` TEXT
+- `reference_kind` TEXT
+- `line`, `col` INTEGER
+- `file_path` TEXT
+
+### `vectors` — optional embeddings (semantic search backend)
+- `node_id` PRIMARY KEY FK → `nodes.id`
+- `embedding` BLOB
+- `model` TEXT, `created_at` INTEGER
+
+### `metadata` — key/value store
+Common keys: `tokens_saved`, schema-version markers.
+
+### `node_fingerprints` — redundancy cache
+- `node_id` PRIMARY KEY FK → `nodes.id`
+- `ast_hash`, `cfg_hash`, `call_seq_hash`, `shingles`
+- `body_tokens`, `source_hash`
+
+### `read_cache` — rendered `tracedecay_read` responses
+- primary key: `(project_id, session_id, file_path, mode, args_hash)`
+- stores `mtime_ns`, `digest`, rendered `body` BLOB, token count, and `created_at`
+
+### v11: `memory_facts`, `memory_entities`, `memory_fact_entities`, `memory_banks`, `memory_feedback_events`
+The holographic fact store replaces narrow decision rows with durable facts
+linked to named entities:
+
+- `memory_facts` — numeric `fact_id`, unique fact content, category, source,
+  tags JSON, computed trust score, retrieval/feedback counts, timestamps, and
+  structured metadata.
+- `memory_entities` — normalized recall keys for symbols, files,
+  directories, branches, people, subsystems, and concepts. Facts can attach
+  multiple entities so recall can start from code or natural-language names.
+- `memory_fact_entities` — many-to-many join table linking facts to entities
+  with cascade deletes.
+- `memory_banks` — optional holographic memory-bank vectors by category or
+  bank name (`bank_name`, `vector`, `hrr_algebra`, `hrr_dim`, `fact_count`,
+  `updated_at`).
+- `memory_feedback_events` — append-only `helpful`/`unhelpful` audit events
+  keyed by numeric `fact_id`, with source, note, old/new trust, and trust delta.
+
+Older `memory_decisions` / `memory_code_areas` tables are migration-only inputs:
+v11 backfills them into `memory_facts` and then drops the legacy tables.
+
+## Recipes
+
+### Find every impl block of a trait
+```sql
+SELECT n.id, n.qualified_name, n.file_path, n.start_line
+FROM nodes n
+JOIN edges e ON e.source = n.id
+WHERE e.kind = 'implements'
+  AND e.target IN (SELECT id FROM nodes WHERE qualified_name = ?1);
+```
+
+### Top callers of a node
+```sql
+SELECT n.qualified_name, COUNT(*) AS call_count
+FROM edges e
+JOIN nodes n ON n.id = e.source
+WHERE e.target = ?1 AND e.kind = 'calls'
+GROUP BY n.qualified_name
+ORDER BY call_count DESC
+LIMIT 20;
+```
+
+### Files modified since last index
+Compare `files.modified_at` against the live filesystem mtime — `tracedecay_affected` does this with extra git plumbing.
+
+### Largest functions by line span
+```sql
+SELECT qualified_name, file_path, end_line - start_line + 1 AS lines
+FROM nodes
+WHERE kind IN ('function', 'method')
+ORDER BY lines DESC
+LIMIT 20;
+```
+
+## Gotchas
+- `nodes.id` is a content hash, so it changes when the symbol moves. For cross-run lookups use `qualified_name` (or `tracedecay_by_qualified_name`).
+- `edges.kind = 'calls'` may reference a *trait method* node rather than the resolved concrete impl — trait dispatch is not currently rewritten.
+- `derives_macro` edges record `#[derive(...)]` usage but generated impls are not in the graph.
+";
+
+impl McpServer {
+    /// Dispatches a parsed JSON-RPC request to the appropriate handler.
+    ///
+    /// Returns `None` for notifications (requests without an `id`).
+    pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
+        // The initialize-replay entry point builds its own per-connection
+        // context so replay dispatches carry a real memory-request scope,
+        // exactly like the live connection loop. These callers never dispatch
+        // memory tools, but the scope is unconditionally present rather than an
+        // absent-scope special case.
+        let mut connection = self.new_connection_route_state();
+        Box::pin(self.handle_request_for_connection(
+            request,
+            self.timings_enabled(),
+            &mut connection,
+        ))
+        .await
+    }
+
+    /// Builds a fresh per-connection routing/identity context. Each call
+    /// allocates a new connection scope sequence, so the derived
+    /// `{mcp_instance_id}-c{seq}` prefix is unique across connections and
+    /// initialize-replay dispatches alike.
+    pub(crate) fn new_connection_route_state(&self) -> ConnectionRouteState {
+        // One replay-identity scope per client connection: envelope ids are
+        // client-chosen and connection-local, so the daemon widens them here
+        // before they become persistent memory operation identities.
+        let memory_request_scope = format!(
+            "{}-c{}",
+            self.mcp_instance_id,
+            self.connection_scope_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        ConnectionRouteState::new(memory_request_scope, self.hook_project_routes.snapshot())
+    }
+
+    pub(crate) async fn handle_request_for_connection(
+        &self,
+        request: &JsonRpcRequest,
+        timings_enabled: bool,
+        connection: &mut ConnectionRouteState,
+    ) -> Option<JsonRpcResponse> {
+        debug_assert!(
+            !request.method.is_empty(),
+            "handle_request called with empty method"
+        );
+        self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut counts) = self.method_call_counts.lock() {
+            *counts.entry(request.method.clone()).or_insert(0) += 1;
+        }
+        if matches!(classify_mcp_method(&request.method), McpMethod::HookEvent) {
+            Box::pin(self.handle_hook_event_notification(
+                request.params.as_ref(),
+                &mut connection.route_cache,
+            ))
+            .await;
+            return None;
+        }
+        self.hook_project_routes
+            .refresh_into(&mut connection.route_cache);
+        let id = request.id.clone()?;
+
+        let result = match classify_mcp_method(&request.method) {
+            McpMethod::Initialize => Some(self.handle_initialize(id, request.params.as_ref())),
+            // Some clients send the initialized notification with an id (or
+            // via the alternate method name); both stay compatibility no-ops.
+            // Hook events were consumed by the early notification dispatch
+            // above and can never reach this match with a response due.
+            McpMethod::InitializedAck | McpMethod::HookEvent => None,
+            McpMethod::ToolsList => Some(self.handle_tools_list(id).await),
+            McpMethod::ToolsCall => Some(
+                Box::pin(self.handle_tools_call(
+                    id,
+                    request.params.as_ref(),
+                    timings_enabled,
+                    &connection.route_cache,
+                    connection.implicit_project_path(),
+                    connection.memory_request_scope(),
+                ))
+                .await,
+            ),
+            McpMethod::ResourcesList => Some(Self::handle_resources_list(id)),
+            McpMethod::ResourcesRead => Some(
+                self.handle_resources_read(id, request.params.as_ref())
+                    .await,
+            ),
+            McpMethod::TrivialAck => Some(JsonRpcResponse::success(id, json!({}))),
+            McpMethod::Unknown => Some(JsonRpcResponse::error(
+                id,
+                ErrorCode::MethodNotFound,
+                format!("method not found: {}", request.method),
+            )),
+        };
+
+        // Track errors
+        if let Some(ref resp) = result
+            && resp.error.is_some()
+        {
+            self.stats.errors.fetch_add(1, Ordering::Relaxed);
+        }
+
+        result
+    }
+
+    pub(crate) async fn handle_hook_event_notification(
+        &self,
+        params: Option<&Value>,
+        route_cache: &mut HookProjectRouteCache,
+    ) -> HostAdmissionOutcome {
+        let Some(event) = hook_events::parse_hook_event(params) else {
+            let outcome = HostAdmissionOutcome::degraded("malformed_event");
+            Self::report_host_admission_outcome(outcome);
+            return outcome;
+        };
+        let cg = self.reopen_if_branch_drifted().await;
+        let root = cg.project_root().to_path_buf();
+        let current_branch = crate::branch::current_branch(&root);
+        let plan = hook_events::plan_hook_event(&event, &root, current_branch.as_deref());
+        let Ok(payload) = hook_events::encode_durable_hook_event_plan(&plan) else {
+            let outcome = HostAdmissionOutcome::degraded("invalid_host_event_plan");
+            Self::report_host_admission_outcome(outcome);
+            return outcome;
+        };
+        let admission_source = event.admission_source();
+        let admitted = match self.host_admission_broker.as_ref() {
+            Some(broker) => broker.admit(&admission_source, &payload).await,
+            None => Err(HostAdmissionOutcome::retained_unavailable(
+                "spool_unavailable",
+            )),
+        };
+        let admitted = match admitted {
+            Ok(admitted) => admitted,
+            Err(outcome) => {
+                Self::report_host_admission_outcome(outcome);
+                return outcome;
+            }
+        };
+        // Connection routing is identity for subsequent tool calls on this
+        // connection: publish it as soon as the routing event is durably
+        // appended, even when effect processing is deferred/retained. Do not
+        // wait for Committed — delayed replay must not leave tools unrouted.
+        self.update_hook_workspace_route(&event, route_cache).await;
+        let outcome = self.replay_host_admission(Some(admitted.seq)).await;
+        // Route analytics + span observations are side writes: only after the
+        // durable spool record is authoritatively committed (Committed or
+        // ExactDuplicate). Failures are best-effort and must never change the
+        // admission outcome already decided above.
+        if matches!(
+            outcome.status,
+            HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
+        ) {
+            if let Some(wake) = &self.project_session_refresh_wake {
+                wake.wake();
+            }
+            if let Some(wake) = &self.user_session_refresh_wake {
+                wake.wake();
+            }
+            self.record_hook_route_analytics(
+                &root,
+                &event,
+                current_branch.as_deref(),
+                admitted.seq,
+            );
+            self.record_hook_span_observation(&event).await;
+        }
+        Self::report_host_admission_outcome(outcome);
+        outcome
+    }
+
+    /// Handles the `initialize` method, returning server capabilities.
+    ///
+    /// Also records the caller's negotiated `clientInfo.name` (e.g.
+    /// `"claude-code"`, `"codex"`, `"cursor"`) so subsequent `tools/call`
+    /// analytics events can attribute per-host adoption instead of every
+    /// call recording the same opaque `provider="mcp"`. Only the short
+    /// name field is retained — never the full `clientInfo` payload.
+    pub(crate) fn handle_initialize(&self, id: Value, params: Option<&Value>) -> JsonRpcResponse {
+        let client_name = params
+            .and_then(|p| p.get("clientInfo"))
+            .and_then(|ci| ci.get("name"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        if client_name.is_some()
+            && let Ok(mut slot) = self.client_name.lock()
+        {
+            *slot = client_name;
+        }
+        JsonRpcResponse::success(id, initialize_result(SERVER_INSTRUCTIONS))
+    }
+
+    /// The negotiated MCP client name recorded by the most recent
+    /// `initialize` handshake, if any (see [`Self::client_name`] field doc).
+    pub(crate) fn client_name(&self) -> Option<String> {
+        self.client_name.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    /// Handles the `tools/list` method, returning all available tool definitions.
+    pub(crate) async fn handle_tools_list(&self, id: Value) -> JsonRpcResponse {
+        let node_count = self
+            .cg_snapshot()
+            .await
+            .get_stats()
+            .await
+            .map_or(0, |s| s.node_count);
+        let budget = explore_call_budget(node_count);
+        let tools = get_tool_definitions_with_budget(node_count, budget);
+        JsonRpcResponse::success(id, json!({ "tools": tools }))
+    }
+
+    /// Handles the `resources/list` method, returning available resources.
+    pub(crate) fn handle_resources_list(id: Value) -> JsonRpcResponse {
+        JsonRpcResponse::success(id, resources_list_result())
+    }
+
+    /// Handles the `resources/read` method, returning resource contents.
+    pub(crate) async fn handle_resources_read(
+        &self,
+        id: Value,
+        params: Option<&Value>,
+    ) -> JsonRpcResponse {
+        let uri = params.and_then(|p| p.get("uri")).and_then(|v| v.as_str());
+
+        let Some(uri) = uri else {
+            return JsonRpcResponse::error(
+                id,
+                ErrorCode::InvalidParams,
+                "missing 'uri' in resources/read params".to_string(),
+            );
+        };
+        if let Ok(mut counts) = self.resource_read_counts.lock() {
+            *counts.entry(uri.to_string()).or_insert(0) += 1;
+        }
+
+        match uri {
+            "tracedecay://status" => self.read_resource_status(id).await,
+            "tracedecay://files" => self.read_resource_files(id).await,
+            "tracedecay://overview" => self.read_resource_overview(id).await,
+            "tracedecay://branches" => self.read_resource_branches(id).await,
+            "tracedecay://schema" => Self::read_resource_schema(id),
+            _ => JsonRpcResponse::error(
+                id,
+                ErrorCode::InvalidParams,
+                format!("unknown resource URI: {uri}"),
+            ),
+        }
+    }
+
+    /// Returns the `SQLite` schema documentation as a markdown resource.
+    /// Sourced from `src/db/migrations.rs::create_schema` — keep in sync.
+    pub(crate) fn read_resource_schema(id: Value) -> JsonRpcResponse {
+        JsonRpcResponse::success(
+            id,
+            json!({
+                "contents": [{
+                    "uri": "tracedecay://schema",
+                    "mimeType": "text/markdown",
+                    "text": SCHEMA_MARKDOWN
+                }]
+            }),
+        )
+    }
+
+    /// Returns graph statistics as a JSON resource.
+    pub(crate) async fn read_resource_status(&self, id: Value) -> JsonRpcResponse {
+        let cg = self.reopen_if_branch_drifted().await;
+        match cg.get_stats().await {
+            Ok(stats) => {
+                let mut output = serde_json::to_value(&stats).unwrap_or(json!({}));
+                output["branch_diagnostics"] =
+                    serde_json::to_value(cg.branch_diagnostics()).unwrap_or(json!({}));
+                let text = serde_json::to_string_pretty(&output).unwrap_or_default();
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "contents": [{
+                            "uri": "tracedecay://status",
+                            "mimeType": "application/json",
+                            "text": text
+                        }]
+                    }),
+                )
+            }
+            Err(e) => JsonRpcResponse::error(
+                id,
+                ErrorCode::InternalError,
+                format!("failed to read graph stats: {e}"),
+            ),
+        }
+    }
+
+    /// Returns the file list as a text resource (grouped by directory).
+    pub(crate) async fn read_resource_files(&self, id: Value) -> JsonRpcResponse {
+        match self.cg_snapshot().await.get_all_files().await {
+            Ok(mut files) => {
+                files.sort_by(|a, b| a.path.cmp(&b.path));
+                let mut groups: std::collections::BTreeMap<String, Vec<String>> =
+                    std::collections::BTreeMap::new();
+                for f in &files {
+                    let dir = f.path.rfind('/').map_or(".", |i| &f.path[..i]).to_string();
+                    let name = f
+                        .path
+                        .rfind('/')
+                        .map_or(f.path.as_str(), |i| &f.path[i + 1..]);
+                    groups
+                        .entry(dir)
+                        .or_default()
+                        .push(format!("{} ({} symbols)", name, f.node_count));
+                }
+                let mut lines = Vec::new();
+                lines.push(format!("{} indexed files", files.len()));
+                for (dir, entries) in &groups {
+                    lines.push(format!("\n{}/ ({} files)", dir, entries.len()));
+                    for entry in entries {
+                        lines.push(format!("  {entry}"));
+                    }
+                }
+                let text = lines.join("\n");
+                JsonRpcResponse::success(
+                    id,
+                    json!({
+                        "contents": [{
+                            "uri": "tracedecay://files",
+                            "mimeType": "text/plain",
+                            "text": text
+                        }]
+                    }),
+                )
+            }
+            Err(e) => JsonRpcResponse::error(
+                id,
+                ErrorCode::InternalError,
+                format!("failed to read file list: {e}"),
+            ),
+        }
+    }
+
+    /// Returns a high-level project overview as a text resource.
+    pub(crate) async fn read_resource_overview(&self, id: Value) -> JsonRpcResponse {
+        let cg = self.cg_snapshot().await;
+        let stats = match cg.get_stats().await {
+            Ok(s) => s,
+            Err(e) => {
+                return JsonRpcResponse::error(
+                    id,
+                    ErrorCode::InternalError,
+                    format!("failed to read graph stats: {e}"),
+                );
+            }
+        };
+
+        let mut lines = Vec::new();
+        lines.push(format!("Project: {}", cg.project_root().display()));
+        lines.push(format!(
+            "Graph: {} nodes, {} edges, {} files",
+            stats.node_count, stats.edge_count, stats.file_count
+        ));
+
+        // Language distribution
+        if !stats.files_by_language.is_empty() {
+            lines.push("\nLanguages:".to_string());
+            let mut langs: Vec<_> = stats.files_by_language.iter().collect();
+            langs.sort_by(|a, b| b.1.cmp(a.1));
+            for (lang, count) in &langs {
+                lines.push(format!("  {lang} ({count} files)"));
+            }
+        }
+
+        // Node kind distribution (top 10)
+        if !stats.nodes_by_kind.is_empty() {
+            lines.push("\nSymbol kinds:".to_string());
+            let mut kinds: Vec<_> = stats.nodes_by_kind.iter().collect();
+            kinds.sort_by(|a, b| b.1.cmp(a.1));
+            for (kind, count) in kinds.iter().take(10) {
+                lines.push(format!("  {kind} ({count})"));
+            }
+        }
+
+        let text = lines.join("\n");
+        JsonRpcResponse::success(
+            id,
+            json!({
+                "contents": [{
+                    "uri": "tracedecay://overview",
+                    "mimeType": "text/plain",
+                    "text": text
+                }]
+            }),
+        )
+    }
+
+    pub(crate) async fn read_resource_branches(&self, id: Value) -> JsonRpcResponse {
+        let cg = self.cg_snapshot().await;
+        let tracedecay_dir = &cg.store_layout().data_root;
+        let current = cg.active_branch();
+
+        let branches: Vec<Value> = match crate::branch_meta::load_branch_meta(tracedecay_dir) {
+            Some(meta) => meta
+                .branches
+                .iter()
+                .map(|(name, entry)| {
+                    let db_path = tracedecay_dir.join(&entry.db_file);
+                    let size_bytes = db_path.metadata().map_or(0, |m| m.len());
+                    json!({
+                        "name": name,
+                        "db_file": entry.db_file,
+                        "parent": entry.parent,
+                        "size_bytes": size_bytes,
+                        "last_synced_at": entry.last_synced_at,
+                        "is_current": current == Some(name.as_str()),
+                        "is_default": name == &meta.default_branch,
+                    })
+                })
+                .collect(),
+            None => vec![],
+        };
+
+        let output = json!({
+            "branch_count": branches.len(),
+            "branches": branches,
+        });
+        let text = serde_json::to_string_pretty(&output).unwrap_or_default();
+        JsonRpcResponse::success(
+            id,
+            json!({
+                "contents": [{
+                    "uri": "tracedecay://branches",
+                    "mimeType": "application/json",
+                    "text": text
+                }]
+            }),
+        )
+    }
+
+    /// Handles the `tools/call` method, dispatching to the appropriate tool handler.
+    pub(crate) async fn handle_tools_call(
+        &self,
+        id: Value,
+        params: Option<&Value>,
+        timings_enabled: bool,
+        route_cache: &HookProjectRouteCache,
+        implicit_project_path: Option<&Path>,
+        memory_request_scope: &str,
+    ) -> JsonRpcResponse {
+        let Some(params) = params else {
+            return JsonRpcResponse::error(
+                id,
+                ErrorCode::InvalidParams,
+                "missing params for tools/call".to_string(),
+            );
+        };
+
+        let Some(tool_name) = params.get("name").and_then(|v| v.as_str()) else {
+            return JsonRpcResponse::error(
+                id,
+                ErrorCode::InvalidParams,
+                "missing 'name' in tools/call params".to_string(),
+            );
+        };
+
+        let mut arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+        if crate::mcp::project_route::protect_tool_structural_ids(&mut arguments).is_err() {
+            return JsonRpcResponse::error(
+                id,
+                ErrorCode::InvalidParams,
+                "invalid structural identifier".to_string(),
+            );
+        }
+        let analytics_arguments = arguments.clone();
+        let analytics_session_id = mcp_analytics_session_id(&arguments);
+
+        // Branch-drift hot-swap: if the working tree switched branches since
+        // the served instance opened, reopen onto the live branch's DB so
+        // this call reads the right index. Cheap no-op check when no drift.
+        let cg = self.reopen_if_branch_drifted().await;
+
+        // Notification-free freshness is useful before tools that edit source
+        // files in the index. Read-only graph queries should not block behind
+        // a full project walk; on very large indexes (especially when
+        // node_modules was intentionally included) that turns diagnostics and
+        // search into sync operations.
+        if needs_lazy_sync_before_dispatch(tool_name) {
+            self.maybe_sync_if_stale().await;
+        } else {
+            // D4: sync-on-read (never blocking). Read tools serve the current
+            // answer IMMEDIATELY and, when the read-refresh cooldown has
+            // elapsed, kick a single-flighted background refresh so the *next*
+            // read sees fresh data. This heals read-only sessions that never
+            // touch an edit tool without ever making a query wait behind a
+            // project walk.
+            self.maybe_spawn_read_refresh(&cg);
+        }
+
+        self.stats.tool_calls.fetch_add(1, Ordering::Relaxed);
+        eprintln!("[tracedecay] tool call: {tool_name}");
+        if let Ok(mut counts) = self.tool_call_counts.lock() {
+            *counts.entry(tool_name.to_string()).or_insert(0) += 1;
+        }
+
+        let server_stats = if tool_name == "tracedecay_status" {
+            Some(self.server_stats_json().await)
+        } else {
+            None
+        };
+
+        let timings_active =
+            timings_enabled && crate::config::load_telemetry_config(cg.project_root()).timings;
+        let handler_start = if timings_active {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        let mut handler_arguments = route_cache.apply_to_tool_arguments(tool_name, arguments);
+        if crate::analytics::is_skill_view_tool(tool_name)
+            && let Some(request_id) = json_rpc_request_id_string(&id)
+            && let Some(map) = handler_arguments.as_object_mut()
+        {
+            map.insert("__mcp_request_id".to_string(), json!(request_id));
+        }
+        inject_trusted_memory_request_id(
+            tool_name,
+            &id,
+            memory_request_scope,
+            &mut handler_arguments,
+        );
+
+        let dispatch_outcome = Box::pin(handle_tool_call_with_registry_and_implicit_project(
+            &cg,
+            tool_name,
+            handler_arguments,
+            server_stats,
+            self.scope_prefix(),
+            ToolCallRegistryOptions {
+                global_db: self.registry_db.as_deref(),
+                profile_root: self.profile_root.as_deref(),
+                allow_default_registry_fallback: self.allow_default_registry_fallback,
+                implicit_project_path,
+                automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
+                automation_writer: self.dashboard_automation_writer.clone(),
+                diagnostics_cache: Some(&self.diagnostics_cache),
+                diagnostics_lsp: Some(&self.diagnostics_lsp),
+                session_authorities: crate::mcp::tools::SessionAuthorities::new(
+                    self.session_db.as_ref(),
+                    self.user_session_db.as_ref(),
+                )
+                .with_refresh_services(
+                    self.project_session_refresh_service.as_deref(),
+                    self.user_session_refresh_service.as_deref(),
+                )
+                .with_retrieval_services(
+                    self.project_session_retrieval_service.as_deref(),
+                    self.user_session_retrieval_service.as_deref(),
+                ),
+            },
+        ))
+        .await;
+        let handler_elapsed_us = handler_start.map(|t| t.elapsed().as_micros() as u64);
+        let request_id = id.clone();
+        match dispatch_outcome {
+            Ok(mut result) => {
+                if let Some(us) = handler_elapsed_us {
+                    let obj = result.value.as_object_mut();
+                    if let Some(map) = obj {
+                        let meta = map.entry("_meta").or_insert_with(|| json!({}));
+                        if let Some(meta_obj) = meta.as_object_mut() {
+                            meta_obj.insert("duration_us".to_string(), json!(us));
+                        }
+                    }
+                }
+                // Estimate approximate token count of the graph response
+                // ("after"), before any banners/metrics lines are appended.
+                let response_tokens: u64 = result
+                    .value
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .map_or(0, |arr| {
+                        let total_chars: usize = arr
+                            .iter()
+                            .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                            .map(str::len)
+                            .sum();
+                        (total_chars / 4) as u64
+                    });
+
+                // "Before" counterfactual: reading every referenced file raw,
+                // in full. Counters credit only the net saving per call —
+                // before minus what this response actually delivered.
+                let raw_file_tokens = self.estimate_raw_file_tokens(&result.touched_files);
+                let net_saved_tokens = raw_file_tokens.saturating_sub(response_tokens);
+                self.persist_saved_tokens(net_saved_tokens).await;
+                crate::monitor::write_entry(
+                    cg.project_root(),
+                    "tracedecay",
+                    tool_name,
+                    net_saved_tokens,
+                    raw_file_tokens,
+                );
+                self.maybe_flush_worldwide().await;
+
+                // Append per-call token savings to the response content.
+                if raw_file_tokens > 0
+                    && let Some(content) = result
+                        .value
+                        .get_mut("content")
+                        .and_then(|c| c.as_array_mut())
+                {
+                    content.push(json!({"type": "text", "text": format!(
+                        "\ntracedecay_metrics: before={raw_file_tokens} after={response_tokens}"
+                    )}));
+                }
+                let analytics_outcome = if tool_result_has_semantic_error(&result) {
+                    "error"
+                } else {
+                    "success"
+                };
+
+                // Persist to the cross-project savings ledger (best-effort, non-blocking).
+                // Clone the Arc — no new connection is opened. The counters
+                // and notify make the write's completion observable to
+                // [`Self::ledger_writes_settled`] without making it awaited
+                // anywhere on the request path.
+                if let Some(gdb) = self.global_db.clone() {
+                    let project_path_str = GlobalDb::canonical_project_key(cg.project_root());
+                    let tool_name_owned = tool_name.to_string();
+                    let ts = crate::tracedecay::current_timestamp();
+                    let client_name = self.client_name();
+                    let failure_reason = (analytics_outcome == "error")
+                        .then(|| semantic_failure_reason(&result))
+                        .flatten();
+                    let analytics_event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
+                        project_root: cg.project_root(),
+                        session_id: analytics_session_id.clone(),
+                        tool_name,
+                        outcome: analytics_outcome,
+                        raw_file_tokens,
+                        response_tokens,
+                        net_saved_tokens,
+                        duration_us: handler_elapsed_us,
+                        timestamp: ts,
+                        request_id: &request_id,
+                        arguments: &analytics_arguments,
+                        internal_analytics: result.internal_analytics(),
+                        client_name: client_name.as_deref(),
+                        mcp_instance_id: Some(self.mcp_instance_id.as_str()),
+                        failure_reason: failure_reason.as_deref(),
+                    });
+                    self.spawn_observed_ledger_write(async move {
+                        gdb.record_savings(
+                            &project_path_str,
+                            &tool_name_owned,
+                            raw_file_tokens,
+                            response_tokens,
+                            ts,
+                        )
+                        .await;
+                        if let Err(e) = gdb.append_analytics_event(&analytics_event).await {
+                            eprintln!("[tracedecay] analytics_events insert failed: {e}");
+                        }
+                    });
+                }
+
+                // Prepend version-update warning + queue logging notification.
+                if let Some(warning) = self.check_version_update().await {
+                    if let Some(content) = result
+                        .value
+                        .get_mut("content")
+                        .and_then(|c| c.as_array_mut())
+                    {
+                        content.insert(0, json!({"type": "text", "text": &warning}));
+                    }
+                    if let Ok(mut pending) = self.pending_notifications.lock() {
+                        pending.push(json!({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/message",
+                            "params": {
+                                "level": "warning",
+                                "logger": "tracedecay",
+                                "data": warning
+                            }
+                        }));
+                    }
+                }
+
+                // Staged-automation nudge (Hermes parity R5): when automation
+                // runs have queued skill drafts for review, append a one-line
+                // notice so the approval queue doesn't grow silently. Fact
+                // proposal counts stay telemetry-only in `staged_notice`.
+                if let Some(notice) = self.maybe_automation_staged_notice(&cg).await
+                    && let Some(content) = result
+                        .value
+                        .get_mut("content")
+                        .and_then(|c| c.as_array_mut())
+                {
+                    content.push(json!({"type": "text", "text": format!("\n{notice}")}));
+                }
+
+                // Per-file staleness banner (#428 design): files this response
+                // referenced that are still pending after the in-line sync
+                // attempt get a focused banner naming them with edit ages,
+                // telling the agent to Read THOSE files directly while
+                // treating the rest of the response as authoritative.
+                // Replaces the previous all-or-nothing "STALE INDEX"
+                // warning that made agents distrust the entire answer.
+                if !result.touched_files.is_empty() {
+                    let stale_files = cg.check_file_staleness(&result.touched_files).await;
+                    if !stale_files.is_empty() {
+                        let still_stale = match cg.sync_if_stale(&stale_files).await {
+                            Ok(false) => false,        // sync completed; files now fresh
+                            Ok(true) | Err(_) => true, // still stale (lock contention / sync error)
+                        };
+                        if still_stale {
+                            let banner =
+                                format_per_file_staleness_banner(cg.project_root(), &stale_files);
+                            // Machine-readable marker. Same shape as before
+                            // so existing scrapers keep working.
+                            let stale_json = serde_json::to_string(&stale_files)
+                                .unwrap_or_else(|_| "[]".to_string());
+                            let marker = format!("\ntracedecay_graph_stale: {stale_json}");
+                            debug_assert!(
+                                result.value.is_object(),
+                                "tool result must be a JSON object so graph_stale can be attached"
+                            );
+                            if let Some(obj) = result.value.as_object_mut() {
+                                obj.insert("graph_stale".to_string(), json!(stale_files));
+                            }
+                            if let Some(content) = result
+                                .value
+                                .get_mut("content")
+                                .and_then(|c| c.as_array_mut())
+                            {
+                                content.insert(0, json!({"type": "text", "text": &banner}));
+                                content.push(json!({"type": "text", "text": marker}));
+                            }
+                        }
+                    }
+                }
+
+                // Warn if serving from a fallback (ancestor) branch DB.
+                if let Some(warning) = cg.fallback_warning() {
+                    let warning = format!("WARNING: {warning}");
+                    if let Some(content) = result
+                        .value
+                        .get_mut("content")
+                        .and_then(|c| c.as_array_mut())
+                    {
+                        content.insert(0, json!({"type": "text", "text": &warning}));
+                    }
+                }
+
+                // Check overall index age (warn if older than 1 hour).
+                // Uses `last_sync_timestamp` (sync execution time) not the
+                // max file `indexed_at` — a no-change sync still updates the
+                // sync metadata even though no file gets a fresh `indexed_at`,
+                // so a per-file fallback fires the warning forever on quiet
+                // repos (#86).
+                //
+                // D7 staleness-warning UX: with auto-sync on (the normal
+                // case), a stale index self-heals — the D4 background refresh
+                // above was already kicked for this read. So instead of the
+                // old "Run `tracedecay sync`" nag, we emit an informational
+                // "refresh in progress" note (or nothing at all if a refresh
+                // just completed). The manual-sync instruction is reserved
+                // for the cases where auto-repair genuinely can't help:
+                //   - serving a read-only fallback/ancestor store, or
+                //   - the user disabled both auto_watch and read_refresh.
+                {
+                    let last_time = cg.last_sync_timestamp().await;
+                    let now = crate::tracedecay::current_timestamp();
+                    let age_secs = now - last_time;
+                    if last_time > 0 && age_secs > 3600 {
+                        let refreshed_recently = {
+                            let done = self.last_background_refresh_done_at.load(Ordering::Acquire);
+                            done > 0
+                                && now.saturating_sub(done)
+                                    < self.sync_config.read_cooldown_secs as i64
+                        };
+                        let banner = staleness_banner(StalenessBannerInputs {
+                            age_secs,
+                            // Auto-sync is "on" when either the daemon watcher
+                            // or sync-on-read can repair this.
+                            auto_sync_on: self.sync_config.auto_watch
+                                || self.sync_config.read_refresh,
+                            // A read-only fallback store can never be written,
+                            // so no background refresh can heal it.
+                            fallback_store: cg.fallback_warning().is_some(),
+                            refresh_running: self
+                                .background_refresh_running
+                                .load(Ordering::Acquire),
+                            refreshed_recently,
+                        });
+
+                        if let Some(banner) = banner
+                            && let Some(content) = result
+                                .value
+                                .get_mut("content")
+                                .and_then(|c| c.as_array_mut())
+                        {
+                            content.insert(0, json!({"type": "text", "text": &banner}));
+                        }
+                    }
+                }
+
+                // Borrowed-worktree heads-up (#312). Inserted LAST so it
+                // appears FIRST in the response — the index serving the
+                // wrong branch is the most serious of these warnings to
+                // surface to the agent.
+                if let Some(ref m) = self.worktree_mismatch {
+                    let notice = crate::worktree::worktree_mismatch_notice(m);
+                    if let Some(content) = result
+                        .value
+                        .get_mut("content")
+                        .and_then(|c| c.as_array_mut())
+                    {
+                        content.insert(0, json!({"type": "text", "text": notice}));
+                    }
+                }
+
+                mark_semantic_tool_error(&mut result);
+                JsonRpcResponse::success(id, result.value)
+            }
+            Err(e) => {
+                self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
+                    project_root: cg.project_root(),
+                    session_id: analytics_session_id,
+                    tool_name,
+                    request_id: &request_id,
+                    arguments: &analytics_arguments,
+                    duration_us: handler_elapsed_us,
+                    error: &e,
+                });
+                tool_error_response(id, tool_name, &e)
+            }
+        }
+    }
+}

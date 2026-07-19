@@ -1,0 +1,636 @@
+use super::evidence::{
+    AutomationEvidenceFilters, AutomationTemporalEvidence, AutomationTemporalEvidenceItem,
+    SESSION_REPLAY_HEAD_TURNS, SESSION_REPLAY_SUMMARY_NODES, SESSION_REPLAY_TAIL_TURNS,
+    find_i64_field_in_json, find_string_field_in_json,
+};
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use tracedecay_domain::{
+    ActorId, PayloadReferenceV1, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
+    TemporalCoverageCountsV1, TemporalModeV1, WorktreeId,
+};
+
+use crate::application::context::{
+    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
+    PolicyDigest, ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedGitRoute,
+    ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+};
+use crate::application::session::{
+    AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
+    SessionFreshnessPolicy, SessionRetrievalConfiguration, SessionRetrievalOutcome,
+    SessionRetrievalScope, SessionRetrievalService, SessionScopeAuthorizationRequest,
+    SessionScopeAuthorizer, SessionTemporalExecutionPort, SessionTemporalQuery,
+};
+use crate::errors::{Result, TraceDecayError};
+use crate::global_db::{GlobalDb, GlobalDbSessionTemporalExecution, ProjectRegistryContext};
+use crate::query::temporal::TemporalKernelResult;
+use crate::query::temporal::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
+use crate::query::temporal::ranking::DiversityLimits;
+use crate::sessions::lcm::LcmScope;
+use crate::sessions::user_sessions_db_path;
+use crate::tracedecay::TraceDecay;
+
+pub(super) const AUTOMATION_SESSION_MAX_BYTES: u64 = 2 * 1024 * 1024;
+const AUTOMATION_SESSION_MAX_RESULTS: u64 = 128;
+const AUTOMATION_SESSION_MAX_WORK_UNITS: u64 = 100_000;
+const AUTOMATION_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+const AUTOMATION_RETRIEVAL_OPEN_TIMEOUT: Duration = Duration::from_secs(2);
+const AUTOMATION_SESSION_ESTIMATOR_VERSION: &str = "automation-words-v1";
+const AUTOMATION_SESSION_ACTOR_ID: &str = "automation.session-evidence";
+const AUTOMATION_SESSION_SCHEMA_VERSION: u32 = 1;
+const AUTOMATION_SESSION_RANKING_VERSION: u32 = 1;
+#[doc(hidden)]
+pub enum AutomationTemporalRetrieval {
+    Complete(AutomationTemporalEvidence),
+    CompleteZero,
+    Rejected(&'static str),
+}
+
+pub type AutomationSessionRetrievalFuture<'a> =
+    Pin<Box<dyn Future<Output = AutomationTemporalRetrieval> + Send + 'a>>;
+
+/// Authorized retrieval dependency supplied by the automation composition root.
+///
+/// Implementations own the request context and grant authority. The runner only
+/// supplies a bounded forensic query and serializes complete results.
+pub trait AutomationSessionRetrieval: Send + Sync {
+    fn anchor_session_id(&self) -> &SessionId;
+
+    fn retrieve<'a>(&'a self, query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'a>;
+}
+
+impl<'a, A, P, E> AuthorizedAutomationSessionRetrieval<'a, A, P, E> {
+    pub fn new(
+        service: &'a SessionRetrievalService<A, P, E>,
+        context: &'a RequestContext,
+        anchor_session_id: SessionId,
+    ) -> Self {
+        Self {
+            service,
+            context,
+            anchor_session_id,
+        }
+    }
+}
+
+impl<A, P, E> AutomationSessionRetrieval for AuthorizedAutomationSessionRetrieval<'_, A, P, E>
+where
+    A: SessionScopeAuthorizer + Send + Sync,
+    P: SessionTemporalExecutionPort + Send + Sync,
+    E: VersionedTokenEstimator + Send + Sync,
+{
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve<'a>(&'a self, query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'a> {
+        Box::pin(async move {
+            accept_automation_temporal_outcome(self.service.retrieve(self.context, query).await)
+        })
+    }
+}
+
+/// Adapter for an already-authorized application retrieval service.
+pub struct AuthorizedAutomationSessionRetrieval<'a, A, P, E> {
+    service: &'a SessionRetrievalService<A, P, E>,
+    context: &'a RequestContext,
+    anchor_session_id: SessionId,
+}
+
+#[derive(Clone, Copy)]
+enum AutomationRetrievalStoreScope {
+    Project,
+    Profile,
+}
+
+struct ProductionAutomationSessionRetrieval {
+    database: Arc<GlobalDb>,
+    identity: ResolvedSessionIdentity,
+    anchor_session_id: SessionId,
+    store_scope: AutomationRetrievalStoreScope,
+}
+
+struct UnavailableAutomationSessionRetrieval {
+    anchor_session_id: SessionId,
+    reason: &'static str,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct AutomationWordEstimator;
+
+impl VersionedTokenEstimator for AutomationWordEstimator {
+    fn version(&self) -> &str {
+        AUTOMATION_SESSION_ESTIMATOR_VERSION
+    }
+
+    fn token_policy(&self) -> TokenPolicy {
+        TokenPolicy::Whitespace
+    }
+}
+
+struct ProductionAutomationSessionAuthorizer {
+    identity: ResolvedSessionIdentity,
+    anchor_session_id: SessionId,
+    retrieval_scope: SessionRetrievalScope,
+    provider: Option<String>,
+    grant_id: &'static str,
+}
+
+impl SessionScopeAuthorizer for ProductionAutomationSessionAuthorizer {
+    fn authorize(
+        &self,
+        context: &RequestContext,
+        request: &SessionScopeAuthorizationRequest,
+    ) -> std::result::Result<SessionAuthorizationGrant, SessionAuthorizationError> {
+        if context.actor_id().as_str() != AUTOMATION_SESSION_ACTOR_ID
+            || request.actor_id() != context.actor_id()
+            || context.identity() != &self.identity
+            || request.identity() != &self.identity
+        {
+            return Err(SessionAuthorizationError::WrongContext);
+        }
+        if request.session_id() != &self.anchor_session_id
+            || request.retrieval_scope() != &self.retrieval_scope
+            || request.provider_scope() != self.provider.as_deref()
+            || request.temporal_mode() != TemporalModeV1::Forensic
+            || request.grain() != RetrievalGrainV1::LogicalMessage
+            || request.access() != SessionAccess::Hydrate
+        {
+            return Err(SessionAuthorizationError::WrongScope);
+        }
+        SessionAuthorizationGrant::issue(
+            AuthorizationGrantId::new(self.grant_id)?,
+            1,
+            context,
+            request,
+        )
+    }
+}
+
+impl ProductionAutomationSessionRetrieval {
+    fn request_context(&self, provider: Option<&str>) -> Option<RequestContext> {
+        Some(RequestContext::new(
+            ActorId::new(AUTOMATION_SESSION_ACTOR_ID).ok()?,
+            RequestId::new(AUTOMATION_SESSION_ACTOR_ID).ok()?,
+            self.identity.clone(),
+            CapabilityDigest::new(automation_session_digest(
+                b"tracedecay.automation.session.capability.v1\0",
+                &self.identity,
+                provider,
+            )),
+            PolicyDigest::new(automation_session_policy_digest()?),
+            ConfigurationDigest::new(automation_session_digest(
+                b"tracedecay.automation.session.configuration.v1\0",
+                &self.identity,
+                None,
+            )),
+            MonotonicDeadline::at(Instant::now() + AUTOMATION_SESSION_TIMEOUT),
+            CancellationToken::new(),
+            RequestBudgets::new(
+                AUTOMATION_SESSION_MAX_RESULTS,
+                AUTOMATION_SESSION_MAX_BYTES,
+                AUTOMATION_SESSION_MAX_WORK_UNITS,
+            )
+            .ok()?,
+        ))
+    }
+}
+
+impl AutomationSessionRetrieval for ProductionAutomationSessionRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve<'a>(&'a self, query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'a> {
+        Box::pin(async move {
+            let Some(context) = self.request_context(query.provider()) else {
+                return AutomationTemporalRetrieval::Rejected("session_evidence_unavailable");
+            };
+            let configuration = match SessionRetrievalConfiguration::new(
+                AUTOMATION_SESSION_SCHEMA_VERSION,
+                AUTOMATION_SESSION_RANKING_VERSION,
+            ) {
+                Ok(configuration) => configuration,
+                Err(_) => {
+                    return AutomationTemporalRetrieval::Rejected("session_evidence_unavailable");
+                }
+            };
+            let grant_id = match self.store_scope {
+                AutomationRetrievalStoreScope::Project => {
+                    "grant.automation.session-evidence.project"
+                }
+                AutomationRetrievalStoreScope::Profile => {
+                    "grant.automation.session-evidence.profile"
+                }
+            };
+            let service = SessionRetrievalService::new(
+                ProductionAutomationSessionAuthorizer {
+                    identity: self.identity.clone(),
+                    anchor_session_id: query.session_id().clone(),
+                    retrieval_scope: query.retrieval_scope().clone(),
+                    provider: query.provider().map(str::to_owned),
+                    grant_id,
+                },
+                GlobalDbSessionTemporalExecution::new(self.database.as_ref()),
+                AutomationWordEstimator,
+                configuration,
+            );
+            accept_automation_temporal_outcome(service.retrieve(&context, query).await)
+        })
+    }
+}
+
+impl AutomationSessionRetrieval for UnavailableAutomationSessionRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        &self.anchor_session_id
+    }
+
+    fn retrieve<'a>(
+        &'a self,
+        _query: SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'a> {
+        Box::pin(async move { AutomationTemporalRetrieval::Rejected(self.reason) })
+    }
+}
+
+fn automation_session_digest(
+    domain: &[u8],
+    identity: &ResolvedSessionIdentity,
+    provider: Option<&str>,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    digest.update(identity.profile_id().as_str().as_bytes());
+    if let Some(project_id) = identity.project_id() {
+        digest.update([0]);
+        digest.update(project_id.as_str().as_bytes());
+    }
+    digest.update([0]);
+    digest.update(identity.store_id().as_str().as_bytes());
+    digest.update([0]);
+    digest.update(identity.root_id().as_str().as_bytes());
+    if let Some(route) = identity.git_route() {
+        digest.update([0]);
+        digest.update(route.repository_id().as_str().as_bytes());
+        digest.update([0]);
+        digest.update(route.worktree_id().as_str().as_bytes());
+        digest.update([0]);
+        digest.update(route.branch_id().as_str().as_bytes());
+    }
+    if let Some(provider) = provider {
+        digest.update([0]);
+        digest.update(provider.as_bytes());
+    }
+    digest.finalize().into()
+}
+
+fn automation_session_policy_digest() -> Option<[u8; 32]> {
+    let encoded = PayloadReferenceV1::for_payload(&json!({
+        "domain": "tracedecay.observation-anchor.authorization.v1",
+        "authority": "observation-capture.v1",
+    }))
+    .ok()?;
+    let digest = encoded.digest().as_str().strip_prefix("sha256:")?;
+    hex::decode(digest).ok()?.try_into().ok()
+}
+
+pub(super) async fn retrieve_automation_session_evidence(
+    retrieval: &dyn AutomationSessionRetrieval,
+    query_text: &str,
+    scope: LcmScope,
+    filters: AutomationEvidenceFilters<'_>,
+) -> Result<AutomationTemporalRetrieval> {
+    let anchor_session_id = match filters.session_id {
+        Some(session_id) => {
+            SessionId::new(session_id.to_string()).map_err(|error| TraceDecayError::Config {
+                message: format!("invalid automation session anchor: {error}"),
+            })?
+        }
+        None => retrieval.anchor_session_id().clone(),
+    };
+    let retrieval_scope = if matches!(scope, LcmScope::Session) {
+        SessionRetrievalScope::Session(anchor_session_id.clone())
+    } else {
+        SessionRetrievalScope::AllSessionsInAuthorizedRoot
+    };
+    let provider = (filters.provider != "all").then(|| filters.provider.to_string());
+    let requested_limit = filters
+        .evidence_limit
+        .max(filters.recent_sessions_limit.clamp(1, 10).saturating_mul(
+            SESSION_REPLAY_HEAD_TURNS + SESSION_REPLAY_TAIL_TURNS + SESSION_REPLAY_SUMMARY_NODES,
+        ))
+        .clamp(1, 128);
+    let temporal_query = SessionTemporalQuery::new(
+        anchor_session_id,
+        provider,
+        query_text,
+        None,
+        TemporalModeV1::Forensic,
+        RetrievalGrainV1::LogicalMessage,
+        requested_limit,
+        DiversityLimits {
+            per_logical_message: 1,
+            per_turn: SESSION_REPLAY_HEAD_TURNS + SESSION_REPLAY_TAIL_TURNS,
+            per_session: SESSION_REPLAY_HEAD_TURNS
+                + SESSION_REPLAY_TAIL_TURNS
+                + SESSION_REPLAY_SUMMARY_NODES,
+            per_source: requested_limit,
+            per_evidence_role: requested_limit,
+        },
+        ContextBudget {
+            max_bytes: AUTOMATION_SESSION_MAX_BYTES,
+            max_tokens: AUTOMATION_SESSION_MAX_BYTES / 4,
+            estimator_version: AUTOMATION_SESSION_ESTIMATOR_VERSION.to_string(),
+        },
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("invalid automation session forensic query: {error}"),
+    })?
+    .with_retrieval_scope(retrieval_scope)
+    .with_freshness_policy(SessionFreshnessPolicy::RequireFresh);
+    Ok(retrieval.retrieve(temporal_query).await)
+}
+
+pub(super) fn accept_automation_temporal_outcome(
+    outcome: SessionRetrievalOutcome<TemporalKernelResult>,
+) -> AutomationTemporalRetrieval {
+    match outcome {
+        SessionRetrievalOutcome::Complete { items, freshness } => {
+            if !SessionFreshnessPolicy::RequireFresh.accepts(freshness) {
+                return AutomationTemporalRetrieval::Rejected("session_evidence_stale");
+            }
+            let mut evidence_items = Vec::new();
+            let mut coverage = TemporalCoverageCountsV1::default();
+            for item in items {
+                if !item.context.bundle.continuation_anchors.is_empty()
+                    || !item.context.bundle.omissions.is_empty()
+                    || !item.summary_omissions.is_empty()
+                    || item.next_cursor.is_some()
+                    || item.coverage.hidden != 0
+                    || item.coverage.unknown != 0
+                    || item.coverage.redacted != 0
+                    || item.context.bundle.coverage != item.coverage
+                {
+                    return AutomationTemporalRetrieval::Rejected("session_evidence_partial");
+                }
+                let payloads = authorized_temporal_payloads(&item.context.rendered);
+                if payloads.len() != item.ranked.len()
+                    || item.context.bundle.records.len() != item.ranked.len()
+                {
+                    return AutomationTemporalRetrieval::Rejected("session_evidence_partial");
+                }
+                coverage.visible = coverage.visible.saturating_add(item.coverage.visible);
+                for ranked in item.ranked {
+                    let snippet = payloads
+                        .get(ranked.anchor_id.as_str())
+                        .cloned()
+                        .unwrap_or_default();
+                    if snippet.is_empty() {
+                        return AutomationTemporalRetrieval::Rejected(
+                            "session_evidence_unavailable",
+                        );
+                    }
+                    let provider =
+                        find_string_field_in_json(&snippet, "provider").unwrap_or_default();
+                    let session_id = ranked.session.unwrap_or_default();
+                    if provider.is_empty() || session_id.is_empty() {
+                        return AutomationTemporalRetrieval::Rejected(
+                            "session_evidence_unavailable",
+                        );
+                    }
+                    evidence_items.push(AutomationTemporalEvidenceItem {
+                        anchor_id: ranked.anchor_id.to_string(),
+                        stable_id: ranked.stable_id,
+                        provider,
+                        session_id,
+                        message_id: ranked.logical_message,
+                        source_id: ranked.source,
+                        store_id: find_i64_field_in_json(&snippet, "store_id"),
+                        role: ranked.evidence_role,
+                        ordinal: find_i64_field_in_json(&snippet, "ordinal"),
+                        session_total_messages: find_i64_field_in_json(
+                            &snippet,
+                            "session_total_messages",
+                        )
+                        .and_then(|value| u64::try_from(value).ok()),
+                        knowledge_at_micros: ranked.knowledge_at_micros,
+                        normalized_score_micros: ranked.normalized_score_micros,
+                        snippet,
+                    });
+                }
+            }
+            let unique_visible = evidence_items
+                .iter()
+                .map(|item| item.anchor_id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len() as u64;
+            if unique_visible != coverage.visible {
+                return AutomationTemporalRetrieval::Rejected("session_evidence_partial");
+            }
+            if evidence_items.is_empty() {
+                AutomationTemporalRetrieval::CompleteZero
+            } else {
+                AutomationTemporalRetrieval::Complete(AutomationTemporalEvidence {
+                    items: evidence_items,
+                    coverage,
+                })
+            }
+        }
+        SessionRetrievalOutcome::CompleteZero { freshness } => {
+            if !SessionFreshnessPolicy::RequireFresh.accepts(freshness) {
+                AutomationTemporalRetrieval::Rejected("session_evidence_stale")
+            } else {
+                AutomationTemporalRetrieval::CompleteZero
+            }
+        }
+        SessionRetrievalOutcome::Stale { .. } => {
+            AutomationTemporalRetrieval::Rejected("session_evidence_stale")
+        }
+        SessionRetrievalOutcome::Partial { .. } => {
+            AutomationTemporalRetrieval::Rejected("session_evidence_partial")
+        }
+        SessionRetrievalOutcome::Denied | SessionRetrievalOutcome::WrongScope => {
+            AutomationTemporalRetrieval::Rejected("session_evidence_denied")
+        }
+        SessionRetrievalOutcome::Locked
+        | SessionRetrievalOutcome::Redacted
+        | SessionRetrievalOutcome::Deleted => {
+            AutomationTemporalRetrieval::Rejected("session_evidence_locked")
+        }
+        SessionRetrievalOutcome::Unavailable => {
+            AutomationTemporalRetrieval::Rejected("session_evidence_unavailable")
+        }
+        SessionRetrievalOutcome::BudgetExhausted => {
+            AutomationTemporalRetrieval::Rejected("session_evidence_budget_exhausted")
+        }
+        SessionRetrievalOutcome::Cancelled => {
+            AutomationTemporalRetrieval::Rejected("session_evidence_cancelled")
+        }
+    }
+}
+
+fn authorized_temporal_payloads(rendered: &str) -> BTreeMap<String, String> {
+    serde_json::from_str::<Value>(rendered)
+        .ok()
+        .and_then(|value| value.get("payloads").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|payload| {
+            let anchor = payload.get("anchor_id")?.as_str()?.to_string();
+            let data = payload.get("data")?.as_str()?.to_string();
+            Some((anchor, data))
+        })
+        .collect()
+}
+
+async fn active_automation_anchor(database: &GlobalDb) -> Option<SessionId> {
+    let snapshot = database.read_snapshot().await.ok()?;
+    let mut rows = snapshot
+        .query(
+            "SELECT session_id
+             FROM session_temporal_generations
+             WHERE state = 'active'
+             ORDER BY COALESCE(activated_at, created_at) DESC, session_id
+             LIMIT 1",
+            (),
+        )
+        .await
+        .ok()?;
+    let session_id = rows.next().await.ok()??.get::<String>(0).ok()?;
+    SessionId::new(session_id).ok()
+}
+
+fn project_automation_identity(
+    cg: &TraceDecay,
+    registry: &GlobalDb,
+    context: &ProjectRegistryContext,
+) -> Option<ResolvedSessionIdentity> {
+    let profile_root = registry.db_path().parent()?;
+    let serving_db = cg.db_path();
+    let mut selected = None;
+    for store in &context.stores {
+        for scope in &store.graph_scopes {
+            if scope.writable
+                && scope.project_id == context.project.project_id
+                && scope.store_id == store.store.store_id
+                && profile_root.join(&scope.db_relpath) == serving_db
+            {
+                if selected.is_some() {
+                    return None;
+                }
+                selected = Some((store.store.store_id.clone(), scope.graph_scope_id.clone()));
+            }
+        }
+    }
+    let (store_id, graph_scope_id) = selected?;
+    Some(ResolvedSessionIdentity::for_project(
+        ProfileId::new("profile.primary").ok()?,
+        ProjectId::new(context.project.project_id.clone()).ok()?,
+        SessionStoreId::new(store_id).ok()?,
+        SessionRootId::new(graph_scope_id.clone()).ok()?,
+        ResolvedGitRoute::new(
+            RepositoryId::new(context.project.git_common_dir.clone()?).ok()?,
+            WorktreeId::new(context.project.canonical_root.clone()).ok()?,
+            BranchId::new(graph_scope_id).ok()?,
+        ),
+    ))
+}
+
+fn profile_automation_identity() -> Option<ResolvedSessionIdentity> {
+    Some(ResolvedSessionIdentity::for_profile(
+        ProfileId::new("profile.primary").ok()?,
+        SessionStoreId::new("store.profile.primary").ok()?,
+        SessionRootId::new("root.profile.primary").ok()?,
+    ))
+}
+
+fn project_registry_db_path(cg: &TraceDecay) -> Option<PathBuf> {
+    cg.open_options()
+        .global_db_path
+        .or_else(crate::global_db::global_db_path)
+}
+
+pub(super) async fn production_project_automation_retrieval(
+    cg: &TraceDecay,
+) -> Box<dyn AutomationSessionRetrieval> {
+    match tokio::time::timeout(
+        AUTOMATION_RETRIEVAL_OPEN_TIMEOUT,
+        open_project_automation_retrieval(cg),
+    )
+    .await
+    {
+        Ok(Some(retrieval)) => retrieval,
+        Ok(None) | Err(_) => {
+            unavailable_automation_retrieval("session_evidence_retrieval_unavailable")
+        }
+    }
+}
+
+async fn open_project_automation_retrieval(
+    cg: &TraceDecay,
+) -> Option<Box<dyn AutomationSessionRetrieval>> {
+    let database = GlobalDb::open_read_only_at(&cg.store_layout().sessions_db_path).await?;
+    let registry_path = project_registry_db_path(cg)?;
+    let registry = GlobalDb::open_read_only_at(&registry_path).await?;
+    let project_id = cg.store_layout().identity.project_id.as_deref()?;
+    let context = registry.project_registry_context_by_id(project_id).await?;
+    let identity = project_automation_identity(cg, &registry, &context)?;
+    let database = Arc::new(database);
+    let anchor_session_id = active_automation_anchor(database.as_ref()).await?;
+    Some(Box::new(ProductionAutomationSessionRetrieval {
+        database,
+        identity,
+        anchor_session_id,
+        store_scope: AutomationRetrievalStoreScope::Project,
+    }))
+}
+
+fn unavailable_automation_retrieval(reason: &'static str) -> Box<dyn AutomationSessionRetrieval> {
+    // The static fallback session id is a fixed, valid identifier.
+    #[allow(clippy::expect_used)]
+    Box::new(UnavailableAutomationSessionRetrieval {
+        anchor_session_id: SessionId::new("session.automation.unavailable")
+            .expect("static automation session id is valid"),
+        reason,
+    })
+}
+
+pub(super) async fn production_user_automation_retrieval(
+    profile_root: &std::path::Path,
+) -> Box<dyn AutomationSessionRetrieval> {
+    match tokio::time::timeout(
+        AUTOMATION_RETRIEVAL_OPEN_TIMEOUT,
+        open_user_automation_retrieval(profile_root),
+    )
+    .await
+    {
+        Ok(Some(retrieval)) => retrieval,
+        Ok(None) | Err(_) => {
+            unavailable_automation_retrieval("session_evidence_retrieval_unavailable")
+        }
+    }
+}
+
+async fn open_user_automation_retrieval(
+    profile_root: &std::path::Path,
+) -> Option<Box<dyn AutomationSessionRetrieval>> {
+    let sessions_db_path = user_sessions_db_path(profile_root);
+    let database = GlobalDb::open_read_only_at(&sessions_db_path).await?;
+    let identity = profile_automation_identity()?;
+    let database = Arc::new(database);
+    let anchor_session_id = active_automation_anchor(database.as_ref()).await?;
+    Some(Box::new(ProductionAutomationSessionRetrieval {
+        database,
+        identity,
+        anchor_session_id,
+        store_scope: AutomationRetrievalStoreScope::Profile,
+    }))
+}

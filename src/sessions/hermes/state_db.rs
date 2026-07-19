@@ -1,0 +1,634 @@
+//! Bounded `state.db` access: schema probing, byte-capped page reads, and the
+//! per-source ingest drivers.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use rayon::prelude::*;
+use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1, ProjectId};
+
+use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use crate::global_db::GlobalDb;
+use crate::sessions::ingest_byte_budget::IngestByteBudget;
+use crate::sessions::shared::{ProjectRootMatcher, StoredCursor, TranscriptIngestStats};
+
+use super::coverage::{admit_rows, admit_rows_with_admission, sqlite_incarnation};
+use super::ingest::{HermesProfileSource, ProjectIngestDestination};
+use super::observation::{HermesProjectionMetadata, project_projection_metadata};
+use super::routing::{
+    turn_project_locations, turn_project_locations_for_destinations, user_turn_locations,
+};
+use super::rows::{HermesPageRead, HermesRow, hermes_budget_bytes, hermes_page_row_charge};
+use super::{CHUNK_ROWS, MAX_HERMES_IDENTITY_BYTES, MAX_HERMES_PAGE_BYTES, MAX_HERMES_VALUE_BYTES};
+
+/// Column names of the `messages` table — `active` (v12 rewind soft-delete)
+/// and `reasoning` arrived in later Hermes schema revisions, so the sweep
+/// probes before selecting to stay readable on legacy stores.
+pub(crate) async fn message_columns(
+    conn: &libsql::Connection,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    table_columns(conn, "messages").await
+}
+
+pub(crate) async fn table_columns(
+    conn: &libsql::Connection,
+    table: &str,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let mut out = std::collections::BTreeSet::new();
+    let query = format!("SELECT name FROM pragma_table_info('{table}')");
+    let mut rows = conn
+        .query(&query, ())
+        .await
+        .map_err(|_| "could not inspect Hermes SQLite schema".to_string())?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| "could not read Hermes SQLite schema".to_string())?
+    {
+        let name = row
+            .get::<String>(0)
+            .map_err(|_| "Hermes SQLite schema row is malformed".to_string())?;
+        out.insert(name);
+    }
+    if out.is_empty() {
+        return Err("Hermes SQLite authority is incomplete".to_string());
+    }
+    Ok(out)
+}
+
+fn sql_byte_len(expr: &str) -> String {
+    format!("length(CAST({expr} AS BLOB))")
+}
+
+/// Returns the column only when it is TEXT, within `max_bytes`, and the whole
+/// row fits the current cumulative page budget. Hostile BLOB/`zeroblob`
+/// values and rows deferred to the next page never appear in the result set.
+fn sql_bounded_text(expr: &str, max_bytes: usize, row_fits_budget: &str) -> String {
+    let byte_len = sql_byte_len(expr);
+    format!(
+        "CASE WHEN ({row_fits_budget}) AND typeof({expr}) = 'text' \
+              AND {byte_len} <= {max_bytes} THEN {expr} ELSE NULL END"
+    )
+}
+
+/// Returns only `SQLite`'s fixed-size numeric representations. `SQLite` columns
+/// are dynamically typed, so selecting a nominal REAL/INTEGER column directly
+/// could otherwise materialize an attacker-controlled TEXT/BLOB value.
+fn sql_bounded_number(expr: &str) -> String {
+    format!("CASE WHEN typeof({expr}) IN ('integer', 'real') THEN {expr} ELSE NULL END")
+}
+
+/// SQL UTF-8/blob byte charge without returning the value. Caps each column at
+/// `max_bytes + 1` so oversized/zeroblob sizes cannot inflate page accounting
+/// unboundedly while still signaling oversize.
+fn sql_capped_len(expr: &str, max_bytes: usize) -> String {
+    let cap = max_bytes.saturating_add(1);
+    let byte_len = sql_byte_len(expr);
+    format!(
+        "CASE
+            WHEN {expr} IS NULL THEN 0
+            WHEN typeof({expr}) IN ('text', 'blob') AND {byte_len} > {max_bytes} THEN {cap}
+            WHEN typeof({expr}) IN ('text', 'blob') THEN {byte_len}
+            WHEN typeof({expr}) IN ('integer', 'real') THEN length(CAST({expr} AS BLOB))
+            ELSE {cap}
+         END"
+    )
+}
+
+fn sql_value_oversized(expr: &str, max_bytes: usize) -> String {
+    let byte_len = sql_byte_len(expr);
+    format!(
+        "CASE
+            WHEN {expr} IS NULL THEN 0
+            WHEN typeof({expr}) = 'text' AND {byte_len} <= {max_bytes} THEN 0
+            ELSE 1
+         END"
+    )
+}
+
+pub(crate) fn select_new_messages_sql(
+    message_columns: &std::collections::BTreeSet<String>,
+    session_columns: &std::collections::BTreeSet<String>,
+) -> String {
+    let reasoning_raw = if message_columns.contains("reasoning") {
+        "m.reasoning"
+    } else {
+        "NULL"
+    };
+    let active_expr = if message_columns.contains("active") {
+        "m.active"
+    } else {
+        "1"
+    };
+    let session_cwd_raw = if session_columns.contains("cwd") {
+        "s.cwd"
+    } else {
+        "NULL"
+    };
+    let session_source_raw = if session_columns.contains("source") {
+        "s.source"
+    } else {
+        "NULL"
+    };
+    let session_title_raw = if session_columns.contains("title") {
+        "s.title"
+    } else {
+        "NULL"
+    };
+    let session_started_at = if session_columns.contains("started_at") {
+        "s.started_at"
+    } else {
+        "NULL"
+    };
+    let session_ended_at = if session_columns.contains("ended_at") {
+        "s.ended_at"
+    } else {
+        "NULL"
+    };
+    let id_max = MAX_HERMES_IDENTITY_BYTES;
+    let value_max = MAX_HERMES_VALUE_BYTES;
+    let measured = format!(
+        "{session_id_len} + {role_len} + {content_len} + {reasoning_len} + {tool_name_len} + {tool_calls_len} + {model_len} + {parent_len} + {cwd_len} + {source_len} + {title_len}",
+        session_id_len = sql_capped_len("m.session_id", id_max),
+        role_len = sql_capped_len("m.role", id_max),
+        content_len = sql_capped_len("m.content", value_max),
+        reasoning_len = sql_capped_len(reasoning_raw, value_max),
+        tool_name_len = sql_capped_len("m.tool_name", id_max),
+        tool_calls_len = sql_capped_len("m.tool_calls", value_max),
+        model_len = sql_capped_len("s.model", id_max),
+        parent_len = sql_capped_len("s.parent_session_id", id_max),
+        cwd_len = sql_capped_len(session_cwd_raw, value_max),
+        source_len = sql_capped_len(session_source_raw, id_max),
+        title_len = sql_capped_len(session_title_raw, value_max),
+    );
+    let oversized = format!(
+        "CASE WHEN ({session_id_os} + {role_os} + {content_os} + {reasoning_os} + {tool_name_os} + {tool_calls_os} + {model_os} + {parent_os} + {cwd_os} + {source_os} + {title_os}) > 0 THEN 1 ELSE 0 END",
+        session_id_os = sql_value_oversized("m.session_id", id_max),
+        role_os = sql_value_oversized("m.role", id_max),
+        content_os = sql_value_oversized("m.content", value_max),
+        reasoning_os = sql_value_oversized(reasoning_raw, value_max),
+        tool_name_os = sql_value_oversized("m.tool_name", id_max),
+        tool_calls_os = sql_value_oversized("m.tool_calls", value_max),
+        model_os = sql_value_oversized("s.model", id_max),
+        parent_os = sql_value_oversized("s.parent_session_id", id_max),
+        cwd_os = sql_value_oversized(session_cwd_raw, value_max),
+        source_os = sql_value_oversized(session_source_raw, id_max),
+        title_os = sql_value_oversized(session_title_raw, value_max),
+    );
+    let row_fits_budget = format!("({measured}) <= ?2");
+    let session_id = sql_bounded_text("m.session_id", id_max, &row_fits_budget);
+    let role = sql_bounded_text("m.role", id_max, &row_fits_budget);
+    let content = sql_bounded_text("m.content", value_max, &row_fits_budget);
+    let reasoning = sql_bounded_text(reasoning_raw, value_max, &row_fits_budget);
+    let tool_name = sql_bounded_text("m.tool_name", id_max, &row_fits_budget);
+    let tool_calls = sql_bounded_text("m.tool_calls", value_max, &row_fits_budget);
+    let model = sql_bounded_text("s.model", id_max, &row_fits_budget);
+    let parent_session_id = sql_bounded_text("s.parent_session_id", id_max, &row_fits_budget);
+    let session_cwd = sql_bounded_text(session_cwd_raw, value_max, &row_fits_budget);
+    let session_source = sql_bounded_text(session_source_raw, id_max, &row_fits_budget);
+    let session_title = sql_bounded_text(session_title_raw, value_max, &row_fits_budget);
+    let timestamp = sql_bounded_number("m.timestamp");
+    let session_started_at = sql_bounded_number(session_started_at);
+    let session_ended_at = sql_bounded_number(session_ended_at);
+    let input_tokens = sql_bounded_number("s.input_tokens");
+    let output_tokens = sql_bounded_number("s.output_tokens");
+    let cache_read_tokens = sql_bounded_number("s.cache_read_tokens");
+    let cache_write_tokens = sql_bounded_number("s.cache_write_tokens");
+    let reasoning_tokens = sql_bounded_number("s.reasoning_tokens");
+    let active = sql_bounded_number(active_expr);
+    let typed_oversized = format!(
+        "CASE WHEN ({oversized}) > 0 OR ({measured}) > {MAX_HERMES_PAGE_BYTES} \
+              THEN 1 ELSE 0 END"
+    );
+    format!(
+        "SELECT m.id,
+                {session_id},
+                {role},
+                {content},
+                {reasoning},
+                {tool_name},
+                {tool_calls},
+                {timestamp},
+                {model},
+                {parent_session_id},
+                {session_cwd},
+                {session_source},
+                {session_title},
+                {session_started_at},
+                {session_ended_at},
+                {input_tokens}, {output_tokens}, {cache_read_tokens}, {cache_write_tokens},
+                {reasoning_tokens}, {active},
+                CAST(({measured}) AS INTEGER) AS measured_bytes,
+                CAST(({typed_oversized}) AS INTEGER) AS value_oversized,
+                CAST(({row_fits_budget}) AS INTEGER) AS row_fits_budget
+         FROM messages m LEFT JOIN sessions s ON s.id = m.session_id
+         WHERE m.id > ?1
+         ORDER BY m.id
+         LIMIT 1"
+    )
+}
+
+/// Incrementally scans one Hermes `state.db`; each bounded page is admitted
+/// against its session-scoped authoritative SQLite-row cursor. The caller
+/// decides whether a source error is runtime noise or migration-blocking.
+pub(crate) async fn try_ingest_state_db(
+    db: &GlobalDb,
+    source: &HermesProfileSource,
+    project_root: &Path,
+    project_id: ProjectId,
+) -> Result<TranscriptIngestStats, String> {
+    let mut budget = IngestByteBudget::unbounded();
+    try_ingest_state_db_bounded(db, source, project_root, project_id, &mut budget).await
+}
+
+/// Opens a Hermes `state.db` read-only and derives everything a page sweep
+/// needs before its first read: the physical incarnation and the column-probed
+/// bounded SELECT.
+async fn open_state_source(
+    source: &HermesProfileSource,
+) -> Result<
+    (
+        libsql::Connection,
+        ObservationSourceGenerationV1,
+        u64,
+        u64,
+        String,
+    ),
+    String,
+> {
+    let state_db = &source.state_db;
+    let conn = open_read_only_strict(state_db).await?;
+    let (generation, file_identity, resume_fingerprint) = sqlite_incarnation(state_db)?;
+    let select_sql = select_new_messages_sql(
+        &message_columns(&conn).await?,
+        &table_columns(&conn, "sessions").await?,
+    );
+    Ok((
+        conn,
+        generation,
+        file_identity,
+        resume_fingerprint,
+        select_sql,
+    ))
+}
+
+/// Drives one single-destination bounded page sweep. Each page is truncated to
+/// the shared byte budget, routed by `route_page`, and admitted against the
+/// destination's authoritative SQLite-row cursor.
+#[allow(clippy::too_many_arguments)]
+async fn ingest_bounded_pages<F, R>(
+    admission: &HostAdmissionFacade<'_>,
+    conn: &libsql::Connection,
+    select_sql: &str,
+    scope: ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    file_identity: u64,
+    resume_fingerprint: u64,
+    budget: &mut IngestByteBudget,
+    mut route_page: F,
+) -> Result<TranscriptIngestStats, String>
+where
+    F: FnMut(&[HermesRow]) -> R,
+    R: Fn(&HermesRow) -> Option<HermesProjectionMetadata>,
+{
+    let mut read_cursor = StoredCursor::default();
+    let mut stats = TranscriptIngestStats::default();
+    loop {
+        let new = read_new_rows_strict(conn, select_sql, read_cursor).await?;
+        let row_count = new.items.len();
+        if row_count == 0 {
+            return Ok(stats);
+        }
+        let bounded_count = new
+            .items
+            .iter()
+            .take_while(|row| budget.try_consume(hermes_budget_bytes(row)))
+            .count();
+        if bounded_count == 0 {
+            return Ok(stats);
+        }
+        let bounded = &new.items[..bounded_count];
+        let route = route_page(bounded);
+        let admitted = admit_rows_with_admission(
+            admission,
+            bounded,
+            scope.clone(),
+            generation,
+            file_identity,
+            resume_fingerprint,
+            route,
+        )
+        .await?;
+        stats.messages_upserted = stats
+            .messages_upserted
+            .saturating_add(admitted.messages_upserted);
+        stats.sessions_upserted = stats
+            .sessions_upserted
+            .saturating_add(admitted.sessions_upserted);
+        read_cursor.position = bounded
+            .last()
+            .and_then(|row| u64::try_from(row.id).ok())
+            .unwrap_or(read_cursor.position);
+        if bounded_count < row_count {
+            return Ok(stats);
+        }
+        if new.truncated_by_byte_budget {
+            continue;
+        }
+        if row_count < CHUNK_ROWS {
+            return Ok(stats);
+        }
+    }
+}
+
+async fn try_ingest_state_db_bounded(
+    db: &GlobalDb,
+    source: &HermesProfileSource,
+    project_root: &Path,
+    project_id: ProjectId,
+    budget: &mut IngestByteBudget,
+) -> Result<TranscriptIngestStats, String> {
+    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+        db,
+        project_id.clone(),
+    ));
+    try_ingest_state_db_bounded_with_admission(source, project_root, project_id, &admission, budget)
+        .await
+}
+
+pub(crate) async fn try_ingest_state_db_bounded_with_admission(
+    source: &HermesProfileSource,
+    project_root: &Path,
+    project_id: ProjectId,
+    admission: &HostAdmissionFacade<'_>,
+    budget: &mut IngestByteBudget,
+) -> Result<TranscriptIngestStats, String> {
+    let (conn, generation, file_identity, resume_fingerprint, select_sql) =
+        open_state_source(source).await?;
+    let scope = ObservationScopeV1::Project { project_id };
+    ingest_bounded_pages(
+        admission,
+        &conn,
+        &select_sql,
+        scope,
+        generation,
+        file_identity,
+        resume_fingerprint,
+        budget,
+        |bounded| {
+            let locations = turn_project_locations(bounded, project_root, source);
+            move |row: &HermesRow| {
+                locations.get(&row.id).copied().map(|provenance| {
+                    project_projection_metadata(row, source, project_root, provenance)
+                })
+            }
+        },
+    )
+    .await
+}
+
+/// Shared-source equivalent of [`try_ingest_state_db`]. The `SQLite` page is read
+/// once, then each destination independently admits routed rows against its own
+/// authoritative observation cursor.
+pub(crate) async fn try_ingest_state_db_for_projects(
+    source: &HermesProfileSource,
+    destinations: &[ProjectIngestDestination<'_>],
+) -> Result<TranscriptIngestStats, String> {
+    let (conn, generation, file_identity, resume_fingerprint, select_sql) =
+        open_state_source(source).await?;
+    let scopes = destinations
+        .iter()
+        .map(|destination| ObservationScopeV1::Project {
+            project_id: destination.project_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    let destination_matchers = destinations
+        .par_iter()
+        .map(|destination| ProjectRootMatcher::new(destination.project_root))
+        .collect::<Vec<_>>();
+    let mut read_cursor = StoredCursor::default();
+    let mut stats = TranscriptIngestStats::default();
+    loop {
+        let new = read_new_rows_strict(&conn, &select_sql, read_cursor).await?;
+        let row_count = new.items.len();
+        if row_count == 0 {
+            return Ok(stats);
+        }
+        // Per-page route cache: avoid unbounded growth across many SQLite pages.
+        let mut destination_routes = HashMap::<PathBuf, Vec<usize>>::new();
+        let locations = turn_project_locations_for_destinations(
+            &new.items,
+            &destination_matchers,
+            source,
+            &mut destination_routes,
+        );
+        for (index, destination) in destinations.iter().enumerate() {
+            let admitted = admit_rows(
+                destination.db,
+                &new.items,
+                scopes[index].clone(),
+                generation,
+                file_identity,
+                resume_fingerprint,
+                |row| {
+                    locations[index]
+                        .by_row_id
+                        .get(&row.id)
+                        .copied()
+                        .map(|provenance| {
+                            project_projection_metadata(
+                                row,
+                                source,
+                                destination.project_root,
+                                provenance,
+                            )
+                        })
+                },
+            )
+            .await?;
+            stats.messages_upserted = stats
+                .messages_upserted
+                .saturating_add(admitted.messages_upserted);
+            stats.sessions_upserted = stats
+                .sessions_upserted
+                .saturating_add(admitted.sessions_upserted);
+        }
+        read_cursor.position = new.new_cursor.position;
+        if new.truncated_by_byte_budget {
+            continue;
+        }
+        if row_count < CHUNK_ROWS {
+            return Ok(stats);
+        }
+    }
+}
+
+pub(crate) async fn try_ingest_user_state_db_bounded(
+    db: &GlobalDb,
+    source: &HermesProfileSource,
+    _registered_roots: &[PathBuf],
+    budget: &mut IngestByteBudget,
+) -> Result<TranscriptIngestStats, String> {
+    let (conn, generation, file_identity, resume_fingerprint, select_sql) =
+        open_state_source(source).await?;
+    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(db));
+    ingest_bounded_pages(
+        &admission,
+        &conn,
+        &select_sql,
+        ObservationScopeV1::Profile,
+        generation,
+        file_identity,
+        resume_fingerprint,
+        budget,
+        |bounded| {
+            let locations = user_turn_locations(bounded, source);
+            let profile = source.profile.clone();
+            let fallback_provenance = source
+                .legacy_project_pin
+                .as_ref()
+                .map_or("session_cwd", |_| "profile_pin");
+            move |row: &HermesRow| {
+                locations
+                    .contains(&row.id)
+                    .then(|| HermesProjectionMetadata {
+                        project_path: None,
+                        location_path: None,
+                        profile: profile.clone(),
+                        location_provenance: Some(fallback_provenance),
+                    })
+            }
+        },
+    )
+    .await
+}
+
+/// Opens a Hermes `state.db` strictly read-only so the sweep can never write
+/// to (or create) another agent's live store.
+pub(crate) async fn open_read_only_strict(path: &Path) -> Result<libsql::Connection, String> {
+    let db = libsql::Builder::new_local(path)
+        .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .build()
+        .await
+        .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))?;
+    db.connect()
+        .map_err(|error| format!("could not connect to '{}': {error}", path.display()))
+}
+
+pub(crate) async fn read_new_rows_strict(
+    conn: &libsql::Connection,
+    select_sql: &str,
+    prev: StoredCursor,
+) -> Result<HermesPageRead, String> {
+    let mut items = Vec::new();
+    let mut max_rowid = prev.position;
+    let mut page_bytes = 0_u64;
+    let mut truncated_by_byte_budget = false;
+    while items.len() < CHUNK_ROWS {
+        let remaining = MAX_HERMES_PAGE_BYTES.saturating_sub(page_bytes);
+        let mut rows = conn
+            .query(
+                select_sql,
+                libsql::params![max_rowid as i64, remaining as i64],
+            )
+            .await
+            .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| format!("could not read legacy Hermes state row: {error}"))?;
+        let Some(row) = row else {
+            break;
+        };
+        let rowid = row
+            .get::<i64>(0)
+            .map_err(|error| format!("legacy Hermes state row has no id: {error}"))?;
+        // Columns 21..23 are SQL byte/typeof/budget aggregates — integers only.
+        let measured = row_i64_flag(&row, 21).max(0) as u64;
+        let charge = hermes_page_row_charge(measured);
+        let row_fits_budget = row_i64_flag(&row, 23) != 0;
+        if !row_fits_budget && !items.is_empty() {
+            // SQL returned NULL for every text payload in this row, so defer it
+            // without allocating the value that would cross the page budget.
+            truncated_by_byte_budget = true;
+            break;
+        }
+        let mapped = map_row(rowid, &row, measured)
+            .ok_or_else(|| format!("legacy Hermes state row {rowid} is malformed"))?;
+        page_bytes = page_bytes.saturating_add(charge);
+        max_rowid = max_rowid.max(rowid as u64);
+        items.push(mapped);
+        if page_bytes >= MAX_HERMES_PAGE_BYTES {
+            truncated_by_byte_budget = true;
+            break;
+        }
+    }
+    if items.len() >= CHUNK_ROWS {
+        truncated_by_byte_budget = true;
+    }
+    Ok(HermesPageRead {
+        items,
+        new_cursor: StoredCursor {
+            position: max_rowid,
+            mtime: 0,
+            file_id: 0,
+        },
+        truncated_by_byte_budget,
+    })
+}
+
+fn row_i64_flag(row: &libsql::Row, idx: i32) -> i64 {
+    row.get::<i64>(idx)
+        .or_else(|_| row.get::<Option<i64>>(idx).map(|value| value.unwrap_or(0)))
+        .or_else(|_| row.get::<f64>(idx).map(|value| value as i64))
+        .unwrap_or(0)
+}
+
+fn row_optional_f64(row: &libsql::Row, idx: i32) -> Option<f64> {
+    row.get::<Option<f64>>(idx).ok().flatten().or_else(|| {
+        row.get::<Option<i64>>(idx)
+            .ok()
+            .flatten()
+            .map(|value| value as f64)
+    })
+}
+
+fn map_row(rowid: i64, row: &libsql::Row, sql_measured_bytes: u64) -> Option<HermesRow> {
+    let sql_value_oversized = row_i64_flag(row, 22) != 0;
+    let session_id = match row.get::<Option<String>>(1).ok().flatten() {
+        Some(id) if !id.is_empty() => id,
+        // Rejected/oversized session_id never materializes the hostile value; use a
+        // deterministic cover identity so the row can advance without payload leakage.
+        _ if sql_value_oversized => format!("hermes.oversized.{rowid}"),
+        _ => return None,
+    };
+    Some(HermesRow {
+        id: rowid,
+        session_id,
+        role: row
+            .get::<Option<String>>(2)
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        content: row.get::<Option<String>>(3).ok().flatten(),
+        reasoning: row.get::<Option<String>>(4).ok().flatten(),
+        tool_name: row.get::<Option<String>>(5).ok().flatten(),
+        tool_calls: row.get::<Option<String>>(6).ok().flatten(),
+        timestamp: row_optional_f64(row, 7),
+        session_model: row.get::<Option<String>>(8).ok().flatten(),
+        parent_session_id: row.get::<Option<String>>(9).ok().flatten(),
+        session_cwd: row.get::<Option<String>>(10).ok().flatten(),
+        session_source: row.get::<Option<String>>(11).ok().flatten(),
+        session_title: row.get::<Option<String>>(12).ok().flatten(),
+        session_started_at: row_optional_f64(row, 13),
+        session_ended_at: row_optional_f64(row, 14),
+        session_input_tokens: row.get::<Option<i64>>(15).ok().flatten(),
+        session_output_tokens: row.get::<Option<i64>>(16).ok().flatten(),
+        session_cache_read_tokens: row.get::<Option<i64>>(17).ok().flatten(),
+        session_cache_write_tokens: row.get::<Option<i64>>(18).ok().flatten(),
+        session_reasoning_tokens: row.get::<Option<i64>>(19).ok().flatten(),
+        active: row.get::<Option<i64>>(20).ok().flatten().unwrap_or(1),
+        sql_value_oversized,
+        sql_measured_bytes,
+    })
+}

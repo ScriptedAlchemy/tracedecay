@@ -208,7 +208,7 @@ fn compatibility_filter_digest(filters: &SessionRetrievalFilters, goals: bool) -
     let mut roles = filters.roles.clone();
     roles.sort();
     roles.dedup();
-    let encoded = serde_json::to_vec(&json!({
+    let encoded = json!({
         "version": 1,
         "project_key": filters.project_key,
         "parent_session_id": filters.parent_session_id,
@@ -220,9 +220,9 @@ fn compatibility_filter_digest(filters: &SessionRetrievalFilters, goals: bool) -
         "git": filters.git_filter,
         "workflow": filters.workflow_scope,
         "goals": goals,
-    }))
-    .expect("compatibility filter bindings are serializable");
-    format!("sha256:{}", hex::encode(Sha256::digest(encoded)))
+    })
+    .to_string();
+    format!("sha256:{}", hex::encode(Sha256::digest(encoded.as_bytes())))
 }
 
 pub(crate) type SessionRetrievalServiceFuture<'a> =
@@ -811,22 +811,19 @@ fn retrieval_command(
     } else {
         SessionFreshnessPolicy::AllowStored
     });
-    Ok(SessionRetrievalCommand {
-        query,
-        filters: SessionRetrievalFilters {
-            project_key: request.project_key.map(str::to_string),
-            parent_session_id: request.parent_session_id.map(str::to_string),
-            scope: request.scope,
-            message_type: request.message_type,
-            roles: Vec::new(),
-            time_range: request.time_range,
-            git_filter: request.git_filter.clone(),
-            workflow_scope: request.workflow_scope.clone(),
-        },
-        goals: request.goals,
-        store_scope,
-        project_selector,
-    })
+    let filters = SessionRetrievalFilters {
+        project_key: request.project_key.map(str::to_string),
+        parent_session_id: request.parent_session_id.map(str::to_string),
+        scope: request.scope,
+        message_type: request.message_type,
+        roles: Vec::new(),
+        time_range: request.time_range,
+        git_filter: request.git_filter.clone(),
+        workflow_scope: request.workflow_scope.clone(),
+    };
+    let mut command = SessionRetrievalCommand::new(query, filters, request.goals, store_scope);
+    command.project_selector = project_selector;
+    Ok(command)
 }
 
 fn deferred_all_registered_payload(request: &MessageSearchRequest<'_>) -> Value {

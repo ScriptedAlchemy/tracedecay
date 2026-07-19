@@ -1616,7 +1616,7 @@ async fn write_migration_dispositions(
         let ordinal = i64::try_from(disposition_ordinal).map_err(|error| {
             db_message(
                 "write temporal migration disposition",
-                &format!("disposition ordinal overflow: {error}"),
+                format!("disposition ordinal overflow: {error}"),
             )
         })?;
         conn.execute(
@@ -1856,7 +1856,7 @@ async fn import_legacy_item(
     let output_ordinal = u32::try_from(item.output_ordinal).map_err(|error| {
         db_message(
             "import legacy temporal occurrence",
-            &format!("invalid projection output ordinal: {error}"),
+            format!("invalid projection output ordinal: {error}"),
         )
     })?;
     let occurrence_id = MessageOccurrenceIdV1::derive(

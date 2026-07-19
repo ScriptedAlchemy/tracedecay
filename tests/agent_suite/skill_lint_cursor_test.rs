@@ -95,9 +95,10 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
     }
 }
 
-/// `tracedecay_*` identifiers that are documented output artifacts, not MCP
-/// tools (skills tell agents to report the `tracedecay_metrics:` line).
-const NON_TOOL_IDENTIFIERS: &[&str] = &["tracedecay_metrics"];
+/// `tracedecay_*` identifiers that are documented output artifacts or tool-family
+/// globs, not single MCP tools (skills tell agents to report the
+/// `tracedecay_metrics:` line, and may reference the `tracedecay_lcm_*` family).
+const NON_TOOL_IDENTIFIERS: &[&str] = &["tracedecay_metrics", "tracedecay_lcm"];
 
 #[test]
 fn cursor_skill_references_resolve() {

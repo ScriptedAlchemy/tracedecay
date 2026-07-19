@@ -642,6 +642,7 @@ async fn dispatch_graph_tools(
 
 /// Dispatch project-info, registry, and file-inspection tools
 /// (`tracedecay_status`, `tracedecay_project_list`, `tracedecay_read`, ...).
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_info_tools(
     tool_name: &str,
     cg: &TraceDecay,

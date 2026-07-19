@@ -207,7 +207,9 @@ harness = false
 [[bench]]
 name = "session_temporal"
 harness = false
-test = true
+# The custom benchmark CLI is not a libtest harness and cannot answer the
+# `--list --format terse` probe used by `cargo test` and nextest.
+test = false
 
 [profile.bench]
 opt-level = 3

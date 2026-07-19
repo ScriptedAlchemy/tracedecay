@@ -1,0 +1,578 @@
+//! Server lifecycle maintenance: startup catch-up, staleness-driven
+//! sync-on-read, branch-drift reopen, and version-update checks.
+
+use super::*;
+
+/// Cache duration for version checks (15 minutes).
+const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
+
+/// Cached result of a latest-version check against GitHub releases.
+pub(crate) struct VersionCheckState {
+    pub(crate) latest: Option<String>,
+    pub(crate) checked_at: Option<Instant>,
+}
+
+/// Runs the project and user transcript portions of startup recovery against
+/// daemon-retained authorities. Project recovery is independent: a missing
+/// user or registry authority skips only the user sweep.
+fn log_startup_transcript_ingest_failure(
+    scope: &str,
+    failure: &crate::sessions::TranscriptCatchUpFailure,
+) {
+    let locator = failure.source_locator.map_or_else(String::new, |range| {
+        format!(
+            " source_offset={} source_end_offset={}",
+            range.start(),
+            range.end()
+        )
+    });
+    eprintln!(
+        "[tracedecay] startup {scope} transcript ingest incomplete: provider={} source={} reason_code={} retryable={}{}",
+        failure.provider, failure.source, failure.reason_code, failure.retryable, locator,
+    );
+}
+
+pub(super) async fn run_startup_session_catch_up(
+    session_db: Option<Arc<GlobalDb>>,
+    user_session_db: Option<Arc<GlobalDb>>,
+    registry_db: Option<Arc<GlobalDb>>,
+    project_root: &Path,
+    project_id: Option<&str>,
+) -> Option<Arc<GlobalDb>> {
+    let Some(db) = session_db else {
+        eprintln!(
+            "[tracedecay] startup project transcript ingest skipped: authoritative project session storage is unavailable for {}",
+            project_root.display()
+        );
+        return None;
+    };
+    let project_id = project_id.and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
+    let project_outcome = crate::sessions::ingest_project_sources_for_provider(
+        db.as_ref(),
+        project_root,
+        project_id,
+        None,
+        true,
+    )
+    .await;
+    for failure in &project_outcome.failures {
+        log_startup_transcript_ingest_failure("project", failure);
+    }
+    if let (Some(user_db), Some(registry_db)) = (user_session_db, registry_db) {
+        if let Some(profile_root) = user_db.db_path().parent() {
+            let outcome = crate::sessions::ingest_user_global_sources_for_startup_with_db(
+                user_db.as_ref(),
+                registry_db.as_ref(),
+                profile_root,
+            )
+            .await;
+            for failure in &outcome.failures {
+                log_startup_transcript_ingest_failure("user", failure);
+            }
+        } else {
+            eprintln!(
+                "[tracedecay] startup user transcript ingest skipped: authoritative user session storage has no profile root"
+            );
+        }
+    } else {
+        eprintln!(
+            "[tracedecay] startup user transcript ingest skipped: authoritative user session or registry storage is unavailable"
+        );
+    }
+    project_outcome.is_success().then_some(db)
+}
+
+impl McpServer {
+    /// Detects mid-session branch drift and reopens the served instance
+    /// onto the live branch's DB, returning the instance the caller should
+    /// use for this request.
+    ///
+    /// Fast path: one cheap `branch_drifted` check (gix HEAD read) on the
+    /// current snapshot. On drift, the write lock serializes the swap and
+    /// the drift check is repeated under it so concurrent calls reopen at
+    /// most once. If reopening fails the previous instance is kept — the
+    /// drift guards in [`TraceDecay::ensure_branch_writable`] and
+    /// [`Self::maybe_sync_if_stale`] still protect writes, exactly as
+    /// before this hot-swap existed.
+    pub(crate) async fn reopen_if_branch_drifted(&self) -> Arc<TraceDecay> {
+        let current = self.cg_snapshot().await;
+        if !current.branch_drifted() {
+            return current;
+        }
+        let snapshot = {
+            let mut guard = self.cg.write().await;
+            if !guard.branch_drifted() {
+                // A concurrent call already swapped (or the user switched back).
+                return guard.clone();
+            }
+            match guard.reopen_for_current_branch().await {
+                Ok(fresh) => {
+                    eprintln!(
+                        "[tracedecay] branch changed to '{}' — reopened the index for it",
+                        fresh.active_branch().unwrap_or("<detached>")
+                    );
+                    *guard = Arc::new(fresh);
+                    let fresh = guard.clone();
+                    if let Some(reconcile) = &self.database_owner_reconciler {
+                        reconcile(fresh.clone()).await;
+                    }
+                    fresh
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[tracedecay] branch drift detected but reopen failed: {e}; \
+                         continuing to serve branch '{}'",
+                        guard.serving_branch().unwrap_or("<none>")
+                    );
+                    return guard.clone();
+                }
+            }
+        };
+        // New branch DB ⇒ new file set; refresh the token accounting map.
+        self.refresh_file_token_map().await;
+        snapshot
+    }
+
+    pub(crate) async fn reopen_after_branch_tracking_added(&self) {
+        let reopened = {
+            let mut guard = self.cg.write().await;
+            match guard.reopen_for_current_branch().await {
+                Ok(fresh) => {
+                    eprintln!(
+                        "[tracedecay] branch tracking added for '{}' — reopened the index for it",
+                        fresh.active_branch().unwrap_or("<detached>")
+                    );
+                    *guard = Arc::new(fresh);
+                    let fresh = guard.clone();
+                    if let Some(reconcile) = &self.database_owner_reconciler {
+                        reconcile(fresh.clone()).await;
+                    }
+                    Some(fresh)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[tracedecay] hook branch tracking added but reopen failed: {e}; \
+                         continuing to serve branch '{}'",
+                        guard.serving_branch().unwrap_or("<none>")
+                    );
+                    None
+                }
+            }
+        };
+        if reopened.is_some() {
+            self.refresh_file_token_map().await;
+        }
+    }
+
+    /// Catch-up sync helper for tests and explicit callers. Bypasses the 30 s
+    /// cooldown in [`Self::maybe_sync_if_stale`] so changes made while the
+    /// server was down — a terminal `git pull`, IDE edits before the agent
+    /// launched, files touched by another tool — can be reconciled before
+    /// assertions or source-editing work. The staleness-check stamp is updated
+    /// on the way out so the next lazy sync doesn't immediately re-walk the
+    /// tree.
+    ///
+    /// The completion flag is flipped on every exit path (including
+    /// errors) so [`Self::wait_for_startup_catch_up`] never hangs.
+    pub async fn run_startup_catch_up_sync(&self) {
+        self.startup_catch_up_done.store(false, Ordering::Release);
+        self.transcript_ingest_done.store(false, Ordering::Release);
+
+        let cg = self.cg_snapshot().await;
+        let refresh = Arc::clone(&self.background_refresh_writer);
+        let request = BackgroundRefreshRequest {
+            project_root: cg.project_root().to_path_buf(),
+            open_options: cg.open_options(),
+            full_sync_escalation_files: 0,
+        };
+        match refresh(request).await {
+            Ok(Some(fresh)) => {
+                if let Ok(mut guard) = self.file_token_map.lock() {
+                    *guard = fresh;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("[tracedecay] startup catch-up sync failed: {e}");
+                self.startup_catch_up_done.store(true, Ordering::Release);
+                self.transcript_ingest_done.store(true, Ordering::Release);
+                return;
+            }
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        self.last_staleness_check_at.store(now, Ordering::Release);
+
+        // Best-effort transcript ingestion sweep for hookless agents (Claude,
+        // Codex, Gemini). Cursor ingests via its own end-of-turn hook; these
+        // agents register no hook, so their transcripts are reconciled here.
+        // Detached so it never delays MCP readiness. Do not wrap the database
+        // work in a timeout: cancelling it after BEGIN could leave the shared
+        // connection inside an open transaction. Callers that need a bounded
+        // readiness wait use `wait_for_startup_catch_up` instead.
+        // `transcript_ingest_done` is flipped inside the spawn (via an Arc
+        // clone) so tests that assert on LCM store content can wait for both
+        // flags via `wait_for_startup_catch_up`.
+        {
+            let project_root = cg.project_root().to_path_buf();
+            let project_id = cg.store_layout().identity.project_id.clone();
+            let session_db = self.session_db.clone();
+            let user_session_db = self.user_session_db.clone();
+            let registry_db = self.registry_db.clone();
+            let user_ingest_requested = user_session_db.is_some() && registry_db.is_some();
+            let project_session_refresh_wake = self.project_session_refresh_wake.clone();
+            let user_session_refresh_wake = self.user_session_refresh_wake.clone();
+            let ingest_done_flag = Arc::clone(&self.transcript_ingest_done);
+            let analytics_db = self.global_db.clone();
+            tokio::spawn(async move {
+                if let Some(db) = run_startup_session_catch_up(
+                    session_db,
+                    user_session_db,
+                    registry_db,
+                    &project_root,
+                    project_id.as_deref(),
+                )
+                .await
+                {
+                    if let Some(wake) = &project_session_refresh_wake {
+                        wake.wake();
+                    }
+                    // Historical git-span correlation is only ever written by
+                    // live hook events (which never fire for stdio/daemonless
+                    // deployments) or a manual CLI backfill. Neither runs for
+                    // most projects, leaving `session_git_spans` empty so
+                    // `sessions_for` silently returns nothing. Drain that
+                    // history here — one bounded, watermarked pass per startup
+                    // — so correlation self-heals without a manual invocation.
+                    let git = crate::sessions::git_correlation::SystemGit;
+                    let _ = db
+                        .git_run_incremental_backfill(
+                            &git,
+                            crate::sessions::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
+                        )
+                        .await;
+                    // With transcripts freshly ingested into `db`'s
+                    // session_messages, close the hint-efficacy loop: import
+                    // any new hook telemetry into the durable analytics store
+                    // and correlate emitted hints against the tool activity
+                    // that followed them. Best-effort and idempotent (own
+                    // parse cursors + hint_outcome watermark), so it never
+                    // blocks readiness and re-runs safely each startup.
+                    if let Some(analytics_db) = analytics_db.as_deref() {
+                        let sources =
+                            crate::analytics_bridge::hook_import_sources(Some(&project_root));
+                        let _ =
+                            crate::analytics_bridge::import_hook_analytics(analytics_db, &sources)
+                                .await;
+                        let project_id = GlobalDb::canonical_project_key(&project_root);
+                        let now = crate::tracedecay::current_timestamp();
+                        let _ = crate::hooks::hint_outcomes::correlate_hint_outcomes(
+                            analytics_db,
+                            db.as_ref(),
+                            &project_id,
+                            now,
+                        )
+                        .await;
+                    }
+                }
+                if user_ingest_requested && let Some(wake) = &user_session_refresh_wake {
+                    wake.wake();
+                }
+                ingest_done_flag.store(true, Ordering::Release);
+            });
+        }
+
+        self.startup_catch_up_done.store(true, Ordering::Release);
+    }
+
+    /// Returns `true` once the *synchronous* portion of
+    /// [`Self::run_startup_catch_up_sync`] has finished (the file-tree walk
+    /// and index sync). See [`Self::transcript_ingest_done`] for the
+    /// detached ingest task.
+    pub fn startup_catch_up_done(&self) -> bool {
+        self.startup_catch_up_done.load(Ordering::Acquire)
+    }
+
+    /// Returns `true` once the detached transcript-ingest task spawned by
+    /// [`Self::run_startup_catch_up_sync`] has completed (success or error).
+    pub fn transcript_ingest_done(&self) -> bool {
+        self.transcript_ingest_done.load(Ordering::Acquire)
+    }
+
+    /// Polls until both the synchronous catch-up sync *and* the detached
+    /// transcript-ingest task have completed, or until `timeout` elapses.
+    /// Returns `true` if both completed within the budget.
+    ///
+    /// Tests use this so neither the index walk nor the transcript ingest
+    /// races against later DB assertions.
+    pub async fn wait_for_startup_catch_up(&self, timeout: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while !self.startup_catch_up_done() || !self.transcript_ingest_done() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        true
+    }
+
+    /// Walk the project tree, sync any stale files, and refresh the
+    /// file-to-token-count map — but only if at least 30 s have passed
+    /// since the last successful sync. The cooldown is the gate: while
+    /// it holds, this returns immediately, so dropping it into every
+    /// `tools/call` handler is cheap.
+    ///
+    /// Concurrent callers are serialized via
+    /// [`Self::last_staleness_check_at`]: the first caller stamps `now`
+    /// into the field with `compare_exchange`; later callers within the
+    /// same window see the stamp and bail. If the actual sync work
+    /// fails, the stamp still advances — failure to walk the tree
+    /// should not cause every subsequent tool call to retry.
+    pub async fn maybe_sync_if_stale(&self) {
+        let cg = self.cg_snapshot().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let previous = self.last_staleness_check_at.load(Ordering::Acquire);
+        let last_sync = cg.last_sync_timestamp().await;
+        if previous != 0 && now.saturating_sub(last_sync) < 30 {
+            return;
+        }
+
+        if now.saturating_sub(previous) < 30 {
+            return;
+        }
+        if self
+            .last_staleness_check_at
+            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        // Branch-drift guard (#2): if the working tree switched branches since
+        // this snapshot opened, the cached DB belongs to the old branch. Skip
+        // the lazy sync — `find_stale_files` would diff the new branch's files
+        // against the old branch's DB, and `ensure_branch_writable` would
+        // reject the write anyway. `tools/call` reopens onto the live branch
+        // via [`Self::reopen_if_branch_drifted`] *before* invoking this, so
+        // the guard only fires on a checkout racing the current call.
+        if cg.branch_drifted() {
+            return;
+        }
+
+        let stale = cg.find_stale_files().await;
+        if !stale.is_empty()
+            && let Err(e) = cg.sync_if_stale_silent(&stale).await
+        {
+            eprintln!("[tracedecay] lazy sync failed: {e}");
+            return;
+        }
+        // Always refresh: a sibling MCP peer may have synced the DB
+        // between our cooldown windows, in which case `stale` is empty
+        // here but our in-memory `file_token_map` is still pre-sync.
+        self.refresh_file_token_map().await;
+    }
+
+    /// D4: sync-on-read entry point for read (non-edit) tools. NEVER blocks.
+    ///
+    /// If read-refresh is enabled and the read cooldown has elapsed since the
+    /// last background spawn, this `compare_exchange`s
+    /// [`background_refresh_running`](Self::background_refresh_running) to
+    /// `true` and spawns a detached refresh, then returns immediately so the
+    /// caller serves the current answer with zero added latency. The *next*
+    /// read observes the freshly synced index.
+    ///
+    /// Single-flighted three ways: the `read_cooldown_secs` stamp, the
+    /// `background_refresh_running` flag, and the underlying cross-process
+    /// sync lock. At most one refresh runs at a time.
+    pub(crate) fn maybe_spawn_read_refresh(&self, cg: &Arc<TraceDecay>) {
+        if !self.sync_config.read_refresh {
+            return;
+        }
+        // A checkout racing this call would diff the new branch against the
+        // old branch's DB; `tools/call` reopens onto the live branch before
+        // dispatch, so this only fires on an in-flight race. Skip it — the
+        // next call runs on the reopened snapshot.
+        if cg.branch_drifted() {
+            return;
+        }
+
+        let now = crate::tracedecay::current_timestamp();
+        let cooldown = self.sync_config.read_cooldown_secs as i64;
+        let previous = self.last_background_refresh_at.load(Ordering::Acquire);
+        if previous != 0 && now.saturating_sub(previous) < cooldown {
+            return;
+        }
+        // Reserve the cooldown slot. If another read call won the race, bail.
+        if self
+            .last_background_refresh_at
+            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        // Reserve the single-flight slot. If a refresh is already running
+        // (e.g. a slow prior spawn that outlived its cooldown), don't stack.
+        if self
+            .background_refresh_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        self.spawn_read_refresh_task(cg, self.sync_config.full_sync_escalation_files);
+    }
+
+    /// Spawns the detached D4 refresh task. The task owns cheap `Arc` clones
+    /// of the background-refresh flag, the completion stamp, and the shared
+    /// file-token map, so no `Arc<Self>` receiver is needed. Prefers diff-
+    /// scoping off `last_synced_commit`; falls back to the full tree walk
+    /// when no base commit is stamped or the diff escalates past the limit.
+    ///
+    /// The caller MUST have already set `background_refresh_running` to
+    /// `true`; this task clears it on completion.
+    pub(crate) fn spawn_read_refresh_task(&self, cg: &Arc<TraceDecay>, escalation: usize) {
+        let running = Arc::clone(&self.background_refresh_running);
+        let done_at = Arc::clone(&self.last_background_refresh_done_at);
+        let token_map = Arc::clone(&self.file_token_map);
+        let refresh = Arc::clone(&self.background_refresh_writer);
+        let request = BackgroundRefreshRequest {
+            project_root: cg.project_root().to_path_buf(),
+            open_options: cg.open_options(),
+            full_sync_escalation_files: escalation,
+        };
+        tokio::spawn(async move {
+            match refresh(request).await {
+                Ok(Some(fresh)) => {
+                    if let Ok(mut guard) = token_map.lock() {
+                        *guard = fresh;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("[tracedecay] background read refresh could not reopen project: {e}");
+                }
+            }
+            done_at.store(crate::tracedecay::current_timestamp(), Ordering::Release);
+            running.store(false, Ordering::Release);
+        });
+    }
+
+    /// D1/daemon hook: refresh the index if this cached project server's last
+    /// sync is older than `threshold_secs`. Called by the daemon on a
+    /// `project_server` cache hit so a long-lived cached server heals like a
+    /// freshly launched one. Non-blocking: it kicks the same detached D4
+    /// refresh and returns immediately.
+    pub async fn refresh_if_session_stale(&self, threshold_secs: u64) {
+        if !self.sync_config.read_refresh && !self.sync_config.auto_watch {
+            return;
+        }
+        let cg = self.cg_snapshot().await;
+        if cg.branch_drifted() {
+            return;
+        }
+        let now = crate::tracedecay::current_timestamp();
+        let last_sync = cg.last_sync_timestamp().await;
+        if last_sync != 0 && now.saturating_sub(last_sync) < threshold_secs as i64 {
+            return;
+        }
+        // Single-flight against the read-refresh machinery.
+        if self
+            .background_refresh_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        self.last_background_refresh_at
+            .store(now, Ordering::Release);
+        self.spawn_read_refresh_task(&cg, self.sync_config.full_sync_escalation_files);
+    }
+
+    /// Returns a compact one-line notice when automation runs have staged
+    /// managed-skill output awaiting review that the user hasn't been told
+    /// about yet. Fact proposal counts remain telemetry-only.
+    ///
+    /// Cheap by construction: a 60 s `compare_exchange` cooldown gates the
+    /// check, and the underlying dedupe state
+    /// ([`crate::automation::staged_notice`]) fires at most once per new
+    /// batch (latest run id or pending-count change), so dropping this into
+    /// every `tools/call` response is safe.
+    pub(crate) async fn maybe_automation_staged_notice(&self, cg: &TraceDecay) -> Option<String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let previous = self.last_automation_notice_check_at.load(Ordering::Acquire);
+        if now.saturating_sub(previous) < 60 {
+            return None;
+        }
+        if self
+            .last_automation_notice_check_at
+            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return None;
+        }
+        let profile_root = crate::storage::default_profile_root().ok()?;
+        let owner = cg.project_memory_owner().ok()?;
+        let memory = crate::tracedecay::facts::memory_application_for_db(owner, cg.db()).ok()?;
+        crate::automation::staged_notice::maybe_automation_staged_notice(
+            &memory,
+            &cg.store_layout().dashboard_root,
+            &profile_root,
+        )
+        .await
+    }
+
+    /// Returns a version-update warning if a newer release is available.
+    /// Results are cached for `VERSION_CHECK_INTERVAL` (15 minutes).
+    pub(crate) async fn check_version_update(&self) -> Option<String> {
+        let current = env!("CARGO_PKG_VERSION");
+
+        // Fast path: serve from cache if still fresh.
+        {
+            let cache = self.version_cache.lock().ok()?;
+            if let Some(checked_at) = cache.checked_at
+                && checked_at.elapsed() < VERSION_CHECK_INTERVAL
+            {
+                let latest = cache.latest.as_deref()?;
+                return if crate::cloud::is_newer_minor_version(current, latest) {
+                    Some(format!(
+                        "⚠️ tracedecay v{current} is installed, but v{latest} is available. \
+                             Run `tracedecay upgrade` to update."
+                    ))
+                } else {
+                    None
+                };
+            }
+        }
+
+        // Cache miss or expired – fetch from GitHub (best-effort, 1 s timeout).
+        let latest = tokio::task::spawn_blocking(crate::cloud::fetch_latest_version)
+            .await
+            .ok()
+            .flatten();
+
+        // Update cache regardless of fetch outcome so we don't retry immediately.
+        if let Ok(mut cache) = self.version_cache.lock() {
+            cache.latest.clone_from(&latest);
+            cache.checked_at = Some(Instant::now());
+        }
+
+        let latest = latest?;
+        if crate::cloud::is_newer_minor_version(current, &latest) {
+            Some(format!(
+                "⚠️ tracedecay v{current} is installed, but v{latest} is available. \
+                 Run `tracedecay upgrade` to update."
+            ))
+        } else {
+            None
+        }
+    }
+}

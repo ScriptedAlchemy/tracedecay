@@ -3780,8 +3780,13 @@ impl GlobalDb {
 
     fn normalize_session_message_timestamp(timestamp: Option<i64>) -> Option<i64> {
         timestamp.map(|timestamp| {
-            if timestamp.unsigned_abs() >= 100_000_000_000 {
+            let magnitude = timestamp.unsigned_abs();
+            if magnitude >= 100_000_000_000_000_000 {
+                timestamp / 1_000_000_000
+            } else if magnitude >= 100_000_000_000_000 {
                 timestamp / 1_000_000
+            } else if magnitude >= 100_000_000_000 {
+                timestamp / 1_000
             } else {
                 timestamp
             }

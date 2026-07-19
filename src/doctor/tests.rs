@@ -1147,17 +1147,16 @@ fn temporal_family_manifest(db_path: &Path) -> BTreeMap<String, (u64, Option<Sys
         for entry in entries.flatten() {
             let path = entry.path();
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if name.ends_with(".access.lock")
+            if (name.ends_with(".access.lock")
                 || name.ends_with(".writer.lock")
                 || name.ends_with(".writer.owner")
-                || name.ends_with(".bootstrap.lock")
+                || name.ends_with(".bootstrap.lock"))
+                && let Ok(metadata) = std::fs::metadata(&path)
             {
-                if let Ok(metadata) = std::fs::metadata(&path) {
-                    manifest.insert(
-                        format!("lock:{name}"),
-                        (metadata.len(), metadata.modified().ok()),
-                    );
-                }
+                manifest.insert(
+                    format!("lock:{name}"),
+                    (metadata.len(), metadata.modified().ok()),
+                );
             }
         }
     }

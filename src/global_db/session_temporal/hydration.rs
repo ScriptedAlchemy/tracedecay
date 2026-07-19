@@ -723,20 +723,18 @@ async fn resolve_occurrence(
                     })));
                 }
             }
-            "external" => {
-                if !payload_ref.is_empty() {
-                    let resolution = resolve_external_manifest(
-                        conn,
-                        provider,
-                        &session_id,
-                        &message_id,
-                        &payload_ref,
-                        &content_hash,
-                    )
-                    .await?;
-                    if matches!(resolution, HydrationResolution::Available(_)) {
-                        return Ok(Some(resolution));
-                    }
+            "external" if !payload_ref.is_empty() => {
+                let resolution = resolve_external_manifest(
+                    conn,
+                    provider,
+                    &session_id,
+                    &message_id,
+                    &payload_ref,
+                    &content_hash,
+                )
+                .await?;
+                if matches!(resolution, HydrationResolution::Available(_)) {
+                    return Ok(Some(resolution));
                 }
             }
             _ => {}

@@ -124,7 +124,11 @@ fn fixture_hash(bytes: &[u8]) -> String {
 
 #[test]
 fn mcp_session_adapters_have_no_local_lcm_storage_authority() {
-    let server = include_str!("../server.rs");
+    let server = concat!(
+        include_str!("../server.rs"),
+        include_str!("session_refresh.rs"),
+        include_str!("session_retrieval.rs"),
+    );
     for forbidden in [
         ".lcm_describe(",
         ".lcm_expand(",
@@ -242,6 +246,7 @@ async fn persist_fixture_observation(
     anchor
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn seed_temporal_message(
     db: &GlobalDb,
     project_key: &str,

@@ -15,15 +15,15 @@ fn skill_writer_options_have_no_storage_selector() {
 
 #[test]
 fn skill_writer_evidence_uses_fresh_authorized_forensic_retrieval() {
-    let source = include_str!("../../src/automation/runner.rs");
-    let start = source
+    let evidence_source = include_str!("../../src/automation/runner/evidence.rs");
+    let source = concat!(
+        include_str!("../../src/automation/runner/evidence.rs"),
+        include_str!("../../src/automation/runner/retrieval.rs")
+    );
+    let start = evidence_source
         .find("async fn build_skill_writer_evidence")
         .expect("skill writer evidence builder");
-    let end = source[start..]
-        .find("async fn skipped_session_reflector_run")
-        .map(|offset| start + offset)
-        .expect("session reflector skip helper");
-    let builder = &source[start..end];
+    let builder = &evidence_source[start..];
 
     assert!(!builder.contains(".lcm_grep("));
     assert!(!builder.contains(".lcm_recent_sessions("));

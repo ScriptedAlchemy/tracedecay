@@ -586,7 +586,16 @@ fn render_error(
             "message": message,
         }
     });
-    tool_json_with_md(None, args, &value, || refresh_markdown(&value))
+    let mut render_args = args.clone();
+    if render_args
+        .get("format")
+        .and_then(Value::as_str)
+        .is_some_and(|format| !matches!(format, "markdown" | "json"))
+        && let Some(object) = render_args.as_object_mut()
+    {
+        object.insert("format".to_string(), json!("json"));
+    }
+    tool_json_with_md(None, &render_args, &value, || refresh_markdown(&value))
         .with_semantic_error(true)
         .with_failure_message(message)
 }

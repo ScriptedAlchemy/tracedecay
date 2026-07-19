@@ -25,9 +25,9 @@ use super::ports::{
     TemporalSnapshotRequest, TemporalWatermarks,
 };
 use super::ranking::{DiversityLimits, RankingCandidate, RankingError};
-use super::resolution::{
-    ResolutionAssertion, ResolutionEvidence, ResolutionOccurrence, SummarySourceState,
-    ValidatedAuthorization,
+use super::resolution::summary::SummarySourceState;
+use super::resolution::types::{
+    ResolutionAssertion, ResolutionEvidence, ResolutionOccurrence, ValidatedAuthorization,
 };
 use super::{TemporalKernelError, TemporalKernelRequest, execute_temporal_kernel};
 use crate::query::temporal::test_support::block_on;

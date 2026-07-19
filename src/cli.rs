@@ -667,7 +667,7 @@ pub(crate) struct SessionsSearchArgs {
 pub enum SessionsRefreshAction {
     /// Start or join the durable refresh and return an opaque handle
     Start(SessionRefreshBeginArgs),
-    /// Read-only progress or terminal receipt lookup using a refresh handle
+    /// Report read-only progress or a terminal receipt using a refresh handle
     Status(SessionRefreshOperationArgs),
     /// Join or start the durable refresh and return an opaque handle
     Join(SessionRefreshBeginArgs),

@@ -297,7 +297,7 @@ mod tests {
         BindingDigest, ExecutionControl, ExecutionLimits, KernelVersions,
         TemporalExecutionSnapshot, TemporalPortError, TemporalSnapshotRequest, TemporalWatermarks,
     };
-    use crate::query::temporal::resolution::ValidatedAuthorization;
+    use crate::query::temporal::resolution::types::ValidatedAuthorization;
     use crate::query::temporal::test_support::block_on;
 
     fn anchor(value: &str) -> RetrievalAnchorId {
