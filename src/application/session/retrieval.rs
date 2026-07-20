@@ -595,11 +595,9 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 SessionRetrievalOutcome::BudgetExhausted
             }
             TemporalPortError::UnauthorizedSnapshot => SessionRetrievalOutcome::Denied,
-            TemporalPortError::EmptyParticipantManifest => {
-                SessionRetrievalOutcome::CompleteZero {
-                    freshness: SessionDataFreshness::Fresh,
-                }
-            }
+            TemporalPortError::EmptyParticipantManifest => SessionRetrievalOutcome::CompleteZero {
+                freshness: SessionDataFreshness::Fresh,
+            },
             TemporalPortError::InvalidBinding { .. }
             | TemporalPortError::DuplicateParticipant
             | TemporalPortError::ZeroGeneration
