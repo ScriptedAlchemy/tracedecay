@@ -1,6 +1,6 @@
 use std::future::Future;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Wake, Waker};
+use std::sync::Mutex;
+use std::task::{Context, Poll, Waker};
 
 use serde_json::json;
 use tracedecay_domain::{

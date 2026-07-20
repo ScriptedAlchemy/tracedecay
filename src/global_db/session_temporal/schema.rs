@@ -17,7 +17,7 @@ const TEMPORAL_FTS_CONTRACTS: &[(&str, &str)] = &[
     ),
 ];
 
-const TEMPORAL_SCHEMA_DDL: &str = r#"
+const TEMPORAL_SCHEMA_DDL: &str = r"
     CREATE TABLE IF NOT EXISTS session_temporal_schema_migrations (
         name TEXT PRIMARY KEY,
         version INTEGER NOT NULL CHECK(version > 0),
@@ -597,7 +597,7 @@ const TEMPORAL_SCHEMA_DDL: &str = r#"
         content='session_summary_nodes',
         content_rowid='rowid'
     );
-"#;
+";
 
 pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
     (

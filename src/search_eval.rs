@@ -496,7 +496,7 @@ fn evaluate_locked_quality(
                 .to_string(),
         ));
     }
-    let declared_label_authority = holdout_seal.label_authority.clone().ok_or_else(|| {
+    let declared_label_authority = holdout_seal.label_authority.ok_or_else(|| {
         SearchEvalError::InvalidRun(
             "locked-quality seal has no declared label authority".to_string(),
         )

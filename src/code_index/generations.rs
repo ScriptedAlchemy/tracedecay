@@ -485,6 +485,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
 
     /// Collect the grammar/extractor revision pins for the languages present
     /// as extractable source in one snapshot, in canonical language order.
+    #[allow(clippy::type_complexity)]
     fn language_revisions(
         &self,
         snapshot: &SanitizedCodeSnapshotV1,
@@ -1229,7 +1230,11 @@ mod tests {
             ..document.clone()
         };
         assert_eq!(
-            join_chunks_to_generation(&generation, &foreign_document, &[matching.clone()]),
+            join_chunks_to_generation(
+                &generation,
+                &foreign_document,
+                std::slice::from_ref(&matching)
+            ),
             Err(GenerationJoinErrorV1::CrossGeneration)
         );
 

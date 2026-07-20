@@ -475,6 +475,7 @@ impl CompositionKernel {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn paginate_at(
         &self,
         request: &RetrievalRequest,

@@ -1739,6 +1739,8 @@ fn evidence_directory_matches_index_contract() {
 }
 
 #[tokio::test]
+// The env lock must stay held for the entire benchmark measurement.
+#[allow(clippy::await_holding_lock)]
 async fn pr7_memory_baseline() {
     if std::env::consts::OS != "linux" {
         eprintln!("[pr7-benchmark] skipping measurement: the evidence platform contract is Linux");

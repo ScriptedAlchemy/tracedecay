@@ -185,6 +185,7 @@ impl SymbolLineageResolver {
     /// Resolve one current symbol. Evidence strength decides the method:
     /// exact identity tuple first, then content digest, then qualified
     /// structure. Anything ambiguous abstains; no evidence emits nothing.
+    #[allow(clippy::too_many_arguments)]
     fn resolve_one(
         &self,
         prior: &GenerationSymbolIndexV1,
@@ -198,27 +199,27 @@ impl SymbolLineageResolver {
     ) -> Result<Option<SymbolLineageCandidateV1>, LineageResolutionErrorV1> {
         // 1. Exact identity tuple: the declared repository, language,
         //    qualified-structure, and source-evidence tuple is unchanged.
-        if let Some(index) = by_identity.get(symbol.identity.as_str()) {
-            if !consumed[*index] {
-                consumed[*index] = true;
-                let ancestor = &prior.symbols[*index];
-                let kind = if ancestor.content_digest == symbol.content_digest {
-                    LineageKindV1::Unchanged
-                } else {
-                    LineageKindV1::StructuralContinuity
-                };
-                return self.candidate(
-                    prior,
-                    current,
-                    symbol,
-                    ancestor,
-                    kind,
-                    LineageMethodV1::ExactIdentityTuple,
-                    LineageConfidenceKindV1::Exact,
-                    vec![],
-                    None,
-                );
-            }
+        if let Some(index) = by_identity.get(symbol.identity.as_str())
+            && !consumed[*index]
+        {
+            consumed[*index] = true;
+            let ancestor = &prior.symbols[*index];
+            let kind = if ancestor.content_digest == symbol.content_digest {
+                LineageKindV1::Unchanged
+            } else {
+                LineageKindV1::StructuralContinuity
+            };
+            return self.candidate(
+                prior,
+                current,
+                symbol,
+                ancestor,
+                kind,
+                LineageMethodV1::ExactIdentityTuple,
+                LineageConfidenceKindV1::Exact,
+                vec![],
+                None,
+            );
         }
 
         // 2. Content digest plus structural continuity: byte-identical bodies
@@ -362,6 +363,7 @@ impl SymbolLineageResolver {
     }
 
     /// Build an evidenced candidate.
+    #[allow(clippy::too_many_arguments)]
     fn candidate(
         &self,
         prior: &GenerationSymbolIndexV1,

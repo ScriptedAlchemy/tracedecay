@@ -929,13 +929,10 @@ fn parse_use_statements(source: &str) -> Vec<UseStatement> {
 /// body needs the binding, not a new public re-export from the destination.
 fn portable_dependency_import(statement: &str) -> Option<String> {
     let trimmed = statement.trim();
-    let (path, was_public) = if let Some(path) = trimmed.strip_prefix("pub use ") {
-        (path, true)
-    } else if let Some(path) = trimmed.strip_prefix("use ") {
-        (path, false)
-    } else {
-        return None;
-    };
+    let (path, was_public) = trimmed
+        .strip_prefix("pub use ")
+        .map(|path| (path, true))
+        .or_else(|| trimmed.strip_prefix("use ").map(|path| (path, false)))?;
     let path = path.trim_start();
     if path == "self;"
         || path.starts_with("self::")

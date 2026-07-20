@@ -151,7 +151,7 @@ fn split_quoted(text: &str) -> (Vec<String>, String) {
         if in_quote {
             if character == '\\' {
                 match chars.peek().copied() {
-                    Some('"') | Some('\\') => {
+                    Some('"' | '\\') => {
                         if let Some(escaped) = chars.next() {
                             current.push(escaped);
                             remainder.push(' ');

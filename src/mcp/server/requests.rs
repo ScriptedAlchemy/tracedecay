@@ -587,6 +587,7 @@ impl McpServer {
         )
     }
 
+    #[allow(clippy::result_large_err)]
     fn prepare_tool_call(
         id: &Value,
         params: Option<&Value>,
@@ -711,6 +712,7 @@ impl McpServer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch_tool_call(
         &self,
         id: &Value,
@@ -850,6 +852,7 @@ impl McpServer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_success_analytics(
         &self,
         cg: &TraceDecay,
@@ -918,6 +921,7 @@ impl McpServer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn record_success_accounting(
         &self,
         cg: &TraceDecay,

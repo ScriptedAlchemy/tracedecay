@@ -291,19 +291,23 @@ where
         let grant = match self.authorizer.authorize(context, &authorization) {
             Ok(grant) => grant,
             Err(SessionAuthorizationError::Denied) => return SessionRetrievalOutcome::Denied,
-            Err(SessionAuthorizationError::WrongScope)
-            | Err(SessionAuthorizationError::WrongTarget)
-            | Err(SessionAuthorizationError::WrongAccess)
-            | Err(SessionAuthorizationError::UnresolvedGitRoute) => {
+            Err(
+                SessionAuthorizationError::WrongScope
+                | SessionAuthorizationError::WrongTarget
+                | SessionAuthorizationError::WrongAccess
+                | SessionAuthorizationError::UnresolvedGitRoute,
+            ) => {
                 return SessionRetrievalOutcome::WrongScope;
             }
             Err(SessionAuthorizationError::WrongContext) => {
                 return SessionRetrievalOutcome::Denied;
             }
-            Err(SessionAuthorizationError::Unavailable)
-            | Err(SessionAuthorizationError::InvalidGrantId)
-            | Err(SessionAuthorizationError::InvalidProviderScope)
-            | Err(SessionAuthorizationError::ZeroRevision) => {
+            Err(
+                SessionAuthorizationError::Unavailable
+                | SessionAuthorizationError::InvalidGrantId
+                | SessionAuthorizationError::InvalidProviderScope
+                | SessionAuthorizationError::ZeroRevision,
+            ) => {
                 return SessionRetrievalOutcome::Unavailable;
             }
         };
@@ -632,10 +636,9 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
         },
         TemporalKernelError::Hydration(error) => match error {
             HydrationError::BudgetExceeded { .. } => SessionRetrievalOutcome::BudgetExhausted,
-            HydrationError::Interrupted(TemporalPortError::Cancelled)
-            | HydrationError::Interrupted(TemporalPortError::DeadlineExceeded) => {
-                SessionRetrievalOutcome::Cancelled
-            }
+            HydrationError::Interrupted(
+                TemporalPortError::Cancelled | TemporalPortError::DeadlineExceeded,
+            ) => SessionRetrievalOutcome::Cancelled,
             HydrationError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
                 SessionRetrievalOutcome::BudgetExhausted
             }
@@ -645,10 +648,9 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
         },
         TemporalKernelError::Context(error) => match error {
             ContextError::BudgetExceeded { .. } => SessionRetrievalOutcome::BudgetExhausted,
-            ContextError::Interrupted(TemporalPortError::Cancelled)
-            | ContextError::Interrupted(TemporalPortError::DeadlineExceeded) => {
-                SessionRetrievalOutcome::Cancelled
-            }
+            ContextError::Interrupted(
+                TemporalPortError::Cancelled | TemporalPortError::DeadlineExceeded,
+            ) => SessionRetrievalOutcome::Cancelled,
             ContextError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
                 SessionRetrievalOutcome::BudgetExhausted
             }

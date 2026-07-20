@@ -763,7 +763,7 @@ fn symbol_name_span(source: &str, symbol: &SymbolRow) -> Option<SourceSpan> {
 /// qualifier, and key separators first, then snake/camel boundaries.
 fn split_subtokens(token: &str) -> Vec<String> {
     let mut subtokens = Vec::new();
-    for segment in token.split(|c: char| matches!(c, ':' | '.' | '/' | '-')) {
+    for segment in token.split([':', '.', '/', '-']) {
         let mut current = String::new();
         let mut prev: Option<char> = None;
         for c in segment.chars() {
@@ -1049,6 +1049,7 @@ impl DeterministicCodeChunker {
     }
 
     /// Build, identify, and canonically order every chunk for the file.
+    #[allow(clippy::too_many_arguments)]
     fn build_chunks(
         &self,
         source: &str,
@@ -1123,7 +1124,7 @@ impl DeterministicCodeChunker {
             }
             let line_end = offsets_line_end(source, symbol.span.start_byte);
             let signature_end = line_end.min(symbol.span.end_byte);
-            let signature = (signature_end > symbol.span.start_byte).then(|| SourceSpan {
+            let signature = (signature_end > symbol.span.start_byte).then_some(SourceSpan {
                 start_byte: symbol.span.start_byte,
                 end_byte: signature_end,
             });
@@ -1572,10 +1573,10 @@ mod tests {
         // Union of chunk spans covers every byte of the file.
         let mut covered = vec![false; RUST_SOURCE.len()];
         for chunk in &result.chunks {
-            for byte in chunk.anchor.source_span.start_byte as usize
-                ..chunk.anchor.source_span.end_byte as usize
+            for covered_byte in &mut covered[chunk.anchor.source_span.start_byte as usize
+                ..chunk.anchor.source_span.end_byte as usize]
             {
-                covered[byte] = true;
+                *covered_byte = true;
             }
         }
         assert!(covered.iter().all(|covered| *covered), "full byte coverage");

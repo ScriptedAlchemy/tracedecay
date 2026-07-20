@@ -15,6 +15,11 @@
 //! filesystem access, storage, or scheduling lives here; capture owns intake
 //! snapshots, the store owns persistence, and the projector composition owns
 //! publication (Plan 25 boundaries).
+//!
+//! Contract constructors in this tree validate canonical identities built
+//! from controlled formats; the `expect` on those constructor calls documents
+//! the canonical-by-construction invariant and can never fail in practice.
+#![allow(clippy::expect_used)]
 
 pub mod capabilities;
 pub mod chunks;

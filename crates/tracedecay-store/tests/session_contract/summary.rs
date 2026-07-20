@@ -1,3 +1,6 @@
+// Contract-test adapters keep the trait's `impl Future` signature shape
+// explicit; the bodies are the async implementation.
+#![allow(clippy::manual_async_fn)]
 use super::common::*;
 use super::*;
 

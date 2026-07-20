@@ -174,15 +174,8 @@ pub(super) fn temporal_digest(value: char) -> SessionTemporalDigestV1 {
     SessionTemporalDigestV1::new(format!("sha256:{}", value.to_string().repeat(64))).unwrap()
 }
 
-struct NoopWake;
-
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 pub(super) fn ready<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let mut context = Context::from_waker(Waker::noop());
     let mut future = std::pin::pin!(future);
     for _ in 0..8 {
         if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
@@ -196,8 +189,7 @@ pub(super) fn yields_then_ready<F>(future: F) -> F::Output
 where
     F: Future + Send,
 {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let mut context = Context::from_waker(Waker::noop());
     let mut future = std::pin::pin!(future);
     assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
     match future.as_mut().poll(&mut context) {

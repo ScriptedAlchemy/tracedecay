@@ -188,15 +188,15 @@ impl LanguageExtractor for TreeSitterExtractor {
             return Err(ExtractionFailureV1::Cancelled);
         }
         let file = file.validated_file();
-        if let Some(declared) = &file.file.language {
-            if declared != &descriptor.language {
-                return Err(ExtractionFailureV1::IncompatibleDescriptor {
-                    detail: format!(
-                        "file declares language {} but descriptor is {}",
-                        declared, descriptor.language
-                    ),
-                });
-            }
+        if let Some(declared) = &file.file.language
+            && declared != &descriptor.language
+        {
+            return Err(ExtractionFailureV1::IncompatibleDescriptor {
+                detail: format!(
+                    "file declares language {} but descriptor is {}",
+                    declared, descriptor.language
+                ),
+            });
         }
 
         let parser = self.resolve_parser(file, descriptor).ok_or({

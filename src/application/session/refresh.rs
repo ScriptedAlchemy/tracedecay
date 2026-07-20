@@ -377,11 +377,11 @@ where
                 let _ = self.scheduler.wake();
                 terminal_outcome(receipt)
             }
-            Ok(Err(SessionStoreError::InvalidRefreshState { .. }))
-            | Ok(Err(SessionStoreError::InvalidStateTransition { .. }))
-            | Ok(Err(SessionStoreError::ReceiptIdentityMismatch { .. })) => {
-                self.status(context, handle).await
-            }
+            Ok(Err(
+                SessionStoreError::InvalidRefreshState { .. }
+                | SessionStoreError::InvalidStateTransition { .. }
+                | SessionStoreError::ReceiptIdentityMismatch { .. },
+            )) => self.status(context, handle).await,
             Ok(Err(_)) => SessionRefreshOutcome::Unavailable,
             Err(outcome) => outcome,
         }
