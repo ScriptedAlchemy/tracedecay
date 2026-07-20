@@ -115,7 +115,7 @@ pub(super) async fn legacy_mapping_matches(
 ) -> FactStoreResult<bool> {
     let mut rows = transaction
         .query(
-            "SELECT owner_json, fact_id, mapping_json FROM memory_v2_legacy_map
+            "SELECT owner_json, fact_id FROM memory_v2_legacy_map
              WHERE owner_kind = ?1 AND project_id = ?2
                AND source_store_id = ?3 AND legacy_fact_id = ?4",
             params![
@@ -134,10 +134,15 @@ pub(super) async fn legacy_mapping_matches(
     else {
         return Ok(false);
     };
+    // A mapping's identity is (owner, source store, legacy fact) -> fact id;
+    // the query already keys on source store and legacy fact. Import
+    // attributes embedded in mapping_json (history coverage, migrated_at)
+    // legitimately differ between the compatibility write path and the
+    // backfill, so full-JSON equality would false-positive on a benign
+    // duplicate import. Genuine corruption (a different fact id or owner for
+    // the same legacy fact) is still caught here.
     Ok(row_string(&row, 0, QUERY_OPERATION)? == owner.json
-        && row_string(&row, 1, QUERY_OPERATION)? == mapping.fact_id().as_str()
-        && row_string(&row, 2, QUERY_OPERATION)?
-            == to_json(mapping, "serialize legacy fact mapping")?)
+        && row_string(&row, 1, QUERY_OPERATION)? == mapping.fact_id().as_str())
 }
 
 pub(super) async fn ensure_event_references(

@@ -14,8 +14,9 @@ use crate::errors::Result;
 
 use super::super::types::{OwnerKey, StoredAssertionHeaderV1};
 use super::super::{
-    OPERATION, canonical_replay, db_error, db_message, json_text, optional_i64, optional_string,
-    payload_access_label, row_exists, scalar_i64_params, validate_v1_compatibility_source,
+    OPERATION, canonical_mapping_replay, canonical_replay, db_error, db_message, json_text,
+    optional_i64, optional_string, payload_access_label, row_exists, scalar_i64_params,
+    validate_v1_compatibility_source,
 };
 use super::purge::insert_quarantine;
 
@@ -73,7 +74,7 @@ pub(in crate::db::memory_v2) async fn insert_mapping(
     )
     .await?
     {
-        return canonical_replay(existing, &mapping_json, "legacy mapping");
+        return canonical_mapping_replay(existing, &mapping_json);
     }
     conn.execute(
         "INSERT INTO memory_v2_legacy_map(

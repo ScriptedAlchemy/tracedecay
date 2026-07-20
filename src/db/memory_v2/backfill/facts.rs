@@ -24,8 +24,8 @@ use super::super::writers::{
 };
 use super::super::{
     OPERATION, RETENTION_CLASS, category_label, current_fact_state, db_error, db_message,
-    json_text, load_legacy_entities, optional_i64, parse_category, seconds_to_micros,
-    update_cursor, update_phase, value_strings,
+    json_text, load_legacy_entities, optional_i64, optional_string, parse_category,
+    seconds_to_micros, update_cursor, update_phase, value_strings,
 };
 
 pub(in crate::db) async fn backfill_fact_batch(
@@ -290,6 +290,27 @@ async fn backfill_fact_payload(
     Ok(Ok(()))
 }
 
+async fn existing_legacy_mapping_fact_id(
+    conn: &Connection,
+    owner_key: &OwnerKey,
+    source_store_id: &SourceStoreId,
+    legacy_fact_id: i64,
+) -> Result<Option<String>> {
+    optional_string(
+        conn,
+        "SELECT fact_id FROM memory_v2_legacy_map
+         WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3
+           AND legacy_fact_id = ?4",
+        params![
+            owner_key.kind,
+            owner_key.project_id.as_str(),
+            source_store_id.as_str(),
+            legacy_fact_id
+        ],
+    )
+    .await
+}
+
 pub(in crate::db) async fn ensure_legacy_identity(
     conn: &Connection,
     owner: &FactOwnerV1,
@@ -309,6 +330,15 @@ pub(in crate::db) async fn ensure_legacy_identity(
     let fact_id = FactId::derive(&material)
         .map_err(|_| db_message(OPERATION, "typed fact identity derivation failed"))?;
     let identity_json = json_text(&material)?;
+    // A compatibility write may have already imported this legacy fact; its
+    // mapping carries different import attributes (Complete/now versus the
+    // backfill's Unknown/started_at), which insert_mapping tolerates as a
+    // replay. The first importer already recorded the import event, so a
+    // second one must not be appended.
+    let mapping_existed =
+        existing_legacy_mapping_fact_id(conn, owner_key, source_store_id, legacy_fact_id)
+            .await?
+            .is_some();
     insert_fact_identity(conn, owner_key, &fact_id, &identity_json, migrated_at).await?;
     let mapping = LegacyFactMappingV1::new(
         owner.clone(),
@@ -328,7 +358,9 @@ pub(in crate::db) async fn ensure_legacy_identity(
         None,
     )
     .map_err(|_| db_message(OPERATION, "typed legacy import event construction failed"))?;
-    insert_event(conn, owner_key, &event, migrated_at).await?;
+    if !mapping_existed {
+        insert_event(conn, owner_key, &event, migrated_at).await?;
+    }
     ensure_current(conn, owner_key, &fact_id, event.event_id(), migrated_at).await?;
     Ok(fact_id)
 }

@@ -473,6 +473,30 @@ fn cutover_replay_identity(receipt_json: &str) -> Result<String> {
     json_text(&receipt)
 }
 
+/// A legacy mapping's identity is (owner, source store, legacy fact) -> fact
+/// id. Its import attributes (history coverage, migrated_at) are produced by
+/// whichever path imported the fact first — the compatibility write path
+/// records Complete/now while the backfill records Unknown/started_at — so a
+/// replayed or duplicate import must not collide on them.
+fn canonical_mapping_replay(existing: String, candidate: &str) -> Result<()> {
+    canonical_replay(
+        mapping_replay_identity(&existing)?,
+        &mapping_replay_identity(candidate)?,
+        "legacy mapping",
+    )
+}
+
+fn mapping_replay_identity(mapping_json: &str) -> Result<String> {
+    let mut mapping: Value = serde_json::from_str(mapping_json)
+        .map_err(|_| db_message(OPERATION, "stored legacy mapping is invalid JSON"))?;
+    let object = mapping
+        .as_object_mut()
+        .ok_or_else(|| db_message(OPERATION, "stored legacy mapping is not an object"))?;
+    object.remove("history_coverage");
+    object.remove("migrated_at");
+    json_text(&mapping)
+}
+
 async fn begin(conn: &Connection, operation: &str) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .await
