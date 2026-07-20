@@ -1744,5 +1744,6 @@ async fn pr7_memory_baseline() {
         eprintln!("[pr7-benchmark] skipping measurement: the evidence platform contract is Linux");
         return;
     }
+    let _env_lock = crate::config::lock_user_data_dir_test_env();
     Box::pin(run()).await;
 }

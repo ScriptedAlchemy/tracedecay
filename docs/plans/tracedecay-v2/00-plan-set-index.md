@@ -140,7 +140,7 @@ not be rebuilt.
 | PR17 | Canonical host-neutral product task/work graph, lossless TaskId-rooted evidence retrieval, adaptive task intelligence, and typed workflows ([Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md), [Plan 32](32-dynamic-workflow-runtime-and-sdk.md)): versioned user task/ticket DAG state, evidence/history relations, Kanban/DAG/timeline/causal/workload projections, task-shape/topology/calibrated-size assessment, reviewed parent/child decomposition and minimal repair, selective escalation, governed experience recall, typed handoff, model-capability profiles and explained routing, isolated independent review, outcomes/calibration, live proposals that never auto-apply, and graph-native typed auxiliary-attempt requests; plus daemon-owned definitions, deterministic replay, and one shared runtime-clock/scheduler/history/lease/attempt/effect/artifact kernel that executes explicitly admitted task steps through negotiated provider adapters. TaskId/Kanban never require Git, worktrees, branches, PRs, GitHub, or stacks. Execution placement, branch topology, review topology, and integration strategy are independent: no-Git tasks, unbranched/independent/locally stacked worktrees without PRs, and PR stacks without managed worktrees remain valid. Claude-designated work uses native Claude Code CLI, never Hermes Anthropic. Codex app-server is preferred; a distinct Codex CLI fallback is explicit, policy/configuration-bounded, and never hidden. Typed workflow steps may compose [Plan 37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md)'s already-shipped read-only advisory operations (feedback-cycle findings, GitHub-ingested review-thread surfacing, CI localization, proximity) — not first availability of those capabilities and no GitHub review-content writes. Plan 24 owns work-graph/proposal/auxiliary-request plus task-domain ready-node/decomposition/sizing/model-backend recommendation semantics; Plan 06 owns pure evaluator/policy-decision mechanics; Plan 26 owns observations/metrics; Plan 32 alone owns runtime clocks, provider-adapter execution, scheduling, leases, attempts, effects, retries, cancellation, and runtime receipts. [Plan 36](36-git-aware-change-context-and-index-transactions.md) owns native Git preflight/apply/receipt mechanics; Plan 32 effect/audit/receipt contracts orchestrate workflow-owned effects without becoming native Git authority. |
 | PR18 | Official API stabilization and SDKs: freeze revisioned names/schemas for the accepted PR17 graph, task-intelligence, and workflow semantics; publish OpenAPI/schema and first-party Rust/TypeScript/Python SDKs with oldest-supported/current compatibility matrices plus structural, semantic, and lifecycle conformance, without moving scoring, policy, query, or runtime logic into clients. |
 | PR19 | Compatibility migration, defragmentation, cutover, and deletion: destination-committed resumable backfill, read-only isolated shadow parity, bounded cutover, forward restoration into verified V2 during the recovery window, V2 default, explicit compatibility dispositions, and removal of every superseded V1 path. V1 archives are recovery input, never renewed authority; no reverse cutover, long-lived dual write, lazy read migration, or production shadow read remains. |
-| PR20 | End-to-end performance optimization: measured database, synchronization, projection, indexing, cache/generation, query, task-intelligence evidence/calibration/proposal paths, and repository-controlled developer-build improvements gated by frozen workload identity, A/A noise floors, paired effect sizes and intervals, practical margins, worst-stratum/resource/tail results, open-loop overload accounting, recomputation equivalence, Linux/Windows, and crash/restart correctness rather than a universal score or paper threshold. |
+| PR20 | End-to-end performance optimization: Plan 33's dated evidence/execution ledger separates completed evidence, active near-term fixes, and unaccepted research candidates; measured database, synchronization, projection, indexing, cache/generation, query, task-intelligence evidence/calibration/proposal paths, and repository-controlled developer-build improvements remain gated by frozen workload identity, A/A noise floors, paired effect sizes and intervals, practical margins, worst-stratum/resource/tail results, open-loop overload accounting, recomputation equivalence, Linux/Windows, and crash/restart correctness rather than a universal score or paper threshold. |
 
 PR #421 stays open through PR20. It merges only after PR20 and the aggregate
 Linux, Windows, migration, recovery, privacy, performance, and deletion gates
@@ -212,7 +212,9 @@ are stable.
   SDK binding, publication, provenance, compatibility, cutover, and deletion.
 - Plan 33: PR20 end-to-end database, synchronization, indexing, query, and
   repository-controlled developer-build performance optimization. Owning slices
-  provide instrumentation and baselines.
+  provide instrumentation and baselines; Plan 33 owns the dated evidence/
+  execution ledger, freezes comparable workloads, and keeps focused near-term
+  implementation evidence distinct from accepted PR20 comparisons.
 - The retired Plans 29–30 review artifacts are deleted. Any still-valid behavior belongs in
   the owning product plan and its direct regression tests.
 
@@ -277,8 +279,9 @@ Ownership summary:
 - **Dashboard:** Plan 11 presents Plan 09/14/24/26/37 envelopes; Plan 14 alone
   owns Doctor/health/remediation composition.
 - **Observability / performance:** Plan 26 owns labels, cohorts, and observation
-  schemas; Plan 33 owns PR20 measured optimization. Neither duplicates query,
-  policy, graph, or Doctor authority.
+  schemas; Plan 33 owns the optimization evidence/execution ledger and PR20
+  measured disposition. Ledger states are not telemetry events or rollout
+  authority. Neither plan duplicates query, policy, graph, or Doctor authority.
 
 ## Rejected rewrite machinery
 

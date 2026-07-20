@@ -7,6 +7,12 @@ Its versioned measurements and coverage semantics are the canonical product
 telemetry input to [PR20 performance optimization](33-end-to-end-performance-optimization.md).
 Versioned benchmark, profiler, and operating-system measurements remain valid
 PR20 evidence under that plan's measurement contract.
+Plan 33 also owns the dated optimization evidence/execution ledger and the
+distinction between completed evidence, active near-term implementation,
+and unaccepted PR20 candidates. Those ledger states are planning evidence, not
+new telemetry events, rollout states, or delivery authority. Product owners
+emit through this plan's existing schemas; Plan 33 freezes workloads, compares
+effects, and decides performance disposition without changing Plan 26 labels.
 
 ## Outcome
 

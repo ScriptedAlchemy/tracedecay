@@ -108,6 +108,7 @@ impl Phase {
 
 /// RAII isolation for `HOME` and `TRACEDECAY_DATA_DIR`.
 pub struct IsolatedBenchmarkEnv {
+    _env_lock: std::sync::MutexGuard<'static, ()>,
     temp: TempDir,
     home: PathBuf,
     data_dir: PathBuf,
@@ -117,6 +118,7 @@ pub struct IsolatedBenchmarkEnv {
 
 impl IsolatedBenchmarkEnv {
     pub fn enter(prefix: &str) -> BenchResult<Self> {
+        let env_lock = crate::config::lock_user_data_dir_test_env();
         let temp = tempfile::Builder::new()
             .prefix(prefix)
             .tempdir()
@@ -129,13 +131,14 @@ impl IsolatedBenchmarkEnv {
 
         let previous_home = env::var_os("HOME");
         let previous_data_dir = env::var_os("TRACEDECAY_DATA_DIR");
-        // SAFETY: benchmark process owns these variables for the RAII lifetime.
+        // SAFETY: the crate-wide environment lock is held for the RAII lifetime.
         unsafe {
             env::set_var("HOME", &home);
             env::set_var("TRACEDECAY_DATA_DIR", &data_dir);
         }
 
         Ok(Self {
+            _env_lock: env_lock,
             temp,
             home,
             data_dir,
@@ -966,8 +969,6 @@ fn current_commit(root: &Path) -> BenchResult<String> {
 mod tests {
     use super::*;
 
-    static ISOLATED_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
     #[test]
     fn contract_matches_checked_in_artifacts() {
         validate_contract().expect("PR8 temporal contract");
@@ -1002,7 +1003,6 @@ mod tests {
 
     #[tokio::test]
     async fn fixture_refresh_persists_progress_before_measurement() {
-        let _env_guard = ISOLATED_ENV_LOCK.lock().await;
         let prepared = prepare_repetition(0)
             .await
             .expect("production fixture refresh must persist durable progress");
@@ -1015,7 +1015,6 @@ mod tests {
 
     #[tokio::test]
     async fn fresh_benchmark_db_provisions_key_for_rank_and_hydration() {
-        let _env_guard = ISOLATED_ENV_LOCK.lock().await;
         let samples = run_one_repetition(0)
             .await
             .expect("fresh benchmark database must provision an authenticated cursor key");
@@ -1027,20 +1026,18 @@ mod tests {
 
     #[tokio::test]
     async fn isolated_env_sets_and_restores_home_and_data_dir() {
-        let _env_guard = ISOLATED_ENV_LOCK.lock().await;
-        let prior_home = env::var_os("HOME");
-        let prior_data = env::var_os("TRACEDECAY_DATA_DIR");
-        {
-            let isolated = IsolatedBenchmarkEnv::enter("pr8-env-").unwrap();
-            assert_eq!(
-                env::var_os("HOME").as_deref(),
-                Some(isolated.home().as_os_str())
-            );
-            assert_eq!(
-                env::var_os("TRACEDECAY_DATA_DIR").as_deref(),
-                Some(isolated.data_dir().as_os_str())
-            );
-        }
+        let isolated = IsolatedBenchmarkEnv::enter("pr8-env-").unwrap();
+        let prior_home = isolated.previous_home.clone();
+        let prior_data = isolated.previous_data_dir.clone();
+        assert_eq!(
+            env::var_os("HOME").as_deref(),
+            Some(isolated.home().as_os_str())
+        );
+        assert_eq!(
+            env::var_os("TRACEDECAY_DATA_DIR").as_deref(),
+            Some(isolated.data_dir().as_os_str())
+        );
+        drop(isolated);
         assert_eq!(env::var_os("HOME"), prior_home);
         assert_eq!(env::var_os("TRACEDECAY_DATA_DIR"), prior_data);
     }
