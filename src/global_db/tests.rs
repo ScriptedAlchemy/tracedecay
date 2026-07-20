@@ -3632,7 +3632,7 @@ async fn search_code_projects_matches_any_whitespace_term() {
 }
 
 #[tokio::test]
-async fn reopen_removes_only_unstarted_refresh_reservations() {
+async fn reopen_repairs_interrupted_refresh_and_legacy_cursor_state() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
@@ -3651,6 +3651,62 @@ async fn reopen_removes_only_unstarted_refresh_reservations() {
         )
         .await
         .unwrap();
+    db.conn
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS session_temporal_generations_insert_guard_v1;
+             DROP TRIGGER IF EXISTS session_temporal_generations_state_guard_v1;
+             DROP TRIGGER IF EXISTS session_refresh_operations_insert_guard_v1;
+             DROP TRIGGER IF EXISTS session_refresh_bindings_insert_guard_v1;
+             DROP TRIGGER IF EXISTS session_refresh_progress_insert_guard_v1;
+             INSERT INTO session_temporal_generations (
+                 session_id, generation, state, frozen_watermarks_json,
+                 created_at, ready_at, activated_at, completed_at
+             ) VALUES (
+                 'session.active', 1, 'active',
+                 '{\"active_generation\":1,\"cursor_key\":null,\"projection_frontier\":0,\"source_frontier\":0,\"summary_frontier\":0}',
+                 50, 51, 52, NULL
+             );
+             INSERT INTO session_temporal_generations (
+                 session_id, generation, state, frozen_watermarks_json, created_at
+             ) VALUES (
+                 'session.stale', 1, 'building',
+                 '{\"active_generation\":1,\"cursor_key\":null,\"projection_frontier\":0,\"source_frontier\":0,\"summary_frontier\":0}',
+                 100
+             );
+             INSERT INTO session_refresh_operations (
+                 session_id, operation_id, request_digest, target_frontier_json,
+                 state, created_at, updated_at
+             ) VALUES (
+                 'session.stale', 'operation.stale',
+                 'sha256:2222222222222222222222222222222222222222222222222222222222222222',
+                 '{\"observed_through\":1,\"committed_through\":0}',
+                 'running', 100, 100
+             );
+             INSERT INTO session_refresh_bindings (
+                 session_id, operation_id, scope_kind, source_frontier, target_frontier,
+                 projector_version, config_digest, generation, frozen_watermarks_json,
+                 binding_digest, created_at
+             ) VALUES (
+                 'session.stale', 'operation.stale', 'session_store', 0, 1,
+                 'session-temporal-projector.v1',
+                 'sha256:3333333333333333333333333333333333333333333333333333333333333333',
+                 1,
+                 '{\"active_generation\":1,\"cursor_key\":null,\"projection_frontier\":0,\"source_frontier\":0,\"summary_frontier\":0}',
+                 'sha256:2222222222222222222222222222222222222222222222222222222222222222',
+                 100
+             );
+             INSERT INTO session_refresh_progress (
+                 session_id, operation_id, progress_ordinal, frontier_json, coverage_json,
+                 committed_batches, committed_records, recorded_at
+             ) VALUES (
+                 'session.stale', 'operation.stale', 0,
+                 '{\"observed_through\":1,\"committed_through\":0}',
+                 '{\"visible\":0,\"hidden\":0,\"unknown\":0,\"redacted\":0}',
+                 0, 0, 100
+             );",
+        )
+        .await
+        .unwrap();
     drop(db);
 
     let reopened = GlobalDb::open_at(&db_path).await.unwrap();
@@ -3666,5 +3722,50 @@ async fn reopen_removes_only_unstarted_refresh_reservations() {
     assert_eq!(
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
         0
+    );
+    drop(rows);
+    let mut stale = reopened
+        .conn
+        .query(
+            "SELECT operation.state, generation.state, receipt.terminal_state
+             FROM session_refresh_operations AS operation
+             JOIN session_refresh_bindings AS binding
+               ON binding.session_id = operation.session_id
+              AND binding.operation_id = operation.operation_id
+             JOIN session_temporal_generations AS generation
+               ON generation.session_id = binding.session_id
+              AND generation.generation = binding.generation
+             JOIN session_refresh_receipts AS receipt
+               ON receipt.session_id = operation.session_id
+              AND receipt.operation_id = operation.operation_id
+             WHERE operation.session_id = 'session.stale'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = stale.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "failed");
+    assert_eq!(row.get::<String>(1).unwrap(), "failed");
+    assert_eq!(row.get::<String>(2).unwrap(), "failed");
+    drop(stale);
+    let mut cursor = reopened
+        .conn
+        .query(
+            "SELECT json_type(frozen_watermarks_json, '$.cursor_key')
+             FROM session_temporal_generations
+             WHERE session_id = 'session.active' AND state = 'active'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cursor
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "object"
     );
 }

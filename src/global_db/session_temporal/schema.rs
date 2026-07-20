@@ -968,7 +968,8 @@ pub(in crate::global_db) async fn ensure_session_temporal_schema(
 
     let rebuild_fts = version.is_none() || temporal_fts_is_missing(conn).await?;
     if version.is_some() {
-        remove_unstarted_refresh_reservations(conn).await?;
+        repair_interrupted_refresh_state(conn).await?;
+        repair_legacy_cursor_key_bindings(conn).await?;
     }
     conn.execute_batch(TEMPORAL_SCHEMA_DDL)
         .await
@@ -994,9 +995,39 @@ pub(in crate::global_db) async fn ensure_session_temporal_schema(
     Ok(())
 }
 
-async fn remove_unstarted_refresh_reservations(conn: &Connection) -> crate::errors::Result<()> {
+async fn repair_interrupted_refresh_state(conn: &Connection) -> crate::errors::Result<()> {
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS session_refresh_operations_delete_guard_v1;
+         DROP TRIGGER IF EXISTS session_refresh_operations_state_guard_v1;
+         DROP TRIGGER IF EXISTS session_refresh_receipts_insert_guard_v1;
+         DROP TRIGGER IF EXISTS session_temporal_generations_state_guard_v1;
+         DROP TRIGGER IF EXISTS session_temporal_generations_delete_guard_v1;
+         DELETE FROM session_temporal_generations
+         WHERE EXISTS (
+             SELECT 1
+             FROM session_refresh_bindings AS binding
+             JOIN session_refresh_operations AS operation
+               ON operation.session_id = binding.session_id
+              AND operation.operation_id = binding.operation_id
+             WHERE binding.session_id = session_temporal_generations.session_id
+               AND binding.generation = session_temporal_generations.generation
+               AND operation.state = 'running'
+               AND NOT EXISTS (
+                   SELECT 1 FROM session_refresh_progress
+                   WHERE session_refresh_progress.session_id = operation.session_id
+                     AND session_refresh_progress.operation_id = operation.operation_id
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM session_refresh_batch_bindings
+                   WHERE session_refresh_batch_bindings.session_id = operation.session_id
+                     AND session_refresh_batch_bindings.operation_id = operation.operation_id
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM session_refresh_receipts
+                   WHERE session_refresh_receipts.session_id = operation.session_id
+                     AND session_refresh_receipts.operation_id = operation.operation_id
+               )
+         );
          DELETE FROM session_refresh_operations
          WHERE state = 'running'
            AND NOT EXISTS (
@@ -1018,7 +1049,152 @@ async fn remove_unstarted_refresh_reservations(conn: &Connection) -> crate::erro
                SELECT 1 FROM session_refresh_receipts
                WHERE session_refresh_receipts.session_id = session_refresh_operations.session_id
                  AND session_refresh_receipts.operation_id = session_refresh_operations.operation_id
+           );
+         INSERT INTO session_refresh_receipts (
+             session_id, operation_id, terminal_state, frontier_json,
+             coverage_json, failure_code, terminal_at
+         )
+         SELECT operation.session_id, operation.operation_id, 'failed',
+                progress.frontier_json, progress.coverage_json,
+                'daemon_restart_stale_refresh',
+                CAST(strftime('%s', 'now') AS INTEGER) * 1000000
+         FROM session_refresh_operations AS operation
+         JOIN session_refresh_progress AS progress
+           ON progress.session_id = operation.session_id
+          AND progress.operation_id = operation.operation_id
+          AND progress.progress_ordinal = (
+              SELECT MAX(latest.progress_ordinal)
+              FROM session_refresh_progress AS latest
+              WHERE latest.session_id = operation.session_id
+                AND latest.operation_id = operation.operation_id
+          )
+         WHERE operation.state = 'running'
+           AND operation.updated_at <
+               CAST(strftime('%s', 'now') AS INTEGER) * 1000000 - 900000000
+           AND NOT EXISTS (
+               SELECT 1 FROM session_refresh_receipts AS existing
+               WHERE existing.session_id = operation.session_id
+                 AND existing.operation_id = operation.operation_id
+           );
+         UPDATE session_temporal_generations
+         SET state = 'failed',
+             completed_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000000
+         WHERE state IN ('building', 'ready')
+           AND EXISTS (
+               SELECT 1
+               FROM session_refresh_bindings AS binding
+               JOIN session_refresh_receipts AS receipt
+                 ON receipt.session_id = binding.session_id
+                AND receipt.operation_id = binding.operation_id
+               WHERE binding.session_id = session_temporal_generations.session_id
+                 AND binding.generation = session_temporal_generations.generation
+                 AND receipt.terminal_state = 'failed'
+                 AND receipt.failure_code = 'daemon_restart_stale_refresh'
+           );
+         UPDATE session_refresh_operations
+         SET state = 'failed',
+             updated_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000000,
+             terminal_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000000,
+             failure_code = 'daemon_restart_stale_refresh'
+         WHERE state = 'running'
+           AND EXISTS (
+               SELECT 1 FROM session_refresh_receipts AS receipt
+               WHERE receipt.session_id = session_refresh_operations.session_id
+                 AND receipt.operation_id = session_refresh_operations.operation_id
+                 AND receipt.failure_code = 'daemon_restart_stale_refresh'
            );",
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    Ok(())
+}
+
+async fn repair_legacy_cursor_key_bindings(conn: &Connection) -> crate::errors::Result<()> {
+    let mut missing = conn
+        .query(
+            "SELECT COUNT(*)
+             FROM session_temporal_generations
+             WHERE state = 'active'
+               AND json_type(frozen_watermarks_json, '$.cursor_key') IS NOT 'object'",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let count = missing
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .map(|row| row.get::<i64>(0))
+        .transpose()
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .unwrap_or(0);
+    drop(missing);
+    if count == 0 {
+        return Ok(());
+    }
+
+    let mut active = conn
+        .query(
+            "SELECT key_id, key_version FROM session_query_cursor_keys
+             WHERE retired_at IS NULL ORDER BY key_version DESC LIMIT 2",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let first = active
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let second = active
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    drop(active);
+    let (key_id, key_version) = match (first, second) {
+        (Some(row), None) => (
+            row.get::<String>(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            row.get::<i64>(1)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        ),
+        (None, None) => {
+            let mut key_id_random = [0_u8; 16];
+            let mut key_material = [0_u8; 32];
+            getrandom::getrandom(&mut key_id_random).map_err(|error| {
+                global_db_operation_message(
+                    OPERATION,
+                    format!("generate legacy cursor key id: {error}"),
+                )
+            })?;
+            getrandom::getrandom(&mut key_material).map_err(|error| {
+                global_db_operation_message(
+                    OPERATION,
+                    format!("generate legacy cursor key material: {error}"),
+                )
+            })?;
+            let key_id = format!("cursor-key-1-{}", hex::encode(key_id_random));
+            conn.execute(
+                "INSERT INTO session_query_cursor_keys (
+                    key_id, key_version, key_material, created_at, retired_at
+                 ) VALUES (?1, 1, ?2, CAST(strftime('%s', 'now') AS INTEGER) * 1000000, NULL)",
+                params![key_id.clone(), key_material.to_vec()],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            (key_id, 1)
+        }
+        _ => return Ok(()),
+    };
+    conn.execute(
+        "UPDATE session_temporal_generations
+         SET frozen_watermarks_json = json_set(
+             frozen_watermarks_json,
+             '$.cursor_key',
+             json_object('key_id', ?1, 'version', ?2)
+         )
+         WHERE state = 'active'
+           AND json_type(frozen_watermarks_json, '$.cursor_key') IS NOT 'object'",
+        params![key_id, key_version],
     )
     .await
     .map_err(|error| global_db_operation_error(OPERATION, error))?;
