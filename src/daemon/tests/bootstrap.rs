@@ -24,6 +24,280 @@ fn bootstrap_tool_catalog_uses_project_node_count() {
     assert!(context_description.contains("65395 nodes"));
 }
 
+fn project_open_test_route(name: &str) -> ProjectRouteKey {
+    ProjectRouteKey {
+        profile_root: std::path::PathBuf::from(format!("/profiles/{name}")),
+        global_db_path: std::path::PathBuf::from(format!("/profiles/{name}/global.db")),
+        project_path: std::path::PathBuf::from(format!("/projects/{name}")),
+        scope_prefix: None,
+    }
+}
+
+#[tokio::test]
+async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let route = project_open_test_route("rejected");
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first_attempts = Arc::clone(&attempts);
+    let first = tasks
+        .start(route.clone(), async move {
+            first_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(crate::errors::TraceDecayError::Database {
+                message: "session temporal receipts or cursor keys are mutable".to_string(),
+                operation: "ensure global database authority invariants".to_string(),
+            })
+        })
+        .await;
+    let first = match first {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("first route request must start one open task")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => {
+            panic!("first route request must fit the bounded task registry")
+        }
+    };
+
+    for _ in 0..32 {
+        let repeated_attempts = Arc::clone(&attempts);
+        let claim = tokio::time::timeout(
+            tokio::time::Duration::from_millis(50),
+            tasks.start(route.clone(), async move {
+                repeated_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }),
+        )
+        .await
+        .expect("repeated initialize/tools-list routing must return promptly");
+        assert!(
+            matches!(
+                claim,
+                super::super::ProjectOpenTaskClaim::InFlight(_)
+                    | super::super::ProjectOpenTaskClaim::Failed(_)
+            ),
+            "same route must reuse its one opening or cached failure"
+        );
+        assert!(
+            tasks.tracked_task_count().await <= 1,
+            "same route must never accumulate detached open tasks"
+        );
+    }
+
+    let error = super::super::ProjectOpenTasks::wait_for_completion(first)
+        .await
+        .expect_err("the injected invariant rejection must surface");
+    assert!(
+        error
+            .to_string()
+            .contains(super::super::PROJECT_OPEN_FAILURE_RETRY_HINT),
+        "cached route failure must carry the stable backoff marker: {error}"
+    );
+    let repeated_attempts = Arc::clone(&attempts);
+    let repeated_error = match tokio::time::timeout(
+        tokio::time::Duration::from_millis(50),
+        tasks.start(route, async move {
+            repeated_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }),
+    )
+    .await
+    .expect("cached invariant failure must return promptly")
+    {
+        super::super::ProjectOpenTaskClaim::Failed(failure) => failure.to_error(),
+        super::super::ProjectOpenTaskClaim::InFlight(_) => {
+            panic!("cached invariant failure must not re-open the route")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => {
+            panic!("cached invariant failure must not be replaced by global saturation")
+        }
+    };
+    assert!(
+        repeated_error
+            .to_string()
+            .contains(super::super::PROJECT_OPEN_FAILURE_RETRY_HINT),
+        "repeated routing must return the typed backoff failure"
+    );
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "repeated bootstrap requests must use one bounded open attempt"
+    );
+    assert_eq!(
+        tasks.tracked_route_count().await,
+        1,
+        "the rejected route must retain one backoff entry"
+    );
+
+    let response = super::super::project_open_error_response(serde_json::json!(17), &error);
+    let data = response
+        .error
+        .expect("typed route rejection")
+        .data
+        .expect("route rejection data");
+    assert_eq!(
+        data["kind"],
+        serde_json::json!("project_route_open_backoff")
+    );
+    assert_eq!(data["retryable"], serde_json::json!(true));
+}
+
+#[tokio::test]
+async fn project_open_task_registry_caps_distinct_inflight_routes() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    for index in 0..super::super::MAX_TRACKED_PROJECT_OPEN_TASKS {
+        let claim = tasks
+            .start(
+                project_open_test_route(&format!("bounded-{index}")),
+                std::future::pending::<crate::errors::Result<()>>(),
+            )
+            .await;
+        assert!(
+            matches!(claim, super::super::ProjectOpenTaskClaim::InFlight(_)),
+            "each route inside the configured bound must get one task"
+        );
+    }
+    assert_eq!(
+        tasks.tracked_task_count().await,
+        super::super::MAX_TRACKED_PROJECT_OPEN_TASKS
+    );
+
+    let overflow = tasks
+        .start(project_open_test_route("overflow"), async { Ok(()) })
+        .await;
+    assert!(
+        matches!(overflow, super::super::ProjectOpenTaskClaim::Saturated),
+        "a new route must not create an unbounded detached task"
+    );
+    let response = super::super::project_open_error_response(
+        serde_json::Value::Null,
+        &super::super::project_open_task_capacity_error(),
+    );
+    let data = response
+        .error
+        .expect("typed task capacity rejection")
+        .data
+        .expect("task capacity rejection data");
+    assert_eq!(data["kind"], "project_open_task_capacity_reached");
+    assert_eq!(data["retryable"], true);
+    assert_eq!(
+        data["capacity"],
+        super::super::MAX_TRACKED_PROJECT_OPEN_TASKS
+    );
+
+    tasks.shutdown().await;
+    assert_eq!(tasks.tracked_task_count().await, 0);
+    assert_eq!(tasks.tracked_route_count().await, 0);
+}
+
+#[tokio::test]
+async fn route_open_backoff_retries_after_deadline_without_cross_route_blocking() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let rejected = project_open_test_route("rejected");
+    let healthy = project_open_test_route("healthy");
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let rejected_attempts = Arc::clone(&attempts);
+    let rejected_state = match tasks
+        .start(rejected.clone(), async move {
+            rejected_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(crate::errors::TraceDecayError::Config {
+                message: "identity cutover conflict: strict route invariant".to_string(),
+            })
+        })
+        .await
+    {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("first rejected route attempt must start")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => panic!("first rejected route must fit"),
+    };
+    super::super::ProjectOpenTasks::wait_for_completion(rejected_state)
+        .await
+        .expect_err("rejected route must fail");
+
+    let healthy_attempts = Arc::clone(&attempts);
+    let healthy_state = match tasks
+        .start(healthy, async move {
+            healthy_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        })
+        .await
+    {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("a rejected route must not poison another route")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => {
+            panic!("independent route must fit the bounded task registry")
+        }
+    };
+    super::super::ProjectOpenTasks::wait_for_completion(healthy_state)
+        .await
+        .expect("independent route must open while another is backed off");
+
+    tokio::time::sleep(
+        super::super::PROJECT_OPEN_FAILURE_RETRY_BACKOFF + tokio::time::Duration::from_millis(25),
+    )
+    .await;
+    let retry_attempts = Arc::clone(&attempts);
+    let retry_state = match tasks
+        .start(rejected, async move {
+            retry_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        })
+        .await
+    {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("backoff expiry must allow a new route attempt")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => {
+            panic!("retry must fit after its completed failure is pruned")
+        }
+    };
+    super::super::ProjectOpenTasks::wait_for_completion(retry_state)
+        .await
+        .expect("retry after route-specific backoff must open");
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::Relaxed),
+        3,
+        "one rejected route retry and one independent route must be the only opens"
+    );
+}
+
+#[tokio::test]
+async fn project_open_task_shutdown_cancels_and_clears_route_registry() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let route = project_open_test_route("shutdown");
+    let started = Arc::new(tokio::sync::Notify::new());
+    let task_started = Arc::clone(&started);
+    let state = match tasks
+        .start(route, async move {
+            task_started.notify_one();
+            std::future::pending::<crate::errors::Result<()>>().await
+        })
+        .await
+    {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("pending task must start"),
+        super::super::ProjectOpenTaskClaim::Saturated => panic!("pending task must fit"),
+    };
+    started.notified().await;
+    assert_eq!(tasks.tracked_task_count().await, 1);
+
+    tasks.shutdown().await;
+
+    assert_eq!(tasks.tracked_task_count().await, 0);
+    assert_eq!(tasks.tracked_route_count().await, 0);
+    assert!(
+        super::super::ProjectOpenTasks::wait_for_completion(state)
+            .await
+            .is_err(),
+        "cancelled open tasks must wake waiters instead of retaining them"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -230,6 +504,7 @@ async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
     let project = temp.path().join("project");
     let profile_root = temp.path().join("profile");
     std::fs::create_dir_all(&project).expect("project dir");
+    std::fs::create_dir_all(&profile_root).expect("profile dir");
     let engine = DaemonEngine::default();
     let handshake = DaemonHandshake {
         project_path: Some(project),
@@ -258,8 +533,11 @@ async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
     });
     writer_held.notified().await;
 
-    engine.spawn_project_server_warmup(handshake, initialize_request);
+    Box::pin(engine.schedule_project_server_warmup(handshake, initialize_request))
+        .await
+        .expect("schedule project warmup");
     engine.lifecycle.begin_draining();
+    engine.shutdown_project_open_tasks().await;
     let idle_while_writer_held = tokio::time::timeout(
         tokio::time::Duration::from_secs(1),
         engine.lifecycle.wait_for_idle(),
@@ -278,6 +556,12 @@ async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
     }
 
     idle_while_writer_held.expect("draining must cancel project warmup before writer release");
+    let tasks = super::super::project_open_tasks(&engine.project_open_gates).await;
+    assert_eq!(
+        tasks.tracked_task_count().await,
+        0,
+        "daemon shutdown must clear its tracked project-open task"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -319,6 +603,7 @@ async fn portable_project_warmup_cancels_before_shutdown_snapshot() {
     let project = temp.path().join("project");
     let profile_root = temp.path().join("profile");
     std::fs::create_dir_all(&project).expect("project dir");
+    std::fs::create_dir_all(&profile_root).expect("profile dir");
     let handshake = DaemonHandshake {
         project_path: Some(project),
         client_identity: test_client_identity_for(profile_root),
@@ -354,14 +639,16 @@ async fn portable_project_warmup_cancels_before_shutdown_snapshot() {
     });
     writer_held.notified().await;
 
-    super::super::spawn_portable_project_server_warmup(
+    Box::pin(super::super::schedule_portable_project_server_warmup(
         lifecycle.clone(),
         store_administration,
         project_open_gates,
         handshake,
         initialize_request,
         Some(Arc::clone(&attempts)),
-    );
+    ))
+    .await
+    .expect("schedule portable project warmup");
     tokio::task::yield_now().await;
     lifecycle.begin_draining();
     let idle_before_writer_release = tokio::time::timeout(
@@ -404,9 +691,13 @@ async fn project_warmup_drain_wins_when_open_is_simultaneously_ready() {
         let open_lifecycle = lifecycle.clone();
         let open_won = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let open_won_by_future = Arc::clone(&open_won);
-        super::super::spawn_lifecycle_project_server_warmup(
+        let tasks = super::super::ProjectOpenTasks::default();
+        let claim = Box::pin(super::super::start_lifecycle_project_open(
+            &tasks,
             lifecycle.clone(),
-            initialize_request.clone(),
+            project_open_test_route("simultaneous-drain"),
+            std::path::PathBuf::from("/projects/simultaneous-drain"),
+            Some(initialize_request.clone()),
             async move {
                 open_polled_by_future.notify_one();
                 open_lifecycle.wait_for_draining().await;
@@ -415,7 +706,17 @@ async fn project_warmup_drain_wins_when_open_is_simultaneously_ready() {
                     message: "simultaneous warmup completion".to_string(),
                 })
             },
-        );
+        ))
+        .await;
+        let state = match claim {
+            super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+            super::super::ProjectOpenTaskClaim::Failed(_) => {
+                panic!("production warmup task must start before draining")
+            }
+            super::super::ProjectOpenTaskClaim::Saturated => {
+                panic!("production warmup task must fit")
+            }
+        };
         open_polled.notified().await;
 
         lifecycle.begin_draining();
@@ -429,6 +730,10 @@ async fn project_warmup_drain_wins_when_open_is_simultaneously_ready() {
             !open_won.load(std::sync::atomic::Ordering::Acquire),
             "draining must win when project open becomes ready on the same tick"
         );
+        super::super::ProjectOpenTasks::wait_for_completion(state)
+            .await
+            .expect_err("draining production warmup must report cancellation");
+        tasks.shutdown().await;
     }
 }
 

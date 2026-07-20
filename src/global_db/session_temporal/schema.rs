@@ -990,6 +990,17 @@ pub(crate) async fn ensure_session_temporal_schema(conn: &Connection) -> crate::
 }
 
 pub(crate) async fn repair_session_temporal_state(conn: &Connection) -> crate::errors::Result<()> {
+    let Some(version) = schema_version(conn).await? else {
+        return Ok(());
+    };
+    if version > SESSION_TEMPORAL_SCHEMA_VERSION {
+        return Err(global_db_operation_message(
+            OPERATION,
+            format!(
+                "database session temporal schema version {version} is newer than supported version {SESSION_TEMPORAL_SCHEMA_VERSION}"
+            ),
+        ));
+    }
     repair_interrupted_refresh_state(conn).await?;
     repair_legacy_cursor_key_bindings(conn).await
 }
@@ -1294,11 +1305,63 @@ async fn repair_interrupted_refresh_state(conn: &Connection) -> crate::errors::R
 }
 
 async fn repair_legacy_cursor_key_bindings(conn: &Connection) -> crate::errors::Result<()> {
+    // Projection receipts are immutable evidence whose digest includes the
+    // generation's frozen watermarks. If an earlier repair rebound the active
+    // generation directly, restore that evidence-authoritative snapshot rather
+    // than rewriting receipts and invalidating their batch digests.
+    conn.execute(
+        "UPDATE session_temporal_generations
+         SET frozen_watermarks_json = (
+             SELECT receipt.frozen_watermarks_json
+             FROM session_temporal_projection_receipts AS receipt
+             WHERE receipt.session_id = session_temporal_generations.session_id
+               AND receipt.generation = session_temporal_generations.generation
+             ORDER BY receipt.batch_ordinal
+             LIMIT 1
+         )
+         WHERE state = 'active'
+           AND EXISTS (
+               SELECT 1
+               FROM session_temporal_projection_receipts AS receipt
+               WHERE receipt.session_id = session_temporal_generations.session_id
+                 AND receipt.generation = session_temporal_generations.generation
+           )",
+        (),
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    conn.execute(
+        "UPDATE session_refresh_bindings
+         SET frozen_watermarks_json = (
+             SELECT generation.frozen_watermarks_json
+             FROM session_temporal_generations AS generation
+             WHERE generation.session_id = session_refresh_bindings.session_id
+               AND generation.generation = session_refresh_bindings.generation
+         )
+         WHERE EXISTS (
+             SELECT 1
+             FROM session_temporal_generations AS generation
+             JOIN session_temporal_projection_receipts AS receipt
+               ON receipt.session_id = generation.session_id
+              AND receipt.generation = generation.generation
+             WHERE generation.session_id = session_refresh_bindings.session_id
+               AND generation.generation = session_refresh_bindings.generation
+         )",
+        (),
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OPERATION, error))?;
     let mut missing = conn
         .query(
             "SELECT COUNT(*)
              FROM session_temporal_generations AS generation
              WHERE generation.state = 'active'
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM session_temporal_projection_receipts AS receipt
+                   WHERE receipt.session_id = generation.session_id
+                     AND receipt.generation = generation.generation
+               )
                AND (
                    json_type(generation.frozen_watermarks_json, '$.cursor_key') IS NOT 'object'
                    OR NOT EXISTS (
@@ -1412,7 +1475,13 @@ async fn repair_legacy_cursor_key_bindings(conn: &Connection) -> crate::errors::
              '$.cursor_key',
              json_object('key_id', ?1, 'version', ?2)
          )
-         WHERE state = 'active'",
+         WHERE state = 'active'
+           AND NOT EXISTS (
+               SELECT 1
+               FROM session_temporal_projection_receipts AS receipt
+               WHERE receipt.session_id = session_temporal_generations.session_id
+                 AND receipt.generation = session_temporal_generations.generation
+           )",
         params![key_id, key_version],
     )
     .await
@@ -1693,4 +1762,39 @@ async fn schema_version(conn: &Connection) -> crate::errors::Result<Option<i64>>
                 .map_err(|error| global_db_operation_error(OPERATION, error))
         })
         .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use libsql::Builder;
+    use tempfile::TempDir;
+
+    use super::repair_session_temporal_state;
+
+    #[tokio::test]
+    async fn repair_uninitialized_store_is_non_mutating() {
+        let temp = TempDir::new().expect("temp dir");
+        let db = Builder::new_local(temp.path().join("sessions.db"))
+            .build()
+            .await
+            .expect("local database");
+        let conn = db.connect().expect("database connection");
+
+        repair_session_temporal_state(&conn)
+            .await
+            .expect("uninitialized store needs no state repair");
+
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'session_temporal_schema_migrations'",
+                (),
+            )
+            .await
+            .expect("inspect schema");
+        assert!(
+            rows.next().await.expect("read schema row").is_none(),
+            "repair must not initialize a normal unopened store"
+        );
+    }
 }

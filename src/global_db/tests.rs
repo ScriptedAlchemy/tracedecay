@@ -14,6 +14,127 @@ use tracedecay_store::{
     ObservationStoreError, ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 
+#[tokio::test]
+async fn offline_session_repair_does_not_initialize_unopened_store() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let db = Builder::new_local(temp.path().join("sessions.db"))
+        .build()
+        .await
+        .expect("local database");
+    let conn = db.connect().expect("database connection");
+
+    repair_session_temporal_connection(&conn)
+        .await
+        .expect("initialize unopened temporal store");
+
+    assert!(
+        !connection_table_exists(&conn, "session_temporal_generations")
+            .await
+            .expect("inspect temporal schema")
+    );
+    assert!(
+        !connection_table_exists(&conn, "session_messages")
+            .await
+            .expect("inspect transcript schema")
+    );
+    assert!(
+        !connection_table_exists(&conn, "observations")
+            .await
+            .expect("inspect observation schema")
+    );
+}
+
+#[tokio::test]
+async fn offline_session_repair_does_not_initialize_transcript_only_store() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let db = Builder::new_local(temp.path().join("sessions.db"))
+        .build()
+        .await
+        .expect("local database");
+    let conn = db.connect().expect("database connection");
+    conn.execute(
+        "CREATE TABLE session_messages (message_id TEXT PRIMARY KEY)",
+        (),
+    )
+    .await
+    .expect("initialize transcript-only fixture");
+
+    repair_session_temporal_connection(&conn)
+        .await
+        .expect("transcript-only store needs no temporal repair");
+
+    assert!(
+        !connection_table_exists(&conn, "session_temporal_generations")
+            .await
+            .expect("inspect temporal schema")
+    );
+    assert!(
+        !connection_table_exists(&conn, "observations")
+            .await
+            .expect("inspect observation schema")
+    );
+}
+
+#[tokio::test]
+async fn offline_session_repair_rolls_back_trigger_suspension_on_failure() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let db = Builder::new_local(temp.path().join("sessions.db"))
+        .build()
+        .await
+        .expect("local database");
+    let conn = db.connect().expect("database connection");
+    session_temporal::ensure_session_temporal_schema(&conn)
+        .await
+        .expect("initialize temporal schema");
+    conn.execute_batch(
+        "CREATE TABLE session_messages (message_id TEXT PRIMARY KEY);
+         CREATE TABLE observations (sequence INTEGER PRIMARY KEY);
+         CREATE TRIGGER session_refresh_operations_delete_guard_v1
+         BEFORE DELETE ON session_refresh_operations BEGIN
+             SELECT RAISE(ABORT, 'session refresh operations are immutable');
+         END;
+         DROP TABLE session_refresh_progress;",
+    )
+    .await
+    .expect("corrupt repair fixture");
+    let mut before = conn
+        .query(
+            "SELECT 1 FROM sqlite_master
+             WHERE type = 'trigger'
+               AND name = 'session_refresh_operations_delete_guard_v1'",
+            (),
+        )
+        .await
+        .expect("inspect repair precondition");
+    assert!(
+        before
+            .next()
+            .await
+            .expect("read repair precondition")
+            .is_some(),
+        "repair fixture must begin with its immutability trigger"
+    );
+    drop(before);
+
+    repair_session_temporal_connection(&conn)
+        .await
+        .expect_err("missing temporal table must reject repair");
+
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM sqlite_master
+             WHERE type = 'trigger'
+               AND name = 'session_refresh_operations_delete_guard_v1'",
+            (),
+        )
+        .await
+        .expect("inspect temporal trigger");
+    assert!(
+        rows.next().await.expect("read temporal trigger").is_some(),
+        "failed maintenance must roll back suspended immutability triggers"
+    );
+}
+
 #[cfg(unix)]
 fn colliding_non_unicode_project_paths(root: &Path) -> (PathBuf, PathBuf) {
     use std::ffi::OsString;
@@ -3655,6 +3776,7 @@ async fn reopen_repairs_interrupted_refresh_and_legacy_cursor_state() {
         .execute_batch(
             "DROP TRIGGER IF EXISTS session_temporal_generations_insert_guard_v1;
              DROP TRIGGER IF EXISTS session_temporal_generations_state_guard_v1;
+             DROP TRIGGER IF EXISTS session_temporal_projection_receipts_insert_guard_v1;
              DROP TRIGGER IF EXISTS session_refresh_operations_insert_guard_v1;
              DROP TRIGGER IF EXISTS session_refresh_bindings_insert_guard_v1;
              DROP TRIGGER IF EXISTS session_refresh_progress_insert_guard_v1;
@@ -3665,6 +3787,29 @@ async fn reopen_repairs_interrupted_refresh_and_legacy_cursor_state() {
                  'session.active', 1, 'active',
                  '{\"active_generation\":1,\"cursor_key\":null,\"projection_frontier\":0,\"source_frontier\":0,\"summary_frontier\":0}',
                  50, 51, 52, NULL
+             );
+             INSERT INTO session_temporal_generations (
+                 session_id, generation, state, frozen_watermarks_json,
+                 created_at, ready_at, activated_at, completed_at
+             ) VALUES (
+                 'session.receipted', 1, 'active',
+                 '{\"active_generation\":1,\"cursor_key\":null,\"projection_frontier\":0,\"source_frontier\":0,\"summary_frontier\":0}',
+                 60, 61, 62, NULL
+             );
+             INSERT INTO session_temporal_projection_receipts (
+                 session_id, generation, batch_ordinal, batch_digest,
+                 frozen_watermarks_json, source_through, projection_through,
+                 occurrence_count, occurrence_digest, dimension_count, dimension_digest,
+                 copy_count, copy_digest, assertion_count, assertion_digest,
+                 supersession_count, supersession_digest, current_count, current_digest,
+                 fts_count, fts_digest, committed_at
+             ) VALUES (
+                 'session.receipted', 1, 0, 'batch.receipted',
+                 '{\"active_generation\":1,\"cursor_key\":null,\"projection_frontier\":0,\"source_frontier\":0,\"summary_frontier\":0}',
+                 0, 0, 0, 'occurrences.empty', 0, 'dimensions.empty',
+                 0, 'copies.empty', 0, 'assertions.empty',
+                 0, 'supersession.empty', 0, 'current.empty',
+                 0, 'fts.empty', 63
              );
              INSERT INTO session_temporal_generations (
                  session_id, generation, state, frozen_watermarks_json, created_at
@@ -3707,14 +3852,9 @@ async fn reopen_repairs_interrupted_refresh_and_legacy_cursor_state() {
         )
         .await
         .unwrap();
-    let writer = db.writer_connection().await.unwrap();
-    super::session_temporal::repair_session_temporal_state(&writer.conn)
+    repair_session_temporal_connection(&db.conn)
         .await
-        .unwrap();
-    super::schema_contract::ensure_authority_invariant_schema(&writer.conn)
-        .await
-        .unwrap();
-    drop(writer);
+        .expect("maintenance repair must restore exhaustive authority");
     drop(db);
 
     let reopened = GlobalDb::open_at(&db_path).await.unwrap();
@@ -3776,4 +3916,23 @@ async fn reopen_repairs_interrupted_refresh_and_legacy_cursor_state() {
             .unwrap(),
         "object"
     );
+    drop(cursor);
+    let mut receipted = reopened
+        .conn
+        .query(
+            "SELECT json_type(generation.frozen_watermarks_json, '$.cursor_key'),
+                    generation.frozen_watermarks_json = receipt.frozen_watermarks_json
+             FROM session_temporal_generations AS generation
+             JOIN session_temporal_projection_receipts AS receipt
+               ON receipt.session_id = generation.session_id
+              AND receipt.generation = generation.generation
+             WHERE generation.session_id = 'session.receipted'
+               AND generation.state = 'active'",
+            (),
+        )
+        .await
+        .unwrap();
+    let row = receipted.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "null");
+    assert_eq!(row.get::<i64>(1).unwrap(), 1);
 }

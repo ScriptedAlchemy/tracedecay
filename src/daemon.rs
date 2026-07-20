@@ -12,12 +12,8 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 #[cfg(unix)]
 use tokio::net::UnixStream;
-#[cfg(unix)]
-use tokio::task::JoinHandle;
-use tokio::task::JoinSet;
-#[cfg(any(unix, test))]
-use tokio::time::Duration;
-use tokio::time::timeout;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::{Duration, timeout};
 
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
@@ -53,6 +49,11 @@ const TOOL_LIST_CHANGED_METHOD: &str = "notifications/tools/list_changed";
 #[cfg(unix)]
 const MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION: usize = 1_024;
 const MAX_CACHED_PROJECT_SERVERS: usize = 8;
+const MAX_TRACKED_PROJECT_OPEN_TASKS: usize = MAX_CACHED_PROJECT_SERVERS;
+const PROJECT_OPEN_REQUEST_DEADLINE: Duration = Duration::from_millis(500);
+const PROJECT_OPEN_FAILURE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+const PROJECT_OPEN_FAILURE_RETRY_HINT: &str =
+    "project route open is backed off after an invariant rejection";
 
 mod authority;
 mod branch_add;
@@ -171,6 +172,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         });
     }
     lifecycle.begin_draining();
+    shutdown_portable_project_open_tasks(project_open_gates.as_ref()).await;
     let in_flight_drained = timeout(DAEMON_CLIENT_DRAIN_DEADLINE, lifecycle.wait_for_idle())
         .await
         .is_ok();
@@ -305,6 +307,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         });
     }
     engine.lifecycle.begin_draining();
+    engine.shutdown_project_open_tasks().await;
     // Stop accepting and unlink the socket before draining so clients that
     // connect during shutdown get NotFound/ConnectionRefused (which they retry
     // via `connect_with_restart_grace`) instead of a queued connection that
@@ -466,8 +469,9 @@ struct DaemonEngine {
     /// One coordinator owns the project-server registry, scheduler registry,
     /// and the writer gate that orders all mutations of either identity map.
     store_administration: StoreAdministration,
-    /// Per-canonical-route singleflight gates. Weak entries disappear after
-    /// the last waiter, so failed opens are never cached.
+    /// Per-canonical-route gates plus a bounded, route-local warm-up task
+    /// registry. Weak gates disappear after the last waiter; deterministic
+    /// route failures remain only for their short retry backoff.
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     /// Per-logical-owner transition guards. Task-map locks are released before
     /// stale owners are awaited; this guard alone spans retirement so a
@@ -530,7 +534,11 @@ struct ProjectRouteKey {
 }
 
 type ProjectOpenGate = tokio::sync::Mutex<()>;
-type ProjectOpenGates = HashMap<ProjectRouteKey, std::sync::Weak<ProjectOpenGate>>;
+#[derive(Default)]
+struct ProjectOpenGates {
+    gates: HashMap<ProjectRouteKey, std::sync::Weak<ProjectOpenGate>>,
+    tasks: ProjectOpenTasks,
+}
 type MaintenanceTransitionGate = tokio::sync::Mutex<()>;
 type MaintenanceTransitionGates =
     HashMap<MaintenanceTransitionKey, std::sync::Weak<MaintenanceTransitionGate>>;
@@ -546,6 +554,220 @@ struct MaintenanceTransitionKey {
 enum MaintenanceRekeyOutcome {
     Completed,
     Retiring,
+}
+
+/// Route-local project-open work. A route owns at most one task, and
+/// deterministic configuration failures retain a short backoff record so a
+/// reconnecting MCP host cannot repeatedly reopen the same rejected store.
+#[derive(Clone, Default)]
+struct ProjectOpenTasks {
+    registry: Arc<tokio::sync::Mutex<ProjectOpenTaskRegistry>>,
+}
+
+#[derive(Default)]
+struct ProjectOpenTaskRegistry {
+    routes: HashMap<ProjectRouteKey, ProjectOpenTaskEntry>,
+}
+
+struct ProjectOpenTaskEntry {
+    state: tokio::sync::watch::Receiver<ProjectOpenTaskState>,
+    task: JoinHandle<()>,
+}
+
+#[derive(Clone)]
+enum ProjectOpenTaskState {
+    Opening,
+    Ready,
+    Failed(ProjectOpenFailure),
+}
+
+#[derive(Clone)]
+struct ProjectOpenFailure {
+    message: String,
+    retry_at: Option<Instant>,
+}
+
+enum ProjectOpenTaskClaim {
+    InFlight(tokio::sync::watch::Receiver<ProjectOpenTaskState>),
+    Failed(ProjectOpenFailure),
+    Saturated,
+}
+
+fn is_invariant_rejected_project_route(error: &TraceDecayError) -> bool {
+    match error {
+        TraceDecayError::Config { message } => {
+            message.contains("identity cutover conflict")
+                || message.contains("ambiguous legacy profile stores")
+                || message.contains("enrollment marker did not resolve a profile store")
+        }
+        TraceDecayError::Database { message, operation } => {
+            operation == "ensure global database authority invariants"
+                && message.contains("session temporal receipts or cursor keys are mutable")
+        }
+        _ => false,
+    }
+}
+
+impl ProjectOpenFailure {
+    fn from_error(error: &TraceDecayError) -> Self {
+        // Operator-repairable authority rejections decline implicit repair.
+        // Reopening before maintenance changes that state is not useful and
+        // only multiplies daemon warm-up tasks.
+        let retry_at = is_invariant_rejected_project_route(error)
+            .then(|| Instant::now() + PROJECT_OPEN_FAILURE_RETRY_BACKOFF);
+        Self {
+            message: error.to_string(),
+            retry_at,
+        }
+    }
+
+    fn is_backed_off(&self, now: Instant) -> bool {
+        self.retry_at.is_some_and(|retry_at| retry_at > now)
+    }
+
+    fn to_error(&self) -> TraceDecayError {
+        let message = match self.retry_at {
+            Some(retry_at) => format!(
+                "{PROJECT_OPEN_FAILURE_RETRY_HINT}; retry after {} ms: {}",
+                retry_at
+                    .saturating_duration_since(Instant::now())
+                    .as_millis(),
+                self.message
+            ),
+            None => self.message.clone(),
+        };
+        TraceDecayError::Config { message }
+    }
+}
+
+impl ProjectOpenTaskRegistry {
+    fn prune(&mut self, now: Instant) {
+        self.routes.retain(|_, entry| {
+            let state = entry.state.borrow().clone();
+            match state {
+                ProjectOpenTaskState::Opening | ProjectOpenTaskState::Ready => {
+                    !entry.task.is_finished()
+                }
+                ProjectOpenTaskState::Failed(failure) => {
+                    !entry.task.is_finished() || failure.is_backed_off(now)
+                }
+            }
+        });
+    }
+}
+
+impl ProjectOpenTasks {
+    async fn start<OpenFuture>(
+        &self,
+        route: ProjectRouteKey,
+        open: OpenFuture,
+    ) -> ProjectOpenTaskClaim
+    where
+        OpenFuture: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
+        let now = Instant::now();
+        let mut registry = self.registry.lock().await;
+        registry.prune(now);
+        if let Some(entry) = registry.routes.get(&route) {
+            return match entry.state.borrow().clone() {
+                ProjectOpenTaskState::Failed(failure) => ProjectOpenTaskClaim::Failed(failure),
+                ProjectOpenTaskState::Opening | ProjectOpenTaskState::Ready => {
+                    ProjectOpenTaskClaim::InFlight(entry.state.clone())
+                }
+            };
+        }
+        if registry.routes.len() >= MAX_TRACKED_PROJECT_OPEN_TASKS {
+            return ProjectOpenTaskClaim::Saturated;
+        }
+
+        let (updates, state) = tokio::sync::watch::channel(ProjectOpenTaskState::Opening);
+        let task = tokio::spawn(async move {
+            let state = match open.await {
+                Ok(()) => ProjectOpenTaskState::Ready,
+                Err(error) => ProjectOpenTaskState::Failed(ProjectOpenFailure::from_error(&error)),
+            };
+            updates.send_replace(state);
+        });
+        registry.routes.insert(
+            route,
+            ProjectOpenTaskEntry {
+                state: state.clone(),
+                task,
+            },
+        );
+        ProjectOpenTaskClaim::InFlight(state)
+    }
+
+    async fn wait_for_completion(
+        mut state: tokio::sync::watch::Receiver<ProjectOpenTaskState>,
+    ) -> Result<()> {
+        loop {
+            let current = state.borrow().clone();
+            match current {
+                ProjectOpenTaskState::Opening => {
+                    state.changed().await.map_err(|_| TraceDecayError::Config {
+                        message: "project open task ended before reporting an outcome".to_string(),
+                    })?;
+                }
+                ProjectOpenTaskState::Ready => return Ok(()),
+                ProjectOpenTaskState::Failed(failure) => return Err(failure.to_error()),
+            }
+        }
+    }
+
+    async fn cached_failure(&self, route: &ProjectRouteKey) -> Option<ProjectOpenFailure> {
+        let now = Instant::now();
+        let mut registry = self.registry.lock().await;
+        registry.prune(now);
+        let entry = registry.routes.get(route)?;
+        match entry.state.borrow().clone() {
+            ProjectOpenTaskState::Failed(failure) if failure.is_backed_off(now) => Some(failure),
+            ProjectOpenTaskState::Opening
+            | ProjectOpenTaskState::Ready
+            | ProjectOpenTaskState::Failed(_) => None,
+        }
+    }
+
+    async fn shutdown(&self) {
+        let entries = {
+            let mut registry = self.registry.lock().await;
+            std::mem::take(&mut registry.routes)
+        };
+        for entry in entries.values() {
+            entry.task.abort();
+        }
+        let drained = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
+            for entry in entries.into_values() {
+                let _ = entry.task.await;
+            }
+        })
+        .await
+        .is_ok();
+        if !drained {
+            log_daemon_event(
+                "project_server_warmup",
+                &[("outcome", "shutdown_abort_timeout".to_string())],
+            );
+        }
+    }
+
+    #[cfg(test)]
+    async fn tracked_task_count(&self) -> usize {
+        let mut registry = self.registry.lock().await;
+        registry.prune(Instant::now());
+        registry
+            .routes
+            .values()
+            .filter(|entry| !entry.task.is_finished())
+            .count()
+    }
+
+    #[cfg(test)]
+    async fn tracked_route_count(&self) -> usize {
+        let mut registry = self.registry.lock().await;
+        registry.prune(Instant::now());
+        registry.routes.len()
+    }
 }
 
 /// Scope-specific MCP servers routed through one canonical physical DB owner.
@@ -693,6 +915,23 @@ fn project_server_capacity_error() -> TraceDecayError {
     }
 }
 
+fn project_open_task_capacity_error() -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "daemon project open task capacity reached (capacity={MAX_TRACKED_PROJECT_OPEN_TASKS}); retry shortly"
+        ),
+    }
+}
+
+fn project_warming_error(project_path: &Path) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "TraceDecay project '{}' {PROJECT_WARMING_RETRY_HINT}",
+            project_path.display(),
+        ),
+    }
+}
+
 impl StoreOwnerKey {
     fn from_paths(
         profile_root: &Path,
@@ -726,17 +965,34 @@ impl ProjectRouteKey {
     }
 }
 
+fn project_route_for_handshake(handshake: &DaemonHandshake) -> Result<(PathBuf, ProjectRouteKey)> {
+    let Some(project_path) = handshake.project_path.as_ref() else {
+        return Err(TraceDecayError::Config {
+            message: "project server requested without project_path".to_string(),
+        });
+    };
+    let canonical_project_path = project_path
+        .canonicalize()
+        .unwrap_or_else(|_| project_path.clone());
+    let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake)?;
+    Ok((canonical_project_path, route))
+}
+
 async fn project_open_gate(
     gates: &tokio::sync::Mutex<ProjectOpenGates>,
     route: &ProjectRouteKey,
 ) -> Arc<ProjectOpenGate> {
     let mut gates = gates.lock().await;
-    if let Some(gate) = gates.get(route).and_then(std::sync::Weak::upgrade) {
+    if let Some(gate) = gates.gates.get(route).and_then(std::sync::Weak::upgrade) {
         return gate;
     }
     let gate = Arc::new(ProjectOpenGate::new(()));
-    gates.insert(route.clone(), Arc::downgrade(&gate));
+    gates.gates.insert(route.clone(), Arc::downgrade(&gate));
     gate
+}
+
+async fn project_open_tasks(gates: &tokio::sync::Mutex<ProjectOpenGates>) -> ProjectOpenTasks {
+    gates.lock().await.tasks.clone()
 }
 
 async fn maintenance_transition_gate(
@@ -987,6 +1243,23 @@ impl DaemonEngine {
         &self,
         handshake: &DaemonHandshake,
     ) -> Result<Arc<crate::mcp::McpServer>> {
+        if let Some(server) = self.cached_project_server(handshake).await? {
+            return Ok(server);
+        }
+
+        let cached = {
+            self.store_administration
+                .with_writer(|| self.open_project_server(handshake))
+                .await?
+        };
+        let (_key, project_path, server, _inserted) = cached;
+        Ok(self.activate_project_server(project_path, server).await)
+    }
+
+    async fn cached_project_server(
+        &self,
+        handshake: &DaemonHandshake,
+    ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
         let (project_path, route) = Self::project_route(handshake)?;
         let cached = {
             let mut servers = self.store_administration.project_servers().lock().await;
@@ -994,81 +1267,92 @@ impl DaemonEngine {
                 .get_route_and_touch(&route)
                 .map(|(_, server)| Arc::clone(server))
         };
-        if let Some(server) = cached {
-            return Ok(self.activate_project_server(project_path, server).await);
-        }
-
-        let (_key, project_path, server, _inserted) = self
-            .store_administration
-            .with_writer(|| self.open_project_server(handshake))
-            .await?;
-        Ok(self.activate_project_server(project_path, server).await)
+        Ok(match cached {
+            Some(server) => Some(self.activate_project_server(project_path, server).await),
+            None => None,
+        })
     }
 
-    fn spawn_project_server_warmup(
+    async fn begin_project_open(
+        &self,
+        handshake: DaemonHandshake,
+        initialize_request: Option<JsonRpcRequest>,
+    ) -> Result<ProjectOpenTaskClaim> {
+        let (project_path, route) = Self::project_route(&handshake)?;
+        let tasks = project_open_tasks(&self.project_open_gates).await;
+        let engine = self.clone();
+        Ok(Box::pin(start_lifecycle_project_open(
+            &tasks,
+            self.lifecycle.clone(),
+            route,
+            project_path,
+            initialize_request,
+            async move { engine.project_server(&handshake).await },
+        ))
+        .await)
+    }
+
+    async fn schedule_project_server_warmup(
         &self,
         handshake: DaemonHandshake,
         initialize_request: JsonRpcRequest,
-    ) {
-        let engine = self.clone();
-        let project = handshake.project_path.clone();
-        spawn_lifecycle_project_server_warmup(
-            self.lifecycle.clone(),
-            initialize_request,
-            async move {
-                Box::pin(engine.project_server(&handshake))
-                    .await
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!(
-                            "project server warm-up for '{}': {error}",
-                            project.as_deref().map_or_else(
-                                || "<projectless>".into(),
-                                |path| path.display().to_string()
-                            )
-                        ),
-                    })
-            },
-        );
+    ) -> Result<()> {
+        if self.cached_project_server(&handshake).await?.is_some() {
+            return Ok(());
+        }
+        match Box::pin(self.begin_project_open(handshake, Some(initialize_request))).await? {
+            ProjectOpenTaskClaim::InFlight(_) => Ok(()),
+            ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
+            ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
+        }
     }
 
-    fn spawn_direct_project_server_open(
+    async fn project_server_for_request(
         &self,
-        handshake: DaemonHandshake,
-    ) -> JoinHandle<Result<Arc<crate::mcp::McpServer>>> {
-        let engine = self.clone();
-        let project = handshake.project_path.clone();
-        tokio::spawn(async move {
-            let Some(activity) = engine.lifecycle.try_enter() else {
-                return Err(TraceDecayError::Config {
-                    message: "daemon is draining before project warm-up".to_string(),
-                });
-            };
-            let _activity = activity;
-            let result = tokio::select! {
-                biased;
-                () = engine.lifecycle.wait_for_draining() => Err(TraceDecayError::Config {
-                    message: "daemon began draining during project warm-up".to_string(),
-                }),
-                result = Box::pin(engine.project_server(&handshake)) => result,
-            };
-            if let Err(error) = &result {
-                log_daemon_event(
-                    "project_server_warmup",
-                    &[
-                        ("outcome", "error".to_string()),
-                        (
-                            "project",
-                            project.as_deref().map_or_else(
-                                || "<projectless>".into(),
-                                |path| path.display().to_string(),
-                            ),
-                        ),
-                        ("error", error.to_string()),
-                    ],
-                );
+        handshake: &DaemonHandshake,
+    ) -> Result<Arc<crate::mcp::McpServer>> {
+        if let Some(server) = self.cached_project_server(handshake).await? {
+            return Ok(server);
+        }
+        let (project_path, _) = Self::project_route(handshake)?;
+        let claim = Box::pin(self.begin_project_open(handshake.clone(), None)).await?;
+        match claim {
+            ProjectOpenTaskClaim::InFlight(state) => {
+                match timeout(
+                    PROJECT_OPEN_REQUEST_DEADLINE,
+                    ProjectOpenTasks::wait_for_completion(state),
+                )
+                .await
+                {
+                    Ok(Ok(())) => self.cached_project_server(handshake).await?.ok_or_else(|| {
+                        TraceDecayError::Config {
+                            message: "project open completed without publishing a server"
+                                .to_string(),
+                        }
+                    }),
+                    Ok(Err(error)) => Err(error),
+                    Err(_) => Err(project_warming_error(&project_path)),
+                }
             }
-            result
-        })
+            ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
+            ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
+        }
+    }
+
+    async fn cached_project_open_failure(
+        &self,
+        handshake: &DaemonHandshake,
+    ) -> Result<Option<ProjectOpenFailure>> {
+        let (_, route) = Self::project_route(handshake)?;
+        let tasks = project_open_tasks(&self.project_open_gates).await;
+        Ok(tasks.cached_failure(&route).await)
+    }
+
+    async fn shutdown_project_open_tasks(&self) {
+        project_open_tasks(&self.project_open_gates)
+            .await
+            .shutdown()
+            .await;
     }
 
     /// Opens or resolves a project server while writer administration is held.
@@ -1233,16 +1517,7 @@ impl DaemonEngine {
     }
 
     fn project_route(handshake: &DaemonHandshake) -> Result<(PathBuf, ProjectRouteKey)> {
-        let Some(project_path) = handshake.project_path.as_ref() else {
-            return Err(TraceDecayError::Config {
-                message: "project server requested without project_path".to_string(),
-            });
-        };
-        let canonical_project_path = project_path
-            .canonicalize()
-            .unwrap_or_else(|_| project_path.clone());
-        let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake)?;
-        Ok((canonical_project_path, route))
+        project_route_for_handshake(handshake)
     }
 
     async fn activate_project_server(
@@ -1469,6 +1744,7 @@ impl DaemonEngine {
     }
 
     async fn shutdown_background_tasks(&self) {
+        self.shutdown_project_open_tasks().await;
         self.store_administration
             .session_temporal_refresh_schedulers()
             .shutdown()
@@ -1701,38 +1977,61 @@ async fn cached_project_node_count(
         .map(|stats| stats.node_count)
 }
 
-fn spawn_lifecycle_project_server_warmup<OpenFuture>(
+async fn start_lifecycle_project_open<OpenFuture>(
+    tasks: &ProjectOpenTasks,
     lifecycle: DaemonLifecycle,
-    initialize_request: JsonRpcRequest,
+    route: ProjectRouteKey,
+    project_path: PathBuf,
+    initialize_request: Option<JsonRpcRequest>,
     open_project_server: OpenFuture,
-) where
+) -> ProjectOpenTaskClaim
+where
     OpenFuture: std::future::Future<Output = Result<Arc<crate::mcp::McpServer>>> + Send + 'static,
 {
-    let Some(activity) = lifecycle.try_enter() else {
-        return;
-    };
-    let _warmup = tokio::spawn(async move {
-        let _activity = activity;
-        let project_server = tokio::select! {
-            biased;
-            () = lifecycle.wait_for_draining() => return,
-            result = Box::pin(open_project_server) => result,
-        };
-        match project_server {
-            Ok(server) => {
-                // Preserve the regular initialize side effect that records
-                // the negotiated MCP client name on the real server.
-                let _ = server.handle_request(&initialize_request).await;
+    if !lifecycle.accepting() {
+        return ProjectOpenTaskClaim::Failed(ProjectOpenFailure {
+            message: "daemon is draining before project warm-up".to_string(),
+            retry_at: None,
+        });
+    }
+    tasks
+        .start(route, async move {
+            let Some(activity) = lifecycle.try_enter() else {
+                return Err(TraceDecayError::Config {
+                    message: "daemon is draining before project warm-up".to_string(),
+                });
+            };
+            let _activity = activity;
+            let result = tokio::select! {
+                biased;
+                () = lifecycle.wait_for_draining() => Err(TraceDecayError::Config {
+                    message: "daemon began draining during project warm-up".to_string(),
+                }),
+                result = Box::pin(open_project_server) => result,
+            };
+            match result {
+                Ok(server) => {
+                    if let Some(initialize_request) = initialize_request {
+                        // Preserve the regular initialize side effect that records
+                        // the negotiated MCP client name on the real server.
+                        let _ = server.handle_request(&initialize_request).await;
+                    }
+                    Ok(())
+                }
+                Err(error) => {
+                    log_daemon_event(
+                        "project_server_warmup",
+                        &[
+                            ("outcome", "error".to_string()),
+                            ("project", project_path.display().to_string()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                    Err(error)
+                }
             }
-            Err(error) => log_daemon_event(
-                "project_server_warmup",
-                &[
-                    ("outcome", "error".to_string()),
-                    ("error", error.to_string()),
-                ],
-            ),
-        }
-    });
+        })
+        .await
 }
 
 fn spawn_lifecycle_automation_scheduler_activation<ActivationFuture>(
@@ -1755,40 +2054,298 @@ fn spawn_lifecycle_automation_scheduler_activation<ActivationFuture>(
 }
 
 #[cfg(any(not(unix), test))]
-fn spawn_portable_project_server_warmup(
+async fn portable_cached_project_server(
+    store_administration: &StoreAdministration,
+    canonical_project_path: &Path,
+    handshake: &DaemonHandshake,
+) -> Result<Option<Arc<crate::mcp::McpServer>>> {
+    let route = ProjectRouteKey::from_handshake(canonical_project_path, handshake)?;
+    let server = {
+        let mut servers = store_administration.project_servers().lock().await;
+        servers
+            .get_route_and_touch(&route)
+            .map(|(_, server)| Arc::clone(server))
+    };
+    Ok(server)
+}
+
+#[cfg(any(not(unix), test))]
+// Cohesive route-open context; a params struct would only move the same ownership bundle.
+#[allow(clippy::too_many_arguments)]
+async fn begin_portable_project_open(
+    lifecycle: DaemonLifecycle,
+    store_administration: StoreAdministration,
+    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    handshake: DaemonHandshake,
+    canonical_project_path: PathBuf,
+    route: ProjectRouteKey,
+    initialize_request: Option<JsonRpcRequest>,
+    #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
+) -> ProjectOpenTaskClaim {
+    let tasks = project_open_tasks(project_open_gates.as_ref()).await;
+    let open_project_path = canonical_project_path.clone();
+    let open_gates = Arc::clone(&project_open_gates);
+    Box::pin(start_lifecycle_project_open(
+        &tasks,
+        lifecycle,
+        route,
+        canonical_project_path,
+        initialize_request,
+        async move {
+            store_administration
+                .with_writer(|| {
+                    portable_project_server(
+                        &store_administration,
+                        open_gates.as_ref(),
+                        &open_project_path,
+                        &handshake,
+                        #[cfg(test)]
+                        project_open_attempts.as_ref(),
+                    )
+                })
+                .await
+        },
+    ))
+    .await
+}
+
+#[cfg(any(not(unix), test))]
+async fn schedule_portable_project_server_warmup(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     handshake: DaemonHandshake,
     initialize_request: JsonRpcRequest,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
-) {
-    let Some(project_path) = handshake.project_path.clone() else {
-        return;
-    };
-    spawn_lifecycle_project_server_warmup(lifecycle, initialize_request, async move {
-        let canonical_project_path = project_path
-            .canonicalize()
-            .unwrap_or_else(|_| project_path.clone());
-        store_administration
-            .with_writer(|| {
-                portable_project_server(
-                    &store_administration,
-                    &project_open_gates,
-                    &canonical_project_path,
-                    &handshake,
-                    #[cfg(test)]
-                    project_open_attempts.as_ref(),
-                )
-            })
+) -> Result<()> {
+    let (canonical_project_path, route) = project_route_for_handshake(&handshake)?;
+    if portable_cached_project_server(&store_administration, &canonical_project_path, &handshake)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    match Box::pin(begin_portable_project_open(
+        lifecycle,
+        store_administration,
+        project_open_gates,
+        handshake,
+        canonical_project_path,
+        route,
+        Some(initialize_request),
+        #[cfg(test)]
+        project_open_attempts,
+    ))
+    .await
+    {
+        ProjectOpenTaskClaim::InFlight(_) => Ok(()),
+        ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
+        ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
+    }
+}
+
+#[cfg(any(not(unix), test))]
+async fn portable_project_server_for_request(
+    lifecycle: DaemonLifecycle,
+    store_administration: StoreAdministration,
+    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    handshake: &DaemonHandshake,
+    #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
+) -> Result<Arc<crate::mcp::McpServer>> {
+    let (canonical_project_path, route) = project_route_for_handshake(handshake)?;
+    if let Some(server) =
+        portable_cached_project_server(&store_administration, &canonical_project_path, handshake)
+            .await?
+    {
+        return Ok(server);
+    }
+    let claim = Box::pin(begin_portable_project_open(
+        lifecycle,
+        store_administration.clone(),
+        project_open_gates,
+        handshake.clone(),
+        canonical_project_path.clone(),
+        route,
+        None,
+        #[cfg(test)]
+        project_open_attempts,
+    ))
+    .await;
+    match claim {
+        ProjectOpenTaskClaim::InFlight(state) => {
+            match timeout(
+                PROJECT_OPEN_REQUEST_DEADLINE,
+                ProjectOpenTasks::wait_for_completion(state),
+            )
             .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "project server warm-up for '{}': {error}",
-                    canonical_project_path.display()
-                ),
-            })
-    });
+            {
+                Ok(Ok(())) => portable_cached_project_server(
+                    &store_administration,
+                    &canonical_project_path,
+                    handshake,
+                )
+                .await?
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "project open completed without publishing a server".to_string(),
+                }),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(project_warming_error(&canonical_project_path)),
+            }
+        }
+        ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
+        ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
+    }
+}
+
+#[cfg(any(not(unix), test))]
+async fn portable_cached_project_open_failure(
+    project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
+    handshake: &DaemonHandshake,
+) -> Result<Option<ProjectOpenFailure>> {
+    let (_, route) = project_route_for_handshake(handshake)?;
+    let tasks = project_open_tasks(project_open_gates).await;
+    Ok(tasks.cached_failure(&route).await)
+}
+
+#[cfg(not(unix))]
+async fn shutdown_portable_project_open_tasks(
+    project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
+) {
+    project_open_tasks(project_open_gates)
+        .await
+        .shutdown()
+        .await;
+}
+
+#[cfg(any(not(unix), test))]
+async fn portable_project_server(
+    store_administration: &StoreAdministration,
+    project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
+    canonical_project_path: &Path,
+    handshake: &DaemonHandshake,
+    #[cfg(test)] project_open_attempts: Option<&Arc<AtomicUsize>>,
+) -> Result<Arc<crate::mcp::McpServer>> {
+    let route = ProjectRouteKey::from_handshake(canonical_project_path, handshake)?;
+    if let Some(server) = {
+        let mut servers = store_administration.project_servers().lock().await;
+        servers
+            .get_route_and_touch(&route)
+            .map(|(_, server)| Arc::clone(server))
+    } {
+        return Ok(server);
+    }
+
+    let gate = project_open_gate(project_open_gates, &route).await;
+    let _singleflight = gate.lock().await;
+    if let Some(server) = {
+        let mut servers = store_administration.project_servers().lock().await;
+        servers
+            .get_route_and_touch(&route)
+            .map(|(_, server)| Arc::clone(server))
+    } {
+        return Ok(server);
+    }
+
+    #[cfg(test)]
+    if let Some(attempts) = project_open_attempts {
+        attempts.fetch_add(1, Ordering::Relaxed);
+    }
+    let cg = Box::pin(open_project_for_handshake(
+        canonical_project_path,
+        handshake,
+    ))
+    .await?;
+    cg.register_project_store_in_global_registry().await;
+    let key = ProjectServerKey::from_open_project(&cg, handshake)?;
+    let existing = {
+        let mut servers = store_administration.project_servers().lock().await;
+        let existing = servers.get(&key).cloned();
+        if existing.is_some() {
+            servers.bind_route(route.clone(), key.clone());
+        }
+        existing
+    };
+    if let Some(existing) = existing {
+        return Ok(existing);
+    }
+
+    let current_key = Arc::new(tokio::sync::Mutex::new(key.clone()));
+    let route_registered = Arc::new(AtomicBool::new(true));
+    let database_owner_reconciler = portable_database_owner_reconciler(
+        store_administration.clone(),
+        current_key,
+        Arc::clone(&route_registered),
+        handshake.clone(),
+    );
+    let registry_db = store_administration
+        .global_database(&handshake.client_identity.global_db_path)
+        .await?;
+    let session_db = store_administration
+        .global_database(&cg.store_layout().sessions_db_path)
+        .await?;
+    let host_admission_broker = store_administration
+        .host_admission_broker(&session_db)
+        .await?
+        .broker()
+        .cloned();
+    let user_session_db = store_administration
+        .user_session_database(&handshake.client_identity.global_db_path)
+        .await?;
+    let project_session_refresh_wake = store_administration
+        .session_temporal_refresh_schedulers()
+        .ensure_project(key.owner.clone(), Arc::clone(&session_db))
+        .await;
+    let user_session_refresh_wake = store_administration
+        .session_temporal_refresh_schedulers()
+        .ensure_profile(
+            user_session_db.db_path().to_path_buf(),
+            Arc::clone(&user_session_db),
+        )
+        .await;
+    let accounting_db =
+        crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registry_db));
+    let context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
+        cg,
+        handshake.scope_prefix.clone(),
+        crate::mcp::server::McpServerDaemonAuthority {
+            profile_root: handshake.client_identity.profile_root.clone(),
+            databases: crate::mcp::server::McpServerDaemonDatabases {
+                accounting: accounting_db,
+                registry: registry_db,
+                project_sessions: session_db,
+                user_sessions: user_session_db,
+            },
+            host_admission_broker,
+            project_session_refresh_wake,
+            user_session_refresh_wake,
+            database_owner_reconciler,
+            writers: crate::mcp::server::McpServerWriters::daemon_owned(
+                coordinated_dashboard_automation_writer(store_administration.clone()),
+                coordinated_hook_branch_writer(store_administration.clone()),
+                coordinated_background_refresh_writer(store_administration.clone()),
+            ),
+        },
+    );
+    let candidate = crate::mcp::McpServer::new_with_context(context).await;
+    let resolution = store_administration
+        .project_servers()
+        .lock()
+        .await
+        .bind_or_insert_route_bounded(
+            route,
+            key,
+            candidate,
+            MAX_CACHED_PROJECT_SERVERS,
+            |server| Arc::strong_count(server) > 1,
+        );
+    let Some((resolved, inserted)) = resolution else {
+        route_registered.store(false, Ordering::Release);
+        return Err(project_server_capacity_error());
+    };
+    if !inserted {
+        route_registered.store(false, Ordering::Release);
+    }
+    Ok(resolved)
 }
 
 async fn write_routed_initialize_response(
@@ -1930,9 +2487,41 @@ async fn serve_broker_socket_client(
             } else {
                 None
             };
-        if let Some(response) =
+        if let Some(mut response) =
             daemon_bootstrap_response(&request, initialize_route.as_ref(), project_node_count)
         {
+            let project_open_error = if handshake.project_path.is_some()
+                && matches!(
+                    classify_mcp_method(&request.method),
+                    McpMethod::Initialize | McpMethod::ToolsList
+                ) {
+                match engine.cached_project_open_failure(&handshake).await {
+                    Ok(Some(failure)) => Some(failure.to_error()),
+                    Ok(None)
+                        if matches!(
+                            classify_mcp_method(&request.method),
+                            McpMethod::Initialize
+                        ) =>
+                    {
+                        Box::pin(
+                            engine
+                                .schedule_project_server_warmup(handshake.clone(), request.clone()),
+                        )
+                        .await
+                        .err()
+                    }
+                    Ok(None) => None,
+                    Err(error) => Some(error),
+                }
+            } else {
+                None
+            };
+            if let Some(error) = project_open_error {
+                response = request
+                    .id
+                    .clone()
+                    .map(|id| project_open_error_response(id, &error));
+            }
             // Keep catalog-refresh bookkeeping consistent with the regular MCP
             // server path: initialize and tools/list mark this catalog current.
             if let Some(key) = engine
@@ -1943,11 +2532,6 @@ async fn serve_broker_socket_client(
                 engine.release_catalog_refresh(key).await;
                 return Err(error);
             }
-            if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
-                && handshake.project_path.is_some()
-            {
-                engine.spawn_project_server_warmup(handshake.clone(), request);
-            }
             drop(setup_activity);
             if let Some(response) = response {
                 write_json_rpc_response(&mut transport, &response).await?;
@@ -1955,37 +2539,15 @@ async fn serve_broker_socket_client(
             return Ok(());
         }
     }
-    let server = if let Some(project_path) = handshake.project_path.as_ref() {
-        let mut project_open = engine.spawn_direct_project_server_open(handshake.clone());
-        let server =
-            match tokio::time::timeout(std::time::Duration::from_millis(500), &mut project_open)
-                .await
-            {
-                Ok(Ok(Ok(server))) => server,
-                Ok(Ok(Err(error))) => {
-                    write_project_open_error(&mut transport, &first_request_line, &error).await?;
-                    return Err(error);
-                }
-                Ok(Err(error)) => {
-                    let error = TraceDecayError::Config {
-                        message: format!("project warm-up task failed: {error}"),
-                    };
-                    write_project_open_error(&mut transport, &first_request_line, &error).await?;
-                    return Err(error);
-                }
-                Err(_) => {
-                    let error = TraceDecayError::Config {
-                        message: format!(
-                            "TraceDecay project '{}' {PROJECT_WARMING_RETRY_HINT}",
-                            project_path.display(),
-                        ),
-                    };
-                    drop(setup_activity);
-                    write_project_open_error(&mut transport, &first_request_line, &error).await?;
-                    return Ok(());
-                }
-            };
-        Some(server)
+    let server = if handshake.project_path.is_some() {
+        match Box::pin(engine.project_server_for_request(&handshake)).await {
+            Ok(server) => Some(server),
+            Err(error) => {
+                drop(setup_activity);
+                write_project_open_error(&mut transport, &first_request_line, &error).await?;
+                return Ok(());
+            }
+        }
     } else {
         None
     };
@@ -2165,21 +2727,47 @@ async fn serve_windows_broker_client_with_class(
             } else {
                 None
             };
-        if let Some(response) =
+        if let Some(mut response) =
             daemon_bootstrap_response(&request, initialize_route.as_ref(), project_node_count)
         {
-            if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
-                && handshake.project_path.is_some()
-            {
-                spawn_portable_project_server_warmup(
-                    lifecycle.clone(),
-                    store_administration.clone(),
-                    Arc::clone(&project_open_gates),
-                    handshake.clone(),
-                    request,
-                    #[cfg(test)]
-                    project_open_attempts.clone(),
-                );
+            let project_open_error = if handshake.project_path.is_some()
+                && matches!(
+                    classify_mcp_method(&request.method),
+                    McpMethod::Initialize | McpMethod::ToolsList
+                ) {
+                match portable_cached_project_open_failure(project_open_gates.as_ref(), &handshake)
+                    .await
+                {
+                    Ok(Some(failure)) => Some(failure.to_error()),
+                    Ok(None)
+                        if matches!(
+                            classify_mcp_method(&request.method),
+                            McpMethod::Initialize
+                        ) =>
+                    {
+                        Box::pin(schedule_portable_project_server_warmup(
+                            lifecycle.clone(),
+                            store_administration.clone(),
+                            Arc::clone(&project_open_gates),
+                            handshake.clone(),
+                            request.clone(),
+                            #[cfg(test)]
+                            project_open_attempts.clone(),
+                        ))
+                        .await
+                        .err()
+                    }
+                    Ok(None) => None,
+                    Err(error) => Some(error),
+                }
+            } else {
+                None
+            };
+            if let Some(error) = project_open_error {
+                response = request
+                    .id
+                    .clone()
+                    .map(|id| project_open_error_response(id, &error));
             }
             drop(setup_activity);
             if let Some(response) = response {
@@ -2188,27 +2776,22 @@ async fn serve_windows_broker_client_with_class(
             return Ok(());
         }
     }
-    if let Some(project_path) = handshake.project_path.as_deref() {
-        let canonical_project_path = project_path
-            .canonicalize()
-            .unwrap_or_else(|_| project_path.to_path_buf());
-        let server_result = store_administration
-            .with_writer(|| {
-                portable_project_server(
-                    &store_administration,
-                    &project_open_gates,
-                    &canonical_project_path,
-                    &handshake,
-                    #[cfg(test)]
-                    project_open_attempts.as_ref(),
-                )
-            })
-            .await;
-        let server = match server_result {
+    if handshake.project_path.is_some() {
+        let server = match Box::pin(portable_project_server_for_request(
+            lifecycle.clone(),
+            store_administration.clone(),
+            Arc::clone(&project_open_gates),
+            &handshake,
+            #[cfg(test)]
+            project_open_attempts.clone(),
+        ))
+        .await
+        {
             Ok(server) => server,
             Err(error) => {
+                drop(setup_activity);
                 write_project_open_error(&mut transport, &first_request_line, &error).await?;
-                return Err(error);
+                return Ok(());
             }
         };
         drop(setup_activity);
@@ -2242,137 +2825,6 @@ async fn serve_windows_broker_client_with_class(
         .await?;
     }
     Ok(())
-}
-
-#[cfg(any(not(unix), test))]
-async fn portable_project_server(
-    store_administration: &StoreAdministration,
-    project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
-    canonical_project_path: &Path,
-    handshake: &DaemonHandshake,
-    #[cfg(test)] project_open_attempts: Option<&Arc<AtomicUsize>>,
-) -> Result<Arc<crate::mcp::McpServer>> {
-    let route = ProjectRouteKey::from_handshake(canonical_project_path, handshake)?;
-    if let Some(server) = {
-        let mut servers = store_administration.project_servers().lock().await;
-        servers
-            .get_route_and_touch(&route)
-            .map(|(_, server)| Arc::clone(server))
-    } {
-        return Ok(server);
-    }
-
-    let gate = project_open_gate(project_open_gates, &route).await;
-    let _singleflight = gate.lock().await;
-    if let Some(server) = {
-        let mut servers = store_administration.project_servers().lock().await;
-        servers
-            .get_route_and_touch(&route)
-            .map(|(_, server)| Arc::clone(server))
-    } {
-        return Ok(server);
-    }
-
-    #[cfg(test)]
-    if let Some(attempts) = project_open_attempts {
-        attempts.fetch_add(1, Ordering::Relaxed);
-    }
-    let cg = Box::pin(open_project_for_handshake(
-        canonical_project_path,
-        handshake,
-    ))
-    .await?;
-    cg.register_project_store_in_global_registry().await;
-    let key = ProjectServerKey::from_open_project(&cg, handshake)?;
-    let existing = {
-        let mut servers = store_administration.project_servers().lock().await;
-        let existing = servers.get(&key).cloned();
-        if existing.is_some() {
-            servers.bind_route(route.clone(), key.clone());
-        }
-        existing
-    };
-    if let Some(existing) = existing {
-        return Ok(existing);
-    }
-
-    let current_key = Arc::new(tokio::sync::Mutex::new(key.clone()));
-    let route_registered = Arc::new(AtomicBool::new(true));
-    let database_owner_reconciler = portable_database_owner_reconciler(
-        store_administration.clone(),
-        current_key,
-        Arc::clone(&route_registered),
-        handshake.clone(),
-    );
-    let registry_db = store_administration
-        .global_database(&handshake.client_identity.global_db_path)
-        .await?;
-    let session_db = store_administration
-        .global_database(&cg.store_layout().sessions_db_path)
-        .await?;
-    let host_admission_broker = store_administration
-        .host_admission_broker(&session_db)
-        .await?
-        .broker()
-        .cloned();
-    let user_session_db = store_administration
-        .user_session_database(&handshake.client_identity.global_db_path)
-        .await?;
-    let project_session_refresh_wake = store_administration
-        .session_temporal_refresh_schedulers()
-        .ensure_project(key.owner.clone(), Arc::clone(&session_db))
-        .await;
-    let user_session_refresh_wake = store_administration
-        .session_temporal_refresh_schedulers()
-        .ensure_profile(
-            user_session_db.db_path().to_path_buf(),
-            Arc::clone(&user_session_db),
-        )
-        .await;
-    let accounting_db =
-        crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registry_db));
-    let context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
-        cg,
-        handshake.scope_prefix.clone(),
-        crate::mcp::server::McpServerDaemonAuthority {
-            profile_root: handshake.client_identity.profile_root.clone(),
-            databases: crate::mcp::server::McpServerDaemonDatabases {
-                accounting: accounting_db,
-                registry: registry_db,
-                project_sessions: session_db,
-                user_sessions: user_session_db,
-            },
-            host_admission_broker,
-            project_session_refresh_wake,
-            user_session_refresh_wake,
-            database_owner_reconciler,
-            writers: crate::mcp::server::McpServerWriters::daemon_owned(
-                coordinated_dashboard_automation_writer(store_administration.clone()),
-                coordinated_hook_branch_writer(store_administration.clone()),
-                coordinated_background_refresh_writer(store_administration.clone()),
-            ),
-        },
-    );
-    let candidate = crate::mcp::McpServer::new_with_context(context).await;
-    let resolution = store_administration
-        .project_servers()
-        .lock()
-        .await
-        .bind_or_insert_route_bounded(
-            route,
-            key,
-            candidate,
-            MAX_CACHED_PROJECT_SERVERS,
-            |server| Arc::strong_count(server) > 1,
-        );
-    let Some((resolved, inserted)) = resolution else {
-        route_registered.store(false, Ordering::Release);
-        return Err(project_server_capacity_error());
-    };
-    if !inserted {
-        route_registered.store(false, Ordering::Release);
-    }
-    Ok(resolved)
 }
 
 #[cfg(unix)]
@@ -2493,6 +2945,34 @@ async fn write_project_open_error(
 
 fn project_open_error_response(id: serde_json::Value, error: &TraceDecayError) -> JsonRpcResponse {
     match error {
+        TraceDecayError::Config { message }
+            if message.contains(PROJECT_OPEN_FAILURE_RETRY_HINT) =>
+        {
+            JsonRpcResponse::error_with_data(
+                id,
+                ErrorCode::InternalError,
+                message.clone(),
+                Some(json!({
+                    "kind": "project_route_open_backoff",
+                    "retryable": true,
+                    "retry_after_ms": PROJECT_OPEN_FAILURE_RETRY_BACKOFF.as_millis() as u64,
+                })),
+            )
+        }
+        TraceDecayError::Config { message }
+            if message.starts_with("daemon project open task capacity reached") =>
+        {
+            JsonRpcResponse::error_with_data(
+                id,
+                ErrorCode::InternalError,
+                message.clone(),
+                Some(json!({
+                    "kind": "project_open_task_capacity_reached",
+                    "retryable": true,
+                    "capacity": MAX_TRACKED_PROJECT_OPEN_TASKS,
+                })),
+            )
+        }
         TraceDecayError::Config { message }
             if message.starts_with("daemon project server capacity reached") =>
         {
